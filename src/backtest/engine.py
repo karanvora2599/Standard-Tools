@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, Any
-from ..metrics.return_metrics import cumulative_return, cagr, annualized_volatility
+from metrics.return_metrics import cumulative_return, cagr, annualized_volatility
 
 def run_strategy(price_data: pd.DataFrame, signal_series: pd.Series, initial_capital: float = 10000.0) -> Dict[str, Any]:
     """

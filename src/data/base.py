@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Union
 import pandas as pd
 from pydantic import BaseModel
+import asyncio
 
 class TickerInfo(BaseModel):
     symbol: str
@@ -53,6 +54,19 @@ class DataProvider(ABC):
         
         Raises:
             ValueError: If data cannot be fetched or symbol is invalid.
+        """
+        pass
+
+    @abstractmethod
+    async def get_ohlcv_async(
+        self, 
+        symbol: str, 
+        start_date: Union[str, datetime], 
+        end_date: Union[str, datetime], 
+        interval: str = "1d"
+    ) -> pd.DataFrame:
+        """
+        Async version of get_ohlcv.
         """
         pass
 
