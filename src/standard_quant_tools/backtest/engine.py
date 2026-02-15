@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, Any
-from metrics.return_metrics import cumulative_return, cagr, annualized_volatility
+from standard_quant_tools.metrics.return_metrics import cumulative_return, cagr, annualized_volatility
 
 def run_strategy(price_data: pd.DataFrame, signal_series: pd.Series, initial_capital: float = 10000.0) -> Dict[str, Any]:
     """
@@ -24,10 +24,6 @@ def run_strategy(price_data: pd.DataFrame, signal_series: pd.Series, initial_cap
     returns = prices.pct_change().fillna(0)
     
     # Shift signals by 1 to avoid lookahead bias (signal today executes tomorrow/close)
-    # OR assume signal executes at CLOSE of same day if calculated on OPEN?
-    # Standard: Signal computed on Close[t], Trade on Open[t+1] or Close[t+1]. 
-    # Vectorised usually implies: Strategy Return = Signal[t-1] * Market Return[t]
-    
     strategy_returns = signals.shift(1) * returns
     strategy_returns = strategy_returns.fillna(0)
     

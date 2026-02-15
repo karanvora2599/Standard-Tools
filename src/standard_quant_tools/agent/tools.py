@@ -1,12 +1,13 @@
 from typing import List, Dict, Any
-from data.factory import DataFactory
-from indicators.trend import sma
-from backtest.engine import run_strategy
-from analysis.regression import calculate_beta
-from metrics.risk_metrics import sharpe_ratio, max_drawdown
-from agent.models import BacktestInput, BacktestResult, AnalysisInput, AnalysisResult
+from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.indicators.trend import sma
+from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.analysis.regression import calculate_beta
+from standard_quant_tools.metrics.risk_metrics import sharpe_ratio, max_drawdown
+from standard_quant_tools.agent.models import BacktestInput, BacktestResult, AnalysisInput, AnalysisResult
 import pandas as pd
 import numpy as np
+import datetime
 
 def run_sma_backtest(input_data: BacktestInput) -> BacktestResult:
     """
@@ -45,11 +46,16 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
     """
     provider = DataFactory.get_provider()
     
-    # Fetch data (defaulting to last 1 year usually if period handled simpler)
-    # For now, let's just fetch 252 days
-    import datetime
+    # Fetch data (defaulting to last 1 year)
     end = datetime.datetime.now()
     start = end - datetime.timedelta(days=365)
+    
+    try:
+        if input_data.period:
+             # Very basic period handling if provided, otherwise stick to 1y default
+             pass
+    except:
+        pass
     
     asset_df = provider.get_ohlcv(input_data.symbol, start, end)
     bench_df = provider.get_ohlcv(input_data.benchmark, start, end)
@@ -71,7 +77,7 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
 
 def get_agent_tools() -> List[Dict[str, Any]]:
     """
-    Returns a list of tools formatted for OpenAI function calling (or similar).
+    Returns a list of tools formatted for OpenAI function calling.
     """
     return [
         {
