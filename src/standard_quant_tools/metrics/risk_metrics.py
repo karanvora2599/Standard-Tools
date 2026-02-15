@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
 from .return_metrics import annualized_volatility, cagr
+from standard_quant_tools.validation import validate_series
 
+@validate_series()
 def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float:
     """
     Calculate Sharpe Ratio.
@@ -9,6 +11,7 @@ def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_ye
     excess_returns = returns - risk_free_rate / periods_per_year
     return (excess_returns.mean() / returns.std()) * np.sqrt(periods_per_year)
 
+@validate_series()
 def sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float:
     """
     Calculate Sortino Ratio.
@@ -23,6 +26,7 @@ def sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_y
         
     return (excess_returns.mean() * periods_per_year) / downside_dev
 
+@validate_series()
 def max_drawdown(series: pd.Series) -> float:
     """
     Calculate Maximum Drawdown.

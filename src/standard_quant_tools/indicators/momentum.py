@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from standard_quant_tools.validation import validate_series
 
 try:
     from numba import njit
@@ -50,6 +51,7 @@ def _rsi_numba(prices: np.ndarray, period: int) -> np.ndarray:
             
     return rsi
 
+@validate_series()
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """
     Calculate Relative Strength Index (RSI).
@@ -70,6 +72,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
         rs = gain / loss
         return 100 - (100 / (1 + rs))
 
+@validate_series()
 def stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 14, d_period: int = 3) -> pd.DataFrame:
     """
     Calculate Stochastic Oscillator.

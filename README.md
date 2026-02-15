@@ -14,6 +14,8 @@ A high-performance, modular, and agent-centric Python library for quantitative f
   - **Error Recovery**: Descriptive error messages designed for LLM self-correction.
 - **Robustness**:
   - **Retry Logic**: Automatic retries with exponential backoff for network resilience.
+  - **Custom Exceptions**: Granular error handling with `QuantError`, `DataNotFoundError`, etc.
+  - **Input Validation**: Decorators (`@validate_series`) ensure data integrity before calculation.
 
 ## Installation
 
@@ -77,6 +79,24 @@ async def fetch_portfolio(tickers):
 # Run async loop
 tickers = ["AAPL", "GOOGL", "MSFT", "AMZN"]
 data_frames = asyncio.run(fetch_portfolio(tickers))
+```
+
+### 3. Robust Error Handling
+
+The library uses a custom exception hierarchy for precise control.
+
+```python
+from standard_quant_tools.error import DataNotFoundError, InvalidSymbolError
+from standard_quant_tools.data.factory import DataFactory
+
+provider = DataFactory.get_provider("yfinance")
+
+try:
+    df = provider.get_ohlcv("INVALID_TICKER", "2023-01-01", "2024-01-01")
+except DataNotFoundError:
+    print("Ticker not found! Please check the symbol.")
+except InvalidSymbolError:
+    print("Symbol format is incorrect.")
 ```
 
 ---
