@@ -5,8 +5,8 @@ import json
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from agent.models import BacktestInput, AnalysisInput
-from agent.tools import run_sma_backtest, analyze_stock_risk
+from standard_quant_tools.agent.models import BacktestInput, AnalysisInput
+from standard_quant_tools.agent.tools import run_sma_backtest, analyze_stock_risk
 
 def test_agent_tools():
     print("Testing Agent Tools...")
