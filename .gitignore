@@ -1,0 +1,154 @@
+# =============================================================================
+# MACRO SHOCK RADAR - GITIGNORE
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Dependencies
+# -----------------------------------------------------------------------------
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+
+# -----------------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.venv/
+venv/
+env/
+ENV/
+
+# -----------------------------------------------------------------------------
+# IDE / Editors
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# -----------------------------------------------------------------------------
+# OS Files
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Data Files (keep folder structure, ignore content)
+# -----------------------------------------------------------------------------
+data/events/*.json
+!data/events/.gitkeep
+data/bursts/*.json
+!data/bursts/.gitkeep
+data/world_state/*.json
+!data/world_state/.gitkeep
+data/daily_counts/*.json
+!data/daily_counts/.gitkeep
+data/graph/*.json
+!data/graph/.gitkeep
+data/market/*.json
+!data/market/.gitkeep
+data/gdelt_cache/
+
+# -----------------------------------------------------------------------------
+# Backend Specific
+# -----------------------------------------------------------------------------
+# Test outputs
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Test results
+test_results.txt
+pytest_output.txt
+
+# Typing
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# CLI generated
+*.log
+logs/
+
+# Backend build
+backend/dist/
+backend/build/
+backend/*.egg-info/
+
+# -----------------------------------------------------------------------------
+# Frontend Specific
+# -----------------------------------------------------------------------------
+# Build output
+frontend/dist/
+frontend/build/
+
+# Vite
+frontend/.vite/
+*.local
+
+# Test output
+frontend/coverage/
+
+# Storybook
+frontend/storybook-static/
+
+# -----------------------------------------------------------------------------
+# Logs & Temporary Files
+# -----------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# -----------------------------------------------------------------------------
+# Docker
+# -----------------------------------------------------------------------------
+*.env.docker
+docker-compose.override.yml
+
+# -----------------------------------------------------------------------------
+# Misc
+# -----------------------------------------------------------------------------
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Local config overrides
+*.local.json
+*.local.yaml
+*.local.toml
+
+# Security - never commit
+*.pem
+*.key
+*.crt
+secrets/
