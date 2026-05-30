@@ -5,8 +5,8 @@ A high-performance, modular Python library for quantitative financial analysis. 
 ## Key Features
 
 - **High Performance** — Numba JIT for RSI, ADX, Parabolic SAR; NumPy BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
-- **Agent-First Design** — All tools return Pydantic models; 8 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
-- **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 10 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
+- **Agent-First Design** — All tools return Pydantic models; 12 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
+- **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional scipy/numba graceful fallback
 
 ---
@@ -297,21 +297,60 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ### AI Agent Tools (`standard_quant_tools.agent`)
 
-8 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas.
+12 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas.
 
 ```python
-from standard_quant_tools.agent.tools import get_agent_tools, analyze_stock_risk
-from standard_quant_tools.agent.models import AnalysisInput
+from standard_quant_tools.agent.tools import (
+    get_agent_tools, analyze_stock_risk,
+    run_factor_regression, run_cointegration_test,
+    run_pca_analysis, run_hurst_analysis,
+)
+from standard_quant_tools.agent.models import (
+    AnalysisInput, FactorRegressionInput,
+    CointegrationInput, PCAInput, HurstInput,
+)
 
 # Get tool schemas for your LLM
-tools = get_agent_tools()  # 8 tools ready for function calling
+tools = get_agent_tools()  # 12 tools ready for function calling
 
-# Call directly
+# Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
 print(result.model_dump_json(indent=2))
+
+# Multi-factor regression (SPY/IWM/IWD as mkt/smb/hml proxies)
+result = run_factor_regression(FactorRegressionInput(
+    symbol='AAPL',
+    factor_tickers=['SPY', 'IWM', 'IWD'],
+    factor_names=['mkt', 'smb', 'hml'],
+    start_date='2022-01-01',
+    end_date='2024-01-01',
+    rolling_window=60,
+))
+
+# Pairs cointegration + live z-score signal
+result = run_cointegration_test(CointegrationInput(
+    symbol_a='KO', symbol_b='PEP',
+    start_date='2022-01-01', end_date='2024-01-01',
+    zscore_window=30,
+))
+print(result.signal)  # "long_a_short_b" | "short_a_long_b" | "neutral"
+
+# PCA on a basket of stocks
+result = run_pca_analysis(PCAInput(
+    tickers=['AAPL', 'MSFT', 'GOOGL', 'META', 'AMZN'],
+    start_date='2022-01-01', end_date='2024-01-01',
+    n_components=3,
+))
+
+# Hurst exponent with rolling regime breakdown
+result = run_hurst_analysis(HurstInput(
+    symbol='SPY', start_date='2022-01-01', end_date='2024-01-01',
+    method='dfa', rolling_window=252,
+))
+print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 ```
 
-**Available tools:** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`
+**Available tools:** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`, `run_factor_regression`, `run_cointegration_test`, `run_pca_analysis`, `run_hurst_analysis`
 
 ---
 
