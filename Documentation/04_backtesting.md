@@ -143,6 +143,51 @@ result = run_bollinger_backtest(BacktestInput(
 
 ---
 
+## Parameter Grid Search
+
+`backtest_grid` runs every combination in `param_grid` in parallel using `ProcessPoolExecutor` and returns a ranked DataFrame.
+
+```python
+from standard_quant_tools.backtest import backtest_grid
+from standard_quant_tools.data.factory import DataFactory
+
+provider = DataFactory.get_provider()
+df = provider.get_ohlcv("AAPL", "2020-01-01", "2024-01-01")
+
+results = backtest_grid(
+    price_data=df,
+    strategy="sma_crossover",          # or rsi_mean_reversion / macd_crossover / bollinger_reversion
+    param_grid={
+        "fast_period": [5, 10, 20],
+        "slow_period": [30, 50, 100, 200],
+    },
+    initial_capital=10_000,
+    commission_pct=0.001,
+    sort_by="sharpe_ratio",            # default: best Sharpe first
+    n_workers=4,                       # default: os.cpu_count()
+)
+
+# 3 × 4 = 12 combinations, sorted best → worst Sharpe
+print(results[["fast_period", "slow_period", "sharpe_ratio", "total_return", "max_drawdown"]].head())
+```
+
+All four strategies are supported:
+
+```python
+results = backtest_grid(df, strategy="rsi_mean_reversion",
+    param_grid={"period": [7, 14, 21], "oversold": [25, 30], "overbought": [65, 70]})
+
+results = backtest_grid(df, strategy="macd_crossover",
+    param_grid={"fast": [8, 12], "slow": [21, 26], "signal": [7, 9]})
+
+results = backtest_grid(df, strategy="bollinger_reversion",
+    param_grid={"period": [15, 20, 25], "num_std": [1.5, 2.0, 2.5]})
+```
+
+Pass `n_workers=1` to run sequentially (no subprocess overhead — useful in notebooks).
+
+---
+
 ## Custom Signal Generation
 
 You can plug any signal series into `run_strategy`:

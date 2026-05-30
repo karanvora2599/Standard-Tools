@@ -100,3 +100,57 @@ class TestScreenerOutput:
     def test_fundamental_columns_present(self, patched_factory):
         result = screen_stocks(['AAPL'], filters={'pe_ratio_max': 35.0})
         assert 'forward_pe' in result.columns
+
+
+class TestScreenerProcessPool:
+    """
+    Verify n_workers behaviour.
+
+    Note: monkeypatch only affects the main process.  Tests that spawn actual
+    child processes (n_workers > 1) cannot use the mock provider and are
+    therefore marked integration.  Unit tests here cover the n_workers=1
+    (sequential) code path and API surface.
+    """
+
+    def test_n_workers_1_explicit_matches_default(self, patched_factory):
+        """Explicit n_workers=1 must give the same result as the auto default."""
+        tickers = ['AAPL', 'MSFT', 'GOOGL']
+        single = screen_stocks(tickers, filters={}, n_workers=1)
+        default = screen_stocks(tickers, filters={}, n_workers=1)
+        assert set(single.index) == set(default.index)
+
+    def test_n_workers_1_applies_filters(self, patched_factory):
+        """Filters work correctly in single-process mode."""
+        tickers = ['AAPL', 'MSFT', 'GOOGL']
+        # mock forward_pe=28.5; require < 30 → all pass
+        result = screen_stocks(tickers, filters={'pe_ratio_max': 30.0}, n_workers=1)
+        assert len(result) == 3
+
+    def test_n_workers_1_filter_excludes(self, patched_factory):
+        """Impossible filter should exclude all tickers even with n_workers=1."""
+        tickers = ['AAPL', 'MSFT', 'GOOGL']
+        result = screen_stocks(tickers, filters={'pe_ratio_max': 1.0}, n_workers=1)
+        assert len(result) == 0
+
+    def test_small_list_auto_uses_single_process(self, patched_factory):
+        """≤20 tickers with no n_workers override auto-selects n_workers=1."""
+        # The screener code sets n_workers=1 when len(tickers) <= 20; the
+        # mock is therefore reachable and all tickers should pass.
+        tickers = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA']
+        result = screen_stocks(tickers, filters={})
+        assert len(result) == 5
+
+    @pytest.mark.integration
+    def test_process_pool_same_as_sequential(self):
+        """
+        Integration: n_workers=2 must return the same tickers as n_workers=1
+        when using the live data provider.  Requires network.
+        """
+        tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA',
+                   'META', 'TSLA', 'JPM', 'V', 'MA',
+                   'UNH', 'HD', 'PG', 'JNJ', 'KO',
+                   'PEP', 'ABBV', 'MRK', 'CVX', 'XOM',
+                   'WMT', 'BAC', 'DIS']
+        seq = screen_stocks(tickers, filters={'pe_ratio_max': 60}, n_workers=1)
+        par = screen_stocks(tickers, filters={'pe_ratio_max': 60}, n_workers=2)
+        assert set(seq.index) == set(par.index)

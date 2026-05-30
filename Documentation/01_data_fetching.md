@@ -88,6 +88,44 @@ df = fresh_provider.get_ohlcv("AAPL", "2023-01-01", "2024-01-01")
 
 ---
 
+## Persistent Parquet Cache
+
+Every `get_ohlcv` call for a **historical date range** (end date before today) is automatically saved as a Parquet file. Subsequent calls — even from a completely new Python process — skip the network entirely and load from disk.
+
+```
+~/.cache/standard_quant_tools/ohlcv/AAPL_2020-01-01_2024-01-01_1d.parquet
+```
+
+**Why only historical ranges?** Historical OHLCV data is immutable. Today's data might still be updating during market hours, so it uses only the in-process TTL cache (1 hour).
+
+```python
+import time
+
+provider = DataFactory.get_provider()
+
+# First call: fetches from yfinance, writes Parquet (~300ms)
+t0 = time.perf_counter()
+df = provider.get_ohlcv("NVDA", "2020-01-01", "2024-01-01")
+print(f"First call: {time.perf_counter() - t0:.2f}s")
+
+# Exit Python, restart, call again
+# Second call: reads from Parquet (~5ms)
+t0 = time.perf_counter()
+df = provider.get_ohlcv("NVDA", "2020-01-01", "2024-01-01")
+print(f"Cached call: {time.perf_counter() - t0:.3f}s")
+```
+
+**Override the cache directory** via the `SQT_CACHE_DIR` environment variable:
+
+```bash
+export SQT_CACHE_DIR=/data/market_cache   # Linux/Mac
+set SQT_CACHE_DIR=D:\market_cache         # Windows
+```
+
+The cache is safe for concurrent access — each process writes to a PID-unique temp file and atomically renames it, so races between workers (e.g. parallel screener) are handled correctly.
+
+---
+
 ## Error Handling
 
 ```python

@@ -2,7 +2,9 @@
 
 The screener evaluates a list of tickers concurrently against fundamental and technical filters, returning a sorted `pd.DataFrame` of passing stocks.
 
-All network calls run in parallel via `asyncio.gather` — screening 50 tickers takes roughly the same wall time as screening 5.
+**Small universes (≤ 20 tickers):** all network calls run in parallel via `asyncio.gather` — screening 20 tickers takes roughly the same wall time as screening 5.
+
+**Large universes (> 20 tickers):** the ticker list is automatically split across multiple `ProcessPoolExecutor` workers. Each worker runs its own asyncio event loop, bypassing the GIL for the full pipeline (fetch + indicator compute). Combined with the Parquet disk cache, repeated runs on the same universe are near-instant.
 
 ---
 
@@ -119,6 +121,38 @@ result = screen_stocks(
     ascending=False,
 )
 ```
+
+---
+
+## Large Universe Screening
+
+For 100+ tickers, pass `n_workers` to control the process pool. Combined with the Parquet cache, the second run of the same universe is dramatically faster.
+
+```python
+# S&P 500 screen — first run fetches from yfinance, writes Parquet cache
+# Subsequent runs read from disk (~10× faster per ticker)
+sp500 = [...]  # your 500-ticker list
+
+result = screen_stocks(
+    tickers=sp500,
+    filters={
+        "pe_ratio_max": 25,
+        "roe_min": 0.15,
+        "rsi_max": 50,
+        "market_cap_min": 10_000_000_000,
+    },
+    sort_by="rsi_14",
+    ascending=True,
+    n_workers=8,    # 8 parallel processes, each running asyncio.gather on their batch
+)
+print(f"Passed: {len(result)} / {len(sp500)}")
+```
+
+| `n_workers` | Behaviour |
+|---|---|
+| `None` (default) | Auto: 1 for ≤ 20 tickers, `cpu_count` for larger universes |
+| `1` | Single process (asyncio only) — best for small lists and notebooks |
+| `> 1` | ProcessPoolExecutor — best for 50+ tickers |
 
 ---
 
