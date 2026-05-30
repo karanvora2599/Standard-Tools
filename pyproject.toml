@@ -20,6 +20,15 @@ dependencies = [
 ]
 requires-python = ">=3.10"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v --tb=short"
+markers = [
+    "integration: tests requiring live network access (skip with '-m not integration')",
+    "slow: tests that are slow due to Numba JIT warm-up or large data",
+]
+
 [project.optional-dependencies]
 test = [
     "pytest>=7.0.0",
