@@ -1,7 +1,6 @@
 import pandas as pd
-import numpy as np
 
-def bollinger_bands(series: pd.Series, period: int = 20, num_std: int = 2) -> pd.DataFrame:
+def bollinger_bands(series: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.DataFrame:
     """
     Calculate Bollinger Bands.
     """
