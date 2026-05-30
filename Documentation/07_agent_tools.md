@@ -23,9 +23,14 @@ from standard_quant_tools.agent.tools import (
     get_technical_analysis,
     get_portfolio_analysis,
     run_screener,
+    run_factor_regression,
+    run_cointegration_test,
+    run_pca_analysis,
+    run_hurst_analysis,
 )
 from standard_quant_tools.agent.models import (
     BacktestInput, AnalysisInput, TechnicalInput, PortfolioInput, ScreenerInput,
+    FactorRegressionInput, CointegrationInput, PCAInput, HurstInput,
 )
 
 # Call any tool directly
@@ -40,13 +45,13 @@ print(result.model_dump_json(indent=2))
 
 ## Tool Registry
 
-`get_agent_tools()` returns 8 tool definitions in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns 12 tool definitions in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent.tools import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 8
+print(len(tools))  # 12
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -60,6 +65,10 @@ for t in tools:
 # get_technical_analysis — Compute configurable technical indicators.
 # get_portfolio_analysis — Multi-asset portfolio metrics.
 # run_screener — Filter a stock universe by fundamental and technical criteria.
+# run_factor_regression — Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R².
+# run_cointegration_test — Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal.
+# run_pca_analysis — PCA on multi-asset returns: explained variance, loadings, factor contributions.
+# run_hurst_analysis — Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.
 
 # Inspect the parameter schema for any tool:
 import json
@@ -75,30 +84,40 @@ from standard_quant_tools.agent.tools import (
     get_agent_tools,
     run_sma_backtest, run_rsi_backtest, run_macd_backtest, run_bollinger_backtest,
     analyze_stock_risk, get_technical_analysis, get_portfolio_analysis, run_screener,
+    run_factor_regression, run_cointegration_test, run_pca_analysis, run_hurst_analysis,
 )
 from standard_quant_tools.agent.models import (
     BacktestInput, AnalysisInput, TechnicalInput, PortfolioInput, ScreenerInput,
+    FactorRegressionInput, CointegrationInput, PCAInput, HurstInput,
 )
 
 TOOL_FN   = {
-    "run_sma_backtest":      run_sma_backtest,
-    "run_rsi_backtest":      run_rsi_backtest,
-    "run_macd_backtest":     run_macd_backtest,
-    "run_bollinger_backtest":run_bollinger_backtest,
-    "analyze_stock_risk":    analyze_stock_risk,
-    "get_technical_analysis":get_technical_analysis,
-    "get_portfolio_analysis":get_portfolio_analysis,
-    "run_screener":          run_screener,
+    "run_sma_backtest":        run_sma_backtest,
+    "run_rsi_backtest":        run_rsi_backtest,
+    "run_macd_backtest":       run_macd_backtest,
+    "run_bollinger_backtest":  run_bollinger_backtest,
+    "analyze_stock_risk":      analyze_stock_risk,
+    "get_technical_analysis":  get_technical_analysis,
+    "get_portfolio_analysis":  get_portfolio_analysis,
+    "run_screener":            run_screener,
+    "run_factor_regression":   run_factor_regression,
+    "run_cointegration_test":  run_cointegration_test,
+    "run_pca_analysis":        run_pca_analysis,
+    "run_hurst_analysis":      run_hurst_analysis,
 }
 INPUT_MODEL = {
-    "run_sma_backtest":      BacktestInput,
-    "run_rsi_backtest":      BacktestInput,
-    "run_macd_backtest":     BacktestInput,
-    "run_bollinger_backtest":BacktestInput,
-    "analyze_stock_risk":    AnalysisInput,
-    "get_technical_analysis":TechnicalInput,
-    "get_portfolio_analysis":PortfolioInput,
-    "run_screener":          ScreenerInput,
+    "run_sma_backtest":        BacktestInput,
+    "run_rsi_backtest":        BacktestInput,
+    "run_macd_backtest":       BacktestInput,
+    "run_bollinger_backtest":  BacktestInput,
+    "analyze_stock_risk":      AnalysisInput,
+    "get_technical_analysis":  TechnicalInput,
+    "get_portfolio_analysis":  PortfolioInput,
+    "run_screener":            ScreenerInput,
+    "run_factor_regression":   FactorRegressionInput,
+    "run_cointegration_test":  CointegrationInput,
+    "run_pca_analysis":        PCAInput,
+    "run_hurst_analysis":      HurstInput,
 }
 
 client   = openai.OpenAI()
@@ -180,7 +199,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 8 financial tools:
+You are a quantitative analyst assistant with access to 12 financial tools:
 
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
    — Backtest a trading strategy on a single stock. Always use a minimum of 2 years
@@ -201,6 +220,22 @@ You are a quantitative analyst assistant with access to 8 financial tools:
 5. run_screener
    — Filter a list of tickers by fundamental and/or technical criteria. Always screen
      first, then analyze or backtest the survivors.
+
+6. run_factor_regression
+   — Decompose a stock's returns into factor loadings (market, size, value, etc.).
+     High R² means the factors explain the return well. Alpha is the unexplained excess.
+
+7. run_cointegration_test
+   — Test whether two assets have a long-run equilibrium relationship (pairs trading).
+     A p-value < 0.05 and short half-life make the pair tradeable.
+
+8. run_pca_analysis
+   — Find the dominant risk factors in a basket of assets. PC1 is usually the market
+     factor; later PCs capture sector or style tilts.
+
+9. run_hurst_analysis
+   — Classify a stock's return series as trending (H > 0.55), random walk (0.45–0.55),
+     or mean-reverting (H < 0.45). Choose strategies accordingly.
 
 When a user asks a question that requires real data, always call the relevant tool
 rather than guessing. Chain tools logically: screen → analyze → backtest.
@@ -980,33 +1015,43 @@ from standard_quant_tools.agent.tools import (
     get_agent_tools,
     run_sma_backtest, run_rsi_backtest, run_macd_backtest, run_bollinger_backtest,
     analyze_stock_risk, get_technical_analysis, get_portfolio_analysis, run_screener,
+    run_factor_regression, run_cointegration_test, run_pca_analysis, run_hurst_analysis,
 )
 from standard_quant_tools.agent.models import (
     BacktestInput, AnalysisInput, TechnicalInput, PortfolioInput, ScreenerInput,
+    FactorRegressionInput, CointegrationInput, PCAInput, HurstInput,
 )
 
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
 TOOL_FN: dict[str, Any] = {
-    "run_sma_backtest":       run_sma_backtest,
-    "run_rsi_backtest":       run_rsi_backtest,
-    "run_macd_backtest":      run_macd_backtest,
-    "run_bollinger_backtest": run_bollinger_backtest,
-    "analyze_stock_risk":     analyze_stock_risk,
-    "get_technical_analysis": get_technical_analysis,
-    "get_portfolio_analysis": get_portfolio_analysis,
-    "run_screener":           run_screener,
+    "run_sma_backtest":        run_sma_backtest,
+    "run_rsi_backtest":        run_rsi_backtest,
+    "run_macd_backtest":       run_macd_backtest,
+    "run_bollinger_backtest":  run_bollinger_backtest,
+    "analyze_stock_risk":      analyze_stock_risk,
+    "get_technical_analysis":  get_technical_analysis,
+    "get_portfolio_analysis":  get_portfolio_analysis,
+    "run_screener":            run_screener,
+    "run_factor_regression":   run_factor_regression,
+    "run_cointegration_test":  run_cointegration_test,
+    "run_pca_analysis":        run_pca_analysis,
+    "run_hurst_analysis":      run_hurst_analysis,
 }
 
 INPUT_MODEL: dict[str, Any] = {
-    "run_sma_backtest":       BacktestInput,
-    "run_rsi_backtest":       BacktestInput,
-    "run_macd_backtest":      BacktestInput,
-    "run_bollinger_backtest": BacktestInput,
-    "analyze_stock_risk":     AnalysisInput,
-    "get_technical_analysis": TechnicalInput,
-    "get_portfolio_analysis": PortfolioInput,
-    "run_screener":           ScreenerInput,
+    "run_sma_backtest":        BacktestInput,
+    "run_rsi_backtest":        BacktestInput,
+    "run_macd_backtest":       BacktestInput,
+    "run_bollinger_backtest":  BacktestInput,
+    "analyze_stock_risk":      AnalysisInput,
+    "get_technical_analysis":  TechnicalInput,
+    "get_portfolio_analysis":  PortfolioInput,
+    "run_screener":            ScreenerInput,
+    "run_factor_regression":   FactorRegressionInput,
+    "run_cointegration_test":  CointegrationInput,
+    "run_pca_analysis":        PCAInput,
+    "run_hurst_analysis":      HurstInput,
 }
 
 
@@ -1025,15 +1070,20 @@ def dispatch_tool(name: str, raw_input: dict) -> str:
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 8 tools:
+You are a quantitative investment analyst. You have 12 tools:
 - run_sma_backtest, run_rsi_backtest, run_macd_backtest, run_bollinger_backtest
 - analyze_stock_risk
 - get_technical_analysis
 - get_portfolio_analysis
 - run_screener
+- run_factor_regression
+- run_cointegration_test
+- run_pca_analysis
+- run_hurst_analysis
 
 Always start by screening if the user mentions a broad universe.
 Prefer at least 2 years of data for backtests.
+Use run_hurst_analysis to identify the return regime before choosing a strategy.
 Interpret numeric results clearly — translate Sharpe ratios, drawdowns, and
 betas into plain English recommendations.
 """
@@ -1099,6 +1149,275 @@ if __name__ == "__main__":
 
 ---
 
+## Tool 9 — Multi-Factor Regression
+
+**When to use:** Decompose a stock's return into exposures to named risk factors. Use ticker proxies for factors (SPY = market, IWM = size, IWD = value, QQQ = growth). Alpha is the return unexplained by the factors — persistent positive alpha is a real edge.
+
+```python
+from standard_quant_tools.agent.tools import run_factor_regression
+from standard_quant_tools.agent.models import FactorRegressionInput
+
+result = run_factor_regression(FactorRegressionInput(
+    symbol="AAPL",
+    factor_tickers=["SPY", "IWM", "IWD"],
+    factor_names=["market", "size", "value"],   # Human-readable labels
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    rolling_window=60,    # Optional: last 20 rolling-OLS points
+))
+
+print(f"Alpha (daily)   : {result.alpha:.6f}")
+print(f"R²              : {result.r_squared:.4f}")
+print(f"Adj R²          : {result.adj_r_squared:.4f}")
+print(f"Observations    : {result.n_obs}")
+print()
+print("Factor loadings:")
+for f, loading in result.loadings.items():
+    t = result.t_stats[f]
+    p = result.p_values[f]
+    print(f"  {f:<12}: {loading:+.4f}  (t={t:.2f}, p={p:.4f})")
+print(f"  {'alpha':<12}: t={result.t_stats['alpha']:.2f}, p={result.p_values['alpha']:.4f}")
+
+if result.rolling_alpha_tail:
+    print(f"\nRolling alpha (last 20 points): {result.rolling_alpha_tail}")
+```
+
+**FactorRegressionInput fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `symbol` | str | Yes | Asset to analyse |
+| `factor_tickers` | List[str] | Yes | Ticker proxies for each factor |
+| `factor_names` | List[str] | No | Human-readable labels; defaults to `factor_tickers` |
+| `start_date` | str | Yes | ISO date |
+| `end_date` | str | Yes | ISO date |
+| `rolling_window` | int | No | If set, return the last 20 bars of rolling loadings |
+
+**Interpreting output:**
+
+- **Alpha**: Daily excess return unexplained by factors. Positive and statistically significant (p < 0.05) = real edge.
+- **Loading**: Sensitivity to each factor. AAPL loading of 1.2 on SPY means it moves 1.2× the market.
+- **R²**: Fraction of return variance explained by all factors combined. Low R² = highly idiosyncratic.
+- **Rolling loadings**: Track whether factor exposures are stable or have drifted over time.
+
+---
+
+## Tool 10 — Cointegration Test
+
+**When to use:** Pairs trading research. Test whether two assets share a long-run equilibrium so that deviations from it are mean-reverting and therefore tradeable. A short half-life (< 20 bars) makes the strategy practical.
+
+```python
+from standard_quant_tools.agent.tools import run_cointegration_test
+from standard_quant_tools.agent.models import CointegrationInput
+
+result = run_cointegration_test(CointegrationInput(
+    symbol_a="KO",
+    symbol_b="PEP",
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    zscore_window=30,   # Rolling window for the trading signal
+))
+
+print(f"Cointegrated    : {result.cointegrated}")
+print(f"P-value         : {result.p_value:.4f}   (< 0.05 = cointegrated)")
+print(f"Hedge ratio     : {result.hedge_ratio:.4f}   (long 1 KO, short {result.hedge_ratio:.2f} PEP)")
+print(f"ADF statistic   : {result.adf_statistic:.4f}")
+print(f"Half-life       : {result.half_life_days:.1f} bars")
+print(f"Spread mean     : {result.spread_mean:.4f}")
+print(f"Spread std      : {result.spread_std:.4f}")
+print(f"Current z-score : {result.current_zscore:.2f}")
+print(f"Signal          : {result.signal}")
+# Signal values: "long_a_short_b" | "short_a_long_b" | "neutral"
+
+print("\nCritical values:")
+for level, cv in result.critical_values.items():
+    print(f"  {level}: {cv:.4f}")
+```
+
+**CointegrationInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol_a` | str | — | First asset (the "long" leg by convention) |
+| `symbol_b` | str | — | Second asset (the "short" leg by convention) |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `zscore_window` | int | 30 | Rolling window for the live z-score signal |
+
+**Signal logic:**
+
+| Z-score | Signal | Interpretation |
+|---|---|---|
+| < −2.0 | `long_a_short_b` | Spread is cheap — buy A, sell B |
+| > +2.0 | `short_a_long_b` | Spread is expensive — sell A, buy B |
+| −2 to +2 | `neutral` | Within normal range — hold or flat |
+
+**Screening a candidate list for pairs:**
+
+```python
+from itertools import combinations
+from standard_quant_tools.agent.tools import run_cointegration_test
+from standard_quant_tools.agent.models import CointegrationInput
+
+candidates = ["KO", "PEP", "MCD", "YUM"]
+pairs = []
+
+for a, b in combinations(candidates, 2):
+    r = run_cointegration_test(CointegrationInput(
+        symbol_a=a, symbol_b=b,
+        start_date="2021-01-01", end_date="2024-01-01",
+    ))
+    if r.cointegrated and r.half_life_days < 30:
+        pairs.append((a, b, r.p_value, r.half_life_days))
+
+pairs.sort(key=lambda x: x[2])
+for a, b, p, hl in pairs:
+    print(f"{a}/{b}: p={p:.4f}, half-life={hl:.1f} bars")
+```
+
+---
+
+## Tool 11 — PCA Analysis
+
+**When to use:** Understand the hidden structure of a multi-asset portfolio. PCA decomposes correlated returns into orthogonal factors ordered by explained variance. PC1 is almost always the broad market; PC2 often captures a growth-vs-value tilt or sector contrast. Use this to identify latent risks and assess true diversification.
+
+```python
+from standard_quant_tools.agent.tools import run_pca_analysis
+from standard_quant_tools.agent.models import PCAInput
+
+result = run_pca_analysis(PCAInput(
+    tickers=["AAPL", "MSFT", "GOOGL", "NVDA", "META",
+             "JPM", "BAC", "GS", "TLT", "GLD"],
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    n_components=3,
+))
+
+print(f"Assets : {result.tickers}")
+print(f"Obs    : {result.n_obs}")
+print()
+print("Explained variance:")
+for pc, evr in result.explained_variance_ratio.items():
+    cumvar = result.cumulative_variance_ratio[pc]
+    print(f"  {pc}: {evr:.1%}  (cumulative: {cumvar:.1%})")
+print()
+print("Factor loadings (eigenvectors):")
+for pc in result.loadings:
+    top = sorted(result.loadings[pc].items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+    print(f"  {pc}: " + ", ".join(f"{t}={v:+.3f}" for t, v in top))
+print()
+print("Per-asset factor contributions (marginal R²):")
+for ticker, contribs in result.factor_contributions.items():
+    total = sum(contribs.values())
+    print(f"  {ticker}: PC1={contribs['PC1']:.3f}, PC2={contribs['PC2']:.3f}, PC3={contribs['PC3']:.3f}  (total={total:.3f})")
+```
+
+**PCAInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tickers` | List[str] | — | Universe to decompose |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `n_components` | int | 3 | Number of PCs to extract (≤ number of tickers) |
+
+**Interpreting output:**
+
+- **`explained_variance_ratio`**: Fraction of total return variance each PC captures. A PC1 of 0.60+ means a single market factor dominates — the portfolio is concentrated.
+- **`cumulative_variance_ratio`**: Cumulative coverage. If PC1 + PC2 covers 90%, a 2-factor model is sufficient.
+- **`loadings`**: Each column is an eigenvector (the PC). High loadings on many tech stocks → PC = "tech factor". Opposite signs → contrast factor (growth vs value).
+- **`factor_contributions`**: How much of each asset's return variance each PC explains. An asset with low PC1 contribution is largely driven by idiosyncratic factors.
+
+---
+
+## Tool 12 — Hurst Exponent
+
+**When to use:** Regime detection before strategy selection. A trending regime (H > 0.55) favours momentum and trend-following. A mean-reverting regime (H < 0.45) favours contrarian strategies like RSI mean-reversion or Bollinger Band reversion. The rolling Hurst tracks how the regime evolves over time.
+
+```python
+from standard_quant_tools.agent.tools import run_hurst_analysis
+from standard_quant_tools.agent.models import HurstInput
+
+result = run_hurst_analysis(HurstInput(
+    symbol="NVDA",
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    method="dfa",           # "dfa" (default) or "rs"
+    rolling_window=252,     # Optional: 1-year rolling Hurst
+))
+
+print(f"Symbol          : {result.symbol}")
+print(f"Hurst exponent  : {result.hurst:.4f}")
+print(f"Regime          : {result.regime}")
+print(f"Fit R²          : {result.fit_r_squared:.4f}")
+print(f"Method          : {result.method}")
+print(f"Observations    : {result.n_obs}")
+
+if result.rolling_current is not None:
+    print(f"\nRolling Hurst (current)   : {result.rolling_current:.4f}")
+    fracs = result.rolling_regime_fractions
+    print(f"Trending fraction         : {fracs['trending']:.1%}")
+    print(f"Random walk fraction      : {fracs['random_walk']:.1%}")
+    print(f"Mean-reverting fraction   : {fracs['mean_reverting']:.1%}")
+```
+
+**HurstInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `method` | str | `"dfa"` | `"dfa"` (Detrended Fluctuation Analysis) or `"rs"` (Rescaled Range) |
+| `rolling_window` | int | None | If set, compute rolling Hurst and return regime fractions |
+
+**Regime table:**
+
+| H value | Regime | Strategy implication |
+|---|---|---|
+| > 0.55 | `trending` | Use SMA crossover or MACD — momentum persists |
+| 0.45–0.55 | `random_walk` | No persistent edge; reduce position sizing |
+| < 0.45 | `mean_reverting` | Use RSI mean-reversion or Bollinger Band reversion |
+
+**DFA vs R/S:**
+
+DFA (default) is unbiased for realistic sample sizes — iid returns produce H ≈ 0.50. R/S has an upward bias, giving H ≈ 0.58 for iid returns, which can misclassify a random walk as trending. Use R/S only to compare with published H estimates that used R/S.
+
+**Regime-conditional strategy selection:**
+
+```python
+from standard_quant_tools.agent.tools import run_hurst_analysis, run_sma_backtest, run_rsi_backtest
+from standard_quant_tools.agent.models import HurstInput, BacktestInput
+
+ticker = "TSLA"
+hurst = run_hurst_analysis(HurstInput(
+    symbol=ticker, start_date="2022-01-01", end_date="2024-01-01",
+))
+
+print(f"{ticker}: H={hurst.hurst:.3f}, regime={hurst.regime}")
+
+if hurst.regime == "trending":
+    result = run_sma_backtest(BacktestInput(
+        symbol=ticker, start_date="2022-01-01", end_date="2024-01-01",
+        strategy_type="sma_crossover", parameters={"fast_period": 10, "slow_period": 50},
+    ))
+    print("→ SMA crossover (trend regime)")
+elif hurst.regime == "mean_reverting":
+    result = run_rsi_backtest(BacktestInput(
+        symbol=ticker, start_date="2022-01-01", end_date="2024-01-01",
+        strategy_type="rsi_mean_reversion", parameters={"period": 14, "oversold": 30, "overbought": 70},
+    ))
+    print("→ RSI mean-reversion (mean-reverting regime)")
+else:
+    print("→ Random walk: no statistical edge; skip backtesting")
+    result = None
+
+if result:
+    print(f"Sharpe: {result.sharpe_ratio:.2f} | MDD: {result.max_drawdown:.1%} | Trades: {result.num_trades}")
+```
+
+---
+
 ## Model Summary
 
 ### Input Models
@@ -1110,6 +1429,10 @@ if __name__ == "__main__":
 | `TechnicalInput` | `symbol`, `start_date`, `end_date` | `indicators=["rsi","macd","bollinger","atr"]` |
 | `PortfolioInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"` |
 | `ScreenerInput` | `tickers`, `filters` | `start_date`, `end_date`, `sort_by=None`, `ascending=True` |
+| `FactorRegressionInput` | `symbol`, `factor_tickers`, `start_date`, `end_date` | `factor_names=None`, `rolling_window=None` |
+| `CointegrationInput` | `symbol_a`, `symbol_b`, `start_date`, `end_date` | `zscore_window=30` |
+| `PCAInput` | `tickers`, `start_date`, `end_date` | `n_components=3` |
+| `HurstInput` | `symbol`, `start_date`, `end_date` | `method="dfa"`, `rolling_window=None` |
 
 ### Output Models
 
@@ -1121,3 +1444,7 @@ if __name__ == "__main__":
 | `PortfolioResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `information_ratio`, `total_return`, `correlation_matrix` |
 | `ScreenerResult` | `num_passed`, `tickers_passed`, `results` (list of dicts) |
 | `Trade` | `entry_date`, `exit_date`, `direction`, `entry_price`, `exit_price`, `return_pct` |
+| `FactorRegressionResult` | `symbol`, `factors`, `alpha`, `loadings`, `t_stats`, `p_values`, `r_squared`, `adj_r_squared`, `n_obs`, `rolling_alpha_tail`, `rolling_loadings_tail` |
+| `CointegrationResult` | `symbol_a`, `symbol_b`, `cointegrated`, `p_value`, `hedge_ratio`, `adf_statistic`, `half_life_days`, `critical_values`, `spread_mean`, `spread_std`, `current_zscore`, `signal`, `n_obs` |
+| `PCAResult` | `tickers`, `n_components`, `n_obs`, `explained_variance_ratio`, `cumulative_variance_ratio`, `loadings`, `factor_contributions` |
+| `HurstResult` | `symbol`, `hurst`, `regime`, `fit_r_squared`, `method`, `n_obs`, `rolling_current`, `rolling_regime_fractions` |

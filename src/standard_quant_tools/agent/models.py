@@ -156,3 +156,132 @@ class ScreenerResult(BaseModel):
     num_passed: int
     tickers_passed: List[str]
     results: List[Dict[str, Any]]
+
+
+# ──────────────────────────────────────────────
+# Factor Regression
+# ──────────────────────────────────────────────
+
+class FactorRegressionInput(BaseModel):
+    symbol: str = Field(..., description="Asset to analyse (e.g. 'AAPL').")
+    factor_tickers: List[str] = Field(
+        ...,
+        description=(
+            "Ticker proxies for each factor (e.g. ['SPY', 'IWM', 'IWD'] "
+            "for market, size, value)."
+        ),
+    )
+    factor_names: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Human-readable names for each factor (e.g. ['mkt', 'smb', 'hml']). "
+            "Defaults to factor_tickers when omitted."
+        ),
+    )
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    rolling_window: Optional[int] = Field(
+        None,
+        description=(
+            "If set, also return the last 20 bars of rolling OLS loadings "
+            "over this window (e.g. 60 for a 60-day rolling model)."
+        ),
+    )
+
+
+class FactorRegressionResult(BaseModel):
+    symbol: str
+    factors: List[str]
+    alpha: float
+    loadings: Dict[str, float]
+    t_stats: Dict[str, float]
+    p_values: Dict[str, float]
+    r_squared: float
+    adj_r_squared: float
+    n_obs: int
+    rolling_alpha_tail: Optional[List[float]] = None
+    rolling_loadings_tail: Optional[Dict[str, List[float]]] = None
+
+
+# ──────────────────────────────────────────────
+# Cointegration
+# ──────────────────────────────────────────────
+
+class CointegrationInput(BaseModel):
+    symbol_a: str = Field(..., description="First asset symbol (the 'long' leg).")
+    symbol_b: str = Field(..., description="Second asset symbol (the 'short' leg).")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    zscore_window: int = Field(
+        30,
+        description="Rolling window (bars) for the spread z-score used to generate a signal.",
+    )
+
+
+class CointegrationResult(BaseModel):
+    symbol_a: str
+    symbol_b: str
+    cointegrated: bool
+    p_value: float
+    hedge_ratio: float
+    adf_statistic: float
+    half_life_days: float
+    critical_values: Dict[str, float]
+    spread_mean: float
+    spread_std: float
+    current_zscore: float
+    signal: str   # "long_a_short_b" | "short_a_long_b" | "neutral"
+    n_obs: int
+
+
+# ──────────────────────────────────────────────
+# PCA
+# ──────────────────────────────────────────────
+
+class PCAInput(BaseModel):
+    tickers: List[str] = Field(..., description="Universe of tickers to decompose.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    n_components: int = Field(3, description="Number of principal components to extract (default 3).")
+
+
+class PCAResult(BaseModel):
+    tickers: List[str]
+    n_components: int
+    n_obs: int
+    explained_variance_ratio: Dict[str, float]       # {"PC1": 0.42, "PC2": 0.12, ...}
+    cumulative_variance_ratio: Dict[str, float]      # {"PC1": 0.42, "PC2": 0.54, ...}
+    loadings: Dict[str, Dict[str, float]]            # {"PC1": {"AAPL": 0.35, ...}, ...}
+    factor_contributions: Dict[str, Dict[str, float]] # {"AAPL": {"PC1": 0.38, ...}, ...}
+
+
+# ──────────────────────────────────────────────
+# Hurst Exponent
+# ──────────────────────────────────────────────
+
+class HurstInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    method: str = Field(
+        "dfa",
+        description="Estimation method: 'dfa' (Detrended Fluctuation Analysis, default) or 'rs' (Rescaled Range).",
+    )
+    rolling_window: Optional[int] = Field(
+        None,
+        description=(
+            "If set, compute rolling Hurst over this window and include the latest "
+            "value plus regime breakdown fractions in the result."
+        ),
+    )
+
+
+class HurstResult(BaseModel):
+    symbol: str
+    hurst: float
+    regime: str   # "trending" | "random_walk" | "mean_reverting"
+    fit_r_squared: float
+    method: str
+    n_obs: int
+    rolling_current: Optional[float] = None
+    rolling_regime_fractions: Optional[Dict[str, float]] = None

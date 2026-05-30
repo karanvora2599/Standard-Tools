@@ -1,11 +1,12 @@
-"""Tests for all 8 agent tools (mocked data provider)."""
+"""Tests for all 12 agent tools (mocked data provider)."""
 
 import pandas as pd
 import pytest
 
 from standard_quant_tools.agent.models import (
-    AnalysisInput, BacktestInput, PortfolioInput,
-    ScreenerInput, TechnicalInput,
+    AnalysisInput, BacktestInput, CointegrationInput,
+    FactorRegressionInput, HurstInput, PCAInput,
+    PortfolioInput, ScreenerInput, TechnicalInput,
 )
 from standard_quant_tools.agent.tools import (
     analyze_stock_risk,
@@ -13,7 +14,11 @@ from standard_quant_tools.agent.tools import (
     get_portfolio_analysis,
     get_technical_analysis,
     run_bollinger_backtest,
+    run_cointegration_test,
+    run_factor_regression,
+    run_hurst_analysis,
     run_macd_backtest,
+    run_pca_analysis,
     run_rsi_backtest,
     run_screener,
     run_sma_backtest,
@@ -24,9 +29,9 @@ START, END = '2023-01-01', '2024-01-01'
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_eight_tools(self):
+    def test_returns_list_of_twelve_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 8
+        assert len(tools) == 12
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -41,6 +46,8 @@ class TestGetAgentTools:
             'run_sma_backtest', 'run_rsi_backtest', 'run_macd_backtest',
             'run_bollinger_backtest', 'analyze_stock_risk',
             'get_technical_analysis', 'get_portfolio_analysis', 'run_screener',
+            'run_factor_regression', 'run_cointegration_test',
+            'run_pca_analysis', 'run_hurst_analysis',
         }
         assert names == expected
 
@@ -233,3 +240,300 @@ class TestRunScreener:
         inp = ScreenerInput(tickers=['AAPL', 'MSFT', 'GOOGL'], filters={})
         result = run_screener(inp)
         assert result.num_passed == len(result.tickers_passed)
+
+
+class TestRunFactorRegression:
+    def test_returns_factor_regression_result(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY', 'IWM'],
+            factor_names=['mkt', 'smb'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert result.symbol == 'AAPL'
+        assert result.factors == ['mkt', 'smb']
+
+    def test_defaults_factor_names_to_tickers(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY', 'IWM'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert result.factors == ['SPY', 'IWM']
+
+    def test_alpha_is_float(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert isinstance(result.alpha, float)
+
+    def test_loadings_keys_match_factor_names(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY', 'IWM'],
+            factor_names=['mkt', 'smb'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert set(result.loadings.keys()) == {'mkt', 'smb'}
+
+    def test_t_stats_and_p_values_have_alpha_key(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY'],
+            factor_names=['mkt'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert 'alpha' in result.t_stats
+        assert 'alpha' in result.p_values
+
+    def test_r_squared_bounded(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert 0.0 <= result.r_squared <= 1.0
+
+    def test_n_obs_positive(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert result.n_obs > 0
+
+    def test_rolling_tail_none_when_not_requested(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY'],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert result.rolling_alpha_tail is None
+        assert result.rolling_loadings_tail is None
+
+    def test_rolling_tail_populated_when_requested(self, patched_factory):
+        inp = FactorRegressionInput(
+            symbol='AAPL',
+            factor_tickers=['SPY'],
+            factor_names=['mkt'],
+            start_date=START,
+            end_date=END,
+            rolling_window=60,
+        )
+        result = run_factor_regression(inp)
+        assert result.rolling_alpha_tail is not None
+        assert result.rolling_loadings_tail is not None
+        assert 'mkt' in result.rolling_loadings_tail
+
+
+class TestRunCointegrationTest:
+    def test_returns_cointegration_result(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert result.symbol_a == 'KO'
+        assert result.symbol_b == 'PEP'
+
+    def test_cointegrated_is_bool(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert isinstance(result.cointegrated, bool)
+
+    def test_p_value_bounded(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert 0.0 <= result.p_value <= 1.0
+
+    def test_signal_is_valid_string(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert result.signal in {'long_a_short_b', 'short_a_long_b', 'neutral'}
+
+    def test_half_life_is_finite_float(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert isinstance(result.half_life_days, float)
+        assert result.half_life_days <= 9999.0
+
+    def test_critical_values_have_three_levels(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert set(result.critical_values.keys()) == {'1%', '5%', '10%'}
+
+    def test_n_obs_positive(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert result.n_obs > 0
+
+    def test_hedge_ratio_is_float(self, patched_factory):
+        inp = CointegrationInput(
+            symbol_a='KO', symbol_b='PEP',
+            start_date=START, end_date=END,
+        )
+        result = run_cointegration_test(inp)
+        assert isinstance(result.hedge_ratio, float)
+
+
+class TestRunPCAAnalysis:
+    def test_returns_pca_result(self, patched_factory):
+        inp = PCAInput(
+            tickers=['AAPL', 'MSFT', 'GOOGL'],
+            start_date=START, end_date=END,
+            n_components=2,
+        )
+        result = run_pca_analysis(inp)
+        assert result.tickers == ['AAPL', 'MSFT', 'GOOGL']
+        assert result.n_components == 2
+
+    def test_explained_variance_ratio_keys(self, patched_factory):
+        inp = PCAInput(
+            tickers=['AAPL', 'MSFT', 'GOOGL'],
+            start_date=START, end_date=END,
+            n_components=3,
+        )
+        result = run_pca_analysis(inp)
+        assert set(result.explained_variance_ratio.keys()) == {'PC1', 'PC2', 'PC3'}
+
+    def test_evr_values_sum_to_one(self, patched_factory):
+        inp = PCAInput(
+            tickers=['AAPL', 'MSFT', 'GOOGL'],
+            start_date=START, end_date=END,
+            n_components=3,
+        )
+        result = run_pca_analysis(inp)
+        total = sum(result.explained_variance_ratio.values())
+        assert abs(total - 1.0) < 0.01
+
+    def test_cumulative_variance_ends_near_one(self, patched_factory):
+        inp = PCAInput(
+            tickers=['AAPL', 'MSFT', 'GOOGL'],
+            start_date=START, end_date=END,
+            n_components=3,
+        )
+        result = run_pca_analysis(inp)
+        last_pc = f"PC{inp.n_components}"
+        assert abs(result.cumulative_variance_ratio[last_pc] - 1.0) < 0.01
+
+    def test_loadings_structure(self, patched_factory):
+        inp = PCAInput(
+            tickers=['AAPL', 'MSFT'],
+            start_date=START, end_date=END,
+            n_components=2,
+        )
+        result = run_pca_analysis(inp)
+        assert 'PC1' in result.loadings
+        assert set(result.loadings['PC1'].keys()) == {'AAPL', 'MSFT'}
+
+    def test_factor_contributions_structure(self, patched_factory):
+        inp = PCAInput(
+            tickers=['AAPL', 'MSFT'],
+            start_date=START, end_date=END,
+            n_components=2,
+        )
+        result = run_pca_analysis(inp)
+        assert 'AAPL' in result.factor_contributions
+        assert 'PC1' in result.factor_contributions['AAPL']
+
+    def test_n_obs_positive(self, patched_factory):
+        inp = PCAInput(
+            tickers=['AAPL', 'MSFT'],
+            start_date=START, end_date=END,
+            n_components=2,
+        )
+        result = run_pca_analysis(inp)
+        assert result.n_obs > 0
+
+
+class TestRunHurstAnalysis:
+    def test_returns_hurst_result(self, patched_factory):
+        inp = HurstInput(
+            symbol='AAPL', start_date=START, end_date=END,
+        )
+        result = run_hurst_analysis(inp)
+        assert result.symbol == 'AAPL'
+
+    def test_hurst_bounded(self, patched_factory):
+        inp = HurstInput(symbol='AAPL', start_date=START, end_date=END)
+        result = run_hurst_analysis(inp)
+        assert 0.0 <= result.hurst <= 1.5
+
+    def test_regime_is_valid_string(self, patched_factory):
+        inp = HurstInput(symbol='AAPL', start_date=START, end_date=END)
+        result = run_hurst_analysis(inp)
+        assert result.regime in {'trending', 'random_walk', 'mean_reverting', 'unknown'}
+
+    def test_fit_r_squared_bounded(self, patched_factory):
+        inp = HurstInput(symbol='AAPL', start_date=START, end_date=END)
+        result = run_hurst_analysis(inp)
+        assert 0.0 <= result.fit_r_squared <= 1.0
+
+    def test_method_dfa_is_default(self, patched_factory):
+        inp = HurstInput(symbol='AAPL', start_date=START, end_date=END)
+        result = run_hurst_analysis(inp)
+        assert result.method == 'dfa'
+
+    def test_method_rs_respected(self, patched_factory):
+        inp = HurstInput(symbol='AAPL', start_date=START, end_date=END, method='rs')
+        result = run_hurst_analysis(inp)
+        assert result.method == 'rs'
+
+    def test_n_obs_positive(self, patched_factory):
+        inp = HurstInput(symbol='AAPL', start_date=START, end_date=END)
+        result = run_hurst_analysis(inp)
+        assert result.n_obs > 0
+
+    def test_rolling_fields_none_when_not_requested(self, patched_factory):
+        inp = HurstInput(symbol='AAPL', start_date=START, end_date=END)
+        result = run_hurst_analysis(inp)
+        assert result.rolling_current is None
+        assert result.rolling_regime_fractions is None
+
+    def test_rolling_fields_populated_when_requested(self, patched_factory):
+        inp = HurstInput(
+            symbol='AAPL', start_date=START, end_date=END,
+            rolling_window=100,
+        )
+        result = run_hurst_analysis(inp)
+        assert result.rolling_current is not None
+        assert result.rolling_regime_fractions is not None
+        fracs = result.rolling_regime_fractions
+        assert set(fracs.keys()) == {'trending', 'random_walk', 'mean_reverting'}
+        assert abs(sum(fracs.values()) - 1.0) < 0.01

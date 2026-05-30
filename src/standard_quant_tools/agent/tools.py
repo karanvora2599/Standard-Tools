@@ -16,6 +16,10 @@ from standard_quant_tools.indicators.volume import obv, vwap
 from standard_quant_tools.backtest.engine import run_strategy
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.analysis.regression import calculate_beta
+from standard_quant_tools.analysis.multi_factor import multi_factor_regression, rolling_factor_loadings
+from standard_quant_tools.analysis.cointegration import cointegration_test, compute_spread, spread_zscore
+from standard_quant_tools.analysis.pca import pca_returns, factor_contributions
+from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
 from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, sortino_ratio, max_drawdown,
     var_historical, cvar, information_ratio,
@@ -28,6 +32,10 @@ from standard_quant_tools.agent.models import (
     TechnicalInput, TechnicalResult,
     PortfolioInput, PortfolioResult,
     ScreenerInput, ScreenerResult,
+    FactorRegressionInput, FactorRegressionResult,
+    CointegrationInput, CointegrationResult,
+    PCAInput, PCAResult,
+    HurstInput, HurstResult,
 )
 
 
@@ -347,6 +355,184 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
 
 
 # ──────────────────────────────────────────────────────────────────
+# Factor Regression Tool
+# ──────────────────────────────────────────────────────────────────
+
+def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegressionResult:
+    """OLS multi-factor regression: alpha, loadings, t-stats, p-values, R²."""
+    provider = DataFactory.get_provider()
+    asset_df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    asset_rets = asset_df["Close"].pct_change().dropna()
+
+    names = input_data.factor_names or input_data.factor_tickers
+    factor_series = {}
+    for ticker, name in zip(input_data.factor_tickers, names):
+        df = provider.get_ohlcv(ticker, input_data.start_date, input_data.end_date)
+        factor_series[name] = df["Close"].pct_change().dropna()
+
+    factors = pd.DataFrame(factor_series)
+    result = multi_factor_regression(asset_rets, factors)
+
+    rolling_alpha_tail = None
+    rolling_loadings_tail = None
+    if input_data.rolling_window:
+        rolling = rolling_factor_loadings(asset_rets, factors, window=input_data.rolling_window)
+        tail = rolling.dropna().tail(20)
+        if not tail.empty:
+            rolling_alpha_tail = [round(float(v), 6) for v in tail["alpha"].tolist()]
+            rolling_loadings_tail = {
+                col: [round(float(v), 6) for v in tail[col].tolist()]
+                for col in tail.columns
+                if col != "alpha"
+            }
+
+    return FactorRegressionResult(
+        symbol=input_data.symbol,
+        factors=names,
+        alpha=round(float(result["alpha"]), 6),
+        loadings={k: round(float(v), 6) for k, v in result["loadings"].items()},
+        t_stats={k: round(float(v), 4) if not (v != v) else 0.0
+                 for k, v in result["t_stats"].items()},
+        p_values={k: round(float(v), 4) if not (v != v) else 1.0
+                  for k, v in result["p_values"].items()},
+        r_squared=round(float(result["r_squared"]), 4),
+        adj_r_squared=round(float(result["adj_r_squared"]), 4)
+        if not (result["adj_r_squared"] != result["adj_r_squared"]) else 0.0,
+        n_obs=result["n_obs"],
+        rolling_alpha_tail=rolling_alpha_tail,
+        rolling_loadings_tail=rolling_loadings_tail,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Cointegration Tool
+# ──────────────────────────────────────────────────────────────────
+
+def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResult:
+    """Engle-Granger cointegration test with hedge ratio, half-life, and a z-score signal."""
+    provider = DataFactory.get_provider()
+    prices_a = provider.get_ohlcv(
+        input_data.symbol_a, input_data.start_date, input_data.end_date
+    )["Close"]
+    prices_b = provider.get_ohlcv(
+        input_data.symbol_b, input_data.start_date, input_data.end_date
+    )["Close"]
+
+    result = cointegration_test(prices_a, prices_b)
+    spread = compute_spread(prices_a, prices_b, hedge_ratio=result["hedge_ratio"])
+    z = spread_zscore(spread, window=input_data.zscore_window)
+    valid_z = z.dropna()
+    current_z = round(float(valid_z.iloc[-1]), 4) if not valid_z.empty else 0.0
+
+    if current_z < -2.0:
+        signal = "long_a_short_b"
+    elif current_z > 2.0:
+        signal = "short_a_long_b"
+    else:
+        signal = "neutral"
+
+    # Guard against inf half-life (non-mean-reverting spread)
+    hl = result["half_life_days"]
+    hl_safe = round(min(hl, 9999.0), 1) if hl != float("inf") else 9999.0
+
+    return CointegrationResult(
+        symbol_a=input_data.symbol_a,
+        symbol_b=input_data.symbol_b,
+        cointegrated=result["cointegrated"],
+        p_value=round(float(result["p_value"]), 4),
+        hedge_ratio=round(float(result["hedge_ratio"]), 4),
+        adf_statistic=round(float(result["adf_statistic"]), 4),
+        half_life_days=hl_safe,
+        critical_values={k: round(float(v), 4) for k, v in result["critical_values"].items()},
+        spread_mean=round(float(spread.mean()), 6),
+        spread_std=round(float(spread.std()), 6),
+        current_zscore=current_z,
+        signal=signal,
+        n_obs=result["n_obs"],
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# PCA Tool
+# ──────────────────────────────────────────────────────────────────
+
+def run_pca_analysis(input_data: PCAInput) -> PCAResult:
+    """PCA on multi-asset returns: explained variance, loadings, per-asset factor contributions."""
+    provider = DataFactory.get_provider()
+    returns = pd.DataFrame({
+        t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)["Close"].pct_change()
+        for t in input_data.tickers
+    }).dropna()
+
+    result = pca_returns(returns, n_components=input_data.n_components)
+    contrib = factor_contributions(returns, n_components=input_data.n_components)
+
+    evr = {k: round(float(v), 4) for k, v in result["explained_variance_ratio"].items()}
+    cumvar = {k: round(float(v), 4) for k, v in result["cumulative_variance_ratio"].items()}
+
+    loadings_dict = {
+        pc: {t: round(float(result["loadings"].loc[t, pc]), 4) for t in input_data.tickers}
+        for pc in result["loadings"].columns
+    }
+
+    contrib_dict = {
+        t: {pc: round(float(contrib.loc[t, pc]), 4) for pc in contrib.columns}
+        for t in contrib.index
+    }
+
+    return PCAResult(
+        tickers=input_data.tickers,
+        n_components=result["n_components"],
+        n_obs=result["n_obs"],
+        explained_variance_ratio=evr,
+        cumulative_variance_ratio=cumvar,
+        loadings=loadings_dict,
+        factor_contributions=contrib_dict,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Hurst Tool
+# ──────────────────────────────────────────────────────────────────
+
+def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
+    """Hurst exponent via DFA or R/S. Optionally includes rolling regime breakdown."""
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    returns = df["Close"].pct_change().dropna()
+
+    result = hurst_exponent(returns, method=input_data.method)
+
+    rolling_current = None
+    rolling_regime_fractions = None
+    if input_data.rolling_window:
+        rolling = rolling_hurst(returns, window=input_data.rolling_window, method=input_data.method)
+        valid = rolling.dropna()
+        if not valid.empty:
+            rolling_current = round(float(valid.iloc[-1]), 4)
+            total = len(valid)
+            rolling_regime_fractions = {
+                "trending": round(float((valid > 0.55).sum() / total), 3),
+                "random_walk": round(float(((valid >= 0.45) & (valid <= 0.55)).sum() / total), 3),
+                "mean_reverting": round(float((valid < 0.45).sum() / total), 3),
+            }
+
+    h = result["hurst"]
+    r2 = result["fit_r_squared"]
+
+    return HurstResult(
+        symbol=input_data.symbol,
+        hurst=round(float(h), 4) if not (h != h) else 0.0,
+        regime=result["regime"],
+        fit_r_squared=round(float(r2), 4) if not (r2 != r2) else 0.0,
+        method=result["method"],
+        n_obs=result["n_obs"],
+        rolling_current=rolling_current,
+        rolling_regime_fractions=rolling_regime_fractions,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Tool Registry for LLM Function Calling
 # ──────────────────────────────────────────────────────────────────
 
@@ -364,6 +550,10 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("get_technical_analysis", "Compute configurable technical indicators.", TechnicalInput),
         ("get_portfolio_analysis", "Multi-asset portfolio metrics.", PortfolioInput),
         ("run_screener", "Filter a stock universe by fundamental and technical criteria.", ScreenerInput),
+        ("run_factor_regression", "Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R².", FactorRegressionInput),
+        ("run_cointegration_test", "Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal.", CointegrationInput),
+        ("run_pca_analysis", "PCA on multi-asset returns: explained variance, loadings, factor contributions.", PCAInput),
+        ("run_hurst_analysis", "Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.", HurstInput),
     ]
 
     return [
