@@ -1,276 +1,248 @@
 # Standard Quant Tools for AI Agents
 
-A high-performance, modular, and agent-centric Python library for quantitative financial analysis. Designed to provide **clean, structured data** and **robust error handling** for AI agents (LLMs) and automated HFT-like workflows.
+A high-performance, modular Python library for quantitative financial analysis. Designed to give AI agents and automated workflows **clean structured data**, **mathematical accuracy**, and **robust error handling**.
 
 ## Key Features
 
-- **High Performance**:
-  - **Numba Acceleration**: JIT-compiled technical indicators (e.g., RSI) for low-latency calculation.
-  - **NumPy Optimization**: OLS regression using linear algebra (`numpy.linalg`) instead of heavy statistical packages, offering ~100x speedup.
-  - **AsyncIO Support**: Non-blocking data fetching for high-throughput applications.
-  - **Smart Caching**: In-memory LRU caching to prevent redundant API calls.
-- **Agent-First Design**:
-  - **Structured Outputs**: All tools return Pydantic models or clean dictionaries, not arbitrary objects.
-  - **Error Recovery**: Descriptive error messages designed for LLM self-correction.
-- **Robustness**:
-  - **Retry Logic**: Automatic retries with exponential backoff for network resilience.
-  - **Custom Exceptions**: Granular error handling with `QuantError`, `DataNotFoundError`, etc.
-  - **Input Validation**: Decorators (`@validate_series`) ensure data integrity before calculation.
+- **High Performance** — Numba JIT for RSI, ADX, Parabolic SAR; NumPy BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching
+- **Agent-First Design** — All tools return Pydantic models; 8 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
+- **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, portfolio analysis, stock screener, 4 backtest strategies, regression analysis
+- **Robust Infrastructure** — Retry logic with exponential backoff, TTL caching, custom exception hierarchy, `@validate_series` decorator, optional scipy/numba graceful fallback
+
+---
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/standard-quant-tools.git
-cd standard-quant-tools
-
-# Install dependencies (ensure you have poetry or pip)
-pip install . 
-# Or with Poetry
+pip install .
+# or
 poetry install
 ```
 
-**Requirements**:
-
-- Python 3.10+
-- `pandas`, `numpy`, `yfinance`
-- `numba` (Performance)
-- `aiohttp` (Async I/O)
-- `cachetools` (Caching)
+**Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`
 
 ---
 
 ## Quick Start
 
-### 1. Synchronous Data Fetching
-
 ```python
 from standard_quant_tools.data.factory import DataFactory
-from standard_quant_tools.indicators.trend import sma
+from standard_quant_tools.indicators import sma, rsi, bollinger_bands, adx
+from standard_quant_tools.metrics import sharpe_ratio, max_drawdown, calmar_ratio, var_historical
 
-# Initialize Provider (Free Tier YFinance by default)
-provider = DataFactory.get_provider("yfinance")
-
-# Fetch Data (Cached automatically)
+# Fetch data
+provider = DataFactory.get_provider()
 df = provider.get_ohlcv("NVDA", "2023-01-01", "2024-01-01")
 
-# Calculate SMA
-df['SMA_20'] = sma(df['Close'], period=20)
-print(df.tail())
-```
+# Technical analysis
+df['RSI'] = rsi(df['Close'], 14)
+df['SMA_50'] = sma(df['Close'], 50)
+bb = bollinger_bands(df['Close'], 20, 2.0)
+adx_df = adx(df['High'], df['Low'], df['Close'])
 
-### 2. High-Performance Async Data Fetching
-
-For building responsive applications or fetching multiple tickers in parallel:
-
-```python
-import asyncio
-from standard_quant_tools.data.factory import DataFactory
-
-async def fetch_portfolio(tickers):
-    provider = DataFactory.get_provider("yfinance")
-    tasks = [
-        provider.get_ohlcv_async(ticker, "2023-01-01", "2024-01-01") 
-        for ticker in tickers
-    ]
-    results = await asyncio.gather(*tasks)
-    return results
-
-# Run async loop
-tickers = ["AAPL", "GOOGL", "MSFT", "AMZN"]
-data_frames = asyncio.run(fetch_portfolio(tickers))
-```
-
-### 3. Robust Error Handling
-
-The library uses a custom exception hierarchy for precise control.
-
-```python
-from standard_quant_tools.error import DataNotFoundError, InvalidSymbolError
-from standard_quant_tools.data.factory import DataFactory
-
-provider = DataFactory.get_provider("yfinance")
-
-try:
-    df = provider.get_ohlcv("INVALID_TICKER", "2023-01-01", "2024-01-01")
-except DataNotFoundError:
-    print("Ticker not found! Please check the symbol.")
-except InvalidSymbolError:
-    print("Symbol format is incorrect.")
+# Risk metrics
+returns = df['Close'].pct_change().dropna()
+equity = (1 + returns).cumprod() * 10_000
+print(f"Sharpe: {sharpe_ratio(returns):.2f}")
+print(f"Max Drawdown: {max_drawdown(equity):.2%}")
+print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 ```
 
 ---
 
-## comprehensive Module Reference
+## Module Reference
 
-### 1. Data (`src.data`)
+### Data (`standard_quant_tools.data`)
 
-Handles data fetching with built-in resilience.
+| Function | Description | Returns |
+|---|---|---|
+| `get_ohlcv(symbol, start, end, interval)` | Historical OHLCV data | `pd.DataFrame` |
+| `get_ohlcv_async(...)` | Non-blocking OHLCV fetch | `Awaitable[pd.DataFrame]` |
+| `get_ticker_info(symbol)` | Company metadata | `TickerInfo` (Pydantic) |
+| `get_financial_ratios(symbol)` | P/E, P/B, D/E, ROE, margins, etc. | `FinancialRatios` (Pydantic) |
 
-#### `get_ohlcv(symbol, start_date, end_date, interval='1d')`
+### Technical Indicators (`standard_quant_tools.indicators`)
 
-Fetches historical Open-High-Low-Close-Volume data.
+**Trend**
 
-- **Returns**: `pd.DataFrame` with standard columns.
-- **Example**:
+| Function | Description | Performance |
+|---|---|---|
+| `sma(series, period)` | Simple Moving Average | Pandas rolling |
+| `ema(series, period)` | Exponential Moving Average | Pandas EWM |
+| `macd(series, fast, slow, signal)` | MACD + Signal + Histogram | Pandas EWM |
+| `adx(high, low, close, period)` | ADX + DI+ + DI− | **Numba JIT** (Wilder smoothing) |
+| `parabolic_sar(high, low)` | Parabolic SAR + Trend direction | **Numba JIT** |
+| `williams_r(high, low, close, period)` | Williams %R oscillator | Pandas rolling |
 
-  ```python
-  df = provider.get_ohlcv("TSLA", "2023-01-01", "2024-01-01")
-  ```
+**Momentum**
 
-#### `get_ohlcv_async(symbol, start_date, end_date, interval='1d')`
+| Function | Description | Performance |
+|---|---|---|
+| `rsi(series, period)` | RSI (Wilder's smoothing) | **Numba JIT** |
+| `stochastic_oscillator(high, low, close)` | Stochastic %K and %D | Pandas rolling |
 
-Non-blocking version of `get_ohlcv`. Ideal for batch processing.
+**Volatility**
 
-- **Returns**: `Awaitable[pd.DataFrame]`
+| Function | Description |
+|---|---|
+| `bollinger_bands(series, period, num_std)` | Upper / Middle / Lower bands |
+| `atr(high, low, close, period)` | Average True Range |
 
-#### `get_ticker_info(symbol)`
+**Volume**
 
-Fetches company metadata.
+| Function | Description |
+|---|---|
+| `obv(close, volume)` | On Balance Volume |
+| `vwap(high, low, close, volume, period)` | VWAP (cumulative or rolling) |
+| `mfi(high, low, close, volume, period)` | Money Flow Index |
 
-- **Returns**: `TickerInfo` (Pydantic model: name, sector, industry, etc.)
-- **Example**:
+### Metrics (`standard_quant_tools.metrics`)
 
-  ```python
-  info = provider.get_ticker_info("AAPL")
-  print(f"{info.name} is in {info.sector}")
-  ```
+**Return Metrics**
 
-#### `get_financial_ratios(symbol)`
+| Function | Description |
+|---|---|
+| `cumulative_return(series)` | Total return over period |
+| `cagr(series)` | Compound Annual Growth Rate |
+| `annualized_volatility(returns)` | Annualized standard deviation |
 
-Fetches key fundamental ratios.
+**Risk Metrics**
 
-- **Returns**: `FinancialRatios` (P/E, P/B, Debt/Eq, etc.)
-- **Example**:
+| Function | Description |
+|---|---|
+| `sharpe_ratio(returns, risk_free_rate)` | Excess return per unit of total risk |
+| `sortino_ratio(returns, risk_free_rate)` | Excess return per unit of downside risk |
+| `max_drawdown(series)` | Maximum peak-to-trough decline |
+| `calmar_ratio(equity_curve)` | CAGR / \|max drawdown\| |
+| `var_historical(returns, confidence)` | Historical Value at Risk |
+| `var_parametric(returns, confidence)` | Gaussian VaR (scipy optional) |
+| `cvar(returns, confidence)` | Conditional VaR / Expected Shortfall |
+| `information_ratio(returns, benchmark)` | Active return / tracking error |
+| `treynor_ratio(returns, benchmark)` | Excess return / beta |
+| `drawdown_series(series)` | Full drawdown time series |
 
-  ```python
-  ratios = provider.get_financial_ratios("MSFT")
-  print(f"Forward P/E: {ratios.forward_pe}")
-  ```
-
-### 2. Technical Indicators (`src.indicators`)
-
-Optimized implementations of standard indicators.
-
-#### Trend (`standard_quant_tools.indicators.trend`)
-
-- **`sma(series, period)`**: Simple Moving Average.
-- **`ema(series, period)`**: Exponential Moving Average.
-- **`macd(series, fast=12, slow=26, signal=9)`**: Moving Average Convergence Divergence.
-  - **Returns**: DataFrame with `MACD`, `Signal`, `Histogram`.
-
-  ```python
-  from standard_quant_tools.indicators.trend import macd
-  macd_df = macd(df['Close'])
-  ```
-
-#### Momentum (`standard_quant_tools.indicators.momentum`)
-
-- **`rsi(series, period=14)`**: Relative Strength Index.
-  - **Optimization**: Uses **Numba JIT** for massive speedup on large arrays.
-
-  ```python
-  from standard_quant_tools.indicators.momentum import rsi
-  rsi_vals = rsi(df['Close'])
-  ```
-
-- **`stochastic_oscillator(high, low, close)`**: Stochastic Oscillator.
-  - **Returns**: DataFrame with `Stoch_K`, `Stoch_D`.
-
-#### Volatility (`standard_quant_tools.indicators.volatility`)
-
-- **`bollinger_bands(series, period=20, num_std=2)`**: Bollinger Bands.
-  - **Returns**: DataFrame with `BB_Upper`, `BB_Middle`, `BB_Lower`.
-- **`atr(high, low, close, period=14)`**: Average True Range.
-
-### 3. Financial Metrics (`src.metrics`)
-
-Standard performance metrics for portfolio evaluation.
-
-#### Return Metrics (`standard_quant_tools.metrics.return_metrics`)
-
-- **`cumulative_return(series)`**: Total return over the period.
-- **`cagr(series)`**: Compound Annual Growth Rate.
-- **`annualized_volatility(returns)`**: Standard deviation scaled to year.
-
-#### Risk Metrics (`standard_quant_tools.metrics.risk_metrics`)
-
-- **`sharpe_ratio(returns, risk_free_rate)`**: Excess return per unit of risk.
-- **`sortino_ratio(returns, risk_free_rate)`**: Excess return per unit of *downside* risk.
-- **`max_drawdown(series)`**: Maximum peak-to-trough decline.
+### Analysis (`standard_quant_tools.analysis`)
 
 ```python
-from standard_quant_tools.metrics.risk_metrics import sharpe_ratio, max_drawdown
-sr = sharpe_ratio(daily_returns)
-mdd = max_drawdown(price_series)
+from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
+
+stats = calculate_beta(asset_returns, benchmark_returns)
+# {'alpha': ..., 'beta': ..., 'r_squared': ...}  — NumPy OLS, ~100x faster than statsmodels
+
+rolling_df = rolling_beta(asset_returns, benchmark_returns, window=60)
+# DataFrame with 'Rolling_Beta' column
 ```
 
-### 4. Regression & Analysis (`src.analysis`)
+### Backtesting (`standard_quant_tools.backtest`)
 
-**High-Performance Regression Module**.
-
-#### `calculate_beta(asset_returns, benchmark_returns)`
-
-Calculates static Alpha and Beta using **NumPy** linear algebra optimization (~100x faster than statsmodels).
-
-- **Returns**: Dict `{'alpha', 'beta', 'r_squared'}`.
-
-```python
-from standard_quant_tools.analysis.regression import calculate_beta
-stats = calculate_beta(stock_returns, market_returns)
-```
-
-#### `rolling_beta(asset_returns, benchmark_returns, window=60)`
-
-Calculates Beta over a rolling window to track changing risk exposure.
-
-- **Returns**: DataFrame with `Rolling_Beta`.
-
-### 5. Backtesting Engine (`src.backtest`)
-
-A **vectorized** backtesting engine. It calculates equity curves entire arrays at once, avoiding slow loops.
-
-#### `run_strategy(price_data, signal_series, initial_capital)`
-
-- **Inputs**:
-  - `price_data`: DataFrame with 'Close'.
-  - `signal_series`: Series of 1 (Long), 0 (Flat), -1 (Short).
-- **Returns**: Dictionary with `total_return`, `final_equity`, `max_drawdown`, `equity_curve`.
+Vectorized engine with transaction costs, trade log, and full metric output.
 
 ```python
 from standard_quant_tools.backtest.engine import run_strategy
-# Strategy: Long if Close > SMA(50)
-signals = (df['Close'] > df['SMA_50']).astype(int)
-results = run_strategy(df, signals, initial_capital=10000)
+import numpy as np
+
+signals = (df['Close'] > sma(df['Close'], 50)).astype(int)
+
+result = run_strategy(
+    df, signals,
+    initial_capital=10_000,
+    commission_pct=0.001,   # 0.1% per trade
+    slippage_pct=0.0005,    # 0.05% per trade
+    include_trade_log=True,
+)
+
+print(f"Sharpe: {result['sharpe_ratio']}")
+print(f"Calmar: {result['calmar_ratio']}")
+print(f"Win Rate: {result['win_rate']:.1%}")
+print(f"Trades: {result['num_trades']}")
 ```
 
-### 6. AI Agent Tools (`src.agent`)
+**Output keys:** `final_equity`, `total_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `profit_factor`, `num_trades`, `avg_trade_return_pct`, `equity_curve`, `trade_log`
 
-**LLM-Ready Functions**. Wrappers designed for OpenAI Function Calling.
-
-#### `get_agent_tools()`
-
-Returns a JSON-serializable list of tool definitions (schema) that can be passed directly to an LLM API.
-
-#### `analyze_stock_risk`
-
-- **Purpose**: Quick risk profile.
-- **Input Model**: `AnalysisInput(symbol="...", benchmark="...")`
-- **Output Model**: `AnalysisResult(alpha=..., beta=..., sharpe=...)`
-
-#### `run_sma_backtest`
-
-- **Purpose**: Test a moving average crossover strategy.
-- **Input Model**: `BacktestInput(symbol="...", strategy_type="sma_crossover", ...)`
-- **Output Model**: `BacktestResult`
-
-**Example Usage**:
+### Portfolio (`standard_quant_tools.portfolio`)
 
 ```python
-from standard_quant_tools.agent.tools import analyze_stock_risk
+from standard_quant_tools.portfolio import portfolio_metrics, correlation_matrix, fetch_returns_sync
+
+returns_df = fetch_returns_sync(['AAPL', 'MSFT', 'GOOGL'], '2023-01-01', '2024-01-01')
+weights = [0.4, 0.35, 0.25]
+
+metrics = portfolio_metrics(returns_df, weights)
+print(f"Portfolio Sharpe: {metrics['sharpe_ratio']:.2f}")
+print(f"Portfolio VaR(95%): {metrics['var_95']:.4f}")
+
+corr = correlation_matrix(returns_df)
+```
+
+### Screener (`standard_quant_tools.screener`)
+
+```python
+from standard_quant_tools.screener import screen_stocks
+
+result = screen_stocks(
+    tickers=['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA'],
+    filters={
+        'pe_ratio_max': 35,
+        'rsi_max': 50,
+        'price_above_sma': 50,
+        'beta_max': 1.5,
+    },
+    sort_by='rsi_14',
+    ascending=True,
+)
+print(result)
+```
+
+**Available filters:** `pe_ratio_max`, `pb_ratio_max`, `debt_equity_max`, `roe_min`, `profit_margin_min`, `div_yield_min`, `market_cap_min`, `rsi_max`, `rsi_min`, `price_above_sma`, `price_below_sma`, `beta_max`, `beta_min`
+
+### AI Agent Tools (`standard_quant_tools.agent`)
+
+8 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas.
+
+```python
+from standard_quant_tools.agent.tools import get_agent_tools, analyze_stock_risk
 from standard_quant_tools.agent.models import AnalysisInput
 
-input_data = AnalysisInput(symbol="GOOGL", benchmark="SPY", period="1y")
-result = analyze_stock_risk(input_data)
-# result.model_dump_json() provides clean JSON for the agent
+# Get tool schemas for your LLM
+tools = get_agent_tools()  # 8 tools ready for function calling
+
+# Call directly
+result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
+print(result.model_dump_json(indent=2))
 ```
+
+**Available tools:** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`
+
+---
+
+## Error Handling
+
+```python
+from standard_quant_tools.error import DataNotFoundError, InvalidSymbolError, ValidationError
+
+try:
+    df = provider.get_ohlcv("INVALID", "2023-01-01", "2024-01-01")
+except DataNotFoundError as e:
+    print(f"No data: {e}")
+except InvalidSymbolError as e:
+    print(f"Bad symbol: {e}")
+```
+
+**Exception hierarchy:** `QuantError` → `DataProviderError` → `DataNotFoundError / InvalidSymbolError / APIError`
+
+---
+
+## Running Tests
+
+```bash
+# Unit tests (no network)
+pytest tests/ -m "not integration"
+
+# Integration tests (requires internet)
+pytest tests/ -m integration
+
+# With coverage
+pytest tests/ -m "not integration" --cov=src/standard_quant_tools
+```
+
+See `Documentation/` for detailed guides on each module.
