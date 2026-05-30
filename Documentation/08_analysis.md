@@ -180,4 +180,197 @@ print(json.dumps(payload, indent=2))
 
 ---
 
-*More tools coming: cointegration & pairs spread analysis, PCA on returns, Hurst exponent.*
+---
+
+## Cointegration & Pairs Spread Analysis
+
+Two price series are **cointegrated** when a linear combination of them is stationary, even though each series individually follows a random walk. This is the statistical foundation of pairs trading.
+
+The toolkit provides four functions covering the full pairs workflow:
+
+| Function | Purpose |
+|---|---|
+| `cointegration_test` | Engle-Granger test — is the pair cointegrated? |
+| `compute_spread` | Compute the hedged residual (the tradeable spread) |
+| `half_life` | How quickly does the spread mean-revert? |
+| `spread_zscore` | Normalise the spread into a trading signal |
+
+### Cointegration test
+
+```python
+from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.analysis import cointegration_test
+
+provider = DataFactory.get_provider()
+
+ko  = provider.get_ohlcv("KO",  "2020-01-01", "2024-01-01")["Close"]
+pep = provider.get_ohlcv("PEP", "2020-01-01", "2024-01-01")["Close"]
+
+result = cointegration_test(ko, pep)
+
+print(f"Cointegrated     : {result['cointegrated']}")
+print(f"Hedge ratio      : {result['hedge_ratio']:.4f}")
+print(f"ADF statistic    : {result['adf_statistic']:.4f}")
+print(f"p-value          : {result['p_value']:.4f}")
+print(f"Half-life (days) : {result['half_life_days']:.1f}")
+print(f"Critical values  : {result['critical_values']}")
+```
+
+The test uses **MacKinnon (2010) p-values** — these are stricter than standard ADF critical values because they account for the fact that we are testing residuals from a fitted regression, not the original series.
+
+#### Output reference
+
+| Key | Type | Description |
+|---|---|---|
+| `cointegrated` | `bool` | `True` when `p_value < 0.05` |
+| `hedge_ratio` | `float` | OLS coefficient: `series_a ≈ α + hedge_ratio × series_b` |
+| `adf_statistic` | `float` | ADF t-statistic on the spread |
+| `p_value` | `float` | MacKinnon cointegration p-value |
+| `critical_values` | `dict` | `{"1%": ..., "5%": ..., "10%": ...}` — sample-size adjusted |
+| `half_life_days` | `float` | AR(1) mean-reversion half-life in bars |
+| `n_obs` | `int` | Observations used after index alignment |
+
+---
+
+### Computing the spread
+
+```python
+from standard_quant_tools.analysis import compute_spread
+
+# Auto-estimate hedge ratio via OLS (zero-mean residual by construction)
+spread = compute_spread(ko, pep)
+
+# Or supply a known/previously fitted ratio
+spread = compute_spread(ko, pep, hedge_ratio=result["hedge_ratio"])
+
+print(spread.describe())
+```
+
+`compute_spread` returns a `pd.Series` named `"spread"`, aligned to the common index of the two inputs.
+
+---
+
+### Half-life of mean reversion
+
+```python
+from standard_quant_tools.analysis import half_life
+
+hl = half_life(spread)
+print(f"Half-life: {hl:.1f} bars")
+# Rule of thumb:
+#   < 5 bars  → too fast, hard to trade (slippage kills it)
+#   5–30 bars → sweet spot for daily-bar mean reversion
+#   > 60 bars → slow; may need patience or tighter entry thresholds
+```
+
+Internally fits `ΔS_t = α + β · S_{t-1} + ε` via OLS and computes `−ln(2) / β`.
+Returns `float('inf')` when the spread is not mean-reverting (β ≥ 0).
+
+---
+
+### Z-score signal
+
+```python
+from standard_quant_tools.analysis import spread_zscore
+
+# Static (full-sample) normalisation — best for research/backtesting
+z_static = spread_zscore(spread)
+
+# Rolling normalisation — required for live trading (avoids lookahead)
+z_rolling = spread_zscore(spread, window=30)
+
+# Typical entry/exit thresholds
+entry_long  = z_rolling < -2.0   # buy series_a, sell series_b
+entry_short = z_rolling >  2.0   # sell series_a, buy series_b
+exit_signal = z_rolling.abs() < 0.5
+```
+
+---
+
+### Full pairs trading workflow
+
+```python
+import pandas as pd
+from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.analysis import (
+    cointegration_test, compute_spread, half_life, spread_zscore
+)
+from standard_quant_tools.backtest.engine import run_strategy
+
+provider = DataFactory.get_provider()
+start, end = "2020-01-01", "2024-01-01"
+
+# 1. Load price series
+ko  = provider.get_ohlcv("KO",  start, end)["Close"]
+pep = provider.get_ohlcv("PEP", start, end)["Close"]
+
+# 2. Test for cointegration
+result = cointegration_test(ko, pep)
+if not result["cointegrated"]:
+    raise ValueError("Pair is not cointegrated — do not trade")
+
+print(f"Hedge ratio: {result['hedge_ratio']:.3f}, Half-life: {result['half_life_days']:.1f} days")
+
+# 3. Build spread and z-score
+spread = compute_spread(ko, pep, hedge_ratio=result["hedge_ratio"])
+hl = half_life(spread)
+window = max(int(hl * 2), 10)          # rolling window = 2× half-life
+z = spread_zscore(spread, window=window)
+
+# 4. Generate mean-reversion signals on series_a (KO)
+import numpy as np
+entry_thresh, exit_thresh = 2.0, 0.5
+signals = pd.Series(0.0, index=z.index)
+in_pos = 0
+for i in range(len(z)):
+    if z.isna().iloc[i]:
+        continue
+    zv = z.iloc[i]
+    if in_pos == 0:
+        if zv < -entry_thresh:
+            in_pos = 1   # spread too low → long KO
+        elif zv > entry_thresh:
+            in_pos = -1  # spread too high → short KO
+    elif in_pos != 0 and abs(zv) < exit_thresh:
+        in_pos = 0
+    signals.iloc[i] = float(in_pos)
+
+# 5. Backtest on series_a's OHLCV
+ohlcv_ko = provider.get_ohlcv("KO", start, end)
+bt = run_strategy(ohlcv_ko, signals, initial_capital=10_000, commission_pct=0.001)
+print(f"Sharpe: {bt['sharpe_ratio']:.2f}, Max DD: {bt['max_drawdown']:.1%}")
+```
+
+---
+
+### Screening for cointegrated pairs
+
+```python
+from itertools import combinations
+import pandas as pd
+from standard_quant_tools.analysis import cointegration_test
+
+tickers = ["KO", "PEP", "MCD", "WEN", "YUM", "SBUX"]
+provider = DataFactory.get_provider()
+
+prices = {t: provider.get_ohlcv(t, "2021-01-01", "2024-01-01")["Close"]
+          for t in tickers}
+
+rows = []
+for a, b in combinations(tickers, 2):
+    r = cointegration_test(prices[a], prices[b])
+    if r["cointegrated"]:
+        rows.append({
+            "pair": f"{a}/{b}",
+            "hedge_ratio": round(r["hedge_ratio"], 3),
+            "p_value": round(r["p_value"], 4),
+            "half_life": round(r["half_life_days"], 1),
+        })
+
+pairs_df = pd.DataFrame(rows).sort_values("half_life")
+print(pairs_df)
+```
+
+---
+
+*More tools coming: PCA on returns, Hurst exponent.*
