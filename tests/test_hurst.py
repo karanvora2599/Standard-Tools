@@ -37,8 +37,8 @@ def trending_returns():
 
 @pytest.fixture(scope="module")
 def mean_reverting_returns():
-    """AR(1) phi=-0.4 → negatively autocorrelated → H < 0.45."""
-    return _make_returns(seed=42, n=2000, phi=-0.4)
+    """AR(1) phi=-0.5 → negatively autocorrelated → H < 0.45 (phi=-0.4 gives H≈0.456, too close to boundary)."""
+    return _make_returns(seed=42, n=2000, phi=-0.5)
 
 
 # ── hurst_exponent — output structure ─────────────────────────────────────────

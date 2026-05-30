@@ -550,4 +550,193 @@ for i, name in enumerate(result["explained_variance_ratio"].index):
 
 ---
 
-*More tools coming: Hurst exponent.*
+---
+
+## Hurst Exponent
+
+The Hurst exponent H classifies the long-memory scaling behaviour of a return series. It is the single most useful number for deciding which *class* of strategy to apply to a market.
+
+| H value | Regime | Strategy implication |
+|---|---|---|
+| H > 0.55 | **Trending** | Momentum strategies — recent direction tends to continue |
+| 0.45 ≤ H ≤ 0.55 | **Random walk** | No persistent edge from past prices alone |
+| H < 0.45 | **Mean-reverting** | Contrarian / mean-reversion strategies — overshoots tend to reverse |
+
+> **Input must be returns, not prices.** Pass `close.pct_change().dropna()` or log-returns — not the price series itself. The algorithm works on the scaling of cumulative return fluctuations.
+
+### Method: DFA vs R/S
+
+Two methods are available:
+
+| Method | `method=` | Notes |
+|---|---|---|
+| Detrended Fluctuation Analysis | `"dfa"` (default) | Less biased for typical daily bar counts (200–2000). Recommended. |
+| Rescaled Range | `"rs"` | Classic method; biased upward for small samples. Available for comparison. |
+
+---
+
+### Basic usage
+
+```python
+from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.analysis import hurst_exponent
+
+provider = DataFactory.get_provider()
+close = provider.get_ohlcv("AAPL", "2020-01-01", "2024-01-01")["Close"]
+returns = close.pct_change().dropna()
+
+result = hurst_exponent(returns)
+
+print(f"H              : {result['hurst']:.3f}")
+print(f"Regime         : {result['regime']}")
+print(f"Fit R²         : {result['fit_r_squared']:.3f}")
+print(f"Method         : {result['method']}")
+```
+
+### Output reference
+
+| Key | Type | Description |
+|---|---|---|
+| `hurst` | `float` | Estimated H value (typically 0 < H < 1) |
+| `regime` | `str` | `"trending"`, `"random_walk"`, or `"mean_reverting"` |
+| `fit_r_squared` | `float` | R² of the log-log scaling fit. Values > 0.90 indicate reliable estimate. |
+| `method` | `str` | Method used (`"dfa"` or `"rs"`) |
+| `n_obs` | `int` | Observations used after dropping NaN |
+
+> **Reliability guide** — `fit_r_squared` tells you how cleanly the series follows a power-law at the tested window sizes. Below 0.85, treat the H estimate with caution.
+
+---
+
+### Screening assets by regime
+
+```python
+import pandas as pd
+from standard_quant_tools.analysis import hurst_exponent
+from standard_quant_tools.data.factory import DataFactory
+
+provider = DataFactory.get_provider()
+tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "GLD", "TLT", "BTC-USD"]
+start, end = "2021-01-01", "2024-01-01"
+
+rows = []
+for ticker in tickers:
+    try:
+        rets = provider.get_ohlcv(ticker, start, end)["Close"].pct_change().dropna()
+        r = hurst_exponent(rets)
+        rows.append({"ticker": ticker, "hurst": round(r["hurst"], 3),
+                     "regime": r["regime"], "fit_r2": round(r["fit_r_squared"], 3)})
+    except Exception:
+        pass
+
+df = pd.DataFrame(rows).sort_values("hurst")
+print(df)
+
+# Split by regime
+trending = df[df["regime"] == "trending"]["ticker"].tolist()
+mean_rev = df[df["regime"] == "mean_reverting"]["ticker"].tolist()
+print(f"Trending:       {trending}")
+print(f"Mean-reverting: {mean_rev}")
+```
+
+---
+
+### Rolling Hurst — regime shift detection
+
+`rolling_hurst` computes H over a sliding window, making it possible to detect when a market switches regimes.
+
+```python
+from standard_quant_tools.analysis import rolling_hurst
+
+returns = provider.get_ohlcv("SPY", "2018-01-01", "2024-01-01")["Close"].pct_change().dropna()
+
+# window=252 (one trading year), compute every 5 bars for speed
+rolling = rolling_hurst(returns, window=252, step=5)
+
+# Identify regime periods
+import numpy as np
+trending_mask   = rolling > 0.55
+mean_rev_mask   = rolling < 0.45
+
+print(f"Trending bars  : {trending_mask.sum()}")
+print(f"Mean-rev bars  : {mean_rev_mask.sum()}")
+
+# Fraction of time each regime was active
+total_valid = rolling.dropna()
+print(f"Fraction trending   : {(total_valid > 0.55).mean():.1%}")
+print(f"Fraction mean-rev   : {(total_valid < 0.45).mean():.1%}")
+print(f"Fraction random walk: {((total_valid >= 0.45) & (total_valid <= 0.55)).mean():.1%}")
+```
+
+#### Visualising regime shifts
+
+```python
+import plotly.graph_objects as go
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=rolling.index, y=rolling, name="Rolling H (252d)"))
+fig.add_hline(y=0.55, line_dash="dash", line_color="green",
+              annotation_text="Trending threshold")
+fig.add_hline(y=0.45, line_dash="dash", line_color="red",
+              annotation_text="Mean-revert threshold")
+fig.add_hline(y=0.50, line_dash="dot", line_color="gray")
+fig.update_layout(title="Rolling Hurst Exponent — SPY", yaxis_title="H")
+fig.show()
+```
+
+---
+
+### Using Hurst to select a strategy
+
+The Hurst regime output feeds naturally into the backtesting module.
+
+```python
+from standard_quant_tools.analysis import hurst_exponent
+from standard_quant_tools.agent.tools import run_rsi_backtest, run_sma_backtest
+from standard_quant_tools.agent.models import BacktestInput
+
+provider = DataFactory.get_provider()
+ticker, start, end = "MSFT", "2021-01-01", "2024-01-01"
+rets = provider.get_ohlcv(ticker, start, end)["Close"].pct_change().dropna()
+result = hurst_exponent(rets)
+
+inp = BacktestInput(symbol=ticker, start_date=start, end_date=end,
+                    strategy_type="", parameters={}, initial_capital=10_000)
+
+if result["regime"] == "trending":
+    inp.strategy_type = "sma_crossover"
+    inp.parameters = {"fast_period": 20, "slow_period": 50}
+    bt = run_sma_backtest(inp)
+elif result["regime"] == "mean_reverting":
+    inp.strategy_type = "rsi_mean_reversion"
+    inp.parameters = {"period": 14, "oversold": 30, "overbought": 70}
+    bt = run_rsi_backtest(inp)
+else:
+    print("Random walk regime — no edge from technical signals")
+    bt = None
+
+if bt:
+    print(f"Regime: {result['regime']}  →  Sharpe: {bt.sharpe_ratio:.2f}")
+```
+
+---
+
+### Parameters
+
+#### `hurst_exponent`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `series` | `pd.Series` | required | Return series (not price levels) |
+| `method` | `str` | `"dfa"` | `"dfa"` or `"rs"` |
+| `min_window` | `int` | `10` | Smallest sub-window for scaling analysis |
+| `max_window` | `int` | `None` | Largest sub-window (default: `n//4` for DFA, `n//2` for R/S) |
+
+#### `rolling_hurst`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `series` | `pd.Series` | required | Return series |
+| `window` | `int` | `200` | Lookback in bars. Minimum ~100 for reliable estimates. |
+| `step` | `int` | `1` | Compute every N bars; intermediate positions are NaN. Use `step > 1` to speed up long series. |
+| `method` | `str` | `"dfa"` | Passed to `hurst_exponent` |
+| `min_window` | `int` | `10` | Passed to `hurst_exponent` |
