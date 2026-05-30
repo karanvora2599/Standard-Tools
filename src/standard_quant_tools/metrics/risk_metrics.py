@@ -25,8 +25,10 @@ def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_ye
 def sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float:
     excess_returns = returns - risk_free_rate / periods_per_year
     downside_returns = excess_returns[excess_returns < 0]
-    downside_dev = downside_returns.std() * np.sqrt(periods_per_year)
-    if downside_dev == 0:
+    if downside_returns.empty:
+        return np.inf
+    downside_dev = float(downside_returns.std()) * np.sqrt(periods_per_year)
+    if downside_dev == 0 or np.isnan(downside_dev):
         return np.inf
     return (excess_returns.mean() * periods_per_year) / downside_dev
 

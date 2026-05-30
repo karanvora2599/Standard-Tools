@@ -44,12 +44,16 @@ class TestEMA:
         assert len(ema(sample_close, 12)) == len(sample_close)
 
     def test_ema_responds_faster_than_sma_to_price_jump(self):
-        """After a sharp price spike, EMA should move more than SMA."""
-        base = pd.Series([100.0] * 30 + [200.0] * 30)
+        """Immediately after a price jump, EMA should be closer to the new price than SMA."""
         period = 10
-        ema_last = float(ema(base, period).iloc[-1])
-        sma_last = float(sma(base, period).iloc[-1])
-        assert ema_last > sma_last
+        # 20 bars at 100, then jump to 200
+        base = pd.Series([100.0] * 20 + [200.0] * 20)
+        # Check just a few bars AFTER the jump (before SMA catches up)
+        bar_after_jump = 21  # 2nd bar at 200
+        ema_val = float(ema(base, period).iloc[bar_after_jump])
+        sma_val = float(sma(base, period).iloc[bar_after_jump])
+        # EMA should be higher than SMA right after the jump (responding faster)
+        assert ema_val > sma_val
 
     def test_constant_series_returns_constant(self):
         s = pd.Series([10.0] * 50)
@@ -146,7 +150,8 @@ class TestParabolicSAR:
     def test_reversals_occur(self, sample_ohlcv):
         """SAR should reverse at least once in 500 bars of real price data."""
         result = parabolic_sar(sample_ohlcv['High'], sample_ohlcv['Low'])
-        trend_changes = result['Trend'].diff().dropna().ne(0).sum()
+        trend_series: pd.Series = result['Trend']  # type: ignore[assignment]
+        trend_changes = int(trend_series.diff().dropna().ne(0).sum())
         assert trend_changes >= 1
 
 

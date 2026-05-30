@@ -67,6 +67,9 @@ def mfi(
     # Negative money flow: bars where typical price fell (or was flat)
     neg_flow = raw_money_flow.where(tp_diff <= 0, 0.0).rolling(period).sum()
 
+    # When neg_flow = 0 (all bars up), MFI = 100; when pos_flow = 0, MFI = 0.
     mfr = pos_flow / neg_flow.replace(0.0, np.nan)
     result = 100.0 - (100.0 / (1.0 + mfr))
+    result = result.where(neg_flow != 0, 100.0)
+    result = result.where(pos_flow != 0, 0.0)
     return result.rename('MFI')

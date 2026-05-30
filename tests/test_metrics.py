@@ -89,11 +89,15 @@ class TestSharpeRatio:
 
 class TestSortinoRatio:
     def test_higher_than_sharpe_for_skewed_returns(self):
-        """For returns with more upside than downside, Sortino > Sharpe."""
+        """For returns with more upside than downside, Sortino >= Sharpe."""
         np.random.seed(3)
-        # Positively skewed: lots of small gains, rare large losses masked
-        returns = pd.Series(np.abs(np.random.normal(0.002, 0.01, 252)))
-        assert sortino_ratio(returns) >= sharpe_ratio(returns)
+        # Mix of positive and negative, but positively skewed
+        ups = np.abs(np.random.normal(0.003, 0.005, 200))
+        downs = -np.abs(np.random.normal(0.001, 0.003, 52))
+        returns = pd.Series(np.concatenate([ups, downs]))
+        sr = sharpe_ratio(returns)
+        srt = sortino_ratio(returns)
+        assert srt >= sr
 
     def test_positive_for_positive_drift(self):
         np.random.seed(4)
