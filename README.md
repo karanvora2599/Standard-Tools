@@ -245,4 +245,14 @@ pytest tests/ -m integration
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-See `Documentation/` for detailed guides on each module.
+## Documentation
+
+| File | Module |
+|---|---|
+| `Documentation/01_data_fetching.md` | Data providers, caching, error handling |
+| `Documentation/02_indicators.md` | All 14 technical indicators with examples |
+| `Documentation/03_metrics.md` | Risk/return metrics (VaR, Sharpe, Calmar, …) |
+| `Documentation/04_backtesting.md` | Vectorized engine, trade log, custom signals |
+| `Documentation/05_portfolio.md` | Multi-asset metrics, correlation, optimization |
+| `Documentation/06_screener.md` | Filter reference, example screens |
+| `Documentation/07_agent_tools.md` | All 8 LLM tools, Pydantic models, end-to-end agent loop |
