@@ -373,4 +373,181 @@ print(pairs_df)
 
 ---
 
-*More tools coming: PCA on returns, Hurst exponent.*
+---
+
+## PCA on Returns
+
+`pca_returns` decomposes a multi-asset return matrix into orthogonal principal components (PCs) using full SVD — pure NumPy, no sklearn required. `factor_contributions` then quantifies how much each PC explains for each individual asset.
+
+### When to use
+
+| Question | Tool |
+|---|---|
+| "What are the dominant hidden risk factors in my universe?" | `pca_returns` |
+| "How correlated is NVDA to the market's first risk factor?" | `pca_returns` → loadings |
+| "Does adding more PCs actually explain more of AAPL's variance?" | `factor_contributions` |
+| "How many PCs do I need to capture 90% of portfolio variance?" | `cumulative_variance_ratio` |
+
+### Basic usage
+
+```python
+from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.analysis import pca_returns
+import pandas as pd
+
+provider = DataFactory.get_provider()
+tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "GS", "BAC"]
+start, end = "2021-01-01", "2024-01-01"
+
+returns = pd.DataFrame({
+    t: provider.get_ohlcv(t, start, end)["Close"].pct_change()
+    for t in tickers
+}).dropna()
+
+result = pca_returns(returns, n_components=3)
+
+print(result["explained_variance_ratio"])
+# PC1    0.421
+# PC2    0.118
+# PC3    0.083
+
+print(result["cumulative_variance_ratio"])
+# PC1    0.421
+# PC2    0.539
+# PC3    0.622
+
+print(result["loadings"])
+#        PC1    PC2    PC3
+# AAPL  0.35  -0.12   0.08
+# MSFT  0.34  -0.14  ...
+# ...
+```
+
+### Reading the output
+
+#### Explained variance ratio
+
+```python
+evr = result["explained_variance_ratio"]
+# How many PCs to reach 80% explained variance?
+n_for_80 = (result["cumulative_variance_ratio"] < 0.80).sum() + 1
+print(f"Need {n_for_80} PCs to explain 80% of variance")
+```
+
+#### Loadings (eigenvectors)
+
+Each column of the loadings matrix is a principal component direction in asset space. A high positive loading on PC1 means the asset moves strongly with the first risk factor.
+
+```python
+loadings = result["loadings"]
+
+# Which assets load most heavily on PC1?
+print(loadings["PC1"].sort_values(ascending=False))
+
+# Assets that load in opposite directions on PC2 tend to hedge each other
+hedges = loadings["PC2"].sort_values()
+print("PC2 shorts:", hedges.head(3).index.tolist())
+print("PC2 longs :", hedges.tail(3).index.tolist())
+```
+
+#### Factor returns (PC time series)
+
+```python
+factor_rets = result["factor_returns"]
+# factor_rets["PC1"] is the time series of the first risk factor
+# Use it as a systematic benchmark or for regime analysis
+
+import plotly.graph_objects as go
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=factor_rets.index, y=factor_rets["PC1"], name="PC1"))
+fig.add_trace(go.Scatter(x=factor_rets.index, y=factor_rets["PC2"], name="PC2"))
+fig.update_layout(title="First Two Risk Factors")
+fig.show()
+```
+
+### Output reference
+
+| Key | Type | Description |
+|---|---|---|
+| `explained_variance_ratio` | `pd.Series` | Fraction of total variance per PC, indexed "PC1", "PC2", ... |
+| `cumulative_variance_ratio` | `pd.Series` | Running sum of EVR |
+| `loadings` | `pd.DataFrame` | Shape (n_assets × n_components). Each column is a unit-norm eigenvector. |
+| `factor_returns` | `pd.DataFrame` | Shape (n_dates × n_components). PC time series; pairwise correlations are exactly 0. |
+| `n_components` | `int` | Actual number of PCs returned (capped at min(n_assets, n_obs)) |
+| `n_obs` | `int` | Rows used after dropping NaN |
+
+> **Sign convention** — SVD eigenvectors have arbitrary signs. `pca_returns` normalises each PC so its largest-magnitude loading is positive, making factors easier to interpret.
+
+> **Standardisation** — `standardize=True` (default) divides each asset column by its standard deviation before fitting. This ensures high-volatility assets don't dominate the decomposition. Set `standardize=False` only when columns are already on a comparable scale (e.g. z-scored returns).
+
+---
+
+### Factor contributions per asset
+
+`factor_contributions` answers: *"for asset X, how much does each PC explain?"*
+
+```python
+from standard_quant_tools.analysis import factor_contributions
+
+contrib = factor_contributions(returns, n_components=3)
+print(contrib)
+#        PC1    PC2    PC3
+# AAPL  0.38   0.09   0.04
+# MSFT  0.36   0.11   0.03
+# NVDA  0.28   0.05   0.12   # more idiosyncratic — less explained by factors
+# JPM   0.41   0.18   0.02   # highly systematic
+# ...
+
+# Total systematic R² for each asset
+print(contrib.sum(axis=1).sort_values())
+
+# Which assets are most idiosyncratic (least explained by top 3 PCs)?
+print("Most idiosyncratic:", contrib.sum(axis=1).nsmallest(3).index.tolist())
+```
+
+Each cell is the **marginal R²** added by including that PC. Values are additive: `contrib["PC1"] + contrib["PC2"] + contrib["PC3"]` equals the total R² from regressing the asset on the first 3 PCs.
+
+---
+
+### Combining PCA with the portfolio module
+
+PCA and portfolio analysis work naturally together. Factor returns can serve as benchmark series for the metrics module.
+
+```python
+from standard_quant_tools.analysis import pca_returns
+from standard_quant_tools.metrics import sharpe_ratio, information_ratio
+import pandas as pd
+
+result = pca_returns(returns, n_components=2)
+pc1 = result["factor_returns"]["PC1"]
+
+# Treat PC1 as the "market" — compute each asset's IR vs the first factor
+for ticker in returns.columns:
+    ir = information_ratio(returns[ticker].dropna(), pc1, periods_per_year=252)
+    print(f"{ticker}: IR vs PC1 = {ir:.2f}")
+```
+
+### Portfolio risk decomposition
+
+```python
+import numpy as np
+
+# What fraction of equal-weight portfolio variance comes from PC1?
+weights = np.ones(len(tickers)) / len(tickers)
+loadings = result["loadings"].to_numpy()
+
+# Portfolio loading on each PC = weighted sum of asset loadings
+port_loadings = weights @ loadings  # (n_components,)
+evr = result["explained_variance_ratio"].values
+
+# Approximate variance attribution (valid when PCs are orthogonal, which they are)
+pc_contrib_to_portfolio = port_loadings ** 2 * evr
+pc_contrib_to_portfolio /= pc_contrib_to_portfolio.sum()
+
+for i, name in enumerate(result["explained_variance_ratio"].index):
+    print(f"{name}: {pc_contrib_to_portfolio[i]:.1%} of equal-weight portfolio variance")
+```
+
+---
+
+*More tools coming: Hurst exponent.*
