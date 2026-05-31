@@ -39,26 +39,13 @@ def calculate_beta(asset_returns: pd.Series, benchmark_returns: pd.Series) -> Di
 
 def rolling_beta(asset_returns: pd.Series, benchmark_returns: pd.Series, window: int = 60) -> pd.DataFrame:
     """
-    Calculate rolling Beta using vectorized NumPy stride tricks.
-    Computes covariance and variance in a single pass vs two separate rolling calls.
+    Calculate rolling Beta using Pandas rolling cov/var (incremental O(n) algorithm).
     """
     common_index = asset_returns.index.intersection(benchmark_returns.index)
-    y = asset_returns.loc[common_index].to_numpy(dtype=float)
-    x = benchmark_returns.loc[common_index].to_numpy(dtype=float)
-    n = len(x)
+    y = asset_returns.loc[common_index]
+    x = benchmark_returns.loc[common_index]
 
-    beta_arr = np.full(n, np.nan)
-    if n >= window:
-        y_w = np.lib.stride_tricks.sliding_window_view(y, window)  # (n-w+1, w)
-        x_w = np.lib.stride_tricks.sliding_window_view(x, window)
+    cov = y.rolling(window=window).cov(x)
+    var = x.rolling(window=window).var()
 
-        y_m = y_w.mean(axis=1, keepdims=True)
-        x_m = x_w.mean(axis=1, keepdims=True)
-
-        cov = ((y_w - y_m) * (x_w - x_m)).sum(axis=1) / (window - 1)
-        var = ((x_w - x_m) ** 2).sum(axis=1) / (window - 1)
-        var[var == 0] = np.nan
-
-        beta_arr[window - 1:] = cov / var
-
-    return pd.DataFrame({"Rolling_Beta": beta_arr}, index=common_index)
+    return pd.DataFrame({'Rolling_Beta': cov / var})

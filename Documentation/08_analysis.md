@@ -486,9 +486,18 @@ fig.show()
 
 `factor_contributions` answers: *"for asset X, how much does each PC explain?"*
 
-```python
-from standard_quant_tools.analysis import factor_contributions
+If you have already called `pca_returns`, pass the result directly to avoid running SVD twice:
 
+```python
+from standard_quant_tools.analysis import pca_returns, factor_contributions
+
+result = pca_returns(returns, n_components=3)
+contrib = factor_contributions(returns, n_components=3, pca_result=result)  # no second SVD
+```
+
+Without the pre-computed result:
+
+```python
 contrib = factor_contributions(returns, n_components=3)
 print(contrib)
 #        PC1    PC2    PC3

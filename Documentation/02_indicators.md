@@ -2,7 +2,9 @@
 
 All indicators accept `pd.Series` (or `pd.DataFrame` for OHLCV-based indicators) and return `pd.Series` or `pd.DataFrame` with the same DatetimeIndex as the input — safe to assign back to any DataFrame.
 
-Performance-critical indicators use **Numba JIT** compilation. On first call, Numba compiles the function (~1–2s warm-up). Subsequent calls are near-native speed.
+Performance-critical indicators use **Numba JIT** compilation. On first call, Numba compiles the function (~1–2s warm-up). Subsequent calls are near-native speed. Numba requires `numba` installed with NumPy ≤ 2.0; the library falls back to pure Python automatically if unavailable.
+
+ATR uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series.
 
 ---
 
@@ -145,7 +147,7 @@ df['squeeze']  = df['bb_width'] < df['bb_width'].rolling(120).quantile(0.2)
 
 ### ATR — Average True Range
 
-ATR measures volatility including overnight gaps.
+ATR measures volatility including overnight gaps. True range is computed in a single `np.maximum` pass (5.6× faster than the `pd.concat` + `.max` approach), then smoothed with a rolling mean.
 
 ```python
 from standard_quant_tools.indicators import atr

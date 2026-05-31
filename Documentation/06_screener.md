@@ -6,6 +6,8 @@ The screener evaluates a list of tickers concurrently against fundamental and te
 
 **Large universes (> 20 tickers):** the ticker list is automatically split across multiple `ProcessPoolExecutor` workers. Each worker runs its own asyncio event loop, bypassing the GIL for the full pipeline (fetch + indicator compute). Combined with the Parquet disk cache, repeated runs on the same universe are near-instant.
 
+**Beta filter optimisation:** When `beta_max` or `beta_min` filters are present, SPY OHLCV data is fetched **once per `screen_stocks()` call** and reused for every ticker that needs a beta computation. On a 500-ticker universe where 200 tickers require beta, this eliminates 199 redundant HTTP requests compared to the naïve per-ticker fetch.
+
 ---
 
 ## Basic Usage
