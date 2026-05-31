@@ -1,4 +1,4 @@
-"""Tests for all 12 agent tools (mocked data provider)."""
+"""Tests for the original 12 agent tools (mocked data provider)."""
 
 import pandas as pd
 import pytest
@@ -29,9 +29,9 @@ START, END = '2023-01-01', '2024-01-01'
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_twelve_tools(self):
+    def test_returns_list_of_seventeen_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 12
+        assert len(tools) == 17
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -40,16 +40,16 @@ class TestGetAgentTools:
             assert 'description' in tool['function']
             assert 'parameters' in tool['function']
 
-    def test_tool_names_are_correct(self):
+    def test_original_tool_names_present(self):
         names = {t['function']['name'] for t in get_agent_tools()}
-        expected = {
+        original = {
             'run_sma_backtest', 'run_rsi_backtest', 'run_macd_backtest',
             'run_bollinger_backtest', 'analyze_stock_risk',
             'get_technical_analysis', 'get_portfolio_analysis', 'run_screener',
             'run_factor_regression', 'run_cointegration_test',
             'run_pca_analysis', 'run_hurst_analysis',
         }
-        assert names == expected
+        assert original.issubset(names)
 
     def test_parameters_are_valid_json_schema(self):
         for tool in get_agent_tools():

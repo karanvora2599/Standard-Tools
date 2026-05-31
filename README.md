@@ -5,7 +5,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 ## Key Features
 
 - **High Performance** — Numba JIT for RSI/ADX/SAR/strategy state machines; NumPy single-pass ATR (5.6× vs `pd.concat`); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
-- **Agent-First Design** — All tools return Pydantic models; 12 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
+- **Agent-First Design** — All tools return Pydantic models; 17 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional scipy/numba graceful fallback
 
@@ -352,7 +352,9 @@ result = run_hurst_analysis(HurstInput(
 print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 ```
 
-**Available tools:** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`, `run_factor_regression`, `run_cointegration_test`, `run_pca_analysis`, `run_hurst_analysis`
+**Original tools (12):** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`, `run_factor_regression`, `run_cointegration_test`, `run_pca_analysis`, `run_hurst_analysis`
+
+**Advanced agentic tools (5):** `run_regime_adaptive_backtest`, `scan_pairs`, `run_walk_forward_backtest`, `get_portfolio_risk_attribution`, `get_position_size`
 
 ---
 
@@ -405,7 +407,7 @@ pytest tests/ -m integration
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**402 unit tests, 6 integration tests.**
+**444 unit tests, 6 integration tests.**
 
 ---
 
@@ -419,5 +421,6 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/04_backtesting.md` | Vectorized engine, trade log, custom signals, grid search |
 | `Documentation/05_portfolio.md` | Multi-asset metrics, correlation, optimization |
 | `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
-| `Documentation/07_agent_tools.md` | All 8 LLM tools, Pydantic models, end-to-end agent loop |
+| `Documentation/07_agent_tools.md` | Original 12 LLM tools, Pydantic models, end-to-end agent loop |
 | `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent |
+| `Documentation/09_advanced_agent_tools.md` | 5 advanced tools: regime-adaptive, pair scanner, walk-forward, risk attribution, position sizer |

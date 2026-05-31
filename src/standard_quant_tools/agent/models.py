@@ -285,3 +285,212 @@ class HurstResult(BaseModel):
     n_obs: int
     rolling_current: Optional[float] = None
     rolling_regime_fractions: Optional[Dict[str, float]] = None
+
+
+# ──────────────────────────────────────────────
+# Regime-Adaptive Strategy Selector
+# ──────────────────────────────────────────────
+
+class RegimeAdaptiveInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    hurst_method: str = Field("dfa", description="Hurst method: 'dfa' or 'rs'.")
+    sma_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None,
+        description="Custom param grid for SMA crossover. Default: fast_period=[5,10,20], slow_period=[30,50,100].",
+    )
+    rsi_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None,
+        description="Custom param grid for RSI mean-reversion. Default: period=[7,14,21], oversold=[25,30], overbought=[65,70].",
+    )
+    macd_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None,
+        description="Custom param grid for MACD crossover. Default: fast=[8,12], slow=[21,26], signal=[7,9].",
+    )
+    bollinger_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None,
+        description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
+    )
+    n_workers: int = Field(1, description="Worker processes for grid search (default 1 for agent use).")
+
+
+class RegimeAdaptiveResult(BaseModel):
+    symbol: str
+    regime: str          # "trending" | "random_walk" | "mean_reverting"
+    hurst: float
+    fit_r_squared: float
+    selected_strategy: str
+    best_parameters: Dict[str, Any]
+    grid_combinations: int
+    backtest: BacktestResult
+
+
+# ──────────────────────────────────────────────
+# Cointegration Pair Scanner
+# ──────────────────────────────────────────────
+
+class PairScannerInput(BaseModel):
+    tickers: List[str] = Field(..., description="Universe of tickers to test for cointegration.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    max_pairs: int = Field(10, description="Maximum number of top pairs to return.")
+    min_half_life: float = Field(5.0, description="Minimum mean-reversion half-life in bars.")
+    max_half_life: float = Field(126.0, description="Maximum half-life in bars (~6 months).")
+    p_value_threshold: float = Field(0.05, description="Maximum cointegration p-value.")
+    zscore_window: int = Field(30, description="Rolling window for spread z-score signal.")
+
+
+class PairResult(BaseModel):
+    symbol_a: str
+    symbol_b: str
+    p_value: float
+    hedge_ratio: float
+    half_life_days: float
+    adf_statistic: float
+    current_zscore: float
+    signal: str          # "long_a_short_b" | "short_a_long_b" | "neutral"
+
+
+class PairScannerResult(BaseModel):
+    n_pairs_tested: int
+    n_pairs_cointegrated: int
+    n_pairs_returned: int
+    pairs: List[PairResult]
+
+
+# ──────────────────────────────────────────────
+# Walk-Forward Backtest
+# ──────────────────────────────────────────────
+
+class WalkForwardInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    strategy: str = Field(
+        ...,
+        description="Strategy name: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+    )
+    param_grid: Dict[str, List[Any]] = Field(
+        ..., description="Parameter grid, e.g. {'fast_period': [5, 10, 20], 'slow_period': [30, 50]}.",
+    )
+    train_bars: int = Field(252, description="In-sample window length in bars (default 252 = ~1 year daily).")
+    test_bars: int = Field(63, description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).")
+    initial_capital: float = Field(10_000.0, description="Starting capital for each window.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    sort_by: str = Field("sharpe_ratio", description="Metric to optimise in-sample (default: 'sharpe_ratio').")
+
+
+class WalkForwardWindow(BaseModel):
+    window_index: int
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
+    best_params: Dict[str, Any]
+    in_sample_sharpe: float
+    out_of_sample_sharpe: float
+    out_of_sample_return: float
+    out_of_sample_max_drawdown: float
+
+
+class WalkForwardResult(BaseModel):
+    symbol: str
+    strategy: str
+    n_windows: int
+    windows: List[WalkForwardWindow]
+    avg_oos_sharpe: float
+    avg_oos_return: float
+    avg_oos_max_drawdown: float
+    pct_windows_profitable: float
+    param_stability: Dict[str, Any]  # most common best param per key + frequency
+
+
+# ──────────────────────────────────────────────
+# Portfolio Risk Attribution
+# ──────────────────────────────────────────────
+
+class RiskAttributionInput(BaseModel):
+    tickers: List[str] = Field(..., description="Portfolio asset symbols.")
+    weights: List[float] = Field(..., description="Portfolio weights summing to 1.0.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    benchmark: str = Field("SPY", description="Benchmark symbol for Information Ratio.")
+    n_components: int = Field(3, description="Number of PCs for PCA decomposition.")
+    factor_tickers: Optional[List[str]] = Field(
+        None,
+        description="Optional factor proxy tickers (e.g. ['SPY','IWM','IWD']). Enables factor regression on the portfolio.",
+    )
+    factor_names: Optional[List[str]] = Field(
+        None, description="Human-readable factor names. Defaults to factor_tickers."
+    )
+
+
+class RiskAttributionResult(BaseModel):
+    tickers: List[str]
+    weights: List[float]
+    # Portfolio-level metrics
+    annualized_return: float
+    annualized_volatility: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    max_drawdown: float
+    var_95: float
+    cvar_95: float
+    information_ratio: float
+    # Asset risk decomposition
+    asset_risk_contributions: Dict[str, float]   # fractional contribution to portfolio vol (sums to 1)
+    # PCA decomposition
+    pca_variance_explained: Dict[str, float]     # EVR per PC across the asset universe
+    portfolio_pc_exposures: Dict[str, float]     # portfolio's loading on each PC
+    # Factor model (optional)
+    factor_loadings: Optional[Dict[str, float]] = None
+    factor_r_squared: Optional[float] = None
+    factor_alpha: Optional[float] = None
+
+
+# ──────────────────────────────────────────────
+# ATR-Based Position Sizer
+# ──────────────────────────────────────────────
+
+class PositionSizerInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD (for ATR calculation).")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    account_equity: float = Field(..., description="Total account equity in dollars.")
+    risk_per_trade_pct: float = Field(
+        0.01, description="Fraction of account to risk per trade (default 0.01 = 1%)."
+    )
+    atr_period: int = Field(14, description="ATR lookback period (default 14).")
+    atr_multiplier: float = Field(
+        2.0, description="Stop distance = atr_multiplier × ATR (default 2.0)."
+    )
+    win_rate: Optional[float] = Field(None, description="Strategy win rate [0,1]. Required for Kelly sizing.")
+    avg_win_pct: Optional[float] = Field(None, description="Average winning trade return (e.g. 0.05 = 5%).")
+    avg_loss_pct: Optional[float] = Field(None, description="Average losing trade return magnitude (e.g. 0.02 = 2%).")
+
+
+class PositionSizerResult(BaseModel):
+    symbol: str
+    last_close: float
+    atr: float
+    atr_pct: float               # ATR as % of price
+    stop_distance: float         # atr_multiplier × ATR in $
+    # Fixed-risk (ATR-based) sizing
+    shares_fixed_risk: int
+    position_value_fixed_risk: float
+    portfolio_pct_fixed_risk: float
+    max_loss_fixed_risk: float   # worst-case $ loss if stop is hit
+    # Kelly sizing (populated when win_rate/avg_win/avg_loss are provided)
+    kelly_fraction: Optional[float] = None
+    shares_half_kelly: Optional[int] = None
+    position_value_half_kelly: Optional[float] = None
+    portfolio_pct_half_kelly: Optional[float] = None
+    # Recommendation
+    recommended_sizing: str      # "fixed_risk" | "half_kelly"
+    recommended_shares: int
+    recommended_position_value: float

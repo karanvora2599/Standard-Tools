@@ -4,8 +4,12 @@ All inputs/outputs use Pydantic models for clean JSON serialization.
 """
 
 import datetime
-from typing import Any, Dict, List
+import math
+from collections import Counter
+from itertools import combinations
+from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.data.factory import DataFactory
@@ -13,13 +17,14 @@ from standard_quant_tools.indicators.trend import sma, ema, macd, adx, williams_
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
 from standard_quant_tools.indicators.volatility import bollinger_bands, atr
 from standard_quant_tools.indicators.volume import obv, vwap
-from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.backtest.engine import run_strategy, backtest_grid
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.analysis.regression import calculate_beta
 from standard_quant_tools.analysis.multi_factor import multi_factor_regression, rolling_factor_loadings
 from standard_quant_tools.analysis.cointegration import cointegration_test, compute_spread, spread_zscore
 from standard_quant_tools.analysis.pca import pca_returns, factor_contributions
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
+from standard_quant_tools.metrics.return_metrics import cagr, annualized_volatility
 from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, sortino_ratio, max_drawdown,
     var_historical, cvar, information_ratio,
@@ -36,6 +41,11 @@ from standard_quant_tools.agent.models import (
     CointegrationInput, CointegrationResult,
     PCAInput, PCAResult,
     HurstInput, HurstResult,
+    RegimeAdaptiveInput, RegimeAdaptiveResult,
+    PairScannerInput, PairResult, PairScannerResult,
+    WalkForwardInput, WalkForwardWindow, WalkForwardResult,
+    RiskAttributionInput, RiskAttributionResult,
+    PositionSizerInput, PositionSizerResult,
 )
 
 
@@ -533,6 +543,483 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
 
 
 # ──────────────────────────────────────────────────────────────────
+# Default parameter grids for regime-adaptive strategy selection
+# ──────────────────────────────────────────────────────────────────
+
+_DEFAULT_PARAM_GRIDS: Dict[str, Dict[str, List[Any]]] = {
+    "sma_crossover": {
+        "fast_period": [5, 10, 20],
+        "slow_period": [30, 50, 100],
+    },
+    "rsi_mean_reversion": {
+        "period": [7, 14, 21],
+        "oversold": [25, 30],
+        "overbought": [65, 70],
+    },
+    "macd_crossover": {
+        "fast": [8, 12],
+        "slow": [21, 26],
+        "signal": [7, 9],
+    },
+    "bollinger_reversion": {
+        "period": [15, 20, 25],
+        "num_std": [1.5, 2.0],
+    },
+}
+
+_REGIME_STRATEGY_MAP: Dict[str, str] = {
+    "trending": "sma_crossover",
+    "mean_reverting": "rsi_mean_reversion",
+    "random_walk": "macd_crossover",
+}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Feature 1: Regime-Adaptive Strategy Selector
+# ──────────────────────────────────────────────────────────────────
+
+def run_regime_adaptive_backtest(input_data: RegimeAdaptiveInput) -> RegimeAdaptiveResult:
+    """
+    Classify the market regime via Hurst exponent, then automatically select
+    and optimise the most appropriate strategy via parameter grid search.
+
+    Regime → Strategy mapping:
+      trending      → sma_crossover
+      mean_reverting → rsi_mean_reversion
+      random_walk   → macd_crossover
+    """
+    from standard_quant_tools.analysis.hurst import hurst_exponent as _hurst
+
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    returns = df["Close"].pct_change().dropna()
+
+    hurst_result = _hurst(returns, method=input_data.hurst_method)
+    h = hurst_result["hurst"]
+    regime = hurst_result["regime"]
+    fit_r2 = hurst_result["fit_r_squared"]
+
+    strategy_name = _REGIME_STRATEGY_MAP[regime]
+
+    grid_map = {
+        "sma_crossover": input_data.sma_param_grid,
+        "rsi_mean_reversion": input_data.rsi_param_grid,
+        "macd_crossover": input_data.macd_param_grid,
+        "bollinger_reversion": input_data.bollinger_param_grid,
+    }
+    param_grid = grid_map[strategy_name] or _DEFAULT_PARAM_GRIDS[strategy_name]
+
+    grid_df = backtest_grid(
+        df,
+        strategy=strategy_name,
+        param_grid=param_grid,
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+        sort_by="sharpe_ratio",
+        ascending=False,
+        n_workers=input_data.n_workers,
+    )
+
+    best_row = grid_df.iloc[0]
+    param_keys = list(param_grid.keys())
+    best_params: Dict[str, Any] = {
+        k: (int(best_row[k]) if isinstance(param_grid[k][0], int) else float(best_row[k]))
+        for k in param_keys
+    }
+
+    signals = STRATEGY_REGISTRY[strategy_name](df, **best_params)
+    dummy_input = BacktestInput(
+        symbol=input_data.symbol,
+        start_date=input_data.start_date,
+        end_date=input_data.end_date,
+        strategy_type=strategy_name,
+        parameters=best_params,
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+    )
+    bt_result = _run_backtest(dummy_input, df, signals)
+
+    n_combos = 1
+    for vals in param_grid.values():
+        n_combos *= len(vals)
+
+    return RegimeAdaptiveResult(
+        symbol=input_data.symbol,
+        regime=regime,
+        hurst=round(float(h) if not math.isnan(float(h)) else 0.0, 4),
+        fit_r_squared=round(float(fit_r2) if not math.isnan(float(fit_r2)) else 0.0, 4),
+        selected_strategy=strategy_name,
+        best_parameters=best_params,
+        grid_combinations=n_combos,
+        backtest=bt_result,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Feature 2: Cointegration Pair Scanner
+# ──────────────────────────────────────────────────────────────────
+
+def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
+    """
+    Test all ticker combinations for cointegration and return the top pairs
+    ranked by half-life (shortest first = fastest mean-reversion = most tradeable).
+    Fetches each ticker's prices once, then evaluates all O(n²/2) combinations.
+    """
+    from standard_quant_tools.analysis.cointegration import (
+        cointegration_test as _coint,
+        compute_spread as _spread,
+        spread_zscore as _zscore,
+    )
+
+    provider = DataFactory.get_provider()
+
+    prices: Dict[str, Optional[pd.Series]] = {}
+    for ticker in input_data.tickers:
+        try:
+            df = provider.get_ohlcv(ticker, input_data.start_date, input_data.end_date)
+            prices[ticker] = df["Close"]
+        except Exception:
+            prices[ticker] = None
+
+    valid_tickers = [t for t, p in prices.items() if p is not None]
+    all_pairs = list(combinations(valid_tickers, 2))
+    n_tested = 0
+    passing: List[PairResult] = []
+
+    for a, b in all_pairs:
+        try:
+            result = _coint(prices[a], prices[b])  # type: ignore[arg-type]
+            n_tested += 1
+
+            if not result["cointegrated"] or result["p_value"] > input_data.p_value_threshold:
+                continue
+
+            hl = result["half_life_days"]
+            if not math.isfinite(hl) or hl < input_data.min_half_life or hl > input_data.max_half_life:
+                continue
+
+            spread = _spread(prices[a], prices[b], hedge_ratio=result["hedge_ratio"])  # type: ignore[arg-type]
+            z = _zscore(spread, window=input_data.zscore_window).dropna()
+            current_z = round(float(z.iloc[-1]), 4) if not z.empty else 0.0
+
+            signal = (
+                "long_a_short_b" if current_z < -2.0
+                else "short_a_long_b" if current_z > 2.0
+                else "neutral"
+            )
+
+            passing.append(PairResult(
+                symbol_a=a,
+                symbol_b=b,
+                p_value=round(float(result["p_value"]), 4),
+                hedge_ratio=round(float(result["hedge_ratio"]), 4),
+                half_life_days=round(float(hl), 2),
+                adf_statistic=round(float(result["adf_statistic"]), 4),
+                current_zscore=current_z,
+                signal=signal,
+            ))
+        except Exception:
+            n_tested += 1
+
+    passing.sort(key=lambda p: p.half_life_days)
+    top = passing[: input_data.max_pairs]
+
+    return PairScannerResult(
+        n_pairs_tested=n_tested,
+        n_pairs_cointegrated=len(passing),
+        n_pairs_returned=len(top),
+        pairs=top,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Feature 3: Walk-Forward Backtest
+# ──────────────────────────────────────────────────────────────────
+
+def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult:
+    """
+    Walk-forward validation: repeatedly optimise parameters on an in-sample
+    window (backtest_grid), then evaluate the best parameters on the next
+    out-of-sample window. Returns per-window stats and aggregate OOS metrics.
+
+    The OOS windows are non-overlapping; the training window slides forward
+    by test_bars each step.
+    """
+    if input_data.strategy not in STRATEGY_REGISTRY:
+        raise ValueError(
+            f"Unknown strategy '{input_data.strategy}'. "
+            f"Available: {list(STRATEGY_REGISTRY)}"
+        )
+
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    n = len(df)
+
+    train_bars = input_data.train_bars
+    test_bars = input_data.test_bars
+    if n < train_bars + test_bars:
+        raise ValueError(
+            f"Not enough data for walk-forward: need at least "
+            f"{train_bars + test_bars} bars, got {n}."
+        )
+
+    windows: List[WalkForwardWindow] = []
+    cursor = 0
+
+    while cursor + train_bars + test_bars <= n:
+        train_df = df.iloc[cursor: cursor + train_bars]
+        test_df = df.iloc[cursor + train_bars: cursor + train_bars + test_bars]
+
+        grid_df = backtest_grid(
+            train_df,
+            strategy=input_data.strategy,
+            param_grid=input_data.param_grid,
+            initial_capital=input_data.initial_capital,
+            commission_pct=input_data.commission_pct,
+            slippage_pct=input_data.slippage_pct,
+            sort_by=input_data.sort_by,
+            ascending=False,
+            n_workers=1,
+        )
+
+        best_row = grid_df.iloc[0]
+        param_keys = list(input_data.param_grid.keys())
+        # Coerce param types: DataFrame stores everything as float; restore original type.
+        best_params: Dict[str, Any] = {
+            k: (int(best_row[k]) if isinstance(input_data.param_grid[k][0], int) else float(best_row[k]))
+            for k in param_keys
+        }
+        is_sharpe = float(best_row.get("sharpe_ratio", 0.0))
+
+        oos_signals = STRATEGY_REGISTRY[input_data.strategy](test_df, **best_params)
+        oos = run_strategy(
+            test_df, oos_signals,
+            initial_capital=input_data.initial_capital,
+            commission_pct=input_data.commission_pct,
+            slippage_pct=input_data.slippage_pct,
+        )
+
+        windows.append(WalkForwardWindow(
+            window_index=len(windows),
+            train_start=str(train_df.index[0].date()),
+            train_end=str(train_df.index[-1].date()),
+            test_start=str(test_df.index[0].date()),
+            test_end=str(test_df.index[-1].date()),
+            best_params=best_params,
+            in_sample_sharpe=round(is_sharpe, 4),
+            out_of_sample_sharpe=round(float(oos["sharpe_ratio"]), 4),
+            out_of_sample_return=round(float(oos["total_return"]), 4),
+            out_of_sample_max_drawdown=round(float(oos["max_drawdown"]), 4),
+        ))
+        cursor += test_bars
+
+    oos_sharpes = [w.out_of_sample_sharpe for w in windows]
+    oos_returns = [w.out_of_sample_return for w in windows]
+    oos_mdd = [w.out_of_sample_max_drawdown for w in windows]
+    pct_profitable = sum(1 for r in oos_returns if r > 0) / len(windows)
+
+    param_stability: Dict[str, Any] = {}
+    for key in input_data.param_grid:
+        counts = Counter(str(w.best_params[key]) for w in windows)
+        most_common_val, most_common_n = counts.most_common(1)[0]
+        param_stability[key] = {
+            "most_common": most_common_val,
+            "frequency": round(most_common_n / len(windows), 3),
+        }
+
+    return WalkForwardResult(
+        symbol=input_data.symbol,
+        strategy=input_data.strategy,
+        n_windows=len(windows),
+        windows=windows,
+        avg_oos_sharpe=round(float(np.mean(oos_sharpes)), 4),
+        avg_oos_return=round(float(np.mean(oos_returns)), 4),
+        avg_oos_max_drawdown=round(float(np.mean(oos_mdd)), 4),
+        pct_windows_profitable=round(pct_profitable, 4),
+        param_stability=param_stability,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Feature 4: Portfolio Risk Attribution
+# ──────────────────────────────────────────────────────────────────
+
+def get_portfolio_risk_attribution(input_data: RiskAttributionInput) -> RiskAttributionResult:
+    """
+    Deep portfolio risk decomposition: portfolio-level metrics, per-asset
+    marginal risk contributions (fractional, summing to 1), PCA decomposition
+    of the asset universe, and an optional multi-factor regression on the
+    aggregate portfolio returns.
+    """
+    from standard_quant_tools.analysis.pca import pca_returns as _pca
+    from standard_quant_tools.analysis.multi_factor import multi_factor_regression as _mfr
+
+    provider = DataFactory.get_provider()
+    weights = np.array(input_data.weights, dtype=float)
+
+    returns_df = pd.DataFrame({
+        t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)["Close"].pct_change()
+        for t in input_data.tickers
+    }).dropna()
+
+    bench_ret = (
+        provider.get_ohlcv(input_data.benchmark, input_data.start_date, input_data.end_date)["Close"]
+        .pct_change().dropna()
+    )
+
+    port_arr: np.ndarray = returns_df.values @ weights
+    port_ret = pd.Series(port_arr, index=returns_df.index)
+    port_equity = (1 + port_ret).cumprod()
+
+    common = port_ret.index.intersection(bench_ret.index)
+    bench_aligned = bench_ret.loc[common]
+    port_aligned = port_ret.loc[common]
+
+    # ── Portfolio-level metrics ────────────────────────────────────
+    ann_ret = float(cagr(port_equity))
+    ann_vol = float(annualized_volatility(port_ret))
+    sr = float(sharpe_ratio(port_ret))
+    sort_r = float(sortino_ratio(port_ret))
+    mdd = float(max_drawdown(port_equity))
+    v95 = float(var_historical(port_ret, 0.95))
+    cv95 = float(cvar(port_ret, 0.95))
+    ir = float(information_ratio(port_aligned, bench_aligned))
+
+    # ── Marginal Risk Contribution (fraction of portfolio variance) ─
+    cov_ann = returns_df.cov().values * 252
+    port_var = float(weights @ cov_ann @ weights)
+    mcr = (cov_ann @ weights) * weights / port_var if port_var > 0 else np.zeros(len(weights))
+    asset_risk_contribs = {
+        t: round(float(mcr[i]), 6)
+        for i, t in enumerate(input_data.tickers)
+    }
+
+    # ── PCA decomposition ─────────────────────────────────────────
+    n_comp = min(input_data.n_components, len(input_data.tickers))
+    pca_res = _pca(returns_df, n_components=n_comp)
+    evr = {k: round(float(v), 4) for k, v in pca_res["explained_variance_ratio"].items()}
+    loadings_mat = pca_res["loadings"].values   # (n_assets, n_comp)
+    port_exposures = weights @ loadings_mat      # (n_comp,)
+    pc_names = list(pca_res["explained_variance_ratio"].index)
+    port_pc_exposures = {pc_names[i]: round(float(port_exposures[i]), 4) for i in range(n_comp)}
+
+    # ── Optional factor regression on portfolio returns ───────────
+    factor_loadings: Optional[Dict[str, float]] = None
+    factor_r2: Optional[float] = None
+    factor_alpha: Optional[float] = None
+
+    if input_data.factor_tickers:
+        names = input_data.factor_names or input_data.factor_tickers
+        factor_df = pd.DataFrame({
+            name: provider.get_ohlcv(tick, input_data.start_date, input_data.end_date)["Close"].pct_change()
+            for name, tick in zip(names, input_data.factor_tickers)
+        }).dropna()
+
+        mfr = _mfr(port_ret, factor_df)
+        factor_loadings = {k: round(float(v), 4) for k, v in mfr["loadings"].items()}
+        factor_r2 = round(float(mfr["r_squared"]), 4)
+        factor_alpha = round(float(mfr["alpha"]), 6)
+
+    return RiskAttributionResult(
+        tickers=input_data.tickers,
+        weights=list(input_data.weights),
+        annualized_return=round(ann_ret, 4),
+        annualized_volatility=round(ann_vol, 4),
+        sharpe_ratio=round(sr, 4),
+        sortino_ratio=round(sort_r, 4),
+        max_drawdown=round(mdd, 6),
+        var_95=round(v95, 6),
+        cvar_95=round(cv95, 6),
+        information_ratio=round(ir, 4),
+        asset_risk_contributions=asset_risk_contribs,
+        pca_variance_explained=evr,
+        portfolio_pc_exposures=port_pc_exposures,
+        factor_loadings=factor_loadings,
+        factor_r_squared=factor_r2,
+        factor_alpha=factor_alpha,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Feature 5: ATR-Based Position Sizer
+# ──────────────────────────────────────────────────────────────────
+
+def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
+    """
+    Compute risk-adjusted position size using ATR-based stop-loss sizing
+    and optionally Kelly criterion when strategy statistics are provided.
+
+    Fixed-risk sizing: shares = (account × risk_pct) / (atr_multiplier × ATR)
+    Kelly sizing:      f = (b×p − q) / b  where b = avg_win/avg_loss,
+                       p = win_rate, q = 1−win_rate. Half-Kelly is recommended.
+    """
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+
+    last_close = float(df["Close"].iloc[-1])
+    atr_series = atr(df["High"], df["Low"], df["Close"], period=input_data.atr_period).dropna()
+    last_atr = float(atr_series.iloc[-1])
+
+    stop_distance = last_atr * input_data.atr_multiplier
+    dollar_risk = input_data.account_equity * input_data.risk_per_trade_pct
+
+    shares_fr = max(int(dollar_risk / stop_distance), 0) if stop_distance > 0 else 0
+    pos_val_fr = shares_fr * last_close
+    port_pct_fr = pos_val_fr / input_data.account_equity if input_data.account_equity > 0 else 0.0
+
+    kelly_fraction: Optional[float] = None
+    shares_hk: Optional[int] = None
+    pos_val_hk: Optional[float] = None
+    port_pct_hk: Optional[float] = None
+
+    has_kelly_inputs = (
+        input_data.win_rate is not None
+        and input_data.avg_win_pct is not None
+        and input_data.avg_loss_pct is not None
+    )
+
+    if has_kelly_inputs:
+        assert input_data.win_rate is not None
+        assert input_data.avg_win_pct is not None
+        assert input_data.avg_loss_pct is not None
+        wr, aw, al = input_data.win_rate, input_data.avg_win_pct, input_data.avg_loss_pct
+        b = aw / al if al > 0 else 0.0
+        raw_kelly = (b * wr - (1.0 - wr)) / b if b > 0 else 0.0
+        kelly_fraction = round(max(raw_kelly, 0.0), 4)
+
+        half_kelly_equity = input_data.account_equity * kelly_fraction * 0.5
+        shares_hk = max(int(half_kelly_equity / last_close), 0) if last_close > 0 else 0
+        pos_val_hk = shares_hk * last_close
+        port_pct_hk = pos_val_hk / input_data.account_equity if input_data.account_equity > 0 else 0.0
+
+    use_kelly = has_kelly_inputs and kelly_fraction is not None and kelly_fraction > 0 and (shares_hk or 0) > 0
+    recommended_sizing = "half_kelly" if use_kelly else "fixed_risk"
+    _rec_shares: int = (shares_hk or 0) if use_kelly else shares_fr  # type: ignore[assignment]
+    recommended_value = _rec_shares * last_close
+
+    return PositionSizerResult(
+        symbol=input_data.symbol,
+        last_close=round(last_close, 4),
+        atr=round(last_atr, 4),
+        atr_pct=round(last_atr / last_close * 100, 4) if last_close > 0 else 0.0,
+        stop_distance=round(stop_distance, 4),
+        shares_fixed_risk=shares_fr,
+        position_value_fixed_risk=round(pos_val_fr, 2),
+        portfolio_pct_fixed_risk=round(port_pct_fr, 4),
+        max_loss_fixed_risk=round(shares_fr * stop_distance, 2),
+        kelly_fraction=kelly_fraction,
+        shares_half_kelly=shares_hk,
+        position_value_half_kelly=round(pos_val_hk, 2) if pos_val_hk is not None else None,
+        portfolio_pct_half_kelly=round(port_pct_hk, 4) if port_pct_hk is not None else None,
+        recommended_sizing=recommended_sizing,
+        recommended_shares=_rec_shares,
+        recommended_position_value=round(recommended_value, 2),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Tool Registry for LLM Function Calling
 # ──────────────────────────────────────────────────────────────────
 
@@ -554,6 +1041,11 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("run_cointegration_test", "Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal.", CointegrationInput),
         ("run_pca_analysis", "PCA on multi-asset returns: explained variance, loadings, factor contributions.", PCAInput),
         ("run_hurst_analysis", "Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.", HurstInput),
+        ("run_regime_adaptive_backtest", "Classify market regime via Hurst, auto-select and optimise the best strategy.", RegimeAdaptiveInput),
+        ("scan_pairs", "Scan a ticker universe for cointegrated pairs, ranked by half-life.", PairScannerInput),
+        ("run_walk_forward_backtest", "Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.", WalkForwardInput),
+        ("get_portfolio_risk_attribution", "Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.", RiskAttributionInput),
+        ("get_position_size", "ATR-based position sizing with optional Kelly criterion.", PositionSizerInput),
     ]
 
     return [
