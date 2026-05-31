@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from .return_metrics import cagr
 from standard_quant_tools.validation import validate_series
+from standard_quant_tools.analysis.regression import calculate_beta
 
 _scipy_stats = None
 try:
@@ -81,11 +82,10 @@ def cvar(returns: pd.Series, confidence: float = 0.95) -> float:
     The expected loss given that the loss exceeds the VaR threshold.
     More conservative and coherent than VaR.
     """
-    var = var_historical(returns, confidence)
-    tail = returns[returns <= -var]
-    if tail.empty:
-        return var
-    return float(-tail.mean())
+    arr = returns.dropna().to_numpy(dtype=np.float64)
+    threshold = np.percentile(arr, (1 - confidence) * 100)
+    tail = arr[arr <= threshold]
+    return float(-tail.mean()) if len(tail) > 0 else float(-threshold)
 
 @validate_series()
 def information_ratio(
@@ -115,7 +115,6 @@ def treynor_ratio(
     Treynor Ratio: excess return per unit of systematic (beta) risk.
     Complements Sharpe (which uses total risk).
     """
-    from standard_quant_tools.analysis.regression import calculate_beta
     common_idx = returns.index.intersection(benchmark_returns.index)
     beta_stats = calculate_beta(returns.loc[common_idx], benchmark_returns.loc[common_idx])
     beta = beta_stats['beta']

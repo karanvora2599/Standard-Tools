@@ -50,6 +50,7 @@ async def _fetch_ticker_data(
     start_date: str,
     end_date: str,
     filters: Dict[str, Any],
+    spy_df: Optional[pd.DataFrame] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch all required data for one ticker and evaluate filters.
@@ -140,9 +141,9 @@ async def _fetch_ticker_data(
                 row[f"sma_{n}"] = round(float(sma_vals.dropna().iloc[-1]), 2)
 
             if "beta_max" in filters or "beta_min" in filters:
-                spy_df = await provider.get_ohlcv_async("SPY", start_date, end_date)
+                _spy = spy_df if spy_df is not None else await provider.get_ohlcv_async("SPY", start_date, end_date)
                 asset_ret = close.pct_change().dropna()
-                spy_ret = spy_df["Close"].pct_change().dropna()
+                spy_ret = _spy["Close"].pct_change().dropna()
                 stats = calculate_beta(asset_ret, spy_ret)
                 beta = stats["beta"]
                 row["beta"] = round(beta, 4)
@@ -188,8 +189,16 @@ async def screen_stocks_async(
 
     provider = DataFactory.get_provider()
 
+    # Pre-fetch SPY once for the whole batch when beta filters are active
+    spy_df: Optional[pd.DataFrame] = None
+    if "beta_max" in filters or "beta_min" in filters:
+        try:
+            spy_df = await provider.get_ohlcv_async("SPY", start, end)
+        except Exception:
+            spy_df = None
+
     tasks = [
-        _fetch_ticker_data(provider, ticker, start, end, filters)
+        _fetch_ticker_data(provider, ticker, start, end, filters, spy_df)
         for ticker in tickers
     ]
     raw = await asyncio.gather(*tasks)

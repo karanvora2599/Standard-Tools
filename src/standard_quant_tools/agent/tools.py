@@ -75,14 +75,14 @@ def _run_backtest(
     if isinstance(trade_log_raw, pd.DataFrame) and not trade_log_raw.empty:
         trades = [
             Trade(
-                entry_date=str(row["entry_date"]),
-                exit_date=str(row["exit_date"]),
-                direction=str(row["direction"]),
-                entry_price=float(row["entry_price"]),
-                exit_price=float(row["exit_price"]),
-                return_pct=float(row["return_pct"]),
+                entry_date=str(r["entry_date"]),
+                exit_date=str(r["exit_date"]),
+                direction=str(r["direction"]),
+                entry_price=float(r["entry_price"]),
+                exit_price=float(r["exit_price"]),
+                return_pct=float(r["return_pct"]),
             )
-            for _, row in trade_log_raw.iterrows()
+            for r in trade_log_raw.to_dict(orient="records")
         ]
 
     return BacktestResult(

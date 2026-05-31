@@ -101,6 +101,7 @@ def pca_returns(
 def factor_contributions(
     returns_df: pd.DataFrame,
     n_components: int = 3,
+    pca_result: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """
     Marginal R² contribution of each principal component to each asset.
@@ -124,7 +125,7 @@ def factor_contributions(
     pd.DataFrame  – shape (n_assets × n_components), indexed by ticker.
         Each cell is the marginal fraction of variance explained.
     """
-    result = pca_returns(returns_df, n_components=n_components)
+    result = pca_result if pca_result is not None else pca_returns(returns_df, n_components=n_components)
     factor_rets = result["factor_returns"]
     comp_names = list(factor_rets.columns)
 

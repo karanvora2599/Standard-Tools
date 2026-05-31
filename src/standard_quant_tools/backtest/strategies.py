@@ -15,6 +15,48 @@ from standard_quant_tools.indicators.trend import sma, macd
 from standard_quant_tools.indicators.momentum import rsi
 from standard_quant_tools.indicators.volatility import bollinger_bands
 
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    def njit(func):  # type: ignore[misc]
+        return func
+
+
+@njit
+def _rsi_state_machine(rsi_arr: np.ndarray, oversold: float, overbought: float) -> np.ndarray:
+    n = len(rsi_arr)
+    values = np.zeros(n)
+    in_pos = False
+    for i in range(n):
+        if np.isnan(rsi_arr[i]):
+            continue
+        if not in_pos and rsi_arr[i] < oversold:
+            in_pos = True
+        elif in_pos and rsi_arr[i] > overbought:
+            in_pos = False
+        values[i] = 1.0 if in_pos else 0.0
+    return values
+
+
+@njit
+def _bollinger_state_machine(
+    close_arr: np.ndarray, lower_arr: np.ndarray, middle_arr: np.ndarray
+) -> np.ndarray:
+    n = len(close_arr)
+    values = np.zeros(n)
+    in_pos = False
+    for i in range(n):
+        if np.isnan(lower_arr[i]):
+            continue
+        if not in_pos and close_arr[i] <= lower_arr[i]:
+            in_pos = True
+        elif in_pos and close_arr[i] >= middle_arr[i]:
+            in_pos = False
+        values[i] = 1.0 if in_pos else 0.0
+    return values
+
 
 def _sma_signals(
     df: pd.DataFrame,
@@ -37,19 +79,8 @@ def _rsi_signals(
     **_,
 ) -> pd.Series:
     """Enter long when RSI < oversold; hold until RSI > overbought."""
-    rsi_vals = rsi(df["Close"], period)
-    rsi_arr = rsi_vals.to_numpy(dtype=float)
-    values = np.zeros(len(df))
-    in_pos = False
-    for i in range(len(values)):
-        if np.isnan(rsi_arr[i]):
-            continue
-        if not in_pos and rsi_arr[i] < oversold:
-            in_pos = True
-        elif in_pos and rsi_arr[i] > overbought:
-            in_pos = False
-        values[i] = 1.0 if in_pos else 0.0
-    return pd.Series(values, index=df.index)
+    rsi_arr = rsi(df["Close"], period).to_numpy(dtype=float)
+    return pd.Series(_rsi_state_machine(rsi_arr, oversold, overbought), index=df.index)
 
 
 def _macd_signals(
@@ -78,17 +109,7 @@ def _bollinger_signals(
     close_arr = df["Close"].to_numpy(dtype=float)
     lower_arr = bb["BB_Lower"].to_numpy(dtype=float)
     middle_arr = bb["BB_Middle"].to_numpy(dtype=float)
-    values = np.zeros(len(close_arr))
-    in_pos = False
-    for i in range(len(close_arr)):
-        if np.isnan(lower_arr[i]):
-            continue
-        if not in_pos and close_arr[i] <= lower_arr[i]:
-            in_pos = True
-        elif in_pos and close_arr[i] >= middle_arr[i]:
-            in_pos = False
-        values[i] = 1.0 if in_pos else 0.0
-    return pd.Series(values, index=df.index)
+    return pd.Series(_bollinger_state_machine(close_arr, lower_arr, middle_arr), index=df.index)
 
 
 STRATEGY_REGISTRY = {
