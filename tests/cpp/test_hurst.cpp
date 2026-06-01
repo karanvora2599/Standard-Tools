@@ -1,9 +1,18 @@
 /**
  * C++ unit tests for sqt::hurst — standalone, no external test framework.
  *
- * Build:  cmake -B build -DSQT_BUILD_TESTS=ON && cmake --build build --config Release
- * Run:    build\tests\cpp\Release\test_hurst.exe   (Windows)
- *         ./build/tests/cpp/test_hurst              (Linux/macOS)
+ * Build (all platforms):
+ *   cmake -B build -DSQT_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+ *   cmake --build build --config Release
+ *
+ * Run directly:
+ *   Windows  : build\tests\cpp\Release\test_hurst.exe
+ *              (or build\tests\cpp\test_hurst.exe with Ninja)
+ *   Linux    : ./build/tests/cpp/test_hurst
+ *   macOS    : ./build/tests/cpp/test_hurst
+ *
+ * Run via CTest (all platforms):
+ *   ctest --test-dir build --config Release -V
  */
 
 #include "sqt/hurst.hpp"
