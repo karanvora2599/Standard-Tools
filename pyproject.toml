@@ -28,6 +28,7 @@ addopts = "-v --tb=short"
 markers = [
     "integration: tests requiring live network access (skip with '-m not integration')",
     "slow: tests that are slow due to Numba JIT warm-up or large data",
+    "benchmark: wall-clock perf tests comparing C++ vs Python paths (requires _sqt_core; run with '-m benchmark -s')",
 ]
 
 [project.optional-dependencies]

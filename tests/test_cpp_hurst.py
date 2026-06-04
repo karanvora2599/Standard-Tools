@@ -334,3 +334,200 @@ class TestRouting:
         result = hurst_exponent(series_500)
         assert isinstance(result, dict)
         assert not math.isnan(result["hurst"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.  Benchmarks: C++ vs Python fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBenchmark:
+    """Wall-clock comparison between the C++ path and the pure Python fallback.
+
+    Skipped when _sqt_core is not built.
+
+    Run with:
+        pytest tests/test_cpp_hurst.py -v -m benchmark -s
+
+    The -s flag is required to see the printed timing lines.
+
+    Each test:
+      1. Measures the median time for the C++ path.
+      2. Measures the median time for the Python path (HAS_CPP forced to False).
+      3. Prints both times and the speedup ratio.
+      4. Asserts a conservative minimum speedup — intentionally loose to avoid
+         flakiness on slow CI machines or under system load.
+    """
+
+    WARMUP = 2
+    REPS   = 5
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _median_ms(fn, warmup: int, reps: int) -> float:
+        import time
+        for _ in range(warmup):
+            fn()
+        times = []
+        for _ in range(reps):
+            t0 = time.perf_counter()
+            fn()
+            times.append((time.perf_counter() - t0) * 1000.0)
+        times.sort()
+        return times[len(times) // 2]
+
+    @staticmethod
+    def _force_python(fn):
+        """Call fn with HAS_CPP temporarily set to False."""
+        import standard_quant_tools.analysis.hurst as _hmod
+        saved = _hmod.HAS_CPP
+        _hmod.HAS_CPP = False
+        try:
+            return fn()
+        finally:
+            _hmod.HAS_CPP = saved
+
+    # ── hurst_exponent single-call benchmarks ─────────────────────────────────
+
+    @requires_cpp
+    @pytest.mark.benchmark
+    @pytest.mark.slow
+    def test_hurst_dfa_speedup_n500(self):
+        arr = RNG.standard_normal(500)
+        s   = pd.Series(arr)
+
+        py_ms  = self._median_ms(
+            lambda: self._force_python(lambda: hurst_exponent(s)),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        cpp_ms = self._median_ms(
+            lambda: hurst_exponent(s),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        speedup = py_ms / cpp_ms
+        print(f"\n  hurst_dfa n=500:   Python {py_ms:7.2f} ms  "
+              f"C++ {cpp_ms:7.3f} ms  speedup {speedup:.1f}x")
+
+        assert cpp_ms < py_ms, (
+            f"C++ ({cpp_ms:.3f} ms) must be faster than Python ({py_ms:.3f} ms)"
+        )
+        assert speedup >= 3.0, f"Expected ≥ 3× speedup, got {speedup:.1f}×"
+
+    @requires_cpp
+    @pytest.mark.benchmark
+    @pytest.mark.slow
+    def test_hurst_dfa_speedup_n1000(self):
+        arr = RNG.standard_normal(1000)
+        s   = pd.Series(arr)
+
+        py_ms  = self._median_ms(
+            lambda: self._force_python(lambda: hurst_exponent(s)),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        cpp_ms = self._median_ms(
+            lambda: hurst_exponent(s),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        speedup = py_ms / cpp_ms
+        print(f"\n  hurst_dfa n=1000:  Python {py_ms:7.2f} ms  "
+              f"C++ {cpp_ms:7.3f} ms  speedup {speedup:.1f}x")
+
+        assert speedup >= 3.0, f"Expected ≥ 3× speedup, got {speedup:.1f}×"
+
+    @requires_cpp
+    @pytest.mark.benchmark
+    @pytest.mark.slow
+    def test_hurst_rs_speedup_n500(self):
+        arr = RNG.standard_normal(500)
+        s   = pd.Series(arr)
+
+        py_ms  = self._median_ms(
+            lambda: self._force_python(lambda: hurst_exponent(s, method="rs")),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        cpp_ms = self._median_ms(
+            lambda: hurst_exponent(s, method="rs"),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        speedup = py_ms / cpp_ms
+        print(f"\n  hurst_rs  n=500:   Python {py_ms:7.2f} ms  "
+              f"C++ {cpp_ms:7.3f} ms  speedup {speedup:.1f}x")
+
+        assert speedup >= 3.0, f"Expected ≥ 3× speedup, got {speedup:.1f}×"
+
+    # ── rolling_hurst benchmarks ──────────────────────────────────────────────
+
+    @requires_cpp
+    @pytest.mark.benchmark
+    @pytest.mark.slow
+    def test_rolling_hurst_speedup_n500_w100(self):
+        """rolling_hurst is the highest-impact path — 30–100× expected."""
+        arr    = RNG.standard_normal(500)
+        s      = pd.Series(arr)
+        window = 100
+
+        py_ms  = self._median_ms(
+            lambda: self._force_python(
+                lambda: rolling_hurst(s, window=window)
+            ),
+            warmup=1, reps=3,
+        )
+        cpp_ms = self._median_ms(
+            lambda: rolling_hurst(s, window=window),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        speedup = py_ms / cpp_ms
+        print(f"\n  rolling   n=500  w=100:  Python {py_ms:7.1f} ms  "
+              f"C++ {cpp_ms:6.2f} ms  speedup {speedup:.1f}x")
+
+        assert speedup >= 5.0, f"Expected rolling speedup ≥ 5×, got {speedup:.1f}×"
+
+    @requires_cpp
+    @pytest.mark.benchmark
+    @pytest.mark.slow
+    def test_rolling_hurst_speedup_n1000_w200(self):
+        """Larger series: Python cost grows O(n), C++ stays in one pass."""
+        arr    = RNG.standard_normal(1000)
+        s      = pd.Series(arr)
+        window = 200
+
+        py_ms  = self._median_ms(
+            lambda: self._force_python(
+                lambda: rolling_hurst(s, window=window)
+            ),
+            warmup=0, reps=2,
+        )
+        cpp_ms = self._median_ms(
+            lambda: rolling_hurst(s, window=window),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        speedup = py_ms / cpp_ms
+        print(f"\n  rolling   n=1000 w=200:  Python {py_ms:7.1f} ms  "
+              f"C++ {cpp_ms:6.2f} ms  speedup {speedup:.1f}x")
+
+        assert speedup >= 5.0, f"Expected rolling speedup ≥ 5×, got {speedup:.1f}×"
+
+    @requires_cpp
+    @pytest.mark.benchmark
+    @pytest.mark.slow
+    def test_rolling_hurst_step5_still_faster(self):
+        """Even with step=5, C++ must outperform the Python step=5 path."""
+        arr    = RNG.standard_normal(1000)
+        s      = pd.Series(arr)
+        window = 200
+
+        py_ms  = self._median_ms(
+            lambda: self._force_python(
+                lambda: rolling_hurst(s, window=window, step=5)
+            ),
+            warmup=1, reps=3,
+        )
+        cpp_ms = self._median_ms(
+            lambda: rolling_hurst(s, window=window, step=5),
+            warmup=self.WARMUP, reps=self.REPS,
+        )
+        speedup = py_ms / cpp_ms
+        print(f"\n  rolling   n=1000 w=200 step=5:  Python {py_ms:7.1f} ms  "
+              f"C++ {cpp_ms:6.2f} ms  speedup {speedup:.1f}x")
+
+        assert speedup >= 1.5, f"C++ must be faster than Python even with step=5, got {speedup:.1f}×"
