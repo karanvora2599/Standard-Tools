@@ -4,10 +4,10 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 ## Key Features
 
-- **High Performance** — Numba JIT for RSI/ADX/SAR/strategy state machines; NumPy single-pass ATR (5.6× vs `pd.concat`); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80× single call, 30–100× rolling); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 17 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
-- **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional scipy/numba graceful fallback
+- **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
 
 ---
 
@@ -74,15 +74,15 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 | `sma(series, period)` | Simple Moving Average | Pandas rolling |
 | `ema(series, period)` | Exponential Moving Average | Pandas EWM |
 | `macd(series, fast, slow, signal)` | MACD + Signal + Histogram | Pandas EWM |
-| `adx(high, low, close, period)` | ADX + DI+ + DI− | **Numba JIT** (Wilder smoothing) |
-| `parabolic_sar(high, low)` | Parabolic SAR + Trend direction | **Numba JIT** |
+| `adx(high, low, close, period)` | ADX + DI+ + DI− | Numba JIT (NumPy ≤ 2.0) / Python fallback |
+| `parabolic_sar(high, low)` | Parabolic SAR + Trend direction | Numba JIT (NumPy ≤ 2.0) / Python fallback |
 | `williams_r(high, low, close, period)` | Williams %R oscillator | Pandas rolling |
 
 **Momentum**
 
 | Function | Description | Performance |
 |---|---|---|
-| `rsi(series, period)` | RSI (Wilder's smoothing) | **Numba JIT** |
+| `rsi(series, period)` | RSI (Wilder's smoothing) | Numba JIT (NumPy ≤ 2.0) / Python fallback |
 | `stochastic_oscillator(high, low, close)` | Stochastic %K and %D | Pandas rolling |
 
 **Volatility**
@@ -197,6 +197,9 @@ contrib = factor_contributions(returns_df, n_components=3)
 
 ```python
 from standard_quant_tools.analysis import hurst_exponent, rolling_hurst
+from standard_quant_tools.analysis.hurst import HAS_CPP
+
+print("C++ backend active:", HAS_CPP)     # True once _sqt_core is built
 
 result = hurst_exponent(returns)          # pass RETURNS not prices
 # {'hurst': 0.38, 'regime': 'mean_reverting', 'fit_r_squared': 0.97, 'method': 'dfa'}
@@ -209,6 +212,8 @@ rolling = rolling_hurst(returns, window=252, step=5)   # pd.Series of H values
 | > 0.55 | trending | Momentum strategies have an edge |
 | 0.45 – 0.55 | random walk | No persistent signal from past prices |
 | < 0.45 | mean-reverting | Contrarian / mean-reversion strategies |
+
+> The C++ extension accelerates `hurst_exponent` by 20–80× and `rolling_hurst` by 30–100×. The API is identical with or without it — pure Python fallback is automatic. See [Development/build_guide.md](Development/build_guide.md).
 
 ---
 
@@ -360,20 +365,39 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 ## Performance
 
-Benchmarks on a 2 000-bar series (≈ 8 years of daily data, Python 3.12, NumPy 2.4):
+### C++ Extension (`_sqt_core`)
 
-| Optimization | Before | After | Speedup | Notes |
+The optional compiled C++ extension accelerates the highest-impact CPU-bound paths. The API is identical with or without it — pure Python fallback is automatic.
+
+| Operation | Python fallback | C++ (`_sqt_core`) | Speedup |
+|---|---|---|---|
+| `hurst_exponent` single call (n = 500) | ~5–15 ms | ~0.1–0.5 ms | **20–80×** |
+| `hurst_exponent` single call (n = 2 000) | ~25–80 ms | ~0.5–2 ms | **20–80×** |
+| `rolling_hurst` (n = 2 000, window = 200, step = 1) | ~5–15 s | ~0.1–0.3 s | **30–100×** |
+| `rolling_hurst` (n = 2 000, window = 252, step = 5) | ~1–3 s | ~0.05–0.15 s | **20–60×** |
+| `run_regime_adaptive_backtest` (end-to-end) | ~10–20 s | ~0.5–2 s | **10–30×** |
+
+The rolling gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function.
+
+> These are projected figures based on algorithmic analysis of loop iterations vs. compiled throughput. The benchmark suite (`tests/cpp/bench_hurst.cpp` and `pytest -m benchmark`) confirms actual numbers once the extension is built. See [Development/build_guide.md](Development/build_guide.md) for build instructions.
+
+---
+
+### Python-Level Optimisations
+
+Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):
+
+| Optimisation | Before | After | Speedup | Notes |
 |---|---|---|---|---|
 | ATR true range | 2.8 ms (`pd.concat` + `.max`) | 0.49 ms (`np.maximum`) | **5.6×** | Single-pass; eliminates 3 Series + concat |
 | Trade log serialization | 31 ms (`iterrows`, 500 trades) | 3.6 ms (`to_dict`) | **~9×** | Vectorized dict conversion |
 | CVaR computation | 0.83 ms (two-pass) | 0.44 ms (one-pass) | **1.9×** | Single `np.percentile` + boolean mask |
 | SPY beta screen | N HTTP requests | 1 HTTP request | **N×** | SPY fetched once per `screen_stocks()` call |
-| RSI / Bollinger state machines | Python loop | Numba JIT | **~50–100×** | Active when Numba + NumPy ≤ 2.0 |
 | Backtesting equity curve | — | NumPy cumprod | vectorized | `(1 + returns).cumprod()` |
 | Portfolio covariance | — | BLAS `pandas.cov` | BLAS-backed | O(n·k²) via LAPACK |
 | Screener (50+ tickers) | — | ProcessPoolExecutor | multi-core | Auto async→multiprocess threshold |
 
-> **Numba note:** RSI, ADX, Parabolic SAR, and the RSI/Bollinger strategy state machines use `@njit` JIT compilation for ~50–100× speedup on their inner loops. This requires `numba` to be installed with a compatible NumPy version (≤ 2.0). The library falls back to pure Python automatically when Numba is unavailable — all functions remain correct, just slower on long series.
+> **Numba note:** RSI, ADX, Parabolic SAR, and the RSI/Bollinger strategy state machines are decorated with `@njit` for ~50–100× speedup on their inner loops. This requires Numba with a compatible NumPy version (≤ 2.0). On NumPy 2.x (current default), Numba decorators are a no-op and the library falls back to pure Python automatically — all functions remain correct. C++ ports of RSI, ADX, and PSAR are next in the roadmap and will resolve this permanently.
 
 ---
 
@@ -397,17 +421,30 @@ except InvalidSymbolError as e:
 ## Running Tests
 
 ```bash
-# Unit tests only (no network required)
+# Unit tests (no network required)
+pytest tests/ -m "not integration and not benchmark and not slow"
+
+# Including slow tests (large-data cross-validation)
 pytest tests/ -m "not integration"
 
 # Integration tests (requires internet)
 pytest tests/ -m integration
 
+# C++ vs Python benchmark tests — prints timing and speedup (requires _sqt_core)
+pytest tests/test_cpp_hurst.py -m benchmark -s -v
+
+# C++ unit tests (requires _sqt_core built with SQT_BUILD_TESTS=ON)
+ctest --test-dir build --config Release -V
+
+# C++ performance benchmark binary (prints a timing table)
+# Windows: build\tests\cpp\Release\bench_hurst.exe
+# Linux / macOS: ./build/tests/cpp/bench_hurst
+
 # With coverage
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**444 unit tests, 6 integration tests.**
+**487 Python unit tests** (472 passing; 15 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **19 C++ unit tests**
 
 ---
 
@@ -422,5 +459,7 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/05_portfolio.md` | Multi-asset metrics, correlation, optimization |
 | `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
 | `Documentation/07_agent_tools.md` | Original 12 LLM tools, Pydantic models, end-to-end agent loop |
-| `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent |
+| `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
 | `Documentation/09_advanced_agent_tools.md` | 5 advanced tools: regime-adaptive, pair scanner, walk-forward, risk attribution, position sizer |
+| `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
+| `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
