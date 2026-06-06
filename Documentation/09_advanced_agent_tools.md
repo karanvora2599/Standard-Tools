@@ -2,6 +2,8 @@
 
 Five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 12 core tools, the full `get_agent_tools()` registry (all 17), OpenAI/Anthropic wiring, and the complete Model Summary.
+
 ---
 
 ## Tool Summary
@@ -88,6 +90,8 @@ result = run_regime_adaptive_backtest(RegimeAdaptiveInput(
 ## 2. Cointegration Pair Scanner
 
 `scan_pairs` tests all O(n²/2) ticker combinations for cointegration, filters by p-value and half-life bounds, and returns the top N pairs sorted by half-life (shortest first = fastest mean reversion = most tradeable). Each ticker's prices are fetched **once** before testing begins.
+
+> **Performance:** Each pair test calls `cointegration_test`, which uses the C++ extension (`_sqt_core`) when available — **5–15× faster** than the statsmodels fallback. For a universe of 10 tickers (45 pairs), the C++ path reduces total scan time from ~15–20 s to ~1–3 s.
 
 ```python
 from standard_quant_tools.agent.tools import scan_pairs
