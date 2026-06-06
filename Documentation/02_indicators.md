@@ -2,7 +2,7 @@
 
 All indicators accept `pd.Series` (or `pd.DataFrame` for OHLCV-based indicators) and return `pd.Series` or `pd.DataFrame` with the same DatetimeIndex as the input — safe to assign back to any DataFrame.
 
-Performance-critical indicators use **Numba JIT** compilation. On first call, Numba compiles the function (~1–2s warm-up). Subsequent calls are near-native speed. Numba requires `numba` installed with NumPy ≤ 2.0; the library falls back to pure Python automatically if unavailable.
+Performance-critical indicators use a three-tier execution stack: **C++ extension** (`_sqt_core`) → **Numba JIT** → **pure Python fallback**. The C++ path is fastest and has no NumPy-version dependency. Numba requires `numba` installed with NumPy ≤ 2.0 (on NumPy 2.x the JIT is a no-op). All functions remain correct regardless of which tier is active — the selection is transparent to callers.
 
 ATR uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series.
 
@@ -48,7 +48,7 @@ df['MACD_Hist'] = macd_df['Histogram']
 df['macd_cross_up'] = (df['MACD'] > df['MACD_Signal']) & (df['MACD'].shift(1) <= df['MACD_Signal'].shift(1))
 ```
 
-### ADX — Average Directional Index *(Numba JIT)*
+### ADX — Average Directional Index *(C++ / Numba JIT)*
 
 ADX measures trend **strength**, not direction. DI+/DI− give direction.
 
@@ -71,7 +71,7 @@ strong_bull = (df['ADX'] > 25) & (df['DI_Plus'] > df['DI_Minus'])
 | 25–50 | Strong trend |
 | > 50 | Very strong trend |
 
-### Parabolic SAR *(Numba JIT)*
+### Parabolic SAR *(C++ / Numba JIT)*
 
 A dynamic trailing stop that also signals trend direction.
 
@@ -101,7 +101,7 @@ df['wr_oversold'] = df['Williams_R'] < -80
 
 ## Momentum Indicators
 
-### RSI — Relative Strength Index *(Numba JIT)*
+### RSI — Relative Strength Index *(C++ / Numba JIT)*
 
 ```python
 from standard_quant_tools.indicators import rsi

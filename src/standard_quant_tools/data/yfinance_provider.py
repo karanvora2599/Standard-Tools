@@ -54,6 +54,8 @@ def retry(times: int = 3, delay: float = 1, backoff: float = 2):
             for i in range(times):
                 try:
                     return func(*args, **kwargs)
+                except (InvalidSymbolError, DataNotFoundError):
+                    raise  # definitive errors — never retry or re-wrap
                 except (ValueError, APIError) as e:
                     last_exc = e
                     if i == times - 1:

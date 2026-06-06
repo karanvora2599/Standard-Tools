@@ -4,7 +4,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 ## Key Features
 
-- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80× single call, 30–100× rolling); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 17 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
@@ -74,15 +74,15 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 | `sma(series, period)` | Simple Moving Average | Pandas rolling |
 | `ema(series, period)` | Exponential Moving Average | Pandas EWM |
 | `macd(series, fast, slow, signal)` | MACD + Signal + Histogram | Pandas EWM |
-| `adx(high, low, close, period)` | ADX + DI+ + DI− | Numba JIT (NumPy ≤ 2.0) / Python fallback |
-| `parabolic_sar(high, low)` | Parabolic SAR + Trend direction | Numba JIT (NumPy ≤ 2.0) / Python fallback |
+| `adx(high, low, close, period)` | ADX + DI+ + DI− | **C++ extension** / Numba JIT / Python fallback |
+| `parabolic_sar(high, low)` | Parabolic SAR + Trend direction | **C++ extension** / Numba JIT / Python fallback |
 | `williams_r(high, low, close, period)` | Williams %R oscillator | Pandas rolling |
 
 **Momentum**
 
 | Function | Description | Performance |
 |---|---|---|
-| `rsi(series, period)` | RSI (Wilder's smoothing) | Numba JIT (NumPy ≤ 2.0) / Python fallback |
+| `rsi(series, period)` | RSI (Wilder's smoothing) | **C++ extension** / Numba JIT / Python fallback |
 | `stochastic_oscillator(high, low, close)` | Stochastic %K and %D | Pandas rolling |
 
 **Volatility**
@@ -376,8 +376,11 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 | `rolling_hurst` (n = 2 000, window = 200, step = 1) | ~5–15 s | ~0.1–0.3 s | **30–100×** |
 | `rolling_hurst` (n = 2 000, window = 252, step = 5) | ~1–3 s | ~0.05–0.15 s | **20–60×** |
 | `run_regime_adaptive_backtest` (end-to-end) | ~10–20 s | ~0.5–2 s | **10–30×** |
+| `rsi` (n = 2 000, period = 14) | ~0.5–2 ms | ~0.02–0.1 ms | **10–30×** |
+| `adx` (n = 2 000, period = 14) | ~1–4 ms | ~0.05–0.2 ms | **10–30×** |
+| `parabolic_sar` (n = 2 000) | ~0.5–2 ms | ~0.02–0.1 ms | **10–30×** |
 
-The rolling gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function.
+The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop.
 
 > These are projected figures based on algorithmic analysis of loop iterations vs. compiled throughput. The benchmark suite (`tests/cpp/bench_hurst.cpp` and `pytest -m benchmark`) confirms actual numbers once the extension is built. See [Development/build_guide.md](Development/build_guide.md) for build instructions.
 
@@ -397,7 +400,7 @@ Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):
 | Portfolio covariance | — | BLAS `pandas.cov` | BLAS-backed | O(n·k²) via LAPACK |
 | Screener (50+ tickers) | — | ProcessPoolExecutor | multi-core | Auto async→multiprocess threshold |
 
-> **Numba note:** RSI, ADX, Parabolic SAR, and the RSI/Bollinger strategy state machines are decorated with `@njit` for ~50–100× speedup on their inner loops. This requires Numba with a compatible NumPy version (≤ 2.0). On NumPy 2.x (current default), Numba decorators are a no-op and the library falls back to pure Python automatically — all functions remain correct. C++ ports of RSI, ADX, and PSAR are next in the roadmap and will resolve this permanently.
+> **Numba note:** RSI, ADX, Parabolic SAR, and the RSI/Bollinger strategy state machines are decorated with `@njit` for ~50–100× speedup on their inner loops. This requires Numba with a compatible NumPy version (≤ 2.0). On NumPy 2.x (current default), Numba decorators are a no-op — but the C++ extension (`_sqt_core`) provides equivalent performance for RSI, ADX, and PSAR without any Numba dependency. All three fall back to pure Python automatically when neither C++ nor Numba is available.
 
 ---
 
@@ -444,7 +447,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**487 Python unit tests** (472 passing; 15 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **19 C++ unit tests**
+**544 Python unit tests** (494 passing; 50 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **35 C++ unit tests** (19 Hurst + 16 indicators)
 
 ---
 
