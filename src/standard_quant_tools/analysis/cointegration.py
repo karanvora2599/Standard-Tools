@@ -4,6 +4,16 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import coint
 
+# ── C++ extension (optional fast path) ───────────────────────────────────────
+
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    HAS_CPP = True
+except ImportError:
+    pass
+
 
 def cointegration_test(
     series_a: pd.Series,
@@ -40,22 +50,38 @@ def cointegration_test(
     common_idx = series_a.index.intersection(series_b.index)
     a = series_a.loc[common_idx]
     b = series_b.loc[common_idx]
-    n = len(a)
-
-    # OLS hedge ratio: a = intercept + hedge_ratio * b + residual
-    b_vals = b.to_numpy(dtype=float)
     a_vals = a.to_numpy(dtype=float)
+    b_vals = b.to_numpy(dtype=float)
+    n = len(a_vals)
+
+    # ── C++ fast path ─────────────────────────────────────────────────────────
+    if HAS_CPP and _cpp_core is not None:
+        use_aic = autolag.lower() != "bic"
+        raw = _cpp_core.engle_granger(a_vals, b_vals, -1, use_aic)
+        return {
+            "cointegrated": bool(raw["cointegrated"]),
+            "hedge_ratio": float(raw["hedge_ratio"]),
+            "adf_statistic": float(raw["adf_statistic"]),
+            "p_value": float(raw["p_value"]),
+            "critical_values": {
+                "1%":  float(raw["cv_1pct"]),
+                "5%":  float(raw["cv_5pct"]),
+                "10%": float(raw["cv_10pct"]),
+            },
+            "half_life_days": float(raw["half_life"]),
+            "n_obs": int(raw["n_obs"]),
+        }
+
+    # ── statsmodels fallback ──────────────────────────────────────────────────
     X = np.column_stack([np.ones(n), b_vals])
     beta, *_ = np.linalg.lstsq(X, a_vals, rcond=None)
     hedge = float(beta[1])
 
-    # Engle-Granger cointegration test (statsmodels uses MacKinnon 2010 p-values)
     adf_t, p_val, crit_arr = coint(a_vals, b_vals, trend="c", autolag=autolag)
 
-    # crit_arr is ndarray ordered [cv_1%, cv_5%, cv_10%]
     crit = {
-        "1%": float(crit_arr[0]),
-        "5%": float(crit_arr[1]),
+        "1%":  float(crit_arr[0]),
+        "5%":  float(crit_arr[1]),
         "10%": float(crit_arr[2]),
     }
 

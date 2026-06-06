@@ -51,6 +51,30 @@ endif()
 
 add_test(NAME cpp_indicators COMMAND test_indicators)
 
+add_library(sqt_cointegration_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/cointegration.cpp
+)
+target_include_directories(sqt_cointegration_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_cointegration_impl PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(sqt_cointegration_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(sqt_cointegration_impl PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_executable(test_cointegration test_cointegration.cpp)
+target_link_libraries(test_cointegration PRIVATE sqt_cointegration_impl)
+target_compile_features(test_cointegration PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_cointegration PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(test_cointegration PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_cointegration COMMAND test_cointegration)
+
 
 # ── Performance benchmarks ────────────────────────────────────────────────────
 # Not a CTest test — run manually to inspect timing output:

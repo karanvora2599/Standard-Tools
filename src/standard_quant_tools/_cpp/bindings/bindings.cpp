@@ -4,6 +4,7 @@
 
 #include "sqt/hurst.hpp"
 #include "sqt/indicators.hpp"
+#include "sqt/cointegration.hpp"
 
 namespace py = pybind11;
 
@@ -139,4 +140,39 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Parabolic SAR state machine.\n\n"
         "Returns a 2-D float64 array of shape (n, 2):\n"
         "  col 0 = SAR, col 1 = Trend (1.0 rising, -1.0 falling).");
+
+    // ── Engle-Granger cointegration ───────────────────────────────────────────
+
+    m.def(
+        "engle_granger",
+        [](Array1D y0, Array1D y1, int max_lag, bool use_aic) -> py::dict {
+            if (y0.size() != y1.size())
+                throw std::invalid_argument("y0 and y1 must have equal length");
+            const auto r = sqt::engle_granger(
+                y0.data(), y1.data(), y0.size(), max_lag, use_aic);
+            py::dict d;
+            d["intercept"]     = r.intercept;
+            d["hedge_ratio"]   = r.hedge_ratio;
+            d["adf_statistic"] = r.adf_statistic;
+            d["optimal_lag"]   = r.optimal_lag;
+            d["p_value"]       = r.p_value;
+            d["cv_1pct"]       = r.cv_1pct;
+            d["cv_5pct"]       = r.cv_5pct;
+            d["cv_10pct"]      = r.cv_10pct;
+            d["half_life"]     = r.half_life;
+            d["n_obs"]         = r.n_obs;
+            d["cointegrated"]  = r.cointegrated;
+            return d;
+        },
+        py::arg("y0"),
+        py::arg("y1"),
+        py::arg("max_lag") = -1,
+        py::arg("use_aic") = true,
+        "Engle-Granger two-step cointegration test.\n\n"
+        "Step 1: OLS of y0 on y1 → hedge_ratio and spread.\n"
+        "Step 2: ADF test on the spread (MacKinnon 2010 critical values).\n"
+        "Step 3: AR(1) half-life of the spread.\n\n"
+        "Returns a dict with keys: intercept, hedge_ratio, adf_statistic,\n"
+        "optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct, half_life,\n"
+        "n_obs, cointegrated.");
 }

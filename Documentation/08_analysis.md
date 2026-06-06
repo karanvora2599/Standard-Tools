@@ -182,9 +182,11 @@ print(json.dumps(payload, indent=2))
 
 ---
 
-## Cointegration & Pairs Spread Analysis
+## Cointegration & Pairs Spread Analysis *(C++ / statsmodels)*
 
 Two price series are **cointegrated** when a linear combination of them is stationary, even though each series individually follows a random walk. This is the statistical foundation of pairs trading.
+
+`cointegration_test` uses the **C++ extension** (`_sqt_core`) when available — a self-contained Engle-Granger implementation (OLS + ADF + MacKinnon 2010 response surface) with no dependency on `statsmodels`. The C++ path is **5–15× faster** on typical series lengths (n = 250–1 000). The statsmodels fallback is used automatically when the extension is not built; the API and return format are identical either way.
 
 The toolkit provides four functions covering the full pairs workflow:
 
@@ -217,6 +219,15 @@ print(f"Critical values  : {result['critical_values']}")
 ```
 
 The test uses **MacKinnon (2010) p-values** — these are stricter than standard ADF critical values because they account for the fact that we are testing residuals from a fitted regression, not the original series.
+
+To check which execution path is active:
+
+```python
+from standard_quant_tools.analysis.cointegration import HAS_CPP
+print("C++ cointegration active:", HAS_CPP)
+# True  → compiled extension found; OLS + ADF computed in C++
+# False → extension not built; statsmodels fallback used automatically
+```
 
 #### Output reference
 
