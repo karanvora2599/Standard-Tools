@@ -166,12 +166,23 @@ pytest tests/ -v
 
 ### Python tests for the C++ bindings
 
+Each C++ feature has a matching Python integration test file. Tests that require
+the compiled extension are automatically skipped when it is not built.
+
 ```
-pytest tests/test_cpp_hurst.py -v
+pytest tests/test_cpp_hurst.py -v           # Hurst + rolling Hurst
+pytest tests/test_cpp_indicators.py -v      # RSI, ADX, Parabolic SAR
+pytest tests/test_cpp_cointegration.py -v   # Engle-Granger cointegration
 ```
 
-The `TestCppBindings` and `TestCppVsPython` groups are automatically skipped
-when the extension is not built. Once built, all 48 tests run.
+Or run all three at once:
+
+```
+pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_cointegration.py -v
+```
+
+Once the extension is built all skipped tests activate (63 total — 28 Hurst,
+15 indicators, 20 cointegration C++ binding tests).
 
 ### C++ unit tests
 
@@ -181,19 +192,28 @@ cmake --build build --config Release
 ctest --test-dir build --config Release -V
 ```
 
-Or run the binary directly:
+This runs three test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`.
+
+Or run each binary directly:
 
 ```
 # Windows (VS generator)
 build\tests\cpp\Release\test_hurst.exe
+build\tests\cpp\Release\test_indicators.exe
+build\tests\cpp\Release\test_cointegration.exe
 
 # Windows (Ninja) / Linux / macOS
 ./build/tests/cpp/test_hurst
+./build/tests/cpp/test_indicators
+./build/tests/cpp/test_cointegration
 ```
 
-Expected:
+Expected output for each:
+
 ```
-19 / 19 tests passed.
+19 / 19 tests passed.   ← test_hurst
+16 / 16 tests passed.   ← test_indicators
+18 / 18 tests passed.   ← test_cointegration
 ```
 
 ---
@@ -227,31 +247,71 @@ Standard Tools/
 │       └── _cpp/                            ← All C++ sources
 │           ├── CMakeLists.txt               ← Extension build rules
 │           ├── include/sqt/
-│           │   └── hurst.hpp                ← Public C++ API
+│           │   ├── hurst.hpp                ← Hurst exponent API
+│           │   ├── indicators.hpp           ← RSI / ADX / Parabolic SAR API
+│           │   └── cointegration.hpp        ← OLS / ADF / Engle-Granger API
 │           ├── src/
-│           │   └── hurst.cpp                ← Implementation
+│           │   ├── hurst.cpp                ← Hurst implementation
+│           │   ├── indicators.cpp           ← RSI / ADX / PSAR implementation
+│           │   └── cointegration.cpp        ← OLS / ADF / cointegration implementation
 │           └── bindings/
-│               └── bindings.cpp             ← pybind11 module definition
+│               └── bindings.cpp             ← pybind11 module definition (all features)
 └── tests/
-    ├── test_cpp_hurst.py                    ← Python integration tests
+    ├── test_cpp_hurst.py                    ← Python integration tests (Hurst)
+    ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR)
+    ├── test_cpp_cointegration.py            ← Python integration tests (cointegration)
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
-        └── test_hurst.cpp                   ← C++ unit tests (no framework needed)
+        ├── test_hurst.cpp                   ← 19 C++ unit tests (no framework needed)
+        ├── test_indicators.cpp              ← 16 C++ unit tests
+        └── test_cointegration.cpp           ← 18 C++ unit tests
 ```
 
 ---
 
-## 7. Adding the Next C++ Feature
+## 7. What Is Currently in `_sqt_core`
 
-Each new module follows the same pattern (example: `indicators`):
+| Feature | Header | Source | Python caller |
+|---|---|---|---|
+| Hurst exponent + rolling Hurst | `hurst.hpp` | `hurst.cpp` | `analysis/hurst.py` |
+| RSI (Wilder's smoothing) | `indicators.hpp` | `indicators.cpp` | `indicators/momentum.py` |
+| ADX + DI+/DI− | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
+| Parabolic SAR | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
+| Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 
-1. `_cpp/include/sqt/indicators.hpp` — C++ API declarations
-2. `_cpp/src/indicators.cpp` — implementation
-3. `_cpp/bindings/bindings.cpp` — add `#include "sqt/indicators.hpp"` and `m.def(...)` calls
-4. `_cpp/CMakeLists.txt` — add `src/indicators.cpp` to `SQT_SOURCES`
-5. `tests/cpp/test_hurst.cpp` or a new `tests/cpp/test_indicators.cpp` — C++ unit tests
-6. `tests/test_cpp_indicators.py` — Python integration tests
-7. `indicators/momentum.py` (or whichever Python module) — add C++ fast path
+All Python callers follow the same guard pattern:
+
+```python
+from typing import Any
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import _sqt_core as _cpp_core
+    HAS_CPP = True
+except ImportError:
+    pass
+
+# in the function body:
+if HAS_CPP and _cpp_core is not None:
+    return _cpp_core.feature_name(...)
+# fallback:
+...
+```
+
+---
+
+## 8. Adding the Next C++ Feature
+
+Each new module follows the same pattern (example: `my_feature`):
+
+1. `_cpp/include/sqt/my_feature.hpp` — C++ API declarations
+2. `_cpp/src/my_feature.cpp` — implementation
+3. `_cpp/bindings/bindings.cpp` — add `#include "sqt/my_feature.hpp"` and `m.def(...)` inside `PYBIND11_MODULE`
+4. `_cpp/CMakeLists.txt` — add `src/my_feature.cpp` to `SQT_SOURCES`
+5. `tests/cpp/CMakeLists.txt` — add static lib + test executable + `add_test`
+6. `tests/cpp/test_my_feature.cpp` — C++ unit tests (same `CHECK` / `CHECK_NEAR` pattern as existing files)
+7. `tests/test_cpp_my_feature.py` — Python integration tests (use `requires_cpp` skip marker)
+8. The relevant Python module — add `_cpp_core: Any = None` guard and fast path
 
 Rebuild:
 ```
@@ -260,7 +320,7 @@ cmake --build build --config Release
 
 ---
 
-## 8. Notes
+## 9. Notes
 
 **`-march=native` / `/arch:AVX2`**  
 Both flags tune the binary for the CPU of the build machine. They are ideal
