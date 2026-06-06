@@ -1,6 +1,15 @@
+from typing import Any
+
 import pandas as pd
 import numpy as np
 from standard_quant_tools.validation import validate_series
+
+_cpp_core: Any = None
+try:
+    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    HAS_CPP = True
+except ImportError:
+    HAS_CPP = False
 
 try:
     from numba import njit
@@ -55,22 +64,28 @@ def _rsi_numba(prices: np.ndarray, period: int) -> np.ndarray:
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """
     Calculate Relative Strength Index (RSI).
-    Uses Numba optimized Wilder's Smoothing if available.
+    Uses C++ fast path when built, then Numba JIT, then pure Python fallback.
+    All three paths use Wilder's smoothing (SMA seed, then alpha=1/period).
     """
     if series.empty:
         return pd.Series(dtype=float)
 
+    values = series.values.astype(np.float64)
+
+    if HAS_CPP and _cpp_core is not None:
+        rsi_vals = _cpp_core.rsi(values, period)
+        return pd.Series(rsi_vals, index=series.index)
+
     if HAS_NUMBA:
-        values = series.values.astype(np.float64)
         rsi_vals = _rsi_numba(values, period)
         return pd.Series(rsi_vals, index=series.index)
-    else:
-        # Fallback to pandas-based (SMA for simplicity in fallback, or EWM)
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
+
+    # Pure Python fallback (EWM — slightly different from Wilder's SMA seed)
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 @validate_series()
 def stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 14, d_period: int = 3) -> pd.DataFrame:

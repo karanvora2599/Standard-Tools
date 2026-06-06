@@ -1,5 +1,6 @@
 set(SQT_SOURCES
     src/hurst.cpp
+    src/indicators.cpp
     bindings/bindings.cpp
 )
 

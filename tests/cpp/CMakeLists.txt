@@ -1,4 +1,4 @@
-# ── Shared helper: compile hurst.cpp once and link both binaries ──────────────
+# ── Shared helpers: compile each .cpp once and link to test + bench ────────────
 
 add_library(sqt_hurst_impl STATIC
     ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/hurst.cpp
@@ -11,6 +11,19 @@ if(MSVC)
     target_compile_options(sqt_hurst_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
 else()
     target_compile_options(sqt_hurst_impl PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_library(sqt_indicators_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/indicators.cpp
+)
+target_include_directories(sqt_indicators_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_indicators_impl PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(sqt_indicators_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(sqt_indicators_impl PRIVATE -O2 -Wall -Wextra)
 endif()
 
 
@@ -26,6 +39,17 @@ else()
 endif()
 
 add_test(NAME cpp_hurst COMMAND test_hurst)
+
+add_executable(test_indicators test_indicators.cpp)
+target_link_libraries(test_indicators PRIVATE sqt_indicators_impl)
+target_compile_features(test_indicators PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_indicators PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(test_indicators PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_indicators COMMAND test_indicators)
 
 
 # ── Performance benchmarks ────────────────────────────────────────────────────

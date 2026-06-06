@@ -1,5 +1,14 @@
+from typing import Any
+
 import pandas as pd
 import numpy as np
+
+_cpp_core: Any = None
+try:
+    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    HAS_CPP = True
+except ImportError:
+    HAS_CPP = False
 
 try:
     from numba import njit
@@ -120,14 +129,17 @@ def adx(
     """
     Average Directional Index (ADX) with DI+ and DI-.
     ADX > 25 indicates a strong trend; direction determined by DI+/DI-.
-    Uses Numba JIT for high throughput.
+    Uses C++ fast path when built, then Numba JIT, then pure Python fallback.
     Returns DataFrame with columns ['DI_Plus', 'DI_Minus', 'ADX'].
     """
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
     c = close.to_numpy(dtype=np.float64)
 
-    raw = _adx_numba(h, l, c, period)
+    if HAS_CPP and _cpp_core is not None:
+        raw = _cpp_core.adx(h, l, c, period)
+    else:
+        raw = _adx_numba(h, l, c, period)
 
     return pd.DataFrame(
         {'DI_Plus': raw[:, 0], 'DI_Minus': raw[:, 1], 'ADX': raw[:, 2]},
@@ -216,7 +228,7 @@ def parabolic_sar(
 ) -> pd.DataFrame:
     """
     Parabolic SAR — a dynamic trailing stop / trend-following indicator.
-    Uses Numba JIT for correctness and speed.
+    Uses C++ fast path when built, then Numba JIT, then pure Python fallback.
 
     Returns DataFrame with:
         'SAR'   : Stop-and-reverse price level.
@@ -225,7 +237,10 @@ def parabolic_sar(
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
 
-    raw = _psar_numba(h, l, af_start, af_step, af_max)
+    if HAS_CPP and _cpp_core is not None:
+        raw = _cpp_core.parabolic_sar(h, l, af_start, af_step, af_max)
+    else:
+        raw = _psar_numba(h, l, af_start, af_step, af_max)
 
     return pd.DataFrame(
         {'SAR': raw[:, 0], 'Trend': raw[:, 1]},
