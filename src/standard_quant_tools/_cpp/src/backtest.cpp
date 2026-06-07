@@ -54,7 +54,9 @@ BacktestResult run_strategy(
     double prev_exec   = 0.0;
 
     for (std::size_t i = 1; i < n; ++i) {
-        const double ret_i  = (prices[i] - prices[i - 1]) / prices[i - 1];
+        const double ret_i  = (prices[i - 1] != 0.0)
+            ? (prices[i] - prices[i - 1]) / prices[i - 1]
+            : 0.0;
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
@@ -75,6 +77,12 @@ BacktestResult run_strategy(
         }
 
         prev_exec = exec_i;
+    }
+
+    // Flush last open trade at final price (mirrors Python _build_trade_log).
+    if (has_open && n > 0) {
+        const double pnl = (prices[n - 1] - entry_price) / entry_price * entry_dir;
+        trade_rets.push_back(pnl * 100.0);
     }
 
     // ── Equity curve: cumprod(1 + strat_ret) ──────────────────────────────────
@@ -115,28 +123,16 @@ BacktestResult run_strategy(
     r.sharpe_ratio   = (sample_std > 0.0)
         ? (mean_r / sample_std) * std::sqrt(kPPY) : 0.0;
 
-    // Sortino: downside std uses only negative elements of strat_ret,
-    // computed with sample variance (ddof=1, matches pandas .std()).
+    // Sortino: semi-deviation = sqrt(mean(min(r, 0)^2)) across ALL periods.
+    // Sortino & Price (1994) definition — zero contribution from profitable bars.
     {
-        double down_mean = 0.0;
-        int    cnt       = 0;
-        for (int i = 0; i < N; ++i)
-            if (strat_ret[i] < 0.0) { down_mean += strat_ret[i]; ++cnt; }
-
-        if (cnt == 0) {
-            r.sortino_ratio = kInf;
-        } else {
-            down_mean /= cnt;
-            double down_sq = 0.0;
-            for (int i = 0; i < N; ++i)
-                if (strat_ret[i] < 0.0) {
-                    const double d = strat_ret[i] - down_mean;
-                    down_sq += d * d;
-                }
-            const double down_std = (cnt > 1) ? std::sqrt(down_sq / (cnt - 1)) : 0.0;
-            r.sortino_ratio = (down_std > 0.0)
-                ? (mean_r / down_std) * std::sqrt(kPPY) : kInf;
+        double down_sq_sum = 0.0;
+        for (int i = 0; i < N; ++i) {
+            const double d = std::min(strat_ret[i], 0.0);
+            down_sq_sum += d * d;
         }
+        const double down_dev = std::sqrt(down_sq_sum / N) * std::sqrt(kPPY);
+        r.sortino_ratio = (down_dev > 0.0) ? (mean_r * kPPY) / down_dev : kInf;
     }
 
     // ── Calmar: CAGR / |max_drawdown|  (CAGR = (final/initial)^(252/n) - 1) ──
