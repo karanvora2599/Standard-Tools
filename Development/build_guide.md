@@ -193,7 +193,7 @@ cmake --build build --config Release
 ctest --test-dir build --config Release -V
 ```
 
-This runs three test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`.
+This runs four test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`, `cpp_backtest`.
 
 Or run each binary directly:
 
@@ -219,6 +219,22 @@ Expected output for each:
 18 / 18 tests passed.   ← test_cointegration
 17 / 17 tests passed.   ← test_backtest
 ```
+
+### C++ performance benchmarks
+
+Benchmarks are not CTest tests — run them manually to inspect timing output:
+
+```
+# Windows (VS generator)
+build\tests\cpp\Release\bench_hurst.exe
+build\tests\cpp\Release\bench_backtest.exe
+
+# Windows (Ninja) / Linux / macOS
+./build/tests/cpp/bench_hurst
+./build/tests/cpp/bench_backtest
+```
+
+Each benchmark prints a table of median wall-clock times with conservative upper bounds. A failure indicates a debug build or missing optimisation flags — not a correctness problem.
 
 ---
 
@@ -272,7 +288,9 @@ Standard Tools/
         ├── test_hurst.cpp                   ← 19 C++ unit tests (no framework needed)
         ├── test_indicators.cpp              ← 24 C++ unit tests
         ├── test_cointegration.cpp           ← 18 C++ unit tests
-        └── test_backtest.cpp                ← 17 C++ unit tests
+        ├── test_backtest.cpp                ← 17 C++ unit tests
+        ├── bench_hurst.cpp                  ← Hurst timing benchmark (run manually)
+        └── bench_backtest.cpp               ← Backtest kernel timing benchmark (run manually)
 ```
 
 ---
@@ -316,6 +334,8 @@ if HAS_CPP and _cpp_core is not None:
 There are two cases:
 
 ### Case A — New standalone module (e.g. `kalman_filter`, `garch`)
+
+*Example: `backtest.cpp` — the `run_strategy` kernel was added this way.*
 
 1. `_cpp/include/sqt/my_feature.hpp` — C++ API declarations
 2. `_cpp/src/my_feature.cpp` — implementation

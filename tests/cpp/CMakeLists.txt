@@ -101,10 +101,13 @@ add_test(NAME cpp_backtest COMMAND test_backtest)
 
 
 # ── Performance benchmarks ────────────────────────────────────────────────────
-# Not a CTest test — run manually to inspect timing output:
+# Not CTest tests — run manually to inspect timing output:
 #   Windows  (VS gen) : build\tests\cpp\Release\bench_hurst.exe
+#                       build\tests\cpp\Release\bench_backtest.exe
 #   Windows  (Ninja)  : build\tests\cpp\bench_hurst.exe
+#                       build\tests\cpp\bench_backtest.exe
 #   Linux / macOS     : ./build/tests/cpp/bench_hurst
+#                       ./build/tests/cpp/bench_backtest
 
 add_executable(bench_hurst bench_hurst.cpp)
 target_link_libraries(bench_hurst PRIVATE sqt_hurst_impl)
@@ -113,4 +116,13 @@ if(MSVC)
     target_compile_options(bench_hurst PRIVATE /O2 /arch:AVX2 /W3 /wd4244 /wd4267)
 else()
     target_compile_options(bench_hurst PRIVATE -O3 -march=native -Wall -Wextra)
+endif()
+
+add_executable(bench_backtest bench_backtest.cpp)
+target_link_libraries(bench_backtest PRIVATE sqt_backtest_impl)
+target_compile_features(bench_backtest PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(bench_backtest PRIVATE /O2 /arch:AVX2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(bench_backtest PRIVATE -O3 -march=native -Wall -Wextra)
 endif()

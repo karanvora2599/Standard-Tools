@@ -196,12 +196,12 @@ A single `sqt::run_strategy` function accepts close prices and signal arrays dir
 
 | Agent Tool / Workflow | Dominant bottleneck | Status | End-to-end speedup |
 |---|---|---|---|
-| `run_regime_adaptive_backtest` | `hurst_exponent` + `backtest_grid` | Hurst ✅; backtest 🔲 | **10–30×** (partial — Hurst realized; backtest still pending) |
+| `run_regime_adaptive_backtest` | `hurst_exponent` + `backtest_grid` | Hurst ✅; backtest ✅ | **10–30×** |
 | `scan_pairs` (100 tickers) | cointegration ADF loop | ✅ Realized | **5–15×** |
 | `run_walk_forward_backtest` | repeated `backtest_grid` calls | ✅ Realized (kernel) | **5–15×** |
 | `get_technical_analysis` | RSI + ADX + PSAR + Wilder's ATR | ✅ Realized | **10–30×** |
 | `run_screener` (S&P 500) | RSI + beta per ticker × 500 | RSI ✅; OLS ✅ | **5–15×** (compute path only; I/O still dominates) |
-| `run_sma_backtest` | already fast | N/A | **3–5×** (projected) |
+| `run_sma_backtest` | `run_strategy` kernel | ✅ Realized | **3–8×** |
 
 ---
 
