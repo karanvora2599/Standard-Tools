@@ -71,6 +71,23 @@ def _build_trade_log(prices: pd.Series, executed: pd.Series) -> pd.DataFrame:
                 "direction": 1 if new_pos > 0 else -1,
             }
 
+    # Close any position still open at the last bar (e.g. buy-and-hold, trend strategies
+    # that never exit). Mark the exit date and price as the final bar in the series.
+    if open_trade:
+        last_date = prices.index[-1]
+        last_price = prices.iloc[-1]
+        direction = open_trade["direction"]
+        entry_price = open_trade["entry_price"]
+        exit_pnl = (last_price - entry_price) / entry_price * direction
+        records.append({
+            "entry_date": open_trade["entry_date"],
+            "exit_date": last_date,
+            "direction": "long" if direction == 1 else "short",
+            "entry_price": round(entry_price, 4),
+            "exit_price": round(float(last_price), 4),
+            "return_pct": round(exit_pnl * 100, 4),
+        })
+
     return pd.DataFrame(records)
 
 

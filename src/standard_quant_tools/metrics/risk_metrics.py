@@ -25,10 +25,11 @@ def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_ye
 @validate_series()
 def sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float:
     excess_returns = returns - risk_free_rate / periods_per_year
-    downside_returns = excess_returns[excess_returns < 0]
-    if downside_returns.empty:
-        return np.inf
-    downside_dev = float(downside_returns.std()) * np.sqrt(periods_per_year)
+    # Semi-deviation: RMS of clipped returns across ALL periods (zero contribution for
+    # profitable bars). Dividing by N (not just n_negative) is the Sortino & Price (1994)
+    # definition and gives a larger, more conservative denominator than std of negatives only.
+    downside_sq = np.minimum(excess_returns.to_numpy(dtype=np.float64), 0.0) ** 2
+    downside_dev = float(np.sqrt(downside_sq.mean())) * np.sqrt(periods_per_year)
     if downside_dev == 0 or np.isnan(downside_dev):
         return np.inf
     return (excess_returns.mean() * periods_per_year) / downside_dev
