@@ -599,7 +599,8 @@ def run_regime_adaptive_backtest(input_data: RegimeAdaptiveInput) -> RegimeAdapt
     regime = hurst_result["regime"]
     fit_r2 = hurst_result["fit_r_squared"]
 
-    strategy_name = _REGIME_STRATEGY_MAP[regime]
+    # "unknown" is returned when Hurst is NaN (insufficient data); default to MACD
+    strategy_name = _REGIME_STRATEGY_MAP.get(regime, "macd_crossover")
 
     grid_map = {
         "sma_crossover": input_data.sma_param_grid,

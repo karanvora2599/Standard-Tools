@@ -129,10 +129,12 @@ def run_strategy(
     executed = signals.shift(1).fillna(0.0)
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
+    # Pass raw signals — C++ applies the one-bar lag internally (executed[i] = signals[i-1]).
+    # Do NOT pass `executed` here: it is already shifted, which would cause a 2-bar lag.
     if HAS_CPP and _cpp_core is not None:
-        prices_arr = prices.to_numpy(dtype=np.float64)
-        exec_arr   = executed.to_numpy(dtype=np.float64)
-        r = _cpp_core.run_strategy(prices_arr, exec_arr,
+        prices_arr  = prices.to_numpy(dtype=np.float64)
+        signals_arr = signals.to_numpy(dtype=np.float64)
+        r = _cpp_core.run_strategy(prices_arr, signals_arr,
                                    initial_capital, commission_pct, slippage_pct)
         equity_curve = pd.Series(r["equity_curve"], index=idx)
         result: Dict[str, Any] = {

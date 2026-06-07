@@ -60,7 +60,7 @@ def portfolio_metrics(
     cov_matrix = returns_df.cov().to_numpy(dtype=np.float64) * periods_per_year
     port_vol = float(np.sqrt(w @ cov_matrix @ w))
 
-    annual_ret = float(port_returns.mean() * periods_per_year)
+    annual_ret = float(cagr(equity_curve, periods_per_year))
     excess = annual_ret - risk_free_rate
     sr = excess / port_vol if port_vol != 0 else 0.0
 

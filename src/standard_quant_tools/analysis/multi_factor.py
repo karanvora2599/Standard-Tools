@@ -39,7 +39,7 @@ def multi_factor_regression(
     Returns
     -------
     dict with keys:
-        alpha         : float  – annualised intercept (Jensen's alpha)
+        alpha         : float  – per-period OLS intercept (raw coefficient; multiply by periods_per_year to annualize)
         loadings      : dict   – {factor_name: coefficient}
         t_stats       : dict   – {factor_name: t-statistic} (includes "alpha")
         p_values      : dict   – {factor_name: two-tailed p-value}

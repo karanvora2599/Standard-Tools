@@ -70,22 +70,17 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     if series.empty:
         return pd.Series(dtype=float)
 
-    values = series.values.astype(np.float64)
+    values: np.ndarray = np.asarray(series.values, dtype=np.float64)
 
     if HAS_CPP and _cpp_core is not None:
         rsi_vals = _cpp_core.rsi(values, period)
         return pd.Series(rsi_vals, index=series.index)
 
-    if HAS_NUMBA:
-        rsi_vals = _rsi_numba(values, period)
-        return pd.Series(rsi_vals, index=series.index)
-
-    # Pure Python fallback (EWM — slightly different from Wilder's SMA seed)
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    # _rsi_numba implements Wilder's SMA-seed smoothing. When Numba is
+    # installed it runs JIT-compiled; the dummy @njit makes it plain Python
+    # otherwise — either way the result is correct.
+    rsi_vals = _rsi_numba(values, period)
+    return pd.Series(rsi_vals, index=series.index)
 
 @validate_series()
 def stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 14, d_period: int = 3) -> pd.DataFrame:
