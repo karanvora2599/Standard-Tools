@@ -141,6 +141,29 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Returns a 2-D float64 array of shape (n, 2):\n"
         "  col 0 = SAR, col 1 = Trend (1.0 rising, -1.0 falling).");
 
+    // ── Wilder's ATR ─────────────────────────────────────────────────────────
+
+    m.def(
+        "wilder_atr",
+        [](Array1D high, Array1D low, Array1D close, int period) -> py::array_t<double> {
+            if (high.size() != low.size() || high.size() != close.size())
+                throw std::invalid_argument("high, low, close must have equal length");
+            const auto n = high.size();
+            auto result  = sqt::wilder_atr(high.data(), low.data(), close.data(), n, period);
+            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("high"),
+        py::arg("low"),
+        py::arg("close"),
+        py::arg("period") = 14,
+        "Wilder's ATR (Average True Range with Wilder's smoothing).\n\n"
+        "TR[0]=high[0]-low[0]; TR[i]=max(H-L,|H-C_prev|,|L-C_prev|) for i>=1.\n"
+        "Seed: ATR[period-1]=mean(TR[0..period-1]).\n"
+        "Forward: ATR[i]=(ATR[i-1]*(period-1)+TR[i])/period.\n\n"
+        "Returns a 1-D float64 array of length n; first period-1 values are NaN.");
+
     // ── Engle-Granger cointegration ───────────────────────────────────────────
 
     m.def(

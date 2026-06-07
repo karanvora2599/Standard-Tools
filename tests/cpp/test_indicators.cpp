@@ -299,6 +299,137 @@ static void test_psar_empty() {
 }
 
 
+// ── Wilder's ATR tests ────────────────────────────────────────────────────────
+
+static void test_wilder_atr_nan_prefix() {
+    // First period-1 values must be NaN; from period-1 onward must be valid.
+    const int period = 5;
+    const int n = 30;
+    auto close = rising_prices(n);
+    std::vector<double> high(n), low(n);
+    for (int i = 0; i < n; ++i) { high[i] = close[i] + 0.5; low[i] = close[i] - 0.5; }
+
+    auto result = sqt::wilder_atr(high.data(), low.data(), close.data(), n, period);
+
+    CHECK_EQ(static_cast<int>(result.size()), n);
+    for (int i = 0; i < period - 1; ++i) CHECK_NAN(result[i]);
+    for (int i = period - 1; i < n; ++i) CHECK_NOT_NAN(result[i]);
+}
+
+static void test_wilder_atr_known_value() {
+    // Hand-computed example, period = 2:
+    //   H=[10,11,12], L=[9,9,10], C=[9.5,10,11]
+    //   TR[0] = 10-9 = 1.0
+    //   TR[1] = max(11-9, |11-9.5|, |9-9.5|) = max(2, 1.5, 0.5) = 2.0
+    //   TR[2] = max(12-10, |12-10|, |10-10|) = max(2, 2, 0) = 2.0
+    //   ATR[1] = mean(1.0, 2.0) = 1.5
+    //   ATR[2] = (1.5*1 + 2.0) / 2 = 1.75
+    const double high[]  = {10.0, 11.0, 12.0};
+    const double low[]   = { 9.0,  9.0, 10.0};
+    const double close[] = { 9.5, 10.0, 11.0};
+
+    auto result = sqt::wilder_atr(high, low, close, 3, 2);
+
+    CHECK_EQ(static_cast<int>(result.size()), 3);
+    CHECK_NAN(result[0]);
+    CHECK_NEAR(result[1], 1.5,  1e-12);
+    CHECK_NEAR(result[2], 1.75, 1e-12);
+}
+
+static void test_wilder_atr_non_negative() {
+    // ATR must always be >= 0 for any price series.
+    const int n = 200;
+    auto close = pseudo_random(n);
+    std::vector<double> high(n), low(n);
+    for (int i = 0; i < n; ++i) { high[i] = close[i] + 0.5; low[i] = close[i] - 0.5; }
+
+    auto result = sqt::wilder_atr(high.data(), low.data(), close.data(), n, 14);
+    for (auto v : result) {
+        if (!std::isnan(v)) CHECK(v >= 0.0);
+    }
+}
+
+static void test_wilder_atr_constant_prices() {
+    // When H=L=C for every bar: TR=0 everywhere, so ATR should be 0.
+    const int n = 30;
+    std::vector<double> h(n, 100.0), l(n, 100.0), c(n, 100.0);
+
+    auto result = sqt::wilder_atr(h.data(), l.data(), c.data(), n, 5);
+
+    for (int i = 4; i < n; ++i) CHECK_NEAR(result[i], 0.0, 1e-12);
+}
+
+static void test_wilder_atr_smoothing_recurrence() {
+    // Verify: for every i >= period, result[i] == (result[i-1]*(p-1) + TR[i]) / p
+    const int period = 7;
+    const int n = 50;
+    auto close = pseudo_random(n, 17);
+    std::vector<double> high(n), low(n);
+    for (int i = 0; i < n; ++i) { high[i] = close[i] + 1.0; low[i] = close[i] - 1.0; }
+
+    auto result = sqt::wilder_atr(high.data(), low.data(), close.data(), n, period);
+
+    for (int i = period; i < n; ++i) {
+        // Recompute TR[i]
+        double tr_i = std::max({
+            high[i] - low[i],
+            std::abs(high[i] - close[i - 1]),
+            std::abs(low[i]  - close[i - 1]),
+        });
+        double expected = (result[i - 1] * (period - 1) + tr_i) / period;
+        CHECK_NEAR(result[i], expected, 1e-10);
+    }
+}
+
+static void test_wilder_atr_short_series() {
+    // n < period → all NaN; n == period → first valid value at index period-1
+    const double h[] = {10.0, 11.0, 12.0};
+    const double l[] = { 9.0,  9.5, 10.0};
+    const double c[] = { 9.5, 10.0, 11.0};
+
+    // n=3 < period=5 → all NaN
+    auto r1 = sqt::wilder_atr(h, l, c, 3, 5);
+    for (auto v : r1) CHECK_NAN(v);
+
+    // n=3 == period=3 → exactly one valid value at index 2
+    auto r2 = sqt::wilder_atr(h, l, c, 3, 3);
+    CHECK_NAN(r2[0]);
+    CHECK_NAN(r2[1]);
+    CHECK_NOT_NAN(r2[2]);
+}
+
+static void test_wilder_atr_empty() {
+    auto result = sqt::wilder_atr(nullptr, nullptr, nullptr, 0, 14);
+    CHECK_EQ(static_cast<int>(result.size()), 0);
+}
+
+static void test_wilder_atr_decays_toward_tr() {
+    // If TR becomes constant after the seed period, ATR should converge to that value.
+    // We set the first `period` bars to have TR=2, then all remaining to TR=0.
+    // ATR should decay toward 0 monotonically after the seed.
+    const int period = 5;
+    const int n = 100;
+    // High - low = 2 for first period bars, then 0 thereafter
+    std::vector<double> h(n), l(n, 0.0), c(n, 0.0);
+    for (int i = 0; i < period; ++i)  { h[i] = 2.0; }
+    for (int i = period; i < n; ++i)  { h[i] = 0.0; }
+    // No prev-close gap since all closes = 0
+
+    auto result = sqt::wilder_atr(h.data(), l.data(), c.data(), n, period);
+
+    // ATR at seed: mean of first `period` TR values = 2.0 (or something positive)
+    CHECK_NOT_NAN(result[period - 1]);
+    CHECK(result[period - 1] > 0.0);
+
+    // From period onward, TR = 0, so ATR should decrease each bar
+    for (int i = period; i < n - 1; ++i) {
+        CHECK(result[i + 1] <= result[i] + 1e-12);  // non-increasing
+    }
+    // After many steps, ATR must be close to zero
+    CHECK(result[n - 1] < 0.01);
+}
+
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -323,6 +454,16 @@ int main() {
     test_psar_rising_trend_sar_below_price();
     test_psar_single_bar();
     test_psar_empty();
+
+    // Wilder's ATR
+    test_wilder_atr_nan_prefix();
+    test_wilder_atr_known_value();
+    test_wilder_atr_non_negative();
+    test_wilder_atr_constant_prices();
+    test_wilder_atr_smoothing_recurrence();
+    test_wilder_atr_short_series();
+    test_wilder_atr_empty();
+    test_wilder_atr_decays_toward_tr();
 
     std::fprintf(
         stdout,

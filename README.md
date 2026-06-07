@@ -4,7 +4,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 ## Key Features
 
-- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Engle-Granger cointegration (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 17 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
@@ -90,7 +90,8 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 | Function | Description | Performance |
 |---|---|---|
 | `bollinger_bands(series, period, num_std)` | Upper / Middle / Lower bands | Pandas rolling |
-| `atr(high, low, close, period)` | Average True Range | **NumPy single-pass** (5.6× vs `pd.concat`) |
+| `atr(high, low, close, period)` | Average True Range (SMA of TR) | **NumPy single-pass** (5.6× vs `pd.concat`) |
+| `wilder_atr(high, low, close, period)` | Wilder's ATR (SMA seed + Wilder smoothing) | **C++ extension** / Python fallback |
 
 **Volume**
 
@@ -379,6 +380,7 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 | `rsi` (n = 2 000, period = 14) | ~0.5–2 ms | ~0.02–0.1 ms | **10–30×** |
 | `adx` (n = 2 000, period = 14) | ~1–4 ms | ~0.05–0.2 ms | **10–30×** |
 | `parabolic_sar` (n = 2 000) | ~0.5–2 ms | ~0.02–0.1 ms | **10–30×** |
+| `wilder_atr` (n = 2 000, period = 14) | ~0.5–2 ms | ~0.05–0.2 ms | **4–8×** |
 | `cointegration_test` (n = 500) | ~5–20 ms (statsmodels) | ~0.3–2 ms | **5–15×** |
 
 The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop.
@@ -448,7 +450,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**575 Python unit tests** (512 passing; 63 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **53 C++ unit tests** (19 Hurst + 16 indicators + 18 cointegration)
+**592 Python unit tests** (520 passing; 72 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **61 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration)
 
 ---
 

@@ -171,7 +171,7 @@ the compiled extension are automatically skipped when it is not built.
 
 ```
 pytest tests/test_cpp_hurst.py -v           # Hurst + rolling Hurst
-pytest tests/test_cpp_indicators.py -v      # RSI, ADX, Parabolic SAR
+pytest tests/test_cpp_indicators.py -v      # RSI, ADX, Parabolic SAR, Wilder's ATR
 pytest tests/test_cpp_cointegration.py -v   # Engle-Granger cointegration
 ```
 
@@ -181,8 +181,8 @@ Or run all three at once:
 pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_cointegration.py -v
 ```
 
-Once the extension is built all skipped tests activate (63 total — 28 Hurst,
-15 indicators, 20 cointegration C++ binding tests).
+Once the extension is built all skipped tests activate (72 total — 28 Hurst,
+24 indicators, 20 cointegration C++ binding tests).
 
 ### C++ unit tests
 
@@ -212,7 +212,7 @@ Expected output for each:
 
 ```
 19 / 19 tests passed.   ← test_hurst
-16 / 16 tests passed.   ← test_indicators
+24 / 24 tests passed.   ← test_indicators
 18 / 18 tests passed.   ← test_cointegration
 ```
 
@@ -277,6 +277,7 @@ Standard Tools/
 | RSI (Wilder's smoothing) | `indicators.hpp` | `indicators.cpp` | `indicators/momentum.py` |
 | ADX + DI+/DI− | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
 | Parabolic SAR | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
+| Wilder's ATR (SMA seed + Wilder's smooth) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
 | Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 
 All Python callers follow the same guard pattern:
@@ -302,7 +303,9 @@ if HAS_CPP and _cpp_core is not None:
 
 ## 8. Adding the Next C++ Feature
 
-Each new module follows the same pattern (example: `my_feature`):
+There are two cases:
+
+### Case A — New standalone module (e.g. `kalman_filter`, `garch`)
 
 1. `_cpp/include/sqt/my_feature.hpp` — C++ API declarations
 2. `_cpp/src/my_feature.cpp` — implementation
@@ -312,6 +315,19 @@ Each new module follows the same pattern (example: `my_feature`):
 6. `tests/cpp/test_my_feature.cpp` — C++ unit tests (same `CHECK` / `CHECK_NEAR` pattern as existing files)
 7. `tests/test_cpp_my_feature.py` — Python integration tests (use `requires_cpp` skip marker)
 8. The relevant Python module — add `_cpp_core: Any = None` guard and fast path
+
+### Case B — Extending an existing module (e.g. adding a function to `indicators.cpp`)
+
+*Example: Wilder's ATR was added to `indicators.hpp` / `indicators.cpp` without creating new files.*
+
+1. `_cpp/include/sqt/indicators.hpp` — add declaration
+2. `_cpp/src/indicators.cpp` — add implementation
+3. `_cpp/bindings/bindings.cpp` — add `m.def(...)` for the new function (no new `#include` needed)
+4. `tests/cpp/test_indicators.cpp` — add test functions and call them in `main()`
+5. `tests/test_cpp_indicators.py` — add `TestCppNew` + `TestNewWrapper` test classes
+6. The relevant Python module — add `_cpp_core` guard if not present and add fast path
+
+No changes to `CMakeLists.txt` are needed when extending an existing `.cpp` file.
 
 Rebuild:
 ```

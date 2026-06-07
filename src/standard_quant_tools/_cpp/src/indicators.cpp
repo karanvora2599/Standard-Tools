@@ -217,4 +217,48 @@ std::vector<double> parabolic_sar(
     return result;
 }
 
+
+// ── Wilder's ATR ──────────────────────────────────────────────────────────────
+//
+// Identical smoothing to RSI and ADX: SMA seed for the first `period` bars,
+// then alpha=1/period.  Not the same as a simple rolling mean of TR.
+
+std::vector<double> wilder_atr(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           period)
+{
+    std::vector<double> result(n, kNaN);
+
+    if (static_cast<int>(n) < period) return result;
+
+    // ── True range ────────────────────────────────────────────────────────────
+    // Bar 0 has no previous close; use high - low.
+    std::vector<double> tr(n);
+    tr[0] = high[0] - low[0];
+    for (std::size_t i = 1; i < n; ++i) {
+        tr[i] = std::max({
+            high[i] - low[i],
+            std::abs(high[i] - close[i - 1]),
+            std::abs(low[i]  - close[i - 1]),
+        });
+    }
+
+    // ── Seed: SMA of first `period` TR values ─────────────────────────────────
+    double atr_val = 0.0;
+    for (int i = 0; i < period; ++i) atr_val += tr[i];
+    atr_val /= period;
+    result[static_cast<std::size_t>(period) - 1] = atr_val;
+
+    // ── Wilder's forward smoothing ────────────────────────────────────────────
+    for (std::size_t i = static_cast<std::size_t>(period); i < n; ++i) {
+        atr_val = (atr_val * (period - 1) + tr[i]) / period;
+        result[i] = atr_val;
+    }
+
+    return result;
+}
+
 }  // namespace sqt

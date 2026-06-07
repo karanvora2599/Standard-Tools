@@ -4,7 +4,7 @@ All indicators accept `pd.Series` (or `pd.DataFrame` for OHLCV-based indicators)
 
 Performance-critical indicators use a three-tier execution stack: **C++ extension** (`_sqt_core`) → **Numba JIT** → **pure Python fallback**. The C++ path is fastest and has no NumPy-version dependency. Numba requires `numba` installed with NumPy ≤ 2.0 (on NumPy 2.x the JIT is a no-op). All functions remain correct regardless of which tier is active — the selection is transparent to callers.
 
-ATR uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series.
+The following indicators have a **C++ fast path**: RSI, ADX, Parabolic SAR, and Wilder's ATR (all in `_sqt_core`). `atr()` uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series. `wilder_atr()` adds Wilder's exponential smoothing on top of that and runs via the compiled C++ extension when available.
 
 ---
 
@@ -145,9 +145,9 @@ df['bb_width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
 df['squeeze']  = df['bb_width'] < df['bb_width'].rolling(120).quantile(0.2)
 ```
 
-### ATR — Average True Range
+### ATR — Average True Range (SMA-smoothed)
 
-ATR measures volatility including overnight gaps. True range is computed in a single `np.maximum` pass (5.6× faster than the `pd.concat` + `.max` approach), then smoothed with a rolling mean.
+ATR measures volatility including overnight gaps. True range is computed in a single `np.maximum` pass (5.6× faster than the `pd.concat` + `.max` approach), then smoothed with a simple rolling mean.
 
 ```python
 from standard_quant_tools.indicators import atr
@@ -157,6 +157,52 @@ df['ATR'] = atr(df['High'], df['Low'], df['Close'], period=14)
 # Dynamic stop-loss: 2× ATR below entry
 entry_price = float(df['Close'].iloc[-1])
 stop_loss = entry_price - 2 * float(df['ATR'].iloc[-1])
+```
+
+### Wilder's ATR *(C++ extension)*
+
+`wilder_atr` uses Wilder's exponential smoothing instead of a simple rolling mean — the same recurrence as RSI and ADX:
+
+```
+TR[0]   = high[0] − low[0]
+TR[i]   = max(H−L, |H−C_prev|, |L−C_prev|)
+ATR[p−1] = mean(TR[0..p−1])          ← SMA seed
+ATR[i]   = (ATR[i−1]×(p−1) + TR[i]) / p   ← Wilder's smooth
+```
+
+This matches the ATR used internally by most charting platforms (TradingView, Bloomberg, MetaTrader) and by the ADX calculation already in this library.
+
+```python
+from standard_quant_tools.indicators import wilder_atr
+
+df['Wilder_ATR'] = wilder_atr(df['High'], df['Low'], df['Close'], period=14)
+
+# Position sizing: risk 1% of equity, stop = 2× ATR
+account_equity = 100_000
+risk_per_trade = account_equity * 0.01
+stop_distance  = 2 * float(df['Wilder_ATR'].iloc[-1])
+shares         = int(risk_per_trade / stop_distance)
+
+# Volatility filter: avoid trading when ATR is unusually high
+atr_pct = df['Wilder_ATR'] / df['Close']          # ATR as % of price
+df['low_vol']  = atr_pct < atr_pct.rolling(60).quantile(0.40)
+df['high_vol'] = atr_pct > atr_pct.rolling(60).quantile(0.80)
+```
+
+**Difference from `atr()`:**
+
+| | `atr()` | `wilder_atr()` |
+|---|---|---|
+| Smoothing | Simple rolling mean | Wilder's exponential (SMA seed) |
+| NaN prefix | First `period` values | First `period−1` values |
+| Implementation | NumPy + pandas | **C++ extension** / Python fallback |
+| Matches charting platforms | Sometimes | Yes (TradingView, Bloomberg) |
+
+**Check which path is active:**
+
+```python
+from standard_quant_tools.indicators.volatility import HAS_CPP
+print("C++ Wilder ATR active:", HAS_CPP)
 ```
 
 ---
@@ -208,7 +254,7 @@ df['mfi_overbought'] = df['MFI'] > 80
 ```python
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.indicators import (
-    sma, ema, macd, rsi, bollinger_bands, atr,
+    sma, ema, macd, rsi, bollinger_bands, atr, wilder_atr,
     adx, parabolic_sar, obv, vwap, mfi
 )
 
@@ -225,10 +271,11 @@ df = df.join(adx_df)
 df = df.join(parabolic_sar(df['High'], df['Low']))
 
 # Momentum & Volatility
-df['RSI']  = rsi(df['Close'], 14)
+df['RSI']         = rsi(df['Close'], 14)
 bb = bollinger_bands(df['Close'])
 df = df.join(bb)
-df['ATR']  = atr(df['High'], df['Low'], df['Close'])
+df['ATR']         = atr(df['High'], df['Low'], df['Close'])
+df['Wilder_ATR']  = wilder_atr(df['High'], df['Low'], df['Close'])
 
 # Volume
 df['OBV']  = obv(df['Close'], df['Volume'])

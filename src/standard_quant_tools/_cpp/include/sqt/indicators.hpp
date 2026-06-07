@@ -59,4 +59,31 @@ std::vector<double> parabolic_sar(
     double        af_step  = 0.02,
     double        af_max   = 0.2);
 
+/**
+ * Wilder's ATR — Average True Range with Wilder's smoothing.
+ *
+ * True range:
+ *   TR[0] = high[0] - low[0]  (no prior close)
+ *   TR[i] = max(H[i]-L[i], |H[i]-C[i-1]|, |L[i]-C[i-1]|)  for i >= 1
+ *
+ * Seed: ATR[period-1] = mean(TR[0..period-1])
+ * Forward: ATR[i] = (ATR[i-1] * (period-1) + TR[i]) / period
+ *
+ * This is identical to the Wilder smoothing used in RSI and ADX —
+ * not the simple rolling-mean ATR produced by pandas .rolling().mean().
+ *
+ * @param high    Contiguous high-price array (length n).
+ * @param low     Contiguous low-price array (length n).
+ * @param close   Contiguous close-price array (length n).
+ * @param n       Number of bars.
+ * @param period  Smoothing period (default 14).
+ * @returns       Vector of length n; first period-1 values are NaN.
+ */
+std::vector<double> wilder_atr(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           period = 14);
+
 }  // namespace sqt

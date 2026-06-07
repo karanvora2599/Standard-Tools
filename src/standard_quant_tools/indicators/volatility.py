@@ -1,5 +1,16 @@
+from typing import Any
+
 import numpy as np
 import pandas as pd
+
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    HAS_CPP = True
+except ImportError:
+    pass
+
 
 def bollinger_bands(series: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.DataFrame:
     """
@@ -30,3 +41,44 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
         index=close.index,
     )
     return tr.rolling(window=period).mean()
+
+
+def wilder_atr(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """
+    Average True Range using Wilder's smoothing (not a simple rolling mean).
+
+    TR[0] = high[0] - low[0]
+    TR[i] = max(H[i]-L[i], |H[i]-C[i-1]|, |L[i]-C[i-1]|)
+    Seed:    ATR[period-1] = mean(TR[0..period-1])
+    Forward: ATR[i]        = (ATR[i-1]*(period-1) + TR[i]) / period
+
+    Uses C++ fast path when built, otherwise falls back to a pure-Python loop.
+    First period-1 values are NaN.
+    """
+    h = high.to_numpy(dtype=np.float64)
+    l = low.to_numpy(dtype=np.float64)
+    c = close.to_numpy(dtype=np.float64)
+    n = len(h)
+
+    if HAS_CPP and _cpp_core is not None:
+        raw = _cpp_core.wilder_atr(h, l, c, period)
+        return pd.Series(raw, index=close.index, name="Wilder_ATR")
+
+    # Pure-Python fallback (correct but slow; C++ path is preferred)
+    tr = np.empty(n)
+    tr[0] = h[0] - l[0]
+    for i in range(1, n):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
+
+    result = np.full(n, np.nan)
+    if n >= period:
+        result[period - 1] = tr[:period].mean()
+        for i in range(period, n):
+            result[i] = (result[i - 1] * (period - 1) + tr[i]) / period
+
+    return pd.Series(result, index=close.index, name="Wilder_ATR")

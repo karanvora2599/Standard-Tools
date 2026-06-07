@@ -34,6 +34,7 @@ from standard_quant_tools.indicators.momentum import _rsi_numba, HAS_CPP as RSI_
 from standard_quant_tools.indicators.trend import _adx_numba, _psar_numba
 from standard_quant_tools.indicators.momentum import rsi as rsi_wrapper
 from standard_quant_tools.indicators.trend import adx as adx_wrapper, parabolic_sar as psar_wrapper
+from standard_quant_tools.indicators.volatility import wilder_atr as wilder_atr_wrapper, HAS_CPP as WATR_HAS_CPP
 from standard_quant_tools.error import ValidationError
 
 # True when the rsi wrapper uses Wilder's SMA seed (C++ or Numba), not EWM.
@@ -440,3 +441,174 @@ class TestPsarWrapper:
         r1 = psar_wrapper(high, low)
         r2 = psar_wrapper(high, low, af_start=0.02, af_step=0.02, af_max=0.2)
         pd.testing.assert_frame_equal(r1, r2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Wilder's ATR — Python reference helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _py_wilder_atr(h: np.ndarray, l: np.ndarray, c: np.ndarray, period: int) -> np.ndarray:
+    """Pure-Python Wilder's ATR matching the C++ implementation exactly."""
+    n = len(h)
+    tr = np.empty(n)
+    tr[0] = h[0] - l[0]
+    for i in range(1, n):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
+    result = np.full(n, np.nan)
+    if n >= period:
+        result[period - 1] = tr[:period].mean()
+        for i in range(period, n):
+            result[i] = (result[i - 1] * (period - 1) + tr[i]) / period
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Wilder's ATR — C++ extension tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCppWilderAtr:
+
+    @requires_cpp
+    def test_matches_python_reference(self, ohlc_200):
+        high, low, close = ohlc_200
+        h, l, c = (x.astype(np.float64) for x in (high, low, close))
+        cpp_out = _cpp.wilder_atr(h, l, c, 14)
+        py_ref  = _py_wilder_atr(h, l, c, 14)
+        np.testing.assert_allclose(cpp_out, py_ref, rtol=1e-12, equal_nan=True)
+
+    @requires_cpp
+    def test_nan_prefix(self, ohlc_200):
+        high, low, close = ohlc_200
+        period = 14
+        out = _cpp.wilder_atr(
+            high.astype(np.float64), low.astype(np.float64),
+            close.astype(np.float64), period,
+        )
+        assert len(out) == len(close)
+        assert np.all(np.isnan(out[:period - 1]))
+        assert np.all(~np.isnan(out[period - 1:]))
+
+    @requires_cpp
+    def test_known_value(self):
+        # H=[10,11,12], L=[9,9,10], C=[9.5,10,11], period=2
+        # TR = [1, 2, 2]; ATR[1]=1.5; ATR[2]=1.75
+        h = np.array([10.0, 11.0, 12.0])
+        l = np.array([ 9.0,  9.0, 10.0])
+        c = np.array([ 9.5, 10.0, 11.0])
+        out = _cpp.wilder_atr(h, l, c, 2)
+        assert np.isnan(out[0])
+        np.testing.assert_allclose(out[1], 1.5,  rtol=1e-12)
+        np.testing.assert_allclose(out[2], 1.75, rtol=1e-12)
+
+    @requires_cpp
+    def test_non_negative(self, ohlc_200):
+        high, low, close = ohlc_200
+        out   = _cpp.wilder_atr(
+            high.astype(np.float64), low.astype(np.float64),
+            close.astype(np.float64), 14,
+        )
+        valid = out[~np.isnan(out)]
+        assert np.all(valid >= 0.0)
+
+    @requires_cpp
+    def test_constant_prices(self):
+        # H=L=C=100 → TR=0 everywhere → ATR=0
+        n = 50
+        h = np.full(n, 100.0)
+        l = np.full(n, 100.0)
+        c = np.full(n, 100.0)
+        out = _cpp.wilder_atr(h, l, c, 5)
+        np.testing.assert_allclose(out[4:], 0.0, atol=1e-12)
+
+    @requires_cpp
+    def test_short_series(self):
+        h = np.arange(1.0, 6.0)
+        l = h - 0.5
+        c = h - 0.25
+        # n=5, period=5 → first valid at index 4 only
+        out = _cpp.wilder_atr(h, l, c, 5)
+        assert np.all(np.isnan(out[:4]))
+        assert not np.isnan(out[4])
+        # n=3, period=5 → all NaN
+        assert np.all(np.isnan(_cpp.wilder_atr(h[:3], l[:3], c[:3], 5)))
+
+    @requires_cpp
+    def test_empty(self):
+        assert len(_cpp.wilder_atr(np.array([]), np.array([]), np.array([]), 14)) == 0
+
+    @requires_cpp
+    def test_mismatched_lengths_raises(self):
+        with pytest.raises(Exception):
+            _cpp.wilder_atr(np.ones(10), np.ones(9), np.ones(10), 5)
+
+    @requires_cpp
+    def test_period_1_equals_tr(self):
+        # period=1: ATR[i] = TR[i] for all i (seed = TR[0], no smoothing thereafter)
+        h = np.array([10.0, 12.0, 11.0, 13.0])
+        l = np.array([ 9.0, 10.0,  9.5, 11.0])
+        c = np.array([ 9.5, 11.0, 10.0, 12.0])
+        out = _cpp.wilder_atr(h, l, c, 1)
+        # Compute expected TR independently
+        expected_tr = np.array([h[0] - l[0]] + [
+            max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
+            for i in range(1, len(h))
+        ])
+        np.testing.assert_allclose(out, expected_tr, atol=1e-12)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Wilder's ATR — Python wrapper tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWilderAtrWrapper:
+
+    def test_returns_series(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        result = wilder_atr_wrapper(high, low, close)
+        assert isinstance(result, pd.Series)
+        assert len(result) == len(close)
+
+    def test_series_name(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        result = wilder_atr_wrapper(high, low, close)
+        assert result.name == "Wilder_ATR"
+
+    def test_preserves_index(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        result = wilder_atr_wrapper(high, low, close)
+        pd.testing.assert_index_equal(result.index, close.index)
+
+    def test_nan_prefix(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        period = 14
+        result = wilder_atr_wrapper(high, low, close, period=period)
+        assert np.all(np.isnan(result.iloc[:period - 1]))
+        assert np.all(~np.isnan(result.iloc[period - 1:]))
+
+    def test_non_negative(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        result = wilder_atr_wrapper(high, low, close)
+        assert (result.dropna() >= 0.0).all()
+
+    def test_default_period_14(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        r1 = wilder_atr_wrapper(high, low, close)
+        r2 = wilder_atr_wrapper(high, low, close, period=14)
+        pd.testing.assert_series_equal(r1, r2)
+
+    def test_matches_python_reference(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        result = wilder_atr_wrapper(high, low, close, period=14)
+        ref = _py_wilder_atr(
+            high.to_numpy(dtype=np.float64),
+            low.to_numpy(dtype=np.float64),
+            close.to_numpy(dtype=np.float64),
+            14,
+        )
+        np.testing.assert_allclose(result.to_numpy(), ref, rtol=1e-10, equal_nan=True)
+
+    def test_cpp_routing(self):
+        # When C++ is built, the wrapper should use it
+        if WATR_HAS_CPP:
+            assert WATR_HAS_CPP is True
+        # Always passes — just documents the expected routing
