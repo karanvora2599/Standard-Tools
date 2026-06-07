@@ -29,9 +29,9 @@ START, END = '2023-01-01', '2024-01-01'
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_seventeen_tools(self):
+    def test_returns_list_of_nineteen_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 17
+        assert len(tools) == 19
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -44,9 +44,9 @@ class TestGetAgentTools:
         names = {t['function']['name'] for t in get_agent_tools()}
         original = {
             'run_sma_backtest', 'run_rsi_backtest', 'run_macd_backtest',
-            'run_bollinger_backtest', 'analyze_stock_risk',
-            'get_technical_analysis', 'get_portfolio_analysis', 'run_screener',
-            'run_factor_regression', 'run_cointegration_test',
+            'run_bollinger_backtest', 'run_buy_and_hold', 'compare_strategies',
+            'analyze_stock_risk', 'get_technical_analysis', 'get_portfolio_analysis',
+            'run_screener', 'run_factor_regression', 'run_cointegration_test',
             'run_pca_analysis', 'run_hurst_analysis',
         }
         assert original.issubset(names)
@@ -537,3 +537,74 @@ class TestRunHurstAnalysis:
         fracs = result.rolling_regime_fractions
         assert set(fracs.keys()) == {'trending', 'random_walk', 'mean_reverting'}
         assert abs(sum(fracs.values()) - 1.0) < 0.01
+
+
+class TestGetTechnicalAnalysisExtended:
+    """Coverage for indicators added after the initial 12-tool set."""
+
+    def test_stochastic_in_last_values(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['stochastic'])
+        result = get_technical_analysis(inp)
+        assert 'stoch_k' in result.last_values
+        assert 'stoch_d' in result.last_values
+
+    def test_stochastic_k_bounded(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['stochastic'])
+        result = get_technical_analysis(inp)
+        assert 0.0 <= result.last_values['stoch_k'] <= 100.0
+
+    def test_stochastic_oversold_signal_is_bool(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['stochastic'])
+        result = get_technical_analysis(inp)
+        assert isinstance(result.signals['stoch_oversold'], bool)
+
+    def test_vwap_in_last_values(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['vwap'])
+        result = get_technical_analysis(inp)
+        assert 'vwap' in result.last_values
+        assert result.last_values['vwap'] > 0
+
+    def test_vwap_signal_is_bool(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['vwap'])
+        result = get_technical_analysis(inp)
+        assert isinstance(result.signals['price_above_vwap'], bool)
+
+    def test_williams_r_in_last_values(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['williams_r'])
+        result = get_technical_analysis(inp)
+        assert 'williams_r' in result.last_values
+
+    def test_williams_r_bounded(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['williams_r'])
+        result = get_technical_analysis(inp)
+        assert -100.0 <= result.last_values['williams_r'] <= 0.0
+
+    def test_williams_r_signals_present(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['williams_r'])
+        result = get_technical_analysis(inp)
+        assert 'williams_r_oversold' in result.signals
+        assert 'williams_r_overbought' in result.signals
+        assert isinstance(result.signals['williams_r_oversold'], bool)
+        assert isinstance(result.signals['williams_r_overbought'], bool)
+
+    def test_ema_in_last_values(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['ema'])
+        result = get_technical_analysis(inp)
+        assert 'ema_12' in result.last_values
+        assert 'ema_26' in result.last_values
+
+    def test_ema_values_positive(self, patched_factory):
+        inp = TechnicalInput(symbol='AAPL', start_date=START, end_date=END, indicators=['ema'])
+        result = get_technical_analysis(inp)
+        assert result.last_values['ema_12'] > 0
+        assert result.last_values['ema_26'] > 0
+
+    def test_all_indicators_at_once(self, patched_factory):
+        inp = TechnicalInput(
+            symbol='AAPL', start_date=START, end_date=END,
+            indicators=['rsi', 'macd', 'bollinger', 'sma', 'ema', 'stochastic', 'vwap', 'williams_r', 'adx', 'obv'],
+        )
+        result = get_technical_analysis(inp)
+        for key in ('rsi_14', 'bb_upper', 'bb_lower', 'ema_12', 'ema_26',
+                    'stoch_k', 'stoch_d', 'vwap', 'williams_r', 'adx', 'obv'):
+            assert key in result.last_values, f"missing key: {key}"

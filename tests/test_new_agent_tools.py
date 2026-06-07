@@ -1,8 +1,9 @@
-"""Tests for the 5 new agentic tools (mocked data provider)."""
+"""Tests for the advanced agentic tools (mocked data provider)."""
 
 import pandas as pd
 import numpy as np
 import pytest
+import pydantic
 
 from standard_quant_tools.agent.models import (
     RegimeAdaptiveInput,
@@ -10,6 +11,10 @@ from standard_quant_tools.agent.models import (
     WalkForwardInput,
     RiskAttributionInput,
     PositionSizerInput,
+    BuyAndHoldInput,
+    CompareStrategiesInput,
+    PortfolioInput,
+    PCAInput,
 )
 from standard_quant_tools.agent.tools import (
     get_agent_tools,
@@ -18,6 +23,9 @@ from standard_quant_tools.agent.tools import (
     run_walk_forward_backtest,
     get_portfolio_risk_attribution,
     get_position_size,
+    run_buy_and_hold,
+    compare_strategies,
+    dispatch,
 )
 
 START, END = "2022-01-01", "2024-01-01"
@@ -61,8 +69,8 @@ def patched_long(long_ohlcv, monkeypatch):
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 class TestToolRegistry:
-    def test_now_has_seventeen_tools(self):
-        assert len(get_agent_tools()) == 17
+    def test_now_has_nineteen_tools(self):
+        assert len(get_agent_tools()) == 19
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -71,6 +79,8 @@ class TestToolRegistry:
         assert "run_walk_forward_backtest" in names
         assert "get_portfolio_risk_attribution" in names
         assert "get_position_size" in names
+        assert "run_buy_and_hold" in names
+        assert "compare_strategies" in names
 
     def test_all_new_tools_have_valid_schema(self):
         new_tools = [
@@ -101,7 +111,7 @@ class TestRegimeAdaptiveBacktest:
     def test_regime_is_valid(self, patched_long):
         inp = RegimeAdaptiveInput(symbol="AAPL", start_date=START, end_date=END)
         result = run_regime_adaptive_backtest(inp)
-        assert result.regime in ("trending", "mean_reverting", "random_walk")
+        assert result.regime in ("trending", "mean_reverting", "random_walk", "unknown")
 
     def test_selected_strategy_is_valid(self, patched_long):
         inp = RegimeAdaptiveInput(symbol="AAPL", start_date=START, end_date=END)
@@ -481,3 +491,235 @@ class TestPositionSizer:
         result = get_position_size(inp)
         assert isinstance(result.recommended_shares, int)
         assert result.recommended_shares >= 0
+
+
+# ── Feature: "unknown" regime fallback ────────────────────────────────────────
+
+class TestRegimeUnknownFallback:
+    """When hurst_exponent returns 'unknown', the tool should not raise and
+    must fall back to macd_crossover."""
+
+    def test_unknown_regime_returns_valid_result(self, patched_long, monkeypatch):
+        import standard_quant_tools.analysis.hurst as hurst_module
+
+        # run_regime_adaptive_backtest imports hurst_exponent locally, so patch the source module.
+        monkeypatch.setattr(
+            hurst_module,
+            "hurst_exponent",
+            lambda *a, **kw: {"hurst": float("nan"), "regime": "unknown", "fit_r_squared": 0.0},
+        )
+        inp = RegimeAdaptiveInput(symbol="AAPL", start_date=START, end_date=END)
+        result = run_regime_adaptive_backtest(inp)
+        assert result.regime == "unknown"
+        assert result.selected_strategy == "macd_crossover"
+        assert result.backtest.final_equity > 0
+
+
+# ── Feature 6: Buy-and-Hold Baseline ──────────────────────────────────────────
+
+class TestBuyAndHold:
+    """run_buy_and_hold returns a BacktestResult (same as active strategies)."""
+
+    def test_returns_backtest_result(self, patched_long):
+        inp = BuyAndHoldInput(symbol="AAPL", start_date=START, end_date=END)
+        result = run_buy_and_hold(inp)
+        assert result.final_equity > 0
+        assert isinstance(result.total_return, float)
+
+    def test_total_return_is_float(self, patched_long):
+        inp = BuyAndHoldInput(symbol="AAPL", start_date=START, end_date=END)
+        result = run_buy_and_hold(inp)
+        assert isinstance(result.total_return, float)
+
+    def test_max_drawdown_non_positive(self, patched_long):
+        inp = BuyAndHoldInput(symbol="AAPL", start_date=START, end_date=END)
+        result = run_buy_and_hold(inp)
+        assert result.max_drawdown <= 0.0
+
+    def test_win_rate_bounded(self, patched_long):
+        inp = BuyAndHoldInput(symbol="AAPL", start_date=START, end_date=END)
+        result = run_buy_and_hold(inp)
+        assert 0.0 <= result.win_rate <= 1.0
+
+    def test_equity_curve_nonempty(self, patched_long):
+        inp = BuyAndHoldInput(symbol="AAPL", start_date=START, end_date=END)
+        result = run_buy_and_hold(inp)
+        assert len(result.equity_curve) > 0
+
+    def test_custom_capital_reflected(self, patched_long):
+        # With 50k capital, final equity should scale proportionally from the 50k base.
+        # Even a 50% loss leaves 25k — much larger than the 10k default.
+        inp = BuyAndHoldInput(symbol="AAPL", start_date=START, end_date=END, initial_capital=50_000.0)
+        result = run_buy_and_hold(inp)
+        assert result.final_equity > 25_000.0
+
+
+# ── Feature 7: Compare Strategies ─────────────────────────────────────────────
+
+class TestCompareStrategies:
+    def test_returns_result(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END)
+        result = compare_strategies(inp)
+        assert result.symbol == "AAPL"
+
+    def test_four_strategies_returned(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END)
+        result = compare_strategies(inp)
+        assert len(result.strategies) == 4
+
+    def test_all_strategy_names_present(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END)
+        result = compare_strategies(inp)
+        names = {s.strategy for s in result.strategies}
+        assert names == {"sma_crossover", "rsi_mean_reversion", "macd_crossover", "bollinger_reversion"}
+
+    def test_best_strategy_is_first(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="sharpe_ratio")
+        result = compare_strategies(inp)
+        assert result.best_strategy == result.strategies[0].strategy
+
+    def test_sorted_descending_by_sharpe(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="sharpe_ratio")
+        result = compare_strategies(inp)
+        sharpes = [s.sharpe_ratio for s in result.strategies]
+        assert sharpes == sorted(sharpes, reverse=True)
+
+    def test_sorted_descending_by_total_return(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="total_return")
+        result = compare_strategies(inp)
+        returns = [s.total_return for s in result.strategies]
+        assert returns == sorted(returns, reverse=True)
+
+    def test_buy_and_hold_return_is_float(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END)
+        result = compare_strategies(inp)
+        assert isinstance(result.buy_and_hold_return, float)
+
+    def test_strategy_fields_are_floats(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END)
+        result = compare_strategies(inp)
+        for s in result.strategies:
+            assert isinstance(s.total_return, float)
+            assert isinstance(s.sharpe_ratio, float)
+            assert isinstance(s.max_drawdown, float)
+            assert s.max_drawdown <= 0.0
+            assert 0.0 <= s.win_rate <= 1.0
+
+    def test_sort_by_in_result(self, patched_long):
+        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="calmar_ratio")
+        result = compare_strategies(inp)
+        assert result.sort_by == "calmar_ratio"
+
+
+# ── Feature 8: Dispatch ────────────────────────────────────────────────────────
+
+class TestDispatch:
+    def test_routes_buy_and_hold(self, patched_long):
+        result = dispatch("run_buy_and_hold", {
+            "symbol": "AAPL", "start_date": START, "end_date": END,
+        })
+        assert "total_return" in result
+        assert "final_equity" in result
+
+    def test_routes_analyze_stock_risk(self, patched_long):
+        result = dispatch("analyze_stock_risk", {
+            "symbol": "AAPL", "benchmark": "SPY", "period": "1y",
+        })
+        assert "sharpe_ratio" in result
+
+    def test_unknown_tool_raises_value_error(self):
+        with pytest.raises(ValueError, match="Unknown tool"):
+            dispatch("does_not_exist", {})
+
+    def test_invalid_arguments_raise_validation_error(self, patched_long):
+        with pytest.raises(pydantic.ValidationError):
+            dispatch("run_buy_and_hold", {"bad_field": 99})
+
+    def test_dispatch_covers_all_registry_tools(self):
+        from standard_quant_tools.agent.tools import _TOOL_DISPATCH
+        registry_names = {t["function"]["name"] for t in get_agent_tools()}
+        assert registry_names == set(_TOOL_DISPATCH.keys())
+
+
+# ── Feature 9: Model Validators ───────────────────────────────────────────────
+
+class TestModelValidators:
+    def test_portfolio_weights_must_sum_to_one(self):
+        with pytest.raises(pydantic.ValidationError, match="sum"):
+            PortfolioInput(
+                tickers=["AAPL", "MSFT"],
+                weights=[0.6, 0.6],
+                start_date=START, end_date=END,
+            )
+
+    def test_portfolio_weights_length_must_match_tickers(self):
+        with pytest.raises(pydantic.ValidationError):
+            PortfolioInput(
+                tickers=["AAPL", "MSFT", "GOOGL"],
+                weights=[0.5, 0.5],
+                start_date=START, end_date=END,
+            )
+
+    def test_portfolio_valid_weights_accepted(self):
+        inp = PortfolioInput(
+            tickers=["AAPL", "MSFT"],
+            weights=[0.5, 0.5],
+            start_date=START, end_date=END,
+        )
+        assert inp.tickers == ["AAPL", "MSFT"]
+
+    def test_risk_attribution_weights_must_sum_to_one(self):
+        with pytest.raises(pydantic.ValidationError, match="sum"):
+            RiskAttributionInput(
+                tickers=["AAPL", "MSFT"],
+                weights=[0.7, 0.7],
+                start_date=START, end_date=END,
+            )
+
+    def test_risk_attribution_weights_length_mismatch(self):
+        with pytest.raises(pydantic.ValidationError):
+            RiskAttributionInput(
+                tickers=["AAPL", "MSFT", "GOOGL"],
+                weights=[0.5, 0.5],
+                start_date=START, end_date=END,
+            )
+
+    def test_pca_n_components_must_be_positive(self):
+        with pytest.raises(pydantic.ValidationError):
+            PCAInput(
+                tickers=["AAPL", "MSFT"],
+                start_date=START, end_date=END,
+                n_components=0,
+            )
+
+    def test_pca_negative_n_components_rejected(self):
+        with pytest.raises(pydantic.ValidationError):
+            PCAInput(
+                tickers=["AAPL", "MSFT"],
+                start_date=START, end_date=END,
+                n_components=-1,
+            )
+
+    def test_position_sizer_risk_pct_must_be_positive(self):
+        with pytest.raises(pydantic.ValidationError):
+            PositionSizerInput(
+                symbol="AAPL", start_date=START, end_date=END,
+                account_equity=100_000.0,
+                risk_per_trade_pct=0.0,
+            )
+
+    def test_position_sizer_risk_pct_cannot_exceed_one(self):
+        with pytest.raises(pydantic.ValidationError):
+            PositionSizerInput(
+                symbol="AAPL", start_date=START, end_date=END,
+                account_equity=100_000.0,
+                risk_per_trade_pct=1.5,
+            )
+
+    def test_position_sizer_valid_risk_pct_accepted(self):
+        inp = PositionSizerInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            account_equity=100_000.0,
+            risk_per_trade_pct=0.01,
+        )
+        assert inp.risk_per_trade_pct == 0.01

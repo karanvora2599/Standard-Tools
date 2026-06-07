@@ -2,7 +2,7 @@
 
 Five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 12 core tools, the full `get_agent_tools()` registry (all 17), OpenAI/Anthropic wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 19), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -31,6 +31,9 @@ Five high-level agentic tools that compose the library's existing primitives int
 | > 0.55 | trending | `sma_crossover` |
 | 0.45–0.55 | random_walk | `macd_crossover` |
 | < 0.45 | mean_reverting | `rsi_mean_reversion` |
+| NaN (< 40 returns) | unknown | `macd_crossover` (safe default) |
+
+> **"unknown" regime:** When the return series is too short for a reliable Hurst estimate (fewer than ~40 observations), `hurst_exponent` returns `"unknown"`. The tool does **not** raise in this case — it logs the regime as `"unknown"` and falls back to `macd_crossover`, the most neutral strategy. Check `result.regime` before trusting the strategy selection for short date ranges.
 
 ```python
 from standard_quant_tools.agent.tools import run_regime_adaptive_backtest
@@ -77,8 +80,8 @@ result = run_regime_adaptive_backtest(RegimeAdaptiveInput(
 
 | Field | Type | Description |
 |---|---|---|
-| `regime` | `str` | `"trending"`, `"random_walk"`, or `"mean_reverting"` |
-| `hurst` | `float` | Hurst exponent H |
+| `regime` | `str` | `"trending"`, `"random_walk"`, `"mean_reverting"`, or `"unknown"` |
+| `hurst` | `float` | Hurst exponent H (NaN when data is insufficient for a reliable estimate) |
 | `fit_r_squared` | `float` | Quality of the Hurst log-log scaling fit |
 | `selected_strategy` | `str` | Strategy name chosen for this regime |
 | `best_parameters` | `dict` | Best parameter set from grid search |

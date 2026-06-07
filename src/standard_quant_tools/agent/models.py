@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional
 
 
@@ -113,6 +113,17 @@ class PortfolioInput(BaseModel):
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     benchmark: str = Field("SPY", description="Benchmark for Information Ratio.")
+
+    @model_validator(mode="after")
+    def _check_weights(self) -> "PortfolioInput":
+        if len(self.weights) != len(self.tickers):
+            raise ValueError(
+                f"len(weights)={len(self.weights)} must equal len(tickers)={len(self.tickers)}"
+            )
+        total = sum(self.weights)
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
+        return self
 
 
 class PortfolioResult(BaseModel):
@@ -243,6 +254,13 @@ class PCAInput(BaseModel):
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     n_components: int = Field(3, description="Number of principal components to extract (default 3).")
+
+    @field_validator("n_components")
+    @classmethod
+    def _check_n_components(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"n_components must be >= 1, got {v}")
+        return v
 
 
 class PCAResult(BaseModel):
@@ -429,6 +447,17 @@ class RiskAttributionInput(BaseModel):
         None, description="Human-readable factor names. Defaults to factor_tickers."
     )
 
+    @model_validator(mode="after")
+    def _check_weights(self) -> "RiskAttributionInput":
+        if len(self.weights) != len(self.tickers):
+            raise ValueError(
+                f"len(weights)={len(self.weights)} must equal len(tickers)={len(self.tickers)}"
+            )
+        total = sum(self.weights)
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
+        return self
+
 
 class RiskAttributionResult(BaseModel):
     tickers: List[str]
@@ -463,7 +492,7 @@ class PositionSizerInput(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     account_equity: float = Field(..., description="Total account equity in dollars.")
     risk_per_trade_pct: float = Field(
-        0.01, description="Fraction of account to risk per trade (default 0.01 = 1%)."
+        0.01, description="Fraction of account to risk per trade (default 0.01 = 1%). Must be in (0, 1]."
     )
     atr_period: int = Field(14, description="ATR lookback period (default 14).")
     atr_multiplier: float = Field(
@@ -472,6 +501,13 @@ class PositionSizerInput(BaseModel):
     win_rate: Optional[float] = Field(None, description="Strategy win rate [0,1]. Required for Kelly sizing.")
     avg_win_pct: Optional[float] = Field(None, description="Average winning trade return (e.g. 0.05 = 5%).")
     avg_loss_pct: Optional[float] = Field(None, description="Average losing trade return magnitude (e.g. 0.02 = 2%).")
+
+    @field_validator("risk_per_trade_pct")
+    @classmethod
+    def _check_risk_pct(cls, v: float) -> float:
+        if not 0.0 < v <= 1.0:
+            raise ValueError(f"risk_per_trade_pct must be in (0, 1], got {v}")
+        return v
 
 
 class PositionSizerResult(BaseModel):
@@ -494,3 +530,73 @@ class PositionSizerResult(BaseModel):
     recommended_sizing: str      # "fixed_risk" | "half_kelly"
     recommended_shares: int
     recommended_position_value: float
+
+
+# ──────────────────────────────────────────────
+# Buy-and-Hold Baseline
+# ──────────────────────────────────────────────
+
+class BuyAndHoldInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(0.001, description="One-time buy commission (fraction, default 0.1%).")
+    slippage_pct: float = Field(0.0005, description="One-time buy slippage (fraction, default 0.05%).")
+
+
+# ──────────────────────────────────────────────
+# Strategy Comparison
+# ──────────────────────────────────────────────
+
+class StrategyComparison(BaseModel):
+    strategy: str
+    parameters: Dict[str, Any]
+    total_return: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    max_drawdown: float
+    calmar_ratio: float
+    win_rate: float
+    num_trades: int
+    final_equity: float
+
+
+class CompareStrategiesInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    sort_by: str = Field(
+        "sharpe_ratio",
+        description=(
+            "Metric to rank strategies by. "
+            "Options: 'total_return', 'sharpe_ratio', 'sortino_ratio', 'calmar_ratio', 'max_drawdown'."
+        ),
+    )
+    sma_parameters: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Custom SMA crossover params. Default: {fast_period: 10, slow_period: 50}.",
+    )
+    rsi_parameters: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Custom RSI mean-reversion params. Default: {period: 14, oversold: 30, overbought: 70}.",
+    )
+    macd_parameters: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Custom MACD crossover params. Default: {fast: 12, slow: 26, signal: 9}.",
+    )
+    bollinger_parameters: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Custom Bollinger reversion params. Default: {period: 20, num_std: 2.0}.",
+    )
+
+
+class CompareStrategiesResult(BaseModel):
+    symbol: str
+    sort_by: str
+    best_strategy: str
+    buy_and_hold_return: float
+    strategies: List[StrategyComparison]  # sorted by sort_by, best first

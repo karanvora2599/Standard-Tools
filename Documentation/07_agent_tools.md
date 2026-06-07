@@ -16,18 +16,22 @@ The agent module exposes every major library capability as **Pydantic-typed, LLM
 ## Quick Start
 
 ```python
-from standard_quant_tools.agent.tools import (
-    get_agent_tools,
-    # Original 12
+from standard_quant_tools.agent import (
+    # LLM wiring
+    get_agent_tools, dispatch,
+    # Backtest strategies
     run_sma_backtest, run_rsi_backtest, run_macd_backtest, run_bollinger_backtest,
+    run_buy_and_hold, compare_strategies,
+    # Analysis
     analyze_stock_risk, get_technical_analysis, get_portfolio_analysis, run_screener,
     run_factor_regression, run_cointegration_test, run_pca_analysis, run_hurst_analysis,
-    # Advanced 5
+    # Advanced strategies
     run_regime_adaptive_backtest, scan_pairs, run_walk_forward_backtest,
     get_portfolio_risk_attribution, get_position_size,
 )
-from standard_quant_tools.agent.models import (
-    BacktestInput, AnalysisInput, TechnicalInput, PortfolioInput, ScreenerInput,
+from standard_quant_tools.agent import (
+    BacktestInput, BuyAndHoldInput, CompareStrategiesInput,
+    AnalysisInput, TechnicalInput, PortfolioInput, ScreenerInput,
     FactorRegressionInput, CointegrationInput, PCAInput, HurstInput,
     RegimeAdaptiveInput, PairScannerInput, WalkForwardInput,
     RiskAttributionInput, PositionSizerInput,
@@ -36,105 +40,75 @@ from standard_quant_tools.agent.models import (
 # Call any tool directly
 result = analyze_stock_risk(AnalysisInput(symbol="AAPL"))
 print(result.model_dump_json(indent=2))
+
+# Or route an LLM tool call through dispatch (recommended for agent loops)
+result = dispatch("analyze_stock_risk", {"symbol": "AAPL"})
+print(result)  # plain dict, JSON-ready
 ```
 
 ---
 
 ## Tool Registry
 
-`get_agent_tools()` returns **17 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **19 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
-from standard_quant_tools.agent.tools import get_agent_tools
+from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 17
+print(len(tools))  # 19
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
 for t in tools:
     print(t["function"]["name"], "—", t["function"]["description"])
-# run_sma_backtest — SMA crossover backtest.
-# run_rsi_backtest — RSI mean-reversion backtest.
-# run_macd_backtest — MACD crossover backtest.
+# run_sma_backtest      — SMA crossover backtest.
+# run_rsi_backtest      — RSI mean-reversion backtest.
+# run_macd_backtest     — MACD crossover backtest.
 # run_bollinger_backtest — Bollinger Band mean-reversion backtest.
-# analyze_stock_risk — Full risk analysis: alpha, beta, Sharpe, VaR, CVaR.
+# run_buy_and_hold      — Buy-and-hold baseline: long the full period. Use as a passive benchmark.
+# compare_strategies    — Run all four strategies on the same symbol and return ranked results vs buy-and-hold.
+# analyze_stock_risk    — Full risk analysis: alpha, beta, Sharpe, VaR, CVaR.
 # get_technical_analysis — Compute configurable technical indicators.
 # get_portfolio_analysis — Multi-asset portfolio metrics.
-# run_screener — Filter a stock universe by fundamental and technical criteria.
+# run_screener          — Filter a stock universe by fundamental and technical criteria.
 # run_factor_regression — Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R².
 # run_cointegration_test — Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal.
-# run_pca_analysis — PCA on multi-asset returns: explained variance, loadings, factor contributions.
-# run_hurst_analysis — Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.
+# run_pca_analysis      — PCA on multi-asset returns: explained variance, loadings, factor contributions.
+# run_hurst_analysis    — Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.
 # run_regime_adaptive_backtest — Classify market regime via Hurst, auto-select and optimise the best strategy.
-# scan_pairs — Scan a ticker universe for cointegrated pairs, ranked by half-life.
+# scan_pairs            — Scan a ticker universe for cointegrated pairs, ranked by half-life.
 # run_walk_forward_backtest — Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.
 # get_portfolio_risk_attribution — Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.
-# get_position_size — ATR-based position sizing with optional Kelly criterion.
+# get_position_size     — ATR-based position sizing with optional Kelly criterion.
 
 # Inspect the parameter schema for any tool:
 import json
-print(json.dumps(tools[4]["function"]["parameters"], indent=2))
+print(json.dumps(tools[0]["function"]["parameters"], indent=2))
 ```
+
+### Dispatch — the recommended wiring approach
+
+`dispatch(tool_name, arguments)` eliminates the manual `TOOL_FN` / `INPUT_MODEL` lookup. Pass the tool name and parsed arguments from any LLM response and get back a plain `dict` ready to send as a tool result.
+
+```python
+from standard_quant_tools.agent import dispatch
+
+# Route any tool call in one line
+result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
+# → plain dict, same as result.model_dump()
+```
+
+Errors:
+- **`ValueError`** — unknown tool name; message lists all 19 valid names.
+- **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 ### Wiring up OpenAI
 
 ```python
 import json
 import openai
-from standard_quant_tools.agent.tools import (
-    get_agent_tools,
-    run_sma_backtest, run_rsi_backtest, run_macd_backtest, run_bollinger_backtest,
-    analyze_stock_risk, get_technical_analysis, get_portfolio_analysis, run_screener,
-    run_factor_regression, run_cointegration_test, run_pca_analysis, run_hurst_analysis,
-    run_regime_adaptive_backtest, scan_pairs, run_walk_forward_backtest,
-    get_portfolio_risk_attribution, get_position_size,
-)
-from standard_quant_tools.agent.models import (
-    BacktestInput, AnalysisInput, TechnicalInput, PortfolioInput, ScreenerInput,
-    FactorRegressionInput, CointegrationInput, PCAInput, HurstInput,
-    RegimeAdaptiveInput, PairScannerInput, WalkForwardInput,
-    RiskAttributionInput, PositionSizerInput,
-)
-
-TOOL_FN   = {
-    "run_sma_backtest":                run_sma_backtest,
-    "run_rsi_backtest":                run_rsi_backtest,
-    "run_macd_backtest":               run_macd_backtest,
-    "run_bollinger_backtest":          run_bollinger_backtest,
-    "analyze_stock_risk":              analyze_stock_risk,
-    "get_technical_analysis":          get_technical_analysis,
-    "get_portfolio_analysis":          get_portfolio_analysis,
-    "run_screener":                    run_screener,
-    "run_factor_regression":           run_factor_regression,
-    "run_cointegration_test":          run_cointegration_test,
-    "run_pca_analysis":                run_pca_analysis,
-    "run_hurst_analysis":              run_hurst_analysis,
-    "run_regime_adaptive_backtest":    run_regime_adaptive_backtest,
-    "scan_pairs":                      scan_pairs,
-    "run_walk_forward_backtest":       run_walk_forward_backtest,
-    "get_portfolio_risk_attribution":  get_portfolio_risk_attribution,
-    "get_position_size":               get_position_size,
-}
-INPUT_MODEL = {
-    "run_sma_backtest":                BacktestInput,
-    "run_rsi_backtest":                BacktestInput,
-    "run_macd_backtest":               BacktestInput,
-    "run_bollinger_backtest":          BacktestInput,
-    "analyze_stock_risk":              AnalysisInput,
-    "get_technical_analysis":          TechnicalInput,
-    "get_portfolio_analysis":          PortfolioInput,
-    "run_screener":                    ScreenerInput,
-    "run_factor_regression":           FactorRegressionInput,
-    "run_cointegration_test":          CointegrationInput,
-    "run_pca_analysis":                PCAInput,
-    "run_hurst_analysis":              HurstInput,
-    "run_regime_adaptive_backtest":    RegimeAdaptiveInput,
-    "scan_pairs":                      PairScannerInput,
-    "run_walk_forward_backtest":       WalkForwardInput,
-    "get_portfolio_risk_attribution":  RiskAttributionInput,
-    "get_position_size":               PositionSizerInput,
-}
+from standard_quant_tools.agent import get_agent_tools, dispatch
 
 client   = openai.OpenAI()
 messages = [{"role": "user", "content": "What is NVDA's current risk profile vs SPY?"}]
@@ -154,13 +128,11 @@ while True:
         break
 
     for tc in msg.tool_calls:
-        fn        = TOOL_FN[tc.function.name]
-        model_cls = INPUT_MODEL[tc.function.name]
-        result    = fn(model_cls(**json.loads(tc.function.arguments)))
+        result = dispatch(tc.function.name, json.loads(tc.function.arguments))
         messages.append({
             "role":         "tool",
             "tool_call_id": tc.id,
-            "content":      result.model_dump_json(),
+            "content":      json.dumps(result),
         })
 ```
 
@@ -169,24 +141,20 @@ while True:
 ```python
 import json
 import anthropic
-from standard_quant_tools.agent.tools import get_agent_tools, run_screener, run_sma_backtest
-from standard_quant_tools.agent.models import ScreenerInput, BacktestInput
-
-# (build TOOL_FN and INPUT_MODEL the same way as above)
+from standard_quant_tools.agent import get_agent_tools, dispatch
 
 client   = anthropic.Anthropic()
 messages = [{"role": "user", "content": "Screen mega-cap tech for RSI < 45, then backtest SMA 10/50 on any that pass"}]
 
 while True:
     response = client.messages.create(
-        model="claude-opus-4-7",
+        model="claude-opus-4-8",
         max_tokens=4096,
         tools=get_agent_tools(),
         messages=messages,
     )
 
     if response.stop_reason != "tool_use":
-        # Final text response
         for block in response.content:
             if hasattr(block, "text"):
                 print(block.text)
@@ -197,13 +165,11 @@ while True:
     tool_results = []
     for block in response.content:
         if block.type == "tool_use":
-            fn        = TOOL_FN[block.name]
-            model_cls = INPUT_MODEL[block.name]
-            result    = fn(model_cls(**block.input))
+            result = dispatch(block.name, block.input)
             tool_results.append({
                 "type":        "tool_result",
                 "tool_use_id": block.id,
-                "content":     result.model_dump_json(),
+                "content":     json.dumps(result),
             })
 
     messages.append({"role": "user", "content": tool_results})
@@ -215,71 +181,83 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 17 financial tools:
+You are a quantitative analyst assistant with access to 19 financial tools:
 
-CORE TOOLS (12)
+CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
-   — Backtest a trading strategy on a single stock. Use at least 2 years of data.
+   — Backtest a single strategy on a symbol. Use at least 2 years of data.
      Prefer Sharpe > 1.0 and max drawdown < 30%.
 
-2. analyze_stock_risk
+2. run_buy_and_hold
+   — Buy-and-hold baseline: holds long the entire period. Always use this as the
+     passive benchmark when evaluating any active strategy.
+
+3. compare_strategies
+   — Runs all four strategies on the same symbol in one call and ranks them by the
+     chosen metric (sharpe_ratio by default). Also includes buy_and_hold_return as
+     the passive baseline. Use this instead of calling the four backtest tools
+     individually when you want to compare approaches.
+
+4. analyze_stock_risk
    — Full risk profile vs a benchmark: alpha, beta, Sharpe, Sortino, VaR, CVaR,
      Information Ratio. Use before recommending a position. Beta > 1.5 = amplified.
 
-3. get_technical_analysis
-   — Latest indicator snapshot: RSI, MACD, ADX, Bollinger, SMA, ATR, OBV, VWAP,
-     Williams %R, Stochastic. RSI < 30 = oversold; ADX > 25 = strong trend.
+5. get_technical_analysis
+   — Latest indicator snapshot: RSI, MACD, ADX, Bollinger, SMA, EMA, ATR, OBV,
+     VWAP, Williams %R, Stochastic. RSI < 30 = oversold; ADX > 25 = strong trend.
 
-4. get_portfolio_analysis
+6. get_portfolio_analysis
    — Weighted basket metrics + correlation matrix. Weights must sum to 1.0.
      Pairs near correlation 1.0 are redundant — poor diversification.
 
-5. run_screener
+7. run_screener
    — Filter tickers by fundamental (PE, PB, ROE, margins) and technical (RSI, SMA,
      beta) criteria. Always screen first, then analyze or backtest the survivors.
 
-6. run_factor_regression
+8. run_factor_regression
    — Multi-factor OLS: alpha, loadings, t-stats, p-values, R², optional rolling.
      High R² = returns well explained by factors. Positive alpha = real edge.
 
-7. run_cointegration_test
+9. run_cointegration_test
    — Engle-Granger test for a pair: p-value, hedge ratio, half-life, z-score signal.
      p < 0.05 and half-life < 30 bars = tradeable pair.
 
-8. run_pca_analysis
-   — PCA on multi-asset returns. PC1 is usually the market factor; later PCs capture
-     sector or style tilts. Use to diagnose hidden concentration risk.
+10. run_pca_analysis
+    — PCA on multi-asset returns. PC1 is usually the market factor; later PCs capture
+      sector or style tilts. Use to diagnose hidden concentration risk.
 
-9. run_hurst_analysis
-   — Hurst exponent (DFA or R/S). H > 0.55 = trending, 0.45–0.55 = random walk,
-     H < 0.45 = mean-reverting. Choose strategy accordingly.
+11. run_hurst_analysis
+    — Hurst exponent (DFA or R/S). H > 0.55 = trending, 0.45–0.55 = random walk,
+      H < 0.45 = mean-reverting. Choose strategy accordingly.
 
 ADVANCED TOOLS (5)
-10. run_regime_adaptive_backtest
+12. run_regime_adaptive_backtest
     — Combines Hurst regime detection + parameter grid search in one call. Auto-selects
       the right strategy for the detected regime. Best for single-click strategy selection.
 
-11. scan_pairs
+13. scan_pairs
     — Tests all O(n²/2) combinations in a ticker universe for cointegration. Returns
       top N pairs sorted by half-life (shortest = fastest mean reversion = most tradeable).
       Use before run_cointegration_test to narrow down candidates.
 
-12. run_walk_forward_backtest
+14. run_walk_forward_backtest
     — Gold-standard validation: optimise in-sample, test out-of-sample, repeat.
       avg_oos_sharpe > 0.5 and pct_windows_profitable > 60% = robust strategy.
       param_stability shows whether winning params are consistent (low overfitting).
 
-13. get_portfolio_risk_attribution
+15. get_portfolio_risk_attribution
     — Deep decomposition: Marginal Risk Contribution per asset (sum = 1.0), PCA
       variance attribution, optional multi-factor regression on the aggregate portfolio.
       Use when the user asks "what's driving my portfolio's risk?"
 
-14. get_position_size
+16. get_position_size
     — ATR-based stop-loss sizing. Optional Kelly criterion when win_rate/avg_win/
       avg_loss are known from a backtest. Always use this before sizing a real trade.
 
 WORKFLOW GUIDANCE
 - Screen → analyze → backtest → size: the natural research chain.
+- Use compare_strategies for a quick multi-strategy sweep; use run_buy_and_hold to
+  establish the passive baseline when evaluating individual strategies.
 - Use run_hurst_analysis before picking a strategy; or run_regime_adaptive_backtest
   to do both steps automatically.
 - Use scan_pairs before run_cointegration_test to find the best pairs first.
@@ -577,7 +555,116 @@ print(f"Buy & hold final: ${buy_hold.iloc[-1]:,.0f}")
 
 ---
 
-## Tool 5 — Stock Risk Analysis
+## Tool 5 — Buy-and-Hold Baseline
+
+**When to use:** Always include buy-and-hold as the passive baseline before evaluating any active strategy. If an active strategy can't beat it, the extra risk isn't justified.
+
+**Signal logic:** Enters long on the first bar and holds for the full period. One trade, zero signal lag. Commission and slippage are applied once on entry.
+
+```python
+from standard_quant_tools.agent import run_buy_and_hold, compare_strategies
+from standard_quant_tools.agent import BuyAndHoldInput
+
+result = run_buy_and_hold(BuyAndHoldInput(
+    symbol="TSLA",
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    initial_capital=10_000,
+    commission_pct=0.001,
+    slippage_pct=0.0005,
+))
+
+print(f"Total Return : {result.total_return:.1%}")
+print(f"Sharpe Ratio : {result.sharpe_ratio:.2f}")
+print(f"Max Drawdown : {result.max_drawdown:.1%}")
+print(f"Final Equity : ${result.final_equity:,.0f}")
+```
+
+**Input:** `BuyAndHoldInput`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | required | Ticker symbol |
+| `start_date` | str | required | ISO date (YYYY-MM-DD) |
+| `end_date` | str | required | ISO date (YYYY-MM-DD) |
+| `initial_capital` | float | `10_000.0` | Starting equity |
+| `commission_pct` | float | `0.001` | One-time buy commission fraction |
+| `slippage_pct` | float | `0.0005` | One-time buy slippage fraction |
+
+**Output:** `BacktestResult` — same schema as active strategy backtests. See the full reference above.
+
+---
+
+## Tool 6 — Compare Strategies
+
+**When to use:** Get a side-by-side ranking of all four strategies in a single call instead of running each one individually. Includes the buy-and-hold return as a passive reference.
+
+**How it works:** Runs SMA crossover, RSI mean reversion, MACD crossover, and Bollinger reversion on the same symbol and date range with a shared buy-and-hold baseline, then sorts all four by the chosen metric.
+
+```python
+from standard_quant_tools.agent import compare_strategies
+from standard_quant_tools.agent import CompareStrategiesInput
+
+result = compare_strategies(CompareStrategiesInput(
+    symbol="AAPL",
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    sort_by="sharpe_ratio",      # rank by Sharpe (default)
+))
+
+print(f"Best strategy     : {result.best_strategy}")
+print(f"Buy-and-hold return: {result.buy_and_hold_return:.1%}")
+for s in result.strategies:
+    print(f"  {s.strategy:<22} sharpe={s.sharpe_ratio:.2f}  return={s.total_return:.1%}")
+```
+
+**Input:** `CompareStrategiesInput`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | required | Ticker symbol |
+| `start_date` | str | required | ISO date (YYYY-MM-DD) |
+| `end_date` | str | required | ISO date (YYYY-MM-DD) |
+| `initial_capital` | float | `10_000.0` | Starting equity |
+| `commission_pct` | float | `0.001` | Commission fraction per trade side |
+| `slippage_pct` | float | `0.0005` | Slippage fraction per trade side |
+| `sort_by` | str | `"sharpe_ratio"` | Metric to rank by: `total_return`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `max_drawdown` |
+| `sma_parameters` | dict\|None | `None` | Override default SMA params |
+| `rsi_parameters` | dict\|None | `None` | Override default RSI params |
+| `macd_parameters` | dict\|None | `None` | Override default MACD params |
+| `bollinger_parameters` | dict\|None | `None` | Override default Bollinger params |
+
+**Output:** `CompareStrategiesResult`
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | str | Ticker symbol |
+| `sort_by` | str | Metric used for ranking |
+| `best_strategy` | str | Name of the top-ranked strategy |
+| `buy_and_hold_return` | float | Passive baseline total return |
+| `strategies` | List[StrategyComparison] | All four strategies, sorted best first |
+
+**`StrategyComparison` fields:** `strategy`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `num_trades`, `final_equity`
+
+**Custom parameter grids:**
+
+```python
+result = compare_strategies(CompareStrategiesInput(
+    symbol="SPY",
+    start_date="2019-01-01",
+    end_date="2024-01-01",
+    sort_by="calmar_ratio",
+    sma_parameters={"fast_period": 20, "slow_period": 100},
+    rsi_parameters={"period": 21, "oversold": 25, "overbought": 75},
+))
+
+best = result.strategies[0]
+print(f"Winner: {best.strategy}, Calmar={best.calmar_ratio:.2f}, vs B&H={result.buy_and_hold_return:.1%}")
+```
+
+---
+
+## Tool 7 — Stock Risk Analysis
 
 **When to use:** Pre-trade due diligence, risk profiling for an LLM to explain a stock's characteristics. Compare multiple stocks on the same risk dimensions before building a portfolio.
 
@@ -650,7 +737,7 @@ result_gold = analyze_stock_risk(AnalysisInput(symbol="GLD", benchmark="TLT", pe
 
 ---
 
-## Tool 6 — Technical Analysis
+## Tool 8 — Technical Analysis
 
 **When to use:** Snapshot of current market conditions on a stock. Use to confirm an entry idea or quickly survey which signals are active. The LLM can interpret the `signals` dict and explain what it sees.
 
@@ -751,7 +838,7 @@ print(df.to_string())
 
 ---
 
-## Tool 7 — Portfolio Analysis
+## Tool 9 — Portfolio Analysis
 
 **When to use:** Evaluate a weighted basket of assets together. Identify diversification quality via correlation, compare equal-weight vs custom weights, understand portfolio-level risk metrics.
 
@@ -855,7 +942,7 @@ print(f"Aggressive — Sharpe: {aggressive.sharpe_ratio:.2f} | MDD: {aggressive.
 
 ---
 
-## Tool 8 — Stock Screener
+## Tool 10 — Stock Screener
 
 **When to use:** Starting a research workflow. Narrow a large universe down to candidates before spending compute on analysis or backtesting. All filters are applied concurrently — screening 50 tickers takes roughly the same time as screening 5.
 
@@ -1056,89 +1143,20 @@ A production-ready loop that handles multiple tool calls per turn, serializes re
 
 ```python
 import json
-from typing import Any
-
 import anthropic
-
-from standard_quant_tools.agent.tools import (
-    get_agent_tools,
-    run_sma_backtest, run_rsi_backtest, run_macd_backtest, run_bollinger_backtest,
-    analyze_stock_risk, get_technical_analysis, get_portfolio_analysis, run_screener,
-    run_factor_regression, run_cointegration_test, run_pca_analysis, run_hurst_analysis,
-    run_regime_adaptive_backtest, scan_pairs, run_walk_forward_backtest,
-    get_portfolio_risk_attribution, get_position_size,
-)
-from standard_quant_tools.agent.models import (
-    BacktestInput, AnalysisInput, TechnicalInput, PortfolioInput, ScreenerInput,
-    FactorRegressionInput, CointegrationInput, PCAInput, HurstInput,
-    RegimeAdaptiveInput, PairScannerInput, WalkForwardInput,
-    RiskAttributionInput, PositionSizerInput,
-)
-
-# ── Tool dispatch ─────────────────────────────────────────────────────────────
-
-TOOL_FN: dict[str, Any] = {
-    "run_sma_backtest":                run_sma_backtest,
-    "run_rsi_backtest":                run_rsi_backtest,
-    "run_macd_backtest":               run_macd_backtest,
-    "run_bollinger_backtest":          run_bollinger_backtest,
-    "analyze_stock_risk":              analyze_stock_risk,
-    "get_technical_analysis":          get_technical_analysis,
-    "get_portfolio_analysis":          get_portfolio_analysis,
-    "run_screener":                    run_screener,
-    "run_factor_regression":           run_factor_regression,
-    "run_cointegration_test":          run_cointegration_test,
-    "run_pca_analysis":                run_pca_analysis,
-    "run_hurst_analysis":              run_hurst_analysis,
-    "run_regime_adaptive_backtest":    run_regime_adaptive_backtest,
-    "scan_pairs":                      scan_pairs,
-    "run_walk_forward_backtest":       run_walk_forward_backtest,
-    "get_portfolio_risk_attribution":  get_portfolio_risk_attribution,
-    "get_position_size":               get_position_size,
-}
-
-INPUT_MODEL: dict[str, Any] = {
-    "run_sma_backtest":                BacktestInput,
-    "run_rsi_backtest":                BacktestInput,
-    "run_macd_backtest":               BacktestInput,
-    "run_bollinger_backtest":          BacktestInput,
-    "analyze_stock_risk":              AnalysisInput,
-    "get_technical_analysis":          TechnicalInput,
-    "get_portfolio_analysis":          PortfolioInput,
-    "run_screener":                    ScreenerInput,
-    "run_factor_regression":           FactorRegressionInput,
-    "run_cointegration_test":          CointegrationInput,
-    "run_pca_analysis":                PCAInput,
-    "run_hurst_analysis":              HurstInput,
-    "run_regime_adaptive_backtest":    RegimeAdaptiveInput,
-    "scan_pairs":                      PairScannerInput,
-    "run_walk_forward_backtest":       WalkForwardInput,
-    "get_portfolio_risk_attribution":  RiskAttributionInput,
-    "get_position_size":               PositionSizerInput,
-}
-
-
-def dispatch_tool(name: str, raw_input: dict) -> str:
-    """Call the named tool and return a JSON string for the LLM."""
-    fn        = TOOL_FN[name]
-    model_cls = INPUT_MODEL[name]
-    result    = fn(model_cls(**raw_input))
-
-    # Strip large lists (equity_curve) before sending back — saves tokens
-    payload = result.model_dump()
-    payload.pop("equity_curve", None)
-    return json.dumps(payload)
-
+from standard_quant_tools.agent import get_agent_tools, dispatch
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 17 tools:
+You are a quantitative investment analyst. You have 19 tools:
 
-Core (12): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
-run_bollinger_backtest, analyze_stock_risk, get_technical_analysis,
-get_portfolio_analysis, run_screener, run_factor_regression,
-run_cointegration_test, run_pca_analysis, run_hurst_analysis.
+Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
+run_bollinger_backtest, run_buy_and_hold (passive baseline),
+compare_strategies (rank all 4 strategies in one call),
+analyze_stock_risk, get_technical_analysis, get_portfolio_analysis,
+run_screener, run_factor_regression, run_cointegration_test,
+run_pca_analysis, run_hurst_analysis.
 
 Advanced (5): run_regime_adaptive_backtest (Hurst + grid search in one call),
 scan_pairs (find cointegrated pairs in a universe), run_walk_forward_backtest
@@ -1147,6 +1165,8 @@ get_position_size (ATR stop-loss + optional Kelly sizing).
 
 Guidelines:
 - Screen first if a broad universe is mentioned.
+- Use compare_strategies for multi-strategy comparison; run_buy_and_hold
+  as the passive reference when evaluating any single active strategy.
 - Use run_regime_adaptive_backtest for single-click regime detection + strategy.
 - Use scan_pairs before run_cointegration_test to narrow candidates.
 - Use run_walk_forward_backtest to validate before recommending capital deployment.
@@ -1163,7 +1183,7 @@ def run_agent(user_message: str, max_turns: int = 10) -> str:
 
     for turn in range(max_turns):
         response = client.messages.create(
-            model="claude-opus-4-7",
+            model="claude-opus-4-8",
             max_tokens=4096,
             system=SYSTEM,
             tools=get_agent_tools(),
@@ -1173,19 +1193,19 @@ def run_agent(user_message: str, max_turns: int = 10) -> str:
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
-            # Final answer — extract text
             for block in response.content:
                 if hasattr(block, "text"):
                     return block.text
             return ""
 
-        # Execute every tool call in this turn
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
                 print(f"  → Calling {block.name}({list(block.input.keys())})")
                 try:
-                    content = dispatch_tool(block.name, block.input)
+                    result  = dispatch(block.name, block.input)
+                    result.pop("equity_curve", None)  # trim large list before sending
+                    content = json.dumps(result)
                 except Exception as e:
                     content = json.dumps({"error": str(e)})
 
@@ -1224,7 +1244,7 @@ if __name__ == "__main__":
 
 ---
 
-## Tool 9 — Multi-Factor Regression
+## Tool 11 — Multi-Factor Regression
 
 **When to use:** Decompose a stock's return into exposures to named risk factors. Use ticker proxies for factors (SPY = market, IWM = size, IWD = value, QQQ = growth). Alpha is the return unexplained by the factors — persistent positive alpha is a real edge.
 
@@ -1376,7 +1396,7 @@ if result.rolling_loadings_tail:
 
 ---
 
-## Tool 10 — Cointegration Test
+## Tool 12 — Cointegration Test
 
 **When to use:** Pairs trading research. Test whether two assets share a long-run equilibrium so that deviations from it are mean-reverting and therefore tradeable. A short half-life (< 20 bars) makes the strategy practical.
 
@@ -1544,7 +1564,7 @@ for start, end in history_periods:
 
 ---
 
-## Tool 11 — PCA Analysis
+## Tool 13 — PCA Analysis
 
 **When to use:** Understand the hidden structure of a multi-asset portfolio. PCA decomposes correlated returns into orthogonal factors ordered by explained variance. PC1 is almost always the broad market; PC2 often captures a growth-vs-value tilt or sector contrast. Use this to identify latent risks and assess true diversification.
 
@@ -1704,7 +1724,7 @@ for candidate in candidates:
 
 ---
 
-## Tool 12 — Hurst Exponent
+## Tool 14 — Hurst Exponent
 
 **When to use:** Regime detection before strategy selection. A trending regime (H > 0.55) favours momentum and trend-following. A mean-reverting regime (H < 0.45) favours contrarian strategies like RSI mean-reversion or Bollinger Band reversion. The rolling Hurst tracks how the regime evolves over time.
 
@@ -1920,18 +1940,25 @@ print(f"Example params: {playbook['example_params']}")
 
 ### Input Models
 
-**Core tools (12)**
+**Backtest tools (6)**
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
 | `BacktestInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
+| `BuyAndHoldInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
+| `CompareStrategiesInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"`, `sma/rsi/macd/bollinger_parameters=None` |
+
+**Analysis tools (8)**
+
+| Model | Required | Optional (with defaults) |
+|---|---|---|
 | `AnalysisInput` | `symbol` | `benchmark="SPY"`, `period="1y"` |
 | `TechnicalInput` | `symbol`, `start_date`, `end_date` | `indicators=["rsi","macd","bollinger","atr"]` |
 | `PortfolioInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"` |
 | `ScreenerInput` | `tickers`, `filters` | `start_date`, `end_date`, `sort_by=None`, `ascending=True` |
 | `FactorRegressionInput` | `symbol`, `factor_tickers`, `start_date`, `end_date` | `factor_names=None`, `rolling_window=None` |
 | `CointegrationInput` | `symbol_a`, `symbol_b`, `start_date`, `end_date` | `zscore_window=30` |
-| `PCAInput` | `tickers`, `start_date`, `end_date` | `n_components=3` |
+| `PCAInput` | `tickers`, `start_date`, `end_date` | `n_components=3` (must be ≥ 1) |
 | `HurstInput` | `symbol`, `start_date`, `end_date` | `method="dfa"`, `rolling_window=None` |
 
 **Advanced tools (5)**
@@ -1942,15 +1969,27 @@ print(f"Example params: {playbook['example_params']}")
 | `PairScannerInput` | `tickers`, `start_date`, `end_date` | `max_pairs=10`, `min_half_life=5.0`, `max_half_life=126.0`, `p_value_threshold=0.05`, `zscore_window=30` |
 | `WalkForwardInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"` |
 | `RiskAttributionInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"`, `n_components=3`, `factor_tickers=None`, `factor_names=None` |
-| `PositionSizerInput` | `symbol`, `start_date`, `end_date`, `account_equity` | `risk_per_trade_pct=0.01`, `atr_period=14`, `atr_multiplier=2.0`, `win_rate=None`, `avg_win_pct=None`, `avg_loss_pct=None` |
+| `PositionSizerInput` | `symbol`, `start_date`, `end_date`, `account_equity` | `risk_per_trade_pct=0.01` (must be in (0,1]), `atr_period=14`, `atr_multiplier=2.0`, `win_rate=None`, `avg_win_pct=None`, `avg_loss_pct=None` |
+
+**Validation rules (Pydantic v2):**
+- `PortfolioInput` and `RiskAttributionInput`: `weights` must sum to 1.0 and `len(weights) == len(tickers)`.
+- `PCAInput`: `n_components` must be ≥ 1.
+- `PositionSizerInput`: `risk_per_trade_pct` must be in (0, 1].
 
 ### Output Models
 
-**Core tools (12)**
+**Backtest tools**
 
 | Model | Key fields |
 |---|---|
 | `BacktestResult` | `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `profit_factor`, `num_trades`, `avg_trade_return_pct`, `final_equity`, `equity_curve`, `trade_log` |
+| `StrategyComparison` | `strategy`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `num_trades`, `final_equity` |
+| `CompareStrategiesResult` | `symbol`, `sort_by`, `best_strategy`, `buy_and_hold_return`, `strategies` (List[StrategyComparison]) |
+
+**Analysis tools**
+
+| Model | Key fields |
+|---|---|
 | `AnalysisResult` | `symbol`, `benchmark`, `alpha`, `beta`, `r_squared`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio` |
 | `TechnicalResult` | `symbol`, `last_close`, `last_values` (dict), `signals` (dict) |
 | `PortfolioResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `information_ratio`, `total_return`, `correlation_matrix` |
@@ -1961,7 +2000,7 @@ print(f"Example params: {playbook['example_params']}")
 | `PCAResult` | `tickers`, `n_components`, `n_obs`, `explained_variance_ratio`, `cumulative_variance_ratio`, `loadings`, `factor_contributions` |
 | `HurstResult` | `symbol`, `hurst`, `regime`, `fit_r_squared`, `method`, `n_obs`, `rolling_current`, `rolling_regime_fractions` |
 
-**Advanced tools (5)**
+**Advanced tools**
 
 | Model | Key fields |
 |---|---|

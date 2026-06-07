@@ -46,6 +46,8 @@ from standard_quant_tools.agent.models import (
     WalkForwardInput, WalkForwardWindow, WalkForwardResult,
     RiskAttributionInput, RiskAttributionResult,
     PositionSizerInput, PositionSizerResult,
+    BuyAndHoldInput,
+    CompareStrategiesInput, CompareStrategiesResult, StrategyComparison,
 )
 
 
@@ -142,6 +144,96 @@ def run_bollinger_backtest(input_data: BacktestInput) -> BacktestResult:
     df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
     signals = STRATEGY_REGISTRY["bollinger_reversion"](df, **input_data.parameters)
     return _run_backtest(input_data, df, signals)
+
+
+def run_buy_and_hold(input_data: BuyAndHoldInput) -> BacktestResult:
+    """Buy-and-hold baseline: long the full period. Use to compare against active strategies."""
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    signals = pd.Series(1.0, index=df.index)
+    bt_input = BacktestInput(
+        symbol=input_data.symbol,
+        start_date=input_data.start_date,
+        end_date=input_data.end_date,
+        strategy_type="buy_and_hold",
+        parameters={},
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+    )
+    return _run_backtest(bt_input, df, signals)
+
+
+def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesResult:
+    """
+    Run all four strategies on the same symbol/period with a buy-and-hold baseline.
+    Returns results sorted by sort_by (best first).
+    Use this instead of calling the four backtest tools individually.
+    """
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+
+    # Buy-and-hold baseline (long all bars, one trade)
+    bh_signals = pd.Series(1.0, index=df.index)
+    bh_input = BacktestInput(
+        symbol=input_data.symbol,
+        start_date=input_data.start_date,
+        end_date=input_data.end_date,
+        strategy_type="buy_and_hold",
+        parameters={},
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+    )
+    bh = _run_backtest(bh_input, df, bh_signals)
+
+    strategy_params: Dict[str, Dict[str, Any]] = {
+        "sma_crossover":       input_data.sma_parameters or _DEFAULT_PARAMS["sma_crossover"],
+        "rsi_mean_reversion":  input_data.rsi_parameters or _DEFAULT_PARAMS["rsi_mean_reversion"],
+        "macd_crossover":      input_data.macd_parameters or _DEFAULT_PARAMS["macd_crossover"],
+        "bollinger_reversion": input_data.bollinger_parameters or _DEFAULT_PARAMS["bollinger_reversion"],
+    }
+
+    comparisons: List[StrategyComparison] = []
+    for strat_name, params in strategy_params.items():
+        signals = STRATEGY_REGISTRY[strat_name](df, **params)
+        bt_input = BacktestInput(
+            symbol=input_data.symbol,
+            start_date=input_data.start_date,
+            end_date=input_data.end_date,
+            strategy_type=strat_name,
+            parameters=params,
+            initial_capital=input_data.initial_capital,
+            commission_pct=input_data.commission_pct,
+            slippage_pct=input_data.slippage_pct,
+        )
+        bt = _run_backtest(bt_input, df, signals)
+        comparisons.append(StrategyComparison(
+            strategy=strat_name,
+            parameters=params,
+            total_return=bt.total_return,
+            sharpe_ratio=bt.sharpe_ratio,
+            sortino_ratio=bt.sortino_ratio,
+            max_drawdown=bt.max_drawdown,
+            calmar_ratio=bt.calmar_ratio,
+            win_rate=bt.win_rate,
+            num_trades=bt.num_trades,
+            final_equity=bt.final_equity,
+        ))
+
+    # Higher is always better for all supported metrics (max_drawdown: -0.10 > -0.30)
+    comparisons.sort(
+        key=lambda c: getattr(c, input_data.sort_by, 0.0),
+        reverse=True,
+    )
+
+    return CompareStrategiesResult(
+        symbol=input_data.symbol,
+        sort_by=input_data.sort_by,
+        best_strategy=comparisons[0].strategy,
+        buy_and_hold_return=bh.total_return,
+        strategies=comparisons,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -571,6 +663,14 @@ _REGIME_STRATEGY_MAP: Dict[str, str] = {
     "trending": "sma_crossover",
     "mean_reverting": "rsi_mean_reversion",
     "random_walk": "macd_crossover",
+}
+
+# Single canonical default parameters for each strategy (used by compare_strategies)
+_DEFAULT_PARAMS: Dict[str, Dict[str, Any]] = {
+    "sma_crossover":       {"fast_period": 10, "slow_period": 50},
+    "rsi_mean_reversion":  {"period": 14, "oversold": 30, "overbought": 70},
+    "macd_crossover":      {"fast": 12, "slow": 26, "signal": 9},
+    "bollinger_reversion": {"period": 20, "num_std": 2.0},
 }
 
 
@@ -1024,6 +1124,10 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
 # Tool Registry for LLM Function Calling
 # ──────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────
+# Tool Registry for LLM Function Calling
+# ──────────────────────────────────────────────────────────────────
+
 def get_agent_tools() -> List[Dict[str, Any]]:
     """
     Returns tool definitions formatted for OpenAI / Anthropic function calling.
@@ -1034,6 +1138,8 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("run_rsi_backtest", "RSI mean-reversion backtest.", BacktestInput),
         ("run_macd_backtest", "MACD crossover backtest.", BacktestInput),
         ("run_bollinger_backtest", "Bollinger Band mean-reversion backtest.", BacktestInput),
+        ("run_buy_and_hold", "Buy-and-hold baseline: long the full period. Use as a passive benchmark.", BuyAndHoldInput),
+        ("compare_strategies", "Run all four strategies on the same symbol and return ranked results vs buy-and-hold.", CompareStrategiesInput),
         ("analyze_stock_risk", "Full risk analysis: alpha, beta, Sharpe, VaR, CVaR.", AnalysisInput),
         ("get_technical_analysis", "Compute configurable technical indicators.", TechnicalInput),
         ("get_portfolio_analysis", "Multi-asset portfolio metrics.", PortfolioInput),
@@ -1060,3 +1166,82 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         }
         for name, desc, model in tool_defs
     ]
+
+
+# ──────────────────────────────────────────────────────────────────
+# Dispatch — route LLM tool calls by name
+# ──────────────────────────────────────────────────────────────────
+
+_TOOL_DISPATCH: Dict[str, Any] = {
+    "run_sma_backtest":               (run_sma_backtest,               BacktestInput),
+    "run_rsi_backtest":               (run_rsi_backtest,               BacktestInput),
+    "run_macd_backtest":              (run_macd_backtest,              BacktestInput),
+    "run_bollinger_backtest":         (run_bollinger_backtest,         BacktestInput),
+    "run_buy_and_hold":               (run_buy_and_hold,               BuyAndHoldInput),
+    "compare_strategies":             (compare_strategies,             CompareStrategiesInput),
+    "analyze_stock_risk":             (analyze_stock_risk,             AnalysisInput),
+    "get_technical_analysis":         (get_technical_analysis,         TechnicalInput),
+    "get_portfolio_analysis":         (get_portfolio_analysis,         PortfolioInput),
+    "run_screener":                   (run_screener,                   ScreenerInput),
+    "run_factor_regression":          (run_factor_regression,          FactorRegressionInput),
+    "run_cointegration_test":         (run_cointegration_test,         CointegrationInput),
+    "run_pca_analysis":               (run_pca_analysis,               PCAInput),
+    "run_hurst_analysis":             (run_hurst_analysis,             HurstInput),
+    "run_regime_adaptive_backtest":   (run_regime_adaptive_backtest,   RegimeAdaptiveInput),
+    "scan_pairs":                     (scan_pairs,                     PairScannerInput),
+    "run_walk_forward_backtest":      (run_walk_forward_backtest,      WalkForwardInput),
+    "get_portfolio_risk_attribution": (get_portfolio_risk_attribution, RiskAttributionInput),
+    "get_position_size":              (get_position_size,              PositionSizerInput),
+}
+
+
+def dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Route an LLM tool call to the correct tool function and return a JSON-ready dict.
+
+    Replaces the manual TOOL_FN / INPUT_MODEL lookup pattern. Pass the tool name
+    and parsed arguments from the LLM response; get back a plain dict from
+    result.model_dump() ready to send back to the model.
+
+    Args:
+        tool_name:  Function name as returned by the LLM (e.g. "analyze_stock_risk").
+        arguments:  Parsed tool arguments dict from the LLM tool call.
+
+    Returns:
+        result.model_dump() — a plain dict, JSON-serializable.
+
+    Raises:
+        ValueError: Unknown tool name.
+        pydantic.ValidationError: Arguments don't match the tool's input schema.
+
+    Example (OpenAI)::
+
+        import json
+        from standard_quant_tools.agent import get_agent_tools, dispatch
+
+        for tc in msg.tool_calls:
+            result = dispatch(tc.function.name, json.loads(tc.function.arguments))
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": json.dumps(result),
+            })
+
+    Example (Anthropic)::
+
+        for block in response.content:
+            if block.type == "tool_use":
+                result = dispatch(block.name, block.input)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result),
+                })
+    """
+    if tool_name not in _TOOL_DISPATCH:
+        raise ValueError(
+            f"Unknown tool '{tool_name}'. "
+            f"Available: {sorted(_TOOL_DISPATCH)}"
+        )
+    fn, model_cls = _TOOL_DISPATCH[tool_name]
+    return fn(model_cls(**arguments)).model_dump()
