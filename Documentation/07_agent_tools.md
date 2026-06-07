@@ -1275,6 +1275,105 @@ if result.rolling_alpha_tail:
 - **R²**: Fraction of return variance explained by all factors combined. Low R² = highly idiosyncratic.
 - **Rolling loadings**: Track whether factor exposures are stable or have drifted over time.
 
+**Fama-French 3-factor using ETF proxies:**
+
+```python
+from standard_quant_tools.agent.tools import run_factor_regression
+from standard_quant_tools.agent.models import FactorRegressionInput
+
+# SPY = market, IWM-SPY ≈ size premium, IWD = value
+# Note: the tool takes raw tickers and computes returns internally;
+# for SMB you typically pass IWM and SPY separately, then interpret the contrast
+result = run_factor_regression(FactorRegressionInput(
+    symbol="TSLA",
+    factor_tickers=["SPY", "IWM", "IWD", "QQQ"],
+    factor_names=["market", "small_cap", "value", "growth"],
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    rolling_window=126,   # 6-month rolling window
+))
+
+# Interpret significance
+print(f"Alpha (ann.): {result.alpha * 252:.2%}")
+print(f"R²: {result.r_squared:.2%}  (how much is explained by these 4 factors)")
+print()
+sig_threshold = 0.05
+for factor in result.factors:
+    loading = result.loadings[factor]
+    p       = result.p_values[factor]
+    stars   = "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.10 else ""
+    print(f"  {factor:<12}: {loading:+.3f}  p={p:.3f} {stars}")
+
+# Rolling alpha: is it trending up or down?
+if result.rolling_alpha_tail:
+    tail = result.rolling_alpha_tail
+    trend = "improving" if tail[-1] > tail[0] else "deteriorating"
+    print(f"\nRolling alpha trend: {trend}")
+    print(f"  First point: {tail[0]:+.6f}  Last: {tail[-1]:+.6f}")
+```
+
+**Comparing factor exposures across a universe:**
+
+```python
+from standard_quant_tools.agent.tools import run_factor_regression
+from standard_quant_tools.agent.models import FactorRegressionInput
+import pandas as pd
+
+universe = ["AAPL", "NVDA", "JPM", "KO", "GLD"]
+rows = []
+
+for ticker in universe:
+    r = run_factor_regression(FactorRegressionInput(
+        symbol=ticker,
+        factor_tickers=["SPY", "IWD", "TLT"],
+        factor_names=["market", "value", "bond"],
+        start_date="2022-01-01",
+        end_date="2024-01-01",
+    ))
+    rows.append({
+        "ticker":  ticker,
+        "alpha":   f"{r.alpha * 252:.2%}",
+        "market":  f"{r.loadings['market']:+.2f}",
+        "value":   f"{r.loadings['value']:+.2f}",
+        "bond":    f"{r.loadings['bond']:+.2f}",
+        "r2":      f"{r.r_squared:.2%}",
+    })
+
+df = pd.DataFrame(rows).set_index("ticker")
+print(df.to_string())
+# KO and GLD typically show low market loading and positive bond loading
+# NVDA shows high market beta and negative value loading (growth tilt)
+# JPM often shows negative bond loading (banks hurt by falling rates)
+```
+
+**Detecting factor drift with rolling loadings:**
+
+```python
+from standard_quant_tools.agent.tools import run_factor_regression
+from standard_quant_tools.agent.models import FactorRegressionInput
+
+result = run_factor_regression(FactorRegressionInput(
+    symbol="AAPL",
+    factor_tickers=["SPY", "QQQ"],
+    factor_names=["market", "growth"],
+    start_date="2019-01-01",
+    end_date="2024-01-01",
+    rolling_window=252,   # 1-year rolling
+))
+
+if result.rolling_loadings_tail:
+    # Last 20 quarterly snapshots of growth-factor loading
+    growth_trail = result.rolling_loadings_tail.get("growth", [])
+    print("Recent 20 rolling growth loadings:")
+    for i, v in enumerate(growth_trail):
+        bar = "█" * int(abs(v) * 20)
+        print(f"  t-{20-i:02d}: {v:+.3f}  {bar}")
+    if growth_trail:
+        drift = growth_trail[-1] - growth_trail[0]
+        print(f"\nLoading drift: {drift:+.3f}  "
+              f"({'more growth-like' if drift > 0 else 'less growth-like'} over time)")
+```
+
 ---
 
 ## Tool 10 — Cointegration Test
@@ -1350,6 +1449,99 @@ for a, b, p, hl in pairs:
     print(f"{a}/{b}: p={p:.4f}, half-life={hl:.1f} bars")
 ```
 
+**Full pairs trading decision framework:**
+
+```python
+from standard_quant_tools.agent.tools import run_cointegration_test
+from standard_quant_tools.agent.models import CointegrationInput
+
+def evaluate_pair(symbol_a: str, symbol_b: str,
+                  start: str, end: str,
+                  min_history_bars: int = 252) -> None:
+    r = run_cointegration_test(CointegrationInput(
+        symbol_a=symbol_a, symbol_b=symbol_b,
+        start_date=start, end_date=end,
+        zscore_window=30,
+    ))
+
+    print(f"\n{'─' * 50}")
+    print(f"Pair: {symbol_a} / {symbol_b}")
+    print(f"{'─' * 50}")
+
+    # 1. Is it statistically cointegrated?
+    if not r.cointegrated:
+        print(f"✗ NOT cointegrated (p={r.p_value:.4f}) — do not trade this pair")
+        return
+
+    print(f"✓ Cointegrated  p={r.p_value:.4f}  ADF={r.adf_statistic:.3f}")
+    print(f"  Critical values: 1%={r.critical_values['1%']:.3f}  "
+          f"5%={r.critical_values['5%']:.3f}  10%={r.critical_values['10%']:.3f}")
+
+    # 2. Is mean-reversion speed practical?
+    if r.half_life_days > 60:
+        print(f"⚠  Half-life {r.half_life_days:.0f} bars — slow reversion, needs patient sizing")
+    elif r.half_life_days < 5:
+        print(f"⚠  Half-life {r.half_life_days:.0f} bars — too fast, transaction costs will dominate")
+    else:
+        print(f"✓ Half-life {r.half_life_days:.0f} bars — good mean-reversion speed")
+
+    # 3. Is there enough data?
+    if r.n_obs < min_history_bars:
+        print(f"⚠  Only {r.n_obs} observations — results may not be reliable")
+
+    # 4. Current signal
+    z = r.current_zscore
+    print(f"\nCurrent z-score: {z:+.2f}  →  signal: {r.signal}")
+    print(f"Hedge ratio: {r.hedge_ratio:.4f}  (long 1 {symbol_a}, short {r.hedge_ratio:.2f} {symbol_b})")
+    print(f"Spread stats: mean={r.spread_mean:.4f}, std={r.spread_std:.4f}")
+
+    if r.signal == "long_a_short_b":
+        print(f"\n→ ACTION: Buy {symbol_a}, Sell {symbol_b}")
+        print(f"  Entry: z-score {z:.2f} (below -2 threshold)")
+        print(f"  Exit when z-score returns to 0")
+    elif r.signal == "short_a_long_b":
+        print(f"\n→ ACTION: Sell {symbol_a}, Buy {symbol_b}")
+        print(f"  Entry: z-score {z:.2f} (above +2 threshold)")
+        print(f"  Exit when z-score returns to 0")
+    else:
+        print(f"\n→ HOLD / FLAT: z-score within normal range ({z:.2f})")
+
+# Example calls
+evaluate_pair("KO", "PEP",  "2020-01-01", "2024-01-01")
+evaluate_pair("GLD", "SLV", "2020-01-01", "2024-01-01")
+evaluate_pair("AAPL", "TSLA", "2020-01-01", "2024-01-01")  # Likely NOT cointegrated
+```
+
+**Monitoring an active pairs position over time:**
+
+```python
+from standard_quant_tools.agent.tools import run_cointegration_test
+from standard_quant_tools.agent.models import CointegrationInput
+
+# Re-run monthly to check if the relationship still holds
+history_periods = [
+    ("2021-01-01", "2022-01-01"),
+    ("2021-07-01", "2022-07-01"),
+    ("2022-01-01", "2023-01-01"),
+    ("2022-07-01", "2023-07-01"),
+    ("2023-01-01", "2024-01-01"),
+]
+
+print("KO/PEP rolling cointegration stability:")
+print(f"{'Period':<25} {'p-value':<10} {'Half-life':<12} {'Hedge ratio':<12} {'Z-score'}")
+print("─" * 75)
+
+for start, end in history_periods:
+    r = run_cointegration_test(CointegrationInput(
+        symbol_a="KO", symbol_b="PEP",
+        start_date=start, end_date=end,
+    ))
+    coint_str = "✓" if r.cointegrated else "✗"
+    print(f"{start}→{end}  {coint_str} p={r.p_value:.3f}   "
+          f"hl={r.half_life_days:5.1f}d    hr={r.hedge_ratio:.3f}       z={r.current_zscore:+.2f}")
+# If p-value spikes or hedge ratio drifts significantly, recalibrate or exit the position
+```
+
 ---
 
 ## Tool 11 — PCA Analysis
@@ -1402,6 +1594,113 @@ for ticker, contribs in result.factor_contributions.items():
 - **`cumulative_variance_ratio`**: Cumulative coverage. If PC1 + PC2 covers 90%, a 2-factor model is sufficient.
 - **`loadings`**: Each column is an eigenvector (the PC). High loadings on many tech stocks → PC = "tech factor". Opposite signs → contrast factor (growth vs value).
 - **`factor_contributions`**: How much of each asset's return variance each PC explains. An asset with low PC1 contribution is largely driven by idiosyncratic factors.
+
+**Diagnosing hidden concentration in a portfolio:**
+
+```python
+from standard_quant_tools.agent.tools import run_pca_analysis
+from standard_quant_tools.agent.models import PCAInput
+
+# Seemingly diversified portfolio
+tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "META",
+           "NVDA", "AMD", "AVGO", "QCOM", "INTC"]
+
+result = run_pca_analysis(PCAInput(
+    tickers=tickers,
+    start_date="2022-01-01",
+    end_date="2024-01-01",
+    n_components=3,
+))
+
+pc1_pct = result.explained_variance_ratio["PC1"]
+cum2    = result.cumulative_variance_ratio.get("PC2", 0)
+
+print(f"PC1 explains {pc1_pct:.0%} of all variance")
+if pc1_pct > 0.50:
+    print("⚠  A single market/sector factor dominates — this is NOT well diversified")
+elif pc1_pct > 0.35:
+    print("⚠  Moderate concentration — consider adding uncorrelated assets")
+else:
+    print("✓ Variance is spread across factors — reasonable diversification")
+
+print(f"\nPC1 + PC2 explain {cum2:.0%} of all variance")
+
+# Which assets are most "market-driven" (high PC1 contribution)?
+print("\nAssets most exposed to PC1 (market factor):")
+pc1_contribs = {t: result.factor_contributions[t]["PC1"] for t in tickers}
+for ticker, contrib in sorted(pc1_contribs.items(), key=lambda x: -x[1])[:5]:
+    print(f"  {ticker}: {contrib:.1%} of its variance explained by PC1")
+
+# Which assets add the most genuine diversification (low PC1 contribution)?
+print("\nMost idiosyncratic assets (low PC1, best diversifiers):")
+for ticker, contrib in sorted(pc1_contribs.items(), key=lambda x: x[1])[:3]:
+    print(f"  {ticker}: only {contrib:.1%} of variance from PC1")
+```
+
+**Comparing a concentrated vs diversified portfolio:**
+
+```python
+from standard_quant_tools.agent.tools import run_pca_analysis
+from standard_quant_tools.agent.models import PCAInput
+
+# Concentrated: all tech
+tech_only = run_pca_analysis(PCAInput(
+    tickers=["AAPL", "MSFT", "GOOGL", "META", "NVDA"],
+    start_date="2022-01-01", end_date="2024-01-01",
+))
+
+# Diversified: tech + bonds + commodities + financials
+diversified = run_pca_analysis(PCAInput(
+    tickers=["AAPL", "MSFT", "TLT", "GLD", "JPM", "XOM"],
+    start_date="2022-01-01", end_date="2024-01-01",
+))
+
+print("Concentrated (all tech):")
+print(f"  PC1 explains: {tech_only.explained_variance_ratio['PC1']:.0%}")
+print(f"  PC1+PC2:      {tech_only.cumulative_variance_ratio.get('PC2', 0):.0%}")
+
+print("\nDiversified (multi-asset):")
+print(f"  PC1 explains: {diversified.explained_variance_ratio['PC1']:.0%}")
+print(f"  PC1+PC2:      {diversified.cumulative_variance_ratio.get('PC2', 0):.0%}")
+
+# Identifying what PC2 captures (often growth-vs-value or bond contrast)
+print("\nDiversified portfolio — PC2 top loadings:")
+pc2_loads = diversified.loadings["PC2"]
+for t, v in sorted(pc2_loads.items(), key=lambda x: -abs(x[1])):
+    bar = "+" * int(v * 20) if v > 0 else "-" * int(abs(v) * 20)
+    print(f"  {t:<6}: {v:+.3f}  {bar}")
+# Opposite signs between GLD/TLT and tech stocks → PC2 = flight-to-safety vs risk
+```
+
+**Finding which assets to add for better diversification:**
+
+```python
+from standard_quant_tools.agent.tools import run_pca_analysis
+from standard_quant_tools.agent.models import PCAInput
+
+# Existing portfolio
+existing = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
+# Candidates to add
+candidates = ["TLT", "GLD", "XOM", "JPM", "WMT", "UNH"]
+
+# Baseline
+base = run_pca_analysis(PCAInput(tickers=existing,
+                                  start_date="2022-01-01", end_date="2024-01-01"))
+base_pc1 = base.explained_variance_ratio["PC1"]
+
+print(f"Baseline PC1 concentration: {base_pc1:.0%}\n")
+print("Effect of adding each candidate:")
+
+for candidate in candidates:
+    test = run_pca_analysis(PCAInput(
+        tickers=existing + [candidate],
+        start_date="2022-01-01", end_date="2024-01-01",
+    ))
+    new_pc1 = test.explained_variance_ratio["PC1"]
+    delta   = new_pc1 - base_pc1
+    arrow   = "↓ better" if delta < -0.02 else ("↑ worse" if delta > 0.01 else "≈ neutral")
+    print(f"  +{candidate}: PC1={new_pc1:.0%}  ({delta:+.1%})  {arrow}")
+```
 
 ---
 
@@ -1489,6 +1788,130 @@ else:
 
 if result:
     print(f"Sharpe: {result.sharpe_ratio:.2f} | MDD: {result.max_drawdown:.1%} | Trades: {result.num_trades}")
+```
+
+**Multi-stock universe regime scan:**
+
+```python
+from standard_quant_tools.agent.tools import run_hurst_analysis
+from standard_quant_tools.agent.models import HurstInput
+
+universe = ["AAPL", "MSFT", "TSLA", "GLD", "TLT", "XOM", "JPM", "KO", "PEP", "VNQ"]
+period_start = "2022-01-01"
+period_end   = "2024-01-01"
+
+results = []
+for ticker in universe:
+    h = run_hurst_analysis(HurstInput(
+        symbol=ticker,
+        start_date=period_start,
+        end_date=period_end,
+        method="dfa",
+    ))
+    results.append((ticker, h.hurst, h.regime, h.fit_r_squared))
+
+# Sort by Hurst — most trending to most mean-reverting
+results.sort(key=lambda x: -x[1])
+
+print(f"{'Ticker':<8} {'H':>6}  {'Regime':<16} {'R²':>6}")
+print("-" * 42)
+for ticker, hurst, regime, r2 in results:
+    flag = ""
+    if regime == "trending":          flag = "← trend-follow"
+    elif regime == "mean_reverting":  flag = "← mean-revert"
+    else:                             flag = "← skip"
+    print(f"{ticker:<8} {hurst:>6.3f}  {regime:<16} {r2:>6.3f}  {flag}")
+
+# Bucket the universe for strategy routing
+trending      = [t for t, h, r, _ in results if r == "trending"]
+mean_reverting = [t for t, h, r, _ in results if r == "mean_reverting"]
+random_walk   = [t for t, h, r, _ in results if r == "random_walk"]
+
+print(f"\nTrend-follow pool    : {trending}")
+print(f"Mean-reversion pool  : {mean_reverting}")
+print(f"No-edge (skip)       : {random_walk}")
+```
+
+**Rolling regime tracking — detecting regime shifts over time:**
+
+```python
+from standard_quant_tools.agent.tools import run_hurst_analysis
+from standard_quant_tools.agent.models import HurstInput
+
+# Run with rolling_window to see how the regime has evolved
+result = run_hurst_analysis(HurstInput(
+    symbol="SPY",
+    start_date="2019-01-01",
+    end_date="2024-01-01",
+    method="dfa",
+    rolling_window=252,      # 1-year rolling window, slides bar by bar
+))
+
+print(f"Full-period Hurst : {result.hurst:.4f}  ({result.regime})")
+print(f"Most recent roll  : {result.rolling_current:.4f}")
+print()
+
+fracs = result.rolling_regime_fractions
+print("Rolling regime history:")
+print(f"  Trending       {fracs['trending']:.0%}  of windows")
+print(f"  Random walk    {fracs['random_walk']:.0%}  of windows")
+print(f"  Mean-reverting {fracs['mean_reverting']:.0%}  of windows")
+
+# Interpreting the fractions:
+# If trending > 50%: the asset has historically behaved as a trend-follower's market.
+# If mean_reverting > 50%: it has spent most time in a mean-reverting regime.
+# If no bucket > 40%: regime has been unstable — strategies must be adaptive.
+
+# Alert: if the current rolling regime differs from the historical majority
+dominant = max(fracs, key=fracs.get)
+current_regime = (
+    "trending" if result.rolling_current > 0.55 else
+    "mean_reverting" if result.rolling_current < 0.45 else
+    "random_walk"
+)
+if current_regime != dominant:
+    print(f"\n⚠  Regime shift detected: historical={dominant}, current={current_regime}")
+    print("   Consider re-evaluating strategy allocation.")
+else:
+    print(f"\n✓ Regime is consistent with historical behaviour ({dominant})")
+```
+
+**Strategy selection matrix by Hurst regime:**
+
+```python
+# Reference table: map regime → recommended strategy class
+REGIME_PLAYBOOK = {
+    "trending": {
+        "strategies": ["SMA crossover", "MACD crossover", "Parabolic SAR trailing stop"],
+        "avoid":      ["RSI mean-reversion", "Bollinger Band reversion"],
+        "sizing_note": "Use wider stops (ATR × 2–3) — trends can retrace before continuing",
+        "example_params": {"sma_fast": 10, "sma_slow": 50},
+    },
+    "random_walk": {
+        "strategies": ["MACD crossover (short-term)", "Volatility breakout"],
+        "avoid":      ["Long-hold trend systems", "Tight-stop mean-reversion"],
+        "sizing_note": "No statistical edge — size down 30–50% vs normal or skip entirely",
+        "example_params": {"macd_fast": 12, "macd_slow": 26, "macd_signal": 9},
+    },
+    "mean_reverting": {
+        "strategies": ["RSI oversold/overbought", "Bollinger Band reversion", "Pairs / spread trading"],
+        "avoid":      ["Long SMA crossover systems", "Momentum following"],
+        "sizing_note": "Use tighter entry z-scores (±1.5–2 σ) and scale in over 2–3 entries",
+        "example_params": {"rsi_period": 14, "oversold": 30, "overbought": 70},
+    },
+}
+
+from standard_quant_tools.agent.tools import run_hurst_analysis
+from standard_quant_tools.agent.models import HurstInput
+
+h = run_hurst_analysis(HurstInput(symbol="NVDA", start_date="2022-01-01", end_date="2024-01-01"))
+playbook = REGIME_PLAYBOOK[h.regime]
+
+print(f"NVDA  H={h.hurst:.3f}  →  {h.regime.upper()} regime")
+print(f"Recommended  : {', '.join(playbook['strategies'])}")
+print(f"Avoid        : {', '.join(playbook['avoid'])}")
+print(f"Sizing note  : {playbook['sizing_note']}")
+print(f"Example params: {playbook['example_params']}")
 ```
 
 ---
