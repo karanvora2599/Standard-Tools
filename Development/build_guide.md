@@ -172,17 +172,18 @@ the compiled extension are automatically skipped when it is not built.
 ```
 pytest tests/test_cpp_hurst.py -v           # Hurst + rolling Hurst
 pytest tests/test_cpp_indicators.py -v      # RSI, ADX, Parabolic SAR, Wilder's ATR
-pytest tests/test_cpp_cointegration.py -v   # Engle-Granger cointegration
+pytest tests/test_cpp_cointegration.py -v   # Engle-Granger cointegration + OLS
+pytest tests/test_cpp_backtest.py -v        # run_strategy backtest kernel
 ```
 
-Or run all three at once:
+Or run all four at once:
 
 ```
-pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_cointegration.py -v
+pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py -v
 ```
 
-Once the extension is built all skipped tests activate (82 total — 28 Hurst,
-24 indicators, 20 cointegration, 10 OLS C++ binding tests).
+Once the extension is built all skipped tests activate (96 total — 28 Hurst,
+24 indicators, 20 cointegration, 10 OLS, 14 backtest C++ binding tests).
 
 ### C++ unit tests
 
@@ -201,11 +202,13 @@ Or run each binary directly:
 build\tests\cpp\Release\test_hurst.exe
 build\tests\cpp\Release\test_indicators.exe
 build\tests\cpp\Release\test_cointegration.exe
+build\tests\cpp\Release\test_backtest.exe
 
 # Windows (Ninja) / Linux / macOS
 ./build/tests/cpp/test_hurst
 ./build/tests/cpp/test_indicators
 ./build/tests/cpp/test_cointegration
+./build/tests/cpp/test_backtest
 ```
 
 Expected output for each:
@@ -214,6 +217,7 @@ Expected output for each:
 19 / 19 tests passed.   ← test_hurst
 24 / 24 tests passed.   ← test_indicators
 18 / 18 tests passed.   ← test_cointegration
+17 / 17 tests passed.   ← test_backtest
 ```
 
 ---
@@ -248,23 +252,27 @@ Standard Tools/
 │           ├── CMakeLists.txt               ← Extension build rules
 │           ├── include/sqt/
 │           │   ├── hurst.hpp                ← Hurst exponent API
-│           │   ├── indicators.hpp           ← RSI / ADX / Parabolic SAR API
-│           │   └── cointegration.hpp        ← OLS / ADF / Engle-Granger API
+│           │   ├── indicators.hpp           ← RSI / ADX / Parabolic SAR / Wilder ATR API
+│           │   ├── cointegration.hpp        ← OLS / ADF / Engle-Granger API
+│           │   └── backtest.hpp             ← run_strategy kernel API
 │           ├── src/
 │           │   ├── hurst.cpp                ← Hurst implementation
-│           │   ├── indicators.cpp           ← RSI / ADX / PSAR implementation
-│           │   └── cointegration.cpp        ← OLS / ADF / cointegration implementation
+│           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR implementation
+│           │   ├── cointegration.cpp        ← OLS / ADF / cointegration implementation
+│           │   └── backtest.cpp             ← backtest kernel implementation
 │           └── bindings/
 │               └── bindings.cpp             ← pybind11 module definition (all features)
 └── tests/
     ├── test_cpp_hurst.py                    ← Python integration tests (Hurst)
-    ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR)
-    ├── test_cpp_cointegration.py            ← Python integration tests (cointegration)
+    ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR/ATR)
+    ├── test_cpp_cointegration.py            ← Python integration tests (cointegration+OLS)
+    ├── test_cpp_backtest.py                 ← Python integration tests (backtest kernel)
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
         ├── test_hurst.cpp                   ← 19 C++ unit tests (no framework needed)
-        ├── test_indicators.cpp              ← 16 C++ unit tests
-        └── test_cointegration.cpp           ← 18 C++ unit tests
+        ├── test_indicators.cpp              ← 24 C++ unit tests
+        ├── test_cointegration.cpp           ← 18 C++ unit tests
+        └── test_backtest.cpp                ← 17 C++ unit tests
 ```
 
 ---
@@ -280,6 +288,7 @@ Standard Tools/
 | Wilder's ATR (SMA seed + Wilder's smooth) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | `cointegration.hpp` | `cointegration.cpp` | `analysis/regression.py`, `analysis/cointegration.py` |
 | Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
+| Backtest kernel (`run_strategy` — returns, equity, all metrics, trade stats) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
 
 All Python callers follow the same guard pattern:
 

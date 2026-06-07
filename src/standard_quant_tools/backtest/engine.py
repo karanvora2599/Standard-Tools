@@ -12,6 +12,16 @@ from standard_quant_tools.metrics.risk_metrics import (
 )
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 
+# ── Optional C++ fast path ────────────────────────────────────────────────────
+from typing import Any as _Any
+_cpp_core: _Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    HAS_CPP = True
+except ImportError:
+    pass
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal helpers
@@ -118,6 +128,32 @@ def run_strategy(
     returns = prices.pct_change().fillna(0.0)
     executed = signals.shift(1).fillna(0.0)
 
+    # ── C++ fast path ─────────────────────────────────────────────────────────
+    if HAS_CPP and _cpp_core is not None:
+        prices_arr = prices.to_numpy(dtype=np.float64)
+        exec_arr   = executed.to_numpy(dtype=np.float64)
+        r = _cpp_core.run_strategy(prices_arr, exec_arr,
+                                   initial_capital, commission_pct, slippage_pct)
+        equity_curve = pd.Series(r["equity_curve"], index=idx)
+        result: Dict[str, Any] = {
+            "final_equity":          round(float(r["final_equity"]),         2),
+            "total_return":          round(float(r["total_return"]),          6),
+            "annualized_volatility": round(float(r["annualized_volatility"]), 6),
+            "sharpe_ratio":          round(float(r["sharpe_ratio"]),          4),
+            "sortino_ratio":         round(float(r["sortino_ratio"]),         4),
+            "max_drawdown":          round(float(r["max_drawdown"]),          6),
+            "calmar_ratio":          round(float(r["calmar_ratio"]),          4),
+            "equity_curve":          equity_curve,
+            "win_rate":              round(float(r["win_rate"]),              4),
+            "profit_factor":         round(float(r["profit_factor"]),         4),
+            "num_trades":            int(r["num_trades"]),
+            "avg_trade_return_pct":  round(float(r["avg_trade_return_pct"]), 4),
+        }
+        if include_trade_log:
+            result["trade_log"] = _build_trade_log(prices, executed)
+        return result
+
+    # ── Python fallback ───────────────────────────────────────────────────────
     cost_per_unit = commission_pct + slippage_pct
     pos_diff = executed.diff().fillna(executed.iloc[0])
     transaction_costs = pos_diff.abs() * cost_per_unit
@@ -133,7 +169,7 @@ def run_strategy(
     cal = calmar_ratio(equity_curve)
     final_eq = float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital
 
-    result: Dict[str, Any] = {
+    result = {
         "final_equity": round(final_eq, 2),
         "total_return": round(total_ret, 6),
         "annualized_volatility": round(annual_vol, 6),

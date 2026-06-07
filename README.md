@@ -4,7 +4,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 ## Key Features
 
-- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 17 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
@@ -388,6 +388,8 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 | `cointegration_test` (n = 500) | ~5–20 ms (statsmodels) | ~0.3–2 ms | **5–15×** |
 | `calculate_beta` (n = 500) | ~0.3–0.8 ms (`lstsq`) | ~0.01–0.03 ms | **10–20×** |
 | `half_life` (n = 500) | ~0.2–0.5 ms (`lstsq`) | ~0.008–0.02 ms | **10–20×** |
+| `run_strategy` (n = 2 000) | ~1–3 ms (pandas) | ~0.1–0.4 ms | **3–8×** |
+| `backtest_grid` (100 combos) | ~100–300 ms | ~10–40 ms | **5–10×** |
 
 The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop.
 
@@ -456,7 +458,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**602 Python unit tests** (520 passing; 82 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **61 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration)
+**625 Python unit tests** (529 passing; 96 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest)
 
 ---
 

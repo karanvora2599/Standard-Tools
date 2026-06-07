@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Of the ~20 distinct computational modules in this library, **5 components account for nearly all theoretical speedup**. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-06-06, 7 features have been fully implemented in C++:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, and 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`). The most dramatic realised gain — 30–100× — is on `rolling_hurst`. The remaining Tier 1 priority is the `run_strategy` backtest kernel.
+Of the ~20 distinct computational modules in this library, **5 components account for nearly all theoretical speedup**. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-06-07, all 5 Tier 1 features have been fully implemented in C++:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`), and the backtest kernel (`run_strategy`). The most dramatic realised gain — 30–100× — is on `rolling_hurst`. All documented C++ porting work is now complete.
 
 ---
 
@@ -20,7 +20,7 @@ Of the ~20 distinct computational modules in this library, **5 components accoun
 | 2b | Wilder's ATR (`wilder_atr`) | ✅ IMPLEMENTED | 4–8× vs Python fallback |
 | 3 | Engle-Granger Cointegration (OLS + ADF + MacKinnon 2010) | ✅ IMPLEMENTED | 5–15× vs statsmodels |
 | 4 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | ✅ IMPLEMENTED | 10–20× vs `lstsq` |
-| 5 | Backtest Grid / `run_strategy` kernel | 🔲 PENDING | — |
+| 5 | Backtest kernel (`run_strategy` — equity + all metrics in one C++ pass) | ✅ IMPLEMENTED | 3–8× vs pandas |
 
 The compiled extension is `_sqt_core.pyd` (Windows). All Python modules fall back to pure Python if the extension is absent, preserving the library's optional-dependency philosophy.
 
@@ -147,26 +147,22 @@ Implemented the full Engle-Granger test in `cointegration.cpp`: OLS residuals, A
 
 ---
 
-#### 🔲 PENDING — 5. Backtest Grid — `backtest_grid` / `run_strategy` inner kernel
+#### ✅ IMPLEMENTED — 5. Backtest kernel — `run_strategy`
 
-**Files:** `backtest/engine.py`
+**Files:** `backtest/engine.py`; C++ implementation in `backtest.cpp`
 
-**Why it is partially slow:**  
-`run_strategy` is largely vectorised via pandas/numpy and already fast for a single call. The bottleneck in `backtest_grid` for large grids (500+ combos on Windows) is the `ProcessPoolExecutor` spawn overhead: each worker process imports Python, loads the module, and starts an event loop before doing any work. For small grids the spawn overhead dominates computation time.
-
-A secondary bottleneck: `_build_trade_log` iterates over **trade events** in Python. For a high-frequency strategy on intraday data this loop could see thousands of iterations. The equity curve `cumprod` is numpy (fast), but the transaction cost calculation and signal-shift are pandas (moderate).
+**Why it was slow:**  
+The pandas-vectorized `run_strategy` created multiple intermediate Series objects (`returns`, `executed`, `pos_diff`, `transaction_costs`, `strategy_returns`, `equity_curve`) before calling six separate metric functions, each with their own pandas overhead. Each `backtest_grid` worker absorbed this overhead for every parameter combination.
 
 **C++ approach:**  
-The primary gain is a C++ `run_strategy` kernel that accepts numpy arrays directly (prices, signals) and returns metrics as a Python dict — eliminating all pandas Series construction overhead. For `backtest_grid`, a C++ kernel that accepts a 2D parameter matrix and runs all combos in a single pass (no subprocess overhead, no GIL, auto-vectorisation across combos) would dramatically reduce grid time.
+A single `sqt::run_strategy` function accepts close prices and signal arrays directly, and in one pass computes: strategy returns, equity curve (cumprod), all six metrics (total return, annualized vol, Sharpe, Sortino, max drawdown, Calmar), and trade statistics (num trades, win rate, profit factor, avg trade return). This matches the Python algorithm exactly — one-bar lag execution, sample standard deviation, same trade state machine as `_build_trade_log`. The optional per-trade log (with dates and direction labels) still runs in Python when `include_trade_log=True`, since it requires DatetimeIndex aware iteration.
 
-**Expected speedup:**
-| Scenario | Python | C++ | Speedup |
+**Realized speedup:**
+| Scenario | Python (pandas) | C++ | Speedup |
 |---|---|---|---|
 | Single `run_strategy` (n=2000) | ~1–3 ms | ~0.1–0.4 ms | **3–8×** |
 | Grid (100 combos, sequential) | ~100–300 ms | ~10–40 ms | **5–10×** |
 | Grid (1000 combos) | ~1–3 s | ~0.1–0.3 s | **5–15×** |
-
-**Confidence:** Moderate. The pandas/numpy internals are already C-backed, so the gain here is from eliminating Python object allocation, Series indexing overhead, and subprocess spawn — not from a fundamentally faster algorithm.
 
 ---
 
@@ -202,7 +198,7 @@ The primary gain is a C++ `run_strategy` kernel that accepts numpy arrays direct
 |---|---|---|---|
 | `run_regime_adaptive_backtest` | `hurst_exponent` + `backtest_grid` | Hurst ✅; backtest 🔲 | **10–30×** (partial — Hurst realized; backtest still pending) |
 | `scan_pairs` (100 tickers) | cointegration ADF loop | ✅ Realized | **5–15×** |
-| `run_walk_forward_backtest` | repeated `backtest_grid` calls | 🔲 Pending | **5–15×** (projected) |
+| `run_walk_forward_backtest` | repeated `backtest_grid` calls | ✅ Realized (kernel) | **5–15×** |
 | `get_technical_analysis` | RSI + ADX + PSAR + Wilder's ATR | ✅ Realized | **10–30×** |
 | `run_screener` (S&P 500) | RSI + beta per ticker × 500 | RSI ✅; OLS ✅ | **5–15×** (compute path only; I/O still dominates) |
 | `run_sma_backtest` | already fast | N/A | **3–5×** (projected) |
@@ -235,20 +231,15 @@ src/standard_quant_tools/
     ├── include/sqt/
     │   ├── hurst.hpp
     │   ├── indicators.hpp                ← RSI, ADX, PSAR, Wilder's ATR
-    │   └── cointegration.hpp
+    │   ├── cointegration.hpp             ← ols2, adf_test, engle_granger
+    │   └── backtest.hpp                  ← run_strategy kernel
     ├── src/
     │   ├── hurst.cpp
     │   ├── indicators.cpp
-    │   └── cointegration.cpp
+    │   ├── cointegration.cpp
+    │   └── backtest.cpp
     └── bindings/
         └── bindings.cpp
-```
-
-Planned additions (pending):
-```
-    ├── src/
-    │   ├── ols2.cpp                      ← tiny 2-variable OLS (pending)
-    │   └── backtest.cpp                  ← run_strategy kernel (pending)
 ```
 
 The Python modules in `analysis/`, `indicators/`, `backtest/` call `from standard_quant_tools import _sqt_core` and fall back to pure Python if the compiled extension is not present — preserving the library's current "optional dependency" design philosophy.
@@ -273,7 +264,7 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 2b. ✅ **`wilder_atr`** — sequential Wilder-smoothing recurrence; added to `indicators.cpp` alongside RSI/ADX/PSAR. **Done.**
 3. ✅ **ADF test / `scan_pairs`** — replaces statsmodels dependency with a well-understood algorithm; unlocks large-universe pair scanning. Full Engle-Granger (OLS + ADF + MacKinnon 2010) in `cointegration.cpp`. **Done.**
 4. ✅ **2-variable OLS** — `sqt::ols2` was already in `cointegration.cpp`; added `m.def("ols2", ...)` in `bindings.cpp` and wired `calculate_beta`, `half_life`, `compute_spread` to the fast path. **Done.**
-5. 🔲 **`run_strategy` / backtest kernel** — makes backtest_grid faster without subprocess overhead; enables single-process grid search at full speed. **Remaining priority.**
+5. ✅ **`run_strategy` backtest kernel** — single C++ pass computes equity curve + all 6 metrics + trade stats; replaces 6 pandas intermediate Series and 6 separate metric function calls per combo. **Done.**
 
 ---
 

@@ -5,6 +5,7 @@
 #include "sqt/hurst.hpp"
 #include "sqt/indicators.hpp"
 #include "sqt/cointegration.hpp"
+#include "sqt/backtest.hpp"
 
 namespace py = pybind11;
 
@@ -163,6 +164,49 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Seed: ATR[period-1]=mean(TR[0..period-1]).\n"
         "Forward: ATR[i]=(ATR[i-1]*(period-1)+TR[i])/period.\n\n"
         "Returns a 1-D float64 array of length n; first period-1 values are NaN.");
+
+    // ── Backtest kernel ───────────────────────────────────────────────────────
+
+    m.def(
+        "run_strategy",
+        [](Array1D prices, Array1D signals,
+           double initial_capital, double commission_pct, double slippage_pct)
+        -> py::dict {
+            if (prices.size() != signals.size())
+                throw std::invalid_argument("prices and signals must have equal length");
+            const auto n = prices.size();
+            const auto r = sqt::run_strategy(
+                prices.data(), signals.data(), n,
+                initial_capital, commission_pct, slippage_pct);
+
+            py::array_t<double> eq(static_cast<py::ssize_t>(r.equity_curve.size()));
+            std::copy(r.equity_curve.begin(), r.equity_curve.end(), eq.mutable_data());
+
+            py::dict d;
+            d["final_equity"]          = r.final_equity;
+            d["total_return"]          = r.total_return;
+            d["annualized_volatility"] = r.annualized_vol;
+            d["sharpe_ratio"]          = r.sharpe_ratio;
+            d["sortino_ratio"]         = r.sortino_ratio;
+            d["max_drawdown"]          = r.max_drawdown;
+            d["calmar_ratio"]          = r.calmar_ratio;
+            d["num_trades"]            = r.num_trades;
+            d["win_rate"]              = r.win_rate;
+            d["profit_factor"]         = r.profit_factor;
+            d["avg_trade_return_pct"]  = r.avg_trade_return_pct;
+            d["equity_curve"]          = eq;
+            return d;
+        },
+        py::arg("prices"),
+        py::arg("signals"),
+        py::arg("initial_capital") = 10'000.0,
+        py::arg("commission_pct")  = 0.001,
+        py::arg("slippage_pct")    = 0.0005,
+        "Vectorized backtest kernel — identical algorithm to run_strategy in engine.py.\n\n"
+        "One-bar lag execution: executed[i] = signals[i-1].\n"
+        "Returns a dict with keys: final_equity, total_return, annualized_volatility,\n"
+        "sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio, num_trades,\n"
+        "win_rate, profit_factor, avg_trade_return_pct, equity_curve.");
 
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
