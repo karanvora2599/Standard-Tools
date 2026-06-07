@@ -33,6 +33,10 @@ from standard_quant_tools.analysis.cointegration import (
     compute_spread,
     half_life,
 )
+from standard_quant_tools.analysis.regression import (
+    HAS_CPP as REG_HAS_CPP,
+    calculate_beta,
+)
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -320,3 +324,94 @@ class TestCppVsStatsmodels:
     def test_wrapper_routes_to_cpp(self):
         # When C++ is built, the wrapper should use it (COINT_HAS_CPP = True)
         assert COINT_HAS_CPP is True
+
+
+# ── C++ ols2 binding tests ────────────────────────────────────────────────────
+
+class TestCppOls2Direct:
+    """Direct calls to _sqt_core.ols2 — bypasses the Python wrapper."""
+
+    @requires_cpp
+    def test_returns_dict_with_required_keys(self):
+        y = np.array([5.0, 7.0, 9.0, 11.0, 13.0])
+        x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        r = _cpp.ols2(y, x)
+        assert set(r.keys()) == {"intercept", "slope", "r_squared"}
+
+    @requires_cpp
+    def test_perfect_linear_fit(self):
+        # y = 3 + 2*x → intercept=3, slope=2, R²=1
+        x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        y = 3.0 + 2.0 * x
+        r = _cpp.ols2(y, x)
+        assert abs(r["intercept"] - 3.0) < 1e-9
+        assert abs(r["slope"] - 2.0) < 1e-9
+        assert abs(r["r_squared"] - 1.0) < 1e-9
+
+    @requires_cpp
+    def test_matches_numpy_lstsq(self):
+        rng = np.random.default_rng(7)
+        x = rng.standard_normal(200)
+        y = 0.5 + 1.3 * x + rng.standard_normal(200) * 0.2
+        r_cpp = _cpp.ols2(y, x)
+        X = np.column_stack([np.ones(len(x)), x])
+        beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+        assert abs(r_cpp["intercept"] - beta[0]) < 1e-8
+        assert abs(r_cpp["slope"] - beta[1]) < 1e-8
+
+    @requires_cpp
+    def test_r_squared_in_unit_interval(self):
+        rng = np.random.default_rng(13)
+        x = rng.standard_normal(100)
+        y = 2.0 * x + rng.standard_normal(100) * 3.0
+        r = _cpp.ols2(y, x)
+        assert 0.0 <= r["r_squared"] <= 1.0
+
+    @requires_cpp
+    def test_mismatched_length_raises(self):
+        y = np.ones(50)
+        x = np.ones(49)
+        with pytest.raises(Exception):
+            _cpp.ols2(y, x)
+
+    @requires_cpp
+    def test_negative_slope(self):
+        x = np.linspace(0, 10, 50)
+        y = 5.0 - 1.5 * x
+        r = _cpp.ols2(y, x)
+        assert r["slope"] < 0.0
+        assert abs(r["slope"] - (-1.5)) < 1e-9
+
+    @requires_cpp
+    def test_calculate_beta_routes_to_cpp(self):
+        assert REG_HAS_CPP is True
+
+    @requires_cpp
+    def test_calculate_beta_matches_lstsq(self):
+        rng = np.random.default_rng(99)
+        bm = pd.Series(rng.standard_normal(300), index=pd.date_range("2020-01-01", periods=300))
+        asset = pd.Series(1.2 * bm.values + rng.standard_normal(300) * 0.1, index=bm.index)
+        r = calculate_beta(asset, bm)
+        assert abs(r["beta"] - 1.2) < 0.05
+        assert 0.0 <= r["r_squared"] <= 1.0
+
+    @requires_cpp
+    def test_half_life_cpp_path(self):
+        # AR(1) with phi=0.8 → half-life ≈ -ln(2)/ln(0.8) ≈ 3.1 bars
+        rng = np.random.default_rng(17)
+        x = np.zeros(500)
+        for i in range(1, 500):
+            x[i] = 0.8 * x[i - 1] + rng.standard_normal()
+        hl = half_life(pd.Series(x))
+        assert 1.0 < hl < 15.0
+
+    @requires_cpp
+    def test_compute_spread_cpp_path(self):
+        rng = np.random.default_rng(23)
+        rw = rng.standard_normal(300).cumsum()
+        y0 = pd.Series(2.0 * rw + rng.standard_normal(300) * 0.05,
+                       index=pd.date_range("2020-01-01", periods=300))
+        y1 = pd.Series(rw, index=pd.date_range("2020-01-01", periods=300))
+        spread = compute_spread(y0, y1)
+        assert len(spread) == 300
+        assert abs(spread.mean()) < 0.5  # spread near zero for cointegrated pair

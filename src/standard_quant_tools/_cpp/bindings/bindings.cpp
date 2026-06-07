@@ -164,6 +164,26 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Forward: ATR[i]=(ATR[i-1]*(period-1)+TR[i])/period.\n\n"
         "Returns a 1-D float64 array of length n; first period-1 values are NaN.");
 
+    // ── 2-variable OLS ────────────────────────────────────────────────────────
+
+    m.def(
+        "ols2",
+        [](Array1D y, Array1D x) -> py::dict {
+            if (y.size() != x.size())
+                throw std::invalid_argument("y and x must have equal length");
+            const auto r = sqt::ols2(y.data(), x.data(), y.size());
+            py::dict d;
+            d["intercept"] = r.intercept;
+            d["slope"]     = r.slope;
+            d["r_squared"] = r.r_squared;
+            return d;
+        },
+        py::arg("y"),
+        py::arg("x"),
+        "2-variable OLS: y = intercept + slope * x.\n\n"
+        "Closed-form normal equations — avoids LAPACK for this 2×2 system.\n"
+        "Returns a dict with keys: intercept, slope, r_squared.");
+
     // ── Engle-Granger cointegration ───────────────────────────────────────────
 
     m.def(

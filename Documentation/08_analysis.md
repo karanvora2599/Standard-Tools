@@ -1,9 +1,10 @@
 # Analysis
 
-The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. Two modules have optional **C++ fast paths** via the `_sqt_core` extension:
+The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
 
 - **Hurst exponent** — 20–80× faster (DFA/R-S); 30–100× for rolling Hurst. Pure-Python fallback is automatic when the extension is not built.
 - **Cointegration** — 5–15× faster (Engle-Granger OLS + ADF + MacKinnon 2010); replaces the statsmodels dependency entirely when built.
+- **`calculate_beta`, `half_life`, `compute_spread`** — 10–20× faster (2-variable OLS via closed-form normal equations, avoids LAPACK `lstsq` overhead).
 
 `scipy` is used for precise p-values in `multi_factor_regression` when available and falls back gracefully to a `math.erf`-based normal approximation otherwise.
 

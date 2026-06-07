@@ -127,9 +127,13 @@ def compute_spread(
     b = series_b.loc[common_idx].to_numpy(dtype=float)
 
     if hedge_ratio is None:
-        X = np.column_stack([np.ones(len(a)), b])
-        beta, *_ = np.linalg.lstsq(X, a, rcond=None)
-        spread_vals = a - beta[0] - beta[1] * b
+        if HAS_CPP and _cpp_core is not None:
+            r = _cpp_core.ols2(a, b)
+            spread_vals = a - r["intercept"] - r["slope"] * b
+        else:
+            X = np.column_stack([np.ones(len(a)), b])
+            beta, *_ = np.linalg.lstsq(X, a, rcond=None)
+            spread_vals = a - beta[0] - beta[1] * b
     else:
         spread_vals = a - hedge_ratio * b
 
@@ -155,10 +159,14 @@ def half_life(spread: pd.Series) -> float:
     if len(y) < 3:
         return float("inf")
 
-    X = np.column_stack([np.ones(len(y)), x])
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    if HAS_CPP and _cpp_core is not None:
+        r = _cpp_core.ols2(y, x)
+        ar_coeff = r["slope"]
+    else:
+        X = np.column_stack([np.ones(len(y)), x])
+        beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+        ar_coeff = float(beta[1])
 
-    ar_coeff = float(beta[1])
     if ar_coeff >= 0:
         return float("inf")
 

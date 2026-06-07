@@ -4,7 +4,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 ## Key Features
 
-- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; vectorized backtesting engine; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 17 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
@@ -132,7 +132,11 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 
 ### Analysis (`standard_quant_tools.analysis`)
 
-10 functions across four areas. The Engle-Granger cointegration test has a **C++ fast path** (`_sqt_core`) — 5–15× faster than statsmodels, no R or SciPy dependency. All other functions are pure NumPy / Pandas.
+10 functions across four areas. Several functions have a **C++ fast path** via `_sqt_core`:
+- `calculate_beta` — 2-variable OLS via closed-form normal equations (10–20× vs. `np.linalg.lstsq`)
+- `half_life` / `compute_spread` — same OLS kernel, same speedup
+- `cointegration_test` — full Engle-Granger pipeline (5–15× vs. statsmodels)
+- `hurst_exponent` / `rolling_hurst` — DFA + R/S + sliding window (20–80× / 30–100×)
 
 #### Regression
 
@@ -382,6 +386,8 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 | `parabolic_sar` (n = 2 000) | ~0.5–2 ms | ~0.02–0.1 ms | **10–30×** |
 | `wilder_atr` (n = 2 000, period = 14) | ~0.5–2 ms | ~0.05–0.2 ms | **4–8×** |
 | `cointegration_test` (n = 500) | ~5–20 ms (statsmodels) | ~0.3–2 ms | **5–15×** |
+| `calculate_beta` (n = 500) | ~0.3–0.8 ms (`lstsq`) | ~0.01–0.03 ms | **10–20×** |
+| `half_life` (n = 500) | ~0.2–0.5 ms (`lstsq`) | ~0.008–0.02 ms | **10–20×** |
 
 The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop.
 
@@ -450,7 +456,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**592 Python unit tests** (520 passing; 72 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **61 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration)
+**602 Python unit tests** (520 passing; 82 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **61 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration)
 
 ---
 

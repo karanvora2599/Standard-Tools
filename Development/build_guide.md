@@ -181,8 +181,8 @@ Or run all three at once:
 pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_cointegration.py -v
 ```
 
-Once the extension is built all skipped tests activate (72 total — 28 Hurst,
-24 indicators, 20 cointegration C++ binding tests).
+Once the extension is built all skipped tests activate (82 total — 28 Hurst,
+24 indicators, 20 cointegration, 10 OLS C++ binding tests).
 
 ### C++ unit tests
 
@@ -278,6 +278,7 @@ Standard Tools/
 | ADX + DI+/DI− | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
 | Parabolic SAR | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
 | Wilder's ATR (SMA seed + Wilder's smooth) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
+| 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | `cointegration.hpp` | `cointegration.cpp` | `analysis/regression.py`, `analysis/cointegration.py` |
 | Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 
 All Python callers follow the same guard pattern:

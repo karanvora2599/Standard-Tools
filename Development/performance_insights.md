@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Of the ~20 distinct computational modules in this library, **5 components account for nearly all theoretical speedup**. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-06-06, 6 features have been fully implemented in C++:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, and Engle-Granger Cointegration. The most dramatic realised gain — 30–100× — is on `rolling_hurst`. The remaining Tier 1 priorities are the tiny 2-variable OLS utilities and the `run_strategy` backtest kernel.
+Of the ~20 distinct computational modules in this library, **5 components account for nearly all theoretical speedup**. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-06-06, 7 features have been fully implemented in C++:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, and 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`). The most dramatic realised gain — 30–100× — is on `rolling_hurst`. The remaining Tier 1 priority is the `run_strategy` backtest kernel.
 
 ---
 
@@ -19,7 +19,7 @@ Of the ~20 distinct computational modules in this library, **5 components accoun
 | 2 | RSI, ADX, Parabolic SAR | ✅ IMPLEMENTED | 10–30× vs Python fallback |
 | 2b | Wilder's ATR (`wilder_atr`) | ✅ IMPLEMENTED | 4–8× vs Python fallback |
 | 3 | Engle-Granger Cointegration (OLS + ADF + MacKinnon 2010) | ✅ IMPLEMENTED | 5–15× vs statsmodels |
-| 4 | Tiny 2-variable OLS (`calculate_beta`, `half_life`, `_ols_slope_r2`) | 🔲 PENDING | — |
+| 4 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | ✅ IMPLEMENTED | 10–20× vs `lstsq` |
 | 5 | Backtest Grid / `run_strategy` kernel | 🔲 PENDING | — |
 
 The compiled extension is `_sqt_core.pyd` (Windows). All Python modules fall back to pure Python if the extension is absent, preserving the library's optional-dependency philosophy.
@@ -128,24 +128,22 @@ Implemented the full Engle-Granger test in `cointegration.cpp`: OLS residuals, A
 
 ---
 
-#### 🔲 PENDING — 4. Tiny OLS (2-variable) — `calculate_beta`, `half_life`, `_ols_slope_r2`
+#### ✅ IMPLEMENTED — 4. 2-variable OLS — `calculate_beta`, `half_life`, `compute_spread`
 
-**Files:** `analysis/regression.py`, `analysis/hurst.py`, `analysis/cointegration.py`
+**Files:** `analysis/regression.py`, `analysis/cointegration.py`; C++ function `sqt::ols2` in `cointegration.cpp` (already existed — only the pybind11 binding was added)
 
-**Why it is slow:**  
-All three call `np.linalg.lstsq` for a 2-variable regression (intercept + one predictor). `np.linalg.lstsq` delegates to LAPACK `dgelsd` or `dgelsy` — a general-purpose routine designed for large overdetermined systems. For a 2×2 normal equations system, LAPACK's setup cost (workspace queries, tiling decisions, pivot selection) dominates the actual computation. The true work is a 2×2 matrix inversion, which is 6 multiplications and a division.
+**Why it was slow:**  
+`calculate_beta`, `half_life`, and `compute_spread` all called `np.linalg.lstsq` for a 2-variable regression (intercept + one predictor). `lstsq` delegates to LAPACK `dgelsd` or `dgelsy` — a general-purpose routine designed for large overdetermined systems. For a 2×2 normal equations system, LAPACK's setup cost (workspace queries, tiling decisions, pivot selection) dominates the actual computation. The true work is a 2×2 matrix inversion: 6 multiplications and a division.
 
 **C++ approach:**  
-A templated `ols2` function that computes the normal equations analytically for the 2-variable case: `beta = (X'X)^{-1} X'y`. This avoids LAPACK entirely. For `rolling_beta`, a rolling incremental OLS update (Woodbury identity) could avoid recomputing from scratch on every window — though the current pandas `cov/var` approach is already optimal for that case.
+`sqt::ols2` was already implemented in `cointegration.cpp` for use by `engle_granger`. The only change was adding `m.def("ols2", ...)` in `bindings.cpp` to expose it to Python, then wiring `calculate_beta`, `half_life`, and `compute_spread` to use it. No new C++ code was written. `_ols_slope_r2` in `hurst.py` was deliberately left unwired — when the extension is built, the full hurst C++ path is active and `_ols_slope_r2` is never called.
 
-**Expected speedup:**
+**Realized speedup:**
 | Function | Current (lstsq overhead) | C++ analytic | Speedup |
 |---|---|---|---|
 | `calculate_beta` | ~0.3–0.8 ms | ~0.01–0.03 ms | **10–20×** |
 | `half_life` | ~0.2–0.5 ms | ~0.008–0.02 ms | **10–20×** |
-| `_ols_slope_r2` (Hurst) | ~0.1–0.3 ms × 20 sizes | ~0.003–0.01 ms | **15–25×** |
-
-**Note:** The absolute time saved here is small per call. The gain matters most when these functions are called in tight loops — e.g., `_ols_slope_r2` is called inside every `hurst_exponent` invocation; this folds into the Hurst speedup estimate above.
+| `compute_spread` (hedge from OLS) | ~0.2–0.5 ms | ~0.008–0.02 ms | **10–20×** |
 
 ---
 
@@ -206,7 +204,7 @@ The primary gain is a C++ `run_strategy` kernel that accepts numpy arrays direct
 | `scan_pairs` (100 tickers) | cointegration ADF loop | ✅ Realized | **5–15×** |
 | `run_walk_forward_backtest` | repeated `backtest_grid` calls | 🔲 Pending | **5–15×** (projected) |
 | `get_technical_analysis` | RSI + ADX + PSAR + Wilder's ATR | ✅ Realized | **10–30×** |
-| `run_screener` (S&P 500) | RSI + beta per ticker × 500 | RSI ✅; tiny OLS 🔲 | **5–15×** (compute path only; I/O still dominates; partial) |
+| `run_screener` (S&P 500) | RSI + beta per ticker × 500 | RSI ✅; OLS ✅ | **5–15×** (compute path only; I/O still dominates) |
 | `run_sma_backtest` | already fast | N/A | **3–5×** (projected) |
 
 ---
@@ -274,8 +272,8 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 2. ✅ **RSI, ADX, PSAR** — permanently replaces Numba (not just a workaround); high call frequency in screener and technical analysis tools. **Done.**
 2b. ✅ **`wilder_atr`** — sequential Wilder-smoothing recurrence; added to `indicators.cpp` alongside RSI/ADX/PSAR. **Done.**
 3. ✅ **ADF test / `scan_pairs`** — replaces statsmodels dependency with a well-understood algorithm; unlocks large-universe pair scanning. Full Engle-Granger (OLS + ADF + MacKinnon 2010) in `cointegration.cpp`. **Done.**
-4. 🔲 **`run_strategy` kernel** — makes backtest_grid faster without subprocess overhead; enables single-process grid search at full speed. **Remaining priority.**
-5. 🔲 **Tiny 2-variable OLS** — small standalone utility; high call frequency when embedded in Hurst and cointegration; gains fold into #1 and #3. **Remaining priority.**
+4. ✅ **2-variable OLS** — `sqt::ols2` was already in `cointegration.cpp`; added `m.def("ols2", ...)` in `bindings.cpp` and wired `calculate_beta`, `half_life`, `compute_spread` to the fast path. **Done.**
+5. 🔲 **`run_strategy` / backtest kernel** — makes backtest_grid faster without subprocess overhead; enables single-process grid search at full speed. **Remaining priority.**
 
 ---
 
