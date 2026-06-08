@@ -1,0 +1,51 @@
+name: C++ Build
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "src/standard_quant_tools/_cpp/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/build-cpp.yml"
+  pull_request:
+    paths:
+      - "src/standard_quant_tools/_cpp/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/build-cpp.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: C++ extension (ubuntu)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y cmake build-essential
+
+      - name: Install Python dependencies
+        run: |
+          pip install flit_core pybind11
+          pip install -e ".[test]"
+
+      - name: Build C++ extension
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel $(nproc)
+
+      - name: Verify extension loaded
+        run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
+
+      - name: Run all tests with C++ path active
+        # Includes benchmark tests now that the extension is built
+        run: |
+          pytest -m "not integration and not slow" \
+            --tb=short -q -s
