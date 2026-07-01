@@ -1,7 +1,10 @@
+import logging
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def pca_returns(
@@ -39,6 +42,8 @@ def pca_returns(
     """
     data = returns_df.dropna()
     n_obs, n_assets = data.shape
+    logger.debug("[pca] assets=%d  obs=%d  n_components=%s  standardize=%s",
+                 n_assets, n_obs, n_components, standardize)
 
     if n_obs < 2 or n_assets < 1:
         raise ValueError(
@@ -87,6 +92,9 @@ def pca_returns(
 
     evr_series = pd.Series(evr[:n_comp], index=comp_names, name="explained_variance_ratio")
     cumvar_series = evr_series.cumsum().rename("cumulative_variance_ratio")
+
+    evr_strs = "  ".join(f"{k}={v:.3f}" for k, v in evr_series.items())
+    logger.debug("[pca] EVR: %s  (cumulative=%.3f)", evr_strs, float(cumvar_series.iloc[-1]))
 
     return {
         "explained_variance_ratio": evr_series,

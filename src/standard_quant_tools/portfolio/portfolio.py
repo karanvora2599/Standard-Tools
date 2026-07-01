@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from typing import Dict, List, Optional, Union, Any
 import pandas as pd
 import numpy as np
+
+logger = logging.getLogger(__name__)
 from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio,
     var_historical, cvar, information_ratio
@@ -25,6 +28,8 @@ def build_portfolio(
         pd.Series of daily portfolio returns.
     """
     w = np.asarray(weights, dtype=np.float64)
+    logger.debug("[portfolio] build  assets=%d  weights=%s  weight_sum=%.4f",
+                 returns_df.shape[1], [round(float(x), 4) for x in w], float(w.sum()))
     if len(w) != returns_df.shape[1]:
         raise ValidationError(
             f"weights length ({len(w)}) must match number of tickers ({returns_df.shape[1]})"
@@ -83,6 +88,9 @@ def portfolio_metrics(
             information_ratio(port_returns, benchmark_returns, periods_per_year), 4
         )
 
+    logger.debug("[portfolio] metrics  return=%.2f%%  vol=%.2f%%  sharpe=%.3f  sortino=%.3f  maxdd=%.2f%%",
+                 metrics["annualized_return"] * 100, metrics["annualized_volatility"] * 100,
+                 metrics["sharpe_ratio"], metrics["sortino_ratio"], metrics["max_drawdown"] * 100)
     return metrics
 
 

@@ -79,6 +79,9 @@ def _run_backtest(
     signal_series: pd.Series,
 ) -> BacktestResult:
     """Shared backtest execution used by all strategy-specific tools."""
+    logger.debug("[backtest] %s  %s  %s → %s  capital=%.0f",
+                 input_data.strategy_type, input_data.symbol,
+                 input_data.start_date, input_data.end_date, input_data.initial_capital)
     results = run_strategy(
         df, signal_series, input_data.initial_capital,
         commission_pct=input_data.commission_pct,
@@ -101,7 +104,7 @@ def _run_backtest(
             for r in trade_log_raw.to_dict(orient="records")
         ]
 
-    return BacktestResult(
+    bt = BacktestResult(
         total_return=results["total_return"],
         annualized_volatility=results["annualized_volatility"],
         sharpe_ratio=results["sharpe_ratio"],
@@ -116,6 +119,10 @@ def _run_backtest(
         equity_curve=results["equity_curve"].tolist(),
         trade_log=trades,
     )
+    logger.debug("[backtest] result  return=%.2f%%  sharpe=%.3f  maxdd=%.2f%%  trades=%d  win=%.0f%%",
+                 bt.total_return * 100, bt.sharpe_ratio, bt.max_drawdown * 100,
+                 bt.num_trades, bt.win_rate * 100)
+    return bt
 
 
 def run_sma_backtest(input_data: BacktestInput) -> BacktestResult:
@@ -174,6 +181,8 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
     Returns results sorted by sort_by (best first).
     Use this instead of calling the four backtest tools individually.
     """
+    logger.debug("[compare_strategies] %s  %s → %s  sort_by=%s",
+                 input_data.symbol, input_data.start_date, input_data.end_date, input_data.sort_by)
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
 
@@ -230,6 +239,9 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
         key=lambda c: getattr(c, input_data.sort_by, 0.0),
         reverse=True,
     )
+    logger.debug("[compare_strategies] winner=%s  sharpe=%.3f  return=%.2f%%  vs B&H=%.2f%%",
+                 comparisons[0].strategy, comparisons[0].sharpe_ratio,
+                 comparisons[0].total_return * 100, bh.total_return * 100)
 
     return CompareStrategiesResult(
         symbol=input_data.symbol,
@@ -246,6 +258,7 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
 
 def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
     """Full risk profile: alpha, beta, Sharpe, Sortino, VaR, CVaR, Information Ratio."""
+    logger.debug("[analyze_risk] %s  vs %s  period=%s", input_data.symbol, input_data.benchmark, input_data.period)
     provider = DataFactory.get_provider()
     end = datetime.datetime.now()
     start = _parse_period(input_data.period)
@@ -259,7 +272,7 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
     beta_metrics = calculate_beta(asset_ret, bench_ret)
     equity_curve = (1 + asset_ret).cumprod()
 
-    return AnalysisResult(
+    result = AnalysisResult(
         symbol=input_data.symbol,
         benchmark=input_data.benchmark,
         alpha=round(beta_metrics["alpha"], 6),
@@ -272,6 +285,9 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
         cvar_95=round(cvar(asset_ret, 0.95), 6),
         information_ratio=round(information_ratio(asset_ret, bench_ret), 4),
     )
+    logger.debug("[analyze_risk] beta=%.4f  alpha=%.6f  sharpe=%.3f  VaR95=%.3f%%  maxdd=%.2f%%",
+                 result.beta, result.alpha, result.sharpe_ratio, result.var_95 * 100, result.max_drawdown * 100)
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -283,6 +299,8 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
     Run a configurable set of indicators and return the last bar's values
     plus simple directional signals.
     """
+    logger.debug("[tech_analysis] %s  %s → %s  indicators=%s",
+                 input_data.symbol, input_data.start_date, input_data.end_date, input_data.indicators)
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
     close = df["Close"]
@@ -397,6 +415,9 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
 
 def get_portfolio_analysis(input_data: PortfolioInput) -> PortfolioResult:
     """Compute portfolio-level metrics with async data fetching."""
+    logger.debug("[portfolio_analysis] tickers=%s  weights=%s  vs %s  %s → %s",
+                 input_data.tickers, [round(w, 4) for w in input_data.weights],
+                 input_data.benchmark, input_data.start_date, input_data.end_date)
     returns_df = fetch_returns_sync(
         input_data.tickers, input_data.start_date, input_data.end_date
     )
@@ -440,6 +461,8 @@ def correlation_matrix_to_dict(returns_df: pd.DataFrame) -> Dict[str, Any]:
 
 def run_screener(input_data: ScreenerInput) -> ScreenerResult:
     """Screen a universe of tickers against fundamental and technical filters."""
+    logger.debug("[screener_tool] universe=%d  filters=%s  sort_by=%s",
+                 len(input_data.tickers), list(input_data.filters.keys()), input_data.sort_by)
     result_df = screen_stocks(
         input_data.tickers,
         input_data.filters,
@@ -466,6 +489,8 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
 
 def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegressionResult:
     """OLS multi-factor regression: alpha, loadings, t-stats, p-values, R²."""
+    logger.debug("[factor_regression] %s  factors=%s  %s → %s",
+                 input_data.symbol, input_data.factor_tickers, input_data.start_date, input_data.end_date)
     provider = DataFactory.get_provider()
     asset_df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
     asset_rets = asset_df["Close"].pct_change().dropna()
@@ -516,6 +541,9 @@ def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegression
 
 def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResult:
     """Engle-Granger cointegration test with hedge ratio, half-life, and a z-score signal."""
+    logger.debug("[cointegration] %s vs %s  %s → %s  z_window=%d",
+                 input_data.symbol_a, input_data.symbol_b,
+                 input_data.start_date, input_data.end_date, input_data.zscore_window)
     provider = DataFactory.get_provider()
     prices_a = provider.get_ohlcv(
         input_data.symbol_a, input_data.start_date, input_data.end_date
@@ -564,6 +592,8 @@ def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResul
 
 def run_pca_analysis(input_data: PCAInput) -> PCAResult:
     """PCA on multi-asset returns: explained variance, loadings, per-asset factor contributions."""
+    logger.debug("[pca_analysis] tickers=%s  n_components=%s  %s → %s",
+                 input_data.tickers, input_data.n_components, input_data.start_date, input_data.end_date)
     provider = DataFactory.get_provider()
     returns = pd.DataFrame({
         t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)["Close"].pct_change()
@@ -603,6 +633,9 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
 
 def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
     """Hurst exponent via DFA or R/S. Optionally includes rolling regime breakdown."""
+    logger.debug("[hurst] %s  %s → %s  method=%s  rolling=%s",
+                 input_data.symbol, input_data.start_date, input_data.end_date,
+                 input_data.method, input_data.rolling_window)
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
     returns = df["Close"].pct_change().dropna()
@@ -693,6 +726,8 @@ def run_regime_adaptive_backtest(input_data: RegimeAdaptiveInput) -> RegimeAdapt
       random_walk   → macd_crossover
     """
     from standard_quant_tools.analysis.hurst import hurst_exponent as _hurst
+    logger.debug("[regime_adaptive] %s  %s → %s  hurst_method=%s",
+                 input_data.symbol, input_data.start_date, input_data.end_date, input_data.hurst_method)
 
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
@@ -750,6 +785,9 @@ def run_regime_adaptive_backtest(input_data: RegimeAdaptiveInput) -> RegimeAdapt
     for vals in param_grid.values():
         n_combos *= len(vals)
 
+    logger.debug("[regime_adaptive] H=%.4f  regime=%s  strategy=%s  best_params=%s  combos=%d",
+                 float(h) if not math.isnan(float(h)) else 0.0,
+                 regime, strategy_name, best_params, n_combos)
     return RegimeAdaptiveResult(
         symbol=input_data.symbol,
         regime=regime,
@@ -777,6 +815,10 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
         compute_spread as _spread,
         spread_zscore as _zscore,
     )
+    n_t = len(input_data.tickers)
+    logger.debug("[scan_pairs] universe=%d  combinations=%d  p_threshold=%.2f  hl_range=[%.0f, %.0f]",
+                 n_t, n_t * (n_t - 1) // 2, input_data.p_value_threshold,
+                 input_data.min_half_life, input_data.max_half_life)
 
     provider = DataFactory.get_provider()
 
@@ -830,6 +872,8 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
 
     passing.sort(key=lambda p: p.half_life_days)
     top = passing[: input_data.max_pairs]
+    logger.debug("[scan_pairs] tested=%d  cointegrated=%d (%.0f%%)  returning=%d",
+                 n_tested, len(passing), 100 * len(passing) / max(n_tested, 1), len(top))
 
     return PairScannerResult(
         n_pairs_tested=n_tested,
@@ -852,6 +896,9 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
     The OOS windows are non-overlapping; the training window slides forward
     by test_bars each step.
     """
+    logger.debug("[walk_forward] %s  strategy=%s  %s → %s  train=%d  test=%d  sort_by=%s",
+                 input_data.symbol, input_data.strategy, input_data.start_date, input_data.end_date,
+                 input_data.train_bars, input_data.test_bars, input_data.sort_by)
     if input_data.strategy not in STRATEGY_REGISTRY:
         raise ValueError(
             f"Unknown strategy '{input_data.strategy}'. "
@@ -934,7 +981,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             "frequency": round(most_common_n / len(windows), 3),
         }
 
-    return WalkForwardResult(
+    result_wf = WalkForwardResult(
         symbol=input_data.symbol,
         strategy=input_data.strategy,
         n_windows=len(windows),
@@ -945,6 +992,10 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         pct_windows_profitable=round(pct_profitable, 4),
         param_stability=param_stability,
     )
+    logger.debug("[walk_forward] windows=%d  avg_OOS_sharpe=%.3f  avg_OOS_return=%.2f%%  profitable=%.0f%%",
+                 result_wf.n_windows, result_wf.avg_oos_sharpe,
+                 result_wf.avg_oos_return * 100, result_wf.pct_windows_profitable * 100)
+    return result_wf
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -960,6 +1011,9 @@ def get_portfolio_risk_attribution(input_data: RiskAttributionInput) -> RiskAttr
     """
     from standard_quant_tools.analysis.pca import pca_returns as _pca
     from standard_quant_tools.analysis.multi_factor import multi_factor_regression as _mfr
+    logger.debug("[risk_attribution] tickers=%s  weights=%s  vs %s  %s → %s",
+                 input_data.tickers, [round(w, 4) for w in input_data.weights],
+                 input_data.benchmark, input_data.start_date, input_data.end_date)
 
     provider = DataFactory.get_provider()
     weights = np.array(input_data.weights, dtype=float)
@@ -1060,6 +1114,9 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     Kelly sizing:      f = (b×p − q) / b  where b = avg_win/avg_loss,
                        p = win_rate, q = 1−win_rate. Half-Kelly is recommended.
     """
+    logger.debug("[position_size] %s  equity=%.0f  risk_pct=%.2f%%  atr_period=%d  atr_mult=%.1f",
+                 input_data.symbol, input_data.account_equity,
+                 input_data.risk_per_trade_pct * 100, input_data.atr_period, input_data.atr_multiplier)
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
 
@@ -1103,6 +1160,9 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     recommended_sizing = "half_kelly" if use_kelly else "fixed_risk"
     _rec_shares: int = (shares_hk or 0) if use_kelly else shares_fr  # type: ignore[assignment]
     recommended_value = _rec_shares * last_close
+    logger.debug("[position_size] close=%.4f  ATR=%.4f  stop=%.4f  sizing=%s  shares=%d  value=%.2f  kelly=%s",
+                 last_close, last_atr, stop_distance, recommended_sizing, _rec_shares,
+                 recommended_value, str(kelly_fraction))
 
     return PositionSizerResult(
         symbol=input_data.symbol,

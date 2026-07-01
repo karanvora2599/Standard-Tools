@@ -1,8 +1,11 @@
+import logging
 import math
 from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 _scipy_stats = None
 try:
@@ -54,6 +57,8 @@ def multi_factor_regression(
 
     n = len(y)
     k = X_f.shape[1] + 1  # +1 for intercept
+    cdf_path = "scipy" if HAS_SCIPY else "math.erf"
+    logger.debug("[multi_factor] factors=%s  n_obs=%d  cdf=%s", factor_names, n, cdf_path)
 
     _nan = float("nan")
     if n < k + 1:
@@ -100,7 +105,7 @@ def multi_factor_regression(
     t_stats = {name: float(t_vals[i]) for i, name in enumerate(all_names)}
     p_values = {name: float(p_vals[i]) for i, name in enumerate(all_names)}
 
-    return {
+    result = {
         "alpha": float(beta[0]),
         "loadings": {name: float(beta[i + 1]) for i, name in enumerate(factor_names)},
         "t_stats": t_stats,
@@ -109,6 +114,10 @@ def multi_factor_regression(
         "adj_r_squared": adj_r_squared,
         "n_obs": n,
     }
+    sig = [f for f in factor_names if p_values.get(f, 1.0) < 0.05]
+    logger.debug("[multi_factor] alpha=%.6f  R²=%.4f  adj_R²=%.4f  significant=%s",
+                 result["alpha"], r_squared, adj_r_squared, sig)
+    return result
 
 
 def rolling_factor_loadings(

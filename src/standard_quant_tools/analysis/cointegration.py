@@ -1,8 +1,11 @@
+import logging
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import coint
+
+logger = logging.getLogger(__name__)
 
 # ── C++ extension (optional fast path) ───────────────────────────────────────
 
@@ -53,6 +56,8 @@ def cointegration_test(
     a_vals = a.to_numpy(dtype=float)
     b_vals = b.to_numpy(dtype=float)
     n = len(a_vals)
+    path = "C++" if (HAS_CPP and _cpp_core is not None) else "statsmodels"
+    logger.debug("[cointegration] n_obs=%d  autolag=%s  path=%s", n, autolag, path)
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
     if HAS_CPP and _cpp_core is not None:
@@ -88,7 +93,7 @@ def cointegration_test(
     spread = pd.Series(a_vals - beta[0] - hedge * b_vals, index=common_idx)
     hl = half_life(spread)
 
-    return {
+    result = {
         "cointegrated": bool(p_val < 0.05),
         "hedge_ratio": hedge,
         "adf_statistic": float(adf_t),
@@ -97,6 +102,9 @@ def cointegration_test(
         "half_life_days": hl,
         "n_obs": n,
     }
+    logger.debug("[cointegration] cointegrated=%s  p=%.4f  hedge=%.4f  half_life=%.1f days",
+                 result["cointegrated"], float(p_val), hedge, hl)
+    return result
 
 
 def compute_spread(

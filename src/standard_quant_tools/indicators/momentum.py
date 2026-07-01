@@ -1,8 +1,11 @@
+import logging
 from typing import Any
 
 import pandas as pd
 import numpy as np
 from standard_quant_tools.validation import validate_series
+
+logger = logging.getLogger(__name__)
 
 _cpp_core: Any = None
 try:
@@ -71,26 +74,34 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
         return pd.Series(dtype=float)
 
     values: np.ndarray = np.asarray(series.values, dtype=np.float64)
+    path = "C++" if (HAS_CPP and _cpp_core is not None) else ("numba" if HAS_NUMBA else "python")
+    logger.debug("[rsi] period=%d  bars=%d  path=%s", period, len(values), path)
 
     if HAS_CPP and _cpp_core is not None:
         rsi_vals = _cpp_core.rsi(values, period)
-        return pd.Series(rsi_vals, index=series.index)
+    else:
+        rsi_vals = _rsi_numba(values, period)
 
-    # _rsi_numba implements Wilder's SMA-seed smoothing. When Numba is
-    # installed it runs JIT-compiled; the dummy @njit makes it plain Python
-    # otherwise — either way the result is correct.
-    rsi_vals = _rsi_numba(values, period)
-    return pd.Series(rsi_vals, index=series.index)
+    result = pd.Series(rsi_vals, index=series.index)
+    valid = result.dropna()
+    if not valid.empty:
+        logger.debug("[rsi] last=%.2f  min=%.2f  max=%.2f", float(valid.iloc[-1]), float(valid.min()), float(valid.max()))
+    return result
 
 @validate_series()
 def stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 14, d_period: int = 3) -> pd.DataFrame:
     """
     Calculate Stochastic Oscillator.
     """
+    logger.debug("[stochastic] k_period=%d  d_period=%d  bars=%d", k_period, d_period, len(close))
     lowest_low = low.rolling(window=k_period).min()
     highest_high = high.rolling(window=k_period).max()
-    
+
     k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
     d = k.rolling(window=d_period).mean()
-    
-    return pd.DataFrame({'Stoch_K': k, 'Stoch_D': d})
+
+    result = pd.DataFrame({'Stoch_K': k, 'Stoch_D': d})
+    valid_k = k.dropna()
+    if not valid_k.empty:
+        logger.debug("[stochastic] K last=%.2f  D last=%.2f", float(valid_k.iloc[-1]), float(d.dropna().iloc[-1]))
+    return result

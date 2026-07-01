@@ -1,6 +1,10 @@
+import logging
 from typing import Optional
 from .base import DataProvider
 from .yfinance_provider import YFinanceProvider
+
+logger = logging.getLogger(__name__)
+
 
 class DataFactory:
     """
@@ -23,7 +27,8 @@ class DataFactory:
             ValueError: If the source is unknown.
         """
         source = source.lower()
-        
+        logger.debug("[factory] provider=%s", source)
+
         if source == "yfinance":
             return YFinanceProvider()
         elif source == "alpaca":

@@ -1,7 +1,10 @@
+import logging
 import pandas as pd
 import numpy as np
 from typing import Optional
 from standard_quant_tools.validation import validate_series
+
+logger = logging.getLogger(__name__)
 
 @validate_series()
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
@@ -11,11 +14,15 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     A rising OBV confirms an uptrend; divergence signals weakness.
     Pure numpy — no loops needed.
     """
+    logger.debug("[obv] bars=%d", len(close))
     direction = pd.Series(
         np.sign(close.diff().fillna(0.0).to_numpy(dtype=np.float64)),
         index=close.index,
     )
-    return (direction * volume).cumsum().rename('OBV')
+    result = (direction * volume).cumsum().rename('OBV')
+    logger.debug("[obv] final=%.0f  trend=%s", float(result.iloc[-1]),
+                 "up" if float(result.iloc[-1]) > float(result.iloc[0]) else "down")
+    return result
 
 
 def vwap(
@@ -33,16 +40,22 @@ def vwap(
 
     Typical price = (H + L + C) / 3 — the standard VWAP numerator.
     """
+    mode = f"rolling({period})" if period is not None else "cumulative"
+    logger.debug("[vwap] mode=%s  bars=%d", mode, len(close))
     typical_price = (high + low + close) / 3.0
     tp_vol = typical_price * volume
 
     if period is None:
-        return (tp_vol.cumsum() / volume.cumsum()).rename('VWAP')
+        result = (tp_vol.cumsum() / volume.cumsum()).rename('VWAP')
     else:
-        return (
+        result = (
             tp_vol.rolling(window=period, min_periods=period).sum()
             / volume.rolling(window=period, min_periods=period).sum()
         ).rename('VWAP')
+    valid = result.dropna()
+    if not valid.empty:
+        logger.debug("[vwap] last=%.4f", float(valid.iloc[-1]))
+    return result
 
 
 def mfi(

@@ -30,9 +30,12 @@ Technical (computed over start_date → end_date):
 
 import asyncio
 import datetime
+import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 
@@ -186,6 +189,7 @@ async def screen_stocks_async(
     start: str = start_date or (
         datetime.date.today() - datetime.timedelta(days=365)
     ).isoformat()
+    logger.debug("[screener] tickers=%d  filters=%s  %s → %s", len(tickers), list(filters.keys()), start, end)
 
     provider = DataFactory.get_provider()
 
@@ -204,6 +208,8 @@ async def screen_stocks_async(
     raw = await asyncio.gather(*tasks)
 
     passing = [r for r in raw if r is not None]
+    logger.debug("[screener] passed=%d / %d (%.0f%%)", len(passing), len(tickers),
+                 100 * len(passing) / len(tickers) if tickers else 0)
     if not passing:
         return pd.DataFrame()
 
@@ -280,6 +286,7 @@ def screen_stocks(
     if n_workers is None:
         # Single process is faster for small universes (no spawn overhead)
         n_workers = 1 if n <= 20 else min(os.cpu_count() or 4, max(n // 10, 2))
+    logger.debug("[screener:screen_stocks] universe=%d  workers=%d  filters=%s", n, n_workers, list(filters.keys()))
 
     if n_workers <= 1:
         return asyncio.run(

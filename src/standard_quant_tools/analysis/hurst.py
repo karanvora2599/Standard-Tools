@@ -1,7 +1,10 @@
+import logging
 from typing import Any, Dict, Literal, Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # ── Optional C++ fast path ────────────────────────────────────────────────────
 # Falls back to pure Python automatically when the extension hasn't been built.
@@ -138,6 +141,8 @@ def hurst_exponent(
     """
     arr = series.dropna().to_numpy(dtype=float)
     n   = len(arr)
+    path = "C++" if (HAS_CPP and _cpp is not None) else "python"
+    logger.debug("[hurst] method=%s  n_obs=%d  min_w=%d  path=%s", method, n, min_window, path)
 
     _nan_result: Dict[str, Any] = {
         "hurst":         float("nan"),
@@ -176,13 +181,15 @@ def hurst_exponent(
     h, r2 = _ols_slope_r2(np.log(sizes), np.log(values))
     h = float(np.clip(h, 0.0, 1.5))
 
-    return {
+    result = {
         "hurst":         h,
         "regime":        _classify(h),
         "fit_r_squared": r2,
         "method":        method,
         "n_obs":         n,
     }
+    logger.debug("[hurst] H=%.4f  regime=%s  R²=%.4f", h, result["regime"], r2)
+    return result
 
 
 def rolling_hurst(
@@ -217,6 +224,10 @@ def rolling_hurst(
     clean   = series.dropna()
     arr     = clean.to_numpy(dtype=float)
     n       = len(arr)
+    path = "C++" if (HAS_CPP and _cpp is not None) else "python"
+    n_positions = max(0, (n - window) // step + 1)
+    logger.debug("[rolling_hurst] window=%d  step=%d  method=%s  n_obs=%d  positions=%d  path=%s",
+                 window, step, method, n, n_positions, path)
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
     if HAS_CPP and _cpp is not None:

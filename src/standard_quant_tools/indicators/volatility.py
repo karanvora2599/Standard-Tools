@@ -1,7 +1,10 @@
+import logging
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 _cpp_core: Any = None
 HAS_CPP = False
@@ -16,23 +19,28 @@ def bollinger_bands(series: pd.Series, period: int = 20, num_std: float = 2.0) -
     """
     Calculate Bollinger Bands.
     """
+    logger.debug("[bollinger] period=%d  std=%.1f  bars=%d", period, num_std, len(series))
     sma = series.rolling(window=period).mean()
     std = series.rolling(window=period).std()
 
     upper = sma + (std * num_std)
     lower = sma - (std * num_std)
 
-    return pd.DataFrame({
-        'BB_Upper': upper,
-        'BB_Middle': sma,
-        'BB_Lower': lower
-    })
+    result = pd.DataFrame({'BB_Upper': upper, 'BB_Middle': sma, 'BB_Lower': lower})
+    valid_u = upper.dropna()
+    valid_l = lower.dropna()
+    if not valid_u.empty:
+        width = float(valid_u.iloc[-1]) - float(valid_l.iloc[-1])
+        logger.debug("[bollinger] last upper=%.4f  middle=%.4f  lower=%.4f  width=%.4f",
+                     float(valid_u.iloc[-1]), float(sma.dropna().iloc[-1]), float(valid_l.iloc[-1]), width)
+    return result
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     """
     Calculate Average True Range (ATR).
     Uses np.maximum for a single-pass true range instead of pd.concat.
     """
+    logger.debug("[atr] period=%d  bars=%d", period, len(close))
     prev_close = close.shift(1).to_numpy(dtype=float)
     h = high.to_numpy(dtype=float)
     l = low.to_numpy(dtype=float)
@@ -40,7 +48,11 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
         np.maximum(h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close))),
         index=close.index,
     )
-    return tr.rolling(window=period).mean()
+    result = tr.rolling(window=period).mean()
+    valid = result.dropna()
+    if not valid.empty:
+        logger.debug("[atr] last=%.4f", float(valid.iloc[-1]))
+    return result
 
 
 def wilder_atr(
