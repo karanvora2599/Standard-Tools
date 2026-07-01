@@ -1,0 +1,253 @@
+"""
+Shared utilities for all agentic scripts — OpenAI provider.
+
+Provides:
+  - setup_logging(name)   → configure lib logger + per-run file handler
+  - _header / _section / _log / _pretty_json → console formatting helpers
+  - run_agent()           → the core agentic loop (GPT + tool dispatch)
+
+Note: get_agent_tools() already returns the OpenAI tool format, so no
+conversion step is needed unlike the Anthropic provider.
+"""
+
+import datetime
+import json
+import logging
+import time
+import textwrap
+from pathlib import Path
+from typing import Any
+
+from openai import OpenAI
+
+from standard_quant_tools.agent.tools import get_agent_tools, dispatch
+
+# ── Constants ──────────────────────────────────────────────────────
+_LOGS_DIR     = Path(__file__).resolve().parent.parent.parent / "logs"
+_DIVIDER      = "═" * 70
+_THIN_DIVIDER = "─" * 70
+
+_fmt_console = logging.Formatter("  %(levelname)-7s  %(name)s  %(message)s")
+_fmt_file    = logging.Formatter(
+    "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+
+def setup_logging(name: str) -> Path:
+    """Attach a per-run FileHandler + StreamHandler to the standard_quant_tools logger."""
+    _LOGS_DIR.mkdir(exist_ok=True)
+    ts       = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    log_file = _LOGS_DIR / f"{name}_{ts}.log"
+
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setFormatter(_fmt_file)
+    fh.setLevel(logging.DEBUG)
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(_fmt_console)
+    sh.setLevel(logging.DEBUG)
+
+    lib = logging.getLogger("standard_quant_tools")
+    lib.setLevel(logging.DEBUG)
+    lib.addHandler(fh)
+    lib.addHandler(sh)
+
+    return log_file
+
+
+# ── Console helpers ─────────────────────────────────────────────────
+
+def _header(title: str) -> None:
+    print(f"\n{_DIVIDER}")
+    print(f"  {title}")
+    print(_DIVIDER)
+
+def _section(title: str) -> None:
+    print(f"\n{_THIN_DIVIDER}")
+    print(f"  {title}")
+    print(_THIN_DIVIDER)
+
+def _log(label: str, value: str = "", indent: int = 2) -> None:
+    prefix = " " * indent
+    print(f"{prefix}{label}: {value}" if value else f"{prefix}{label}")
+
+def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
+    raw = json.dumps(data, indent=2, default=str)
+    if len(raw) > max_len:
+        raw = raw[:max_len] + f"\n  ... [truncated — {len(raw)} chars total]"
+    pad = " " * indent
+    return "\n".join(pad + line for line in raw.splitlines())
+
+
+# ── Core agent loop ─────────────────────────────────────────────────
+
+def run_agent(
+    system_prompt: str,
+    user_request: str,
+    api_key: str,
+    model: str = "gpt-4o-mini",
+    max_iterations: int = 15,
+    max_tokens: int = 4096,
+) -> str:
+    """
+    Run the agentic loop: send user_request to GPT, execute any tool calls
+    via dispatch(), feed results back, and repeat until stop or exhausted.
+
+    finish_reason values:
+      "stop"       — model finished normally
+      "tool_calls" — model wants to call tools
+      "length"     — hit max_tokens mid-response (continuation logic applies)
+
+    Returns the final text response from the model.
+    """
+    client = OpenAI(api_key=api_key)
+    tools  = get_agent_tools()  # already in OpenAI format
+
+    _header("AGENT SESSION STARTED  (OpenAI)")
+    _log("Model",          model)
+    _log("Max tokens",     str(max_tokens))
+    _log("Max iterations", str(max_iterations))
+    _log("Tools loaded",   str(len(tools)))
+    _log("Tool names",     ", ".join(t["function"]["name"] for t in tools))
+    _section("USER REQUEST")
+    print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_request},
+    ]
+    session_start        = time.perf_counter()
+    total_input_tokens   = 0
+    total_output_tokens  = 0
+    iteration            = 0
+    accumulated_text: list[str] = []
+
+    for iteration in range(1, max_iterations + 1):
+        _header(f"ITERATION {iteration}")
+        iter_start = time.perf_counter()
+
+        _log("Sending request to OpenAI ...")
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=max_tokens,
+            tools=tools,       # type: ignore[arg-type]
+            messages=messages, # type: ignore[arg-type]
+            stream=False,
+        )
+
+        elapsed = time.perf_counter() - iter_start
+        if response.usage:
+            total_input_tokens  += response.usage.prompt_tokens
+            total_output_tokens += response.usage.completion_tokens
+
+        choice        = response.choices[0]
+        finish_reason = choice.finish_reason
+        msg           = choice.message
+
+        _section("API RESPONSE METADATA")
+        _log("Finish reason",  finish_reason or "—")
+        _log("Input tokens",   str(response.usage.prompt_tokens if response.usage else "—"))
+        _log("Output tokens",  str(response.usage.completion_tokens if response.usage else "—"))
+        _log("Latency",        f"{elapsed:.2f}s")
+
+        _section("MODEL OUTPUT")
+        if msg.content:
+            print(textwrap.fill(
+                msg.content, width=68,
+                initial_indent="    ", subsequent_indent="    ",
+            ))
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                print(f"\n  [tool_use]  {tc.function.name}  id={tc.id}")
+                try:
+                    print(_pretty_json(json.loads(tc.function.arguments), indent=4))
+                except json.JSONDecodeError:
+                    print(f"    {tc.function.arguments}")
+
+        if msg.content:
+            accumulated_text.append(msg.content)
+
+        # Append assistant message preserving tool_calls for API history
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": msg.content}
+        if msg.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+        messages.append(assistant_msg)
+
+        # ── Finished normally ────────────────────────────────────────
+        if finish_reason == "stop":
+            _section("AGENT FINISHED  (stop)")
+            return "".join(accumulated_text) or "Analysis complete."
+
+        # ── Mid-text truncation: ask model to continue ───────────────
+        if finish_reason == "length":
+            if msg.content and not msg.tool_calls:
+                _log("length limit hit mid-text — sending continuation prompt ...")
+                messages.append({
+                    "role": "user",
+                    "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
+                })
+                continue
+            _log("length limit with tool_calls — stopping")
+            break
+
+        if finish_reason != "tool_calls":
+            _log(f"Unexpected finish reason '{finish_reason}' — breaking loop")
+            break
+
+        # ── Execute tool calls ───────────────────────────────────────
+        _section("TOOL EXECUTION")
+        tool_results: list[dict[str, Any]] = []
+        for tc in (msg.tool_calls or []):
+            print(f"\n  ┌─ {tc.function.name}")
+            print(f"  │  id : {tc.id}")
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                args = {}
+            print(_pretty_json(args, indent=5))
+
+            t0 = time.perf_counter()
+            try:
+                result = dispatch(tc.function.name, args)
+                ms = (time.perf_counter() - t0) * 1000
+                print(f"  │  ✓  completed in {ms:.0f}ms")
+                print(_pretty_json(result, indent=5))
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, default=str),
+                })
+            except Exception as exc:
+                ms = (time.perf_counter() - t0) * 1000
+                print(f"  │  ✗  FAILED in {ms:.0f}ms — {exc}")
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"Error: {exc}",
+                })
+            print("  └" + "─" * 50)
+
+        accumulated_text.clear()
+        messages.extend(tool_results)
+
+    # ── Session summary ──────────────────────────────────────────────
+    total_elapsed = time.perf_counter() - session_start
+    _header("SESSION SUMMARY")
+    _log("Iterations used",     f"{iteration} / {max_iterations}")
+    _log("Total input tokens",  str(total_input_tokens))
+    _log("Total output tokens", str(total_output_tokens))
+    _log("Total tokens",        str(total_input_tokens + total_output_tokens))
+    _log("Total wall time",     f"{total_elapsed:.2f}s")
+
+    return "".join(accumulated_text) or "Max iterations reached."
