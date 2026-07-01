@@ -1,7 +1,11 @@
+import logging
 import os
+import time
 from concurrent.futures import ProcessPoolExecutor
 from itertools import product
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -142,6 +146,12 @@ def run_strategy(
     prices = price_data.loc[idx, "Close"]
     signals = signal_series.loc[idx]
 
+    n_bars = len(prices)
+    logger.debug(
+        "[run_strategy] bars=%d  capital=%.0f  commission=%.4f  slippage=%.4f",
+        n_bars, initial_capital, commission_pct, slippage_pct,
+    )
+
     returns = prices.pct_change().fillna(0.0)
     executed = signals.shift(1).fillna(0.0)
 
@@ -149,6 +159,7 @@ def run_strategy(
     # Pass raw signals — C++ applies the one-bar lag internally (executed[i] = signals[i-1]).
     # Do NOT pass `executed` here: it is already shifted, which would cause a 2-bar lag.
     if HAS_CPP and _cpp_core is not None:
+        logger.debug("[run_strategy] using C++ kernel")
         prices_arr  = prices.to_numpy(dtype=np.float64)
         signals_arr = signals.to_numpy(dtype=np.float64)
         r = _cpp_core.run_strategy(prices_arr, signals_arr,
@@ -170,9 +181,15 @@ def run_strategy(
         }
         if include_trade_log:
             result["trade_log"] = _build_trade_log(prices, executed)
+        logger.debug(
+            "[run_strategy] C++  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
+            result["total_return"] * 100, result["sharpe_ratio"],
+            result["num_trades"], result["max_drawdown"] * 100,
+        )
         return result
 
     # ── Python fallback ───────────────────────────────────────────────────────
+    logger.debug("[run_strategy] using Python fallback")
     cost_per_unit = commission_pct + slippage_pct
     pos_diff = executed.diff().fillna(executed.iloc[0])
     transaction_costs = pos_diff.abs() * cost_per_unit
@@ -205,6 +222,11 @@ def run_strategy(
     if include_trade_log:
         result["trade_log"] = trade_log
 
+    logger.debug(
+        "[run_strategy] Python  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
+        result["total_return"] * 100, result["sharpe_ratio"],
+        result["num_trades"], result["max_drawdown"] * 100,
+    )
     return result
 
 
@@ -298,6 +320,11 @@ def backtest_grid(
     ]
 
     workers = n_workers if n_workers is not None else (os.cpu_count() or 4)
+    logger.debug(
+        "[backtest_grid] strategy=%s  combos=%d  workers=%d  sort_by=%s",
+        strategy, len(jobs), workers, sort_by,
+    )
+    t0 = time.perf_counter()
 
     if workers == 1 or len(jobs) == 1:
         results = [_run_grid_job(job) for job in jobs]
@@ -308,4 +335,16 @@ def backtest_grid(
     df_out = pd.DataFrame(results)
     if sort_by in df_out.columns:
         df_out = df_out.sort_values(sort_by, ascending=ascending).reset_index(drop=True)
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    if not df_out.empty and sort_by in df_out.columns:
+        best = df_out.iloc[0]
+        best_params = {k: best[k] for k in keys if k in best}
+        logger.debug(
+            "[backtest_grid] ✓ %.0fms  best %s=%.4f  params=%s",
+            elapsed_ms, sort_by, best[sort_by], best_params,
+        )
+    else:
+        logger.debug("[backtest_grid] ✓ %.0fms  %d results", elapsed_ms, len(df_out))
+
     return df_out

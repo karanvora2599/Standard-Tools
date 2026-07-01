@@ -4,10 +4,14 @@ All inputs/outputs use Pydantic models for clean JSON serialization.
 """
 
 import datetime
+import logging
 import math
+import time
 from collections import Counter
 from itertools import combinations
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -1244,4 +1248,13 @@ def dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             f"Available: {sorted(_TOOL_DISPATCH)}"
         )
     fn, model_cls = _TOOL_DISPATCH[tool_name]
-    return fn(model_cls(**arguments)).model_dump()
+    logger.debug("[dispatch] → %s  args=%s", tool_name, list(arguments.keys()))
+    t0 = time.perf_counter()
+    try:
+        result = fn(model_cls(**arguments)).model_dump()
+    except Exception as exc:
+        logger.error("[dispatch] ✗ %s  error=%s", tool_name, exc)
+        raise
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    logger.debug("[dispatch] ✓ %s  completed in %.0fms", tool_name, elapsed_ms)
+    return result

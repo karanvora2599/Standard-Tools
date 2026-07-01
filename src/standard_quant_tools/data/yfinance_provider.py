@@ -1,10 +1,13 @@
 import asyncio
 import functools
+import logging
 import os
 import time
 from datetime import date as _date, datetime
 from pathlib import Path
 from typing import Union
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 import yfinance as yf
@@ -60,6 +63,10 @@ def retry(times: int = 3, delay: float = 1, backoff: float = 2):
                     last_exc = e
                     if i == times - 1:
                         raise
+                    logger.warning(
+                        "[retry] %s attempt %d/%d failed: %s — retrying in %.1fs",
+                        func.__name__, i + 1, times, e, t_delay,
+                    )
                     time.sleep(t_delay)
                     t_delay *= backoff
                 except Exception as e:
@@ -92,9 +99,12 @@ class YFinanceProvider(DataProvider):
         # ── Parquet disk cache (historical ranges only) ────────────────────
         pq_path = _parquet_path(symbol, start_str, end_str, interval)
         if _is_historical(end_date) and pq_path.exists():
+            logger.debug("[cache] disk hit  %s  %s → %s  (%s)", symbol, start_str, end_str, pq_path.name)
             return pd.read_parquet(pq_path)
 
         # ── Fetch from yfinance ────────────────────────────────────────────
+        logger.debug("[fetch] yfinance   %s  %s → %s  interval=%s", symbol, start_str, end_str, interval)
+        t0 = time.perf_counter()
         try:
             ticker = yf.Ticker(symbol)
             df = ticker.history(
@@ -126,6 +136,9 @@ class YFinanceProvider(DataProvider):
                 f"Error fetching data for '{symbol}' from yfinance: {e}"
             ) from e
 
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.debug("[fetch] ✓ %s  %d rows  %.0fms", symbol, len(result), elapsed_ms)
+
         # ── Persist to Parquet for future sessions ─────────────────────────
         if _is_historical(end_date):
             try:
@@ -137,8 +150,9 @@ class YFinanceProvider(DataProvider):
                 )
                 result.to_parquet(tmp)
                 tmp.replace(pq_path)  # atomic on all platforms
-            except Exception:
-                pass  # cache write failure is non-fatal
+                logger.debug("[cache] disk write %s  → %s", symbol, pq_path.name)
+            except Exception as cache_exc:
+                logger.warning("[cache] disk write failed for %s: %s", symbol, cache_exc)
 
         return result
 
