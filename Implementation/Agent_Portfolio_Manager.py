@@ -1,0 +1,89 @@
+"""
+Agentic Portfolio Manager — Claude autonomously builds and stress-tests
+a multi-asset portfolio.
+
+The agent:
+  1. Runs technical analysis on each holding to assess current regime
+  2. Computes portfolio-level metrics (Sharpe, drawdown, VaR, correlation)
+  3. Decomposes risk via PCA and marginal risk contributions
+  4. Regresses portfolio returns on market/size/value factors
+  5. Profiles each asset's individual beta and alpha vs the benchmark
+  6. Produces a written rebalancing recommendation
+"""
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from _agent_utils import setup_logging, run_agent, _header, _log
+
+# ── Configuration ──────────────────────────────────────────────────
+ANTHROPIC_API_KEY = ""   # Replace with your key
+MODEL             = "claude-haiku-4-5"
+
+PORTFOLIO = {
+    "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"],
+    "weights": [0.20,   0.20,   0.20,   0.20,   0.20],
+}
+START_DATE = "2022-01-01"
+END_DATE   = "2024-12-31"
+BENCHMARK  = "SPY"
+
+SYSTEM_PROMPT = """You are a senior portfolio manager with expertise in quantitative risk management.
+
+Your task is to perform a comprehensive portfolio review using the available tools.
+
+Follow this workflow:
+1. Use get_portfolio_analysis to get portfolio-level performance and correlation metrics
+2. Use get_portfolio_risk_attribution to decompose risk (PCA, marginal contributions, factor loadings)
+3. Use analyze_stock_risk for each individual holding to get beta, alpha, Sharpe, VaR
+4. Use get_technical_analysis to check the current technical regime for each holding
+5. Synthesize findings into a written report with:
+   - Portfolio health summary (return, vol, drawdown vs benchmark)
+   - Risk concentration alerts (which assets or factors dominate risk)
+   - Individual position assessment (which holdings are dilutive vs accretive)
+   - Specific rebalancing recommendations with reasoning
+
+Be quantitative and specific. Reference exact numbers from the tool results."""
+
+# ── Build request ──────────────────────────────────────────────────
+tickers_str = ", ".join(PORTFOLIO["tickers"])
+weights_str = ", ".join(f"{w*100:.0f}%" for w in PORTFOLIO["weights"])
+
+USER_REQUEST = f"""
+Please perform a full portfolio review for the following equal-weight portfolio:
+
+Tickers : {tickers_str}
+Weights : {weights_str}
+Period  : {START_DATE} to {END_DATE}
+Benchmark: {BENCHMARK}
+
+Use factor proxies SPY (market), IWM (size), IWD (value) for the factor regression.
+
+Deliver a complete written analysis with:
+- Portfolio performance vs benchmark
+- Risk attribution and concentration
+- Per-asset beta/alpha/Sharpe ranking
+- Technical regime for each holding
+- Rebalancing recommendation (keep / trim / add) for each position
+""".strip()
+
+
+if __name__ == "__main__":
+    log_file = setup_logging("agent_portfolio_manager")
+
+    _header("Agentic Portfolio Manager — Claude Haiku")
+    _log("Log file", str(log_file))
+    _log("Portfolio", tickers_str)
+    _log("Period",    f"{START_DATE} → {END_DATE}")
+
+    result = run_agent(
+        system_prompt=SYSTEM_PROMPT,
+        user_request=USER_REQUEST,
+        api_key=ANTHROPIC_API_KEY,
+        model=MODEL,
+        max_iterations=20,
+    )
+
+    _header("FINAL REPORT")
+    print(result)
