@@ -114,9 +114,10 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
 
     messages: list[MessageParam] = [cast(MessageParam, {"role": "user", "content": user_request})]
     session_start = time.perf_counter()
-    total_input_tokens = 0
+    total_input_tokens  = 0
     total_output_tokens = 0
-    iteration = 0
+    iteration           = 0
+    accumulated_text: list[str] = []
 
     for iteration in range(1, max_iterations + 1):
         _header(f"ITERATION {iteration}")
@@ -127,7 +128,7 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
             Message,
             client.messages.create(
                 model="claude-haiku-4-5",
-                max_tokens=4096,
+                max_tokens=8096,
                 system=SYSTEM_PROMPT,
                 tools=tools,
                 messages=messages,
@@ -144,7 +145,6 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
         _log("Output tokens",  str(response.usage.output_tokens))
         _log("Latency",        f"{elapsed:.2f}s")
 
-        # Log each content block the model returned
         _section(f"MODEL OUTPUT  ({len(response.content)} block(s))")
         for i, block in enumerate(response.content):
             print(f"\n  [Block {i+1}]  type={block.type}")
@@ -160,15 +160,30 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
                 _log("  Arguments",                    indent=4)
                 print(_pretty_json(block.input, indent=6))
 
+        for block in response.content:
+            if block.type == "text" and block.text:
+                accumulated_text.append(block.text)  # type: ignore[attr-defined]
+
         messages.append(cast(MessageParam, {"role": "assistant", "content": response.content}))
 
         # ── Done ──────────────────────────────────────────────────
         if response.stop_reason == "end_turn":
             _section("AGENT FINISHED  (end_turn)")
-            for block in response.content:
-                if hasattr(block, "text"):
-                    return block.text  # type: ignore[attr-defined]
-            return "Analysis complete."
+            return "".join(accumulated_text) or "Analysis complete."
+
+        # ── Mid-text truncation: ask Claude to continue ────────────
+        if response.stop_reason == "max_tokens":
+            has_text = any(b.type == "text" for b in response.content)
+            has_tool = any(b.type == "tool_use" for b in response.content)
+            if has_text and not has_tool:
+                _log("max_tokens hit mid-text — sending continuation prompt ...")
+                messages.append(cast(MessageParam, {
+                    "role": "user",
+                    "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
+                }))
+                continue
+            _log("max_tokens with tool_use content — stopping")
+            break
 
         if response.stop_reason != "tool_use":
             _log(f"Unexpected stop reason '{response.stop_reason}' — breaking loop")
@@ -209,6 +224,7 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
                 })
             print("  └" + "─" * 50)
 
+        accumulated_text.clear()
         messages.append(cast(MessageParam, {"role": "user", "content": tool_results}))
 
     # ── Session summary ────────────────────────────────────────────
@@ -220,7 +236,7 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
     _log("Total tokens",        str(total_input_tokens + total_output_tokens))
     _log("Total wall time",     f"{total_elapsed:.2f}s")
 
-    return "Max iterations reached."
+    return "".join(accumulated_text) or "Max iterations reached."
 
 
 # ── Entry point ────────────────────────────────────────────────────

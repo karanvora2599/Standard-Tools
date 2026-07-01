@@ -106,10 +106,14 @@ def run_agent(
     api_key: str,
     model: str = "claude-haiku-4-5",
     max_iterations: int = 15,
+    max_tokens: int = 8096,
 ) -> str:
     """
     Run the agentic loop: send user_request to Claude, execute any tool calls
     via dispatch(), feed results back, and repeat until end_turn or exhausted.
+
+    max_tokens applies to each individual API call (not the whole session).
+    Haiku 4.5 supports up to 8096 output tokens per call; Opus 4.8 supports 32000.
 
     Returns the final text response from the model.
     """
@@ -118,6 +122,7 @@ def run_agent(
 
     _header("AGENT SESSION STARTED")
     _log("Model",          model)
+    _log("Max tokens",     str(max_tokens))
     _log("Max iterations", str(max_iterations))
     _log("Tools loaded",   str(len(tools)))
     _log("Tool names",     ", ".join(t["name"] for t in tools))
@@ -127,10 +132,13 @@ def run_agent(
     messages: list[MessageParam] = [
         cast(MessageParam, {"role": "user", "content": user_request})
     ]
-    session_start       = time.perf_counter()
-    total_input_tokens  = 0
-    total_output_tokens = 0
-    iteration           = 0
+    session_start        = time.perf_counter()
+    total_input_tokens   = 0
+    total_output_tokens  = 0
+    iteration            = 0
+    # Accumulate text chunks across continuation turns so the final
+    # answer is always the complete uninterrupted text.
+    accumulated_text: list[str] = []
 
     for iteration in range(1, max_iterations + 1):
         _header(f"ITERATION {iteration}")
@@ -141,7 +149,7 @@ def run_agent(
             Message,
             client.messages.create(
                 model=model,
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 system=system_prompt,
                 tools=tools,
                 messages=messages,
@@ -171,14 +179,37 @@ def run_agent(
                 _log(f"  Call ID   → {block.id}",   indent=4)
                 print(_pretty_json(block.input, indent=6))
 
+        # Collect any text produced this turn
+        for block in response.content:
+            if block.type == "text" and block.text:
+                accumulated_text.append(block.text)  # type: ignore[attr-defined]
+
         messages.append(cast(MessageParam, {"role": "assistant", "content": response.content}))
 
+        # ── Finished normally ────────────────────────────────────────
         if response.stop_reason == "end_turn":
             _section("AGENT FINISHED  (end_turn)")
-            for block in response.content:
-                if hasattr(block, "text"):
-                    return block.text  # type: ignore[attr-defined]
-            return "Analysis complete."
+            return "".join(accumulated_text) or "Analysis complete."
+
+        # ── Mid-text truncation: ask Claude to continue ──────────────
+        if response.stop_reason == "max_tokens":
+            has_text = any(b.type == "text" for b in response.content)
+            has_tool = any(b.type == "tool_use" for b in response.content)
+
+            if has_text and not has_tool:
+                # Claude was writing its final answer and ran out of tokens.
+                # Append a continuation prompt so it picks up exactly where it stopped.
+                _log("max_tokens hit mid-text — sending continuation prompt ...")
+                messages.append(cast(MessageParam, {
+                    "role": "user",
+                    "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
+                }))
+                continue  # next iteration will get the rest
+
+            # If tool_use blocks are present alongside max_tokens the API
+            # state is ambiguous — safer to stop than corrupt the tool loop.
+            _log("max_tokens with tool_use content — cannot continue cleanly, stopping")
+            break
 
         if response.stop_reason != "tool_use":
             _log(f"Unexpected stop reason '{response.stop_reason}' — breaking loop")
@@ -217,6 +248,9 @@ def run_agent(
                 })
             print("  └" + "─" * 50)
 
+        # Text collected during a tool-calling turn belongs to the reasoning
+        # preamble, not the final answer — clear it so we don't duplicate it.
+        accumulated_text.clear()
         messages.append(cast(MessageParam, {"role": "user", "content": tool_results}))
 
     # ── Session summary ──────────────────────────────────────────────
@@ -228,4 +262,4 @@ def run_agent(
     _log("Total tokens",        str(total_input_tokens + total_output_tokens))
     _log("Total wall time",     f"{total_elapsed:.2f}s")
 
-    return "Max iterations reached."
+    return "".join(accumulated_text) or "Max iterations reached."
