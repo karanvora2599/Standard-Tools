@@ -600,3 +600,164 @@ class CompareStrategiesResult(BaseModel):
     best_strategy: str
     buy_and_hold_return: float
     strategies: List[StrategyComparison]  # sorted by sort_by, best first
+
+
+# ──────────────────────────────────────────────
+# Stock Fundamentals
+# ──────────────────────────────────────────────
+
+class FundamentalsInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
+
+
+class FundamentalsResult(BaseModel):
+    symbol: str
+    name: str
+    sector: str
+    industry: str
+    country: Optional[str]
+    full_time_employees: Optional[int]
+    forward_pe: Optional[float]
+    trailing_pe: Optional[float]
+    price_to_book: Optional[float]
+    debt_to_equity: Optional[float]
+    return_on_equity: Optional[float]
+    profit_margins: Optional[float]
+    dividend_yield: Optional[float]
+    market_cap: Optional[int]
+
+
+# ──────────────────────────────────────────────
+# Backtest Optimization
+# ──────────────────────────────────────────────
+
+class BacktestOptInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    strategy: str = Field(
+        ...,
+        description=(
+            "Strategy to optimise: 'sma_crossover', 'rsi_mean_reversion', "
+            "'macd_crossover', or 'bollinger_reversion'."
+        ),
+    )
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    param_grid: Dict[str, List[Any]] = Field(
+        ...,
+        description=(
+            "Parameter search space. "
+            "sma_crossover: {'fast_period': [5,10,20], 'slow_period': [30,50,100]}. "
+            "rsi_mean_reversion: {'period': [7,14,21], 'oversold': [25,30], 'overbought': [65,70]}. "
+            "macd_crossover: {'fast': [8,12], 'slow': [21,26], 'signal': [7,9]}. "
+            "bollinger_reversion: {'period': [15,20,25], 'num_std': [1.5,2.0,2.5]}."
+        ),
+    )
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    sort_by: str = Field(
+        "sharpe_ratio",
+        description=(
+            "Metric to optimise. "
+            "Options: 'sharpe_ratio', 'total_return', 'calmar_ratio', 'sortino_ratio', 'max_drawdown'."
+        ),
+    )
+    top_n: int = Field(5, description="Number of top parameter combinations to return (default 5, max 20).")
+    n_workers: int = Field(1, description="CPU workers for parallel grid search (default 1).")
+
+
+class OptimizationRun(BaseModel):
+    rank: int
+    parameters: Dict[str, Any]
+    total_return: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    calmar_ratio: float
+    max_drawdown: float
+    num_trades: int
+
+
+class BacktestOptResult(BaseModel):
+    symbol: str
+    strategy: str
+    n_combinations: int
+    sort_by: str
+    best_params: Dict[str, Any]
+    best_sharpe: float
+    best_return: float
+    top_results: List[OptimizationRun]
+
+
+# ──────────────────────────────────────────────
+# Advanced Indicators
+# ──────────────────────────────────────────────
+
+class AdvancedIndicatorsInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    mfi_period: int = Field(14, description="Money Flow Index period (default 14).")
+    atr_period: int = Field(14, description="Wilder ATR period (default 14).")
+    sar_af_start: float = Field(0.02, description="Parabolic SAR initial acceleration factor (default 0.02).")
+    sar_af_max: float = Field(0.2, description="Parabolic SAR maximum acceleration factor (default 0.2).")
+
+
+class AdvancedIndicatorsResult(BaseModel):
+    symbol: str
+    last_close: float
+    sar_value: float
+    sar_trend: str       # "bullish" | "bearish"
+    sar_signal: str      # "buy" | "sell"
+    wilder_atr: float
+    wilder_atr_pct: float
+    mfi: float
+    mfi_signal: str      # "overbought" | "oversold" | "neutral"
+
+
+# ──────────────────────────────────────────────
+# Rolling Beta
+# ──────────────────────────────────────────────
+
+class RollingBetaInput(BaseModel):
+    symbol: str = Field(..., description="Asset ticker symbol.")
+    benchmark: str = Field("SPY", description="Benchmark symbol (default SPY).")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    window: int = Field(60, description="Rolling window in bars (default 60 ≈ 3 months daily).")
+
+
+class RollingBetaResult(BaseModel):
+    symbol: str
+    benchmark: str
+    window: int
+    current_beta: float
+    beta_1m_ago: Optional[float]
+    beta_3m_ago: Optional[float]
+    beta_6m_ago: Optional[float]
+    beta_trend: str      # "increasing" | "decreasing" | "stable"
+    beta_min: float
+    beta_max: float
+    beta_mean: float
+    n_obs: int
+
+
+# ──────────────────────────────────────────────
+# Extended Risk Metrics
+# ──────────────────────────────────────────────
+
+class ExtendedRiskInput(BaseModel):
+    symbol: str = Field(..., description="Asset ticker symbol.")
+    benchmark: str = Field("SPY", description="Benchmark symbol (default SPY).")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+
+
+class ExtendedRiskResult(BaseModel):
+    symbol: str
+    benchmark: str
+    annualized_return: float
+    calmar_ratio: float
+    treynor_ratio: float
+    var_parametric_95: float
+    var_parametric_99: float
+    var_historical_99: float
+    cvar_99: float
+    beta: float

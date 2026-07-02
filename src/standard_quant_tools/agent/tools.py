@@ -17,13 +17,13 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.data.factory import DataFactory
-from standard_quant_tools.indicators.trend import sma, ema, macd, adx, williams_r
+from standard_quant_tools.indicators.trend import sma, ema, macd, adx, williams_r, parabolic_sar
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
-from standard_quant_tools.indicators.volatility import bollinger_bands, atr
-from standard_quant_tools.indicators.volume import obv, vwap
+from standard_quant_tools.indicators.volatility import bollinger_bands, atr, wilder_atr
+from standard_quant_tools.indicators.volume import obv, vwap, mfi
 from standard_quant_tools.backtest.engine import run_strategy, backtest_grid
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
-from standard_quant_tools.analysis.regression import calculate_beta
+from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.analysis.multi_factor import multi_factor_regression, rolling_factor_loadings
 from standard_quant_tools.analysis.cointegration import cointegration_test, compute_spread, spread_zscore
 from standard_quant_tools.analysis.pca import pca_returns, factor_contributions
@@ -32,6 +32,7 @@ from standard_quant_tools.metrics.return_metrics import cagr, annualized_volatil
 from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, sortino_ratio, max_drawdown,
     var_historical, cvar, information_ratio,
+    calmar_ratio, treynor_ratio, var_parametric,
 )
 from standard_quant_tools.portfolio.portfolio import portfolio_metrics, fetch_returns_sync
 from standard_quant_tools.screener.screener import screen_stocks
@@ -52,6 +53,11 @@ from standard_quant_tools.agent.models import (
     PositionSizerInput, PositionSizerResult,
     BuyAndHoldInput,
     CompareStrategiesInput, CompareStrategiesResult, StrategyComparison,
+    FundamentalsInput, FundamentalsResult,
+    BacktestOptInput, OptimizationRun, BacktestOptResult,
+    AdvancedIndicatorsInput, AdvancedIndicatorsResult,
+    RollingBetaInput, RollingBetaResult,
+    ExtendedRiskInput, ExtendedRiskResult,
 )
 
 
@@ -1191,6 +1197,256 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
 # ──────────────────────────────────────────────────────────────────
 # Tool Registry for LLM Function Calling
 # ──────────────────────────────────────────────────────────────────
+# Stock Fundamentals Tool
+# ──────────────────────────────────────────────────────────────────
+
+def get_stock_fundamentals(input_data: FundamentalsInput) -> FundamentalsResult:
+    """Fetch company metadata and key financial ratios for a single ticker."""
+    logger.debug("[fundamentals] %s", input_data.symbol)
+    provider = DataFactory.get_provider()
+    info = provider.get_ticker_info(input_data.symbol)
+    ratios = provider.get_financial_ratios(input_data.symbol)
+    logger.debug("[fundamentals] %s  sector=%s  fwd_pe=%s  mktcap=%s",
+                 info.name, info.sector, ratios.forward_pe,
+                 f"${ratios.market_cap/1e9:.1f}B" if ratios.market_cap else "N/A")
+    return FundamentalsResult(
+        symbol=input_data.symbol,
+        name=info.name,
+        sector=info.sector,
+        industry=info.industry,
+        country=info.country,
+        full_time_employees=info.full_time_employees,
+        forward_pe=ratios.forward_pe,
+        trailing_pe=ratios.trailing_pe,
+        price_to_book=ratios.price_to_book,
+        debt_to_equity=ratios.debt_to_equity,
+        return_on_equity=ratios.return_on_equity,
+        profit_margins=ratios.profit_margins,
+        dividend_yield=ratios.dividend_yield,
+        market_cap=ratios.market_cap,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Backtest Optimization Tool
+# ──────────────────────────────────────────────────────────────────
+
+def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult:
+    """
+    Run a full parameter grid search for one strategy and return the top N combinations.
+    Use this to find the best parameters before committing to a single backtest.
+    """
+    logger.debug("[backtest_opt] %s  %s  %s → %s  sort_by=%s",
+                 input_data.symbol, input_data.strategy,
+                 input_data.start_date, input_data.end_date, input_data.sort_by)
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+
+    grid_df = backtest_grid(
+        price_data=df,
+        strategy=input_data.strategy,
+        param_grid=input_data.param_grid,
+        initial_capital=input_data.initial_capital,
+        sort_by=input_data.sort_by,
+        ascending=False,
+        n_workers=input_data.n_workers,
+    )
+
+    n_combinations = len(grid_df)
+    top_n = min(input_data.top_n, 20, n_combinations)
+    top_df = grid_df.head(top_n)
+
+    metric_cols = {
+        "total_return", "annualized_volatility", "sharpe_ratio", "sortino_ratio",
+        "max_drawdown", "calmar_ratio", "win_rate", "profit_factor",
+        "num_trades", "avg_trade_return_pct", "final_equity",
+    }
+    param_cols = [c for c in grid_df.columns if c not in metric_cols]
+
+    top_results = [
+        OptimizationRun(
+            rank=rank,
+            parameters={col: row[col] for col in param_cols if col in row},
+            total_return=round(float(row.get("total_return", 0.0)), 6),
+            sharpe_ratio=round(float(row.get("sharpe_ratio", 0.0)), 4),
+            sortino_ratio=round(float(row.get("sortino_ratio", 0.0)), 4),
+            calmar_ratio=round(float(row.get("calmar_ratio", 0.0)), 4),
+            max_drawdown=round(float(row.get("max_drawdown", 0.0)), 6),
+            num_trades=int(row.get("num_trades", 0)),
+        )
+        for rank, (_, row) in enumerate(top_df.iterrows(), start=1)
+    ]
+
+    best_row = top_df.iloc[0]
+    best_params = {col: best_row[col] for col in param_cols if col in best_row}
+    logger.debug("[backtest_opt] n=%d  best_params=%s  %s=%.4f",
+                 n_combinations, best_params, input_data.sort_by,
+                 float(best_row.get(input_data.sort_by, 0.0)))
+    return BacktestOptResult(
+        symbol=input_data.symbol,
+        strategy=input_data.strategy,
+        n_combinations=n_combinations,
+        sort_by=input_data.sort_by,
+        best_params=best_params,
+        best_sharpe=round(float(best_row.get("sharpe_ratio", 0.0)), 4),
+        best_return=round(float(best_row.get("total_return", 0.0)), 6),
+        top_results=top_results,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Advanced Indicators Tool
+# ──────────────────────────────────────────────────────────────────
+
+def get_advanced_indicators(input_data: AdvancedIndicatorsInput) -> AdvancedIndicatorsResult:
+    """
+    Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow).
+    Complements get_technical_analysis with indicators not included there.
+    """
+    logger.debug("[advanced_indicators] %s  %s → %s",
+                 input_data.symbol, input_data.start_date, input_data.end_date)
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+
+    high   = df["High"]
+    low    = df["Low"]
+    close  = df["Close"]
+    volume = df["Volume"]
+    last_close = float(close.iloc[-1])
+
+    sar_df = parabolic_sar(high, low, af_start=input_data.sar_af_start, af_max=input_data.sar_af_max)
+    sar_val = float(sar_df["SAR"].iloc[-1])
+    sar_trend_int = int(sar_df["Trend"].iloc[-1])
+    sar_trend  = "bullish" if sar_trend_int == 1 else "bearish"
+    sar_signal = "buy"     if sar_trend_int == 1 else "sell"
+
+    watr_series = wilder_atr(high, low, close, period=input_data.atr_period).dropna()
+    watr_val = float(watr_series.iloc[-1])
+    watr_pct = watr_val / last_close if last_close > 0 else 0.0
+
+    mfi_series = mfi(high, low, close, volume, period=input_data.mfi_period).dropna()
+    mfi_val = float(mfi_series.iloc[-1])
+    if mfi_val >= 80:
+        mfi_signal = "overbought"
+    elif mfi_val <= 20:
+        mfi_signal = "oversold"
+    else:
+        mfi_signal = "neutral"
+
+    logger.debug("[advanced_indicators] SAR=%.4f (%s)  ATR=%.4f (%.2f%%)  MFI=%.1f (%s)",
+                 sar_val, sar_trend, watr_val, watr_pct * 100, mfi_val, mfi_signal)
+    return AdvancedIndicatorsResult(
+        symbol=input_data.symbol,
+        last_close=round(last_close, 4),
+        sar_value=round(sar_val, 4),
+        sar_trend=sar_trend,
+        sar_signal=sar_signal,
+        wilder_atr=round(watr_val, 4),
+        wilder_atr_pct=round(watr_pct, 6),
+        mfi=round(mfi_val, 2),
+        mfi_signal=mfi_signal,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Rolling Beta Tool
+# ──────────────────────────────────────────────────────────────────
+
+def get_rolling_beta(input_data: RollingBetaInput) -> RollingBetaResult:
+    """
+    Compute rolling OLS beta to detect beta drift over time.
+    Use alongside analyze_stock_risk (static beta) for a fuller market-sensitivity picture.
+    """
+    logger.debug("[rolling_beta] %s vs %s  %s → %s  window=%d",
+                 input_data.symbol, input_data.benchmark,
+                 input_data.start_date, input_data.end_date, input_data.window)
+    provider = DataFactory.get_provider()
+    asset_df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    bench_df = provider.get_ohlcv(input_data.benchmark, input_data.start_date, input_data.end_date)
+
+    asset_ret = asset_df["Close"].pct_change().dropna()
+    bench_ret = bench_df["Close"].pct_change().dropna()
+
+    rb = rolling_beta(asset_ret, bench_ret, window=input_data.window)["Rolling_Beta"].dropna()
+    if rb.empty:
+        raise ValueError(f"Not enough data for rolling beta with window={input_data.window}")
+
+    current  = float(rb.iloc[-1])
+    b_1m  = float(rb.iloc[-22])  if len(rb) >= 22  else None
+    b_3m  = float(rb.iloc[-63])  if len(rb) >= 63  else None
+    b_6m  = float(rb.iloc[-126]) if len(rb) >= 126 else None
+
+    if len(rb) >= 22:
+        delta = current - float(rb.iloc[-22])
+        trend = "increasing" if delta > 0.1 else ("decreasing" if delta < -0.1 else "stable")
+    else:
+        trend = "stable"
+
+    logger.debug("[rolling_beta] current=%.4f  trend=%s  min=%.4f  max=%.4f  n=%d",
+                 current, trend, float(rb.min()), float(rb.max()), len(rb))
+    return RollingBetaResult(
+        symbol=input_data.symbol,
+        benchmark=input_data.benchmark,
+        window=input_data.window,
+        current_beta=round(current, 4),
+        beta_1m_ago=round(b_1m, 4)  if b_1m  is not None else None,
+        beta_3m_ago=round(b_3m, 4)  if b_3m  is not None else None,
+        beta_6m_ago=round(b_6m, 4)  if b_6m  is not None else None,
+        beta_trend=trend,
+        beta_min=round(float(rb.min()), 4),
+        beta_max=round(float(rb.max()), 4),
+        beta_mean=round(float(rb.mean()), 4),
+        n_obs=len(rb),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Extended Risk Metrics Tool
+# ──────────────────────────────────────────────────────────────────
+
+def get_extended_risk_metrics(input_data: ExtendedRiskInput) -> ExtendedRiskResult:
+    """
+    Extended risk metrics not in analyze_stock_risk: Calmar ratio, Treynor ratio,
+    parametric VaR at 95%/99%, historical VaR at 99%, CVaR at 99%, and CAGR.
+    Pair with analyze_stock_risk for a complete risk picture.
+    """
+    logger.debug("[extended_risk] %s vs %s  %s → %s",
+                 input_data.symbol, input_data.benchmark,
+                 input_data.start_date, input_data.end_date)
+    provider = DataFactory.get_provider()
+    asset_df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    bench_df = provider.get_ohlcv(input_data.benchmark, input_data.start_date, input_data.end_date)
+
+    asset_ret = asset_df["Close"].pct_change().dropna()
+    bench_ret = bench_df["Close"].pct_change().dropna()
+    equity_curve = (1 + asset_ret).cumprod()
+
+    ann_ret  = cagr(equity_curve)
+    cal      = calmar_ratio(equity_curve)
+    beta_val = calculate_beta(asset_ret, bench_ret)["beta"]
+    treynor  = treynor_ratio(asset_ret, bench_ret)
+    vp95     = var_parametric(asset_ret, confidence=0.95)
+    vp99     = var_parametric(asset_ret, confidence=0.99)
+    vh99     = var_historical(asset_ret, 0.99)
+    cv99     = cvar(asset_ret, 0.99)
+
+    logger.debug("[extended_risk] calmar=%.4f  treynor=%.4f  VaR_p95=%.4f  VaR_p99=%.4f",
+                 cal, treynor, vp95, vp99)
+    return ExtendedRiskResult(
+        symbol=input_data.symbol,
+        benchmark=input_data.benchmark,
+        annualized_return=round(ann_ret, 6),
+        calmar_ratio=round(cal, 4),
+        treynor_ratio=round(treynor, 6),
+        var_parametric_95=round(vp95, 6),
+        var_parametric_99=round(vp99, 6),
+        var_historical_99=round(vh99, 6),
+        cvar_99=round(cv99, 6),
+        beta=round(beta_val, 4),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 
 def get_agent_tools() -> List[Dict[str, Any]]:
     """
@@ -1217,6 +1473,11 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("run_walk_forward_backtest", "Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.", WalkForwardInput),
         ("get_portfolio_risk_attribution", "Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.", RiskAttributionInput),
         ("get_position_size", "ATR-based position sizing with optional Kelly criterion.", PositionSizerInput),
+        ("get_stock_fundamentals", "Fetch company metadata and key financial ratios (PE, P/B, debt/equity, ROE, market cap).", FundamentalsInput),
+        ("run_backtest_optimization", "Grid-search strategy parameters and return the top N combinations ranked by a chosen metric.", BacktestOptInput),
+        ("get_advanced_indicators", "Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow oscillator).", AdvancedIndicatorsInput),
+        ("get_rolling_beta", "Compute rolling OLS beta to detect beta drift over time vs a benchmark.", RollingBetaInput),
+        ("get_extended_risk_metrics", "Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.", ExtendedRiskInput),
     ]
 
     return [
@@ -1256,6 +1517,11 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_walk_forward_backtest":      (run_walk_forward_backtest,      WalkForwardInput),
     "get_portfolio_risk_attribution": (get_portfolio_risk_attribution, RiskAttributionInput),
     "get_position_size":              (get_position_size,              PositionSizerInput),
+    "get_stock_fundamentals":         (get_stock_fundamentals,         FundamentalsInput),
+    "run_backtest_optimization":      (run_backtest_optimization,      BacktestOptInput),
+    "get_advanced_indicators":        (get_advanced_indicators,        AdvancedIndicatorsInput),
+    "get_rolling_beta":               (get_rolling_beta,               RollingBetaInput),
+    "get_extended_risk_metrics":      (get_extended_risk_metrics,      ExtendedRiskInput),
 }
 
 
