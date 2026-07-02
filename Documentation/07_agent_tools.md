@@ -28,6 +28,9 @@ from standard_quant_tools.agent import (
     # Advanced strategies
     run_regime_adaptive_backtest, scan_pairs, run_walk_forward_backtest,
     get_portfolio_risk_attribution, get_position_size,
+    # Supplementary tools
+    get_stock_fundamentals, run_backtest_optimization,
+    get_advanced_indicators, get_rolling_beta, get_extended_risk_metrics,
 )
 from standard_quant_tools.agent import (
     BacktestInput, BuyAndHoldInput, CompareStrategiesInput,
@@ -35,6 +38,8 @@ from standard_quant_tools.agent import (
     FactorRegressionInput, CointegrationInput, PCAInput, HurstInput,
     RegimeAdaptiveInput, PairScannerInput, WalkForwardInput,
     RiskAttributionInput, PositionSizerInput,
+    FundamentalsInput, BacktestOptInput, AdvancedIndicatorsInput,
+    RollingBetaInput, ExtendedRiskInput,
 )
 
 # Call any tool directly
@@ -50,13 +55,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **19 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **24 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 19
+print(len(tools))  # 24
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -81,6 +86,11 @@ for t in tools:
 # run_walk_forward_backtest — Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.
 # get_portfolio_risk_attribution — Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.
 # get_position_size     — ATR-based position sizing with optional Kelly criterion.
+# get_stock_fundamentals — Fetch company metadata and key financial ratios (PE, P/B, debt/equity, ROE, market cap).
+# run_backtest_optimization — Grid-search strategy parameters and return the top N combinations ranked by a chosen metric.
+# get_advanced_indicators — Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow oscillator).
+# get_rolling_beta      — Compute rolling OLS beta to detect beta drift over time vs a benchmark.
+# get_extended_risk_metrics — Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.
 
 # Inspect the parameter schema for any tool:
 import json
@@ -100,7 +110,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 19 valid names.
+- **`ValueError`** — unknown tool name; message lists all 24 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 ### Wiring up OpenAI
@@ -181,7 +191,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 19 financial tools:
+You are a quantitative analyst assistant with access to 24 financial tools:
 
 CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
@@ -254,6 +264,35 @@ ADVANCED TOOLS (5)
     — ATR-based stop-loss sizing. Optional Kelly criterion when win_rate/avg_win/
       avg_loss are known from a backtest. Always use this before sizing a real trade.
 
+SUPPLEMENTARY TOOLS (5)
+17. get_stock_fundamentals
+    — Company metadata (sector, employees, country) and key financial ratios
+      (forward/trailing PE, P/B, debt/equity, ROE, profit margins, market cap).
+      Call before any fundamental analysis or screening.
+
+18. run_backtest_optimization
+    — Exhaustive parameter grid search for a single strategy. Returns top N
+      combinations ranked by a chosen metric. Use this to find the best parameters
+      before committing to a single run_*_backtest call.
+
+19. get_advanced_indicators
+    — Three indicators not in get_technical_analysis: Parabolic SAR (dynamic
+      trailing-stop trend signal), Wilder ATR (true smoothed volatility), and
+      MFI (volume-weighted RSI). SAR trend = "bullish"/"bearish"; MFI > 80 =
+      overbought, < 20 = oversold.
+
+20. get_rolling_beta
+    — Rolling OLS beta in a sliding window to detect beta drift over time.
+      Returns current beta plus 1m/3m/6m lookbacks and a trend label
+      ("increasing"/"decreasing"/"stable"). Use alongside analyze_stock_risk
+      (which gives a single static beta) for a fuller sensitivity picture.
+
+21. get_extended_risk_metrics
+    — Risk metrics not in analyze_stock_risk: CAGR, Calmar ratio (CAGR / |MDD|),
+      Treynor ratio (excess return / beta), parametric VaR at 95% and 99%,
+      historical VaR at 99%, and CVaR at 99%. Pair with analyze_stock_risk for
+      a complete risk picture.
+
 WORKFLOW GUIDANCE
 - Screen → analyze → backtest → size: the natural research chain.
 - Use compare_strategies for a quick multi-strategy sweep; use run_buy_and_hold to
@@ -264,6 +303,11 @@ WORKFLOW GUIDANCE
 - Use run_walk_forward_backtest after run_regime_adaptive_backtest to validate
   out-of-sample before committing capital.
 - Use get_position_size last, after backtest statistics are known.
+- Use get_stock_fundamentals early in any fundamental or screener workflow.
+- Use run_backtest_optimization before a single backtest to identify the best params.
+- Use get_advanced_indicators alongside get_technical_analysis for SAR/Wilder-ATR/MFI.
+- Use get_rolling_beta when beta drift over time is relevant to the question.
+- Use get_extended_risk_metrics alongside analyze_stock_risk for a complete risk view.
 
 Always call tools — never guess numeric results.
 """
@@ -1149,7 +1193,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 19 tools:
+You are a quantitative investment analyst. You have 24 tools:
 
 Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
 run_bollinger_backtest, run_buy_and_hold (passive baseline),
@@ -1163,6 +1207,12 @@ scan_pairs (find cointegrated pairs in a universe), run_walk_forward_backtest
 (OOS validation), get_portfolio_risk_attribution (MCR + PCA decomposition),
 get_position_size (ATR stop-loss + optional Kelly sizing).
 
+Supplementary (5): get_stock_fundamentals (PE, P/B, D/E, ROE, market cap),
+run_backtest_optimization (exhaustive parameter grid search, top N combos),
+get_advanced_indicators (Parabolic SAR, Wilder ATR, MFI),
+get_rolling_beta (rolling OLS beta drift over time),
+get_extended_risk_metrics (Calmar, Treynor, parametric VaR 95/99, CVaR 99).
+
 Guidelines:
 - Screen first if a broad universe is mentioned.
 - Use compare_strategies for multi-strategy comparison; run_buy_and_hold
@@ -1171,6 +1221,9 @@ Guidelines:
 - Use scan_pairs before run_cointegration_test to narrow candidates.
 - Use run_walk_forward_backtest to validate before recommending capital deployment.
 - Use get_position_size after a backtest to size the trade.
+- Use get_stock_fundamentals early in any fundamental workflow.
+- Use run_backtest_optimization to find best params before running a single backtest.
+- Use get_extended_risk_metrics alongside analyze_stock_risk for a full risk picture.
 - Always use at least 2 years of data for backtests.
 - Interpret all numbers — translate Sharpe ratios, drawdowns, and betas into
   plain English before responding.
@@ -1971,6 +2024,16 @@ print(f"Example params: {playbook['example_params']}")
 | `RiskAttributionInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"`, `n_components=3`, `factor_tickers=None`, `factor_names=None` |
 | `PositionSizerInput` | `symbol`, `start_date`, `end_date`, `account_equity` | `risk_per_trade_pct=0.01` (must be in (0,1]), `atr_period=14`, `atr_multiplier=2.0`, `win_rate=None`, `avg_win_pct=None`, `avg_loss_pct=None` |
 
+**Supplementary tools (5)**
+
+| Model | Required | Optional (with defaults) |
+|---|---|---|
+| `FundamentalsInput` | `symbol` | — |
+| `BacktestOptInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `top_n=5`, `metric="sharpe_ratio"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
+| `AdvancedIndicatorsInput` | `symbol`, `start_date`, `end_date` | `sar_af_start=0.02`, `sar_af_step=0.02`, `sar_af_max=0.2`, `atr_period=14`, `mfi_period=14` |
+| `RollingBetaInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"`, `window=60` |
+| `ExtendedRiskInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"` |
+
 **Validation rules (Pydantic v2):**
 - `PortfolioInput` and `RiskAttributionInput`: `weights` must sum to 1.0 and `len(weights) == len(tickers)`.
 - `PCAInput`: `n_components` must be ≥ 1.
@@ -2012,8 +2075,19 @@ print(f"Example params: {playbook['example_params']}")
 | `RiskAttributionResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio`, `asset_risk_contributions`, `pca_variance_explained`, `portfolio_pc_exposures`, `factor_loadings`, `factor_r_squared`, `factor_alpha` |
 | `PositionSizerResult` | `symbol`, `last_close`, `atr`, `atr_pct`, `stop_distance`, `shares_fixed_risk`, `position_value_fixed_risk`, `portfolio_pct_fixed_risk`, `max_loss_fixed_risk`, `kelly_fraction`, `shares_half_kelly`, `position_value_half_kelly`, `portfolio_pct_half_kelly`, `recommended_sizing`, `recommended_shares`, `recommended_position_value` |
 
+**Supplementary tools**
+
+| Model | Key fields |
+|---|---|
+| `FundamentalsResult` | `symbol`, `name`, `sector`, `industry`, `country`, `employees`, `market_cap`, `pe_ratio`, `forward_pe`, `pb_ratio`, `debt_to_equity`, `return_on_equity`, `profit_margin`, `revenue_growth`, `earnings_growth` |
+| `OptimizationRun` | `rank`, `parameters`, `sharpe_ratio`, `total_return`, `max_drawdown`, `num_trades` |
+| `BacktestOptResult` | `symbol`, `strategy`, `metric`, `n_combinations`, `top_runs` (List[`OptimizationRun`]) |
+| `AdvancedIndicatorsResult` | `symbol`, `sar_trend`, `sar_last`, `atr_last`, `atr_pct_price`, `mfi_last`, `mfi_signal` |
+| `RollingBetaResult` | `symbol`, `benchmark`, `window`, `current_beta`, `beta_1m_ago`, `beta_3m_ago`, `beta_6m_ago`, `beta_trend`, `n_obs` |
+| `ExtendedRiskResult` | `symbol`, `benchmark`, `cagr`, `calmar_ratio`, `treynor_ratio`, `var_95_parametric`, `var_99_parametric`, `var_99_historical`, `cvar_99`, `n_obs` |
+
 ---
 
 ## Advanced Tools
 
-The 5 advanced tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).
+The 10 advanced and supplementary tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).

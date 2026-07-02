@@ -1,12 +1,14 @@
 # Advanced Agent Tools
 
-Five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Ten high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 19), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 24), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
 ## Tool Summary
+
+**Advanced tools (5)**
 
 | Tool | What it does | Key output fields |
 |---|---|---|
@@ -15,6 +17,16 @@ Five high-level agentic tools that compose the library's existing primitives int
 | `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `avg_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
 | `get_portfolio_risk_attribution` | Deep risk decomposition: MCR, PCA, optional factor model | `asset_risk_contributions`, `pca_variance_explained` |
 | `get_position_size` | ATR stop-loss sizing with optional Kelly criterion | `shares_fixed_risk`, `kelly_fraction`, `recommended_shares` |
+
+**Supplementary tools (5)**
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `get_stock_fundamentals` | Fetch company metadata and key financial ratios | `pe_ratio`, `pb_ratio`, `debt_to_equity`, `return_on_equity`, `market_cap` |
+| `run_backtest_optimization` | Exhaustive parameter grid search, return top N ranked by metric | `top_runs[].parameters`, `top_runs[].sharpe_ratio` |
+| `get_advanced_indicators` | Parabolic SAR trend, Wilder ATR volatility, MFI volume signal | `sar_trend`, `atr_pct_price`, `mfi_signal` |
+| `get_rolling_beta` | Rolling OLS beta to detect drift vs a benchmark | `current_beta`, `beta_trend`, `beta_6m_ago` |
+| `get_extended_risk_metrics` | Calmar, Treynor, parametric VaR 95/99, historical VaR 99, CVaR 99 | `calmar_ratio`, `treynor_ratio`, `var_95_parametric` |
 
 ---
 
@@ -1046,4 +1058,438 @@ if wf.avg_oos_sharpe > 0.5 and wf.pct_windows_profitable > 0.6:
     ))
     print(f"Strategy validated (avg OOS Sharpe={wf.avg_oos_sharpe:.2f})")
     print(f"Position: {pos.recommended_shares} shares ({pos.recommended_sizing})")
+```
+
+---
+
+## 6. Stock Fundamentals
+
+`get_stock_fundamentals` fetches company metadata (sector, industry, country, employees) and key financial ratios from the data provider. Call this early in any fundamental-driven workflow to establish the valuation context before running backtests or risk analysis.
+
+```python
+from standard_quant_tools.agent.tools import get_stock_fundamentals
+from standard_quant_tools.agent.models import FundamentalsInput
+
+result = get_stock_fundamentals(FundamentalsInput(symbol="AAPL"))
+
+print(f"Name       : {result.name}")
+print(f"Sector     : {result.sector}")
+print(f"Industry   : {result.industry}")
+print(f"Market cap : ${result.market_cap:,.0f}" if result.market_cap else "Market cap : N/A")
+print(f"PE (trail) : {result.pe_ratio}")
+print(f"PE (fwd)   : {result.forward_pe}")
+print(f"P/B        : {result.pb_ratio}")
+print(f"D/E        : {result.debt_to_equity}")
+print(f"ROE        : {result.return_on_equity}")
+print(f"Profit mrg : {result.profit_margin}")
+print(f"Rev growth : {result.revenue_growth}")
+print(f"EPS growth : {result.earnings_growth}")
+```
+
+**FundamentalsInput fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `symbol` | str | yes | Ticker symbol |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | `str` | Ticker symbol |
+| `name` | `str?` | Company long name |
+| `sector` | `str?` | GICS sector |
+| `industry` | `str?` | Industry sub-group |
+| `country` | `str?` | Country of domicile |
+| `employees` | `int?` | Full-time headcount |
+| `market_cap` | `float?` | Market capitalisation in USD |
+| `pe_ratio` | `float?` | Trailing twelve-month P/E |
+| `forward_pe` | `float?` | Forward P/E (consensus estimate) |
+| `pb_ratio` | `float?` | Price-to-book ratio |
+| `debt_to_equity` | `float?` | Total debt / equity |
+| `return_on_equity` | `float?` | ROE as a decimal (e.g. 0.25 = 25%) |
+| `profit_margin` | `float?` | Net profit margin as decimal |
+| `revenue_growth` | `float?` | YoY revenue growth as decimal |
+| `earnings_growth` | `float?` | YoY EPS growth as decimal |
+
+All ratio fields may be `None` when the data provider does not report them (e.g. pre-revenue companies, REITs without standard PE).
+
+**Comparing fundamentals across peers:**
+
+```python
+from standard_quant_tools.agent.tools import get_stock_fundamentals
+from standard_quant_tools.agent.models import FundamentalsInput
+
+peers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]
+rows = [get_stock_fundamentals(FundamentalsInput(symbol=s)) for s in peers]
+
+print(f"{'Ticker':<8} {'PE':>7} {'Fwd PE':>8} {'P/B':>6} {'D/E':>6} {'ROE':>7} {'Margin':>8}")
+print("-" * 55)
+for r in rows:
+    pe   = f"{r.pe_ratio:.1f}"  if r.pe_ratio  else "N/A"
+    fpe  = f"{r.forward_pe:.1f}" if r.forward_pe else "N/A"
+    pb   = f"{r.pb_ratio:.1f}"  if r.pb_ratio  else "N/A"
+    de   = f"{r.debt_to_equity:.1f}" if r.debt_to_equity else "N/A"
+    roe  = f"{r.return_on_equity:.0%}" if r.return_on_equity else "N/A"
+    mrg  = f"{r.profit_margin:.0%}"    if r.profit_margin   else "N/A"
+    print(f"{r.symbol:<8} {pe:>7} {fpe:>8} {pb:>6} {de:>6} {roe:>7} {mrg:>8}")
+```
+
+---
+
+## 7. Backtest Parameter Optimization
+
+`run_backtest_optimization` runs an exhaustive parameter grid search for a single strategy and returns the top N combinations ranked by a chosen metric. Use this before committing to a single `run_*_backtest` call to identify which parameter settings perform best over the chosen period.
+
+```python
+from standard_quant_tools.agent.tools import run_backtest_optimization
+from standard_quant_tools.agent.models import BacktestOptInput
+
+result = run_backtest_optimization(BacktestOptInput(
+    symbol="AAPL",
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    strategy="sma_crossover",
+    param_grid={
+        "fast_period": [5, 10, 20],
+        "slow_period": [30, 50, 100],
+    },
+    top_n=5,
+    metric="sharpe_ratio",
+))
+
+print(f"Strategy    : {result.strategy}")
+print(f"Combos tested: {result.n_combinations}")
+print(f"Ranked by   : {result.metric}")
+print()
+for run in result.top_runs:
+    print(f"  #{run.rank}  params={run.parameters}  "
+          f"Sharpe={run.sharpe_ratio:.2f}  Return={run.total_return:.1%}  "
+          f"MDD={run.max_drawdown:.1%}  Trades={run.num_trades}")
+```
+
+**BacktestOptInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `strategy` | str | — | `"sma_crossover"`, `"rsi_mean_reversion"`, `"macd_crossover"`, `"bollinger_reversion"` |
+| `param_grid` | dict | — | Mapping of parameter name → list of values to test |
+| `top_n` | int | 5 | Number of top combinations to return |
+| `metric` | str | `"sharpe_ratio"` | Ranking metric: `"sharpe_ratio"`, `"total_return"`, `"calmar_ratio"`, `"sortino_ratio"` |
+| `initial_capital` | float | 10000 | Starting capital |
+| `commission_pct` | float | 0.001 | Commission per trade (fraction) |
+| `slippage_pct` | float | 0.0005 | Slippage per trade (fraction) |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | `str` | Ticker |
+| `strategy` | `str` | Strategy name |
+| `metric` | `str` | Metric used to rank |
+| `n_combinations` | `int` | Total parameter combinations tested |
+| `top_runs` | `List[OptimizationRun]` | Top N results, sorted best first |
+
+Each `OptimizationRun` has:
+
+| Field | Type | Description |
+|---|---|---|
+| `rank` | `int` | 1 = best |
+| `parameters` | `dict` | Parameter combination |
+| `sharpe_ratio` | `float` | Sharpe ratio for this run |
+| `total_return` | `float` | Total return (decimal) |
+| `max_drawdown` | `float` | Max drawdown (negative decimal) |
+| `num_trades` | `int` | Number of round-trip trades |
+
+**Finding the best SMA parameters then running the full backtest:**
+
+```python
+from standard_quant_tools.agent.tools import run_backtest_optimization, run_sma_backtest
+from standard_quant_tools.agent.models import BacktestOptInput, BacktestInput
+
+opt = run_backtest_optimization(BacktestOptInput(
+    symbol="NVDA",
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    strategy="sma_crossover",
+    param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]},
+    top_n=1,
+    metric="sharpe_ratio",
+))
+
+best = opt.top_runs[0]
+print(f"Best params: {best.parameters}  Sharpe={best.sharpe_ratio:.2f}")
+
+# Now run with full trade log for the best params
+bt = run_sma_backtest(BacktestInput(
+    symbol="NVDA",
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    strategy_type="sma_crossover",
+    parameters=best.parameters,
+))
+print(f"Full run: Sharpe={bt.sharpe_ratio:.2f}  Trades={bt.num_trades}  "
+      f"WinRate={bt.win_rate:.1%}  MDD={bt.max_drawdown:.1%}")
+```
+
+---
+
+## 8. Advanced Technical Indicators
+
+`get_advanced_indicators` computes three indicators that are not included in `get_technical_analysis`:
+
+- **Parabolic SAR** — a dynamic trailing stop used to identify trend direction and potential reversals
+- **Wilder ATR** — the original Wilder smoothed Average True Range, a measure of true price volatility
+- **MFI** — Money Flow Index, a volume-weighted RSI that signals overbought/oversold conditions
+
+```python
+from standard_quant_tools.agent.tools import get_advanced_indicators
+from standard_quant_tools.agent.models import AdvancedIndicatorsInput
+
+result = get_advanced_indicators(AdvancedIndicatorsInput(
+    symbol="AAPL",
+    start_date="2022-01-01",
+    end_date="2024-01-01",
+))
+
+print(f"Symbol      : {result.symbol}")
+print(f"SAR trend   : {result.sar_trend}")       # "bullish" or "bearish"
+print(f"SAR last    : {result.sar_last:.2f}")
+print(f"Wilder ATR  : {result.atr_last:.2f}  ({result.atr_pct_price:.2%} of price)")
+print(f"MFI last    : {result.mfi_last:.1f}")
+print(f"MFI signal  : {result.mfi_signal}")      # "overbought", "oversold", or "neutral"
+```
+
+**AdvancedIndicatorsInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `sar_af_start` | float | 0.02 | SAR: initial acceleration factor |
+| `sar_af_step` | float | 0.02 | SAR: acceleration factor step |
+| `sar_af_max` | float | 0.2 | SAR: maximum acceleration factor |
+| `atr_period` | int | 14 | Wilder ATR period in bars |
+| `mfi_period` | int | 14 | MFI lookback period in bars |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | `str` | Ticker |
+| `sar_trend` | `str` | `"bullish"` (price above SAR) or `"bearish"` (price below SAR) |
+| `sar_last` | `float` | Most recent SAR value |
+| `atr_last` | `float` | Most recent Wilder ATR value in price units |
+| `atr_pct_price` | `float` | ATR as a fraction of closing price |
+| `mfi_last` | `float` | Most recent MFI reading (0–100) |
+| `mfi_signal` | `str` | `"overbought"` (≥80), `"oversold"` (≤20), `"neutral"` |
+
+**Interpreting the signals:**
+
+| Indicator | Signal | Interpretation |
+|---|---|---|
+| SAR trend | `"bullish"` | Price is above SAR — trend is up; SAR acts as trailing support |
+| SAR trend | `"bearish"` | Price is below SAR — trend is down; SAR acts as trailing resistance |
+| MFI | ≥ 80 | Overbought: buying pressure may be exhausted; watch for reversal |
+| MFI | ≤ 20 | Oversold: selling pressure may be exhausted; watch for recovery |
+| ATR % | > 3–4% | Elevated volatility — widen stops and reduce position size |
+| ATR % | < 1% | Low volatility — tight stops are feasible; breakout potential building |
+
+**Multi-stock signal scan:**
+
+```python
+from standard_quant_tools.agent.tools import get_advanced_indicators
+from standard_quant_tools.agent.models import AdvancedIndicatorsInput
+
+tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "META"]
+
+print(f"{'Ticker':<8} {'SAR':>8} {'ATR%':>7} {'MFI':>6} {'MFI Signal'}")
+print("-" * 45)
+for t in tickers:
+    r = get_advanced_indicators(AdvancedIndicatorsInput(
+        symbol=t, start_date="2023-01-01", end_date="2024-01-01",
+    ))
+    print(f"{r.symbol:<8} {r.sar_trend:>8} {r.atr_pct_price:>7.2%} "
+          f"{r.mfi_last:>6.1f} {r.mfi_signal}")
+```
+
+---
+
+## 9. Rolling Beta
+
+`get_rolling_beta` computes a rolling OLS beta against a benchmark using a sliding window. Unlike the static beta in `analyze_stock_risk`, this shows how sensitivity to the market has evolved over time — useful for detecting structural shifts (e.g. a stock becoming more/less market-correlated after a strategic pivot or sector rotation).
+
+```python
+from standard_quant_tools.agent.tools import get_rolling_beta
+from standard_quant_tools.agent.models import RollingBetaInput
+
+result = get_rolling_beta(RollingBetaInput(
+    symbol="AAPL",
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    benchmark="SPY",
+    window=60,
+))
+
+print(f"Symbol        : {result.symbol}")
+print(f"Benchmark     : {result.benchmark}")
+print(f"Window        : {result.window} bars")
+print(f"Current beta  : {result.current_beta:.3f}")
+print(f"1m ago        : {result.beta_1m_ago:.3f}" if result.beta_1m_ago else "1m ago: N/A")
+print(f"3m ago        : {result.beta_3m_ago:.3f}" if result.beta_3m_ago else "3m ago: N/A")
+print(f"6m ago        : {result.beta_6m_ago:.3f}" if result.beta_6m_ago else "6m ago: N/A")
+print(f"Beta trend    : {result.beta_trend}")   # "increasing", "decreasing", or "stable"
+print(f"Observations  : {result.n_obs}")
+```
+
+**RollingBetaInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Asset ticker |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `benchmark` | str | `"SPY"` | Benchmark ticker |
+| `window` | int | 60 | Rolling window in trading days |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | `str` | Asset ticker |
+| `benchmark` | `str` | Benchmark ticker |
+| `window` | `int` | Rolling window in bars |
+| `current_beta` | `float` | Beta at the most recent window |
+| `beta_1m_ago` | `float?` | Beta ~22 bars before the end (None if insufficient data) |
+| `beta_3m_ago` | `float?` | Beta ~66 bars before the end |
+| `beta_6m_ago` | `float?` | Beta ~132 bars before the end |
+| `beta_trend` | `str` | `"increasing"` / `"decreasing"` / `"stable"` relative to 22 bars ago |
+| `n_obs` | `int` | Number of return observations used |
+
+**Beta trend rule:** `"increasing"` if `current_beta - beta_1m_ago > 0.1`; `"decreasing"` if `< -0.1`; otherwise `"stable"`.
+
+**Comparing rolling beta across a portfolio:**
+
+```python
+from standard_quant_tools.agent.tools import get_rolling_beta
+from standard_quant_tools.agent.models import RollingBetaInput
+
+holdings = ["AAPL", "MSFT", "NVDA", "JPM", "XOM"]
+
+print(f"{'Ticker':<8} {'β now':>7} {'β 6m':>7} {'Drift':>7} {'Trend'}")
+print("-" * 42)
+for t in holdings:
+    r = get_rolling_beta(RollingBetaInput(
+        symbol=t, start_date="2022-01-01", end_date="2024-01-01",
+    ))
+    b6 = f"{r.beta_6m_ago:.3f}" if r.beta_6m_ago else "  N/A"
+    drift = f"{r.current_beta - r.beta_6m_ago:+.3f}" if r.beta_6m_ago else "  N/A"
+    print(f"{r.symbol:<8} {r.current_beta:>7.3f} {b6:>7} {drift:>7} {r.beta_trend}")
+
+# Flag any stock where beta has shifted by more than 0.2 over 6 months
+print("\nBeta-drift alerts (|Δβ| > 0.2 vs 6m ago):")
+for t in holdings:
+    r = get_rolling_beta(RollingBetaInput(
+        symbol=t, start_date="2022-01-01", end_date="2024-01-01",
+    ))
+    if r.beta_6m_ago and abs(r.current_beta - r.beta_6m_ago) > 0.2:
+        print(f"  {t}: β drifted from {r.beta_6m_ago:.2f} → {r.current_beta:.2f}")
+```
+
+---
+
+## 10. Extended Risk Metrics
+
+`get_extended_risk_metrics` returns risk metrics that complement `analyze_stock_risk`. Where `analyze_stock_risk` focuses on alpha/beta, Sharpe, and VaR at 95%, this tool adds CAGR, Calmar ratio, Treynor ratio, parametric VaR at both 95% and 99%, historical VaR at 99%, and CVaR at 99%.
+
+```python
+from standard_quant_tools.agent.tools import get_extended_risk_metrics
+from standard_quant_tools.agent.models import ExtendedRiskInput
+
+result = get_extended_risk_metrics(ExtendedRiskInput(
+    symbol="AAPL",
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    benchmark="SPY",
+))
+
+print(f"Symbol              : {result.symbol}")
+print(f"CAGR                : {result.cagr:.2%}")
+print(f"Calmar ratio        : {result.calmar_ratio:.2f}")
+print(f"Treynor ratio       : {result.treynor_ratio:.4f}")
+print(f"Parametric VaR 95%  : {result.var_95_parametric:.2%}")
+print(f"Parametric VaR 99%  : {result.var_99_parametric:.2%}")
+print(f"Historical VaR 99%  : {result.var_99_historical:.2%}")
+print(f"CVaR 99%            : {result.cvar_99:.2%}")
+print(f"Observations        : {result.n_obs}")
+```
+
+**ExtendedRiskInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `benchmark` | str | `"SPY"` | Benchmark ticker (required for Treynor ratio) |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | `str` | Ticker |
+| `benchmark` | `str` | Benchmark ticker |
+| `cagr` | `float` | Compound Annual Growth Rate as decimal |
+| `calmar_ratio` | `float` | CAGR / |max drawdown| — higher is better |
+| `treynor_ratio` | `float` | (Return − Risk-free) / Beta — excess return per unit of market risk |
+| `var_95_parametric` | `float` | 1-day parametric VaR at 95% confidence (negative = loss) |
+| `var_99_parametric` | `float` | 1-day parametric VaR at 99% confidence |
+| `var_99_historical` | `float` | 1-day historical VaR at 99% (5th-worst percentile of daily returns) |
+| `cvar_99` | `float` | 1-day CVaR at 99% — expected loss in the worst 1% of days |
+| `n_obs` | `int` | Number of return observations |
+
+**Interpreting the metrics:**
+
+| Metric | Good value | Poor value | Notes |
+|---|---|---|---|
+| Calmar ratio | > 1.0 | < 0.5 | CAGR earned per unit of drawdown risk |
+| Treynor ratio | > 0.10 | < 0.05 | Annualised excess return per unit of beta |
+| VaR 99% (parametric) | < −2% | < −5% | Single-day loss expected 1% of the time |
+| CVaR 99% | < −3% | < −8% | Average loss on the worst 1% of days |
+
+**Full risk picture — combining with analyze_stock_risk:**
+
+```python
+from standard_quant_tools.agent.tools import analyze_stock_risk, get_extended_risk_metrics
+from standard_quant_tools.agent.models import AnalysisInput, ExtendedRiskInput
+
+ticker = "NVDA"
+start, end = "2021-01-01", "2024-01-01"
+
+# Core risk
+core = analyze_stock_risk(AnalysisInput(symbol=ticker))
+# Extended risk
+ext  = get_extended_risk_metrics(ExtendedRiskInput(
+    symbol=ticker, start_date=start, end_date=end,
+))
+
+print(f"=== {ticker} Complete Risk Profile ===")
+print(f"Alpha            : {core.alpha:.4f}")
+print(f"Beta             : {core.beta:.3f}")
+print(f"Sharpe           : {core.sharpe_ratio:.2f}")
+print(f"Sortino          : {core.sortino_ratio:.2f}")
+print(f"Max drawdown     : {core.max_drawdown:.1%}")
+print(f"VaR 95% (core)   : {core.var_95:.2%}")
+print()
+print(f"CAGR             : {ext.cagr:.2%}")
+print(f"Calmar ratio     : {ext.calmar_ratio:.2f}")
+print(f"Treynor ratio    : {ext.treynor_ratio:.4f}")
+print(f"Param VaR 95%    : {ext.var_95_parametric:.2%}")
+print(f"Param VaR 99%    : {ext.var_99_parametric:.2%}")
+print(f"Hist  VaR 99%    : {ext.var_99_historical:.2%}")
+print(f"CVaR 99%         : {ext.cvar_99:.2%}")
 ```

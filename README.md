@@ -5,7 +5,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 ## Key Features
 
 - **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
-- **Agent-First Design** — All tools return Pydantic models; 17 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
+- **Agent-First Design** — All tools return Pydantic models; 24 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
 
@@ -316,14 +316,19 @@ from standard_quant_tools.agent.tools import (
     get_agent_tools, analyze_stock_risk,
     run_factor_regression, run_cointegration_test,
     run_pca_analysis, run_hurst_analysis,
+    get_stock_fundamentals, run_backtest_optimization,
+    get_advanced_indicators, get_rolling_beta,
+    get_extended_risk_metrics,
 )
 from standard_quant_tools.agent.models import (
     AnalysisInput, FactorRegressionInput,
     CointegrationInput, PCAInput, HurstInput,
+    FundamentalsInput, BacktestOptInput,
+    AdvancedIndicatorsInput, RollingBetaInput, ExtendedRiskInput,
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools()  # 12 tools ready for function calling
+tools = get_agent_tools()  # 24 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -362,9 +367,11 @@ result = run_hurst_analysis(HurstInput(
 print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 ```
 
-**Original tools (12):** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`, `run_factor_regression`, `run_cointegration_test`, `run_pca_analysis`, `run_hurst_analysis`
+**Core backtest & analysis tools (14):** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `run_buy_and_hold`, `compare_strategies`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`, `run_factor_regression`, `run_cointegration_test`, `run_pca_analysis`, `run_hurst_analysis`
 
 **Advanced agentic tools (5):** `run_regime_adaptive_backtest`, `scan_pairs`, `run_walk_forward_backtest`, `get_portfolio_risk_attribution`, `get_position_size`
+
+**Supplementary tools (5):** `get_stock_fundamentals`, `run_backtest_optimization`, `get_advanced_indicators`, `get_rolling_beta`, `get_extended_risk_metrics`
 
 ---
 
@@ -474,6 +481,6 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
 | `Documentation/07_agent_tools.md` | Original 12 LLM tools, Pydantic models, end-to-end agent loop |
 | `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
-| `Documentation/09_advanced_agent_tools.md` | 5 advanced tools: regime-adaptive, pair scanner, walk-forward, risk attribution, position sizer |
+| `Documentation/09_advanced_agent_tools.md` | Advanced tools: regime-adaptive, pair scanner, walk-forward, risk attribution, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
