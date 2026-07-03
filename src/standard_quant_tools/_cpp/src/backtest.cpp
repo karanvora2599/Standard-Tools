@@ -162,4 +162,33 @@ BacktestResult run_strategy(
     return r;
 }
 
+// ── batch_run_strategy ────────────────────────────────────────────────────────
+
+std::vector<BacktestResult> batch_run_strategy(
+    const double* prices,
+    const double* signals_flat,
+    std::size_t   n,
+    std::size_t   num_tests,
+    double initial_capital,
+    double commission_pct,
+    double slippage_pct)
+{
+    std::vector<BacktestResult> results;
+    results.reserve(num_tests);
+    for (std::size_t t = 0; t < num_tests; ++t) {
+        BacktestResult r = run_strategy(
+            prices,
+            signals_flat + t * n,
+            n,
+            initial_capital,
+            commission_pct,
+            slippage_pct);
+        // Strip equity curve to save memory — not needed for grid search
+        r.equity_curve.clear();
+        r.equity_curve.shrink_to_fit();
+        results.push_back(std::move(r));
+    }
+    return results;
+}
+
 }  // namespace sqt

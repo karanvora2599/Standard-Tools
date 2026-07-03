@@ -319,12 +319,87 @@ def backtest_grid(
         for combo in combos
     ]
 
+    t0 = time.perf_counter()
+
+    # ── C++ batch path ────────────────────────────────────────────────────────
+    # Generate all signal arrays in Python, then ship the entire batch to C++
+    # in a single call — no subprocess overhead, no per-combo boundary crossing.
+    if HAS_CPP and _cpp_core is not None:
+        try:
+            signal_fn  = STRATEGY_REGISTRY[strategy]
+            prices_arr = price_data["Close"].to_numpy(dtype=np.float64)
+
+            # Build (num_combos × n_bars) signal matrix
+            sig_rows = []
+            for combo in combos:
+                params = dict(zip(keys, combo))
+                sig_rows.append(
+                    signal_fn(price_data, **params).to_numpy(dtype=np.float64)
+                )
+            signals_mat = np.ascontiguousarray(
+                np.vstack(sig_rows), dtype=np.float64
+            )  # shape: (num_combos, n_bars)
+
+            logger.debug(
+                "[backtest_grid] strategy=%s  combos=%d  path=C++  sort_by=%s",
+                strategy, len(combos), sort_by,
+            )
+
+            cpp_results = _cpp_core.batch_run_strategy(
+                prices_arr, signals_mat,
+                initial_capital, commission_pct, slippage_pct,
+            )
+
+            rows = []
+            for combo, r in zip(combos, cpp_results):
+                row = {
+                    "final_equity":          round(float(r["final_equity"]),          2),
+                    "total_return":          round(float(r["total_return"]),           6),
+                    "annualized_volatility": round(float(r["annualized_volatility"]),  6),
+                    "sharpe_ratio":          round(float(r["sharpe_ratio"]),           4),
+                    "sortino_ratio":         round(float(r["sortino_ratio"]),          4),
+                    "max_drawdown":          round(float(r["max_drawdown"]),           6),
+                    "calmar_ratio":          round(float(r["calmar_ratio"]),           4),
+                    "win_rate":              round(float(r["win_rate"]),               4),
+                    "profit_factor":         round(float(r["profit_factor"]),          4),
+                    "num_trades":            int(r["num_trades"]),
+                    "avg_trade_return_pct":  round(float(r["avg_trade_return_pct"]),  4),
+                }
+                row.update(dict(zip(keys, combo)))
+                rows.append(row)
+
+            df_out = pd.DataFrame(rows)
+            if sort_by in df_out.columns:
+                df_out = df_out.sort_values(
+                    sort_by, ascending=ascending
+                ).reset_index(drop=True)
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            if not df_out.empty and sort_by in df_out.columns:
+                best = df_out.iloc[0]
+                best_params = {k: best[k] for k in keys if k in best}
+                logger.debug(
+                    "[backtest_grid] ✓ %.0fms (C++)  best %s=%.4f  params=%s",
+                    elapsed_ms, sort_by, best[sort_by], best_params,
+                )
+            else:
+                logger.debug(
+                    "[backtest_grid] ✓ %.0fms (C++)  %d results",
+                    elapsed_ms, len(df_out),
+                )
+            return df_out
+
+        except Exception as exc:
+            logger.warning(
+                "[backtest_grid] C++ batch path failed (%s) — falling back to Python", exc
+            )
+
+    # ── Python fallback ───────────────────────────────────────────────────────
     workers = n_workers if n_workers is not None else (os.cpu_count() or 4)
     logger.debug(
-        "[backtest_grid] strategy=%s  combos=%d  workers=%d  sort_by=%s",
+        "[backtest_grid] strategy=%s  combos=%d  workers=%d  path=Python  sort_by=%s",
         strategy, len(jobs), workers, sort_by,
     )
-    t0 = time.perf_counter()
 
     if workers == 1 or len(jobs) == 1:
         results = [_run_grid_job(job) for job in jobs]
@@ -341,10 +416,12 @@ def backtest_grid(
         best = df_out.iloc[0]
         best_params = {k: best[k] for k in keys if k in best}
         logger.debug(
-            "[backtest_grid] ✓ %.0fms  best %s=%.4f  params=%s",
+            "[backtest_grid] ✓ %.0fms (Python)  best %s=%.4f  params=%s",
             elapsed_ms, sort_by, best[sort_by], best_params,
         )
     else:
-        logger.debug("[backtest_grid] ✓ %.0fms  %d results", elapsed_ms, len(df_out))
+        logger.debug(
+            "[backtest_grid] ✓ %.0fms (Python)  %d results", elapsed_ms, len(df_out)
+        )
 
     return df_out

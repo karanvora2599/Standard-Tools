@@ -6,6 +6,7 @@
 #include "sqt/indicators.hpp"
 #include "sqt/cointegration.hpp"
 #include "sqt/backtest.hpp"
+#include "sqt/rolling_regression.hpp"
 
 namespace py = pybind11;
 
@@ -208,6 +209,62 @@ PYBIND11_MODULE(_sqt_core, m) {
         "sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio, num_trades,\n"
         "win_rate, profit_factor, avg_trade_return_pct, equity_curve.");
 
+    // ── Batch backtest ────────────────────────────────────────────────────────
+
+    m.def(
+        "batch_run_strategy",
+        [](Array1D prices,
+           py::array_t<double, py::array::c_style | py::array::forcecast> signals_2d,
+           double initial_capital, double commission_pct, double slippage_pct)
+        -> py::list
+        {
+            auto prices_buf  = prices.request();
+            auto signals_buf = signals_2d.request();
+
+            if (signals_buf.ndim != 2)
+                throw std::invalid_argument("signals must be a 2-D array (num_tests, n_bars)");
+
+            const auto n         = static_cast<std::size_t>(prices_buf.shape[0]);
+            const auto num_tests = static_cast<std::size_t>(signals_buf.shape[0]);
+
+            if (static_cast<std::size_t>(signals_buf.shape[1]) != n)
+                throw std::invalid_argument("signals.shape[1] must equal len(prices)");
+
+            const double* p_ptr = static_cast<const double*>(prices_buf.ptr);
+            const double* s_ptr = static_cast<const double*>(signals_buf.ptr);
+
+            const auto results = sqt::batch_run_strategy(
+                p_ptr, s_ptr, n, num_tests,
+                initial_capital, commission_pct, slippage_pct);
+
+            py::list out;
+            for (const auto& r : results) {
+                py::dict d;
+                d["final_equity"]          = r.final_equity;
+                d["total_return"]          = r.total_return;
+                d["annualized_volatility"] = r.annualized_vol;
+                d["sharpe_ratio"]          = r.sharpe_ratio;
+                d["sortino_ratio"]         = r.sortino_ratio;
+                d["max_drawdown"]          = r.max_drawdown;
+                d["calmar_ratio"]          = r.calmar_ratio;
+                d["num_trades"]            = r.num_trades;
+                d["win_rate"]              = r.win_rate;
+                d["profit_factor"]         = r.profit_factor;
+                d["avg_trade_return_pct"]  = r.avg_trade_return_pct;
+                out.append(d);
+            }
+            return out;
+        },
+        py::arg("prices"),
+        py::arg("signals"),
+        py::arg("initial_capital") = 10'000.0,
+        py::arg("commission_pct")  = 0.001,
+        py::arg("slippage_pct")    = 0.0005,
+        "Batch vectorized backtest — run all parameter combinations in one C++ call.\n\n"
+        "signals must be a 2-D float64 array of shape (num_tests, n_bars).\n"
+        "Returns a Python list of dicts, one per test, in input order.\n"
+        "equity_curve is NOT included in the output to save memory.");
+
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
     m.def(
@@ -227,6 +284,119 @@ PYBIND11_MODULE(_sqt_core, m) {
         "2-variable OLS: y = intercept + slope * x.\n\n"
         "Closed-form normal equations — avoids LAPACK for this 2×2 system.\n"
         "Returns a dict with keys: intercept, slope, r_squared.");
+
+    // ── Rolling factor loadings ───────────────────────────────────────────────
+
+    m.def(
+        "rolling_factor_loadings",
+        [](Array1D y_arr,
+           py::array_t<double, py::array::c_style | py::array::forcecast> factors_arr,
+           int window) -> py::array_t<double>
+        {
+            auto y_buf  = y_arr.request();
+            auto f_buf  = factors_arr.request();
+
+            if (f_buf.ndim != 2)
+                throw std::invalid_argument("factors must be a 2-D array (n, k)");
+            if (y_buf.shape[0] != f_buf.shape[0])
+                throw std::invalid_argument("len(y) must equal factors.shape[0]");
+
+            const auto n = static_cast<std::size_t>(y_buf.shape[0]);
+            const auto k = static_cast<std::size_t>(f_buf.shape[1]);
+            const int  p = static_cast<int>(k) + 1;
+
+            const double* y_ptr = static_cast<const double*>(y_buf.ptr);
+            const double* f_ptr = static_cast<const double*>(f_buf.ptr);
+
+            const auto flat = sqt::rolling_factor_loadings(y_ptr, f_ptr, n, k, window);
+
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n), static_cast<py::ssize_t>(p)});
+            std::copy(flat.begin(), flat.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("y"),
+        py::arg("factors"),
+        py::arg("window"),
+        "Rolling OLS factor loadings (incremental rank-1 updates + periodic refresh).\n\n"
+        "y      : 1-D float64 array of length n (asset returns).\n"
+        "factors: 2-D float64 array of shape (n, k).\n"
+        "window : rolling window size in bars.\n\n"
+        "Returns a 2-D float64 array of shape (n, k+1):\n"
+        "  col 0 = alpha (intercept); cols 1..k = factor loadings.\n"
+        "First (window-1) rows are NaN.");
+
+    // ── Rolling beta ──────────────────────────────────────────────────────────
+
+    m.def(
+        "rolling_beta",
+        [](Array1D y_arr, Array1D x_arr, int window) -> py::array_t<double>
+        {
+            if (y_arr.size() != x_arr.size())
+                throw std::invalid_argument("y and x must have equal length");
+            const auto n  = static_cast<std::size_t>(y_arr.size());
+            const auto result = sqt::rolling_beta(
+                y_arr.data(), x_arr.data(), n, window);
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("y"),
+        py::arg("x"),
+        py::arg("window"),
+        "Rolling OLS beta using incremental O(1) sum updates.\n\n"
+        "Returns a 1-D float64 array of length n;\n"
+        "first (window-1) values are NaN.");
+
+    // ── Bollinger Bands ───────────────────────────────────────────────────────
+
+    m.def(
+        "bollinger_bands",
+        [](Array1D prices, int period, double num_std) -> py::array_t<double>
+        {
+            const auto n      = static_cast<std::size_t>(prices.size());
+            const auto result = sqt::bollinger_bands(
+                prices.data(), n, period, num_std);
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n), py::ssize_t(3)});
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("prices"),
+        py::arg("period")  = 20,
+        py::arg("num_std") = 2.0,
+        "Bollinger Bands — fused sliding mean+std in one pass.\n\n"
+        "Returns a 2-D float64 array of shape (n, 3):\n"
+        "  col 0 = Upper, col 1 = Middle (SMA), col 2 = Lower.\n"
+        "First (period-1) rows are NaN.");
+
+    // ── Stochastic Oscillator ─────────────────────────────────────────────────
+
+    m.def(
+        "stochastic_oscillator",
+        [](Array1D high, Array1D low, Array1D close,
+           int k_period, int d_period) -> py::array_t<double>
+        {
+            if (high.size() != low.size() || high.size() != close.size())
+                throw std::invalid_argument("high, low, close must have equal length");
+            const auto n      = static_cast<std::size_t>(high.size());
+            const auto result = sqt::stochastic_oscillator(
+                high.data(), low.data(), close.data(), n, k_period, d_period);
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n), py::ssize_t(2)});
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("high"),
+        py::arg("low"),
+        py::arg("close"),
+        py::arg("k_period") = 14,
+        py::arg("d_period") = 3,
+        "Stochastic Oscillator — fused sliding min+max in one pass.\n\n"
+        "Returns a 2-D float64 array of shape (n, 2):\n"
+        "  col 0 = %%K, col 1 = %%D.\n"
+        "First (k_period-1) rows have NaN in %%K;\n"
+        "first (k_period + d_period - 2) rows have NaN in %%D.");
 
     // ── Engle-Granger cointegration ───────────────────────────────────────────
 

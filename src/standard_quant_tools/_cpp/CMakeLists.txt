@@ -12,6 +12,7 @@ set(SQT_SOURCES
     src/indicators.cpp
     src/cointegration.cpp
     src/backtest.cpp
+    src/rolling_regression.cpp
     bindings/bindings.cpp
 )
 

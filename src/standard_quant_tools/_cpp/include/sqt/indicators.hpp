@@ -86,4 +86,55 @@ std::vector<double> wilder_atr(
     std::size_t   n,
     int           period = 14);
 
+/**
+ * Bollinger Bands — fused sliding-window mean + std in one pass.
+ *
+ * Uses incremental sum and sum-of-squares to compute mean and sample std
+ * without re-iterating the window.  Equivalent to:
+ *   middle = SMA(prices, period)
+ *   std    = rolling std (ddof=1) of prices over period
+ *   upper  = middle + num_std * std
+ *   lower  = middle - num_std * std
+ *
+ * Returns a flat row-major array of length 3*n:
+ *   [upper_0, middle_0, lower_0, upper_1, middle_1, lower_1, ...].
+ * First (period-1) triples are NaN.
+ *
+ * @param prices   Contiguous close-price array (length n).
+ * @param n        Number of bars.
+ * @param period   Lookback period (default 20).
+ * @param num_std  Band width in standard deviations (default 2.0).
+ */
+std::vector<double> bollinger_bands(
+    const double* prices,
+    std::size_t   n,
+    int           period  = 20,
+    double        num_std = 2.0);
+
+/**
+ * Stochastic Oscillator — fused sliding min + max in one pass.
+ *
+ * %K = 100 * (close - lowest_low) / (highest_high - lowest_low)
+ * %D = SMA(%K, d_period)
+ *
+ * Returns a flat row-major array of length 2*n:
+ *   [K_0, D_0, K_1, D_1, ...].
+ * First (k_period-1) K values are NaN; first (k_period + d_period - 2)
+ * D values are NaN.
+ *
+ * @param high      Contiguous high-price array (length n).
+ * @param low       Contiguous low-price array (length n).
+ * @param close     Contiguous close-price array (length n).
+ * @param n         Number of bars.
+ * @param k_period  Fast period (default 14).
+ * @param d_period  Slow period (SMA of K, default 3).
+ */
+std::vector<double> stochastic_oscillator(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           k_period = 14,
+    int           d_period = 3);
+
 }  // namespace sqt

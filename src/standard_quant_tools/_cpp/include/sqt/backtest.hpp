@@ -52,4 +52,29 @@ BacktestResult run_strategy(
     double slippage_pct    = 0.0005
 );
 
+/**
+ * Batch backtest: run `num_tests` signal arrays against the same price series.
+ *
+ * Avoids the Python/C++ boundary crossing overhead that accumulates when
+ * calling run_strategy once per parameter combination from Python.
+ *
+ * @param prices         Close prices, length n.
+ * @param signals_flat   Flattened 2-D array, shape (num_tests × n) row-major.
+ *                         signals_flat[t*n + i] = signal for test t at bar i.
+ * @param n              Number of bars.
+ * @param num_tests      Number of signal arrays.
+ * @param initial_capital / commission_pct / slippage_pct — same for all tests.
+ * @return               Vector of BacktestResult, one per test in input order.
+ *                       equity_curve is empty in every result to save memory.
+ */
+std::vector<BacktestResult> batch_run_strategy(
+    const double* prices,
+    const double* signals_flat,
+    std::size_t   n,
+    std::size_t   num_tests,
+    double initial_capital = 10'000.0,
+    double commission_pct  = 0.001,
+    double slippage_pct    = 0.0005
+);
+
 }  // namespace sqt

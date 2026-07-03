@@ -1,0 +1,185 @@
+#include "sqt/rolling_regression.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <vector>
+
+namespace sqt {
+
+namespace {
+    constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+
+    // ── Cholesky solve: A * beta = b ─────────────────────────────────────────
+    // A is (p×p) symmetric positive definite (stored row-major).
+    // Returns false if A is singular or near-singular (diagonal entry ≤ 1e-14).
+    bool cholesky_solve(
+        const std::vector<double>& A,
+        const std::vector<double>& b,
+        std::vector<double>&       beta,
+        int p)
+    {
+        std::vector<double> L(p * p, 0.0);
+        for (int i = 0; i < p; ++i) {
+            for (int j = 0; j <= i; ++j) {
+                double s = A[i * p + j];
+                for (int kk = 0; kk < j; ++kk)
+                    s -= L[i * p + kk] * L[j * p + kk];
+                if (i == j) {
+                    if (s <= 1e-14) return false;
+                    L[i * p + i] = std::sqrt(s);
+                } else {
+                    L[i * p + j] = s / L[j * p + j];
+                }
+            }
+        }
+        // Forward: L z = b
+        std::vector<double> z(p);
+        for (int i = 0; i < p; ++i) {
+            double s = b[i];
+            for (int j = 0; j < i; ++j) s -= L[i * p + j] * z[j];
+            z[i] = s / L[i * p + i];
+        }
+        // Back: L' beta = z
+        beta.resize(p);
+        for (int i = p - 1; i >= 0; --i) {
+            double s = z[i];
+            for (int j = i + 1; j < p; ++j) s -= L[j * p + i] * beta[j];
+            beta[i] = s / L[i * p + i];
+        }
+        return true;
+    }
+
+    // ── Build XtX (p×p) and Xty (p) from a contiguous range of bars ──────────
+    // Design matrix row for bar i: xi = [1, factors[i*k], ..., factors[i*k+k-1]].
+    void build_normal_equations(
+        const double* y,
+        const double* factors,
+        int start, int end,
+        int k, int p,
+        std::vector<double>& XtX,
+        std::vector<double>& Xty)
+    {
+        std::fill(XtX.begin(), XtX.end(), 0.0);
+        std::fill(Xty.begin(), Xty.end(), 0.0);
+        for (int i = start; i < end; ++i) {
+            const double* fi = factors + i * k;
+            for (int r = 0; r < p; ++r) {
+                const double xr = (r == 0) ? 1.0 : fi[r - 1];
+                for (int c = 0; c < p; ++c) {
+                    XtX[r * p + c] += xr * ((c == 0) ? 1.0 : fi[c - 1]);
+                }
+                Xty[r] += xr * y[i];
+            }
+        }
+    }
+}  // namespace
+
+// ── rolling_factor_loadings ───────────────────────────────────────────────────
+
+std::vector<double> rolling_factor_loadings(
+    const double* y,
+    const double* factors,
+    std::size_t   n,
+    std::size_t   k,
+    int           window)
+{
+    const int p = static_cast<int>(k) + 1;  // intercept + k factors
+    const int N = static_cast<int>(n);
+    std::vector<double> result(n * p, kNaN);
+
+    if (window < p + 1 || N < window) return result;
+
+    std::vector<double> XtX(p * p), Xty(p);
+    std::vector<double> beta;
+
+    // Recompute XtX from scratch every `window` steps to prevent drift.
+    const int refresh = window;
+
+    // ── Seed: first full window ───────────────────────────────────────────────
+    build_normal_equations(y, factors, 0, window, static_cast<int>(k), p, XtX, Xty);
+    if (cholesky_solve(XtX, Xty, beta, p)) {
+        for (int j = 0; j < p; ++j)
+            result[(window - 1) * p + j] = beta[j];
+    }
+
+    // ── Slide window ─────────────────────────────────────────────────────────
+    for (int i = window; i < N; ++i) {
+        const int old = i - window;
+
+        if ((i - window + 1) % refresh == 0) {
+            // Periodic full recompute to flush floating-point accumulation
+            build_normal_equations(y, factors, old + 1, i + 1,
+                                   static_cast<int>(k), p, XtX, Xty);
+        } else {
+            // Rank-1 update: add bar i, remove bar old
+            const double* fi_new = factors + i   * k;
+            const double* fi_old = factors + old * k;
+            for (int r = 0; r < p; ++r) {
+                const double xr_n = (r == 0) ? 1.0 : fi_new[r - 1];
+                const double xr_o = (r == 0) ? 1.0 : fi_old[r - 1];
+                for (int c = 0; c < p; ++c) {
+                    const double xc_n = (c == 0) ? 1.0 : fi_new[c - 1];
+                    const double xc_o = (c == 0) ? 1.0 : fi_old[c - 1];
+                    XtX[r * p + c] += xr_n * xc_n - xr_o * xc_o;
+                }
+                Xty[r] += xr_n * y[i] - xr_o * y[old];
+            }
+        }
+
+        if (cholesky_solve(XtX, Xty, beta, p)) {
+            for (int j = 0; j < p; ++j)
+                result[i * p + j] = beta[j];
+        }
+    }
+
+    return result;
+}
+
+// ── rolling_beta ─────────────────────────────────────────────────────────────
+
+std::vector<double> rolling_beta(
+    const double* y,
+    const double* x,
+    std::size_t   n,
+    int           window)
+{
+    std::vector<double> result(n, kNaN);
+    if (window < 2 || static_cast<int>(n) < window) return result;
+
+    // beta = cov(x,y) / var(x)
+    //      = [W*Sxy - Sx*Sy] / [W*Sxx - Sx^2]
+    // where W = window (constant), maintained with O(1) sliding updates.
+    const double W = static_cast<double>(window);
+    double Sx = 0.0, Sy = 0.0, Sxy = 0.0, Sxx = 0.0;
+
+    // Seed first window
+    for (int i = 0; i < window; ++i) {
+        Sx  += x[i];
+        Sy  += y[i];
+        Sxy += x[i] * y[i];
+        Sxx += x[i] * x[i];
+    }
+    {
+        const double denom = W * Sxx - Sx * Sx;
+        if (std::abs(denom) > 1e-14)
+            result[window - 1] = (W * Sxy - Sx * Sy) / denom;
+    }
+
+    // Slide
+    for (int i = window; i < static_cast<int>(n); ++i) {
+        const int old = i - window;
+        Sx  += x[i]        - x[old];
+        Sy  += y[i]        - y[old];
+        Sxy += x[i] * y[i] - x[old] * y[old];
+        Sxx += x[i] * x[i] - x[old] * x[old];
+
+        const double denom = W * Sxx - Sx * Sx;
+        if (std::abs(denom) > 1e-14)
+            result[i] = (W * Sxy - Sx * Sy) / denom;
+    }
+
+    return result;
+}
+
+}  // namespace sqt

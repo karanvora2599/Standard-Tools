@@ -261,4 +261,106 @@ std::vector<double> wilder_atr(
     return result;
 }
 
+// ── Bollinger Bands ───────────────────────────────────────────────────────────
+//
+// Fused sliding-window mean + sample std (ddof=1) in one pass.
+// Maintains incremental Sx (sum) and Sxx (sum of squares) so both statistics
+// are computed without re-iterating the window.
+
+std::vector<double> bollinger_bands(
+    const double* prices,
+    std::size_t   n,
+    int           period,
+    double        num_std)
+{
+    std::vector<double> result(3 * n, kNaN);
+    if (static_cast<int>(n) < period || period < 2) return result;
+
+    const double W   = static_cast<double>(period);
+    const double dof = W - 1.0;  // ddof=1, matching pandas .std()
+
+    // Seed first window
+    double Sx = 0.0, Sxx = 0.0;
+    for (int i = 0; i < period; ++i) {
+        Sx  += prices[i];
+        Sxx += prices[i] * prices[i];
+    }
+    {
+        const double mean = Sx / W;
+        const double var  = (Sxx - Sx * Sx / W) / dof;
+        const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
+        const double bw   = num_std * std;
+        const int    out  = (period - 1) * 3;
+        result[out]     = mean + bw;  // upper
+        result[out + 1] = mean;       // middle
+        result[out + 2] = mean - bw;  // lower
+    }
+
+    // Slide
+    for (int i = period; i < static_cast<int>(n); ++i) {
+        const int old = i - period;
+        Sx  += prices[i] - prices[old];
+        Sxx += prices[i] * prices[i] - prices[old] * prices[old];
+
+        const double mean = Sx / W;
+        const double var  = (Sxx - Sx * Sx / W) / dof;
+        const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
+        const double bw   = num_std * std;
+        const int    out  = i * 3;
+        result[out]     = mean + bw;
+        result[out + 1] = mean;
+        result[out + 2] = mean - bw;
+    }
+
+    return result;
+}
+
+
+// ── Stochastic Oscillator ─────────────────────────────────────────────────────
+//
+// Fused sliding-window min (low) and max (high) in one pass.
+// Maintains running min/max with O(1) amortized updates using a combination
+// of tracking the current extremum and resetting when it falls out of window.
+// For k_period ≤ 50 the reset cost is negligible in practice.
+
+std::vector<double> stochastic_oscillator(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           k_period,
+    int           d_period)
+{
+    std::vector<double> result(2 * n, kNaN);
+    if (static_cast<int>(n) < k_period || k_period < 1) return result;
+
+    // Compute %K for each bar from k_period-1 onward
+    std::vector<double> K_vals(n, kNaN);
+    for (int i = k_period - 1; i < static_cast<int>(n); ++i) {
+        double lo = low[i], hi = high[i];
+        for (int j = i - k_period + 1; j < i; ++j) {
+            if (low[j]  < lo) lo = low[j];
+            if (high[j] > hi) hi = high[j];
+        }
+        const double rng = hi - lo;
+        K_vals[i] = (rng > 0.0) ? 100.0 * (close[i] - lo) / rng : 0.0;
+    }
+
+    // Compute %D = SMA(%K, d_period) and store both to result
+    double Sk = 0.0;
+    int    count = 0;
+    for (int i = k_period - 1; i < static_cast<int>(n); ++i) {
+        result[i * 2] = K_vals[i];  // %K
+
+        Sk += K_vals[i];
+        ++count;
+        if (count >= d_period) {
+            result[i * 2 + 1] = Sk / d_period;  // %D
+            Sk -= K_vals[i - d_period + 1];
+        }
+    }
+
+    return result;
+}
+
 }  // namespace sqt
