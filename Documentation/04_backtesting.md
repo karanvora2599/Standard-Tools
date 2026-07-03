@@ -23,15 +23,15 @@ print(f"C++ kernel active: {HAS_CPP}")
 - All performance metrics: total return, annualized vol, Sharpe, Sortino, max drawdown, Calmar
 - Trade statistics: num trades (closed only), win rate, profit factor, avg trade return
 
-**`backtest_grid` multiplier:** Each of the `n_workers` processes runs the C++ kernel independently, so the effective speedup is approximately **C++ gain × CPU core count** for grid searches.
+**`backtest_grid` batch kernel:** When `_sqt_core` is built, `backtest_grid` uses an additional C++ batch path. All signal arrays for every parameter combination are generated in Python (the strategy logic is Python), stacked into a single 2D matrix, and passed to `_sqt_core.batch_run_strategy` in **one call**. This eliminates Python re-entry overhead between combinations and is significantly faster than the previous approach of calling the C++ kernel once per combination from a `ProcessPoolExecutor` worker.
 
 The optional per-trade log (`include_trade_log=True`) still runs in Python — it requires DatetimeIndex-aware iteration to produce labeled entry/exit dates. All numeric results are identical to the Python fallback.
 
-| Scenario | Python (pandas) | C++ | Speedup |
-|---|---|---|---|
-| `run_strategy` (n=2000) | ~1–3 ms | ~0.1–0.4 ms | **3–8×** |
-| Grid (100 combos) | ~100–300 ms | ~10–40 ms | **5–10×** |
-| Grid (1000 combos) | ~1–3 s | ~0.1–0.3 s | **5–15×** |
+| Scenario | Python (pandas) | C++ single calls | C++ batch kernel | Speedup (batch) |
+|---|---|---|---|---|
+| `run_strategy` (n=2000) | ~1–3 ms | ~0.1–0.4 ms | — | **3–8×** |
+| Grid (100 combos) | ~100–300 ms | ~10–40 ms | ~5–20 ms | **10–50×** |
+| Grid (1000 combos) | ~1–3 s | ~0.1–0.3 s | ~50–200 ms | **10–50×** |
 
 See [build_guide.md](../Development/build_guide.md) for build instructions.
 

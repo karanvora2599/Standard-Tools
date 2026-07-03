@@ -4,7 +4,7 @@ All indicators accept `pd.Series` (or `pd.DataFrame` for OHLCV-based indicators)
 
 Performance-critical indicators use a three-tier execution stack: **C++ extension** (`_sqt_core`) → **Numba JIT** → **pure Python fallback**. The C++ path is fastest and has no NumPy-version dependency. Numba requires `numba` installed with NumPy ≤ 2.0 (on NumPy 2.x the JIT is a no-op). All functions remain correct regardless of which tier is active — the selection is transparent to callers.
 
-The following indicators have a **C++ fast path**: RSI, ADX, Parabolic SAR, and Wilder's ATR (all in `_sqt_core`). `atr()` uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series. `wilder_atr()` adds Wilder's exponential smoothing on top of that and runs via the compiled C++ extension when available.
+The following indicators have a **C++ fast path** via `_sqt_core`: RSI, ADX, Parabolic SAR, Wilder's ATR, Bollinger Bands, and Stochastic Oscillator. `atr()` uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series. All C++ paths fall back to pure Python/pandas automatically when the extension is not built — the API is identical either way.
 
 ---
 
@@ -113,7 +113,9 @@ df['oversold']   = df['RSI'] < 30
 df['overbought'] = df['RSI'] > 70
 ```
 
-### Stochastic Oscillator
+### Stochastic Oscillator *(C++ extension)*
+
+Uses a C++ fused sliding min+max pass (5–15× faster than two separate pandas rolling operations). Falls back to pandas when the extension is not built.
 
 ```python
 from standard_quant_tools.indicators import stochastic_oscillator
@@ -130,7 +132,9 @@ df['stoch_bull'] = (df['Stoch_K'] > df['Stoch_D']) & (df['Stoch_K'] < 20)
 
 ## Volatility Indicators
 
-### Bollinger Bands
+### Bollinger Bands *(C++ extension)*
+
+Uses a C++ fused single-pass mean+std computation — one sliding window maintains both `Σx` and `Σx²`, computing mean and variance together rather than running two separate pandas rolling operations (3–8× faster). Falls back to pandas when the extension is not built.
 
 ```python
 from standard_quant_tools.indicators import bollinger_bands

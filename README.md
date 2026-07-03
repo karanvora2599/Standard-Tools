@@ -4,7 +4,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 ## Key Features
 
-- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 24 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
@@ -83,13 +83,13 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 | Function | Description | Performance |
 |---|---|---|
 | `rsi(series, period)` | RSI (Wilder's smoothing) | **C++ extension** / Numba JIT / Python fallback |
-| `stochastic_oscillator(high, low, close)` | Stochastic %K and %D | Pandas rolling |
+| `stochastic_oscillator(high, low, close)` | Stochastic %K and %D | **C++ extension** / Pandas rolling fallback |
 
 **Volatility**
 
 | Function | Description | Performance |
 |---|---|---|
-| `bollinger_bands(series, period, num_std)` | Upper / Middle / Lower bands | Pandas rolling |
+| `bollinger_bands(series, period, num_std)` | Upper / Middle / Lower bands | **C++ extension** / Pandas rolling fallback |
 | `atr(high, low, close, period)` | Average True Range (SMA of TR) | **NumPy single-pass** (5.6× vs `pd.concat`) |
 | `wilder_atr(high, low, close, period)` | Wilder's ATR (SMA seed + Wilder smoothing) | **C++ extension** / Python fallback |
 
@@ -134,9 +134,11 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 
 10 functions across four areas. Several functions have a **C++ fast path** via `_sqt_core`:
 - `calculate_beta` — 2-variable OLS via closed-form normal equations (10–20× vs. `np.linalg.lstsq`)
+- `rolling_beta` — incremental O(1)-per-bar sum updates (10–40× vs. two pandas rolling passes)
 - `half_life` / `compute_spread` — same OLS kernel, same speedup
 - `cointegration_test` — full Engle-Granger pipeline (5–15× vs. statsmodels)
 - `hurst_exponent` / `rolling_hurst` — DFA + R/S + sliding window (20–80× / 30–100×)
+- `rolling_factor_loadings` — incremental Cholesky rank-1 updates (50–200× vs. per-window `lstsq`)
 
 #### Regression
 
@@ -396,9 +398,13 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 | `calculate_beta` (n = 500) | ~0.3–0.8 ms (`lstsq`) | ~0.01–0.03 ms | **10–20×** |
 | `half_life` (n = 500) | ~0.2–0.5 ms (`lstsq`) | ~0.008–0.02 ms | **10–20×** |
 | `run_strategy` (n = 2 000) | ~1–3 ms (pandas) | ~0.1–0.4 ms | **3–8×** |
-| `backtest_grid` (100 combos) | ~100–300 ms | ~10–40 ms | **5–10×** |
+| `backtest_grid` (100 combos, batch kernel) | ~100–300 ms | ~5–20 ms | **10–50×** |
+| `rolling_factor_loadings` (n = 500, window = 60, k = 3) | ~50–200 ms (lstsq loop) | ~0.5–3 ms | **50–200×** |
+| `rolling_beta` (n = 2 000, window = 60) | ~1–3 ms (2× rolling) | ~0.05–0.2 ms | **10–40×** |
+| `bollinger_bands` (n = 2 000, period = 20) | ~0.5–1.5 ms (2× rolling) | ~0.1–0.4 ms | **3–8×** |
+| `stochastic_oscillator` (n = 2 000, k = 14) | ~0.6–1.8 ms (2× rolling) | ~0.1–0.3 ms | **5–15×** |
 
-The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop.
+The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop. `rolling_factor_loadings` achieves its dramatic speedup through incremental rank-1 XtX updates — each new bar costs O(k²) instead of a full O(n·k²) `lstsq` solve.
 
 > These are projected figures based on algorithmic analysis of loop iterations vs. compiled throughput. The benchmark suite (`tests/cpp/bench_hurst.cpp` and `pytest -m benchmark`) confirms actual numbers once the extension is built. See [Development/build_guide.md](Development/build_guide.md) for build instructions.
 
@@ -465,7 +471,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**625 Python unit tests** (529 passing; 96 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest)
+**696 Python unit tests** (546 passing; 150 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest)
 
 ---
 

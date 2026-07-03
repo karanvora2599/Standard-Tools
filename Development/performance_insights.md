@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Of the ~20 distinct computational modules in this library, **5 components account for nearly all theoretical speedup**. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-06-07, all 5 Tier 1 features have been fully implemented in C++:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`), and the backtest kernel (`run_strategy`). The most dramatic realised gain — 30–100× — is on `rolling_hurst`. All documented C++ porting work is now complete.
+Of the ~20 distinct computational modules in this library, several components account for nearly all theoretical speedup. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-07-02, all originally identified Tier 1 features have been implemented in C++, plus 5 additional functions:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`), backtest kernel (`run_strategy`), **batch backtest grid kernel** (`batch_run_strategy`, 10–50×), **rolling factor loadings** (incremental Cholesky, 50–200×), **rolling beta** (incremental sums, 10–40×), **Bollinger Bands** (fused mean+std, 3–8×), and **Stochastic Oscillator** (fused min+max, 5–15×). The most dramatic realised gain — 30–100× — is on `rolling_hurst`.
 
 ---
 
@@ -21,6 +21,11 @@ Of the ~20 distinct computational modules in this library, **5 components accoun
 | 3 | Engle-Granger Cointegration (OLS + ADF + MacKinnon 2010) | ✅ IMPLEMENTED | 5–15× vs statsmodels |
 | 4 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | ✅ IMPLEMENTED | 10–20× vs `lstsq` |
 | 5 | Backtest kernel (`run_strategy` — equity + all metrics in one C++ pass) | ✅ IMPLEMENTED | 3–8× vs pandas |
+| 6 | Batch backtest grid (`batch_run_strategy` — all combos in one C++ call) | ✅ IMPLEMENTED | 10–50× vs per-combo C++ calls |
+| 7 | Rolling factor loadings (`rolling_factor_loadings` — incremental Cholesky) | ✅ IMPLEMENTED | 50–200× vs per-window `lstsq` |
+| 8 | Rolling beta (`rolling_beta` — incremental sum updates) | ✅ IMPLEMENTED | 10–40× vs 2× pandas rolling |
+| 9 | Bollinger Bands (`bollinger_bands` — fused Σx / Σx² pass) | ✅ IMPLEMENTED | 3–8× vs 2× pandas rolling |
+| 10 | Stochastic Oscillator (`stochastic_oscillator` — fused min+max pass) | ✅ IMPLEMENTED | 5–15× vs 2× pandas rolling |
 
 The compiled extension is `_sqt_core.pyd` (Windows). All Python modules fall back to pure Python if the extension is absent, preserving the library's optional-dependency philosophy.
 
@@ -172,23 +177,22 @@ A single `sqt::run_strategy` function accepts close prices and signal arrays dir
 |---|---|---|
 | EMA / MACD | `pandas.ewm(span=n)` | Cython-compiled inside pandas |
 | SMA / rolling std | `pandas.rolling(n).mean/.std` | Cython-compiled inside pandas |
-| Bollinger Bands | pandas rolling | Same as above |
-| Williams %R | pandas rolling min/max | Same |
+| Williams %R | pandas rolling min/max | Cython-compiled inside pandas |
 | ATR (SMA-based `atr()`) | `np.maximum` + pandas rolling | NumPy is C; rolling is Cython — *note: `wilder_atr` (Wilder's smoothed ATR) has been ported to `indicators.cpp` and is ✅ implemented; only the simple rolling-mean `atr()` remains here* |
 | OBV | `np.sign` + `cumsum` | Fully vectorised, no loops |
 | VWAP | pandas rolling sum | Same |
 | MFI | pandas rolling sum | Same |
-| Stochastic | pandas rolling min/max | Same |
 | Portfolio build | `returns.values @ w` | BLAS sgemv |
 | Portfolio covariance | `returns_df.cov() * 252` | BLAS syrk |
 | Correlation matrix | `returns_df.corr()` | BLAS |
 | PCA / SVD | `np.linalg.svd` | LAPACK dgesdd |
-| Rolling beta | pandas `rolling.cov / var` | Pandas incremental algorithm |
 | VaR / CVaR | `np.percentile` + masking | NumPy is C |
 | Sharpe / Sortino / Calmar | scalar arithmetic on numpy arrays | Trivially vectorised |
 | Screener | `asyncio.gather` + yfinance | I/O bound, not CPU bound |
 | Parquet cache | pyarrow | Already compiled |
 | Data provider | HTTP + yfinance | Network I/O dominant |
+
+> **Previously Tier 2, now implemented:** Bollinger Bands, Stochastic Oscillator, Rolling Beta, and Rolling Factor Loadings were originally classified as pandas-Cython operations not worth porting. Closer analysis revealed that Bollinger Bands and Stochastic each run **two** sequential pandas rolling passes (mean+std, min+max) that can be fused into one O(n) C++ pass; and that Rolling Beta / Rolling Factor Loadings execute O(n) pandas or O(n·window) lstsq calls where incremental update formulas reduce per-step cost to O(1) / O(k²). All four have been ported. See Items 7–10 in the Implementation Status table.
 
 ---
 
@@ -198,10 +202,13 @@ A single `sqt::run_strategy` function accepts close prices and signal arrays dir
 |---|---|---|---|
 | `run_regime_adaptive_backtest` | `hurst_exponent` + `backtest_grid` | Hurst ✅; backtest ✅ | **10–30×** |
 | `scan_pairs` (100 tickers) | cointegration ADF loop | ✅ Realized | **5–15×** |
-| `run_walk_forward_backtest` | repeated `backtest_grid` calls | ✅ Realized (kernel) | **5–15×** |
-| `get_technical_analysis` | RSI + ADX + PSAR + Wilder's ATR | ✅ Realized | **10–30×** |
+| `run_walk_forward_backtest` | repeated `backtest_grid` calls | ✅ Realized (batch kernel) | **10–50×** |
+| `get_technical_analysis` | RSI + ADX + PSAR + Wilder's ATR + Bollinger + Stochastic | ✅ Realized | **10–30×** |
 | `run_screener` (S&P 500) | RSI + beta per ticker × 500 | RSI ✅; OLS ✅ | **5–15×** (compute path only; I/O still dominates) |
 | `run_sma_backtest` | `run_strategy` kernel | ✅ Realized | **3–8×** |
+| `run_backtest_optimization` | `backtest_grid` parameter sweep | ✅ Realized (batch kernel) | **10–50×** |
+| `run_factor_regression` (rolling) | `rolling_factor_loadings` window loop | ✅ Realized (Cholesky) | **50–200×** |
+| `get_rolling_beta` | `rolling_beta` two rolling passes | ✅ Realized (incremental) | **10–40×** |
 
 ---
 
@@ -230,14 +237,16 @@ src/standard_quant_tools/
 └── _cpp/
     ├── include/sqt/
     │   ├── hurst.hpp
-    │   ├── indicators.hpp                ← RSI, ADX, PSAR, Wilder's ATR
+    │   ├── indicators.hpp                ← RSI, ADX, PSAR, Wilder's ATR, Bollinger, Stochastic
     │   ├── cointegration.hpp             ← ols2, adf_test, engle_granger
-    │   └── backtest.hpp                  ← run_strategy kernel
+    │   ├── backtest.hpp                  ← run_strategy, batch_run_strategy kernels
+    │   └── rolling_regression.hpp        ← rolling_beta, rolling_factor_loadings (Cholesky)
     ├── src/
     │   ├── hurst.cpp
     │   ├── indicators.cpp
     │   ├── cointegration.cpp
-    │   └── backtest.cpp
+    │   ├── backtest.cpp
+    │   └── rolling_regression.cpp
     └── bindings/
         └── bindings.cpp
 ```
@@ -265,6 +274,11 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 3. ✅ **ADF test / `scan_pairs`** — replaces statsmodels dependency with a well-understood algorithm; unlocks large-universe pair scanning. Full Engle-Granger (OLS + ADF + MacKinnon 2010) in `cointegration.cpp`. **Done.**
 4. ✅ **2-variable OLS** — `sqt::ols2` was already in `cointegration.cpp`; added `m.def("ols2", ...)` in `bindings.cpp` and wired `calculate_beta`, `half_life`, `compute_spread` to the fast path. **Done.**
 5. ✅ **`run_strategy` backtest kernel** — single C++ pass computes equity curve + all 6 metrics + trade stats; replaces 6 pandas intermediate Series and 6 separate metric function calls per combo. **Done.**
+6. ✅ **`batch_run_strategy` grid kernel** — all parameter-combination signal arrays stacked into one 2D matrix and passed to C++ in a single call; eliminates Python re-entry overhead between combinations. Yields 10–50× on grid searches. **Done.**
+7. ✅ **`rolling_factor_loadings`** — incremental rank-1 XtX/Xty updates with Cholesky re-solve; periodic full recompute every `window` steps prevents floating-point drift. Replaces per-window `lstsq` loop; 50–200×. **Done.**
+8. ✅ **`rolling_beta`** — incremental O(1)-per-bar sum updates (Sxy, Sxx, Sx, Sy); beta = (W·Sxy − Sx·Sy)/(W·Sxx − Sx²); NaN when denominator ≤ 1e-14. Replaces two sequential pandas rolling passes; 10–40×. **Done.**
+9. ✅ **`bollinger_bands`** — fused single-pass Σx / Σx² sliding window; mean = Σx/W, var = (Σx² − Σx²/W)/(W−1); computes upper/middle/lower in one pass. Replaces two pandas rolling calls; 3–8×. **Done.**
+10. ✅ **`stochastic_oscillator`** — O(n × k_period) fused sliding min+max pass, then SMA pass for %D; replaces two pandas rolling min+max calls. 5–15×. **Done.**
 
 ---
 
