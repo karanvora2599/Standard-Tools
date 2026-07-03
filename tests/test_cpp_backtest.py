@@ -279,3 +279,158 @@ class TestCppRunStrategyDirect:
     @requires_cpp
     def test_wrapper_routes_to_cpp(self):
         assert ENGINE_HAS_CPP is True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# batch_run_strategy — C++ extension tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCppBatchRunStrategy:
+    """Direct calls to _sqt_core.batch_run_strategy."""
+
+    def _signals_matrix(self, n: int, num_tests: int, seed: int = 0) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        rows = [np.sign(rng.standard_normal(n)).astype(np.float64)
+                for _ in range(num_tests)]
+        return np.vstack(rows)
+
+    @requires_cpp
+    def test_returns_list_of_dicts(self):
+        prices  = np.linspace(100.0, 110.0, 50)
+        signals = np.vstack([np.ones(50), np.zeros(50)])
+        results = _cpp.batch_run_strategy(prices, signals)
+        assert isinstance(results, list)
+        assert len(results) == 2
+        for r in results:
+            assert isinstance(r, dict)
+
+    @requires_cpp
+    def test_result_count_equals_num_tests(self):
+        prices = np.linspace(100.0, 120.0, 100)
+        for num_tests in (1, 3, 10):
+            sig_mat = np.tile(np.ones(100), (num_tests, 1))
+            results = _cpp.batch_run_strategy(prices, sig_mat)
+            assert len(results) == num_tests
+
+    @requires_cpp
+    def test_each_result_has_required_keys(self):
+        prices   = np.linspace(100.0, 110.0, 60)
+        sig_mat  = np.vstack([np.ones(60), np.zeros(60)])
+        required = {
+            "final_equity", "total_return", "annualized_volatility",
+            "sharpe_ratio", "sortino_ratio", "max_drawdown", "calmar_ratio",
+            "num_trades", "win_rate", "profit_factor", "avg_trade_return_pct",
+        }
+        for r in _cpp.batch_run_strategy(prices, sig_mat):
+            assert required <= set(r.keys())
+
+    @requires_cpp
+    def test_equity_curve_stripped(self):
+        """batch_run_strategy strips the equity_curve to save memory."""
+        prices  = np.linspace(100.0, 110.0, 50)
+        sig_mat = np.vstack([np.ones(50)])
+        r = _cpp.batch_run_strategy(prices, sig_mat)[0]
+        assert "equity_curve" not in r
+
+    @requires_cpp
+    def test_flat_signal_zero_return(self):
+        prices  = np.linspace(100.0, 130.0, 80)
+        sig_mat = np.zeros((1, 80))
+        r = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.0, 0.0)[0]
+        assert abs(r["total_return"]) < 1e-10
+
+    @requires_cpp
+    def test_all_long_rising_prices_positive_return(self):
+        prices  = np.linspace(100.0, 130.0, 100)
+        sig_mat = np.ones((1, 100))
+        r = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.0, 0.0)[0]
+        assert r["total_return"] > 0.0
+
+    @requires_cpp
+    def test_matches_single_run_strategy(self):
+        """Each row must match an individual run_strategy call exactly."""
+        rng     = np.random.default_rng(99)
+        n       = 150
+        prices  = 100.0 + np.cumsum(rng.standard_normal(n))
+        sig_mat = self._signals_matrix(n, 4, seed=99)
+
+        batch = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.001, 0.0005)
+        for i, br in enumerate(batch):
+            sr = _cpp.run_strategy(prices, sig_mat[i], 10_000.0, 0.001, 0.0005)
+            assert abs(br["total_return"]  - sr["total_return"])  < 1e-10, f"row {i}"
+            assert abs(br["sharpe_ratio"]  - sr["sharpe_ratio"])  < 1e-10, f"row {i}"
+            assert abs(br["max_drawdown"]  - sr["max_drawdown"])  < 1e-10, f"row {i}"
+
+    @requires_cpp
+    def test_different_signals_produce_different_results(self):
+        n       = 120
+        prices  = np.linspace(100.0, 115.0, n)
+        sig_mat = np.vstack([np.ones(n), -np.ones(n)])
+        results = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.0, 0.0)
+        assert results[0]["total_return"] != results[1]["total_return"]
+
+    @requires_cpp
+    def test_shape_mismatch_raises(self):
+        prices  = np.linspace(100.0, 110.0, 50)
+        sig_mat = np.ones((2, 60))  # wrong n_cols
+        with pytest.raises(Exception):
+            _cpp.batch_run_strategy(prices, sig_mat)
+
+    @requires_cpp
+    def test_non_2d_signals_raises(self):
+        prices = np.linspace(100.0, 110.0, 50)
+        with pytest.raises(Exception):
+            _cpp.batch_run_strategy(prices, np.ones(50))  # 1D, not 2D
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# backtest_grid C++ batch path (wrapper-level)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestBacktestGridCppPath:
+    """When _sqt_core is built, backtest_grid should use the C++ batch kernel."""
+
+    @requires_cpp
+    def test_cpp_grid_matches_python_fallback(self):
+        """Force both paths and compare sharpe_ratios (allow small float tolerance)."""
+        from unittest.mock import patch
+        from standard_quant_tools.backtest import backtest_grid
+        from standard_quant_tools.backtest import engine as eng
+
+        rng    = np.random.default_rng(1)
+        n      = 300
+        dates  = pd.date_range("2020-01-01", periods=n, freq="B")
+        prices = pd.DataFrame({
+            "Open":   100.0 + np.cumsum(rng.standard_normal(n)),
+            "High":   100.0 + np.cumsum(rng.standard_normal(n)) + 0.5,
+            "Low":    100.0 + np.cumsum(rng.standard_normal(n)) - 0.5,
+            "Close":  100.0 + np.cumsum(rng.standard_normal(n)),
+            "Volume": 1_000_000.0,
+        }, index=dates)
+        prices["High"]  = prices[["Open", "High", "Close"]].max(axis=1)
+        prices["Low"]   = prices[["Open", "Low",  "Close"]].min(axis=1)
+
+        grid = {"fast_period": [5, 10], "slow_period": [20, 30]}
+
+        # C++ path (default when built)
+        cpp_result = backtest_grid(prices, strategy="sma_crossover",
+                                   param_grid=grid, n_workers=1)
+
+        # Python fallback: patch HAS_CPP to False inside engine module
+        with patch.object(eng, "HAS_CPP", False), \
+             patch.object(eng, "_cpp_core", None):
+            py_result = backtest_grid(prices, strategy="sma_crossover",
+                                      param_grid=grid, n_workers=1)
+
+        assert len(cpp_result) == len(py_result)
+        cpp_sorted = cpp_result.sort_values(
+            ["fast_period", "slow_period"]).reset_index(drop=True)
+        py_sorted  = py_result.sort_values(
+            ["fast_period", "slow_period"]).reset_index(drop=True)
+        for col in ["total_return", "sharpe_ratio", "max_drawdown"]:
+            np.testing.assert_allclose(
+                cpp_sorted[col].to_numpy(),
+                py_sorted[col].to_numpy(),
+                atol=1e-6,
+                err_msg=f"C++ vs Python mismatch in column '{col}'",
+            )
