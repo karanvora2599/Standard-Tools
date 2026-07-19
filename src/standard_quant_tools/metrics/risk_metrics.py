@@ -1,8 +1,12 @@
+import logging
+
 import pandas as pd
 import numpy as np
 from .return_metrics import cagr
 from standard_quant_tools.validation import validate_series
 from standard_quant_tools.analysis.regression import calculate_beta
+
+logger = logging.getLogger(__name__)
 
 _scipy_stats = None
 try:
@@ -19,6 +23,7 @@ def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_ye
     excess_returns = returns - risk_free_rate / periods_per_year
     std = returns.std()
     if std == 0:
+        logger.warning("[sharpe_ratio] zero-volatility returns — returning 0.0")
         return 0.0
     return (excess_returns.mean() / std) * np.sqrt(periods_per_year)
 

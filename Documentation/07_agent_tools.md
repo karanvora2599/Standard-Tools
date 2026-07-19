@@ -113,6 +113,8 @@ Errors:
 - **`ValueError`** — unknown tool name; message lists all 24 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
+Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [08_auditability.md](08_auditability.md).
+
 ### Wiring up OpenAI
 
 ```python

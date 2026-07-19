@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools import audit
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.indicators.trend import sma, ema, macd, adx, williams_r, parabolic_sar
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
@@ -1577,7 +1578,7 @@ def dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     logger.debug("[dispatch] → %s  args=%s", tool_name, list(arguments.keys()))
     t0 = time.perf_counter()
     try:
-        result = fn(model_cls(**arguments)).model_dump()
+        result = audit._run_and_record(tool_name, fn, model_cls(**arguments))
     except Exception as exc:
         logger.error("[dispatch] ✗ %s  error=%s", tool_name, exc)
         raise

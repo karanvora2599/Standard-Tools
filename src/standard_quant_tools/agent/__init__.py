@@ -1,3 +1,11 @@
+from standard_quant_tools.audit import (
+    configure_logging,
+    RequestIdFilter,
+    verify_replay,
+    AuditWriter,
+    DecisionRecord,
+    ReplayResult,
+)
 from .tools import (
     # backtest strategies
     run_sma_backtest,
@@ -92,6 +100,13 @@ __all__ = [
     "get_position_size",
     "get_agent_tools",
     "dispatch",
+    # auditability
+    "configure_logging",
+    "RequestIdFilter",
+    "verify_replay",
+    "AuditWriter",
+    "DecisionRecord",
+    "ReplayResult",
     # models
     "BacktestInput",
     "BacktestResult",

@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import functools
 import logging
 import os
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 import pandas as pd
 import yfinance as yf
 
+from standard_quant_tools import audit
 from .base import DataProvider, TickerInfo, FinancialRatios
 from standard_quant_tools.error import APIError, DataNotFoundError, InvalidSymbolError
 from cachetools import TTLCache, cached
@@ -100,7 +102,12 @@ class YFinanceProvider(DataProvider):
         pq_path = _parquet_path(symbol, start_str, end_str, interval)
         if _is_historical(end_date) and pq_path.exists():
             logger.debug("[cache] disk hit  %s  %s → %s  (%s)", symbol, start_str, end_str, pq_path.name)
-            return pd.read_parquet(pq_path)
+            cached_df = pd.read_parquet(pq_path)
+            audit.record_data_access(
+                symbol, start_str, end_str, interval,
+                source="disk_cache", content_hash=audit.hash_dataframe(cached_df),
+            )
+            return cached_df
 
         # ── Fetch from yfinance ────────────────────────────────────────────
         logger.debug("[fetch] yfinance   %s  %s → %s  interval=%s", symbol, start_str, end_str, interval)
@@ -138,6 +145,10 @@ class YFinanceProvider(DataProvider):
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.debug("[fetch] ✓ %s  %d rows  %.0fms", symbol, len(result), elapsed_ms)
+        audit.record_data_access(
+            symbol, start_str, end_str, interval,
+            source="live_fetch", content_hash=audit.hash_dataframe(result),
+        )
 
         # ── Persist to Parquet for future sessions ─────────────────────────
         if _is_historical(end_date):
@@ -165,7 +176,12 @@ class YFinanceProvider(DataProvider):
     ) -> pd.DataFrame:
         loop = asyncio.get_event_loop()
         fn = functools.partial(self.get_ohlcv, symbol, start_date, end_date, interval)
-        return await loop.run_in_executor(None, fn)  # type: ignore[arg-type]
+        # run_in_executor (unlike call_soon) does not copy the calling context
+        # into the worker thread, so without this the audit contextvars
+        # (request id, data-source collector) would silently no-op for every
+        # fetch made this way — e.g. the per-ticker legs of a portfolio call.
+        ctx = contextvars.copy_context()
+        return await loop.run_in_executor(None, lambda: ctx.run(fn))  # type: ignore[arg-type]
 
     @retry(times=3, delay=1)
     def get_ticker_info(self, symbol: str) -> TickerInfo:
