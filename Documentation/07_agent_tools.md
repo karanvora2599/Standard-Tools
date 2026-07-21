@@ -113,7 +113,7 @@ Errors:
 - **`ValueError`** — unknown tool name; message lists all 24 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
-Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [08_auditability.md](08_auditability.md).
+Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
 
 ### Wiring up OpenAI
 
@@ -1047,9 +1047,10 @@ value = ScreenerInput(
 )
 
 # Momentum screen: already running, confirmed by SMA structure
+# (filters accepts one price_above_sma value per call — 200 = golden-zone confirmation)
 momentum = ScreenerInput(
     tickers=["NVDA", "META", "MSFT", "AAPL", "GOOGL", "AMD", "AVGO"],
-    filters={"rsi_min": 55, "price_above_sma": 50, "price_above_sma": 200},
+    filters={"rsi_min": 55, "price_above_sma": 200},
     sort_by="rsi_14", ascending=False,
 )
 
@@ -2031,8 +2032,8 @@ print(f"Example params: {playbook['example_params']}")
 | Model | Required | Optional (with defaults) |
 |---|---|---|
 | `FundamentalsInput` | `symbol` | — |
-| `BacktestOptInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `top_n=5`, `metric="sharpe_ratio"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
-| `AdvancedIndicatorsInput` | `symbol`, `start_date`, `end_date` | `sar_af_start=0.02`, `sar_af_step=0.02`, `sar_af_max=0.2`, `atr_period=14`, `mfi_period=14` |
+| `BacktestOptInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `initial_capital=10000`, `sort_by="sharpe_ratio"`, `top_n=5`, `n_workers=1` |
+| `AdvancedIndicatorsInput` | `symbol`, `start_date`, `end_date` | `mfi_period=14`, `atr_period=14`, `sar_af_start=0.02`, `sar_af_max=0.2` |
 | `RollingBetaInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"`, `window=60` |
 | `ExtendedRiskInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"` |
 
@@ -2081,12 +2082,12 @@ print(f"Example params: {playbook['example_params']}")
 
 | Model | Key fields |
 |---|---|
-| `FundamentalsResult` | `symbol`, `name`, `sector`, `industry`, `country`, `employees`, `market_cap`, `pe_ratio`, `forward_pe`, `pb_ratio`, `debt_to_equity`, `return_on_equity`, `profit_margin`, `revenue_growth`, `earnings_growth` |
-| `OptimizationRun` | `rank`, `parameters`, `sharpe_ratio`, `total_return`, `max_drawdown`, `num_trades` |
-| `BacktestOptResult` | `symbol`, `strategy`, `metric`, `n_combinations`, `top_runs` (List[`OptimizationRun`]) |
-| `AdvancedIndicatorsResult` | `symbol`, `sar_trend`, `sar_last`, `atr_last`, `atr_pct_price`, `mfi_last`, `mfi_signal` |
-| `RollingBetaResult` | `symbol`, `benchmark`, `window`, `current_beta`, `beta_1m_ago`, `beta_3m_ago`, `beta_6m_ago`, `beta_trend`, `n_obs` |
-| `ExtendedRiskResult` | `symbol`, `benchmark`, `cagr`, `calmar_ratio`, `treynor_ratio`, `var_95_parametric`, `var_99_parametric`, `var_99_historical`, `cvar_99`, `n_obs` |
+| `FundamentalsResult` | `symbol`, `name`, `sector`, `industry`, `country`, `full_time_employees`, `market_cap`, `trailing_pe`, `forward_pe`, `price_to_book`, `debt_to_equity`, `return_on_equity`, `profit_margins`, `dividend_yield` |
+| `OptimizationRun` | `rank`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `max_drawdown`, `num_trades` |
+| `BacktestOptResult` | `symbol`, `strategy`, `n_combinations`, `sort_by`, `best_params`, `best_sharpe`, `best_return`, `top_results` (List[`OptimizationRun`]) |
+| `AdvancedIndicatorsResult` | `symbol`, `last_close`, `sar_value`, `sar_trend`, `sar_signal`, `wilder_atr`, `wilder_atr_pct`, `mfi`, `mfi_signal` |
+| `RollingBetaResult` | `symbol`, `benchmark`, `window`, `current_beta`, `beta_1m_ago`, `beta_3m_ago`, `beta_6m_ago`, `beta_trend`, `beta_min`, `beta_max`, `beta_mean`, `n_obs` |
+| `ExtendedRiskResult` | `symbol`, `benchmark`, `annualized_return`, `calmar_ratio`, `treynor_ratio`, `var_parametric_95`, `var_parametric_99`, `var_historical_99`, `cvar_99`, `beta` |
 
 ---
 

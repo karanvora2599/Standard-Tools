@@ -6,7 +6,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 - **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 24 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
-- **Comprehensive Coverage** — 14 indicators, 10 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
+- **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
 
 ---
@@ -132,7 +132,7 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 
 ### Analysis (`standard_quant_tools.analysis`)
 
-10 functions across four areas. Several functions have a **C++ fast path** via `_sqt_core`:
+12 functions across five areas. Several functions have a **C++ fast path** via `_sqt_core`:
 - `calculate_beta` — 2-variable OLS via closed-form normal equations (10–20× vs. `np.linalg.lstsq`)
 - `rolling_beta` — incremental O(1)-per-bar sum updates (10–40× vs. two pandas rolling passes)
 - `half_life` / `compute_spread` — same OLS kernel, same speedup
@@ -311,7 +311,7 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ### AI Agent Tools (`standard_quant_tools.agent`)
 
-12 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas.
+24 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas.
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -471,7 +471,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**696 Python unit tests** (546 passing; 150 skipped pending C++ build) · **6 integration tests** · **6 benchmark tests** · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest)
+**749 Python tests total** (600 passing; 149 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 
@@ -485,8 +485,9 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/04_backtesting.md` | Vectorized engine, trade log, custom signals, grid search |
 | `Documentation/05_portfolio.md` | Multi-asset metrics, correlation, optimization |
 | `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
-| `Documentation/07_agent_tools.md` | Original 12 LLM tools, Pydantic models, end-to-end agent loop |
+| `Documentation/07_agent_tools.md` | Core 14 LLM tools, full 24-tool registry, Pydantic models, end-to-end agent loop |
 | `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
 | `Documentation/09_advanced_agent_tools.md` | Advanced tools: regime-adaptive, pair scanner, walk-forward, risk attribution, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk |
+| `Documentation/10_auditability.md` | Decision-record audit trail, replay verification, correlated logging |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |

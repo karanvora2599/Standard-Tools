@@ -23,10 +23,10 @@ Ten high-level agentic tools that compose the library's existing primitives into
 | Tool | What it does | Key output fields |
 |---|---|---|
 | `get_stock_fundamentals` | Fetch company metadata and key financial ratios | `pe_ratio`, `pb_ratio`, `debt_to_equity`, `return_on_equity`, `market_cap` |
-| `run_backtest_optimization` | Exhaustive parameter grid search, return top N ranked by metric | `top_runs[].parameters`, `top_runs[].sharpe_ratio` |
-| `get_advanced_indicators` | Parabolic SAR trend, Wilder ATR volatility, MFI volume signal | `sar_trend`, `atr_pct_price`, `mfi_signal` |
+| `run_backtest_optimization` | Exhaustive parameter grid search, return top N ranked by metric | `top_results[].parameters`, `top_results[].sharpe_ratio` |
+| `get_advanced_indicators` | Parabolic SAR trend, Wilder ATR volatility, MFI volume signal | `sar_trend`, `wilder_atr_pct`, `mfi_signal` |
 | `get_rolling_beta` | Rolling OLS beta to detect drift vs a benchmark | `current_beta`, `beta_trend`, `beta_6m_ago` |
-| `get_extended_risk_metrics` | Calmar, Treynor, parametric VaR 95/99, historical VaR 99, CVaR 99 | `calmar_ratio`, `treynor_ratio`, `var_95_parametric` |
+| `get_extended_risk_metrics` | Calmar, Treynor, parametric VaR 95/99, historical VaR 99, CVaR 99 | `calmar_ratio`, `treynor_ratio`, `var_parametric_95` |
 
 ---
 
@@ -1075,15 +1075,16 @@ result = get_stock_fundamentals(FundamentalsInput(symbol="AAPL"))
 print(f"Name       : {result.name}")
 print(f"Sector     : {result.sector}")
 print(f"Industry   : {result.industry}")
+print(f"Country    : {result.country}")
+print(f"Employees  : {result.full_time_employees}")
 print(f"Market cap : ${result.market_cap:,.0f}" if result.market_cap else "Market cap : N/A")
-print(f"PE (trail) : {result.pe_ratio}")
+print(f"PE (trail) : {result.trailing_pe}")
 print(f"PE (fwd)   : {result.forward_pe}")
-print(f"P/B        : {result.pb_ratio}")
+print(f"P/B        : {result.price_to_book}")
 print(f"D/E        : {result.debt_to_equity}")
 print(f"ROE        : {result.return_on_equity}")
-print(f"Profit mrg : {result.profit_margin}")
-print(f"Rev growth : {result.revenue_growth}")
-print(f"EPS growth : {result.earnings_growth}")
+print(f"Profit mrg : {result.profit_margins}")
+print(f"Div yield  : {result.dividend_yield}")
 ```
 
 **FundamentalsInput fields:**
@@ -1097,20 +1098,19 @@ print(f"EPS growth : {result.earnings_growth}")
 | Field | Type | Description |
 |---|---|---|
 | `symbol` | `str` | Ticker symbol |
-| `name` | `str?` | Company long name |
-| `sector` | `str?` | GICS sector |
-| `industry` | `str?` | Industry sub-group |
+| `name` | `str` | Company long name |
+| `sector` | `str` | GICS sector |
+| `industry` | `str` | Industry sub-group |
 | `country` | `str?` | Country of domicile |
-| `employees` | `int?` | Full-time headcount |
-| `market_cap` | `float?` | Market capitalisation in USD |
-| `pe_ratio` | `float?` | Trailing twelve-month P/E |
+| `full_time_employees` | `int?` | Full-time headcount |
+| `market_cap` | `int?` | Market capitalisation in USD |
+| `trailing_pe` | `float?` | Trailing twelve-month P/E |
 | `forward_pe` | `float?` | Forward P/E (consensus estimate) |
-| `pb_ratio` | `float?` | Price-to-book ratio |
+| `price_to_book` | `float?` | Price-to-book ratio |
 | `debt_to_equity` | `float?` | Total debt / equity |
 | `return_on_equity` | `float?` | ROE as a decimal (e.g. 0.25 = 25%) |
-| `profit_margin` | `float?` | Net profit margin as decimal |
-| `revenue_growth` | `float?` | YoY revenue growth as decimal |
-| `earnings_growth` | `float?` | YoY EPS growth as decimal |
+| `profit_margins` | `float?` | Net profit margin as decimal |
+| `dividend_yield` | `float?` | Dividend yield as decimal |
 
 All ratio fields may be `None` when the data provider does not report them (e.g. pre-revenue companies, REITs without standard PE).
 
@@ -1126,12 +1126,12 @@ rows = [get_stock_fundamentals(FundamentalsInput(symbol=s)) for s in peers]
 print(f"{'Ticker':<8} {'PE':>7} {'Fwd PE':>8} {'P/B':>6} {'D/E':>6} {'ROE':>7} {'Margin':>8}")
 print("-" * 55)
 for r in rows:
-    pe   = f"{r.pe_ratio:.1f}"  if r.pe_ratio  else "N/A"
+    pe   = f"{r.trailing_pe:.1f}"  if r.trailing_pe  else "N/A"
     fpe  = f"{r.forward_pe:.1f}" if r.forward_pe else "N/A"
-    pb   = f"{r.pb_ratio:.1f}"  if r.pb_ratio  else "N/A"
+    pb   = f"{r.price_to_book:.1f}"  if r.price_to_book  else "N/A"
     de   = f"{r.debt_to_equity:.1f}" if r.debt_to_equity else "N/A"
     roe  = f"{r.return_on_equity:.0%}" if r.return_on_equity else "N/A"
-    mrg  = f"{r.profit_margin:.0%}"    if r.profit_margin   else "N/A"
+    mrg  = f"{r.profit_margins:.0%}"    if r.profit_margins   else "N/A"
     print(f"{r.symbol:<8} {pe:>7} {fpe:>8} {pb:>6} {de:>6} {roe:>7} {mrg:>8}")
 ```
 
@@ -1155,14 +1155,15 @@ result = run_backtest_optimization(BacktestOptInput(
         "slow_period": [30, 50, 100],
     },
     top_n=5,
-    metric="sharpe_ratio",
+    sort_by="sharpe_ratio",
 ))
 
 print(f"Strategy    : {result.strategy}")
 print(f"Combos tested: {result.n_combinations}")
-print(f"Ranked by   : {result.metric}")
+print(f"Ranked by   : {result.sort_by}")
+print(f"Best params : {result.best_params}")
 print()
-for run in result.top_runs:
+for run in result.top_results:
     print(f"  #{run.rank}  params={run.parameters}  "
           f"Sharpe={run.sharpe_ratio:.2f}  Return={run.total_return:.1%}  "
           f"MDD={run.max_drawdown:.1%}  Trades={run.num_trades}")
@@ -1177,11 +1178,10 @@ for run in result.top_runs:
 | `end_date` | str | — | ISO date |
 | `strategy` | str | — | `"sma_crossover"`, `"rsi_mean_reversion"`, `"macd_crossover"`, `"bollinger_reversion"` |
 | `param_grid` | dict | — | Mapping of parameter name → list of values to test |
-| `top_n` | int | 5 | Number of top combinations to return |
-| `metric` | str | `"sharpe_ratio"` | Ranking metric: `"sharpe_ratio"`, `"total_return"`, `"calmar_ratio"`, `"sortino_ratio"` |
 | `initial_capital` | float | 10000 | Starting capital |
-| `commission_pct` | float | 0.001 | Commission per trade (fraction) |
-| `slippage_pct` | float | 0.0005 | Slippage per trade (fraction) |
+| `sort_by` | str | `"sharpe_ratio"` | Ranking metric: `"sharpe_ratio"`, `"total_return"`, `"calmar_ratio"`, `"sortino_ratio"`, `"max_drawdown"` |
+| `top_n` | int | 5 | Number of top combinations to return (capped at 20) |
+| `n_workers` | int | 1 | CPU workers for parallel grid search |
 
 **Output reference:**
 
@@ -1189,9 +1189,12 @@ for run in result.top_runs:
 |---|---|---|
 | `symbol` | `str` | Ticker |
 | `strategy` | `str` | Strategy name |
-| `metric` | `str` | Metric used to rank |
 | `n_combinations` | `int` | Total parameter combinations tested |
-| `top_runs` | `List[OptimizationRun]` | Top N results, sorted best first |
+| `sort_by` | `str` | Metric used to rank |
+| `best_params` | `dict` | Parameter combination of the top-ranked run |
+| `best_sharpe` | `float` | Sharpe ratio of the top-ranked run |
+| `best_return` | `float` | Total return of the top-ranked run |
+| `top_results` | `List[OptimizationRun]` | Top N results, sorted best first |
 
 Each `OptimizationRun` has:
 
@@ -1199,8 +1202,10 @@ Each `OptimizationRun` has:
 |---|---|---|
 | `rank` | `int` | 1 = best |
 | `parameters` | `dict` | Parameter combination |
-| `sharpe_ratio` | `float` | Sharpe ratio for this run |
 | `total_return` | `float` | Total return (decimal) |
+| `sharpe_ratio` | `float` | Sharpe ratio for this run |
+| `sortino_ratio` | `float` | Sortino ratio for this run |
+| `calmar_ratio` | `float` | Calmar ratio for this run |
 | `max_drawdown` | `float` | Max drawdown (negative decimal) |
 | `num_trades` | `int` | Number of round-trip trades |
 
@@ -1217,10 +1222,10 @@ opt = run_backtest_optimization(BacktestOptInput(
     strategy="sma_crossover",
     param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]},
     top_n=1,
-    metric="sharpe_ratio",
+    sort_by="sharpe_ratio",
 ))
 
-best = opt.top_runs[0]
+best = opt.top_results[0]
 print(f"Best params: {best.parameters}  Sharpe={best.sharpe_ratio:.2f}")
 
 # Now run with full trade log for the best params
@@ -1256,10 +1261,12 @@ result = get_advanced_indicators(AdvancedIndicatorsInput(
 ))
 
 print(f"Symbol      : {result.symbol}")
+print(f"Last close  : {result.last_close:.2f}")
 print(f"SAR trend   : {result.sar_trend}")       # "bullish" or "bearish"
-print(f"SAR last    : {result.sar_last:.2f}")
-print(f"Wilder ATR  : {result.atr_last:.2f}  ({result.atr_pct_price:.2%} of price)")
-print(f"MFI last    : {result.mfi_last:.1f}")
+print(f"SAR signal  : {result.sar_signal}")      # "buy" or "sell"
+print(f"SAR value   : {result.sar_value:.2f}")
+print(f"Wilder ATR  : {result.wilder_atr:.2f}  ({result.wilder_atr_pct:.2%} of price)")
+print(f"MFI         : {result.mfi:.1f}")
 print(f"MFI signal  : {result.mfi_signal}")      # "overbought", "oversold", or "neutral"
 ```
 
@@ -1271,7 +1278,6 @@ print(f"MFI signal  : {result.mfi_signal}")      # "overbought", "oversold", or 
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
 | `sar_af_start` | float | 0.02 | SAR: initial acceleration factor |
-| `sar_af_step` | float | 0.02 | SAR: acceleration factor step |
 | `sar_af_max` | float | 0.2 | SAR: maximum acceleration factor |
 | `atr_period` | int | 14 | Wilder ATR period in bars |
 | `mfi_period` | int | 14 | MFI lookback period in bars |
@@ -1281,11 +1287,13 @@ print(f"MFI signal  : {result.mfi_signal}")      # "overbought", "oversold", or 
 | Field | Type | Description |
 |---|---|---|
 | `symbol` | `str` | Ticker |
+| `last_close` | `float` | Most recent closing price |
 | `sar_trend` | `str` | `"bullish"` (price above SAR) or `"bearish"` (price below SAR) |
-| `sar_last` | `float` | Most recent SAR value |
-| `atr_last` | `float` | Most recent Wilder ATR value in price units |
-| `atr_pct_price` | `float` | ATR as a fraction of closing price |
-| `mfi_last` | `float` | Most recent MFI reading (0–100) |
+| `sar_signal` | `str` | `"buy"` or `"sell"` — mirrors `sar_trend` |
+| `sar_value` | `float` | Most recent SAR value |
+| `wilder_atr` | `float` | Most recent Wilder ATR value in price units |
+| `wilder_atr_pct` | `float` | ATR as a fraction of closing price |
+| `mfi` | `float` | Most recent MFI reading (0–100) |
 | `mfi_signal` | `str` | `"overbought"` (≥80), `"oversold"` (≤20), `"neutral"` |
 
 **Interpreting the signals:**
@@ -1313,8 +1321,8 @@ for t in tickers:
     r = get_advanced_indicators(AdvancedIndicatorsInput(
         symbol=t, start_date="2023-01-01", end_date="2024-01-01",
     ))
-    print(f"{r.symbol:<8} {r.sar_trend:>8} {r.atr_pct_price:>7.2%} "
-          f"{r.mfi_last:>6.1f} {r.mfi_signal}")
+    print(f"{r.symbol:<8} {r.sar_trend:>8} {r.wilder_atr_pct:>7.2%} "
+          f"{r.mfi:>6.1f} {r.mfi_signal}")
 ```
 
 ---
@@ -1368,6 +1376,9 @@ print(f"Observations  : {result.n_obs}")
 | `beta_3m_ago` | `float?` | Beta ~66 bars before the end |
 | `beta_6m_ago` | `float?` | Beta ~132 bars before the end |
 | `beta_trend` | `str` | `"increasing"` / `"decreasing"` / `"stable"` relative to 22 bars ago |
+| `beta_min` | `float` | Minimum rolling beta over the full period |
+| `beta_max` | `float` | Maximum rolling beta over the full period |
+| `beta_mean` | `float` | Mean rolling beta over the full period |
 | `n_obs` | `int` | Number of return observations used |
 
 **Beta trend rule:** `"increasing"` if `current_beta - beta_1m_ago > 0.1`; `"decreasing"` if `< -0.1`; otherwise `"stable"`.
@@ -1418,14 +1429,14 @@ result = get_extended_risk_metrics(ExtendedRiskInput(
 ))
 
 print(f"Symbol              : {result.symbol}")
-print(f"CAGR                : {result.cagr:.2%}")
+print(f"Annualized return   : {result.annualized_return:.2%}")
+print(f"Beta                : {result.beta:.3f}")
 print(f"Calmar ratio        : {result.calmar_ratio:.2f}")
 print(f"Treynor ratio       : {result.treynor_ratio:.4f}")
-print(f"Parametric VaR 95%  : {result.var_95_parametric:.2%}")
-print(f"Parametric VaR 99%  : {result.var_99_parametric:.2%}")
-print(f"Historical VaR 99%  : {result.var_99_historical:.2%}")
+print(f"Parametric VaR 95%  : {result.var_parametric_95:.2%}")
+print(f"Parametric VaR 99%  : {result.var_parametric_99:.2%}")
+print(f"Historical VaR 99%  : {result.var_historical_99:.2%}")
 print(f"CVaR 99%            : {result.cvar_99:.2%}")
-print(f"Observations        : {result.n_obs}")
 ```
 
 **ExtendedRiskInput fields:**
@@ -1443,14 +1454,14 @@ print(f"Observations        : {result.n_obs}")
 |---|---|---|
 | `symbol` | `str` | Ticker |
 | `benchmark` | `str` | Benchmark ticker |
-| `cagr` | `float` | Compound Annual Growth Rate as decimal |
+| `annualized_return` | `float` | CAGR of the asset's equity curve, as a decimal |
 | `calmar_ratio` | `float` | CAGR / |max drawdown| — higher is better |
 | `treynor_ratio` | `float` | (Return − Risk-free) / Beta — excess return per unit of market risk |
-| `var_95_parametric` | `float` | 1-day parametric VaR at 95% confidence (negative = loss) |
-| `var_99_parametric` | `float` | 1-day parametric VaR at 99% confidence |
-| `var_99_historical` | `float` | 1-day historical VaR at 99% (5th-worst percentile of daily returns) |
+| `var_parametric_95` | `float` | 1-day parametric VaR at 95% confidence (negative = loss) |
+| `var_parametric_99` | `float` | 1-day parametric VaR at 99% confidence |
+| `var_historical_99` | `float` | 1-day historical VaR at 99% (5th-worst percentile of daily returns) |
 | `cvar_99` | `float` | 1-day CVaR at 99% — expected loss in the worst 1% of days |
-| `n_obs` | `int` | Number of return observations |
+| `beta` | `float` | OLS beta vs `benchmark` (same computation as `analyze_stock_risk`) |
 
 **Interpreting the metrics:**
 
@@ -1485,11 +1496,11 @@ print(f"Sortino          : {core.sortino_ratio:.2f}")
 print(f"Max drawdown     : {core.max_drawdown:.1%}")
 print(f"VaR 95% (core)   : {core.var_95:.2%}")
 print()
-print(f"CAGR             : {ext.cagr:.2%}")
+print(f"Annualized return: {ext.annualized_return:.2%}")
 print(f"Calmar ratio     : {ext.calmar_ratio:.2f}")
 print(f"Treynor ratio    : {ext.treynor_ratio:.4f}")
-print(f"Param VaR 95%    : {ext.var_95_parametric:.2%}")
-print(f"Param VaR 99%    : {ext.var_99_parametric:.2%}")
-print(f"Hist  VaR 99%    : {ext.var_99_historical:.2%}")
+print(f"Param VaR 95%    : {ext.var_parametric_95:.2%}")
+print(f"Param VaR 99%    : {ext.var_parametric_99:.2%}")
+print(f"Hist  VaR 99%    : {ext.var_historical_99:.2%}")
 print(f"CVaR 99%         : {ext.cvar_99:.2%}")
 ```

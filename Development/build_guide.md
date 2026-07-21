@@ -170,20 +170,23 @@ Each C++ feature has a matching Python integration test file. Tests that require
 the compiled extension are automatically skipped when it is not built.
 
 ```
-pytest tests/test_cpp_hurst.py -v           # Hurst + rolling Hurst
-pytest tests/test_cpp_indicators.py -v      # RSI, ADX, Parabolic SAR, Wilder's ATR
-pytest tests/test_cpp_cointegration.py -v   # Engle-Granger cointegration + OLS
-pytest tests/test_cpp_backtest.py -v        # run_strategy backtest kernel
+pytest tests/test_cpp_hurst.py -v            # Hurst + rolling Hurst
+pytest tests/test_cpp_indicators.py -v       # RSI, ADX, Parabolic SAR, Wilder's ATR
+pytest tests/test_cpp_new_indicators.py -v   # Bollinger Bands, Stochastic Oscillator
+pytest tests/test_cpp_cointegration.py -v    # Engle-Granger cointegration + OLS
+pytest tests/test_cpp_backtest.py -v         # run_strategy + batch_run_strategy kernels
+pytest tests/test_cpp_regression.py -v       # rolling_beta, rolling_factor_loadings
 ```
 
-Or run all four at once:
+Or run all six at once:
 
 ```
-pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py -v
+pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py -v
 ```
 
-Once the extension is built all skipped tests activate (96 total — 28 Hurst,
-24 indicators, 20 cointegration, 10 OLS, 14 backtest C++ binding tests).
+Once the extension is built all skipped tests activate (149 total across the
+six files above — 22 Hurst, 36 indicators, 25 new-indicators, 23 cointegration,
+25 backtest, 18 regression).
 
 ### C++ unit tests
 
@@ -268,21 +271,25 @@ Standard Tools/
 │           ├── CMakeLists.txt               ← Extension build rules
 │           ├── include/sqt/
 │           │   ├── hurst.hpp                ← Hurst exponent API
-│           │   ├── indicators.hpp           ← RSI / ADX / Parabolic SAR / Wilder ATR API
+│           │   ├── indicators.hpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic API
 │           │   ├── cointegration.hpp        ← OLS / ADF / Engle-Granger API
-│           │   └── backtest.hpp             ← run_strategy kernel API
+│           │   ├── backtest.hpp             ← run_strategy / batch_run_strategy kernel API
+│           │   └── rolling_regression.hpp   ← rolling_beta / rolling_factor_loadings API
 │           ├── src/
 │           │   ├── hurst.cpp                ← Hurst implementation
-│           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR implementation
+│           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic implementation
 │           │   ├── cointegration.cpp        ← OLS / ADF / cointegration implementation
-│           │   └── backtest.cpp             ← backtest kernel implementation
+│           │   ├── backtest.cpp             ← backtest + batch grid kernel implementation
+│           │   └── rolling_regression.cpp   ← incremental rolling beta / factor loadings implementation
 │           └── bindings/
 │               └── bindings.cpp             ← pybind11 module definition (all features)
 └── tests/
     ├── test_cpp_hurst.py                    ← Python integration tests (Hurst)
     ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR/ATR)
+    ├── test_cpp_new_indicators.py           ← Python integration tests (Bollinger/Stochastic)
     ├── test_cpp_cointegration.py            ← Python integration tests (cointegration+OLS)
-    ├── test_cpp_backtest.py                 ← Python integration tests (backtest kernel)
+    ├── test_cpp_backtest.py                 ← Python integration tests (backtest + batch kernel)
+    ├── test_cpp_regression.py               ← Python integration tests (rolling beta/factor loadings)
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
         ├── test_hurst.cpp                   ← 19 C++ unit tests (no framework needed)
@@ -304,9 +311,14 @@ Standard Tools/
 | ADX + DI+/DI− | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
 | Parabolic SAR | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
 | Wilder's ATR (SMA seed + Wilder's smooth) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
+| Bollinger Bands (fused Σx/Σx² pass) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
+| Stochastic Oscillator (fused min+max pass) | `indicators.hpp` | `indicators.cpp` | `indicators/momentum.py` |
 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | `cointegration.hpp` | `cointegration.cpp` | `analysis/regression.py`, `analysis/cointegration.py` |
 | Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 | Backtest kernel (`run_strategy` — returns, equity, all metrics, trade stats) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
+| Batch backtest grid kernel (`batch_run_strategy`) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
+| Rolling beta (incremental sum updates) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/regression.py` |
+| Rolling factor loadings (incremental Cholesky) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
 
 All Python callers follow the same guard pattern:
 

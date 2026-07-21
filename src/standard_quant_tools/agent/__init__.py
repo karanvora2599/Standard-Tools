@@ -32,6 +32,12 @@ from .tools import (
     # portfolio & sizing
     get_portfolio_risk_attribution,
     get_position_size,
+    # supplementary tools
+    get_stock_fundamentals,
+    run_backtest_optimization,
+    get_advanced_indicators,
+    get_rolling_beta,
+    get_extended_risk_metrics,
     # LLM wiring
     get_agent_tools,
     dispatch,
@@ -75,6 +81,18 @@ from .models import (
     RiskAttributionResult,
     PositionSizerInput,
     PositionSizerResult,
+    # supplementary tool models
+    FundamentalsInput,
+    FundamentalsResult,
+    BacktestOptInput,
+    BacktestOptResult,
+    OptimizationRun,
+    AdvancedIndicatorsInput,
+    AdvancedIndicatorsResult,
+    RollingBetaInput,
+    RollingBetaResult,
+    ExtendedRiskInput,
+    ExtendedRiskResult,
 )
 
 __all__ = [
@@ -98,6 +116,11 @@ __all__ = [
     "run_walk_forward_backtest",
     "get_portfolio_risk_attribution",
     "get_position_size",
+    "get_stock_fundamentals",
+    "run_backtest_optimization",
+    "get_advanced_indicators",
+    "get_rolling_beta",
+    "get_extended_risk_metrics",
     "get_agent_tools",
     "dispatch",
     # auditability
@@ -140,4 +163,15 @@ __all__ = [
     "RiskAttributionResult",
     "PositionSizerInput",
     "PositionSizerResult",
+    "FundamentalsInput",
+    "FundamentalsResult",
+    "BacktestOptInput",
+    "BacktestOptResult",
+    "OptimizationRun",
+    "AdvancedIndicatorsInput",
+    "AdvancedIndicatorsResult",
+    "RollingBetaInput",
+    "RollingBetaResult",
+    "ExtendedRiskInput",
+    "ExtendedRiskResult",
 ]

@@ -82,13 +82,14 @@ result = screen_stocks(
     tickers=["NVDA", "AMD", "AAPL", "MSFT", "TSLA", "META"],
     filters={
         "rsi_min": 60,           # strong momentum
-        "price_above_sma": 50,   # price above 50-day SMA
         "price_above_sma": 200,  # above 200-day SMA (golden zone)
     },
     sort_by="rsi_14",
     ascending=False,  # highest RSI first
 )
 ```
+
+> `filters` accepts only one `price_above_sma` / `price_below_sma` value per call — it's a single SMA period, not a set. To require price above *both* the 50- and 200-day SMA, screen on one and check the other with a follow-up `get_technical_analysis` call.
 
 ### Oversold Quality Screen
 
