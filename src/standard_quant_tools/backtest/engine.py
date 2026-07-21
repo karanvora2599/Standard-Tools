@@ -3,7 +3,7 @@ import os
 import time
 from concurrent.futures import ProcessPoolExecutor
 from itertools import product
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +238,11 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     Worker function for backtest_grid. Must live at module level to be
     picklable by ProcessPoolExecutor on Windows (spawn start method).
+
+    Only reached via ProcessPoolExecutor when `strategy` was a registry
+    name (see backtest_grid) — a raw user callable is never sent through
+    this path, since arbitrary callables (lambdas, closures) are frequently
+    unpicklable across the spawn boundary.
     """
     df = job["price_data"]
     signal_fn = STRATEGY_REGISTRY[job["strategy"]]
@@ -256,9 +261,35 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _run_signal_fn_job(
+    price_data: pd.DataFrame,
+    signal_fn: Callable[..., pd.Series],
+    params: Dict[str, Any],
+    initial_capital: float,
+    commission_pct: float,
+    slippage_pct: float,
+) -> Dict[str, Any]:
+    """
+    Sequential-only counterpart to _run_grid_job for a user-supplied signal
+    callable. Always runs in the calling process (never via
+    ProcessPoolExecutor), so signal_fn need not be picklable.
+    """
+    signals = signal_fn(price_data, **params)
+    result = run_strategy(
+        price_data, signals,
+        initial_capital=initial_capital,
+        commission_pct=commission_pct,
+        slippage_pct=slippage_pct,
+    )
+    result.pop("equity_curve", None)
+    result.pop("trade_log", None)
+    result.update(params)
+    return result
+
+
 def backtest_grid(
     price_data: pd.DataFrame,
-    strategy: str,
+    strategy: Union[str, Callable[..., pd.Series]],
     param_grid: Dict[str, List],
     initial_capital: float = 10_000.0,
     commission_pct: float = 0.001,
@@ -272,8 +303,15 @@ def backtest_grid(
 
     Args:
         price_data:     OHLCV DataFrame (from provider.get_ohlcv).
-        strategy:       One of 'sma_crossover', 'rsi_mean_reversion',
-                        'macd_crossover', 'bollinger_reversion'.
+        strategy:       Either one of the built-in registry names
+                        ('sma_crossover', 'rsi_mean_reversion', 'macd_crossover',
+                        'bollinger_reversion'), or your own signal-generating
+                        callable with signature `(price_data: pd.DataFrame, **params)
+                        -> pd.Series` (values in {-1, 0, 1}). A custom callable
+                        still gets the full C++ batch-kernel speedup when
+                        `_sqt_core` is built — only the metric computation runs
+                        in C++, so it has no idea whether the signal came from
+                        a built-in strategy or your own model.
         param_grid:     Dict mapping parameter name → list of values.
                         e.g. {'fast_period': [5, 10, 20], 'slow_period': [30, 50]}
         initial_capital: Starting capital for every backtest.
@@ -283,12 +321,16 @@ def backtest_grid(
         ascending:      Sort direction (default: False = best first).
         n_workers:      Worker processes. Defaults to os.cpu_count().
                         Pass 1 to run sequentially (no subprocess overhead).
+                        Ignored (forced to 1) for a custom callable when the
+                        C++ extension is not built — arbitrary callables
+                        (lambdas, closures) are frequently unpicklable across
+                        the ProcessPoolExecutor spawn boundary.
 
     Returns:
         pd.DataFrame with one row per parameter combination, sorted by sort_by.
         Columns include all metric keys plus the parameter names.
 
-    Example::
+    Example (built-in strategy)::
 
         df = provider.get_ohlcv("AAPL", "2020-01-01", "2024-01-01")
         results = backtest_grid(
@@ -297,27 +339,36 @@ def backtest_grid(
             param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]},
         )
         print(results[["fast_period", "slow_period", "sharpe_ratio", "total_return"]].head())
-    """
-    if strategy not in STRATEGY_REGISTRY:
-        raise ValueError(
-            f"Unknown strategy '{strategy}'. "
-            f"Available: {list(STRATEGY_REGISTRY)}"
+
+    Example (your own signal, still grid-searched and C++-accelerated)::
+
+        def my_signal(price_data: pd.DataFrame, threshold: float) -> pd.Series:
+            # any proprietary alpha logic — the grid searcher doesn't care
+            edge = my_model.score(price_data)
+            return (edge > threshold).astype(int)
+
+        results = backtest_grid(
+            df,
+            strategy=my_signal,
+            param_grid={"threshold": [0.1, 0.2, 0.3]},
         )
+    """
+    is_custom = callable(strategy)
+    if is_custom:
+        signal_fn: Callable[..., pd.Series] = strategy  # type: ignore[assignment]
+        strategy_label = getattr(strategy, "__name__", "custom_strategy")
+    else:
+        if strategy not in STRATEGY_REGISTRY:
+            raise ValueError(
+                f"Unknown strategy '{strategy}'. "
+                f"Available: {list(STRATEGY_REGISTRY)}"
+            )
+        signal_fn = STRATEGY_REGISTRY[strategy]
+        strategy_label = strategy
 
     # Build all parameter combinations
     keys = list(param_grid.keys())
     combos = list(product(*[param_grid[k] for k in keys]))
-    jobs = [
-        {
-            "price_data": price_data,
-            "strategy": strategy,
-            "params": dict(zip(keys, combo)),
-            "initial_capital": initial_capital,
-            "commission_pct": commission_pct,
-            "slippage_pct": slippage_pct,
-        }
-        for combo in combos
-    ]
 
     t0 = time.perf_counter()
 
@@ -326,7 +377,6 @@ def backtest_grid(
     # in a single call — no subprocess overhead, no per-combo boundary crossing.
     if HAS_CPP and _cpp_core is not None:
         try:
-            signal_fn  = STRATEGY_REGISTRY[strategy]
             prices_arr = price_data["Close"].to_numpy(dtype=np.float64)
 
             # Build (num_combos × n_bars) signal matrix
@@ -342,7 +392,7 @@ def backtest_grid(
 
             logger.debug(
                 "[backtest_grid] strategy=%s  combos=%d  path=C++  sort_by=%s",
-                strategy, len(combos), sort_by,
+                strategy_label, len(combos), sort_by,
             )
 
             cpp_results = _cpp_core.batch_run_strategy(
@@ -395,17 +445,53 @@ def backtest_grid(
             )
 
     # ── Python fallback ───────────────────────────────────────────────────────
-    workers = n_workers if n_workers is not None else (os.cpu_count() or 4)
-    logger.debug(
-        "[backtest_grid] strategy=%s  combos=%d  workers=%d  path=Python  sort_by=%s",
-        strategy, len(jobs), workers, sort_by,
-    )
-
-    if workers == 1 or len(jobs) == 1:
-        results = [_run_grid_job(job) for job in jobs]
+    if is_custom:
+        # A raw callable may not be picklable (lambda, closure, notebook-defined
+        # function) — always run sequentially in this process rather than risk
+        # an opaque PicklingError from a ProcessPoolExecutor worker. The C++
+        # batch path above (when built) already handles custom callables at
+        # full speed with no subprocessing involved, so this only gives up
+        # parallelism in the one uncommon case: no C++ extension AND >1 workers
+        # requested AND a custom strategy.
+        if n_workers is not None and n_workers != 1:
+            logger.debug(
+                "[backtest_grid] custom strategy without C++ extension — "
+                "forcing sequential execution (n_workers=%s ignored)", n_workers
+            )
+        logger.debug(
+            "[backtest_grid] strategy=%s  combos=%d  workers=1 (forced)  path=Python  sort_by=%s",
+            strategy_label, len(combos), sort_by,
+        )
+        results = [
+            _run_signal_fn_job(
+                price_data, signal_fn, dict(zip(keys, combo)),
+                initial_capital, commission_pct, slippage_pct,
+            )
+            for combo in combos
+        ]
     else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(_run_grid_job, jobs))
+        jobs = [
+            {
+                "price_data": price_data,
+                "strategy": strategy,
+                "params": dict(zip(keys, combo)),
+                "initial_capital": initial_capital,
+                "commission_pct": commission_pct,
+                "slippage_pct": slippage_pct,
+            }
+            for combo in combos
+        ]
+        workers = n_workers if n_workers is not None else (os.cpu_count() or 4)
+        logger.debug(
+            "[backtest_grid] strategy=%s  combos=%d  workers=%d  path=Python  sort_by=%s",
+            strategy_label, len(jobs), workers, sort_by,
+        )
+
+        if workers == 1 or len(jobs) == 1:
+            results = [_run_grid_job(job) for job in jobs]
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(_run_grid_job, jobs))
 
     df_out = pd.DataFrame(results)
     if sort_by in df_out.columns:

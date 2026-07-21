@@ -6,7 +6,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 
 - **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 24 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
-- **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search
+- **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
 
 ---
@@ -260,6 +260,8 @@ results = backtest_grid(
 print(results.head())   # 9 combinations ranked by Sharpe
 ```
 
+`strategy` also accepts your own signal-generating callable — grid search, C++ speed, and `sort_by` ranking all work identically on your own alpha logic, not just the built-ins. For a pre-computed signal matrix across a ticker universe, see `run_signal_panel_backtest` in [Documentation/04_backtesting.md](Documentation/04_backtesting.md#grid-searching-your-own-signal).
+
 ---
 
 ### Portfolio (`standard_quant_tools.portfolio`)
@@ -471,7 +473,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**749 Python tests total** (600 passing; 149 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**763 Python tests total** (614 passing; 149 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 

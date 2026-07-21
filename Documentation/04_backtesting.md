@@ -259,6 +259,100 @@ result = run_strategy(df, signals, initial_capital=10_000, commission_pct=0.001)
 
 ---
 
+## Grid-Searching Your Own Signal
+
+`backtest_grid`'s `strategy` argument accepts either a built-in registry name
+(`"sma_crossover"`, etc.) **or your own signal-generating callable** — the
+grid searcher, C++ batch kernel, and sort/rank logic don't care where the
+signal came from.
+
+```python
+from standard_quant_tools.backtest import backtest_grid
+import pandas as pd
+
+def my_signal(price_data: pd.DataFrame, threshold: float) -> pd.Series:
+    """Any proprietary alpha logic — this is not part of the library."""
+    edge = my_model.score(price_data)          # your model, not this library's
+    return (edge > threshold).astype(int)      # 1 = long, 0 = flat, -1 = short
+
+results = backtest_grid(
+    df,
+    strategy=my_signal,
+    param_grid={"threshold": [0.05, 0.10, 0.15, 0.20]},
+    sort_by="sharpe_ratio",
+)
+print(results[["threshold", "sharpe_ratio", "total_return", "num_trades"]])
+```
+
+A custom callable still gets the full C++ batch-kernel speedup when
+`_sqt_core` is built: the C++ path always calls `signal_fn(price_data, **params)`
+in-process to build the signal matrix before shipping it to C++ in one call —
+it never inspects *how* the signal was produced.
+
+**One constraint:** without the C++ extension built, `backtest_grid`'s
+Python fallback parallelises across parameter combinations via
+`ProcessPoolExecutor`, which requires picklable, importable functions.
+Lambdas, closures, and locally-defined functions are frequently *not*
+picklable, so a custom callable always runs **sequentially** in that fallback
+path — `n_workers` is silently ignored for custom callables when C++ isn't
+built. Built-in string strategies are unaffected and keep parallelising
+exactly as before. Define your signal function at module level (not inside
+another function) if you want it to remain picklable for other uses.
+
+---
+
+## Multi-Ticker Signal Panel Backtest
+
+`run_signal_panel_backtest` is the entry point for a **pre-computed signal
+matrix across a ticker universe** — e.g. the output of your own cross-sectional
+alpha model — without assuming anything about how the signal was generated.
+It reuses `run_strategy` per ticker (full C++ speed where available) and
+combines the realized returns via the existing portfolio module
+(`build_portfolio` / `portfolio_metrics`) — no new backtest math.
+
+```python
+from standard_quant_tools.backtest import run_signal_panel_backtest
+import pandas as pd
+
+tickers = ["AAPL", "MSFT", "GOOGL"]
+price_data = {t: provider.get_ohlcv(t, "2022-01-01", "2024-01-01") for t in tickers}
+
+# Your own signal panel: index = dates, columns = tickers, values in {-1, 0, 1}
+signal_panel = pd.DataFrame({
+    t: my_model.signal(price_data[t]) for t in tickers
+})
+
+result = run_signal_panel_backtest(
+    price_data,
+    signal_panel,
+    weights={"AAPL": 0.4, "MSFT": 0.35, "GOOGL": 0.25},   # optional — default equal weight
+)
+
+# Per-ticker backtest results (same shape as run_strategy's output)
+print(result["per_ticker"]["AAPL"]["sharpe_ratio"])
+
+# Portfolio-level combination
+print(f"Portfolio Sharpe : {result['portfolio_metrics']['sharpe_ratio']:.2f}")
+print(f"Portfolio Return : {result['portfolio_metrics']['total_return']:.1%}")
+print(result["portfolio_returns"].tail())
+```
+
+**Output:**
+
+| Key | Type | Description |
+|---|---|---|
+| `tickers` | `List[str]` | Universe, in `signal_panel`'s column order |
+| `per_ticker` | `Dict[str, dict]` | One `run_strategy`-shaped result per ticker |
+| `portfolio_returns` | `pd.Series` | Daily weighted portfolio returns |
+| `portfolio_metrics` | `dict` | Same shape as `portfolio.portfolio_metrics()` output |
+
+**Notes:**
+- `weights` accepts a list (matching `signal_panel`'s column order) or a `{ticker: weight}` dict; defaults to equal weight. Must sum to 1.0 — validated by the existing `build_portfolio` check.
+- Per-ticker equity curves are aligned to their **common date range** (inner join) before combining into the portfolio — a ticker whose `price_data` doesn't fully cover `signal_panel`'s dates will shrink the portfolio's effective range.
+- Pass `benchmark_returns=` to get an `information_ratio` in `portfolio_metrics`, and `include_trade_log=True` to get a per-ticker trade log in `per_ticker[ticker]["trade_log"]`.
+
+---
+
 ## Understanding the Output
 
 | Key | Type | Description |
