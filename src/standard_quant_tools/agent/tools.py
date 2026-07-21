@@ -24,6 +24,7 @@ from standard_quant_tools.indicators.volatility import bollinger_bands, atr, wil
 from standard_quant_tools.indicators.volume import obv, vwap, mfi
 from standard_quant_tools.backtest.engine import run_strategy, backtest_grid
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+from standard_quant_tools.backtest.panel import run_signal_panel_backtest as _signal_panel_backtest
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.analysis.multi_factor import multi_factor_regression, rolling_factor_loadings
 from standard_quant_tools.analysis.cointegration import cointegration_test, compute_spread, spread_zscore
@@ -59,6 +60,8 @@ from standard_quant_tools.agent.models import (
     AdvancedIndicatorsInput, AdvancedIndicatorsResult,
     RollingBetaInput, RollingBetaResult,
     ExtendedRiskInput, ExtendedRiskResult,
+    CustomSignalBacktestInput,
+    SignalPanelBacktestInput, SignalPanelBacktestResult,
 )
 
 
@@ -1448,6 +1451,125 @@ def get_extended_risk_metrics(input_data: ExtendedRiskInput) -> ExtendedRiskResu
 
 
 # ──────────────────────────────────────────────────────────────────
+# Custom Signal Backtest (bring-your-own signal)
+# ──────────────────────────────────────────────────────────────────
+
+def run_custom_signal_backtest(input_data: CustomSignalBacktestInput) -> BacktestResult:
+    """
+    Backtest a signal computed entirely outside this library (e.g. your own
+    alpha model) on a single symbol. Unlike run_sma_backtest / run_rsi_backtest /
+    run_macd_backtest / run_bollinger_backtest, this tool does not generate the
+    signal — you supply it, and it reuses the same fast backtest engine.
+    """
+    logger.debug("[custom_signal_backtest] %s  %s → %s  n_signal_points=%d",
+                 input_data.symbol, input_data.start_date, input_data.end_date,
+                 len(input_data.signals))
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+
+    signal_series = pd.Series(
+        {pd.Timestamp(d): v for d, v in input_data.signals.items()}
+    ).sort_index()
+
+    bt_input = BacktestInput(
+        symbol=input_data.symbol,
+        start_date=input_data.start_date,
+        end_date=input_data.end_date,
+        strategy_type="custom_signal",
+        parameters={},
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+    )
+    return _run_backtest(bt_input, df, signal_series)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Signal Panel Backtest (bring-your-own multi-ticker signal matrix)
+# ──────────────────────────────────────────────────────────────────
+
+def run_signal_panel_backtest(input_data: SignalPanelBacktestInput) -> SignalPanelBacktestResult:
+    """
+    Backtest a pre-computed signal panel (e.g. your own cross-sectional alpha
+    model) across a ticker universe, combined into portfolio-level metrics.
+    Fetches OHLCV internally and reuses run_strategy per ticker plus the
+    existing portfolio module for the combination — no new backtest math.
+    """
+    logger.debug("[signal_panel_backtest] tickers=%d  %s → %s",
+                 len(input_data.tickers), input_data.start_date, input_data.end_date)
+    provider = DataFactory.get_provider()
+    price_data = {
+        t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)
+        for t in input_data.tickers
+    }
+
+    signal_panel = pd.DataFrame({
+        t: pd.Series({pd.Timestamp(d): v for d, v in input_data.signal_panel[t].items()})
+        for t in input_data.tickers
+    }).sort_index()
+
+    bench_returns = None
+    if input_data.benchmark:
+        bench_df = provider.get_ohlcv(input_data.benchmark, input_data.start_date, input_data.end_date)
+        bench_returns = bench_df["Close"].pct_change().dropna()
+
+    weights_arg: Any = input_data.weights if input_data.weights is not None else None
+
+    raw = _signal_panel_backtest(
+        price_data, signal_panel,
+        weights=weights_arg,
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+        benchmark_returns=bench_returns,
+        include_trade_log=input_data.include_trade_log,
+    )
+
+    per_ticker: Dict[str, BacktestResult] = {}
+    for ticker, res in raw["per_ticker"].items():
+        trade_log_raw = res.get("trade_log", pd.DataFrame())
+        trades = None
+        if isinstance(trade_log_raw, pd.DataFrame) and not trade_log_raw.empty:
+            trades = [
+                Trade(
+                    entry_date=str(r["entry_date"]),
+                    exit_date=str(r["exit_date"]),
+                    direction=str(r["direction"]),
+                    entry_price=float(r["entry_price"]),
+                    exit_price=float(r["exit_price"]),
+                    return_pct=float(r["return_pct"]),
+                )
+                for r in trade_log_raw.to_dict(orient="records")
+            ]
+        per_ticker[ticker] = BacktestResult(
+            total_return=res["total_return"],
+            annualized_volatility=res["annualized_volatility"],
+            sharpe_ratio=res["sharpe_ratio"],
+            sortino_ratio=res["sortino_ratio"],
+            max_drawdown=res["max_drawdown"],
+            calmar_ratio=res["calmar_ratio"],
+            win_rate=res["win_rate"],
+            profit_factor=res["profit_factor"],
+            num_trades=res["num_trades"],
+            avg_trade_return_pct=res["avg_trade_return_pct"],
+            final_equity=res["final_equity"],
+            equity_curve=res["equity_curve"].tolist(),
+            trade_log=trades,
+        )
+
+    portfolio_metrics_out = dict(raw["portfolio_metrics"])
+    logger.debug("[signal_panel_backtest] portfolio  sharpe=%.3f  return=%.2f%%",
+                 portfolio_metrics_out.get("sharpe_ratio", float("nan")),
+                 portfolio_metrics_out.get("annualized_return", 0.0) * 100)
+
+    return SignalPanelBacktestResult(
+        tickers=input_data.tickers,
+        per_ticker=per_ticker,
+        portfolio_metrics=portfolio_metrics_out,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 
 def get_agent_tools() -> List[Dict[str, Any]]:
     """
@@ -1479,6 +1601,8 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("get_advanced_indicators", "Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow oscillator).", AdvancedIndicatorsInput),
         ("get_rolling_beta", "Compute rolling OLS beta to detect beta drift over time vs a benchmark.", RollingBetaInput),
         ("get_extended_risk_metrics", "Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.", ExtendedRiskInput),
+        ("run_custom_signal_backtest", "Backtest a signal computed outside this library (your own alpha model) on one symbol.", CustomSignalBacktestInput),
+        ("run_signal_panel_backtest", "Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.", SignalPanelBacktestInput),
     ]
 
     return [
@@ -1523,6 +1647,8 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "get_advanced_indicators":        (get_advanced_indicators,        AdvancedIndicatorsInput),
     "get_rolling_beta":               (get_rolling_beta,               RollingBetaInput),
     "get_extended_risk_metrics":      (get_extended_risk_metrics,      ExtendedRiskInput),
+    "run_custom_signal_backtest":     (run_custom_signal_backtest,     CustomSignalBacktestInput),
+    "run_signal_panel_backtest":      (run_signal_panel_backtest,      SignalPanelBacktestInput),
 }
 
 

@@ -761,3 +761,75 @@ class ExtendedRiskResult(BaseModel):
     var_historical_99: float
     cvar_99: float
     beta: float
+
+
+# ──────────────────────────────────────────────
+# Custom Signal Backtest (bring-your-own signal)
+# ──────────────────────────────────────────────
+
+class CustomSignalBacktestInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    signals: Dict[str, float] = Field(
+        ...,
+        description=(
+            "Map of ISO date (YYYY-MM-DD) -> signal value (1=long, 0=flat, -1=short), "
+            "computed entirely outside this library (e.g. your own alpha model). "
+            "This tool does not generate or validate the signal logic — it only "
+            "backtests it. Dates are matched against the fetched OHLCV index; "
+            "any dates on either side with no counterpart are ignored."
+        ),
+    )
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
+
+
+# ──────────────────────────────────────────────
+# Signal Panel Backtest (bring-your-own multi-ticker signal matrix)
+# ──────────────────────────────────────────────
+
+class SignalPanelBacktestInput(BaseModel):
+    tickers: List[str] = Field(..., description="Ticker universe. Must match signal_panel's outer keys.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    signal_panel: Dict[str, Dict[str, float]] = Field(
+        ...,
+        description=(
+            "Per-ticker signal map: {ticker: {date: value}}, value in "
+            "{1=long, 0=flat, -1=short}. Computed entirely outside this library "
+            "(e.g. a cross-sectional alpha model) — this tool only backtests it "
+            "and combines the per-ticker results into portfolio-level metrics."
+        ),
+    )
+    weights: Optional[Dict[str, float]] = Field(
+        None,
+        description="Per-ticker portfolio weight, must sum to 1.0. Defaults to equal weight across tickers.",
+    )
+    initial_capital: float = Field(10_000.0, description="Starting capital applied per ticker.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    benchmark: Optional[str] = Field(
+        None, description="Optional benchmark ticker — adds information_ratio to portfolio_metrics."
+    )
+    include_trade_log: bool = Field(False, description="If True, include a per-trade log for each ticker.")
+
+    @model_validator(mode="after")
+    def _check_panel_and_weights(self) -> "SignalPanelBacktestInput":
+        missing = [t for t in self.tickers if t not in self.signal_panel]
+        if missing:
+            raise ValueError(f"signal_panel is missing entries for: {missing}")
+        if self.weights is not None:
+            if set(self.weights) != set(self.tickers):
+                raise ValueError("weights keys must exactly match tickers")
+            total = sum(self.weights.values())
+            if abs(total - 1.0) > 1e-6:
+                raise ValueError(f"weights must sum to 1.0, got {total:.6f}")
+        return self
+
+
+class SignalPanelBacktestResult(BaseModel):
+    tickers: List[str]
+    per_ticker: Dict[str, BacktestResult]
+    portfolio_metrics: Dict[str, Any]

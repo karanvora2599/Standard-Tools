@@ -5,7 +5,7 @@ A high-performance, modular Python library for quantitative financial analysis. 
 ## Key Features
 
 - **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
-- **Agent-First Design** — All tools return Pydantic models; 24 LLM-callable tools with OpenAI/Anthropic function-calling schemas; descriptive errors for self-correction
+- **Agent-First Design** — All tools return Pydantic models; 26 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
 
@@ -313,7 +313,7 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ### AI Agent Tools (`standard_quant_tools.agent`)
 
-24 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas.
+26 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -323,16 +323,18 @@ from standard_quant_tools.agent.tools import (
     get_stock_fundamentals, run_backtest_optimization,
     get_advanced_indicators, get_rolling_beta,
     get_extended_risk_metrics,
+    run_custom_signal_backtest, run_signal_panel_backtest,
 )
 from standard_quant_tools.agent.models import (
     AnalysisInput, FactorRegressionInput,
     CointegrationInput, PCAInput, HurstInput,
     FundamentalsInput, BacktestOptInput,
     AdvancedIndicatorsInput, RollingBetaInput, ExtendedRiskInput,
+    CustomSignalBacktestInput, SignalPanelBacktestInput,
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools()  # 24 tools ready for function calling
+tools = get_agent_tools()  # 26 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -473,7 +475,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**763 Python tests total** (614 passing; 149 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**773 Python tests total** (624 passing; 149 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 

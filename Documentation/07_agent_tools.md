@@ -55,13 +55,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **24 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **26 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 24
+print(len(tools))  # 26
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -91,6 +91,8 @@ for t in tools:
 # get_advanced_indicators — Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow oscillator).
 # get_rolling_beta      — Compute rolling OLS beta to detect beta drift over time vs a benchmark.
 # get_extended_risk_metrics — Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.
+# run_custom_signal_backtest — Backtest a signal computed outside this library (your own alpha model) on one symbol.
+# run_signal_panel_backtest — Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.
 
 # Inspect the parameter schema for any tool:
 import json
@@ -110,7 +112,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 24 valid names.
+- **`ValueError`** — unknown tool name; message lists all 26 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -193,7 +195,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 24 financial tools:
+You are a quantitative analyst assistant with access to 26 financial tools:
 
 CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
@@ -295,6 +297,22 @@ SUPPLEMENTARY TOOLS (5)
       historical VaR at 99%, and CVaR at 99%. Pair with analyze_stock_risk for
       a complete risk picture.
 
+CUSTOM SIGNAL TOOLS (2)
+22. run_custom_signal_backtest
+    — Backtest a signal you (or an upstream system) computed outside this
+      library — NOT one of run_sma_backtest / run_rsi_backtest / run_macd_backtest /
+      run_bollinger_backtest. Pass signals as a {date: value} map (1=long, 0=flat,
+      -1=short); this tool only backtests it, it never generates or second-guesses
+      the signal logic. Use when the user supplies or references their own model's
+      output rather than asking for a named indicator strategy.
+
+23. run_signal_panel_backtest
+    — Same idea as run_custom_signal_backtest but across a ticker universe: pass
+      signal_panel as {ticker: {date: value}}. Returns per-ticker backtest results
+      plus portfolio-level metrics (Sharpe, VaR, correlation-aware combination via
+      weights). Use for a pre-computed cross-sectional signal instead of screening
+      + backtesting each ticker one at a time.
+
 WORKFLOW GUIDANCE
 - Screen → analyze → backtest → size: the natural research chain.
 - Use compare_strategies for a quick multi-strategy sweep; use run_buy_and_hold to
@@ -310,6 +328,9 @@ WORKFLOW GUIDANCE
 - Use get_advanced_indicators alongside get_technical_analysis for SAR/Wilder-ATR/MFI.
 - Use get_rolling_beta when beta drift over time is relevant to the question.
 - Use get_extended_risk_metrics alongside analyze_stock_risk for a complete risk view.
+- Use run_custom_signal_backtest / run_signal_panel_backtest whenever the user
+  provides or references their own signal — never substitute a built-in strategy
+  for it, and never invent signal values yourself.
 
 Always call tools — never guess numeric results.
 """
@@ -1196,7 +1217,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 24 tools:
+You are a quantitative investment analyst. You have 26 tools:
 
 Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
 run_bollinger_backtest, run_buy_and_hold (passive baseline),
@@ -1216,6 +1237,10 @@ get_advanced_indicators (Parabolic SAR, Wilder ATR, MFI),
 get_rolling_beta (rolling OLS beta drift over time),
 get_extended_risk_metrics (Calmar, Treynor, parametric VaR 95/99, CVaR 99).
 
+Custom signal (2): run_custom_signal_backtest (backtest a signal the user/an
+upstream model already computed — never one you invent), run_signal_panel_backtest
+(same idea across a ticker universe, combined into portfolio metrics).
+
 Guidelines:
 - Screen first if a broad universe is mentioned.
 - Use compare_strategies for multi-strategy comparison; run_buy_and_hold
@@ -1227,6 +1252,8 @@ Guidelines:
 - Use get_stock_fundamentals early in any fundamental workflow.
 - Use run_backtest_optimization to find best params before running a single backtest.
 - Use get_extended_risk_metrics alongside analyze_stock_risk for a full risk picture.
+- Use run_custom_signal_backtest / run_signal_panel_backtest whenever the user
+  supplies their own signal — do not substitute a built-in strategy for it.
 - Always use at least 2 years of data for backtests.
 - Interpret all numbers — translate Sharpe ratios, drawdowns, and betas into
   plain English before responding.
@@ -2037,10 +2064,18 @@ print(f"Example params: {playbook['example_params']}")
 | `RollingBetaInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"`, `window=60` |
 | `ExtendedRiskInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"` |
 
+**Custom signal tools (2)**
+
+| Model | Required | Optional (with defaults) |
+|---|---|---|
+| `CustomSignalBacktestInput` | `symbol`, `start_date`, `end_date`, `signals` (`{date: value}`) | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
+| `SignalPanelBacktestInput` | `tickers`, `start_date`, `end_date`, `signal_panel` (`{ticker: {date: value}}`) | `weights=None` (equal weight), `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `benchmark=None`, `include_trade_log=False` |
+
 **Validation rules (Pydantic v2):**
 - `PortfolioInput` and `RiskAttributionInput`: `weights` must sum to 1.0 and `len(weights) == len(tickers)`.
 - `PCAInput`: `n_components` must be ≥ 1.
 - `PositionSizerInput`: `risk_per_trade_pct` must be in (0, 1].
+- `SignalPanelBacktestInput`: `signal_panel` must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0.
 
 ### Output Models
 
@@ -2088,6 +2123,13 @@ print(f"Example params: {playbook['example_params']}")
 | `AdvancedIndicatorsResult` | `symbol`, `last_close`, `sar_value`, `sar_trend`, `sar_signal`, `wilder_atr`, `wilder_atr_pct`, `mfi`, `mfi_signal` |
 | `RollingBetaResult` | `symbol`, `benchmark`, `window`, `current_beta`, `beta_1m_ago`, `beta_3m_ago`, `beta_6m_ago`, `beta_trend`, `beta_min`, `beta_max`, `beta_mean`, `n_obs` |
 | `ExtendedRiskResult` | `symbol`, `benchmark`, `annualized_return`, `calmar_ratio`, `treynor_ratio`, `var_parametric_95`, `var_parametric_99`, `var_historical_99`, `cvar_99`, `beta` |
+
+**Custom signal tools**
+
+| Model | Key fields |
+|---|---|
+| `run_custom_signal_backtest` output | Reuses `BacktestResult` — identical shape to the built-in strategy backtests |
+| `SignalPanelBacktestResult` | `tickers`, `per_ticker` (`Dict[str, BacktestResult]`), `portfolio_metrics` (same shape as `portfolio.portfolio_metrics()` output: `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `total_return`, `tickers`, `weights`, plus `information_ratio` when `benchmark` was set) |
 
 ---
 

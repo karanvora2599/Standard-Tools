@@ -1,8 +1,8 @@
 # Advanced Agent Tools
 
-Ten high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Twelve high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 24), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 26), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -22,11 +22,18 @@ Ten high-level agentic tools that compose the library's existing primitives into
 
 | Tool | What it does | Key output fields |
 |---|---|---|
-| `get_stock_fundamentals` | Fetch company metadata and key financial ratios | `pe_ratio`, `pb_ratio`, `debt_to_equity`, `return_on_equity`, `market_cap` |
+| `get_stock_fundamentals` | Fetch company metadata and key financial ratios | `trailing_pe`, `price_to_book`, `debt_to_equity`, `return_on_equity`, `market_cap` |
 | `run_backtest_optimization` | Exhaustive parameter grid search, return top N ranked by metric | `top_results[].parameters`, `top_results[].sharpe_ratio` |
 | `get_advanced_indicators` | Parabolic SAR trend, Wilder ATR volatility, MFI volume signal | `sar_trend`, `wilder_atr_pct`, `mfi_signal` |
 | `get_rolling_beta` | Rolling OLS beta to detect drift vs a benchmark | `current_beta`, `beta_trend`, `beta_6m_ago` |
 | `get_extended_risk_metrics` | Calmar, Treynor, parametric VaR 95/99, historical VaR 99, CVaR 99 | `calmar_ratio`, `treynor_ratio`, `var_parametric_95` |
+
+**Custom signal tools (2)**
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `run_custom_signal_backtest` | Backtest a signal computed outside this library on one symbol | Same shape as `BacktestResult` — `sharpe_ratio`, `total_return`, `num_trades`, ... |
+| `run_signal_panel_backtest` | Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics | `per_ticker[ticker]`, `portfolio_metrics.sharpe_ratio` |
 
 ---
 
@@ -1503,4 +1510,155 @@ print(f"Param VaR 95%    : {ext.var_parametric_95:.2%}")
 print(f"Param VaR 99%    : {ext.var_parametric_99:.2%}")
 print(f"Hist  VaR 99%    : {ext.var_historical_99:.2%}")
 print(f"CVaR 99%         : {ext.cvar_99:.2%}")
+```
+
+---
+
+## 11. Custom Signal Backtest
+
+`run_custom_signal_backtest` does **not** generate a signal — unlike every
+`run_*_backtest` tool above, which computes its signal from a named indicator
+(SMA, RSI, MACD, Bollinger). This tool backtests a signal *you* (or an
+upstream model) already computed, reusing the same fast engine
+(`standard_quant_tools.backtest.engine.run_strategy`, with the C++ kernel
+when built) without assuming anything about how the signal was produced.
+
+**When to use:** the user references or supplies their own alpha logic —
+"backtest my momentum score", "here's my model's output, evaluate it" —
+rather than asking for one of the built-in strategies. Never substitute a
+built-in strategy when the user's intent is to test their own signal.
+
+```python
+from standard_quant_tools.agent.tools import run_custom_signal_backtest
+from standard_quant_tools.agent.models import CustomSignalBacktestInput
+
+# `signals` would normally come from your own model — a toy example here:
+signals = {
+    "2023-01-03": 1.0, "2023-01-04": 1.0, "2023-01-05": 0.0,
+    "2023-01-06": 0.0, "2023-01-09": -1.0,
+    # ... one entry per trading day in [start_date, end_date]
+}
+
+result = run_custom_signal_backtest(CustomSignalBacktestInput(
+    symbol="AAPL",
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    signals=signals,
+))
+
+print(f"Sharpe Ratio  : {result.sharpe_ratio:.2f}")
+print(f"Total Return  : {result.total_return:.1%}")
+print(f"Num Trades    : {result.num_trades}")
+```
+
+**CustomSignalBacktestInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `signals` | `Dict[str, float]` | — | `{date: value}`, value in `{1, 0, -1}` (long/flat/short). Dates without a matching OHLCV bar are ignored, same as extra OHLCV bars with no signal entry. |
+| `initial_capital` | float | `10000` | Starting capital |
+| `commission_pct` | float | `0.001` | Commission per trade (fraction) |
+| `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
+
+**Output:** `BacktestResult` — identical shape to `run_sma_backtest` / `run_rsi_backtest` / etc. See the full reference in [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult--full-reference).
+
+**Chaining into position sizing — exactly the "let my own agent optimize risk parameters" workflow:**
+
+```python
+from standard_quant_tools.agent.tools import run_custom_signal_backtest, get_position_size
+from standard_quant_tools.agent.models import CustomSignalBacktestInput, PositionSizerInput
+
+bt = run_custom_signal_backtest(CustomSignalBacktestInput(
+    symbol="AAPL", start_date="2022-01-01", end_date="2024-01-01",
+    signals=my_model_signals,   # your own model's output
+))
+
+# Use the resulting win-rate / trade stats to size the next position —
+# the library never had to know how the signal itself was generated.
+pos = get_position_size(PositionSizerInput(
+    symbol="AAPL", start_date="2023-06-01", end_date="2024-01-01",
+    account_equity=100_000,
+    win_rate=bt.win_rate,
+    avg_win_pct=max(bt.avg_trade_return_pct / 100, 0.001),
+    avg_loss_pct=abs(min(bt.avg_trade_return_pct / 100, -0.001)),
+))
+print(f"Sharpe: {bt.sharpe_ratio:.2f}  →  Recommended: {pos.recommended_shares} shares")
+```
+
+---
+
+## 12. Signal Panel Backtest
+
+`run_signal_panel_backtest` extends the same idea to a **ticker universe**:
+pass a pre-computed signal matrix (e.g. a cross-sectional alpha model's
+output) and get back per-ticker backtest results plus portfolio-level
+metrics. It fetches OHLCV internally, runs `run_strategy` per ticker, and
+combines the realized returns via the existing portfolio module
+(`build_portfolio` / `portfolio_metrics`) — no new backtest math, and no
+assumption about how the signal was generated.
+
+```python
+from standard_quant_tools.agent.tools import run_signal_panel_backtest
+from standard_quant_tools.agent.models import SignalPanelBacktestInput
+
+tickers = ["AAPL", "MSFT", "GOOGL"]
+
+# signal_panel would normally come from your own cross-sectional model
+signal_panel = {
+    "AAPL": {"2023-01-03": 1.0, "2023-01-04": 1.0, "2023-01-05": 0.0},
+    "MSFT": {"2023-01-03": 0.0, "2023-01-04": 1.0, "2023-01-05": 1.0},
+    "GOOGL": {"2023-01-03": -1.0, "2023-01-04": 0.0, "2023-01-05": 0.0},
+    # ... one entry per trading day in [start_date, end_date] for each ticker
+}
+
+result = run_signal_panel_backtest(SignalPanelBacktestInput(
+    tickers=tickers,
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    signal_panel=signal_panel,
+    weights={"AAPL": 0.4, "MSFT": 0.35, "GOOGL": 0.25},   # optional — default equal weight
+    benchmark="SPY",   # optional — adds information_ratio to portfolio_metrics
+))
+
+# Per-ticker results — same shape as run_custom_signal_backtest's output
+for t in tickers:
+    r = result.per_ticker[t]
+    print(f"{t}: Sharpe={r.sharpe_ratio:.2f}  Return={r.total_return:.1%}  Trades={r.num_trades}")
+
+# Portfolio-level combination
+pm = result.portfolio_metrics
+print(f"\nPortfolio Sharpe : {pm['sharpe_ratio']:.2f}")
+print(f"Portfolio Return : {pm['total_return']:.1%}")
+print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
+```
+
+**SignalPanelBacktestInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tickers` | `List[str]` | — | Universe; must match `signal_panel`'s outer keys |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `signal_panel` | `Dict[str, Dict[str, float]]` | — | `{ticker: {date: value}}`, value in `{1, 0, -1}` |
+| `weights` | `Dict[str, float]?` | `None` | Per-ticker weight, must sum to 1.0. Defaults to equal weight. |
+| `initial_capital` | float | `10000` | Starting capital applied per ticker |
+| `commission_pct` | float | `0.001` | Commission per trade (fraction) |
+| `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
+| `benchmark` | str? | `None` | Optional benchmark ticker — adds `information_ratio` to `portfolio_metrics` |
+| `include_trade_log` | bool | `False` | If `True`, include a per-trade log for each ticker |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `tickers` | `List[str]` | Universe, in `signal_panel`'s order |
+| `per_ticker` | `Dict[str, BacktestResult]` | One full backtest result per ticker |
+| `portfolio_metrics` | `dict` | Same shape as `portfolio.portfolio_metrics()`: `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `total_return`, `tickers`, `weights`, plus `information_ratio` when `benchmark` was set |
+
+**Validation:** `signal_panel` must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0 — both raise a Pydantic `ValidationError` with the offending ticker(s) named directly, so the calling agent can retry with a corrected payload.
+
+**Note on scale:** per-ticker equity curves are aligned to their common date range (inner join) before being combined into the portfolio — a ticker whose signal/price data doesn't fully cover the requested range will shrink the portfolio's effective date range. For very large universes, prefer calling this tool once per rebalance period rather than once per ticker.
 ```

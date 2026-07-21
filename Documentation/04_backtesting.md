@@ -289,6 +289,12 @@ A custom callable still gets the full C++ batch-kernel speedup when
 in-process to build the signal matrix before shipping it to C++ in one call —
 it never inspects *how* the signal was produced.
 
+For LLM/JSON tool-calling rather than a direct Python callable, see the
+`run_custom_signal_backtest` agent tool in
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md#11-custom-signal-backtest) —
+it accepts a pre-computed `{date: value}` signal map instead of a callable
+(a raw Python function can't cross a JSON tool-calling boundary).
+
 **One constraint:** without the C++ extension built, `backtest_grid`'s
 Python fallback parallelises across parameter combinations via
 `ProcessPoolExecutor`, which requires picklable, importable functions.
@@ -350,6 +356,10 @@ print(result["portfolio_returns"].tail())
 - `weights` accepts a list (matching `signal_panel`'s column order) or a `{ticker: weight}` dict; defaults to equal weight. Must sum to 1.0 — validated by the existing `build_portfolio` check.
 - Per-ticker equity curves are aligned to their **common date range** (inner join) before combining into the portfolio — a ticker whose `price_data` doesn't fully cover `signal_panel`'s dates will shrink the portfolio's effective range.
 - Pass `benchmark_returns=` to get an `information_ratio` in `portfolio_metrics`, and `include_trade_log=True` to get a per-ticker trade log in `per_ticker[ticker]["trade_log"]`.
+
+For LLM/JSON tool-calling, see the `run_signal_panel_backtest` agent tool in
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md#12-signal-panel-backtest) —
+same idea, JSON-shaped input for function calling.
 
 ---
 

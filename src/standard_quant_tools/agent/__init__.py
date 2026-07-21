@@ -38,6 +38,8 @@ from .tools import (
     get_advanced_indicators,
     get_rolling_beta,
     get_extended_risk_metrics,
+    run_custom_signal_backtest,
+    run_signal_panel_backtest,
     # LLM wiring
     get_agent_tools,
     dispatch,
@@ -93,6 +95,9 @@ from .models import (
     RollingBetaResult,
     ExtendedRiskInput,
     ExtendedRiskResult,
+    CustomSignalBacktestInput,
+    SignalPanelBacktestInput,
+    SignalPanelBacktestResult,
 )
 
 __all__ = [
@@ -121,6 +126,8 @@ __all__ = [
     "get_advanced_indicators",
     "get_rolling_beta",
     "get_extended_risk_metrics",
+    "run_custom_signal_backtest",
+    "run_signal_panel_backtest",
     "get_agent_tools",
     "dispatch",
     # auditability
@@ -174,4 +181,7 @@ __all__ = [
     "RollingBetaResult",
     "ExtendedRiskInput",
     "ExtendedRiskResult",
+    "CustomSignalBacktestInput",
+    "SignalPanelBacktestInput",
+    "SignalPanelBacktestResult",
 ]

@@ -29,9 +29,9 @@ START, END = '2023-01-01', '2024-01-01'
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_twenty_four_tools(self):
+    def test_returns_list_of_twenty_six_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 24
+        assert len(tools) == 26
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
