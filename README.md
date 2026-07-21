@@ -315,6 +315,8 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 26 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
+For a single agent choosing among all 26, see `Implementation/`. For an **orchestrator-workers** architecture — a lead agent that delegates to six specialist sub-agents, each scoped to a small, non-overlapping tool subset — see `Multi_Agent_Implementation/` (Anthropic only for now). Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest): a worker that was never given the other tool cannot call it by mistake.
+
 ```python
 from standard_quant_tools.agent.tools import (
     get_agent_tools, analyze_stock_risk,
