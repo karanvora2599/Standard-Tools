@@ -54,7 +54,7 @@ def run_pair_backtest(
     hedge_ratio: float,
     entry_z: float = 2.0,
     exit_z: float = 0.5,
-    zscore_window: Optional[int] = None,
+    zscore_window: Optional[int] = 30,
     initial_capital: float = 10_000.0,
     commission_pct: float = 0.001,
     slippage_pct: float = 0.0005,
@@ -80,8 +80,14 @@ def run_pair_backtest(
             hedge_ratio from cointegration_test's Engle-Granger regression
             is the typical source).
         entry_z, exit_z: z-score thresholds — see _spread_state.
-        zscore_window: rolling window for spread_zscore; None = full-sample
-            z-score (spread_zscore's own default).
+        zscore_window: rolling window for spread_zscore; defaults to 30 so
+            every signal only uses spread history available up to that bar.
+            Passing None reverts to spread_zscore's full-sample static
+            z-score, which computes mean/std over the ENTIRE series
+            (including bars after the signal date) — this leaks future
+            spread statistics into historical signals and will produce an
+            optimistically-biased backtest. Only pass None for exploratory
+            analysis, never to evaluate real strategy performance.
         gross_leverage: sum(|weight|) while in a position, split between the
             two legs so the dollar ratio matches hedge_ratio: weight_a =
             gross_leverage / (1 + |hedge_ratio|), weight_b = hedge_ratio *

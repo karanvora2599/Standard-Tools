@@ -2060,11 +2060,19 @@ def get_robustness_diagnostics(input_data: RobustnessDiagnosticsInput) -> Robust
     best_sharpe = float(best_row["sharpe_ratio"])
     sharpe_trials_std = float(grid_df["sharpe_ratio"].std()) if len(grid_df) > 1 else 0.0
 
+    # grid_df's sharpe_ratio column is annualized (run_strategy -> sharpe_ratio's
+    # default periods_per_year=252), but deflated_sharpe_ratio's formula requires
+    # the non-annualized, per-period Sharpe (its z-score already scales by
+    # sqrt(n_obs - 1) itself). De-annualize before the DSR call, then re-annualize
+    # expected_max_sharpe for reporting so it's on the same scale as best_sharpe.
+    _ANNUALIZATION = np.sqrt(252.0)
     dsr = _deflated_sharpe_ratio(
-        observed_sharpe=best_sharpe, sharpe_trials_std=sharpe_trials_std,
+        observed_sharpe=best_sharpe / _ANNUALIZATION,
+        sharpe_trials_std=sharpe_trials_std / _ANNUALIZATION,
         n_trials=len(grid_df), n_obs=len(df),
         skew=input_data.skew, kurtosis=input_data.kurtosis,
     )
+    dsr["expected_max_sharpe"] = round(dsr["expected_max_sharpe"] * _ANNUALIZATION, 6)
 
     best_signals = STRATEGY_REGISTRY[input_data.strategy](df, **best_params)
     best_result = run_strategy(

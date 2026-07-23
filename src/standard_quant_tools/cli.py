@@ -5,6 +5,11 @@ Command-line interface for the audit trail's JSONL decision records
     sqt replay <request_id>              — re-run the recorded call via
                                             audit.verify_replay(), report
                                             whether data/output still match.
+                                            Exit code: 0 = output matched,
+                                            1 = output_match is False (a
+                                            confirmed mismatch), 2 = the
+                                            record has no output_hash to
+                                            compare (indeterminate).
     sqt compare <request_id_a> <id_b>    — diff two records' status/output/
                                             timing/provenance and inputs.
     sqt report <request_id>              — pretty-print one record in full.
@@ -54,11 +59,7 @@ def cmd_report(request_id: str, audit_dir: Optional[Path] = None) -> str:
     return json.dumps(record, indent=2, sort_keys=True)
 
 
-def cmd_replay(request_id: str, audit_dir: Optional[Path] = None) -> str:
-    """Re-run the recorded call via audit.verify_replay() and format the result."""
-    record = find_record(request_id, audit_dir)
-    result = audit.verify_replay(record)
-
+def _format_replay(result: audit.ReplayResult) -> str:
     lines = [
         f"request_id   : {result.request_id}",
         f"tool_name    : {result.tool_name}",
@@ -72,6 +73,27 @@ def cmd_replay(request_id: str, audit_dir: Optional[Path] = None) -> str:
     for note in result.notes:
         lines.append(f"  note       : {note}")
     return "\n".join(lines)
+
+
+def _replay_exit_code(result: audit.ReplayResult) -> int:
+    """
+    0 = output reproduced exactly, 1 = output_match is False (confirmed
+    mismatch — code or data changed the result), 2 = output_match is None
+    (the stored record has no output_hash to compare against, so replay
+    success can't be determined either way).
+    """
+    if result.output_match is False:
+        return 1
+    if result.output_match is None:
+        return 2
+    return 0
+
+
+def cmd_replay(request_id: str, audit_dir: Optional[Path] = None) -> str:
+    """Re-run the recorded call via audit.verify_replay() and format the result."""
+    record = find_record(request_id, audit_dir)
+    result = audit.verify_replay(record)
+    return _format_replay(result)
 
 
 def cmd_compare(request_id_a: str, request_id_b: str, audit_dir: Optional[Path] = None) -> str:
@@ -121,7 +143,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         if args.command == "replay":
-            print(cmd_replay(args.request_id))
+            record = find_record(args.request_id, None)
+            result = audit.verify_replay(record)
+            print(_format_replay(result))
+            return _replay_exit_code(result)
         elif args.command == "compare":
             print(cmd_compare(args.request_id_a, args.request_id_b))
         elif args.command == "report":

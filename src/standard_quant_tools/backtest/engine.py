@@ -15,6 +15,9 @@ from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, max_drawdown, calmar_ratio, sortino_ratio,
 )
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+from standard_quant_tools.error import ValidationError
+
+_VALID_FILL_PRICES = ("close", "next_open", "midpoint")
 
 # ── Optional C++ fast path ────────────────────────────────────────────────────
 from typing import Any as _Any
@@ -158,7 +161,15 @@ def run_strategy(
 
     Returns:
         Dict with performance metrics, equity curve, and optionally trade_log.
+
+    Raises:
+        ValidationError: fill_price is not one of "close", "next_open", "midpoint".
     """
+    if fill_price not in _VALID_FILL_PRICES:
+        raise ValidationError(
+            f"fill_price must be one of {_VALID_FILL_PRICES}, got {fill_price!r}"
+        )
+
     idx = price_data.index.intersection(signal_series.index)
     prices = price_data.loc[idx, "Close"]
     signals = signal_series.loc[idx]

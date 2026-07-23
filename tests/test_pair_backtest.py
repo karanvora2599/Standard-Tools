@@ -54,6 +54,7 @@ class TestRunPairBacktest:
         result = run_pair_backtest(
             price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
             entry_z=1.0, exit_z=0.3, commission_pct=0.0, slippage_pct=0.0,
+            zscore_window=None,
         )
         # 3 transitions: enter long-spread (bar 5), exit to flat (bar 10),
         # enter short-spread (bar 15). n_round_trips counts only completed
@@ -75,6 +76,7 @@ class TestRunPairBacktest:
         result = run_pair_backtest(
             price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
             entry_z=1.0, exit_z=0.3, commission_pct=0.0, slippage_pct=0.0,
+            zscore_window=None,
         )
         rebalance_dates = [r["date"] for r in result["rebalance_log"].to_dict(orient="records")]
         assert rebalance_dates == [str(dates[5].date()), str(dates[10].date()), str(dates[15].date())]
@@ -84,7 +86,7 @@ class TestRunPairBacktest:
         result = run_pair_backtest(
             price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
             entry_z=1.0, exit_z=0.3, gross_leverage=1.0,
-            commission_pct=0.0, slippage_pct=0.0,
+            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
         )
         # hedge_ratio=1.0 -> equal-magnitude legs: weight_a = weight_b = 0.5.
         first_rebalance = result["rebalance_log"].iloc[0]
@@ -94,7 +96,7 @@ class TestRunPairBacktest:
         price_data, _ = _pair_price_data()
         result = run_pair_backtest(
             price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3,
+            entry_z=1.0, exit_z=0.3, zscore_window=None,
         )
         # Most recent entry is the bar-15 short-spread entry, spread = 40.0.
         assert result["entry_spread"] == pytest.approx(40.0)
@@ -105,7 +107,7 @@ class TestRunPairBacktest:
         price_data, _ = _pair_price_data()
         result = run_pair_backtest(
             price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3,
+            entry_z=1.0, exit_z=0.3, zscore_window=None,
         )
         for key in ("equity_curve", "cash_curve", "gross_exposure_curve",
                     "leverage_curve", "final_equity", "final_cash", "warnings"):

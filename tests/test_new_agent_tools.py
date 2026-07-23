@@ -1409,7 +1409,7 @@ class TestPairTradeBacktest:
         inp = PairTradeBacktestInput(
             symbol_a="A", symbol_b="B", start_date=START, end_date=END,
             hedge_ratio=1.0, entry_z=1.0, exit_z=0.3,
-            commission_pct=0.0, slippage_pct=0.0,
+            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
         )
         result = run_pair_trade_backtest(inp)
         assert result.symbol_a == "A"
@@ -1420,7 +1420,7 @@ class TestPairTradeBacktest:
     def test_summary_fields_typed(self, patched_pair):
         inp = PairTradeBacktestInput(
             symbol_a="A", symbol_b="B", start_date=START, end_date=END,
-            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3,
+            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3, zscore_window=None,
         )
         result = run_pair_trade_backtest(inp)
         for field in ("total_return", "annualized_return", "annualized_volatility",
@@ -1442,7 +1442,7 @@ class TestPairTradeBacktest:
     def test_dispatched_through_dispatch(self, patched_pair):
         result = dispatch("run_pair_trade_backtest", {
             "symbol_a": "A", "symbol_b": "B", "start_date": START, "end_date": END,
-            "hedge_ratio": 1.0, "entry_z": 1.0, "exit_z": 0.3,
+            "hedge_ratio": 1.0, "entry_z": 1.0, "exit_z": 0.3, "zscore_window": None,
         })
         assert result["symbol_a"] == "A"
         assert result["n_round_trips"] == 1

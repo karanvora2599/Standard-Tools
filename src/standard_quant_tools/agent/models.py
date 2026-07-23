@@ -1198,7 +1198,14 @@ class PairTradeBacktestInput(BaseModel):
     entry_z: float = Field(2.0, description="Enter the spread when |z-score| >= entry_z.")
     exit_z: float = Field(0.5, description="Exit to flat once |z-score| <= exit_z.")
     zscore_window: Optional[int] = Field(
-        None, description="Rolling window for the spread z-score. None = full-sample static z-score.",
+        30,
+        description=(
+            "Rolling window (bars) for the spread z-score. Defaults to 30 so signals only use "
+            "data available up to each bar. Passing None switches to a full-sample static "
+            "z-score computed once over the whole series — this leaks future spread statistics "
+            "into every historical signal and should only be used for exploratory/offline "
+            "analysis, never to evaluate strategy performance."
+        ),
     )
     initial_capital: float = Field(10_000.0, description="Starting cash for the whole account.")
     commission_pct: float = Field(0.001, description="Commission per trade notional (fraction).")

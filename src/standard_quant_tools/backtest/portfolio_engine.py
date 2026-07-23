@@ -155,6 +155,17 @@ def run_portfolio_simulation(
             f"every ticker in the universe: {[str(d) for d in missing_dates[:5]]}"
         )
 
+    nan_mask = target_weights.isna()
+    if nan_mask.to_numpy().any():
+        bad = {
+            str(date): [t for t in target_weights.columns if bool(nan_mask.loc[date, t])]
+            for date in target_weights.index if nan_mask.loc[date].any()
+        }
+        raise ValidationError(
+            "target_weights contains NaN — every ticker must have a value at "
+            f"every rebalance date (see: {dict(list(bad.items())[:5])})"
+        )
+
     for date, row in target_weights.iterrows():
         gross = float(row.abs().sum())
         if gross > max_gross_leverage + 1e-9:
@@ -300,6 +311,16 @@ def run_portfolio_simulation(
         net_records.append(sum(shares[t] * close_prices[t] for t in tickers))
 
     warnings: List[str] = []
+    if fill_price == "close" and rebalance_dates:
+        warnings.append(
+            "fill_price='close': each rebalance executes at the same bar's own Close, "
+            "the same price its target weight is dated on. If target_weights was derived "
+            "from that bar's own Close (e.g. a same-day signal/score), this is a look-ahead "
+            "bias — the trade could not actually have been placed at that price in real "
+            "time. Use fill_price='next_open' for a lookahead-free simulation, or confirm "
+            "target_weights was already known before this bar's Close (e.g. computed from "
+            "the prior bar's data)."
+        )
     if any(c < 0 for c in cash_records):
         warnings.append("cash went negative at one or more bars — implied margin borrowing")
 

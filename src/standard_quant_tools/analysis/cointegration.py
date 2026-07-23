@@ -193,8 +193,11 @@ def spread_zscore(
     spread : pd.Series
     window : int, optional
         Rolling lookback. If None, uses the full-sample mean and std
-        (static normalisation). A rolling window of 20-60 bars is
-        typical for live trading signals.
+        (static normalisation) — this uses the ENTIRE series' mean/std at
+        every point, including bars in the future relative to any given
+        row, so it must not be used to generate historical trading signals
+        for a backtest (look-ahead bias). A rolling window of 20-60 bars is
+        typical for live trading signals and backtests.
 
     Returns
     -------
