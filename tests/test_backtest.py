@@ -139,6 +139,75 @@ class TestTradeLog:
         result = run_strategy(simple_ohlcv, sig, include_trade_log=True)
         assert result['trade_log']['direction'].eq('long').all()
 
+    def test_trade_log_reconciles_with_equity_curve_close_mode(self):
+        """
+        Regression test (P0 item 4), hand-verified: under fill_price="close",
+        executed[i] = signals[i-1], so a position "appearing" in `executed`
+        at bar i actually earns its first return over Close[i-1] -> Close[i]
+        — Close[i-1] is the trade's true economic entry/exit reference, not
+        Close[i]. 6-bar deterministic series, signals=[1,1,1,0,0,0] ->
+        executed=[0,1,1,1,0,0] -> one trade, entry event at bar 1, exit
+        event at bar 4.
+        """
+        dates = pd.date_range("2023-01-02", periods=6, freq="B")
+        close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
+        df = pd.DataFrame({
+            "Open": close, "High": close, "Low": close, "Close": close,
+            "Volume": [1_000_000.0] * 6,
+        }, index=dates)
+        signals = pd.Series([1, 1, 1, 0, 0, 0], index=dates, dtype=float)
+        result = run_strategy(
+            df, signals, commission_pct=0.001, slippage_pct=0.0005, include_trade_log=True,
+        )
+        trade_log = result["trade_log"]
+        assert len(trade_log) == 1
+        row = trade_log.iloc[0]
+        # entry event at bar 1 -> Close[0]=100.0; exit event at bar 4 -> Close[3]=103.0.
+        assert row["entry_price"] == pytest.approx(100.0)
+        assert row["exit_price"] == pytest.approx(103.0)
+        # raw price return (100 -> 103) = 3.0%, minus 2 * cost_per_unit
+        # (0.001 + 0.0005 = 0.0015, entry + exit) = 0.3% -> 2.7%.
+        assert row["return_pct"] == pytest.approx(2.7, abs=1e-9)
+        # Reconcile against the equity curve's own compounded return over
+        # the trade's actual bar span (bars 1..4) -- small residual (~0.006
+        # points here) is expected: return_pct subtracts cost as a simple
+        # fraction, while the equity curve compounds (1 + return - cost) at
+        # each bar, so cost/return cross terms create a tiny difference,
+        # same second-order approximation already documented for the
+        # next_open/midpoint two-leg decomposition.
+        equity = result["equity_curve"]
+        span_multiplier = float(equity.iloc[4] / equity.iloc[0])
+        assert row["return_pct"] == pytest.approx((span_multiplier - 1.0) * 100, abs=0.05)
+
+    def test_trade_log_reconciles_with_equity_curve_next_open_mode(self):
+        """
+        Regression test (P0 item 4): under fill_price="next_open", the
+        two-leg decomposition already prices entries/exits at that bar's
+        own reference price (Open), so no shift is needed there (unlike
+        "close" mode) -- entry_price/exit_price must equal Open at the
+        entry/exit event dates directly.
+        """
+        dates = pd.date_range("2023-01-02", periods=6, freq="B")
+        close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
+        open_ = [99.0, 101.0, 103.0, 102.5, 104.0, 105.5]
+        df = pd.DataFrame({
+            "Open": open_, "High": close, "Low": close, "Close": close,
+            "Volume": [1_000_000.0] * 6,
+        }, index=dates)
+        signals = pd.Series([1, 1, 1, 0, 0, 0], index=dates, dtype=float)
+        result = run_strategy(
+            df, signals, commission_pct=0.001, slippage_pct=0.0005,
+            fill_price="next_open", include_trade_log=True,
+        )
+        trade_log = result["trade_log"]
+        assert len(trade_log) == 1
+        row = trade_log.iloc[0]
+        assert row["entry_price"] == pytest.approx(101.0)  # Open[1]
+        assert row["exit_price"] == pytest.approx(104.0)   # Open[4]
+        equity = result["equity_curve"]
+        span_multiplier = float(equity.iloc[4] / equity.iloc[0])
+        assert row["return_pct"] == pytest.approx((span_multiplier - 1.0) * 100, abs=0.05)
+
 
 class TestMetricBounds:
     def test_win_rate_between_0_and_1(self, simple_ohlcv):

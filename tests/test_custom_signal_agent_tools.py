@@ -181,6 +181,77 @@ class TestSignalPanelBacktestTool:
         )
 
 
+class TestSignalFillPolicy:
+    """
+    Regression tests (P0 item 3): a sparse signal map (e.g. monthly dates)
+    must not silently collapse the backtest onto only those dates — it has
+    to be reindexed onto the full daily price calendar first, or every
+    downstream metric (which assumes periods_per_year=252 daily bars) is
+    silently wrong.
+    """
+
+    def test_sparse_monthly_signal_holds_across_full_daily_calendar(self, patched_factory):
+        df = patched_factory.get_ohlcv("AAPL", START, END)
+        monthly_dates = df.index[::21]  # ~monthly cadence over a 1-year daily calendar
+        sparse_signal = {str(d.date()): 1.0 for d in monthly_dates}
+        inp = CustomSignalBacktestInput(
+            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
+        )
+        result = run_custom_signal_backtest(inp)
+        assert len(result.equity_curve) == len(df)
+
+    def test_signal_panel_sparse_signal_holds_across_full_daily_calendar(self, patched_factory):
+        tickers = ["AAPL", "MSFT"]
+        df = patched_factory.get_ohlcv("AAPL", START, END)
+        monthly_dates = df.index[::21]
+        sparse_signal = {str(d.date()): 1.0 for d in monthly_dates}
+        panel = {t: sparse_signal for t in tickers}
+        inp = SignalPanelBacktestInput(
+            tickers=tickers, start_date=START, end_date=END, signal_panel=panel,
+        )
+        result = run_signal_panel_backtest(inp)
+        for ticker in tickers:
+            assert len(result.per_ticker[ticker].equity_curve) == len(df)
+
+    def test_hold_vs_flat_produce_different_results(self, patched_factory):
+        df = patched_factory.get_ohlcv("AAPL", START, END)
+        d0, d1 = df.index[0], df.index[21]
+        sparse_signal = {str(d0.date()): 1.0, str(d1.date()): 1.0}
+        hold_result = run_custom_signal_backtest(CustomSignalBacktestInput(
+            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
+            signal_fill_policy="hold",
+        ))
+        flat_result = run_custom_signal_backtest(CustomSignalBacktestInput(
+            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
+            signal_fill_policy="flat",
+        ))
+        # "hold" stays long between d0 and d1; "flat" is only long on the two
+        # exact submitted dates -- materially different exposure/final equity.
+        assert hold_result.final_equity != pytest.approx(flat_result.final_equity, abs=1e-6)
+
+    def test_error_fill_policy_raises_on_incomplete_calendar(self, patched_factory):
+        from standard_quant_tools.error import ValidationError as SQTValidationError
+
+        df = patched_factory.get_ohlcv("AAPL", START, END)
+        sparse_signal = {str(df.index[0].date()): 1.0}
+        inp = CustomSignalBacktestInput(
+            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
+            signal_fill_policy="error",
+        )
+        with pytest.raises(SQTValidationError, match="signal_fill_policy"):
+            run_custom_signal_backtest(inp)
+
+    def test_error_fill_policy_succeeds_on_complete_calendar(self, patched_factory):
+        df = patched_factory.get_ohlcv("AAPL", START, END)
+        dense_signal = {str(d.date()): 1.0 for d in df.index}
+        inp = CustomSignalBacktestInput(
+            symbol="AAPL", start_date=START, end_date=END, signals=dense_signal,
+            signal_fill_policy="error",
+        )
+        result = run_custom_signal_backtest(inp)
+        assert len(result.equity_curve) == len(df)
+
+
 class TestSignalTypeValidation:
     """
     SignalType is opt-in: the default (SCORE) is unrestricted and must be

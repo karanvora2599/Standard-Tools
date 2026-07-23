@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 # ──────────────────────────────────────────────
@@ -940,6 +940,17 @@ class CustomSignalBacktestInput(BaseModel):
     max_abs_weight: float = Field(
         1.0, description="Bound used only when signal_type='target_weight' (ignored otherwise)."
     )
+    signal_fill_policy: Literal["hold", "flat", "error"] = Field(
+        "hold",
+        description=(
+            "How to extend a sparse signal map (e.g. monthly dates) onto the full "
+            "daily price calendar before backtesting: 'hold' (default) forward-fills "
+            "between submitted dates (flat before the first one) — correct for a "
+            "target-position signal meant to persist until changed. 'flat' does not "
+            "forward-fill; only the exact submitted dates carry a nonzero signal. "
+            "'error' requires every price date to have an explicit signal entry."
+        ),
+    )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
     commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
@@ -971,6 +982,16 @@ class SignalPanelBacktestInput(BaseModel):
     weights: Optional[Dict[str, float]] = Field(
         None,
         description="Per-ticker portfolio weight, must sum to 1.0. Defaults to equal weight across tickers.",
+    )
+    signal_fill_policy: Literal["hold", "flat", "error"] = Field(
+        "hold",
+        description=(
+            "How to extend each ticker's sparse signal map onto its full daily price "
+            "calendar before backtesting: 'hold' (default) forward-fills between "
+            "submitted dates (flat before the first one). 'flat' does not "
+            "forward-fill; only the exact submitted dates carry a nonzero signal. "
+            "'error' requires every price date to have an explicit signal entry."
+        ),
     )
     initial_capital: float = Field(10_000.0, description="Starting capital applied per ticker.")
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")

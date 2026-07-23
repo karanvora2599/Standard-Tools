@@ -1,13 +1,19 @@
 """
 Walk-forward out-of-sample stitching utilities.
 
-run_walk_forward_backtest() (agent/tools.py) computes per-window OOS stats
-independently, then averages them across windows. That misrepresents
-compounding: e.g. windows of +20% and -20% average to 0% but compound to
-roughly -4%. These helpers instead stitch the per-window OOS return series
-into one chronological series and compute metrics from a single equity
-curve, reusing the existing metrics functions rather than introducing new
-metric math.
+run_walk_forward_backtest() and run_regime_adaptive_walkforward_backtest()
+(agent/tools.py) now compute their stitched_oos_* aggregate from a single
+continuous run_strategy call spanning the whole OOS region (one capital
+base, real costs at every actual transition) rather than by averaging or
+concatenating independently-computed per-window return series — averaging
+per-window stats misrepresents compounding (e.g. windows of +20% and -20%
+average to 0% but compound to roughly -4%), and even a naive per-window
+return-series concatenation still can't capture a real, cost-bearing
+transition at a window boundary the way a single continuous backtest does.
+stitch_oos_returns/compute_stitched_metrics below are no longer on that
+code path; kept as general-purpose utilities for combining an arbitrary
+list of return series (still exercised by their own tests) — not dead
+code, just not what the two OOS aggregate fields are computed from anymore.
 """
 
 import logging

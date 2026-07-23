@@ -342,6 +342,74 @@ class TestRegimeAdaptiveWalkForwardBacktest:
             mutated_result.windows[0].out_of_sample_return, abs=1e-9
         )
 
+    def test_oos_signal_generation_receives_train_plus_test_warm_up(self, patched_long, monkeypatch):
+        """
+        Regression test (P0 item 5), regime-adaptive walk-forward: same
+        warm-up guarantee as run_walk_forward_backtest -- OOS signals must
+        be generated from train_df + test_df together, never test_bars
+        alone, regardless of which of the four strategies wins a given
+        window. Patches every STRATEGY_REGISTRY entry (not just one),
+        since this tool grid-searches all four per window.
+        """
+        import standard_quant_tools.backtest.strategies as strategies_mod
+
+        train_bars, test_bars = 252, 63
+        call_lengths: list = []
+
+        def make_spy(real_fn):
+            def spy(df, **kwargs):
+                call_lengths.append(len(df))
+                return real_fn(df, **kwargs)
+            return spy
+
+        for name, fn in list(strategies_mod.STRATEGY_REGISTRY.items()):
+            monkeypatch.setitem(strategies_mod.STRATEGY_REGISTRY, name, make_spy(fn))
+
+        inp = RegimeAdaptiveWalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            train_bars=train_bars, test_bars=test_bars,
+            sma_param_grid=_RAWF_GRID["sma_crossover"],
+            rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+            macd_param_grid=_RAWF_GRID["macd_crossover"],
+            bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+        )
+        run_regime_adaptive_walkforward_backtest(inp)
+
+        # test_bars alone must never appear -- every OOS signal call used
+        # train_bars + test_bars of history. (train_bars alone also appears,
+        # legitimately, from backtest_grid's own in-sample search.)
+        assert test_bars not in call_lengths
+        assert (train_bars + test_bars) in call_lengths
+
+    def test_stitched_oos_is_one_continuous_backtest_not_reset_per_window(self, patched_long, monkeypatch):
+        """Same continuity guarantee as run_walk_forward_backtest's version:
+        the stitched OOS aggregate comes from one continuous run_strategy
+        call spanning the whole OOS region, not a per-window reset."""
+        import standard_quant_tools.agent.tools as tools_mod
+
+        train_bars, test_bars = 252, 63
+        call_lengths: list = []
+        real_run_strategy = tools_mod.run_strategy
+
+        def spy(price_data, signal_series, **kwargs):
+            call_lengths.append(len(price_data))
+            return real_run_strategy(price_data, signal_series, **kwargs)
+
+        monkeypatch.setattr(tools_mod, "run_strategy", spy)
+
+        inp = RegimeAdaptiveWalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            train_bars=train_bars, test_bars=test_bars,
+            sma_param_grid=_RAWF_GRID["sma_crossover"],
+            rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+            macd_param_grid=_RAWF_GRID["macd_crossover"],
+            bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+        )
+        result = run_regime_adaptive_walkforward_backtest(inp)
+
+        assert call_lengths.count(test_bars) == result.n_windows
+        assert call_lengths.count(result.n_windows * test_bars) == 1
+
     def test_dispatched_through_dispatch(self, patched_long):
         result = dispatch("run_regime_adaptive_walkforward_backtest", {
             "symbol": "AAPL", "start_date": START, "end_date": END,
@@ -720,6 +788,81 @@ class TestWalkForwardBacktest:
         assert baseline.windows[0].out_of_sample_return != pytest.approx(
             mutated_result.windows[0].out_of_sample_return, abs=1e-9
         )
+
+    def test_stitched_oos_is_one_continuous_backtest_not_reset_per_window(
+        self, patched_long, monkeypatch,
+    ):
+        """
+        Regression test (P0 item 5): the stitched OOS aggregate must come
+        from ONE continuous run_strategy call spanning the entire OOS
+        region -- not from resetting capital and re-running independently
+        per window. Spies on every run_strategy call's price_data length:
+        expects exactly one call per window at length test_bars (the
+        window-scoped diagnostic, unchanged), PLUS exactly one additional
+        call at length n_windows * test_bars (the single continuous
+        backtest the stitched_oos_* fields are computed from).
+        """
+        import standard_quant_tools.agent.tools as tools_mod
+
+        train_bars, test_bars = 252, 63
+        call_lengths: list = []
+        real_run_strategy = tools_mod.run_strategy
+
+        def spy(price_data, signal_series, **kwargs):
+            call_lengths.append(len(price_data))
+            return real_run_strategy(price_data, signal_series, **kwargs)
+
+        monkeypatch.setattr(tools_mod, "run_strategy", spy)
+
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=train_bars, test_bars=test_bars,
+        )
+        result = run_walk_forward_backtest(inp)
+
+        assert call_lengths.count(test_bars) == result.n_windows
+        assert call_lengths.count(result.n_windows * test_bars) == 1
+
+    def test_oos_signal_generation_receives_train_plus_test_warm_up(
+        self, patched_long, monkeypatch,
+    ):
+        """
+        Regression test (P0 item 5): OOS signals must be generated from
+        train_df + test_df together (giving indicators train_bars of
+        warm-up before the OOS region starts), not test_df alone -- the
+        original bug meant e.g. a 50-bar SMA was wrong for its first 49
+        bars of every OOS window. Spies on the strategy registry's signal
+        function (STRATEGY_REGISTRY is a single shared dict object --
+        mutating the entry in place, via monkeypatch.setitem, is visible
+        to agent.tools's own reference to the same dict) to confirm every
+        call receives train_bars + test_bars of data, never test_bars alone.
+        """
+        import standard_quant_tools.backtest.strategies as strategies_mod
+
+        train_bars, test_bars = 252, 63
+        call_lengths: list = []
+        real_sma = strategies_mod.STRATEGY_REGISTRY["sma_crossover"]
+
+        def spy(df, **kwargs):
+            call_lengths.append(len(df))
+            return real_sma(df, **kwargs)
+
+        monkeypatch.setitem(strategies_mod.STRATEGY_REGISTRY, "sma_crossover", spy)
+
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=train_bars, test_bars=test_bars,
+        )
+        result = run_walk_forward_backtest(inp)
+
+        # One call per window for the OOS signal generation (train+test
+        # slice) -- never called with test_bars alone.
+        assert call_lengths.count(train_bars + test_bars) == result.n_windows
+        assert test_bars not in call_lengths
 
 
 # ── Feature 4: Portfolio Risk Attribution ─────────────────────────────────────

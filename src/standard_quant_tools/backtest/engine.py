@@ -34,11 +34,34 @@ except ImportError:
 # Internal helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _build_trade_log(prices: pd.Series, executed: pd.Series) -> pd.DataFrame:
+def _build_trade_log(
+    ref_prices: pd.Series,
+    close_prices: pd.Series,
+    executed: pd.Series,
+    cost_per_unit: float = 0.0,
+) -> pd.DataFrame:
     """
-    Build a per-trade log from the executed position series.
-    Vectorized detection of position changes; only iterates over trade events
-    (orders-of-magnitude fewer than bars).
+    Build a per-trade log reconciled with the equity curve's own P&L.
+
+    entry_price/exit_price use ref_prices — the same reference price series
+    run_strategy's return calculation uses: Close[i-1] under
+    fill_price="close" (since executed[i] = signals[i-1], a position that
+    "appears" in `executed` at event date i actually earns its first
+    return over Close[i-1] -> Close[i], so i-1's close is its true economic
+    entry/exit point — the review's finding), or Open[i] / (High[i]+Low[i])/2
+    directly under "next_open"/"midpoint", where the two-leg decomposition
+    already prices entries/exits at that bar's own reference price (no
+    shift needed there).
+
+    return_pct is reduced by 2 * cost_per_unit (entry + exit — matching the
+    two separate pos_diff-triggered cost deductions run_strategy applies to
+    the equity curve for a completed round trip), or 1 * cost_per_unit for
+    a position still open at the final bar (a synthesized mark-to-market
+    "exit", not a real exit event — the equity curve never deducted a
+    second cost for it either).
+
+    Vectorized detection of position changes; only iterates over trade
+    events (orders-of-magnitude fewer than bars).
     """
     pos_diff = executed.diff()
     pos_diff.iloc[0] = executed.iloc[0]
@@ -54,45 +77,49 @@ def _build_trade_log(prices: pd.Series, executed: pd.Series) -> pd.DataFrame:
     open_trade: Dict[str, Any] = {}
 
     for date in trade_event_idx:
-        price = prices[date]
+        ref_price = ref_prices[date]
         new_pos = executed[date]
 
         if open_trade:
             direction = open_trade["direction"]
             entry_price = open_trade["entry_price"]
-            exit_pnl = (price - entry_price) / entry_price * direction
+            raw_pnl = (ref_price - entry_price) / entry_price * direction
+            net_pnl = raw_pnl - 2 * cost_per_unit
             records.append({
                 "entry_date": open_trade["entry_date"],
                 "exit_date": date,
                 "direction": "long" if direction == 1 else "short",
                 "entry_price": round(entry_price, 4),
-                "exit_price": round(price, 4),
-                "return_pct": round(exit_pnl * 100, 4),
+                "exit_price": round(ref_price, 4),
+                "return_pct": round(net_pnl * 100, 4),
             })
             open_trade = {}
 
         if new_pos != 0:
             open_trade = {
                 "entry_date": date,
-                "entry_price": price,
+                "entry_price": ref_price,
                 "direction": 1 if new_pos > 0 else -1,
             }
 
     # Close any position still open at the last bar (e.g. buy-and-hold, trend strategies
-    # that never exit). Mark the exit date and price as the final bar in the series.
+    # that never exit). Mark the exit date and price as the final bar in the series --
+    # equity is always marked to Close regardless of fill_price, so this synthesized
+    # "exit" uses Close too, not ref_prices.
     if open_trade:
-        last_date = prices.index[-1]
-        last_price = prices.iloc[-1]
+        last_date = close_prices.index[-1]
+        last_price = close_prices.iloc[-1]
         direction = open_trade["direction"]
         entry_price = open_trade["entry_price"]
-        exit_pnl = (last_price - entry_price) / entry_price * direction
+        raw_pnl = (last_price - entry_price) / entry_price * direction
+        net_pnl = raw_pnl - cost_per_unit  # entry cost only -- no real exit event occurred
         records.append({
             "entry_date": open_trade["entry_date"],
             "exit_date": last_date,
             "direction": "long" if direction == 1 else "short",
             "entry_price": round(entry_price, 4),
             "exit_price": round(float(last_price), 4),
-            "return_pct": round(exit_pnl * 100, 4),
+            "return_pct": round(net_pnl * 100, 4),
         })
 
     return pd.DataFrame(records)
@@ -210,7 +237,9 @@ def run_strategy(
             "avg_trade_return_pct":  round(float(r["avg_trade_return_pct"]), 4),
         }
         if include_trade_log:
-            result["trade_log"] = _build_trade_log(prices, executed)
+            result["trade_log"] = _build_trade_log(
+                prices.shift(1), prices, executed, commission_pct + slippage_pct,
+            )
         logger.debug(
             "[run_strategy] C++  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
             result["total_return"] * 100, result["sharpe_ratio"],
@@ -253,6 +282,12 @@ def run_strategy(
         strategy_returns = gross_returns - transaction_costs
     else:
         strategy_returns = executed * returns - transaction_costs
+        # executed[i] = signals[i-1], so a position "appearing" in `executed`
+        # at bar i actually earns its first return over Close[i-1] -> Close[i]
+        # — Close[i-1] is its true economic entry/exit reference, not Close[i]
+        # (only used for the trade log below; the return calc above is
+        # already correct as-is).
+        ref_prices = prices.shift(1)
     equity_curve = initial_capital * (1 + strategy_returns).cumprod()
 
     total_ret = cumulative_return(equity_curve)
@@ -274,7 +309,7 @@ def run_strategy(
         "equity_curve": equity_curve,
     }
 
-    trade_log = _build_trade_log(prices, executed)
+    trade_log = _build_trade_log(ref_prices, prices, executed, cost_per_unit)
     result.update(_compute_trade_stats(trade_log))
 
     if include_trade_log:

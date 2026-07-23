@@ -128,11 +128,25 @@ regardless of whether `_sqt_core` is built.
 one of `"close"`, `"next_open"`, `"midpoint"` — the same self-correcting-error
 pattern used everywhere else in this library.
 
-**Known limitation:** the trade log's `entry_price`/`exit_price` always
-report the bar's `Close`, in every mode — only the aggregate P&L (equity
-curve, Sharpe, total return, everything else) reflects `next_open`/
-`midpoint` fills correctly. Treat the trade log's prices as a reference
-marker, not the literal assumed fill price, when using either mode.
+**Trade log price convention:** `entry_price`/`exit_price` use the same
+reference price the equity curve's P&L is actually computed from, per
+mode — not always `Close`. Under `fill_price="close"`, `executed[i] =
+signals[i-1]`, so a position that "appears" in the executed-position
+series at bar *i* actually earns its first return over `Close[i-1] ->
+Close[i]`: the trade log reports `Close[i-1]` as that entry (and, at exit,
+the analogous `Close[j-1]` for the closing event at bar *j*) — not
+`Close[i]`/`Close[j]`, which would be one bar later than the price the
+equity curve actually used. Under `next_open`/`midpoint`, the two-leg
+decomposition already prices entries/exits at that bar's own reference
+price (`Open`/midpoint), so no shift is needed there — `entry_price`/
+`exit_price` equal that bar's reference price directly. `return_pct` is
+also net of commission+slippage (2× `cost_per_unit`, for the entry and
+exit; 1× for a position still open at the final bar, since no real exit
+event/cost was ever applied to the equity curve in that case) — matching,
+up to a small second-order compounding residual, the equity curve's own
+return over the trade's span. A position still open at the final bar (no
+exit signal) is marked at that bar's `Close` regardless of `fill_price`,
+matching how the equity curve itself is always marked to `Close`.
 
 On the agent-tool side, `fill_price` is exposed on `BacktestInput`,
 `BuyAndHoldInput`, `CompareStrategiesInput`, `CustomSignalBacktestInput`,

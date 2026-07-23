@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools import audit
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.indicators.trend import sma, ema, macd, adx, williams_r, parabolic_sar
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
@@ -46,7 +47,6 @@ from standard_quant_tools.backtest.robustness import (
     block_bootstrap_ci as _block_bootstrap_ci,
 )
 from standard_quant_tools.backtest.walk_forward import (
-    stitch_oos_returns, compute_stitched_metrics,
     longest_losing_streak, parameter_turnover,
 )
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
@@ -113,6 +113,40 @@ def _parse_period(period: str) -> datetime.datetime:
     if unit == "d":
         return now - datetime.timedelta(days=num)
     return now - datetime.timedelta(days=365)
+
+
+def _apply_signal_fill_policy(
+    signal_series: pd.Series, price_index: pd.Index, policy: str,
+) -> pd.Series:
+    """
+    A caller-submitted signal map only covers the dates it explicitly
+    listed (e.g. a monthly rebalance signal against a daily price index).
+    Reindexing onto the full price calendar HERE — not downstream, where
+    run_strategy intersects the price and signal indices — is what keeps
+    the backtest on the real daily bar time scale instead of silently
+    collapsing to whatever sparse dates were submitted (which would also
+    corrupt annualization, since every metric assumes periods_per_year=252
+    daily bars).
+
+    "hold" (default): forward-fill between submitted dates, flat (0.0)
+        before the first one — correct for a target-position signal that's
+        meant to persist until explicitly changed.
+    "flat": no forward-fill — only the exact submitted dates carry a
+        nonzero signal; every other bar is flat.
+    "error": every price-calendar date must have an explicit entry.
+    """
+    if policy == "error":
+        missing = price_index.difference(signal_series.index)
+        if len(missing) > 0:
+            raise ValidationError(
+                f"signal_fill_policy='error': {len(missing)} price date(s) have no "
+                f"corresponding signal entry (e.g. {[str(d.date()) for d in missing[:5]]})"
+            )
+        return signal_series.reindex(price_index)
+    reindexed = signal_series.reindex(price_index)
+    if policy == "hold":
+        return reindexed.ffill().fillna(0.0)
+    return reindexed.fillna(0.0)  # "flat"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -900,12 +934,14 @@ def run_regime_adaptive_walkforward_backtest(
     }
 
     windows: List[RegimeAdaptiveWalkForwardWindow] = []
-    oos_return_series: List[pd.Series] = []
+    oos_signal_tails: List[pd.Series] = []
     cursor = 0
+    first_test_start = train_bars
 
     while cursor + train_bars + test_bars <= n:
         train_df = df.iloc[cursor: cursor + train_bars]
         test_df = df.iloc[cursor + train_bars: cursor + train_bars + test_bars]
+        full_slice = df.iloc[cursor: cursor + train_bars + test_bars]
 
         train_returns = train_df["Close"].pct_change().dropna()
         hurst_result = _hurst(train_returns, method=input_data.hurst_method)
@@ -947,7 +983,14 @@ def run_regime_adaptive_walkforward_backtest(
         strategy_name = best_overall["strategy"]
         best_params = best_overall["params"]
 
-        oos_signals = STRATEGY_REGISTRY[strategy_name](test_df, **best_params)
+        # Warm-up-aware, same as run_walk_forward_backtest: signals generated
+        # over train+test together, keeping only the test-bars tail.
+        oos_signals_full = STRATEGY_REGISTRY[strategy_name](full_slice, **best_params)
+        oos_signals = oos_signals_full.iloc[train_bars:]
+        oos_signal_tails.append(oos_signals)
+
+        # Window-scoped diagnostic only — see stitched_oos_* below for the
+        # single continuous OOS backtest.
         oos = run_strategy(
             test_df, oos_signals,
             initial_capital=input_data.initial_capital,
@@ -955,7 +998,6 @@ def run_regime_adaptive_walkforward_backtest(
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
         )
-        oos_return_series.append(oos["equity_curve"].pct_change().fillna(0.0))
 
         windows.append(RegimeAdaptiveWalkForwardWindow(
             window_index=len(windows),
@@ -988,8 +1030,15 @@ def run_regime_adaptive_walkforward_backtest(
         "frequency": round(most_common_n / len(windows), 3),
     }
 
-    stitched_returns = stitch_oos_returns(oos_return_series)
-    stitched = compute_stitched_metrics(stitched_returns, input_data.initial_capital)
+    stitched_signals = pd.concat(oos_signal_tails)
+    full_oos_df = df.iloc[first_test_start: cursor + train_bars]
+    stitched = run_strategy(
+        full_oos_df, stitched_signals,
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+        fill_price=input_data.fill_price,
+    )
     worst_window = min(windows, key=lambda w: w.out_of_sample_return)
 
     result = RegimeAdaptiveWalkForwardResult(
@@ -1117,7 +1166,20 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
     out-of-sample window. Returns per-window stats and aggregate OOS metrics.
 
     The OOS windows are non-overlapping; the training window slides forward
-    by test_bars each step.
+    by test_bars each step. Each window's OOS signals are generated from
+    train_df + test_df together (so indicators get train_bars of warm-up
+    before the OOS region starts, instead of computing over test_df alone —
+    wrong for any indicator needing more history than test_bars provides),
+    keeping only the test-bars tail. Those tails are then stitched
+    chronologically into ONE continuous signal series and run through a
+    SINGLE run_strategy call spanning the whole OOS region — one capital
+    base, one compounding stream, real transaction costs at every actual
+    transition including window boundaries (now just an ordinary bar, not a
+    reset) — rather than resetting capital and re-running run_strategy
+    independently per window. windows[i].out_of_sample_* stay window-scoped
+    diagnostics (their own independent run_strategy call, still useful to
+    see per-window) — stitched_oos_* are the economically correct aggregate,
+    computed from the single continuous backtest above.
     """
     logger.debug("[walk_forward] %s  strategy=%s  %s → %s  train=%d  test=%d  sort_by=%s",
                  input_data.symbol, input_data.strategy, input_data.start_date, input_data.end_date,
@@ -1141,12 +1203,14 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         )
 
     windows: List[WalkForwardWindow] = []
-    oos_return_series: List[pd.Series] = []
+    oos_signal_tails: List[pd.Series] = []
     cursor = 0
+    first_test_start = train_bars
 
     while cursor + train_bars + test_bars <= n:
         train_df = df.iloc[cursor: cursor + train_bars]
         test_df = df.iloc[cursor + train_bars: cursor + train_bars + test_bars]
+        full_slice = df.iloc[cursor: cursor + train_bars + test_bars]
 
         grid_df = backtest_grid(
             train_df,
@@ -1170,7 +1234,16 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         is_sharpe = float(best_row.get("sharpe_ratio", 0.0))
         is_return = float(best_row.get("total_return", 0.0))
 
-        oos_signals = STRATEGY_REGISTRY[input_data.strategy](test_df, **best_params)
+        # Warm-up-aware: generate signals over train+test together, keep only
+        # the test-bars tail — a strategy needing more lookback than
+        # test_bars alone provides now gets it, from this window's own
+        # train_df (not reaching further back than cursor).
+        oos_signals_full = STRATEGY_REGISTRY[input_data.strategy](full_slice, **best_params)
+        oos_signals = oos_signals_full.iloc[train_bars:]
+        oos_signal_tails.append(oos_signals)
+
+        # Window-scoped diagnostic only — independently capitalized/reset,
+        # not the aggregate (see stitched_oos_* below for the continuous one).
         oos = run_strategy(
             test_df, oos_signals,
             initial_capital=input_data.initial_capital,
@@ -1178,10 +1251,6 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
         )
-        # Recovered from the equity curve (always present in run_strategy's
-        # result) — same pattern used in backtest/panel.py — so each window's
-        # OOS returns can be stitched into one chronological series below.
-        oos_return_series.append(oos["equity_curve"].pct_change().fillna(0.0))
 
         windows.append(WalkForwardWindow(
             window_index=len(windows),
@@ -1212,10 +1281,18 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             "frequency": round(most_common_n / len(windows), 3),
         }
 
-    # Stitched (compounded) OOS metrics — one equity curve across all windows,
-    # not an average of independently-computed per-window stats.
-    stitched_returns = stitch_oos_returns(oos_return_series)
-    stitched = compute_stitched_metrics(stitched_returns, input_data.initial_capital)
+    # Continuous OOS backtest: one signal series spanning the whole OOS
+    # region (windows are contiguous by construction, cursor += test_bars
+    # each step), one run_strategy call, one capital base.
+    stitched_signals = pd.concat(oos_signal_tails)
+    full_oos_df = df.iloc[first_test_start: cursor + train_bars]
+    stitched = run_strategy(
+        full_oos_df, stitched_signals,
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+        fill_price=input_data.fill_price,
+    )
     avg_is_sharpe = float(np.mean([w.in_sample_sharpe for w in windows]))
     avg_is_return = float(np.mean([w.in_sample_return for w in windows]))
     worst_window = min(windows, key=lambda w: w.out_of_sample_return)
@@ -1710,6 +1787,9 @@ def run_custom_signal_backtest(input_data: CustomSignalBacktestInput) -> Backtes
     signal_series = pd.Series(
         {pd.Timestamp(d): v for d, v in input_data.signals.items()}
     ).sort_index()
+    signal_series = _apply_signal_fill_policy(
+        signal_series, df.index, input_data.signal_fill_policy,
+    )
 
     bt_input = BacktestInput(
         symbol=input_data.symbol,
@@ -1745,7 +1825,10 @@ def run_signal_panel_backtest(input_data: SignalPanelBacktestInput) -> SignalPan
     }
 
     signal_panel = pd.DataFrame({
-        t: pd.Series({pd.Timestamp(d): v for d, v in input_data.signal_panel[t].items()})
+        t: _apply_signal_fill_policy(
+            pd.Series({pd.Timestamp(d): v for d, v in input_data.signal_panel[t].items()}).sort_index(),
+            price_data[t].index, input_data.signal_fill_policy,
+        )
         for t in input_data.tickers
     }).sort_index()
 

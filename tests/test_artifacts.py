@@ -76,6 +76,37 @@ class TestRoundTrip:
 
 
 class TestLoadArtifact:
-    def test_missing_uri_raises(self, tmp_path):
+    def test_missing_uri_raises(self, runs_dir):
         with pytest.raises(ValidationError, match="not found"):
-            load_artifact(str(tmp_path / "nonexistent.parquet"))
+            load_artifact(str(runs_dir / "nonexistent.parquet"))
+
+    def test_uri_outside_runs_dir_raises(self, tmp_path):
+        # A path that's a real file but lives outside SQT_RUNS_DIR entirely
+        # (a sibling of the "runs" directory the autouse fixture points at)
+        # must be rejected regardless of whether the file exists.
+        outside = tmp_path / "not_a_run.parquet"
+        pd.DataFrame({"a": [1]}).to_parquet(outside)
+        with pytest.raises(ValidationError, match="escapes SQT_RUNS_DIR"):
+            load_artifact(str(outside))
+
+
+class TestIdentifierValidation:
+    @pytest.mark.parametrize("bad_run_id", [
+        "../escape", "..\\escape", "/abs/path", "a/b", "a\\b", "", "a\x00b", "C:\\Windows",
+    ])
+    def test_save_artifact_rejects_bad_run_id(self, bad_run_id):
+        with pytest.raises(ValidationError, match="not a valid identifier"):
+            save_artifact(pd.Series([1.0, 2.0]), run_id=bad_run_id, name="equity_curve")
+
+    @pytest.mark.parametrize("bad_name", ["../escape", "a/b", "a\\b", ""])
+    def test_save_artifact_rejects_bad_name(self, bad_name):
+        with pytest.raises(ValidationError, match="not a valid identifier"):
+            save_artifact(pd.Series([1.0, 2.0]), run_id="run1", name=bad_name)
+
+    def test_path_traversal_run_id_creates_no_file_outside_runs_dir(self, tmp_path):
+        with pytest.raises(ValidationError):
+            save_artifact(
+                pd.Series([1.0, 2.0]), run_id="../../escaped", name="equity_curve",
+            )
+        # Nothing should have been written anywhere outside (or inside) runs_dir.
+        assert not (tmp_path / "escaped").exists()

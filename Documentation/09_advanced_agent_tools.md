@@ -488,7 +488,9 @@ for win in result.windows:
 | `longest_losing_window_streak` | `int` | Longest run of consecutive windows with negative OOS return |
 | `parameter_turnover` | `float` | Fraction of consecutive windows whose `best_params` changed (0.0 = perfectly stable, 1.0 = changes every window) |
 
-> **Why both `avg_oos_*` and `stitched_oos_*` exist:** `avg_oos_sharpe`/`avg_oos_return`/`avg_oos_max_drawdown` average each window's independently-computed stats — simple, but it misrepresents compounding. Two windows of +20% and -20% average to a 0% return, but an account that actually lived through both windows sequentially would be down ~4% (1.2 × 0.8 − 1). `stitched_oos_*` concatenates every window's out-of-sample daily returns into one chronological series and computes metrics from a single resulting equity curve — the economically correct aggregate. Prefer `stitched_oos_*` for reporting; the `avg_oos_*` fields are kept for backward compatibility and as a quick per-window sanity check.
+> **Why both `avg_oos_*` and `stitched_oos_*` exist:** `avg_oos_sharpe`/`avg_oos_return`/`avg_oos_max_drawdown` average each window's independently-computed stats — simple, but it misrepresents compounding. Two windows of +20% and -20% average to a 0% return, but an account that actually lived through both windows sequentially would be down ~4% (1.2 × 0.8 − 1). `stitched_oos_*` is computed from **one continuous backtest spanning the entire OOS region** — a single capital base carried across every window boundary, real transaction costs applied at every actual transition (including at a window boundary, which is now just an ordinary bar, not a capital reset) — the economically correct aggregate. Prefer `stitched_oos_*` for reporting; the `avg_oos_*`/`windows[].out_of_sample_*` fields are window-scoped diagnostics (each computed from an independent, separately-capitalized run over just that window) — useful to see per-window variation, but not a substitute for the continuous result.
+>
+> **Warm-up:** each window's OOS signal is generated from `train_df + test_df` together (so an indicator needing more lookback than `test_bars` alone provides — e.g. a 100-bar SMA against `test_bars=63` — still gets correctly warmed up from that window's own `train_df`), then only the `test_bars` tail is kept and used for both `windows[].out_of_sample_*` and the stitched aggregate. Earlier versions generated OOS signals from `test_df` alone, silently producing an under-warmed-up (and, worse, capital-reset-per-window) result.
 
 **Detecting overfitting — is-sample Sharpe that vanishes out-of-sample:**
 
@@ -1590,9 +1592,10 @@ print(f"Num Trades    : {result.num_trades}")
 | `symbol` | str | — | Ticker symbol |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
-| `signals` | `Dict[str, float]` | — | `{date: value}`, computed entirely outside this library. Dates without a matching OHLCV bar are ignored, same as extra OHLCV bars with no signal entry. Whether/how values are validated is controlled by `signal_type`. |
+| `signals` | `Dict[str, float]` | — | `{date: value}`, computed entirely outside this library. Reindexed onto the **full daily price calendar** per `signal_fill_policy` before backtesting — a sparse (e.g. monthly) signal no longer silently collapses the backtest onto only those dates. Whether/how values are validated is controlled by `signal_type`. |
 | `signal_type` | `SignalType` | `"score"` | `"score"` (default — unrestricted float, today's original behavior) \| `"direction"` (every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) |
 | `max_abs_weight` | float | `1.0` | Bound used only when `signal_type="target_weight"` (ignored otherwise) |
+| `signal_fill_policy` | str | `"hold"` | How a sparse `signals` map is extended onto the full price calendar: `"hold"` (default) forward-fills between submitted dates, flat before the first one — correct for a target-position signal meant to persist until changed. `"flat"` does not forward-fill; only the exact submitted dates carry a nonzero signal. `"error"` requires every price date to have an explicit entry. |
 | `initial_capital` | float | `10000` | Starting capital |
 | `commission_pct` | float | `0.001` | Commission per trade (fraction) |
 | `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
@@ -1677,10 +1680,11 @@ print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
 | `tickers` | `List[str]` | — | Universe; must match `signal_panel`'s outer keys |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
-| `signal_panel` | `Dict[str, Dict[str, float]]` | — | `{ticker: {date: value}}`, computed entirely outside this library. Whether/how values are validated is controlled by `signal_type`, applied uniformly across every ticker's signal map. |
+| `signal_panel` | `Dict[str, Dict[str, float]]` | — | `{ticker: {date: value}}`, computed entirely outside this library. Each ticker's map is reindexed onto that ticker's **full daily price calendar** per `signal_fill_policy` before backtesting. Whether/how values are validated is controlled by `signal_type`, applied uniformly across every ticker's signal map. |
 | `signal_type` | `SignalType` | `"score"` | `"score"` (default — unrestricted float, today's original behavior) \| `"direction"` (every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) |
 | `max_abs_weight` | float | `1.0` | Bound used only when `signal_type="target_weight"` (ignored otherwise) |
 | `weights` | `Dict[str, float]?` | `None` | Per-ticker weight, must sum to 1.0. Defaults to equal weight. |
+| `signal_fill_policy` | str | `"hold"` | Same semantics as `CustomSignalBacktestInput.signal_fill_policy` (§11), applied independently to each ticker's own price calendar. |
 | `initial_capital` | float | `10000` | Starting capital applied per ticker |
 | `commission_pct` | float | `0.001` | Commission per trade (fraction) |
 | `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
@@ -1759,8 +1763,8 @@ print(f"\nTime in market: {exp.time_in_market:.0%}  "
 
 1. Compute the Hurst exponent on `train_df`'s returns → regime + H, reported per window as **diagnostic context only**.
 2. Grid-search **all four** registered strategies (`sma_crossover`, `rsi_mean_reversion`, `macd_crossover`, `bollinger_reversion`) on `train_df`, using the same default parameter grids as `run_regime_adaptive_backtest` (or your own overrides) — keep whichever `(strategy, params)` wins by `sort_by`.
-3. Freeze that choice; run it on `test_df` only.
-4. Slide forward by `test_bars`; stitch every window's OOS returns into one chronological equity curve (same `backtest/walk_forward.py` helpers `run_walk_forward_backtest` uses — no new stitching math).
+3. Freeze that choice; generate its signal from `train_df + test_df` together (warm-up), keep only the `test_bars` tail — the window-scoped diagnostic in `windows[]` runs that tail through its own independent `run_strategy` call.
+4. Slide forward by `test_bars`; concatenate every window's `test_bars`-tail signal chronologically and run **one continuous** `run_strategy` call across the whole OOS region — one capital base, real costs at every actual transition, same continuity guarantee as `run_walk_forward_backtest` (§3).
 
 This directly answers two criticisms of `run_regime_adaptive_backtest`: the in-sample selection bias (every number here is genuinely out-of-sample), and the hardcoded regime → strategy map (a "trending" window is free to pick `rsi_mean_reversion` if it actually wins in-sample — the regime is context, not a hard rule).
 
@@ -2223,7 +2227,13 @@ equity_curve = load_artifact(result.equity_curve_uri).squeeze("columns")
 
 **Artifact storage:** `SQT_RUNS_DIR` (default
 `~/.cache/standard_quant_tools/runs/`, same env-var-override convention as
-`SQT_AUDIT_DIR`/`SQT_CACHE_DIR`), one subdirectory per `run_id`.
+`SQT_AUDIT_DIR`/`SQT_CACHE_DIR`), one subdirectory per `run_id`. Both
+`run_id` and the artifact `name` must match `^[A-Za-z0-9_-]+$` (`save_artifact`/
+`load_artifact` in `backtest/artifacts.py` raise `ValidationError` otherwise)
+— since `run_id` is LLM-reachable, this rejects path separators, `..`, and
+absolute/drive-letter prefixes before they ever reach a filesystem path, with
+a resolved-path containment check against `SQT_RUNS_DIR` as defense in depth.
+Writes are atomic (temp file + `os.replace`).
 
 **Scope, stated explicitly:** no `positions_uri`/`orders_uri` from the
 original design doc — this signal-array engine has no per-order or

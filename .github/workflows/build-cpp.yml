@@ -12,11 +12,28 @@ on:
       - "src/standard_quant_tools/_cpp/**"
       - "CMakeLists.txt"
       - ".github/workflows/build-cpp.yml"
+  # Best-effort parity check: a Python-only change (backtest/**, indicators/**,
+  # analysis/**, etc.) can silently break the C++/Python parity these two
+  # implementations are supposed to maintain without ever touching _cpp/**
+  # itself, so the path-scoped triggers above would never catch it. Widening
+  # those `paths:` filters directly to cover the likely Python call sites
+  # would make this workflow run on nearly every push (backtest/indicators/
+  # analysis together are most of the codebase) -- triggering off CI's own
+  # completion instead means this only fires once CI has already validated
+  # the commit, and every push/PR is covered without duplicating CI's own
+  # path scoping here.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
   workflow_dispatch:
 
 jobs:
   build-and-test:
     name: C++ extension (ubuntu)
+    # Skip when triggered by workflow_run -- that path is handled by the
+    # parity-check job below, which checks out the actual tested commit
+    # (github.event.workflow_run.head_sha) rather than this job's default ref.
+    if: github.event_name != 'workflow_run'
     runs-on: ubuntu-latest
 
     steps:
@@ -46,6 +63,103 @@ jobs:
 
       - name: Run all tests with C++ path active
         # Includes benchmark tests now that the extension is built
+        run: |
+          pytest -m "not integration and not slow" \
+            --tb=short -q -s
+
+  build-and-test-sanitizers:
+    name: C++ extension (ASan/UBSan, ubuntu)
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-latest
+    # This job's sanitizer/LD_PRELOAD plumbing could not be verified locally
+    # (no C++ toolchain on the machine that wrote it) -- continue-on-error
+    # until it's proven green on a real run, so a config mistake here (wrong
+    # libasan path, incompatible flag combination) doesn't block unrelated
+    # PRs. Flip this to false once confirmed working.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y cmake build-essential
+
+      - name: Install Python dependencies
+        run: |
+          pip install flit_core pybind11
+          pip install -e ".[test]"
+
+      - name: Build C++ extension with ASan/UBSan
+        env:
+          CXXFLAGS: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -O1"
+          LDFLAGS: "-fsanitize=address,undefined"
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --config Debug --parallel $(nproc)
+
+      - name: Verify extension loaded
+        run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
+
+      - name: Run tests under ASan/UBSan
+        # Python itself isn't built with ASan, so libasan must be preloaded
+        # into the interpreter process for a sanitized extension to work.
+        # detect_leaks=0: CPython's own long-lived allocator pools otherwise
+        # get flagged as leaks at interpreter shutdown -- not something this
+        # project's code is responsible for. This is exactly where item 1's
+        # new negative/zero-argument C++ tests (test_cpp_indicators.py,
+        # test_cpp_hurst.py) earn their keep: an out-of-bounds write that a
+        # plain Release build silently corrupts memory on now aborts here.
+        env:
+          ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: |
+          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+          pytest -m "not integration and not slow" --tb=short -q -s
+
+  parity-check-on-ci-completion:
+    name: C++ extension (best-effort parity check after CI)
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    # Best-effort: only meant to widen coverage to Python-only changes that
+    # the path-scoped build-and-test job above never sees; a failure here
+    # signals real C++/Python drift worth investigating, but shouldn't block
+    # merges on its own the way build-and-test does for direct _cpp/** changes.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y cmake build-essential
+
+      - name: Install Python dependencies
+        run: |
+          pip install flit_core pybind11
+          pip install -e ".[test]"
+
+      - name: Build C++ extension
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel $(nproc)
+
+      - name: Verify extension loaded
+        run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
+
+      - name: Run all tests with C++ path active
         run: |
           pytest -m "not integration and not slow" \
             --tb=short -q -s

@@ -72,6 +72,9 @@ def save_artifact(
         ValidationError: data is empty, or the target file already exists
         and overwrite=False.
     """
+    _validate_identifier(run_id, "run_id")
+    _validate_identifier(name, "name")
+
     if isinstance(data, pd.Series):
         frame = data.to_frame(name=data.name or "value")
     else:
@@ -80,14 +83,21 @@ def save_artifact(
         raise ValidationError("cannot save an empty artifact")
 
     directory = _runs_dir() / run_id
-    directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{name}.parquet"
+    path = _resolved_within_runs_dir(path)
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
     if path.exists() and not overwrite:
         raise ValidationError(
             f"artifact already exists at {path} (run_id={run_id!r}, name={name!r}) — "
             "pass overwrite=True to replace it, or use a different run_id/name."
         )
-    frame.to_parquet(path)
+
+    # Write atomically: a crash or concurrent reader must never observe a
+    # partially-written Parquet file at the final path.
+    tmp_path = directory / f".{name}.{uuid.uuid4().hex}.tmp"
+    frame.to_parquet(tmp_path)
+    os.replace(tmp_path, path)
     return str(path)
 
 
@@ -100,9 +110,9 @@ def load_artifact(uri: str) -> pd.DataFrame:
     column).
 
     Raises:
-        ValidationError: uri does not exist.
+        ValidationError: uri does not exist, or resolves outside SQT_RUNS_DIR.
     """
-    path = Path(uri)
+    path = _resolved_within_runs_dir(Path(uri))
     if not path.exists():
         raise ValidationError(f"artifact not found: {uri}")
     return pd.read_parquet(path)
