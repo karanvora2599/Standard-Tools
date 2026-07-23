@@ -26,6 +26,10 @@ from standard_quant_tools.backtest.engine import run_strategy, backtest_grid
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.backtest.panel import run_signal_panel_backtest as _signal_panel_backtest
 from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation as _portfolio_engine_run
+from standard_quant_tools.backtest.sizing import (
+    rank_weighted, equal_weight_top_bottom, zscore_normalized, vol_scaled, dollar_neutral,
+)
+from standard_quant_tools.backtest.pairs import run_pair_backtest as _pair_backtest_run
 from standard_quant_tools.backtest.walk_forward import (
     stitch_oos_returns, compute_stitched_metrics,
     longest_losing_streak, parameter_turnover,
@@ -69,11 +73,12 @@ from standard_quant_tools.agent.models import (
     AdvancedIndicatorsInput, AdvancedIndicatorsResult,
     RollingBetaInput, RollingBetaResult,
     ExtendedRiskInput, ExtendedRiskResult,
-    CustomSignalBacktestInput,
+    CustomSignalBacktestInput, SignalType,
     SignalPanelBacktestInput, SignalPanelBacktestResult,
     BacktestDiagnosticsInput, DrawdownEpisode, TradeDiagnostics,
     ExposureDiagnostics, BacktestDiagnosticsResult,
     PortfolioSimulationInput, RebalanceEvent, PortfolioSimulationResult,
+    PairTradeBacktestInput, PairTradeBacktestResult,
 )
 
 
@@ -929,6 +934,7 @@ def run_regime_adaptive_walkforward_backtest(
             initial_capital=input_data.initial_capital,
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
+            fill_price=input_data.fill_price,
         )
         oos_return_series.append(oos["equity_curve"].pct_change().fillna(0.0))
 
@@ -1151,6 +1157,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             initial_capital=input_data.initial_capital,
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
+            fill_price=input_data.fill_price,
         )
         # Recovered from the equity curve (always present in run_strategy's
         # result) — same pattern used in backtest/panel.py — so each window's
@@ -1798,6 +1805,11 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
     streams afterward. Reuses backtest/portfolio_engine.py for the
     simulation and the existing metrics functions for the summary; no new
     metric math.
+
+    When signal_type='score', target_weights holds arbitrary per-ticker
+    alpha scores instead of weights — converted via construction_method
+    (backtest/sizing.py: rank_weighted, equal_weight_top_bottom,
+    zscore_normalized, vol_scaled) before simulation.
     """
     logger.debug("[portfolio_simulation] tickers=%d  %s → %s  max_gross_leverage=%.2f",
                  len(input_data.tickers), input_data.start_date, input_data.end_date,
@@ -1808,10 +1820,41 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
         for t in input_data.tickers
     }
 
-    target_weights = pd.DataFrame({
+    values_panel = pd.DataFrame({
         t: pd.Series({pd.Timestamp(d): v for d, v in input_data.target_weights[t].items()})
         for t in input_data.tickers
     }).sort_index()
+
+    if input_data.signal_type == SignalType.SCORE:
+        method = input_data.construction_method
+        if method == "rank_weighted":
+            target_weights = rank_weighted(values_panel, gross_leverage=input_data.gross_leverage)
+        elif method == "equal_weight_top_bottom":
+            # n_long/n_short non-None is enforced by PortfolioSimulationInput's
+            # model validator when construction_method == "equal_weight_top_bottom".
+            assert input_data.n_long is not None and input_data.n_short is not None
+            target_weights = equal_weight_top_bottom(
+                values_panel, n_long=input_data.n_long, n_short=input_data.n_short,
+                gross_leverage=input_data.gross_leverage,
+            )
+        elif method == "zscore_normalized":
+            target_weights = zscore_normalized(values_panel, gross_leverage=input_data.gross_leverage)
+        else:  # vol_scaled — validated to be one of _CONSTRUCTION_METHODS by the input model
+            returns_df = pd.DataFrame({
+                t: price_data[t]["Close"].pct_change() for t in input_data.tickers
+            })
+            target_weights = vol_scaled(
+                values_panel, returns_df, lookback=input_data.vol_lookback,
+                gross_leverage=input_data.gross_leverage,
+            )
+        if input_data.make_dollar_neutral:
+            target_weights = dollar_neutral(target_weights)
+        logger.debug(
+            "[portfolio_simulation] converted SCORE signals via construction_method=%s  gross_leverage=%.2f",
+            method, input_data.gross_leverage,
+        )
+    else:
+        target_weights = values_panel
 
     raw = _portfolio_engine_run(
         price_data, target_weights,
@@ -1820,6 +1863,7 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
         slippage_pct=input_data.slippage_pct,
         max_gross_leverage=input_data.max_gross_leverage,
         max_position_pct=input_data.max_position_pct,
+        fill_price=input_data.fill_price,
     )
 
     equity_curve = raw["equity_curve"]
@@ -1843,9 +1887,7 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
         for r in raw["rebalance_log"].to_dict(orient="records")
     ]
 
-    gross_curve = raw["gross_exposure_curve"]
-    equity_safe = equity_curve.where(equity_curve.abs() > 1e-9, other=1e-9)
-    leverage_series = gross_curve / equity_safe
+    leverage_series = raw["leverage_curve"]
     avg_gross_leverage = round(float(leverage_series.mean()), 4) if not leverage_series.empty else 0.0
     max_gross_leverage_used = round(float(leverage_series.max()), 4) if not leverage_series.empty else 0.0
 
@@ -1872,6 +1914,74 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
         final_cash=round(float(raw["final_cash"]), 2),
         avg_gross_leverage=avg_gross_leverage,
         max_gross_leverage_used=max_gross_leverage_used,
+        equity_curve=equity_curve.tolist(),
+        warnings=list(raw["warnings"]),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Pair Trade Backtest (synchronized two-leg execution)
+# ──────────────────────────────────────────────────────────────────
+
+def run_pair_trade_backtest(input_data: PairTradeBacktestInput) -> PairTradeBacktestResult:
+    """
+    Backtest a cointegrated pair as one synchronized two-leg trade — unlike
+    scan_pairs, which only screens for cointegration candidates and reports
+    a current z-score signal. Reuses backtest/pairs.py, which itself reuses
+    run_portfolio_simulation: both legs are columns of the same
+    target_weights row, so they enter/exit together by construction and
+    share one cash account.
+    """
+    logger.debug("[pair_trade_backtest] %s/%s  hedge_ratio=%.4f  entry_z=%.2f  exit_z=%.2f",
+                 input_data.symbol_a, input_data.symbol_b, input_data.hedge_ratio,
+                 input_data.entry_z, input_data.exit_z)
+    provider = DataFactory.get_provider()
+    price_data = {
+        input_data.symbol_a: provider.get_ohlcv(input_data.symbol_a, input_data.start_date, input_data.end_date),
+        input_data.symbol_b: provider.get_ohlcv(input_data.symbol_b, input_data.start_date, input_data.end_date),
+    }
+
+    raw = _pair_backtest_run(
+        price_data, symbol_a=input_data.symbol_a, symbol_b=input_data.symbol_b,
+        hedge_ratio=input_data.hedge_ratio, entry_z=input_data.entry_z, exit_z=input_data.exit_z,
+        zscore_window=input_data.zscore_window, initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct, slippage_pct=input_data.slippage_pct,
+        gross_leverage=input_data.gross_leverage, fill_price=input_data.fill_price,
+    )
+
+    equity_curve = raw["equity_curve"]
+    returns = equity_curve.pct_change().fillna(0.0)
+    rebalance_events = [
+        RebalanceEvent(
+            date=str(r["date"]), turnover_pct=float(r["turnover_pct"]),
+            gross_leverage_after=float(r["gross_leverage_after"]), n_positions=int(r["n_positions"]),
+        )
+        for r in raw["rebalance_log"].to_dict(orient="records")
+    ]
+
+    logger.debug(
+        "[pair_trade_backtest] rebalances=%d  round_trips=%d  final_equity=%.2f  sharpe=%.3f",
+        len(rebalance_events), raw["n_round_trips"], raw["final_equity"], float(sharpe_ratio(returns)),
+    )
+
+    return PairTradeBacktestResult(
+        symbol_a=input_data.symbol_a,
+        symbol_b=input_data.symbol_b,
+        hedge_ratio=raw["hedge_ratio"],
+        n_rebalances=len(rebalance_events),
+        n_round_trips=raw["n_round_trips"],
+        rebalance_log=rebalance_events,
+        entry_spread=raw["entry_spread"],
+        current_spread=round(float(raw["current_spread"]), 6),
+        total_return=round(float(cumulative_return(equity_curve)), 6),
+        annualized_return=round(float(cagr(equity_curve)), 6),
+        annualized_volatility=round(float(annualized_volatility(returns)), 6),
+        sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
+        sortino_ratio=round(float(sortino_ratio(returns)), 4),
+        max_drawdown=round(float(max_drawdown(equity_curve)), 6),
+        calmar_ratio=round(float(calmar_ratio(equity_curve)), 4),
+        final_equity=round(float(raw["final_equity"]), 2),
+        final_cash=round(float(raw["final_cash"]), 2),
         equity_curve=equity_curve.tolist(),
         warnings=list(raw["warnings"]),
     )
@@ -2004,6 +2114,7 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("run_signal_panel_backtest", "Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.", SignalPanelBacktestInput),
         ("get_backtest_diagnostics", "Extended diagnostics for a built-in strategy: top drawdown episodes, trade expectancy/payoff/streaks with MAE/MFE, and exposure stats.", BacktestDiagnosticsInput),
         ("run_portfolio_simulation", "True shared-cash portfolio simulation with rebalancing at target-weight dates — unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.", PortfolioSimulationInput),
+        ("run_pair_trade_backtest", "Backtest a cointegrated pair as one synchronized two-leg trade — both legs enter/exit together and share one cash account, unlike scan_pairs which only screens candidates.", PairTradeBacktestInput),
     ]
 
     return [
@@ -2053,6 +2164,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_signal_panel_backtest":      (run_signal_panel_backtest,      SignalPanelBacktestInput),
     "get_backtest_diagnostics":       (get_backtest_diagnostics,       BacktestDiagnosticsInput),
     "run_portfolio_simulation":       (run_portfolio_simulation,       PortfolioSimulationInput),
+    "run_pair_trade_backtest":        (run_pair_trade_backtest,        PairTradeBacktestInput),
 }
 
 

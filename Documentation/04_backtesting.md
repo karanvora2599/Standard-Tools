@@ -97,13 +97,16 @@ This is optimistic in one sense: it assumes you can transact right at the
 closing price the instant you observe it.
 
 `fill_price="next_open"` is more conservative: entries and exits are priced
-off the bar's own `Open` instead. This decomposes each bar into two legs:
+off the bar's own `Open` instead. `fill_price="midpoint"` uses that bar's
+`(High + Low) / 2` instead — a bid/ask-free proxy for a midquote fill, for
+data sources that don't carry a real bid/ask. Both decompose each bar into
+two legs:
 
-- **Overnight leg** (prior close → this bar's open), priced at *yesterday's*
-  position — an exit still bears the gap risk of the position it was held
-  through overnight, before selling at today's open.
-- **Intraday leg** (this bar's open → close), priced at *today's* position —
-  a same-day entry only earns its own open-to-close move.
+- **Overnight leg** (prior close → this bar's reference price), priced at
+  *yesterday's* position — an exit still bears the gap risk of the position
+  it was held through overnight, before selling at today's reference price.
+- **Intraday leg** (this bar's reference price → close), priced at *today's*
+  position — a same-day entry only earns its own reference-to-close move.
 
 A held (unchanged) position sums these two legs rather than compounding them
 — a second-order, daily-bar-negligible difference from pure close-to-close
@@ -113,26 +116,29 @@ compounding by ~0.0025%).
 ```python
 result_close     = run_strategy(df, signals, fill_price="close")       # default
 result_next_open = run_strategy(df, signals, fill_price="next_open")   # more conservative
+result_midpoint  = run_strategy(df, signals, fill_price="midpoint")    # bid/ask-free midquote proxy
 ```
 
 `backtest_grid` accepts the same `fill_price` argument and forces the
 Python execution path when it isn't `"close"` — the compiled C++ kernel
-only knows `Close` prices, so `next_open` always runs in Python regardless
-of whether `_sqt_core` is built.
+only knows `Close` prices, so `next_open`/`midpoint` always run in Python
+regardless of whether `_sqt_core` is built.
 
 **Known limitation:** the trade log's `entry_price`/`exit_price` always
-report the bar's `Close`, in both modes — only the aggregate P&L (equity
-curve, Sharpe, total return, everything else) reflects `next_open` fills
-correctly. Treat the trade log's prices as a reference marker, not the
-literal assumed fill price, when using `fill_price="next_open"`.
+report the bar's `Close`, in every mode — only the aggregate P&L (equity
+curve, Sharpe, total return, everything else) reflects `next_open`/
+`midpoint` fills correctly. Treat the trade log's prices as a reference
+marker, not the literal assumed fill price, when using either mode.
 
 On the agent-tool side, `fill_price` is exposed on `BacktestInput`,
 `BuyAndHoldInput`, `CompareStrategiesInput`, `CustomSignalBacktestInput`,
-`SignalPanelBacktestInput`, `BacktestOptInput`, and `BacktestDiagnosticsInput`
-— i.e. every tool that calls `run_strategy`/`backtest_grid` directly once.
-`run_walk_forward_backtest`, `run_regime_adaptive_backtest`, and
-`run_regime_adaptive_walkforward_backtest` call it from inside another loop
-and currently always use `"close"`.
+`SignalPanelBacktestInput`, `BacktestOptInput`, `BacktestDiagnosticsInput`,
+`WalkForwardInput`, `RegimeAdaptiveWalkForwardInput`, and
+`PortfolioSimulationInput` — every tool whose out-of-sample/simulated leg
+ultimately calls `run_strategy` or `run_portfolio_simulation`. The one
+holdout is `run_regime_adaptive_backtest` (the older, in-sample exploratory
+tool, kept deliberately simple — see its own docstring), which still always
+uses `"close"`.
 
 ---
 
@@ -455,10 +461,12 @@ blend can't represent that, because it never tracks share counts or cash at
 all.
 
 **Output:** `equity_curve`, `cash_curve`, `gross_exposure_curve`,
-`net_exposure_curve` (all `pd.Series`), `rebalance_log` (`pd.DataFrame`:
-`date`, `turnover_pct`, `gross_leverage_after`, `n_positions`),
-`final_equity`, `final_cash`, `warnings` (e.g. flags if cash ever went
-negative — implied margin borrowing).
+`net_exposure_curve`, `leverage_curve` (all `pd.Series` — `leverage_curve`
+is `gross_exposure_curve / equity_curve`, the continuous version of
+`rebalance_log`'s point-in-time `gross_leverage_after`), `rebalance_log`
+(`pd.DataFrame`: `date`, `turnover_pct`, `gross_leverage_after`,
+`n_positions`), `final_equity`, `final_cash`, `warnings` (e.g. flags if cash
+ever went negative — implied margin borrowing).
 
 **Validation (raises `ValidationError` — same self-correcting-error pattern
 as everywhere else in this library):** every ticker must be present at every
@@ -469,17 +477,107 @@ invested, no leverage); no single `|weight|` can exceed `max_position_pct`
 price data for (the master trading calendar is the **intersection** of every
 ticker's own index).
 
-**Scope, stated explicitly:** fills happen at that bar's `Close` only (no
-`fill_price="next_open"` yet — see [Execution Timing](#execution-timing-fill_price)
-above); costs are the same flat `commission_pct`/`slippage_pct` every other
-tool uses (no per-share/ADV/impact model yet); short-sale proceeds are
-credited to cash in full with no margin/haircut modeling. All three are
-natural follow-on work, not required for the shared-cash architecture itself
-to be correct.
+**Execution timing (`fill_price`):** like `run_strategy`, accepts `"close"`
+(default — a rebalance dated D executes at D's own Close), `"next_open"`
+(the rebalance instead executes at the *following* bar's Open — one-bar
+delay; raises `ValidationError` if the last rebalance date has no following
+bar to fill against), or `"midpoint"` (same bar as `"close"`, but at that
+bar's `(High + Low) / 2` instead — a bid/ask-free proxy for a midquote
+fill). Equity is always marked to Close regardless of `fill_price` — only
+the rebalance trade's own execution price changes.
+
+```python
+result = run_portfolio_simulation(
+    price_data, target_weights, fill_price="next_open",
+)
+```
+
+**Scope, stated explicitly:** costs are the same flat
+`commission_pct`/`slippage_pct` every other tool uses (no per-share/ADV/
+impact model yet); short-sale proceeds are credited to cash in full with no
+margin/haircut modeling. Both are natural follow-on work, not required for
+the shared-cash architecture itself to be correct.
+
+**Feeding it SCORE signals:** `target_weights` above assumes you already
+have per-ticker target weights. If you instead have an arbitrary
+cross-sectional alpha score per ticker (a `SignalType.SCORE` panel — see
+[Custom Signal Backtest](#custom-signal-generation)), convert it to weights
+first with `backtest/sizing.py`'s construction functions —
+`rank_weighted`, `equal_weight_top_bottom`, `zscore_normalized`,
+`vol_scaled`, and the post-processing helper `dollar_neutral` — before
+passing the result in as `target_weights`:
+
+```python
+from standard_quant_tools.backtest.sizing import zscore_normalized
+
+target_weights = zscore_normalized(my_alpha_scores, gross_leverage=1.0)
+result = run_portfolio_simulation(price_data, target_weights)
+```
+
+Beta-neutral, sector-neutral, risk-parity, and optimizer-generated weights
+are not implemented — each needs infrastructure this repo doesn't have yet
+(per-ticker beta/sector metadata, a QP solver).
 
 For LLM/JSON tool-calling, see the `run_portfolio_simulation` agent tool in
 [09_advanced_agent_tools.md](09_advanced_agent_tools.md#15-true-portfolio-simulation) —
 same idea, JSON-shaped `{ticker: {date: weight}}` input for function calling.
+
+---
+
+## Pair Trade Backtest (Synchronized Two-Leg Execution)
+
+`scan_pairs` (Feature 2 in the agent tools) screens a ticker universe for
+cointegrated candidates and reports a current z-score signal, but the
+plain per-symbol `run_strategy` can't execute a pair trade as one
+synchronized position — each leg would need its own independent state
+machine, with no guarantee both legs enter/exit together.
+`run_pair_backtest` (`backtest/pairs.py`) closes that gap by treating a
+pair trade as a **2-asset portfolio with a dollar-neutral weight vector**:
+both legs are columns of the same `target_weights` row passed to
+`run_portfolio_simulation`, so they can never fall out of sync — no new
+execution engine, just a different way to build the weight panel.
+
+```python
+from standard_quant_tools.backtest.pairs import run_pair_backtest
+
+price_data = {"KO": provider.get_ohlcv("KO", "2022-01-01", "2024-01-01"),
+              "PEP": provider.get_ohlcv("PEP", "2022-01-01", "2024-01-01")}
+
+result = run_pair_backtest(
+    price_data, symbol_a="KO", symbol_b="PEP",
+    hedge_ratio=0.85,   # typically from run_cointegration_test / cointegration_test
+    entry_z=2.0, exit_z=0.5,
+    initial_capital=100_000.0,
+)
+
+print(f"Round trips  : {result['n_round_trips']}")
+print(f"Final equity : ${result['final_equity']:,.2f}")
+print(result["rebalance_log"])
+```
+
+**Position logic:** long the spread (long `symbol_a`, short `symbol_b`)
+when the z-scored spread (`analysis/cointegration.py`'s `compute_spread` +
+`spread_zscore`, same functions `scan_pairs` already uses) falls to or
+below `-entry_z`; short the spread on the mirror condition; exit to flat
+once the z-score reverts inside `exit_z`. Each leg's weight is sized so the
+dollar ratio matches `hedge_ratio`: `weight_a = gross_leverage / (1 +
+|hedge_ratio|)`, `weight_b = hedge_ratio * weight_a` (sign flips with
+direction) — together they sum to `gross_leverage` at every entry.
+
+**Output:** everything `run_portfolio_simulation` returns (`equity_curve`,
+`cash_curve`, `leverage_curve`, `rebalance_log`, `final_equity`,
+`final_cash`, `warnings`), plus `hedge_ratio`, `entry_spread` (spread value
+at the most recent entry, `None` if the spread never crossed `entry_z`),
+`current_spread`, `n_round_trips` (completed entry → exit cycles), and
+`state` (`pd.Series` — the daily long/short/flat spread position).
+
+**Validation:** raises `ValidationError` if either symbol is missing from
+`price_data`, or if the spread never crosses `entry_z` (nothing to
+backtest) — the same self-correcting-error pattern used everywhere else in
+this library.
+
+For LLM/JSON tool-calling, see the `run_pair_trade_backtest` agent tool in
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md#16-pair-trade-backtest).
 
 ---
 

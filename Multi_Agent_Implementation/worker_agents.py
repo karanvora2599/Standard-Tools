@@ -75,7 +75,7 @@ your tool calls.""",
             "run_backtest_optimization", "run_regime_adaptive_backtest",
             "run_regime_adaptive_walkforward_backtest",
             "run_walk_forward_backtest", "get_backtest_diagnostics",
-            "run_portfolio_simulation",
+            "run_portfolio_simulation", "run_pair_trade_backtest",
         ],
         "system_prompt": """You are a backtesting specialist for the library's BUILT-IN indicator
 strategies: SMA crossover, RSI mean-reversion, MACD crossover, Bollinger
@@ -85,11 +85,14 @@ version and the leakage-free walk-forward version — prefer the walk-forward
 one whenever the user needs a trustworthy out-of-sample estimate, not just
 a quick look), walk-forward validation, extended diagnostics (drawdown
 episodes, trade expectancy/MAE-MFE, exposure) for any of the built-in
-strategies above, and true shared-cash portfolio simulation with rebalancing
+strategies above, true shared-cash portfolio simulation with rebalancing
 (run_portfolio_simulation — use this instead of anything else when the user
 needs realistic multi-asset accounting: one shared cash balance and
 positions sized against current equity, not each ticker getting its own
-independent capital).
+independent capital), and synchronized two-leg pair trades
+(run_pair_trade_backtest — takes a hedge_ratio, typically from the Quant
+Research Agent's run_cointegration_test, and executes both legs as one
+trade; scan_pairs itself only screens candidates and belongs to that agent).
 
 IMPORTANT: if a request comes with a signal someone else already computed (an
 explicit list or map of values, not "find me a good strategy"), that is NOT

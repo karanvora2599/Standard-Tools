@@ -18,6 +18,7 @@ from standard_quant_tools.agent.models import (
     PCAInput,
     BacktestDiagnosticsInput,
     PortfolioSimulationInput,
+    PairTradeBacktestInput,
 )
 from standard_quant_tools.agent.tools import (
     get_agent_tools,
@@ -31,6 +32,7 @@ from standard_quant_tools.agent.tools import (
     compare_strategies,
     get_backtest_diagnostics,
     run_portfolio_simulation,
+    run_pair_trade_backtest,
     dispatch,
 )
 
@@ -75,8 +77,8 @@ def patched_long(long_ohlcv, monkeypatch):
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 class TestToolRegistry:
-    def test_now_has_twenty_nine_tools(self):
-        assert len(get_agent_tools()) == 29
+    def test_now_has_thirty_tools(self):
+        assert len(get_agent_tools()) == 30
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -256,6 +258,27 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         )
         with pytest.raises(ValueError, match="Not enough data"):
             run_regime_adaptive_walkforward_backtest(inp)
+
+    def test_fill_price_threads_into_oos_leg(self, patched_long):
+        """Same fix as WalkForwardInput: fill_price used to be hardcoded to
+        "close" for the OOS leg (04_backtesting.md's own documented gap)."""
+        base_kwargs = dict(
+            symbol="AAPL", start_date=START, end_date=END,
+            train_bars=252, test_bars=63,
+            sma_param_grid=_RAWF_GRID["sma_crossover"],
+            rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+            macd_param_grid=_RAWF_GRID["macd_crossover"],
+            bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+        )
+        default_result = run_regime_adaptive_walkforward_backtest(
+            RegimeAdaptiveWalkForwardInput(**base_kwargs)
+        )
+        next_open_result = run_regime_adaptive_walkforward_backtest(
+            RegimeAdaptiveWalkForwardInput(**base_kwargs, fill_price="next_open")
+        )
+        assert next_open_result.stitched_oos_return != pytest.approx(
+            default_result.stitched_oos_return, abs=1e-9
+        )
 
     def test_no_lookahead_window0_unaffected_by_future_mutation(self, long_ohlcv, monkeypatch):
         """
@@ -605,6 +628,25 @@ class TestWalkForwardBacktest:
         result = run_walk_forward_backtest(inp)
         for window in result.windows:
             assert isinstance(window.in_sample_return, float)
+
+    def test_fill_price_threads_into_oos_leg(self, patched_long):
+        """
+        fill_price used to be silently hardcoded to "close" for every
+        window's OOS evaluation (04_backtesting.md's own documented
+        limitation). Now it threads through — next_open should change the
+        stitched OOS result relative to the default.
+        """
+        kwargs = dict(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=252, test_bars=63,
+        )
+        default_result = run_walk_forward_backtest(WalkForwardInput(**kwargs))
+        next_open_result = run_walk_forward_backtest(WalkForwardInput(**kwargs, fill_price="next_open"))
+        assert next_open_result.stitched_oos_return != pytest.approx(
+            default_result.stitched_oos_return, abs=1e-9
+        )
 
     def test_no_lookahead_window0_params_unaffected_by_future_mutation(self, long_ohlcv, monkeypatch):
         """
@@ -1249,3 +1291,142 @@ class TestPortfolioSimulation:
         assert result["tickers"] == tickers
         assert "rebalance_log" in result
         assert "sharpe_ratio" in result
+
+    def test_next_open_fill_price_accepted(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0, 100])
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            fill_price="next_open",
+        )
+        result = run_portfolio_simulation(inp)
+        assert result.n_rebalances == 2
+
+
+def _score_values(long_ohlcv, tickers, scores_by_ticker, rebalance_indices):
+    dates = [str(long_ohlcv.index[i].date()) for i in rebalance_indices]
+    return {t: {d: scores_by_ticker[t] for d in dates} for t in tickers}
+
+
+class TestPortfolioSimulationScoreSignals:
+    def test_zscore_normalized_gross_leverage_matches(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT", "GOOGL"]
+        scores = _score_values(long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0, "GOOGL": 0.5}, [0])
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=scores,
+            signal_type="score", construction_method="zscore_normalized", gross_leverage=1.0,
+            commission_pct=0.0, slippage_pct=0.0,
+        )
+        result = run_portfolio_simulation(inp)
+        assert result.rebalance_log[0].gross_leverage_after == pytest.approx(1.0, abs=1e-3)
+
+    def test_equal_weight_top_bottom_requires_n_long_n_short(self, long_ohlcv):
+        tickers = ["AAPL", "MSFT", "GOOGL"]
+        scores = _score_values(long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0, "GOOGL": 0.5}, [0])
+        with pytest.raises(pydantic.ValidationError, match="n_long"):
+            PortfolioSimulationInput(
+                tickers=tickers, start_date=START, end_date=END, target_weights=scores,
+                signal_type="score", construction_method="equal_weight_top_bottom",
+            )
+
+    def test_missing_construction_method_raises(self, long_ohlcv):
+        tickers = ["AAPL", "MSFT"]
+        scores = _score_values(long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0}, [0])
+        with pytest.raises(pydantic.ValidationError, match="construction_method"):
+            PortfolioSimulationInput(
+                tickers=tickers, start_date=START, end_date=END, target_weights=scores,
+                signal_type="score",
+            )
+
+    def test_dollar_neutral_flag_runs_end_to_end(self, patched_long, long_ohlcv):
+        # rank_weighted's weight-invariant unit tests live in test_sizing.py;
+        # this only checks the make_dollar_neutral wiring runs end-to-end
+        # through the agent tool without erroring.
+        tickers = ["AAPL", "MSFT", "GOOGL", "AMZN"]
+        scores = _score_values(
+            long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": 1.0, "GOOGL": 0.5, "AMZN": -1.5}, [0],
+        )
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=scores,
+            signal_type="score", construction_method="rank_weighted",
+            make_dollar_neutral=True,
+        )
+        result = run_portfolio_simulation(inp)
+        assert result.rebalance_log[0].gross_leverage_after > 0
+        assert result.rebalance_log[0].n_positions == 4
+
+
+# ── Pair Trade Backtest (synchronized two-leg execution) ─────────────────────
+
+def _diverging_pair_ohlcv():
+    """symbol_a dips then spikes relative to a flat symbol_b — same
+    scenario shape as test_pair_backtest.py's unit-level fixture, sized to
+    cross entry_z=1.0/exit_z=0.3 with hedge_ratio=1.0."""
+    dates = pd.date_range(START, periods=20, freq="B")
+    close_a = [100.0] * 5 + [60.0] * 5 + [100.0] * 5 + [140.0] * 5
+    close_b = [100.0] * 20
+
+    def _df(close):
+        return pd.DataFrame(
+            {"Open": close, "High": close, "Low": close, "Close": close,
+             "Volume": [1_000_000.0] * len(close)},
+            index=dates,
+        )
+
+    return {"A": _df(close_a), "B": _df(close_b)}
+
+
+@pytest.fixture
+def patched_pair(monkeypatch):
+    from unittest.mock import MagicMock
+    from standard_quant_tools.data.factory import DataFactory
+
+    price_data = _diverging_pair_ohlcv()
+    provider = MagicMock()
+    provider.get_ohlcv.side_effect = lambda symbol, *a, **kw: price_data[symbol]
+    monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+    return provider
+
+
+class TestPairTradeBacktest:
+    def test_returns_result(self, patched_pair):
+        inp = PairTradeBacktestInput(
+            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
+            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3,
+            commission_pct=0.0, slippage_pct=0.0,
+        )
+        result = run_pair_trade_backtest(inp)
+        assert result.symbol_a == "A"
+        assert result.symbol_b == "B"
+        assert result.n_rebalances == 3
+        assert result.n_round_trips == 1
+
+    def test_summary_fields_typed(self, patched_pair):
+        inp = PairTradeBacktestInput(
+            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
+            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3,
+        )
+        result = run_pair_trade_backtest(inp)
+        for field in ("total_return", "annualized_return", "annualized_volatility",
+                      "sharpe_ratio", "sortino_ratio", "max_drawdown", "calmar_ratio"):
+            assert isinstance(getattr(result, field), float)
+        assert result.current_spread == pytest.approx(40.0)
+        assert result.entry_spread == pytest.approx(40.0)
+
+    def test_no_entry_crossing_raises(self, patched_pair):
+        from standard_quant_tools.error import ValidationError
+
+        inp = PairTradeBacktestInput(
+            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
+            hedge_ratio=1.0, entry_z=100.0,
+        )
+        with pytest.raises(ValidationError, match="never crossed"):
+            run_pair_trade_backtest(inp)
+
+    def test_dispatched_through_dispatch(self, patched_pair):
+        result = dispatch("run_pair_trade_backtest", {
+            "symbol_a": "A", "symbol_b": "B", "start_date": START, "end_date": END,
+            "hedge_ratio": 1.0, "entry_z": 1.0, "exit_z": 0.3,
+        })
+        assert result["symbol_a"] == "A"
+        assert result["n_round_trips"] == 1

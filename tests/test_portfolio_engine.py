@@ -111,7 +111,93 @@ class TestShortPosition:
         assert result["equity_curve"].iloc[1] == pytest.approx(9_900.0)
 
 
+class TestLeverageCurve:
+    def test_leverage_curve_matches_gross_over_equity(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame(
+            {"AAPL": [0.5, 0.2], "MSFT": [0.3, 0.6]}, index=[dates[0], dates[3]],
+        )
+        result = run_portfolio_simulation(price_data, target_weights, commission_pct=0.0, slippage_pct=0.0)
+        expected = result["gross_exposure_curve"] / result["equity_curve"]
+        for actual, exp in zip(result["leverage_curve"].tolist(), expected.tolist()):
+            assert actual == pytest.approx(exp, abs=1e-9)
+
+
+class TestNextOpenFill:
+    def test_rebalance_executes_at_following_bars_open(self):
+        dates = pd.date_range("2023-01-02", periods=3, freq="B")
+        prices = pd.DataFrame(
+            {"Open": [100.0, 103.0, 106.0], "High": [101.0, 104.0, 107.0],
+             "Low": [99.0, 102.0, 105.0], "Close": [100.0, 103.0, 106.0],
+             "Volume": [1_000_000.0] * 3},
+            index=dates,
+        )
+        price_data = {"AAPL": prices}
+        target_weights = pd.DataFrame({"AAPL": [1.0]}, index=[dates[0]])
+
+        result = run_portfolio_simulation(
+            price_data, target_weights,
+            initial_capital=10_000.0, commission_pct=0.0, slippage_pct=0.0,
+            fill_price="next_open",
+        )
+        # Fill happens at dates[1]'s Open (103.0), not dates[0]'s Close (100.0):
+        # shares bought = 10000 / 103.0.
+        expected_shares = 10_000.0 / 103.0
+        # Equity at dates[0] is still all-cash (rebalance hasn't executed yet).
+        assert result["equity_curve"].iloc[0] == pytest.approx(10_000.0)
+        # Equity at dates[2] = expected_shares * Close[2] (106.0).
+        assert result["equity_curve"].iloc[2] == pytest.approx(expected_shares * 106.0)
+
+    def test_last_bar_rebalance_without_following_bar_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[-1]])
+        with pytest.raises(ValidationError, match="next_open"):
+            run_portfolio_simulation(price_data, target_weights, fill_price="next_open")
+
+    def test_missing_open_column_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        no_open = {t: df.drop(columns=["Open"]) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="Open"):
+            run_portfolio_simulation(no_open, target_weights, fill_price="next_open")
+
+
+class TestMidpointFill:
+    def test_rebalance_executes_at_same_bar_midpoint(self):
+        dates = pd.date_range("2023-01-02", periods=2, freq="B")
+        prices = pd.DataFrame(
+            {"Open": [100.0, 105.0], "High": [104.0, 106.0], "Low": [96.0, 104.0],
+             "Close": [100.0, 105.0], "Volume": [1_000_000.0] * 2},
+            index=dates,
+        )
+        price_data = {"AAPL": prices}
+        target_weights = pd.DataFrame({"AAPL": [1.0]}, index=[dates[0]])
+
+        result = run_portfolio_simulation(
+            price_data, target_weights,
+            initial_capital=10_000.0, commission_pct=0.0, slippage_pct=0.0,
+            fill_price="midpoint",
+        )
+        # Midpoint of bar 0 = (104 + 96) / 2 = 100.0 -> shares = 100.
+        # Equity still marked to Close at bar 0 (100.0 == midpoint here, so
+        # equity is unaffected either way); bar 1 equity = 100 shares * 105.
+        assert result["equity_curve"].iloc[1] == pytest.approx(100.0 * 105.0)
+
+    def test_missing_high_low_columns_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        no_hl = {t: df.drop(columns=["High", "Low"]) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="High"):
+            run_portfolio_simulation(no_hl, target_weights, fill_price="midpoint")
+
+
 class TestValidation:
+    def test_invalid_fill_price_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="fill_price"):
+            run_portfolio_simulation(price_data, target_weights, fill_price="bogus")
+
     def test_missing_ticker_in_price_data_raises(self, two_ticker_price_data):
         price_data, dates = two_ticker_price_data
         target_weights = pd.DataFrame({"AAPL": [0.5], "GOOGL": [0.3]}, index=[dates[0]])

@@ -421,6 +421,10 @@ class WalkForwardInput(BaseModel):
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
     sort_by: str = Field("sharpe_ratio", description="Metric to optimise in-sample (default: 'sharpe_ratio').")
+    fill_price: str = Field(
+        "close",
+        description="'close' (default), 'next_open', or 'midpoint' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
+    )
 
 
 class WalkForwardWindow(BaseModel):
@@ -491,6 +495,10 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
         None, description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
     )
     sort_by: str = Field("sharpe_ratio", description="Metric to optimise in-sample, across all four strategies (default: 'sharpe_ratio').")
+    fill_price: str = Field(
+        "close",
+        description="'close' (default), 'next_open', or 'midpoint' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
+    )
 
 
 class RegimeAdaptiveWalkForwardWindow(BaseModel):
@@ -1015,6 +1023,11 @@ class SignalPanelBacktestResult(BaseModel):
 # own independent capital and only blends return streams afterward)
 # ──────────────────────────────────────────────
 
+_CONSTRUCTION_METHODS = (
+    "rank_weighted", "equal_weight_top_bottom", "zscore_normalized", "vol_scaled",
+)
+
+
 class PortfolioSimulationInput(BaseModel):
     tickers: List[str] = Field(..., description="Ticker universe. Must match target_weights' outer keys.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1022,12 +1035,50 @@ class PortfolioSimulationInput(BaseModel):
     target_weights: Dict[str, Dict[str, float]] = Field(
         ...,
         description=(
-            "Per-ticker target-weight map: {ticker: {date: weight}}, weight = "
-            "fraction of account equity (negative for short). Every ticker must "
-            "share the identical set of rebalance dates — that shared date set "
-            "is the rebalance calendar. Between rebalance dates, share counts "
+            "Per-ticker map: {ticker: {date: value}}. When signal_type='target_weight' "
+            "(default), value = fraction of account equity (negative for short), and "
+            "every ticker must share the identical set of rebalance dates — that shared "
+            "date set is the rebalance calendar; between rebalance dates, share counts "
             "stay fixed and weights drift with the market, unlike "
-            "run_signal_panel_backtest's fixed per-bar blend."
+            "run_signal_panel_backtest's fixed per-bar blend. When signal_type='score', "
+            "value is an arbitrary per-ticker alpha score (unrestricted), converted into "
+            "target weights via construction_method before simulation — every date "
+            "present becomes a rebalance date."
+        ),
+    )
+    signal_type: SignalType = Field(
+        SignalType.TARGET_WEIGHT,
+        description=(
+            "'target_weight' (default — today's exact behavior: target_weights values "
+            "are already portfolio weights) | 'score' (target_weights values are "
+            "arbitrary per-ticker alpha scores, converted into weights via "
+            "construction_method — see backtest/sizing.py — before simulation)."
+        ),
+    )
+    construction_method: Optional[str] = Field(
+        None,
+        description=(
+            f"Required when signal_type='score'. One of {_CONSTRUCTION_METHODS} "
+            "(backtest/sizing.py). Ignored when signal_type='target_weight'."
+        ),
+    )
+    gross_leverage: float = Field(
+        1.0, description="Target sum(|weight|) per date when signal_type='score' (ignored otherwise)."
+    )
+    n_long: Optional[int] = Field(
+        None, description="Required when construction_method='equal_weight_top_bottom'."
+    )
+    n_short: Optional[int] = Field(
+        None, description="Required when construction_method='equal_weight_top_bottom'."
+    )
+    vol_lookback: int = Field(
+        20, description="Rolling window (bars) used when construction_method='vol_scaled'."
+    )
+    make_dollar_neutral: bool = Field(
+        False,
+        description=(
+            "If True, post-process constructed weights so sum(weight)==0 per date "
+            "(backtest/sizing.py's dollar_neutral). Only applies when signal_type='score'."
         ),
     )
     initial_capital: float = Field(10_000.0, description="Starting cash for the whole account.")
@@ -1038,6 +1089,10 @@ class PortfolioSimulationInput(BaseModel):
     )
     max_position_pct: float = Field(
         1.0, description="Reject any single position whose |weight| exceeds this."
+    )
+    fill_price: str = Field(
+        "close",
+        description="'close' (default), 'next_open', or 'midpoint' — see run_strategy's fill_price / the True Portfolio Simulation docs.",
     )
     benchmark: Optional[str] = Field(None, description="Optional benchmark ticker — adds information_ratio.")
 
@@ -1053,6 +1108,23 @@ class PortfolioSimulationInput(BaseModel):
                 "every ticker in target_weights must share the identical set of "
                 f"rebalance dates (the rebalance calendar); got mismatched sets: {date_sets}"
             )
+
+        if self.signal_type == SignalType.SCORE:
+            if self.construction_method not in _CONSTRUCTION_METHODS:
+                raise ValueError(
+                    f"signal_type='score' requires construction_method to be one of "
+                    f"{_CONSTRUCTION_METHODS}, got {self.construction_method!r}"
+                )
+            if self.construction_method == "equal_weight_top_bottom" and (
+                self.n_long is None or self.n_short is None
+            ):
+                raise ValueError(
+                    "construction_method='equal_weight_top_bottom' requires both "
+                    "n_long and n_short"
+                )
+            return self
+
+        # signal_type == TARGET_WEIGHT (default): today's exact validation.
         for date in next(iter(calendars), frozenset()):
             row = {t: self.target_weights[t][date] for t in self.tickers}
             _validate_signal_values(row, SignalType.TARGET_WEIGHT, self.max_position_pct)
@@ -1090,6 +1162,59 @@ class PortfolioSimulationResult(BaseModel):
     final_cash: float
     avg_gross_leverage: float
     max_gross_leverage_used: float
+    equity_curve: List[float]
+    warnings: List[str] = []
+
+
+# ──────────────────────────────────────────────
+# Pair Trade Backtest (synchronized two-leg execution — reuses
+# run_portfolio_simulation so both legs enter/exit on the same rebalance
+# event, unlike scan_pairs which only screens for candidates)
+# ──────────────────────────────────────────────
+
+class PairTradeBacktestInput(BaseModel):
+    symbol_a: str = Field(..., description="First leg ticker.")
+    symbol_b: str = Field(..., description="Second leg ticker.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    hedge_ratio: float = Field(
+        ..., description="spread = Close_a - hedge_ratio * Close_b — typically the hedge_ratio from run_cointegration_test.",
+    )
+    entry_z: float = Field(2.0, description="Enter the spread when |z-score| >= entry_z.")
+    exit_z: float = Field(0.5, description="Exit to flat once |z-score| <= exit_z.")
+    zscore_window: Optional[int] = Field(
+        None, description="Rolling window for the spread z-score. None = full-sample static z-score.",
+    )
+    initial_capital: float = Field(10_000.0, description="Starting cash for the whole account.")
+    commission_pct: float = Field(0.001, description="Commission per trade notional (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade notional (fraction).")
+    gross_leverage: float = Field(
+        1.0, description="sum(|weight|) while in a position, split between the two legs to match hedge_ratio.",
+    )
+    fill_price: str = Field(
+        "close",
+        description="'close' (default), 'next_open', or 'midpoint' — see run_strategy's fill_price.",
+    )
+
+
+class PairTradeBacktestResult(BaseModel):
+    symbol_a: str
+    symbol_b: str
+    hedge_ratio: float
+    n_rebalances: int
+    n_round_trips: int
+    rebalance_log: List[RebalanceEvent]
+    entry_spread: Optional[float] = None
+    current_spread: float
+    total_return: float
+    annualized_return: float
+    annualized_volatility: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    max_drawdown: float
+    calmar_ratio: float
+    final_equity: float
+    final_cash: float
     equity_curve: List[float]
     warnings: List[str] = []
 

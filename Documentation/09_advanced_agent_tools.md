@@ -1828,11 +1828,31 @@ if result.warnings:
     print("Warnings:", result.warnings)
 ```
 
-**`target_weights` shape:** `{ticker: {date: weight}}`, same convention as
-`run_signal_panel_backtest`'s `signal_panel` — but here every ticker must
-share the **identical set of dates** (that shared set is the rebalance
-calendar), and a value is a target *fraction of account equity*
-(negative for short), not a `{-1, 0, 1}` direction.
+**`target_weights` shape:** `{ticker: {date: value}}`, same convention as
+`run_signal_panel_backtest`'s `signal_panel` — every ticker must share the
+**identical set of dates**. With the default `signal_type="target_weight"`,
+a value is a target *fraction of account equity* (negative for short), not a
+`{-1, 0, 1}` direction, and that shared date set is the rebalance calendar.
+With `signal_type="score"`, values are instead arbitrary per-ticker alpha
+scores, converted into weights via `construction_method` — one of
+`rank_weighted`, `equal_weight_top_bottom`, `zscore_normalized`,
+`vol_scaled` (`backtest/sizing.py`), optionally followed by
+`make_dollar_neutral=True` — before simulation; every date present becomes
+a rebalance date:
+
+```python
+result = run_portfolio_simulation(PortfolioSimulationInput(
+    tickers=["AAPL", "MSFT", "GOOGL"],
+    start_date="2022-01-01", end_date="2024-01-01",
+    target_weights={  # arbitrary alpha scores, not weights
+        "AAPL": {"2022-01-03": 2.1}, "MSFT": {"2022-01-03": -0.8}, "GOOGL": {"2022-01-03": 0.5},
+    },
+    signal_type="score", construction_method="zscore_normalized", gross_leverage=1.0,
+))
+```
+
+Beta-neutral, sector-neutral, risk-parity, and optimizer-generated weights
+are not implemented — each needs infrastructure this repo doesn't have yet.
 
 **Output reference:**
 
@@ -1854,9 +1874,70 @@ may exceed `max_position_pct` (default `1.0` — reuses the same
 `SignalType.TARGET_WEIGHT` bound check `CustomSignalBacktestInput` already
 uses, since a per-position weight bound is exactly that check).
 
+**`fill_price`:** `"close"` (default), `"next_open"`, or `"midpoint"` — same
+convention as every other backtest tool (see
+[04_backtesting.md](04_backtesting.md#execution-timing-fill_price)).
+
 **Scope, stated explicitly (see [04_backtesting.md](04_backtesting.md#true-portfolio-simulation-shared-cash) for the full list):**
-fills at `Close` only (no `fill_price="next_open"` yet), flat
-`commission_pct`/`slippage_pct` costs (no pluggable cost model yet), and
-short-sale proceeds credited to cash in full with no margin/haircut
-modeling. None of these are required for the shared-cash accounting itself
-to be correct — they're natural follow-on work.
+flat `commission_pct`/`slippage_pct` costs (no pluggable per-share/ADV
+impact cost model yet), and short-sale proceeds credited to cash in full
+with no margin/haircut modeling. Neither is required for the shared-cash
+accounting itself to be correct — they're natural follow-on work.
+
+---
+
+## 16. Pair Trade Backtest
+
+`run_pair_trade_backtest` backtests a cointegrated pair as one synchronized
+two-leg trade — unlike `scan_pairs` (§2, in the base agent tools), which
+only screens a universe for cointegration candidates and reports a current
+z-score. It reuses `run_portfolio_simulation` (§15) internally: both legs
+are columns of one `target_weights` row, so they enter and exit together by
+construction and share a single cash account.
+
+```python
+from standard_quant_tools.agent.tools import run_pair_trade_backtest
+from standard_quant_tools.agent.models import PairTradeBacktestInput
+
+result = run_pair_trade_backtest(PairTradeBacktestInput(
+    symbol_a="KO", symbol_b="PEP",
+    start_date="2022-01-01", end_date="2024-01-01",
+    hedge_ratio=0.85,     # typically from run_cointegration_test's hedge_ratio
+    entry_z=2.0, exit_z=0.5,
+    initial_capital=100_000.0,
+))
+
+print(f"Round trips  : {result.n_round_trips}")
+print(f"Final equity : ${result.final_equity:,.2f}")
+print(f"Sharpe       : {result.sharpe_ratio:.2f}")
+for r in result.rebalance_log:
+    print(f"[{r.date}]  turnover={r.turnover_pct:.1%}  leverage_after={r.gross_leverage_after:.2f}")
+```
+
+**Position logic:** long the spread (long `symbol_a`, short `symbol_b`)
+when the z-scored spread falls to or below `-entry_z`; short the spread on
+the mirror condition; exit to flat once the z-score reverts inside
+`exit_z`. `gross_leverage` (default `1.0`) is split between the two legs so
+the dollar ratio matches `hedge_ratio`.
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `hedge_ratio` | `float` | Echoed back from input |
+| `n_rebalances`, `n_round_trips` | `int` | Total position changes vs. completed entry → exit cycles |
+| `rebalance_log` | `List[RebalanceEvent]` | Same shape as §15 |
+| `entry_spread` | `float?` | Spread value at the most recent entry; `None` if the spread never crossed `entry_z` |
+| `current_spread` | `float` | Last spread value |
+| `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio` | `float` | Computed from the engine's `equity_curve` via existing metrics functions |
+| `final_equity`, `final_cash`, `equity_curve`, `warnings` | — | Same meaning as §15 |
+
+**`fill_price`:** `"close"` (default), `"next_open"`, or `"midpoint"` — same
+convention as every other backtest tool.
+
+**Validation:** raises `ValidationError` if either symbol is missing OHLCV,
+or if the spread never crosses `entry_z` (nothing to backtest).
+
+**Scope, stated explicitly:** two legs only — no N-leg basket trades; the
+same flat cost model and no-margin-modeling caveats as §15 apply, since this
+tool is a thin wrapper around `run_portfolio_simulation`.

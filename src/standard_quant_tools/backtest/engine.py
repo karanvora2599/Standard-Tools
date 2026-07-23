@@ -148,10 +148,13 @@ def run_strategy(
             own open-to-close move, an exit still bears the overnight gap
             it was held through before selling at the open, and a held
             position sums the two legs instead of compounding them (a
-            second-order, daily-bar-negligible approximation). Only
-            entry_price/exit_price in the trade log stay Close-based either
-            way — the aggregate P&L (equity curve, all metrics) is what
-            reflects next_open fills correctly.
+            second-order, daily-bar-negligible approximation). "midpoint" —
+            identical two-leg decomposition, but using that bar's
+            (High + Low) / 2 as the reference fill price instead of Open —
+            a bid/ask-free proxy for a midquote fill (requires 'High' and
+            'Low' columns). Only entry_price/exit_price in the trade log
+            stay Close-based either way — the aggregate P&L (equity curve,
+            all metrics) is what reflects next_open/midpoint fills correctly.
 
     Returns:
         Dict with performance metrics, equity curve, and optionally trade_log.
@@ -210,24 +213,30 @@ def run_strategy(
     pos_diff = executed.diff().fillna(executed.iloc[0])
     transaction_costs = pos_diff.abs() * cost_per_unit
 
-    if fill_price == "next_open":
+    if fill_price in ("next_open", "midpoint"):
         # Two-leg decomposition, correct for entries, continuations, exits,
         # and same-bar flips alike:
-        #   overnight leg (Close[t-1] -> Open[t]) priced at YESTERDAY's
+        #   overnight leg (Close[t-1] -> ref_price[t]) priced at YESTERDAY's
         #     position (executed.shift(1)) — captures the gap a position
         #     still held overnight is exposed to, including on an exit bar
-        #     (sold at today's open, so still exposed to the overnight gap
-        #     but not today's intraday move).
-        #   intraday leg (Open[t] -> Close[t]) priced at TODAY's position
-        #     (executed) — captures a same-day entry's open-to-close move,
-        #     and a held-through day's intraday move.
+        #     (sold at today's reference price, so still exposed to the
+        #     overnight gap but not today's remaining move).
+        #   intraday leg (ref_price[t] -> Close[t]) priced at TODAY's
+        #     position (executed) — captures a same-day entry's move from
+        #     the reference price to the close, and a held-through day's
+        #     remaining move.
         # For an unchanged position this sums two simple returns instead of
         # compounding them (their product is the only difference from pure
         # close-to-close — negligible for daily bars, standard in overnight
-        # vs. intraday P&L attribution).
-        opens = price_data.loc[idx, "Open"]
-        overnight_leg = ((opens - prices.shift(1)) / prices.shift(1)).fillna(0.0)
-        intraday_leg = (prices - opens) / opens
+        # vs. intraday P&L attribution). "next_open" uses that bar's Open as
+        # the reference price; "midpoint" uses (High + Low) / 2 as a
+        # bid/ask-free proxy for a midquote fill.
+        if fill_price == "next_open":
+            ref_prices = price_data.loc[idx, "Open"]
+        else:
+            ref_prices = (price_data.loc[idx, "High"] + price_data.loc[idx, "Low"]) / 2.0
+        overnight_leg = ((ref_prices - prices.shift(1)) / prices.shift(1)).fillna(0.0)
+        intraday_leg = (prices - ref_prices) / ref_prices
         executed_prev = executed.shift(1).fillna(0.0)
         gross_returns = executed_prev * overnight_leg + executed * intraday_leg
         strategy_returns = gross_returns - transaction_costs
@@ -367,9 +376,10 @@ def backtest_grid(
                         C++ extension is not built — arbitrary callables
                         (lambdas, closures) are frequently unpicklable across
                         the ProcessPoolExecutor spawn boundary.
-        fill_price:     "close" (default) or "next_open" — see run_strategy.
-                        Forces the Python path (the C++ batch kernel only
-                        knows Close prices) regardless of n_workers/HAS_CPP.
+        fill_price:     "close" (default), "next_open", or "midpoint" — see
+                        run_strategy. Forces the Python path for the latter
+                        two (the C++ batch kernel only knows Close prices)
+                        regardless of n_workers/HAS_CPP.
 
     Returns:
         pd.DataFrame with one row per parameter combination, sorted by sort_by.
