@@ -282,6 +282,8 @@ print(spread.describe())
 
 `compute_spread` returns a `pd.Series` named `"spread"`, aligned to the common index of the two inputs.
 
+> **Look-ahead bias warning** — leaving `hedge_ratio=None` fits the OLS hedge ratio on the *entire* series passed in, so every historical spread value (including early ones) is computed with a ratio that was estimated using data from the whole sample, future bars included. That's fine for one-off research on a fixed historical window (e.g. "was this pair cointegrated over 2020–2024?"), but it is look-ahead bias if you then use that same spread to generate historical backtest signals. For a walk-forward backtest, re-estimate `hedge_ratio` periodically from a trailing window only (e.g. via `cointegration_test` on data available as of each rebalance date) and pass it explicitly rather than relying on the full-sample default.
+
 ---
 
 ### Half-life of mean reversion
@@ -307,17 +309,19 @@ Returns `float('inf')` when the spread is not mean-reverting (β ≥ 0).
 ```python
 from standard_quant_tools.analysis import spread_zscore
 
-# Static (full-sample) normalisation — best for research/backtesting
-z_static = spread_zscore(spread)
-
-# Rolling normalisation — required for live trading (avoids lookahead)
+# Rolling normalisation — required for both live trading and backtesting
 z_rolling = spread_zscore(spread, window=30)
+
+# Static (full-sample) normalisation — descriptive stats only, never for signals
+z_static = spread_zscore(spread)
 
 # Typical entry/exit thresholds
 entry_long  = z_rolling < -2.0   # buy series_a, sell series_b
 entry_short = z_rolling >  2.0   # sell series_a, buy series_b
 exit_signal = z_rolling.abs() < 0.5
 ```
+
+> **Look-ahead bias warning** — with `window=None` (the default), `spread_zscore` normalises using the full-sample mean and standard deviation at **every** row, including bars that lie in the future relative to that row. This makes the static form unsuitable for generating historical trading signals in a backtest — each timestamp's z-score would be informed by returns that hadn't happened yet at that point in time. Use it only for descriptive statistics on a fixed historical sample (e.g. summarising how far the spread has strayed from its mean over the full period). Always pass an explicit `window` (20–60 bars is typical) when producing signals for backtesting or live trading.
 
 ---
 
@@ -374,6 +378,8 @@ ohlcv_ko = provider.get_ohlcv("KO", start, end)
 bt = run_strategy(ohlcv_ko, signals, initial_capital=10_000, commission_pct=0.001)
 print(f"Sharpe: {bt['sharpe_ratio']:.2f}, Max DD: {bt['max_drawdown']:.1%}")
 ```
+
+> **This workflow is a research illustration, not a leakage-free backtest** — step 2 fits `hedge_ratio` on the entire `2020-01-01`–`2024-01-01` sample and step 3 reuses that same full-sample ratio for every historical spread value, so the Sharpe/Max DD printed above are optimistic relative to a true walk-forward test. For a leakage-free version, re-run `cointegration_test` on a trailing window as of each rebalance date (or reuse the walk-forward helpers elsewhere in this library) instead of fitting once on the whole history.
 
 ---
 

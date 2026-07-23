@@ -56,13 +56,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **29 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **34 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 29
+print(len(tools))  # 34
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -94,6 +94,14 @@ for t in tools:
 # get_extended_risk_metrics — Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.
 # run_custom_signal_backtest — Backtest a signal computed outside this library (your own alpha model) on one symbol.
 # run_signal_panel_backtest — Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.
+# run_regime_adaptive_walkforward_backtest — Leakage-free regime-adaptive backtest: regime/strategy/parameter selection per walk-forward window, evaluated strictly out-of-sample.
+# get_backtest_diagnostics — Extended diagnostics for a built-in strategy: top drawdown episodes, trade expectancy/payoff/streaks with MAE/MFE, and exposure stats.
+# run_portfolio_simulation — True shared-cash portfolio simulation with rebalancing at target-weight dates.
+# run_pair_trade_backtest — Backtest a cointegrated pair as one synchronized two-leg trade sharing a single cash account.
+# get_robustness_diagnostics — Same-sample robustness checks for a grid search: parameter sensitivity, Deflated Sharpe Ratio, block-bootstrap CI.
+# get_capacity_report — How much account size a target-weight portfolio can support before positions outgrow each ticker's own trading volume.
+# get_data_quality_report — Dataset provenance plus missing-bar/stale-price/price-jump detection on a symbol's OHLCV.
+# run_backtest_compact — Compact backtest result: summary/risk/exposure/cost sub-reports plus equity-curve/trade-log artifact URIs.
 
 # Inspect the parameter schema for any tool:
 import json
@@ -113,7 +121,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 29 valid names.
+- **`ValueError`** — unknown tool name; message lists all 34 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -196,7 +204,12 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 29 financial tools:
+You are a quantitative analyst assistant with access to a 34-tool financial
+toolkit. The 26 most commonly used are described below (see
+09_advanced_agent_tools.md for the remaining execution/diagnostic tools —
+run_regime_adaptive_walkforward_backtest, get_backtest_diagnostics,
+run_portfolio_simulation, run_pair_trade_backtest, get_robustness_diagnostics,
+get_capacity_report, get_data_quality_report, run_backtest_compact):
 
 CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
@@ -567,6 +580,7 @@ inp = BacktestInput(
     initial_capital=10_000.0,    # Optional: default $10,000
     commission_pct=0.001,        # Optional: fraction per trade side (default 0.1%)
     slippage_pct=0.0005,         # Optional: fraction per trade side (default 0.05%)
+    fill_price="close",          # Optional: "close" (default) or "next_open" — see below
 )
 
 # All BacktestResult fields:
@@ -1218,7 +1232,9 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 29 tools:
+You are a quantitative investment analyst. You have access to a 34-tool
+financial toolkit; the 27 covered here are the most commonly used (see
+09_advanced_agent_tools.md for the remaining execution/diagnostic tools):
 
 Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
 run_bollinger_backtest, run_buy_and_hold (passive baseline),

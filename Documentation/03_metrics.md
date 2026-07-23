@@ -1,6 +1,6 @@
 # Metrics
 
-All metric functions accept `pd.Series` and return a single `float`. They are decorated with `@validate_series` which raises `ValidationError` on empty input.
+All metric functions accept `pd.Series`. Most return a single `float` — the exception is `drawdown_series`, which returns a full `pd.Series` (one drawdown value per bar). The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `information_ratio`, `treynor_ratio`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility`/`drawdown_series` return `nan`/an empty `Series` rather than raising.
 
 ---
 
@@ -28,15 +28,23 @@ print(f"Annual Vol   : {vol:.1%}")
 ```python
 from standard_quant_tools.metrics import sharpe_ratio, sortino_ratio
 
-# Risk-free rate: 5% annual → 0.05/252 per day
-rf_daily = 0.05 / 252
+# risk_free_rate is the ANNUAL rate — both functions divide it by
+# periods_per_year internally to get the per-period risk-free rate.
+# Do NOT pre-divide it yourself (e.g. don't pass 0.05/252), or the
+# risk-free adjustment gets divided by periods_per_year twice and
+# becomes negligible.
+rf_annual = 0.05
 
-sr  = sharpe_ratio(returns, risk_free_rate=rf_daily)
-srt = sortino_ratio(returns, risk_free_rate=rf_daily)
+sr  = sharpe_ratio(returns, risk_free_rate=rf_annual)
+srt = sortino_ratio(returns, risk_free_rate=rf_annual)
 
 print(f"Sharpe  : {sr:.2f}")   # > 1.0 = good, > 2.0 = excellent
 print(f"Sortino : {srt:.2f}")  # Sortino ≥ Sharpe when returns are right-skewed
 ```
+
+**Formulas:**
+- `sharpe_ratio` = `mean(returns - risk_free_rate/periods_per_year) / std(returns) * sqrt(periods_per_year)`. `std` is computed on the raw `returns` (equivalent to the std of the excess returns, since subtracting a constant doesn't change dispersion).
+- `sortino_ratio` = `(mean(excess_returns) * periods_per_year) / downside_deviation`, where `excess_returns = returns - risk_free_rate/periods_per_year` and `downside_deviation = sqrt(mean(min(excess_returns, 0)**2)) * sqrt(periods_per_year)`. Note the denominator is the RMS of `min(excess_return, 0)` averaged over **all** N periods (zero contribution from winning bars), not just the subset of losing periods — the Sortino & Price (1994) convention. This gives a larger, more conservative denominator than dividing by the count of negative-return bars only, which some other libraries do. Returns `inf` when downside deviation is zero or `nan`.
 
 **Sortino vs Sharpe:** Sortino only penalizes downside deviation, making it more appropriate for strategies with asymmetric returns.
 
@@ -98,6 +106,8 @@ tr  = treynor_ratio(returns, bench)        # excess return / beta
 print(f"Information Ratio : {ir:.2f}")   # > 0.5 = strong active management
 print(f"Treynor Ratio     : {tr:.4f}")
 ```
+
+> **Index alignment in `treynor_ratio`** — `beta` is computed via `calculate_beta` restricted to the dates common to `returns` and `benchmark_returns` (`returns.index.intersection(benchmark_returns.index)`). The numerator, however, is `(returns.mean() - risk_free_rate/periods_per_year) * periods_per_year`, computed on the **full, unaligned** `returns` series — it does not get restricted to the common index first. When `returns` and `benchmark_returns` already share an identical index (the normal case, e.g. both built from `.pct_change().dropna()` over the same date range) this is a non-issue. If they don't, align both series yourself before calling `treynor_ratio`, since the numerator and the beta denominator would otherwise be computed over different date ranges. `information_ratio`, by contrast, restricts both legs to the common index before computing active returns.
 
 ---
 

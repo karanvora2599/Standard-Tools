@@ -206,7 +206,20 @@ output_match : True
 
 `sqt replay` is a thin CLI wrapper around `verify_replay()` above — same
 re-run, data/output match semantics, and notes, just formatted for a
-terminal instead of a `ReplayResult` object. `sqt compare` diffs
+terminal instead of a `ReplayResult` object.
+
+**Exit codes (`sqt replay` only):** `0` — `output_match` is `True` (the
+output reproduced exactly); `1` — `output_match` is `False` (a confirmed
+mismatch — code or data changed the result); `2` — `output_match` is `None`
+(the stored record has no `output_hash` to compare against, so replay
+success is indeterminate, not confirmed). Check the exit code rather than
+scraping stdout when scripting `sqt replay` in CI — a prior version of this
+CLI always exited `0` regardless of match status, so treat any script
+written against that behavior as stale. `sqt report` and `sqt compare` exit
+`0` on success and `1` on a lookup error (unknown `request_id`), same as
+`sqt replay`'s own error path.
+
+`sqt compare` diffs
 `tool_name`, `status`, `output_hash`, `duration_ms`, `git_commit_sha`,
 `package_version`, `strategy_source_hash`, `random_seed`, and every key in
 `input` that differs between the two records — useful for "why did this

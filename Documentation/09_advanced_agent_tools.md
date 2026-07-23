@@ -1,8 +1,8 @@
 # Advanced Agent Tools
 
-Fifteen high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Twenty high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 29), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 34), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -20,7 +20,7 @@ Fifteen high-level agentic tools that compose the library's existing primitives 
 | `get_position_size` | ATR stop-loss sizing with optional Kelly criterion | `shares_fixed_risk`, `kelly_fraction`, `recommended_shares` |
 | `run_portfolio_simulation` | True shared-cash portfolio: rebalancing, position sizing vs. current equity, weight drift between rebalances | `rebalance_log`, `avg_gross_leverage`, `final_equity`, `final_cash` |
 
-**Supplementary tools (5)**
+**Supplementary tools (6)**
 
 | Tool | What it does | Key output fields |
 |---|---|---|
@@ -37,6 +37,16 @@ Fifteen high-level agentic tools that compose the library's existing primitives 
 |---|---|---|
 | `run_custom_signal_backtest` | Backtest a signal computed outside this library on one symbol | Same shape as `BacktestResult` — `sharpe_ratio`, `total_return`, `num_trades`, ... |
 | `run_signal_panel_backtest` | Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics | `per_ticker[ticker]`, `portfolio_metrics.sharpe_ratio` |
+
+**Diagnostics, capacity & specialized backtests (5)**
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `run_pair_trade_backtest` | Backtest a cointegrated pair as one synchronized two-leg trade (reuses `run_portfolio_simulation`) | `n_round_trips`, `entry_spread`, `current_spread`, `sharpe_ratio` |
+| `get_robustness_diagnostics` | Same-sample confidence checks on a grid search's winning combination: parameter sensitivity, Deflated Sharpe Ratio, block-bootstrap CI | `expected_max_sharpe`, `deflated_sharpe_ratio`, `bootstrap_ci_lower`, `bootstrap_ci_upper` |
+| `get_capacity_report` | Max account size a target-weight portfolio can support before positions move their own market | `max_account_size`, `binding_ticker`, `days_to_liquidate_at_capacity` |
+| `get_data_quality_report` | Dataset provenance plus missing-bar/stale-price/price-jump detection on fetched OHLCV | `metadata`, `missing_bars`, `stale_price_runs`, `price_jumps` |
+| `run_backtest_compact` | Same four built-in strategies as `run_sma_backtest` etc., but returns a compact summary/risk/exposure/cost result with artifact URIs instead of the inline equity curve/trade log | `summary`, `risk`, `exposure`, `costs`, `equity_curve_uri` |
 
 ---
 
@@ -1210,6 +1220,7 @@ for run in result.top_results:
 | `sort_by` | str | `"sharpe_ratio"` | Ranking metric: `"sharpe_ratio"`, `"total_return"`, `"calmar_ratio"`, `"sortino_ratio"`, `"max_drawdown"` |
 | `top_n` | int | 5 | Number of top combinations to return (capped at 20) |
 | `n_workers` | int | 1 | CPU workers for parallel grid search |
+| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
 
 **Output reference:**
 
@@ -1579,10 +1590,13 @@ print(f"Num Trades    : {result.num_trades}")
 | `symbol` | str | — | Ticker symbol |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
-| `signals` | `Dict[str, float]` | — | `{date: value}`, value in `{1, 0, -1}` (long/flat/short). Dates without a matching OHLCV bar are ignored, same as extra OHLCV bars with no signal entry. |
+| `signals` | `Dict[str, float]` | — | `{date: value}`, computed entirely outside this library. Dates without a matching OHLCV bar are ignored, same as extra OHLCV bars with no signal entry. Whether/how values are validated is controlled by `signal_type`. |
+| `signal_type` | `SignalType` | `"score"` | `"score"` (default — unrestricted float, today's original behavior) \| `"direction"` (every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) |
+| `max_abs_weight` | float | `1.0` | Bound used only when `signal_type="target_weight"` (ignored otherwise) |
 | `initial_capital` | float | `10000` | Starting capital |
 | `commission_pct` | float | `0.001` | Commission per trade (fraction) |
 | `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
+| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
 
 **Output:** `BacktestResult` — identical shape to `run_sma_backtest` / `run_rsi_backtest` / etc. See the full reference in [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult--full-reference).
 
@@ -1663,13 +1677,16 @@ print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
 | `tickers` | `List[str]` | — | Universe; must match `signal_panel`'s outer keys |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
-| `signal_panel` | `Dict[str, Dict[str, float]]` | — | `{ticker: {date: value}}`, value in `{1, 0, -1}` |
+| `signal_panel` | `Dict[str, Dict[str, float]]` | — | `{ticker: {date: value}}`, computed entirely outside this library. Whether/how values are validated is controlled by `signal_type`, applied uniformly across every ticker's signal map. |
+| `signal_type` | `SignalType` | `"score"` | `"score"` (default — unrestricted float, today's original behavior) \| `"direction"` (every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) |
+| `max_abs_weight` | float | `1.0` | Bound used only when `signal_type="target_weight"` (ignored otherwise) |
 | `weights` | `Dict[str, float]?` | `None` | Per-ticker weight, must sum to 1.0. Defaults to equal weight. |
 | `initial_capital` | float | `10000` | Starting capital applied per ticker |
 | `commission_pct` | float | `0.001` | Commission per trade (fraction) |
 | `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
 | `benchmark` | str? | `None` | Optional benchmark ticker — adds `information_ratio` to `portfolio_metrics` |
 | `include_trade_log` | bool | `False` | If `True`, include a per-trade log for each ticker |
+| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
 
 **Output reference:**
 
@@ -1872,11 +1889,25 @@ share the identical rebalance-date set; per rebalance date, `sum(|weight|)`
 must not exceed `max_gross_leverage` (default `1.0`); no single `|weight|`
 may exceed `max_position_pct` (default `1.0` — reuses the same
 `SignalType.TARGET_WEIGHT` bound check `CustomSignalBacktestInput` already
-uses, since a per-position weight bound is exactly that check).
+uses, since a per-position weight bound is exactly that check). A `NaN` in
+`target_weights` is **not** caught by the Pydantic layer above (`abs(NaN) >
+bound` is always `False`) — it's caught immediately once the simulation
+engine runs, before any bar is processed, and raises `ValidationError`
+naming every offending `(date, ticker)` pair, same as a missing-entry or
+leverage-limit violation.
 
 **`fill_price`:** `"close"` (default), `"next_open"`, or `"midpoint"` — same
 convention as every other backtest tool (see
-[04_backtesting.md](04_backtesting.md#execution-timing-fill_price)).
+[04_backtesting.md](04_backtesting.md#execution-timing-fill_price)). With
+`fill_price="close"` (the default), the result's `warnings` list **always**
+includes a look-ahead-bias caveat: each rebalance executes at the same
+bar's own Close that its target weight is dated on, so if `target_weights`
+was derived from that same bar's Close (e.g. a same-day signal/score), the
+trade could not actually have been placed at that price in real time. Use
+`fill_price="next_open"` for a lookahead-free simulation, or confirm
+`target_weights` was already known before that bar's Close (e.g. computed
+from the prior bar's data) before trusting a `"close"`-filled run's
+numbers.
 
 **Cost models and liquidity (`04_backtesting.md`'s
 [Pluggable cost models](04_backtesting.md#pluggable-cost-models-backtestcostspy)
@@ -1936,6 +1967,14 @@ the mirror condition; exit to flat once the z-score reverts inside
 `exit_z`. `gross_leverage` (default `1.0`) is split between the two legs so
 the dollar ratio matches `hedge_ratio`.
 
+**`zscore_window`:** `Optional[int]`, default **`30`** — a rolling window
+(bars) so the spread z-score at each bar only uses data available up to
+that bar. Passing `None` switches to a full-sample static z-score computed
+once over the whole series, which leaks future spread mean/std into every
+historical signal; only use `None` for exploratory/offline analysis, never
+to evaluate strategy performance — the same convention and warning as
+`PairTradeBacktestInput.zscore_window` in the model itself.
+
 **Output reference:**
 
 | Field | Type | Description |
@@ -1949,7 +1988,11 @@ the dollar ratio matches `hedge_ratio`.
 | `final_equity`, `final_cash`, `equity_curve`, `warnings` | — | Same meaning as §15 |
 
 **`fill_price`:** `"close"` (default), `"next_open"`, or `"midpoint"` — same
-convention as every other backtest tool.
+convention as every other backtest tool. Since this tool is a thin wrapper
+around `run_portfolio_simulation`, the same `fill_price="close"`
+look-ahead-bias warning described in §15 applies here too: with the
+default, `result.warnings` always includes the caveat that each leg fills
+at the same bar's own Close its z-score signal is dated on.
 
 **Validation:** raises `ValidationError` if either symbol is missing OHLCV,
 or if the spread never crosses `entry_z` (nothing to backtest).
@@ -2011,6 +2054,18 @@ an independently-estimated theoretical variance — a practical proxy common
 in applied use of DSR, not the only way to compute it. The bootstrap CI is
 on the best trial's in-sample Sharpe, not an out-of-sample estimate.
 
+**Annualization, handled internally:** `grid_df`'s `sharpe_ratio` column
+(and therefore `best_params`' Sharpe) is annualized, but the Deflated
+Sharpe Ratio formula's z-score already scales by `sqrt(n_obs - 1)` itself
+and expects a non-annualized, per-period Sharpe as input. The tool
+de-annualizes `best_sharpe`/`sharpe_trials_std` before the DSR call and
+re-annualizes `expected_max_sharpe` afterward so it's back on the same
+scale as `best_sharpe` for reporting — `deflated_sharpe_ratio` itself is a
+probability and is scale-invariant either way. Feeding the raw annualized
+Sharpe into the DSR formula (as an earlier version of this tool did)
+inflates `deflated_sharpe_ratio` by roughly 16× and is no longer how this
+tool computes it.
+
 ---
 
 ## 18. Capacity Report
@@ -2056,7 +2111,7 @@ were run at exactly that capacity.
 | `binding_ticker` | `str?` | The name imposing the tightest capacity constraint; `None` if every weight is 0 |
 | `max_account_size` | `float?` | Overall capacity — the smallest per-ticker max; `None` if unbounded |
 | `days_to_liquidate_at_capacity` | `Dict[str, float]` | Trading days to unwind each position at `max_participation`, assuming the account were sized at `max_account_size` |
-| `sector_exposure` | `Dict[str, float]?` | Weight aggregated by sector (via `get_stock_fundamentals`' underlying provider call), `None` when `include_sector_exposure=False` |
+| `sector_exposure` | `Dict[str, float]?` | Weight aggregated by sector (via the data provider's `get_ticker_info` call directly — **not** `get_stock_fundamentals`), `None` when `include_sector_exposure=False` |
 | `warnings` | `List[str]` | E.g. a per-ticker sector lookup failure (falls back to `"Unknown"`, doesn't fail the call) |
 
 **Scope, stated explicitly:** `target_weights` is a single snapshot (not a

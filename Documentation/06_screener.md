@@ -1,12 +1,14 @@
 # Stock Screener
 
-The screener evaluates a list of tickers concurrently against fundamental and technical filters, returning a sorted `pd.DataFrame` of passing stocks.
+The screener evaluates a list of tickers concurrently against fundamental and technical filters, returning a `pd.DataFrame` of passing stocks, optionally sorted by a chosen column.
 
 **Small universes (≤ 20 tickers):** all network calls run in parallel via `asyncio.gather` — screening 20 tickers takes roughly the same wall time as screening 5.
 
 **Large universes (> 20 tickers):** the ticker list is automatically split across multiple `ProcessPoolExecutor` workers. Each worker runs its own asyncio event loop, bypassing the GIL for the full pipeline (fetch + indicator compute). Combined with the Parquet disk cache, repeated runs on the same universe are near-instant.
 
-**Beta filter optimisation:** When `beta_max` or `beta_min` filters are present, SPY OHLCV data is fetched **once per `screen_stocks()` call** and reused for every ticker that needs a beta computation. On a 500-ticker universe where 200 tickers require beta, this eliminates 199 redundant HTTP requests compared to the naïve per-ticker fetch.
+**Beta filter optimisation:** When `beta_max` or `beta_min` filters are present, SPY OHLCV data is fetched **once per `screen_stocks_async()` invocation** and reused for every ticker in that invocation that needs a beta computation. For a single-process run (≤ 20 tickers, or `n_workers=1`) that means one SPY fetch total; when the universe is split across a `ProcessPoolExecutor`, each worker independently prefetches SPY once for its own batch, i.e. one fetch per worker. On a 500-ticker universe where 200 tickers require beta, screened with the default 8-worker split, this means 8 SPY fetches instead of up to 200 — eliminating roughly 192 redundant HTTP requests compared to the naïve per-ticker fetch. If the SPY prefetch itself fails, it is silently skipped and each ticker needing beta falls back to fetching SPY individually.
+
+**Error handling:** a per-ticker failure (network error, missing data, bad ratio, indicator that can't be computed, etc.) is caught inside `_fetch_ticker_data` and causes that ticker to be dropped by returning `None` — the exact same return value used when a ticker simply fails a filter condition. `screen_stocks` / `screen_stocks_async` do not distinguish the two cases: there is no `failed_tickers` list or error field in the result. A ticker missing from the output may have failed a filter, or it may have errored out entirely — enable debug logging (`logger.debug` in the `standard_quant_tools.screener` logger) to see aggregate passed/total counts, or wrap individual `provider` calls yourself if you need per-ticker failure visibility.
 
 ---
 
@@ -153,7 +155,7 @@ print(f"Passed: {len(result)} / {len(sp500)}")
 
 | `n_workers` | Behaviour |
 |---|---|
-| `None` (default) | Auto: 1 for ≤ 20 tickers, `cpu_count` for larger universes |
+| `None` (default) | Auto: 1 for ≤ 20 tickers; otherwise `min(cpu_count, max(n // 10, 2))` — approaches `cpu_count` as the universe grows, but is capped lower for universes just over the 20-ticker threshold |
 | `1` | Single process (asyncio only) — best for small lists and notebooks |
 | `> 1` | ProcessPoolExecutor — best for 50+ tickers |
 

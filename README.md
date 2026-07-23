@@ -5,9 +5,9 @@ A high-performance, modular Python library for quantitative financial analysis. 
 ## Key Features
 
 - **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
-- **Agent-First Design** — All tools return Pydantic models; 29 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
-- **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
-- **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, optional C++/scipy/numba graceful fallback
+- **Agent-First Design** — All tools return Pydantic models; 34 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
+- **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions, portfolio analysis, stock screener, 4 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
+- **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
 
 ---
 
@@ -19,7 +19,7 @@ pip install .
 poetry install
 ```
 
-**Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `pyarrow`
+**Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `scikit-learn`, `plotly`, `pyarrow`
 
 ---
 
@@ -60,8 +60,11 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 | `get_ohlcv_async(...)` | Non-blocking OHLCV fetch | `Awaitable[pd.DataFrame]` |
 | `get_ticker_info(symbol)` | Company metadata | `TickerInfo` (Pydantic) |
 | `get_financial_ratios(symbol)` | P/E, P/B, D/E, ROE, margins, etc. | `FinancialRatios` (Pydantic) |
+| `get_metadata(symbol, interval)` | Dataset provenance: adjusted, survivorship-free, point-in-time, timezone | `DataSetMetadata` (Pydantic) |
 
 **Caching:** Historical OHLCV calls are saved as Parquet files under `~/.cache/standard_quant_tools/ohlcv/`. Subsequent calls — even from a new Python process — load from disk rather than the network. Override the cache directory with `SQT_CACHE_DIR`.
+
+**Data quality (`standard_quant_tools.data.quality`):** `detect_missing_bars`, `detect_stale_prices`, `detect_price_jumps` — heuristic checks on an already-fetched OHLCV frame (weekday gaps, frozen prices, large single-bar jumps). `detect_missing_bars` has no market-holiday calendar, so U.S. holidays show up as false-positive gaps — treat findings as leads to investigate, not confirmed defects. Exposed together with `get_metadata` via the `get_data_quality_report` agent tool.
 
 ---
 
@@ -124,9 +127,21 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 | `var_historical(returns, confidence)` | Historical Value at Risk |
 | `var_parametric(returns, confidence)` | Gaussian VaR (scipy optional) |
 | `cvar(returns, confidence)` | Conditional VaR / Expected Shortfall |
-| `information_ratio(returns, benchmark)` | Active return / tracking error |
-| `treynor_ratio(returns, benchmark)` | Excess return / beta |
+| `information_ratio(returns, benchmark_returns)` | Active return / tracking error |
+| `treynor_ratio(returns, benchmark_returns)` | Excess return / beta |
 | `drawdown_series(series)` | Full drawdown time series |
+
+**Backtest Diagnostics**
+
+| Function | Description |
+|---|---|
+| `drawdown_periods(equity_curve)` | One row per drawdown episode: peak, trough, recovery, depth, duration |
+| `top_n_drawdowns(equity_curve, n)` | The n deepest drawdown episodes, worst first |
+| `trade_expectancy(trade_log)` | Expectancy, avg winner/loser, payoff ratio, consecutive win/loss streaks |
+| `trade_excursions(trade_log, price_data)` | Adds MAE/MFE (max adverse/favorable excursion) columns to a trade log |
+| `exposure_stats(executed_signal, trade_log)` | Time in market, gross/net exposure, % long/short, avg holding period |
+
+Computed entirely from data a backtest already produces (`equity_curve`, `trade_log`, the OHLCV frame) — no engine changes required. Exposed together via the `get_backtest_diagnostics` agent tool.
 
 ---
 
@@ -262,6 +277,38 @@ print(results.head())   # 9 combinations ranked by Sharpe
 
 `strategy` also accepts your own signal-generating callable — grid search, C++ speed, and `sort_by` ranking all work identically on your own alpha logic, not just the built-ins. For a pre-computed signal matrix across a ticker universe, see `run_signal_panel_backtest` in [Documentation/04_backtesting.md](Documentation/04_backtesting.md#grid-searching-your-own-signal).
 
+#### Portfolio Simulation Engine
+
+`run_signal_panel_backtest` gives every ticker its own independent capital and blends the return streams afterward. `run_portfolio_simulation` (`standard_quant_tools.backtest.portfolio_engine`) is the true-portfolio counterpart: one shared cash balance, position sizing relative to current account equity, and rebalancing at specific dates — weights drift between rebalances instead of being re-applied every bar.
+
+```python
+from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation
+
+result = run_portfolio_simulation(
+    price_data={"AAPL": aapl_df, "MSFT": msft_df},
+    target_weights=weights_df,           # DataFrame indexed by rebalance date, one column per ticker
+    initial_capital=100_000,
+    max_gross_leverage=1.0,
+    max_position_pct=0.25,
+    commission_model="pct",              # or "per_share"
+    use_impact_model=True,
+    max_adv_participation=0.1,
+)
+print(result['final_equity'], result['avg_gross_leverage'])
+```
+
+Pluggable building blocks compose into `run_portfolio_simulation` (or can be used standalone):
+
+- `standard_quant_tools.backtest.costs` — `percentage_commission`, `per_share_commission`, `fixed_bps_spread`, `pct_of_range_spread`, `sqrt_impact_bps`, `impact_cost`, `short_borrow_cost`, `margin_interest`
+- `standard_quant_tools.backtest.constraints` — `adv_participation`, `days_to_liquidate`, `sector_exposure`, `capacity_report`
+- `standard_quant_tools.backtest.sizing` — `rank_weighted`, `equal_weight_top_bottom`, `zscore_normalized`, `vol_scaled`, `dollar_neutral` — turns a SCORE signal panel into a target-weight panel
+- `standard_quant_tools.backtest.pairs` — `run_pair_backtest`, a two-leg pair trade as one dollar-neutral portfolio (reuses `run_portfolio_simulation`)
+- `standard_quant_tools.backtest.artifacts` — `save_artifact` / `load_artifact`, a local Parquet store for equity curves/trade logs too large to embed inline in an agent-tool response
+
+#### Robustness Diagnostics
+
+`standard_quant_tools.backtest.robustness` answers "is this backtest result trustworthy, or a fluke of one sample path / one lucky parameter combination": `block_bootstrap_ci` (confidence interval on a point-estimate metric), `parameter_sensitivity` (best-vs-median gap on a grid search), and `deflated_sharpe_ratio` (corrects the best observed Sharpe for having been selected as the max of `n_trials` attempts). Complementary to, not a substitute for, out-of-sample walk-forward validation.
+
 ---
 
 ### Portfolio (`standard_quant_tools.portfolio`)
@@ -313,9 +360,9 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ### AI Agent Tools (`standard_quant_tools.agent`)
 
-29 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
+34 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
-For a single agent choosing among all 29, see `Implementation/`. For an **orchestrator-workers** architecture — a lead agent that delegates to six specialist sub-agents, each scoped to a small, non-overlapping tool subset — see `Multi_Agent_Implementation/` (Anthropic only for now). Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest): a worker that was never given the other tool cannot call it by mistake.
+For a single agent choosing among all 34, see `Implementation/`. For an **orchestrator-workers** architecture — a lead agent that delegates to six specialist sub-agents, each scoped to a small, non-overlapping tool subset — see `Multi_Agent_Implementation/` (Anthropic only for now). Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest): a worker that was never given the other tool cannot call it by mistake.
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -338,7 +385,7 @@ from standard_quant_tools.agent.models import (
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools()  # 29 tools ready for function calling
+tools = get_agent_tools()  # 34 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -382,6 +429,10 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 **Advanced agentic tools (7):** `run_regime_adaptive_backtest`, `run_regime_adaptive_walkforward_backtest`, `scan_pairs`, `run_walk_forward_backtest`, `get_portfolio_risk_attribution`, `get_position_size`, `run_portfolio_simulation`
 
 **Supplementary tools (6):** `get_stock_fundamentals`, `run_backtest_optimization`, `get_advanced_indicators`, `get_rolling_beta`, `get_extended_risk_metrics`, `get_backtest_diagnostics`
+
+**Custom signal tools (2):** `run_custom_signal_backtest`, `run_signal_panel_backtest`
+
+**Diagnostics, capacity & specialized backtests (5):** `run_pair_trade_backtest`, `get_robustness_diagnostics`, `get_capacity_report`, `get_data_quality_report`, `run_backtest_compact`
 
 ---
 
@@ -453,6 +504,22 @@ except InvalidSymbolError as e:
 
 ---
 
+## Audit Trail & CLI (`standard_quant_tools.audit`, `sqt`)
+
+Every call routed through `agent.tools.dispatch()` can produce an immutable JSONL decision record capturing its inputs, the market data it pulled (with content hashes), which execution path ran, and a hash of its output — enough to tell a stale/tampered cache apart from a genuine code change. Nothing runs automatically; set `SQT_AUDIT_ENABLED=0` to disable record writes, and override the storage directory with `SQT_AUDIT_DIR`.
+
+The `sqt` command (installed with the package) inspects and verifies these records by `request_id`:
+
+```bash
+sqt replay <request_id>              # re-run the recorded call, report whether data/output still match
+sqt compare <request_id_a> <id_b>    # diff two records' status/output/timing/provenance/inputs
+sqt report <request_id>              # pretty-print one record in full
+```
+
+`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. See [Documentation/10_auditability.md](Documentation/10_auditability.md).
+
+---
+
 ## Running Tests
 
 ```bash
@@ -479,7 +546,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**822 Python tests total** (666 passing; 141 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **78 C++ unit tests** (19 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**1033 Python tests total** (892 passing; 141 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 
@@ -493,9 +560,10 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/04_backtesting.md` | Vectorized engine, trade log, custom signals, grid search |
 | `Documentation/05_portfolio.md` | Multi-asset metrics, correlation, optimization |
 | `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
-| `Documentation/07_agent_tools.md` | Core 14 LLM tools, full 29-tool registry, Pydantic models, end-to-end agent loop |
+| `Documentation/07_agent_tools.md` | Core 14 LLM tools, full 34-tool registry, Pydantic models, end-to-end agent loop |
 | `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
-| `Documentation/09_advanced_agent_tools.md` | Advanced tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation |
-| `Documentation/10_auditability.md` | Decision-record audit trail, replay verification, correlated logging |
+| `Documentation/09_advanced_agent_tools.md` | 20 advanced/supplementary/custom-signal/diagnostic tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation, pair trade backtest, robustness diagnostics, capacity report, data quality report, compact backtest result |
+| `Documentation/10_auditability.md` | Decision-record audit trail, replay verification, correlated logging, `sqt` CLI |
+| `Documentation/11_data_quality.md` | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |

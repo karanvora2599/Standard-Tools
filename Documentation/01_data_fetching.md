@@ -75,9 +75,9 @@ All ratio fields are `Optional[float]` — missing data returns `None` rather th
 
 ## Caching & Retry
 
-- **TTL cache**: identical calls within 1 hour return the cached DataFrame (no network round-trip)
-- **Retry**: up to 3 attempts with exponential backoff (1s, 2s, 4s) on transient failures
-- **Thread-safe**: the cache key includes `(symbol, start_date, end_date, interval)`
+- **TTL cache**: identical calls within 1 hour return the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that
+- **Retry**: up to 3 attempts, waiting 1s then 2s between attempts (exponential backoff, factor 2) on transient failures
+- **Cache key**: `(self, symbol, start_date, end_date, interval)` — `self` is part of the key because caching wraps a bound method, so although the underlying `TTLCache` is one shared module-level object, each provider instance's calls land on distinct keys. It's not lock-guarded (`@cached()` is used without a `lock=`), so it isn't safe against races between concurrent threads hitting the same instance/args at once
 
 To force a fresh fetch, create a new provider instance (cache is per-instance):
 

@@ -39,7 +39,7 @@ print(meta)
 | `survivorship_free` | `False` | Not a yfinance guarantee — delisted tickers may become unqueryable |
 | `point_in_time` | `False` | Not a yfinance guarantee — historical values can be silently revised |
 | `frequency` | echoes the requested `interval` | — |
-| `timezone` | `"America/New_York"` | Fixed NYSE default — yfinance doesn't expose a reliable per-symbol timezone through this provider's interface |
+| `timezone` | Inferred from the symbol's Yahoo Finance exchange suffix via a ~19-entry lookup table (`_EXCHANGE_SUFFIX_TIMEZONES`), e.g. `.L`→`Europe/London`, `.DE`→`Europe/Berlin`, `.HK`→`Asia/Hong_Kong`; any symbol whose suffix isn't in that table — including all unsuffixed US tickers — defaults to `"America/New_York"` | Local, no-network heuristic based on ticker convention, not a provider-verified exchange timezone — yfinance doesn't expose a reliable per-symbol timezone through this provider's interface |
 | `retrieved_at` | current UTC timestamp | When this metadata object was generated, not when the underlying data was last updated upstream |
 
 A provider that could make stronger guarantees (a real point-in-time

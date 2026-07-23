@@ -124,6 +124,10 @@ Python execution path when it isn't `"close"` — the compiled C++ kernel
 only knows `Close` prices, so `next_open`/`midpoint` always run in Python
 regardless of whether `_sqt_core` is built.
 
+**Validation:** `run_strategy` raises `ValidationError` if `fill_price` isn't
+one of `"close"`, `"next_open"`, `"midpoint"` — the same self-correcting-error
+pattern used everywhere else in this library.
+
 **Known limitation:** the trade log's `entry_price`/`exit_price` always
 report the bar's `Close`, in every mode — only the aggregate P&L (equity
 curve, Sharpe, total return, everything else) reflects `next_open`/
@@ -479,17 +483,24 @@ all.
 is `gross_exposure_curve / equity_curve`, the continuous version of
 `rebalance_log`'s point-in-time `gross_leverage_after`), `rebalance_log`
 (`pd.DataFrame`: `date`, `turnover_pct`, `gross_leverage_after`,
-`n_positions`), `final_equity`, `final_cash`, `warnings` (e.g. flags if cash
-ever went negative — implied margin borrowing).
+`n_positions`), `final_equity`, `final_cash`, `warnings` (`list[str]`).
+`warnings` **always** includes a look-ahead-bias notice when `fill_price`
+is left at its default `"close"` and at least one rebalance occurs — each
+rebalance executes at the same bar's own Close that its target weight is
+dated on, which is only lookahead-free if `target_weights` was itself
+derived from data known before that bar's Close; use `fill_price="next_open"`
+for a lookahead-free simulation to silence it. It also flags if cash ever
+went negative (implied margin borrowing).
 
 **Validation (raises `ValidationError` — same self-correcting-error pattern
-as everywhere else in this library):** every ticker must be present at every
-rebalance date (`target_weights` must be dense); `sum(|weight|)` per
-rebalance date can't exceed `max_gross_leverage` (default `1.0` = fully
-invested, no leverage); no single `|weight|` can exceed `max_position_pct`
-(default `1.0`); every rebalance date must fall on a day all tickers have
-price data for (the master trading calendar is the **intersection** of every
-ticker's own index).
+as everywhere else in this library):** `target_weights` must be dense — every
+ticker must be present at every rebalance date, and no cell may be `NaN`
+(a `NaN` used to silently corrupt the equity curve; it now fails fast with
+the offending dates/tickers listed); `sum(|weight|)` per rebalance date can't
+exceed `max_gross_leverage` (default `1.0` = fully invested, no leverage); no
+single `|weight|` can exceed `max_position_pct` (default `1.0`); every
+rebalance date must fall on a day all tickers have price data for (the master
+trading calendar is the **intersection** of every ticker's own index).
 
 **Execution timing (`fill_price`):** like `run_strategy`, accepts `"close"`
 (default — a rebalance dated D executes at D's own Close), `"next_open"`
@@ -532,18 +543,13 @@ result = run_portfolio_simulation(
   (today's exact behavior — no financing cost beyond the existing "cash
   went negative" warning).
 
-**Liquidity constraint (`backtest/constraints.py`):** pass
-`max_adv_participation=0.1` to reject (raise `ValidationError`) any
-rebalance trade whose notional exceeds 10% of the ticker's own rolling
-average dollar volume — same fail-fast pattern as `max_gross_leverage`/
-`max_position_pct`. Requires a `'Volume'` column.
-
-For a **standalone capacity estimate** (not wired into the simulation
-itself) — how much account size a target-weight portfolio can support
-before hitting that same ADV constraint, plus days-to-liquidate and sector
-exposure — see `backtest/constraints.py`'s `capacity_report()` or the
-`get_capacity_report` agent tool
-([09_advanced_agent_tools.md §18](09_advanced_agent_tools.md#18-capacity-report)).
+**Liquidity constraint:** pass `max_adv_participation=0.1` to reject (raise
+`ValidationError`) any rebalance trade whose notional exceeds 10% of the
+ticker's own rolling average dollar volume — same fail-fast pattern as
+`max_gross_leverage`/`max_position_pct`. Requires a `'Volume'` column. Built
+on `backtest/constraints.py`'s `adv_participation()` — see the "Liquidity &
+Capacity Diagnostics" section below for the full module, including the
+standalone `capacity_report()` (not wired into the simulation itself).
 
 **Scope, stated explicitly:** short-sale proceeds are credited to cash in
 full with no margin haircut modeling beyond the flat `margin_interest_rate`
@@ -551,14 +557,24 @@ accrual above; sector-exposure constraints (as opposed to reporting — see
 `get_capacity_report`) aren't enforced by the engine itself. Neither is
 required for the shared-cash architecture itself to be correct.
 
-**Feeding it SCORE signals:** `target_weights` above assumes you already
-have per-ticker target weights. If you instead have an arbitrary
-cross-sectional alpha score per ticker (a `SignalType.SCORE` panel — see
+### Position Sizing (`backtest/sizing.py`)
+
+`target_weights` above assumes you already have per-ticker target weights.
+If you instead have an arbitrary cross-sectional alpha score per ticker (a
+`SignalType.SCORE` panel — see
 [Custom Signal Backtest](#custom-signal-generation)), convert it to weights
-first with `backtest/sizing.py`'s construction functions —
-`rank_weighted`, `equal_weight_top_bottom`, `zscore_normalized`,
-`vol_scaled`, and the post-processing helper `dollar_neutral` — before
-passing the result in as `target_weights`:
+first. Every function takes/returns a `pd.DataFrame` of the same shape
+(dates × tickers) and scales each row's gross exposure (`sum(|weight|)`) to
+`gross_leverage`; all raise `ValidationError` on an empty or NaN-containing
+`scores` panel.
+
+| Function | Signature | Behavior |
+|---|---|---|
+| `rank_weighted` | `(scores, gross_leverage=1.0)` | Weight ∝ cross-sectional rank, centered on the row's mean rank (long top, short bottom); `sum(weight) ≈ 0` automatically. |
+| `equal_weight_top_bottom` | `(scores, n_long, n_short, gross_leverage=1.0)` | Equal-weight the top `n_long` and bottom `n_short` names each row; everything else gets 0. Raises if `n_long + n_short` exceeds the ticker count. |
+| `zscore_normalized` | `(scores, gross_leverage=1.0)` | Weight ∝ cross-sectional z-score; a row with zero cross-sectional std gets all-zero weight rather than a division-by-zero blowup. |
+| `vol_scaled` | `(scores, returns_df, lookback=20, gross_leverage=1.0)` | Divide each score by its trailing realized volatility (rolling std of `returns_df` over `lookback` bars), then apply the same normalization as `zscore_normalized`. |
+| `dollar_neutral` | `(weights)` | Post-process any weight panel so `sum(weight) == 0` per row, by subtracting each row's mean weight. |
 
 ```python
 from standard_quant_tools.backtest.sizing import zscore_normalized
@@ -570,6 +586,54 @@ result = run_portfolio_simulation(price_data, target_weights)
 Beta-neutral, sector-neutral, risk-parity, and optimizer-generated weights
 are not implemented — each needs infrastructure this repo doesn't have yet
 (per-ticker beta/sector metadata, a QP solver).
+
+### Cost Model Building Blocks (`backtest/costs.py`)
+
+Pure functions `run_portfolio_simulation`'s cost parameters (above) are
+built from — import them directly for a custom cost calculation outside the
+engine.
+
+| Function | Signature | Behavior |
+|---|---|---|
+| `percentage_commission` | `(notional, rate)` | `abs(notional) * rate` — today's default model. |
+| `per_share_commission` | `(shares, rate_per_share, minimum=0.0)` | Flat rate per share, floored at `minimum`. |
+| `fixed_bps_spread` | `(notional, bps)` | Spread cost as a fixed number of basis points of notional. Not wired into `run_portfolio_simulation` (which uses `slippage_pct` instead) — available for standalone use. |
+| `pct_of_range_spread` | `(notional, high, low, close, pct)` | Spread cost as a fraction of the bar's own `(High - Low)` range, scaled to notional via `Close`. Raises `ValidationError` if `close <= 0`. Not wired into the engine. |
+| `sqrt_impact_bps` | `(participation, volatility, coefficient=1.0)` | Square-root impact model in bps: `coefficient * volatility * sqrt(participation)`. Raises `ValidationError` if `participation < 0`. |
+| `impact_cost` | `(notional, avg_dollar_volume, volatility, coefficient=1.0)` | Dollar impact cost combining `sqrt_impact_bps` with trade notional; returns `0.0` if `avg_dollar_volume <= 0` (no volume baseline). |
+| `short_borrow_cost` | `(notional, annual_bps, days=1.0)` | Daily-accrued borrow fee on short notional. |
+| `margin_interest` | `(cash, annual_rate, days=1.0)` | Daily-accrued interest on negative cash; `0.0` when `cash >= 0`. |
+
+```python
+from standard_quant_tools.backtest.costs import per_share_commission
+
+cost = per_share_commission(shares=500, rate_per_share=0.005, minimum=1.0)
+```
+
+### Liquidity & Capacity Diagnostics (`backtest/constraints.py`)
+
+| Function | Signature | Behavior |
+|---|---|---|
+| `adv_participation` | `(notional, avg_dollar_volume)` | Fraction of average dollar volume a trade's notional represents; `0.0` if `avg_dollar_volume <= 0`. What `max_adv_participation` above checks under the hood. |
+| `days_to_liquidate` | `(shares, avg_daily_volume, max_participation)` | Estimated trading days to unwind a position without exceeding `max_participation` of average daily volume. Raises `ValidationError` if `avg_daily_volume <= 0` or `max_participation <= 0`. |
+| `sector_exposure` | `(weights, sectors)` | Aggregate portfolio weight by sector; tickers missing from `sectors` are bucketed into `"Unknown"` rather than dropped. |
+| `capacity_report` | `(tickers, avg_dollar_volumes, target_weights, max_participation)` | Per-ticker max account size deployable at `max_participation` of its own ADV, given its target weight. Returns `per_ticker`, `binding_ticker` (tightest constraint, `None` if every weight is 0), `max_account_size`. Raises `ValidationError` on missing tickers or `max_participation <= 0`. |
+
+```python
+from standard_quant_tools.backtest.constraints import capacity_report
+
+report = capacity_report(
+    tickers=["AAPL", "MSFT"],
+    avg_dollar_volumes={"AAPL": 8e9, "MSFT": 6e9},
+    target_weights={"AAPL": 0.4, "MSFT": 0.3},
+    max_participation=0.1,
+)
+print(report["max_account_size"], report["binding_ticker"])
+```
+
+See also `get_capacity_report`
+([09_advanced_agent_tools.md §18](09_advanced_agent_tools.md#18-capacity-report))
+for the LLM/JSON tool-calling form of `capacity_report`.
 
 For LLM/JSON tool-calling, see the `run_portfolio_simulation` agent tool in
 [09_advanced_agent_tools.md](09_advanced_agent_tools.md#15-true-portfolio-simulation) —
@@ -615,7 +679,20 @@ below `-entry_z`; short the spread on the mirror condition; exit to flat
 once the z-score reverts inside `exit_z`. Each leg's weight is sized so the
 dollar ratio matches `hedge_ratio`: `weight_a = gross_leverage / (1 +
 |hedge_ratio|)`, `weight_b = hedge_ratio * weight_a` (sign flips with
-direction) — together they sum to `gross_leverage` at every entry.
+direction) — together they sum to `gross_leverage` at every entry. The
+resulting `max(|weight_a|, |weight_b|)` is passed to `run_portfolio_simulation`
+as its `max_position_pct` (instead of the engine's own default `1.0`), so a
+large `|hedge_ratio|` or `gross_leverage > 1.0` doesn't spuriously trip the
+position-size check on an otherwise-valid pair trade.
+
+**`zscore_window`** (default `30`): rolling window, in bars, for
+`spread_zscore` — every signal only uses spread history available up to
+that bar, so the backtest is causal/lookahead-free. Passing `None` reverts
+to a full-sample static z-score computed once over the *entire* series
+(including bars after the signal date), which leaks future spread
+statistics into historical signals and produces an optimistically-biased
+backtest; it's an explicit opt-in, intended for exploratory analysis only —
+never use it to evaluate real strategy performance.
 
 **Output:** everything `run_portfolio_simulation` returns (`equity_curve`,
 `cash_curve`, `leverage_curve`, `rebalance_log`, `final_equity`,

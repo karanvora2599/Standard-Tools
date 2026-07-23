@@ -38,9 +38,11 @@ print(f"Annual return     : {port_returns.mean() * 252:.2%}")
 ## Full Portfolio Metrics
 
 ```python
+from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.portfolio import portfolio_metrics
 
 # Fetch benchmark for Information Ratio
+provider = DataFactory.get_provider()
 spy_df = provider.get_ohlcv("SPY", "2023-01-01", "2024-01-01")
 bench_ret = spy_df['Close'].pct_change().dropna()
 
