@@ -14,6 +14,10 @@ is not built — all existing tests continue to pass either way.
 
 ## 1. Prerequisites
 
+Root `CMakeLists.txt` requires CMake **>= 3.15**. `pyproject.toml` requires
+Python **>= 3.10**. Both are still accurate as of this writing — no change
+needed to build against the current `pyproject.toml`.
+
 ### Python packages (all platforms)
 
 ```
@@ -184,9 +188,9 @@ Or run all six at once:
 pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py -v
 ```
 
-Once the extension is built all skipped tests activate (149 total across the
-six files above — 22 Hurst, 36 indicators, 25 new-indicators, 23 cointegration,
-25 backtest, 18 regression).
+Once the extension is built all skipped tests activate (145 total across the
+six files above — 22 Hurst, 36 indicators, 23 new-indicators, 23 cointegration,
+25 backtest, 16 regression — counted from each file's `@requires_cpp` markers).
 
 ### C++ unit tests
 
@@ -214,14 +218,18 @@ build\tests\cpp\Release\test_backtest.exe
 ./build/tests/cpp/test_backtest
 ```
 
-Expected output for each:
+Each binary prints its own pass count on exit, e.g.:
 
 ```
-19 / 19 tests passed.   ← test_hurst
-24 / 24 tests passed.   ← test_indicators
-18 / 18 tests passed.   ← test_cointegration
-17 / 17 tests passed.   ← test_backtest
+N / N tests passed.   ← test_hurst
+N / N tests passed.   ← test_indicators
+N / N tests passed.   ← test_cointegration
+N / N tests passed.   ← test_backtest
 ```
+
+`N` grows as tests are added to `tests/cpp/test_*.cpp` — do not hardcode a
+specific count here; run the suite to see the current numbers. A non-`N/N`
+result (`M / N` with `M < N`) is a real failure, not a stale-doc mismatch.
 
 ### C++ performance benchmarks
 

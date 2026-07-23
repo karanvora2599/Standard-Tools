@@ -599,6 +599,12 @@ result.final_equity           # Portfolio value at end date
 result.equity_curve           # List[float] — daily portfolio value
 result.trade_log              # Optional[List[Trade]] — per-trade details
 
+# fill_price controls execution timing:
+#   "close" (default) — signal known at bar t-1's close is filled at that same close.
+#   "next_open" — more conservative; entries/exits/holds are priced off the bar's own
+#                 Open where relevant (see run_strategy's docstring for the exact
+#                 overnight/intraday decomposition).
+
 # Quick benchmarking table — what's "good":
 # Sharpe > 1.0     acceptable  |  > 2.0 excellent
 # Max drawdown < 20%  comfortable  |  > 40% risky
@@ -672,6 +678,7 @@ print(f"Final Equity : ${result.final_equity:,.0f}")
 | `initial_capital` | float | `10_000.0` | Starting equity |
 | `commission_pct` | float | `0.001` | One-time buy commission fraction |
 | `slippage_pct` | float | `0.0005` | One-time buy slippage fraction |
+| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
 
 **Output:** `BacktestResult` — same schema as active strategy backtests. See the full reference above.
 
@@ -715,6 +722,7 @@ for s in result.strategies:
 | `rsi_parameters` | dict\|None | `None` | Override default RSI params |
 | `macd_parameters` | dict\|None | `None` | Override default MACD params |
 | `bollinger_parameters` | dict\|None | `None` | Override default Bollinger params |
+| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
 
 **Output:** `CompareStrategiesResult`
 
@@ -2067,12 +2075,12 @@ print(f"Example params: {playbook['example_params']}")
 | Model | Required | Optional (with defaults) |
 |---|---|---|
 | `RegimeAdaptiveInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"`, `sma/rsi/macd/bollinger_param_grid=None`, `n_workers=1` |
-| `RegimeAdaptiveWalkForwardInput` | `symbol`, `start_date`, `end_date` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"`, `sma/rsi/macd/bollinger_param_grid=None`, `sort_by="sharpe_ratio"` |
+| `RegimeAdaptiveWalkForwardInput` | `symbol`, `start_date`, `end_date` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"`, `sma/rsi/macd/bollinger_param_grid=None`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"midpoint"`, applied to each window's OOS leg) |
 | `PairScannerInput` | `tickers`, `start_date`, `end_date` | `max_pairs=10`, `min_half_life=5.0`, `max_half_life=126.0`, `p_value_threshold=0.05`, `zscore_window=30` |
-| `WalkForwardInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"` |
+| `WalkForwardInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"midpoint"`, applied to each window's OOS leg) |
 | `RiskAttributionInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"`, `n_components=3`, `factor_tickers=None`, `factor_names=None` |
 | `PositionSizerInput` | `symbol`, `start_date`, `end_date`, `account_equity` | `risk_per_trade_pct=0.01` (must be in (0,1]), `atr_period=14`, `atr_multiplier=2.0`, `win_rate=None`, `avg_win_pct=None`, `avg_loss_pct=None` |
-| `PortfolioSimulationInput` | `tickers`, `start_date`, `end_date`, `target_weights` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `max_gross_leverage=1.0`, `max_position_pct=1.0`, `benchmark=None` |
+| `PortfolioSimulationInput` | `tickers`, `start_date`, `end_date`, `target_weights` | `signal_type="target_weight"`, `construction_method=None`, `gross_leverage=1.0`, `n_long=None`, `n_short=None`, `vol_lookback=20`, `make_dollar_neutral=False`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `max_gross_leverage=1.0`, `max_position_pct=1.0`, `fill_price="close"` (`"close"`/`"next_open"`/`"midpoint"`), `commission_model="pct"`, `per_share_rate=0.0`, `min_commission=0.0`, `use_impact_model=False`, `impact_coefficient=1.0`, `impact_lookback=20`, `borrow_fee_bps=0.0`, `margin_interest_rate=0.0`, `max_adv_participation=None`, `benchmark=None` — see 09_advanced_agent_tools.md for how the cost-model and construction-method fields interact |
 
 **Supplementary tools (6)**
 
@@ -2108,6 +2116,7 @@ print(f"Example params: {playbook['example_params']}")
 - `PositionSizerInput`: `risk_per_trade_pct` must be in (0, 1].
 - `SignalPanelBacktestInput`: `signal_panel` must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0.
 - `CustomSignalBacktestInput` / `SignalPanelBacktestInput`: signal values must satisfy `signal_type`'s constraint (see table above).
+- `PortfolioSimulationInput`: `target_weights` must have an entry for every ticker in `tickers`, and every ticker must share the identical set of rebalance dates. When `signal_type="target_weight"` (default), each date's weights must also satisfy the `target_weight` constraint and gross leverage must not exceed `max_gross_leverage`. When `signal_type="score"`, `construction_method` is required (and `n_long`/`n_short` are required when it is `"equal_weight_top_bottom"`).
 
 ### Output Models
 
@@ -2176,4 +2185,4 @@ print(f"Example params: {playbook['example_params']}")
 
 ## Advanced Tools
 
-The 10 advanced and supplementary tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).
+The remaining 20 advanced, supplementary, custom-signal, and diagnostic tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).

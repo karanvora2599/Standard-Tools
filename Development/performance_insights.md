@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Of the ~20 distinct computational modules in this library, several components account for nearly all theoretical speedup. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-07-02, all originally identified Tier 1 features have been implemented in C++, plus 5 additional functions:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`), backtest kernel (`run_strategy`), **batch backtest grid kernel** (`batch_run_strategy`, 10–50×), **rolling factor loadings** (incremental Cholesky, 50–200×), **rolling beta** (incremental sums, 10–40×), **Bollinger Bands** (fused mean+std, 3–8×), and **Stochastic Oscillator** (fused min+max, 5–15×). The most dramatic realised gain — 30–100× — is on `rolling_hurst`.
+Of the ~20 distinct computational modules in this library, several components account for nearly all theoretical speedup. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-07-02, all originally identified Tier 1 features have been implemented in C++, plus 5 additional functions:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`), backtest kernel (`run_strategy`), **batch backtest grid kernel** (`batch_run_strategy`, 10–50×), **rolling factor loadings** (incremental Cholesky, 50–200×), **rolling beta** (incremental sums, 10–40×), **Bollinger Bands** (fused mean+std, 3–8×), and **Stochastic Oscillator** (fused min+max, 5–15×). The most dramatic realised gain — 30–100× — is on `rolling_hurst`. The `_sqt_core` feature set itself has not grown since 2026-07-02; the backtest engine gained new pure-Python modules afterward (portfolio simulation, pair trading, sizing, costs, constraints, robustness diagnostics — see Tier 3 below) that have not yet been evaluated for a C++ port.
 
 ---
 
@@ -196,6 +196,27 @@ A single `sqt::run_strategy` function accepts close prices and signal arrays dir
 
 ---
 
+### Tier 3 — Not Yet Evaluated (new since this doc's last review)
+
+`backtest/sizing.py`, `costs.py`, `constraints.py`, `robustness.py`, `pairs.py`,
+and a rewritten `portfolio_engine.py` (`run_portfolio_simulation`) landed
+2026-07-22/23 — after the 2026-07-02 status above — and are pure
+Python/pandas with no C++ or Numba path. Quick read, not a full porting
+analysis:
+
+| Component | Current implementation | Port candidate? |
+|---|---|---|
+| `portfolio_engine.py: run_portfolio_simulation` | Python `for date in master_index` loop, one iteration per bar, dict-of-floats per-ticker state (cash, shares) | Plausible Tier 1 — sequential per-bar state like `run_strategy`, but multi-ticker dict access is less C++-friendly than a flat array; would need profiling first |
+| `pairs.py: _spread_state` | Python `for zi in z.to_numpy()` state machine (long/short/flat) | Small, single pass — same shape as the PSAR/RSI state machines already ported; low absolute payoff given it only runs once per pair backtest (not O(n²) like `scan_pairs`) |
+| `robustness.py: block_bootstrap_ci` | Python `for i in range(n_iterations)` (default 1000), calls an arbitrary `metric_fn` callback per resample | Not a clean port — the callback is user-supplied Python, so the loop can't be pushed into C++ without also compiling `metric_fn` |
+| `sizing.py`, `costs.py`, `constraints.py` | Vectorised pandas (`rank`, `sub`, `div`) or small scalar pure functions | Tier 2 — already vectorised or too small to matter |
+
+None of these are on the priority list below yet; add `run_portfolio_simulation`
+if profiling shows it's a bottleneck for `run_portfolio_simulation` /
+`run_pair_trade_backtest` at realistic universe sizes.
+
+---
+
 ## Aggregate Speedup Estimates by Use Case
 
 | Agent Tool / Workflow | Dominant bottleneck | Status | End-to-end speedup |
@@ -214,7 +235,7 @@ A single `sqt::run_strategy` function accepts close prices and signal arrays dir
 
 ## Implementation Strategy
 
-### Recommended approach: pybind11 + scikit-build-core
+### Recommended approach: pybind11 + a standalone CMake build
 
 **Why pybind11:**
 - Header-only, no separate compilation step for the binding layer
@@ -255,12 +276,16 @@ The Python modules in `analysis/`, `indicators/`, `backtest/` call `from standar
 
 ### Build
 
-```toml
-# pyproject.toml addition
-[build-system]
-requires = ["scikit-build-core", "pybind11"]
-build-backend = "scikit_build_core.build"
-```
+As implemented, `pyproject.toml`'s `[build-system]` was left on `flit_core`
+(the pure-Python package build backend, unchanged) rather than switching to
+`scikit-build-core`. The C++ extension is built by invoking `cmake` directly
+against the root `CMakeLists.txt`, which drops `_sqt_core` into
+`src/standard_quant_tools/` — see `Development/build_guide.md`. This keeps
+`pip install -e .` fast and dependency-free for anyone who doesn't need the
+extension; the tradeoff is that `pip install` alone does not build
+`_sqt_core` — a separate `cmake -B build && cmake --build build` step is
+required. `.github/workflows/build-cpp.yml` runs that same two-step sequence
+in CI.
 
 A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GCC/Clang, `/O2 /arch:AVX2` on MSVC) and links the extension.
 
@@ -296,7 +321,7 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 
 | Risk | Mitigation |
 |---|---|
-| Windows build toolchain (MSVC vs MinGW) | Use `scikit-build-core`; test with both compilers in CI |
+| Windows build toolchain (MSVC vs MinGW) | `build_guide.md` documents the MSVC path only (Build Tools for Visual Studio 2022). CI (`build-cpp.yml`) only builds/tests on `ubuntu-latest` with gcc — there is no Windows or MinGW job, so the Windows path is currently unverified by CI. |
 | Floating-point result divergence from pandas fallback | Unit test C++ output against Python reference implementation with `atol=1e-10` |
 | Maintenance burden (dual Python + C++ paths) | Keep Python fallback; C++ path is additive, not a replacement |
 | NumPy ABI changes (same problem as Numba) | Pin to `numpy>=2.0` ABI stable tag in the extension; re-test on each numpy major bump |
