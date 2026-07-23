@@ -411,6 +411,78 @@ same idea, JSON-shaped input for function calling.
 
 ---
 
+## True Portfolio Simulation (Shared Cash)
+
+`run_signal_panel_backtest` above is fast and useful for research, but it
+isn't a real portfolio: every ticker gets its **own independent
+`initial_capital`**, and only the resulting *return streams* are blended
+afterward via fixed weights. `run_portfolio_simulation`
+(`backtest/portfolio_engine.py`) is the true alternative — **one shared cash
+balance**, positions sized against **current account equity**, and explicit
+**rebalancing** at whichever dates you choose.
+
+```python
+from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation
+import pandas as pd
+
+tickers = ["AAPL", "MSFT", "GOOGL"]
+price_data = {t: provider.get_ohlcv(t, "2022-01-01", "2024-01-01") for t in tickers}
+
+# Rebalance calendar: index = rebalance dates only (not every bar), one
+# column per ticker, values = target fraction of account equity.
+target_weights = pd.DataFrame(
+    {"AAPL": [0.4, 0.3], "MSFT": [0.3, 0.3], "GOOGL": [0.2, 0.3]},
+    index=pd.to_datetime(["2022-01-03", "2022-07-01"]),
+)
+
+result = run_portfolio_simulation(
+    price_data, target_weights,
+    initial_capital=100_000.0,
+    max_gross_leverage=1.0,   # reject any rebalance date requesting more than fully invested
+)
+
+print(f"Final equity : ${result['final_equity']:,.2f}")
+print(f"Final cash   : ${result['final_cash']:,.2f}")
+print(result["rebalance_log"])           # date, turnover_pct, gross_leverage_after, n_positions
+print(result["equity_curve"].tail())      # drifts between rebalances, doesn't jump
+```
+
+**Why this is a different engine, not a flag on `run_signal_panel_backtest`:**
+between rebalance dates, share counts stay fixed but `equity_curve` still
+moves bar-to-bar as prices move — weights **drift** with the market exactly
+like a real account. `run_signal_panel_backtest`'s fixed per-bar weighted
+blend can't represent that, because it never tracks share counts or cash at
+all.
+
+**Output:** `equity_curve`, `cash_curve`, `gross_exposure_curve`,
+`net_exposure_curve` (all `pd.Series`), `rebalance_log` (`pd.DataFrame`:
+`date`, `turnover_pct`, `gross_leverage_after`, `n_positions`),
+`final_equity`, `final_cash`, `warnings` (e.g. flags if cash ever went
+negative — implied margin borrowing).
+
+**Validation (raises `ValidationError` — same self-correcting-error pattern
+as everywhere else in this library):** every ticker must be present at every
+rebalance date (`target_weights` must be dense); `sum(|weight|)` per
+rebalance date can't exceed `max_gross_leverage` (default `1.0` = fully
+invested, no leverage); no single `|weight|` can exceed `max_position_pct`
+(default `1.0`); every rebalance date must fall on a day all tickers have
+price data for (the master trading calendar is the **intersection** of every
+ticker's own index).
+
+**Scope, stated explicitly:** fills happen at that bar's `Close` only (no
+`fill_price="next_open"` yet — see [Execution Timing](#execution-timing-fill_price)
+above); costs are the same flat `commission_pct`/`slippage_pct` every other
+tool uses (no per-share/ADV/impact model yet); short-sale proceeds are
+credited to cash in full with no margin/haircut modeling. All three are
+natural follow-on work, not required for the shared-cash architecture itself
+to be correct.
+
+For LLM/JSON tool-calling, see the `run_portfolio_simulation` agent tool in
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md#15-true-portfolio-simulation) —
+same idea, JSON-shaped `{ticker: {date: weight}}` input for function calling.
+
+---
+
 ## Understanding the Output
 
 | Key | Type | Description |

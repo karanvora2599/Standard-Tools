@@ -17,6 +17,7 @@ from standard_quant_tools.agent.models import (
     PortfolioInput,
     PCAInput,
     BacktestDiagnosticsInput,
+    PortfolioSimulationInput,
 )
 from standard_quant_tools.agent.tools import (
     get_agent_tools,
@@ -29,6 +30,7 @@ from standard_quant_tools.agent.tools import (
     run_buy_and_hold,
     compare_strategies,
     get_backtest_diagnostics,
+    run_portfolio_simulation,
     dispatch,
 )
 
@@ -73,8 +75,8 @@ def patched_long(long_ohlcv, monkeypatch):
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 class TestToolRegistry:
-    def test_now_has_twenty_eight_tools(self):
-        assert len(get_agent_tools()) == 28
+    def test_now_has_twenty_nine_tools(self):
+        assert len(get_agent_tools()) == 29
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -1172,3 +1174,78 @@ class TestBacktestDiagnostics:
             fill_price="next_open",
         ))
         assert base.total_return != pytest.approx(next_open.total_return, abs=1e-9)
+
+
+# ── True Portfolio Simulation (shared cash, rebalancing) ──────────────────────
+
+def _rebalance_weights(long_ohlcv, tickers, weight_per_ticker, rebalance_indices):
+    dates = [str(long_ohlcv.index[i].date()) for i in rebalance_indices]
+    return {t: {d: weight_per_ticker for d in dates} for t in tickers}
+
+
+class TestPortfolioSimulation:
+    def test_returns_result(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0, 100, 300])
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+        )
+        result = run_portfolio_simulation(inp)
+        assert result.tickers == tickers
+        assert result.n_rebalances == 3
+        assert len(result.rebalance_log) == 3
+
+    def test_summary_fields_typed(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0, 150])
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+        )
+        result = run_portfolio_simulation(inp)
+        for field in ("total_return", "annualized_return", "annualized_volatility",
+                      "sharpe_ratio", "sortino_ratio", "max_drawdown", "calmar_ratio",
+                      "var_95", "cvar_95", "avg_gross_leverage", "max_gross_leverage_used"):
+            assert isinstance(getattr(result, field), float)
+        assert result.final_equity > 0
+        assert len(result.equity_curve) > 0
+
+    def test_rebalance_log_reports_gross_leverage_near_target(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT", "GOOGL"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.25, [0])  # gross = 0.75
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            commission_pct=0.0, slippage_pct=0.0,
+        )
+        result = run_portfolio_simulation(inp)
+        assert result.rebalance_log[0].gross_leverage_after == pytest.approx(0.75, abs=1e-6)
+        assert result.rebalance_log[0].n_positions == 3
+
+    def test_gross_leverage_exceeded_raises(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.8, [0])  # gross = 1.6
+        inp_kwargs = dict(tickers=tickers, start_date=START, end_date=END, target_weights=weights)
+        with pytest.raises(pydantic.ValidationError, match="leverage"):
+            PortfolioSimulationInput(**inp_kwargs)
+
+    def test_mismatched_rebalance_calendars_raise(self, long_ohlcv):
+        dates_a = [str(long_ohlcv.index[0].date())]
+        dates_b = [str(long_ohlcv.index[10].date())]
+        with pytest.raises(pydantic.ValidationError, match="rebalance calendar"):
+            PortfolioSimulationInput(
+                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                target_weights={
+                    "AAPL": {dates_a[0]: 0.4},
+                    "MSFT": {dates_b[0]: 0.4},
+                },
+            )
+
+    def test_dispatched_through_dispatch(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
+        result = dispatch("run_portfolio_simulation", {
+            "tickers": tickers, "start_date": START, "end_date": END,
+            "target_weights": weights,
+        })
+        assert result["tickers"] == tickers
+        assert "rebalance_log" in result
+        assert "sharpe_ratio" in result

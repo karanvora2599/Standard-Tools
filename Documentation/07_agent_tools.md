@@ -56,13 +56,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **28 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **29 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 28
+print(len(tools))  # 29
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -113,7 +113,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 28 valid names.
+- **`ValueError`** — unknown tool name; message lists all 29 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -196,7 +196,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 28 financial tools:
+You are a quantitative analyst assistant with access to 29 financial tools:
 
 CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
@@ -1218,7 +1218,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 28 tools:
+You are a quantitative investment analyst. You have 29 tools:
 
 Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
 run_bollinger_backtest, run_buy_and_hold (passive baseline),
@@ -2046,15 +2046,17 @@ print(f"Example params: {playbook['example_params']}")
 | `PCAInput` | `tickers`, `start_date`, `end_date` | `n_components=3` (must be ≥ 1) |
 | `HurstInput` | `symbol`, `start_date`, `end_date` | `method="dfa"`, `rolling_window=None` |
 
-**Advanced tools (5)**
+**Advanced tools (7)**
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
 | `RegimeAdaptiveInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"`, `sma/rsi/macd/bollinger_param_grid=None`, `n_workers=1` |
+| `RegimeAdaptiveWalkForwardInput` | `symbol`, `start_date`, `end_date` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"`, `sma/rsi/macd/bollinger_param_grid=None`, `sort_by="sharpe_ratio"` |
 | `PairScannerInput` | `tickers`, `start_date`, `end_date` | `max_pairs=10`, `min_half_life=5.0`, `max_half_life=126.0`, `p_value_threshold=0.05`, `zscore_window=30` |
 | `WalkForwardInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"` |
 | `RiskAttributionInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"`, `n_components=3`, `factor_tickers=None`, `factor_names=None` |
 | `PositionSizerInput` | `symbol`, `start_date`, `end_date`, `account_equity` | `risk_per_trade_pct=0.01` (must be in (0,1]), `atr_period=14`, `atr_multiplier=2.0`, `win_rate=None`, `avg_win_pct=None`, `avg_loss_pct=None` |
+| `PortfolioSimulationInput` | `tickers`, `start_date`, `end_date`, `target_weights` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `max_gross_leverage=1.0`, `max_position_pct=1.0`, `benchmark=None` |
 
 **Supplementary tools (6)**
 
@@ -2120,6 +2122,8 @@ print(f"Example params: {playbook['example_params']}")
 | Model | Key fields |
 |---|---|
 | `RegimeAdaptiveResult` | `symbol`, `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_parameters`, `grid_combinations`, `backtest` (full `BacktestResult`) |
+| `RegimeAdaptiveWalkForwardResult` | `symbol`, `n_windows`, `windows` (List[`RegimeAdaptiveWalkForwardWindow`]), `avg_oos_sharpe`, `avg_oos_return`, `avg_oos_max_drawdown`, `pct_windows_profitable`, `strategy_stability`, `stitched_oos_return`, `stitched_oos_sharpe`, `stitched_oos_sortino`, `stitched_oos_max_drawdown`, `stitched_oos_calmar`, `worst_oos_window`, `longest_losing_window_streak` |
+| `RegimeAdaptiveWalkForwardWindow` | `window_index`, `train_start`, `train_end`, `test_start`, `test_end`, `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_params`, `in_sample_sharpe`, `in_sample_return`, `out_of_sample_sharpe`, `out_of_sample_return`, `out_of_sample_max_drawdown` |
 | `PairScannerResult` | `n_pairs_tested`, `n_pairs_cointegrated`, `n_pairs_returned`, `pairs` (List[`PairResult`]), `failed_pairs` (List[`PairFailure`]), `failed_tickers` (`Dict[str, str]`) |
 | `PairResult` | `symbol_a`, `symbol_b`, `p_value`, `hedge_ratio`, `half_life_days`, `adf_statistic`, `current_zscore`, `signal` |
 | `PairFailure` | `symbol_a`, `symbol_b`, `reason` |
@@ -2127,6 +2131,8 @@ print(f"Example params: {playbook['example_params']}")
 | `WalkForwardWindow` | `window_index`, `train_start`, `train_end`, `test_start`, `test_end`, `best_params`, `in_sample_sharpe`, `in_sample_return`, `out_of_sample_sharpe`, `out_of_sample_return`, `out_of_sample_max_drawdown` |
 | `RiskAttributionResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio`, `asset_risk_contributions`, `pca_variance_explained`, `portfolio_pc_exposures`, `factor_loadings`, `factor_r_squared`, `factor_alpha` |
 | `PositionSizerResult` | `symbol`, `last_close`, `atr`, `atr_pct`, `stop_distance`, `shares_fixed_risk`, `position_value_fixed_risk`, `portfolio_pct_fixed_risk`, `max_loss_fixed_risk`, `kelly_fraction`, `shares_half_kelly`, `position_value_half_kelly`, `portfolio_pct_half_kelly`, `recommended_sizing`, `recommended_shares`, `recommended_position_value` |
+| `PortfolioSimulationResult` | `tickers`, `n_rebalances`, `rebalance_log` (List[`RebalanceEvent`]), `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `information_ratio`, `final_equity`, `final_cash`, `avg_gross_leverage`, `max_gross_leverage_used`, `equity_curve`, `warnings` |
+| `RebalanceEvent` | `date`, `turnover_pct`, `gross_leverage_after`, `n_positions` |
 
 **Supplementary tools**
 

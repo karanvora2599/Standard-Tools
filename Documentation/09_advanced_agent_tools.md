@@ -1,14 +1,14 @@
 # Advanced Agent Tools
 
-Fourteen high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Fifteen high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 28), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 29), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
 ## Tool Summary
 
-**Advanced tools (6)**
+**Advanced tools (7)**
 
 | Tool | What it does | Key output fields |
 |---|---|---|
@@ -18,6 +18,7 @@ Fourteen high-level agentic tools that compose the library's existing primitives
 | `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `stitched_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
 | `get_portfolio_risk_attribution` | Deep risk decomposition: MCR, PCA, optional factor model | `asset_risk_contributions`, `pca_variance_explained` |
 | `get_position_size` | ATR stop-loss sizing with optional Kelly criterion | `shares_fixed_risk`, `kelly_fraction`, `recommended_shares` |
+| `run_portfolio_simulation` | True shared-cash portfolio: rebalancing, position sizing vs. current equity, weight drift between rebalances | `rebalance_log`, `avg_gross_leverage`, `final_equity`, `final_cash` |
 
 **Supplementary tools (5)**
 
@@ -1783,3 +1784,79 @@ for win in result.windows:
 Each `RegimeAdaptiveWalkForwardWindow` additionally reports `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_params`, `in_sample_sharpe`, `in_sample_return` alongside the usual `out_of_sample_*` fields.
 
 **Cost:** each window grid-searches four strategies instead of one, so this tool costs roughly 4× a single `run_walk_forward_backtest` call per window. Still fast enough for interactive use at default grid sizes (~35 combinations total per window).
+
+---
+
+## 15. True Portfolio Simulation
+
+`run_portfolio_simulation` is the shared-cash counterpart to
+`run_signal_panel_backtest` (§12). That tool gives every ticker its own
+independent `initial_capital` and only blends the resulting return streams
+— fine for research, not a real portfolio. This tool maintains **one
+account**: a shared cash balance, positions sized against **current
+equity**, and rebalancing only at the dates you specify — share counts stay
+fixed between rebalances while weights drift with the market, exactly like
+a real account.
+
+```python
+from standard_quant_tools.agent.tools import run_portfolio_simulation
+from standard_quant_tools.agent.models import PortfolioSimulationInput
+
+result = run_portfolio_simulation(PortfolioSimulationInput(
+    tickers=["AAPL", "MSFT", "GOOGL"],
+    start_date="2022-01-01",
+    end_date="2024-01-01",
+    target_weights={
+        "AAPL":  {"2022-01-03": 0.4, "2022-07-01": 0.3},
+        "MSFT":  {"2022-01-03": 0.3, "2022-07-01": 0.3},
+        "GOOGL": {"2022-01-03": 0.2, "2022-07-01": 0.3},
+    },
+    initial_capital=100_000.0,
+    max_gross_leverage=1.0,
+))
+
+print(f"Rebalances     : {result.n_rebalances}")
+print(f"Final equity   : ${result.final_equity:,.2f}")
+print(f"Sharpe         : {result.sharpe_ratio:.2f}")
+print(f"Avg leverage   : {result.avg_gross_leverage:.2f}")
+
+for r in result.rebalance_log:
+    print(f"[{r.date}]  turnover={r.turnover_pct:.1%}  "
+          f"leverage_after={r.gross_leverage_after:.2f}  positions={r.n_positions}")
+
+if result.warnings:
+    print("Warnings:", result.warnings)
+```
+
+**`target_weights` shape:** `{ticker: {date: weight}}`, same convention as
+`run_signal_panel_backtest`'s `signal_panel` — but here every ticker must
+share the **identical set of dates** (that shared set is the rebalance
+calendar), and a value is a target *fraction of account equity*
+(negative for short), not a `{-1, 0, 1}` direction.
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `n_rebalances`, `rebalance_log` | — | One `RebalanceEvent` per rebalance date: `date`, `turnover_pct`, `gross_leverage_after`, `n_positions` |
+| `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95` | `float` | Computed from the engine's `equity_curve` via the **existing** metrics functions — no new metric math |
+| `information_ratio` | `float?` | Present only when `benchmark` is set |
+| `final_equity`, `final_cash` | `float` | Account state at the last bar |
+| `avg_gross_leverage`, `max_gross_leverage_used` | `float` | `gross_exposure / equity` averaged and maxed across every bar (not just rebalance dates) — shows how far weight drift pushed leverage between rebalances |
+| `equity_curve` | `List[float]` | Full daily curve — drifts between rebalances rather than jumping |
+| `warnings` | `List[str]` | E.g. `"cash went negative..."` if implied margin borrowing occurred |
+
+**Validation (Pydantic, fails fast with the offending date/ticker named):**
+`target_weights` must have an entry for every ticker; every ticker must
+share the identical rebalance-date set; per rebalance date, `sum(|weight|)`
+must not exceed `max_gross_leverage` (default `1.0`); no single `|weight|`
+may exceed `max_position_pct` (default `1.0` — reuses the same
+`SignalType.TARGET_WEIGHT` bound check `CustomSignalBacktestInput` already
+uses, since a per-position weight bound is exactly that check).
+
+**Scope, stated explicitly (see [04_backtesting.md](04_backtesting.md#true-portfolio-simulation-shared-cash) for the full list):**
+fills at `Close` only (no `fill_price="next_open"` yet), flat
+`commission_pct`/`slippage_pct` costs (no pluggable cost model yet), and
+short-sale proceeds credited to cash in full with no margin/haircut
+modeling. None of these are required for the shared-cash accounting itself
+to be correct — they're natural follow-on work.

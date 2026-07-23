@@ -42,6 +42,7 @@ from .tools import (
     run_custom_signal_backtest,
     run_signal_panel_backtest,
     get_backtest_diagnostics,
+    run_portfolio_simulation,
     # LLM wiring
     get_agent_tools,
     dispatch,
@@ -108,6 +109,9 @@ from .models import (
     DrawdownEpisode,
     TradeDiagnostics,
     ExposureDiagnostics,
+    PortfolioSimulationInput,
+    RebalanceEvent,
+    PortfolioSimulationResult,
 )
 
 __all__ = [
@@ -140,6 +144,7 @@ __all__ = [
     "run_custom_signal_backtest",
     "run_signal_panel_backtest",
     "get_backtest_diagnostics",
+    "run_portfolio_simulation",
     "get_agent_tools",
     "dispatch",
     # auditability
@@ -204,4 +209,7 @@ __all__ = [
     "DrawdownEpisode",
     "TradeDiagnostics",
     "ExposureDiagnostics",
+    "PortfolioSimulationInput",
+    "RebalanceEvent",
+    "PortfolioSimulationResult",
 ]

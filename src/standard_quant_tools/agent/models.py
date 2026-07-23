@@ -1010,6 +1010,91 @@ class SignalPanelBacktestResult(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# True Portfolio Simulation (shared cash, rebalancing — the gap
+# run_signal_panel_backtest can't close, since it gives every ticker its
+# own independent capital and only blends return streams afterward)
+# ──────────────────────────────────────────────
+
+class PortfolioSimulationInput(BaseModel):
+    tickers: List[str] = Field(..., description="Ticker universe. Must match target_weights' outer keys.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    target_weights: Dict[str, Dict[str, float]] = Field(
+        ...,
+        description=(
+            "Per-ticker target-weight map: {ticker: {date: weight}}, weight = "
+            "fraction of account equity (negative for short). Every ticker must "
+            "share the identical set of rebalance dates — that shared date set "
+            "is the rebalance calendar. Between rebalance dates, share counts "
+            "stay fixed and weights drift with the market, unlike "
+            "run_signal_panel_backtest's fixed per-bar blend."
+        ),
+    )
+    initial_capital: float = Field(10_000.0, description="Starting cash for the whole account.")
+    commission_pct: float = Field(0.001, description="Commission per trade notional (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade notional (fraction).")
+    max_gross_leverage: float = Field(
+        1.0, description="Reject any rebalance date whose sum(|weight|) exceeds this (default 1.0 = fully invested, no leverage)."
+    )
+    max_position_pct: float = Field(
+        1.0, description="Reject any single position whose |weight| exceeds this."
+    )
+    benchmark: Optional[str] = Field(None, description="Optional benchmark ticker — adds information_ratio.")
+
+    @model_validator(mode="after")
+    def _check_weights_panel(self) -> "PortfolioSimulationInput":
+        missing = [t for t in self.tickers if t not in self.target_weights]
+        if missing:
+            raise ValueError(f"target_weights is missing entries for: {missing}")
+        date_sets = {t: frozenset(self.target_weights[t]) for t in self.tickers}
+        calendars = set(date_sets.values())
+        if len(calendars) > 1:
+            raise ValueError(
+                "every ticker in target_weights must share the identical set of "
+                f"rebalance dates (the rebalance calendar); got mismatched sets: {date_sets}"
+            )
+        for date in next(iter(calendars), frozenset()):
+            row = {t: self.target_weights[t][date] for t in self.tickers}
+            _validate_signal_values(row, SignalType.TARGET_WEIGHT, self.max_position_pct)
+            gross = sum(abs(v) for v in row.values())
+            if gross > self.max_gross_leverage + 1e-9:
+                raise ValueError(
+                    f"rebalance date {date}: gross leverage {gross:.4f} exceeds "
+                    f"max_gross_leverage={self.max_gross_leverage}"
+                )
+        return self
+
+
+class RebalanceEvent(BaseModel):
+    date: str
+    turnover_pct: float
+    gross_leverage_after: float
+    n_positions: int
+
+
+class PortfolioSimulationResult(BaseModel):
+    tickers: List[str]
+    n_rebalances: int
+    rebalance_log: List[RebalanceEvent]
+    total_return: float
+    annualized_return: float
+    annualized_volatility: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    max_drawdown: float
+    calmar_ratio: float
+    var_95: float
+    cvar_95: float
+    information_ratio: Optional[float] = None
+    final_equity: float
+    final_cash: float
+    avg_gross_leverage: float
+    max_gross_leverage_used: float
+    equity_curve: List[float]
+    warnings: List[str] = []
+
+
+# ──────────────────────────────────────────────
 # Extended Backtest Diagnostics
 # ──────────────────────────────────────────────
 

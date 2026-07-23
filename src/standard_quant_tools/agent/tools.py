@@ -25,6 +25,7 @@ from standard_quant_tools.indicators.volume import obv, vwap, mfi
 from standard_quant_tools.backtest.engine import run_strategy, backtest_grid
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.backtest.panel import run_signal_panel_backtest as _signal_panel_backtest
+from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation as _portfolio_engine_run
 from standard_quant_tools.backtest.walk_forward import (
     stitch_oos_returns, compute_stitched_metrics,
     longest_losing_streak, parameter_turnover,
@@ -34,7 +35,7 @@ from standard_quant_tools.analysis.multi_factor import multi_factor_regression, 
 from standard_quant_tools.analysis.cointegration import cointegration_test, compute_spread, spread_zscore
 from standard_quant_tools.analysis.pca import pca_returns, factor_contributions
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
-from standard_quant_tools.metrics.return_metrics import cagr, annualized_volatility
+from standard_quant_tools.metrics.return_metrics import cagr, annualized_volatility, cumulative_return
 from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, sortino_ratio, max_drawdown,
     var_historical, cvar, information_ratio,
@@ -72,6 +73,7 @@ from standard_quant_tools.agent.models import (
     SignalPanelBacktestInput, SignalPanelBacktestResult,
     BacktestDiagnosticsInput, DrawdownEpisode, TradeDiagnostics,
     ExposureDiagnostics, BacktestDiagnosticsResult,
+    PortfolioSimulationInput, RebalanceEvent, PortfolioSimulationResult,
 )
 
 
@@ -1784,6 +1786,98 @@ def run_signal_panel_backtest(input_data: SignalPanelBacktestInput) -> SignalPan
 
 
 # ──────────────────────────────────────────────────────────────────
+# True Portfolio Simulation (shared cash, rebalancing)
+# ──────────────────────────────────────────────────────────────────
+
+def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioSimulationResult:
+    """
+    True shared-cash portfolio simulation: one account, position sizing
+    relative to current equity, and rebalancing at the dates in
+    target_weights — unlike run_signal_panel_backtest, which gives every
+    ticker its own independent capital and only blends per-ticker return
+    streams afterward. Reuses backtest/portfolio_engine.py for the
+    simulation and the existing metrics functions for the summary; no new
+    metric math.
+    """
+    logger.debug("[portfolio_simulation] tickers=%d  %s → %s  max_gross_leverage=%.2f",
+                 len(input_data.tickers), input_data.start_date, input_data.end_date,
+                 input_data.max_gross_leverage)
+    provider = DataFactory.get_provider()
+    price_data = {
+        t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)
+        for t in input_data.tickers
+    }
+
+    target_weights = pd.DataFrame({
+        t: pd.Series({pd.Timestamp(d): v for d, v in input_data.target_weights[t].items()})
+        for t in input_data.tickers
+    }).sort_index()
+
+    raw = _portfolio_engine_run(
+        price_data, target_weights,
+        initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+        max_gross_leverage=input_data.max_gross_leverage,
+        max_position_pct=input_data.max_position_pct,
+    )
+
+    equity_curve = raw["equity_curve"]
+    returns = equity_curve.pct_change().fillna(0.0)
+
+    ir: Optional[float] = None
+    if input_data.benchmark:
+        bench_df = provider.get_ohlcv(input_data.benchmark, input_data.start_date, input_data.end_date)
+        bench_returns = bench_df["Close"].pct_change().dropna()
+        common = returns.index.intersection(bench_returns.index)
+        if len(common) > 1:
+            ir = round(float(information_ratio(returns.loc[common], bench_returns.loc[common])), 4)
+
+    rebalance_events = [
+        RebalanceEvent(
+            date=str(r["date"]),
+            turnover_pct=float(r["turnover_pct"]),
+            gross_leverage_after=float(r["gross_leverage_after"]),
+            n_positions=int(r["n_positions"]),
+        )
+        for r in raw["rebalance_log"].to_dict(orient="records")
+    ]
+
+    gross_curve = raw["gross_exposure_curve"]
+    equity_safe = equity_curve.where(equity_curve.abs() > 1e-9, other=1e-9)
+    leverage_series = gross_curve / equity_safe
+    avg_gross_leverage = round(float(leverage_series.mean()), 4) if not leverage_series.empty else 0.0
+    max_gross_leverage_used = round(float(leverage_series.max()), 4) if not leverage_series.empty else 0.0
+
+    logger.debug(
+        "[portfolio_simulation] rebalances=%d  final_equity=%.2f  sharpe=%.3f  warnings=%s",
+        len(rebalance_events), raw["final_equity"], float(sharpe_ratio(returns)), raw["warnings"],
+    )
+
+    return PortfolioSimulationResult(
+        tickers=input_data.tickers,
+        n_rebalances=len(rebalance_events),
+        rebalance_log=rebalance_events,
+        total_return=round(float(cumulative_return(equity_curve)), 6),
+        annualized_return=round(float(cagr(equity_curve)), 6),
+        annualized_volatility=round(float(annualized_volatility(returns)), 6),
+        sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
+        sortino_ratio=round(float(sortino_ratio(returns)), 4),
+        max_drawdown=round(float(max_drawdown(equity_curve)), 6),
+        calmar_ratio=round(float(calmar_ratio(equity_curve)), 4),
+        var_95=round(float(var_historical(returns, 0.95)), 6),
+        cvar_95=round(float(cvar(returns, 0.95)), 6),
+        information_ratio=ir,
+        final_equity=round(float(raw["final_equity"]), 2),
+        final_cash=round(float(raw["final_cash"]), 2),
+        avg_gross_leverage=avg_gross_leverage,
+        max_gross_leverage_used=max_gross_leverage_used,
+        equity_curve=equity_curve.tolist(),
+        warnings=list(raw["warnings"]),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Extended Backtest Diagnostics
 # ──────────────────────────────────────────────────────────────────
 
@@ -1909,6 +2003,7 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("run_custom_signal_backtest", "Backtest a signal computed outside this library (your own alpha model) on one symbol.", CustomSignalBacktestInput),
         ("run_signal_panel_backtest", "Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.", SignalPanelBacktestInput),
         ("get_backtest_diagnostics", "Extended diagnostics for a built-in strategy: top drawdown episodes, trade expectancy/payoff/streaks with MAE/MFE, and exposure stats.", BacktestDiagnosticsInput),
+        ("run_portfolio_simulation", "True shared-cash portfolio simulation with rebalancing at target-weight dates — unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.", PortfolioSimulationInput),
     ]
 
     return [
@@ -1957,6 +2052,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_custom_signal_backtest":     (run_custom_signal_backtest,     CustomSignalBacktestInput),
     "run_signal_panel_backtest":      (run_signal_panel_backtest,      SignalPanelBacktestInput),
     "get_backtest_diagnostics":       (get_backtest_diagnostics,       BacktestDiagnosticsInput),
+    "run_portfolio_simulation":       (run_portfolio_simulation,       PortfolioSimulationInput),
 }
 
 
