@@ -49,7 +49,9 @@ produces a record like:
   "output_hash": "8a2b0ca80ac84ba1",
   "status": "ok",
   "error_type": null,
-  "error_message": null
+  "error_message": null,
+  "git_commit_sha": "463b874696913a8ec813c9a789465a443b66a15b",
+  "package_version": "0.1.0"
 }
 ```
 
@@ -57,6 +59,13 @@ produces a record like:
 `live_fetch`, with a content hash of the DataFrame actually used. Failed
 calls still produce a record — `status: "error"` with `error_type` /
 `error_message` set, and `output_hash: null`.
+
+`git_commit_sha` and `package_version` are reproducibility provenance: the
+exact commit and library version that produced this record, so a replay
+months later can tell "the code changed since this ran" apart from "the
+underlying data changed." Both are best-effort — `git_commit_sha` is `null`
+outside a git checkout or when git isn't installed; resolving them never
+raises or blocks the tool call itself.
 
 ### Env vars
 

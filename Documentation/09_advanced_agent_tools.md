@@ -2,7 +2,7 @@
 
 Twelve high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 26), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 27), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -27,6 +27,7 @@ Twelve high-level agentic tools that compose the library's existing primitives i
 | `get_advanced_indicators` | Parabolic SAR trend, Wilder ATR volatility, MFI volume signal | `sar_trend`, `wilder_atr_pct`, `mfi_signal` |
 | `get_rolling_beta` | Rolling OLS beta to detect drift vs a benchmark | `current_beta`, `beta_trend`, `beta_6m_ago` |
 | `get_extended_risk_metrics` | Calmar, Treynor, parametric VaR 95/99, historical VaR 99, CVaR 99 | `calmar_ratio`, `treynor_ratio`, `var_parametric_95` |
+| `get_backtest_diagnostics` | Drawdown episodes, trade expectancy/MAE-MFE, exposure stats for a built-in strategy | `top_drawdowns`, `trade_diagnostics`, `exposure` |
 
 **Custom signal tools (2)**
 
@@ -265,8 +266,12 @@ for pair in result.pairs:
 | `n_pairs_cointegrated` | `int` | Pairs passing p-value and half-life filters |
 | `n_pairs_returned` | `int` | Pairs in the result (capped at `max_pairs`) |
 | `pairs` | `List[PairResult]` | Sorted by `half_life_days` ascending |
+| `failed_pairs` | `List[PairFailure]` | Pairs where the cointegration test itself raised (e.g. degenerate/insufficient data) — distinct from a pair that was tested and simply didn't qualify |
+| `failed_tickers` | `Dict[str, str]` | Tickers whose price fetch failed, mapped to the error message; excluded from all pairwise testing |
 
-Each `PairResult` contains: `symbol_a`, `symbol_b`, `p_value`, `hedge_ratio`, `half_life_days`, `adf_statistic`, `current_zscore`, `signal`.
+Each `PairResult` contains: `symbol_a`, `symbol_b`, `p_value`, `hedge_ratio`, `half_life_days`, `adf_statistic`, `current_zscore`, `signal`. Each `PairFailure` contains: `symbol_a`, `symbol_b`, `reason`.
+
+**Why failures are reported explicitly:** before this, a pair whose cointegration test raised an exception was silently absorbed into `n_pairs_tested` with no trace — indistinguishable from a pair that was tested cleanly and just didn't pass the p-value/half-life filters. `failed_pairs` and `failed_tickers` make that distinction visible instead of requiring the caller to guess.
 
 **Full workflow — scan, select top pair, and get position size:**
 
@@ -458,6 +463,18 @@ for win in result.windows:
 | `avg_oos_max_drawdown` | `float` | Mean OOS max drawdown per window |
 | `pct_windows_profitable` | `float` | Fraction of OOS windows with positive return |
 | `param_stability` | `dict` | Most common winning parameter per key + frequency |
+| `stitched_oos_return` | `float` | Compounded total return across all OOS windows, from one chronological equity curve |
+| `stitched_oos_sharpe` | `float` | Sharpe of the stitched OOS return series |
+| `stitched_oos_sortino` | `float` | Sortino of the stitched OOS return series |
+| `stitched_oos_max_drawdown` | `float` | Max drawdown of the stitched OOS equity curve |
+| `stitched_oos_calmar` | `float` | Calmar of the stitched OOS equity curve |
+| `is_to_oos_sharpe_decay` | `float` | Avg in-sample Sharpe minus stitched OOS Sharpe |
+| `is_to_oos_return_decay` | `float` | Avg in-sample return minus stitched OOS return |
+| `worst_oos_window` | `int` | `window_index` of the window with the lowest `out_of_sample_return` |
+| `longest_losing_window_streak` | `int` | Longest run of consecutive windows with negative OOS return |
+| `parameter_turnover` | `float` | Fraction of consecutive windows whose `best_params` changed (0.0 = perfectly stable, 1.0 = changes every window) |
+
+> **Why both `avg_oos_*` and `stitched_oos_*` exist:** `avg_oos_sharpe`/`avg_oos_return`/`avg_oos_max_drawdown` average each window's independently-computed stats — simple, but it misrepresents compounding. Two windows of +20% and -20% average to a 0% return, but an account that actually lived through both windows sequentially would be down ~4% (1.2 × 0.8 − 1). `stitched_oos_*` concatenates every window's out-of-sample daily returns into one chronological series and computes metrics from a single resulting equity curve — the economically correct aggregate. Prefer `stitched_oos_*` for reporting; the `avg_oos_*` fields are kept for backward compatibility and as a quick per-window sanity check.
 
 **Detecting overfitting — is-sample Sharpe that vanishes out-of-sample:**
 
@@ -1661,4 +1678,55 @@ print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
 **Validation:** `signal_panel` must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0 — both raise a Pydantic `ValidationError` with the offending ticker(s) named directly, so the calling agent can retry with a corrected payload.
 
 **Note on scale:** per-ticker equity curves are aligned to their common date range (inner join) before being combined into the portfolio — a ticker whose signal/price data doesn't fully cover the requested range will shrink the portfolio's effective date range. For very large universes, prefer calling this tool once per rebalance period rather than once per ticker.
+
+---
+
+## 6. Extended Backtest Diagnostics
+
+Sharpe and total return don't tell you whether a backtest is trustworthy. `get_backtest_diagnostics` runs one of the library's built-in strategies (same `strategy_type`/`parameters` shape as `run_sma_backtest` etc.) and layers on three additional diagnostic sections: drawdown episodes with recovery time, trade expectancy/payoff with MAE/MFE, and exposure statistics. It reuses `run_strategy` for the backtest itself — no new backtest math, only new analysis of the same equity curve and trade log every other backtest tool already produces.
+
+```python
+from standard_quant_tools.agent.tools import get_backtest_diagnostics
+from standard_quant_tools.agent.models import BacktestDiagnosticsInput
+
+result = get_backtest_diagnostics(BacktestDiagnosticsInput(
+    symbol="AAPL",
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    strategy_type="sma_crossover",
+    parameters={"fast_period": 10, "slow_period": 50},
+    top_n_drawdowns=5,
+))
+
+print(f"Sharpe: {result.sharpe_ratio:.2f}  Return: {result.total_return:.1%}  Trades: {result.num_trades}")
+
+print("\nWorst drawdowns:")
+for dd in result.top_drawdowns:
+    status = f"recovered in {dd.recovery_bars} bars" if dd.end else "still underwater"
+    print(f"  {dd.start} → {dd.trough}  depth={dd.depth:.1%}  {status}")
+
+td = result.trade_diagnostics
+print(f"\nExpectancy: {td.expectancy_pct:+.2f}%  Payoff ratio: {td.payoff_ratio:.2f}  "
+      f"Max losing streak: {td.max_consecutive_losses}")
+print(f"Avg MAE: {td.avg_mae_pct:.2f}%  Avg MFE: {td.avg_mfe_pct:.2f}%")
+
+exp = result.exposure
+print(f"\nTime in market: {exp.time_in_market:.0%}  "
+      f"Avg holding period: {exp.avg_holding_period_bars} bars")
+```
+
+**How MAE/MFE are recovered without engine changes:** the backtest engine's trade log only stores each trade's entry/exit price and date, not its intra-trade price path. `get_backtest_diagnostics` re-walks the same OHLCV data every backtest tool already fetches, slicing it by each trade's own `entry_date`/`exit_date`, and computes the maximum favorable/adverse move (using High/Low, sign-adjusted for long vs. short) relative to the entry price.
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `num_trades` | — | Same as `BacktestResult`'s summary fields |
+| `top_drawdowns` | `List[DrawdownEpisode]` | The `top_n_drawdowns` deepest episodes, worst first |
+| `trade_diagnostics` | `TradeDiagnostics` | Expectancy, payoff ratio, consecutive win/loss streaks, avg MAE/MFE |
+| `exposure` | `ExposureDiagnostics` | Time in market, gross/net exposure, long/short split, avg holding period |
+
+`DrawdownEpisode` fields: `start` (peak before the decline), `trough`, `end` (`None` if still underwater), `depth` (negative fraction), `duration_bars` (peak → recovery), `recovery_bars` (trough → recovery, `None` if unrecovered).
+
+`TradeDiagnostics.payoff_ratio` can be `inf` when there are no losing trades — the same convention `BacktestResult.profit_factor` already uses elsewhere in this library.
 ```

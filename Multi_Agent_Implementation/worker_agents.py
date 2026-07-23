@@ -1,9 +1,9 @@
 """
 Worker-agent registry for the multi-agent Standard Quant Tools example.
 
-Each worker owns a small, non-overlapping subset of the library's 26 agent
+Each worker owns a small, non-overlapping subset of the library's 27 agent
 tools and a system prompt scoped to exactly that workflow. Together the six
-workers cover all 26 tools exactly once — see test_multi_agent_tool_coverage
+workers cover all 27 tools exactly once — see test_multi_agent_tool_coverage
 in tests/ for the coverage check.
 
 This is the direct, structural answer to "how do I stop the model confusing
@@ -73,12 +73,14 @@ your tool calls.""",
             "run_sma_backtest", "run_rsi_backtest", "run_macd_backtest",
             "run_bollinger_backtest", "run_buy_and_hold", "compare_strategies",
             "run_backtest_optimization", "run_regime_adaptive_backtest",
-            "run_walk_forward_backtest",
+            "run_walk_forward_backtest", "get_backtest_diagnostics",
         ],
         "system_prompt": """You are a backtesting specialist for the library's BUILT-IN indicator
 strategies: SMA crossover, RSI mean-reversion, MACD crossover, Bollinger
 reversion, buy-and-hold baselines, multi-strategy comparison, parameter grid
-search, regime-adaptive strategy selection, and walk-forward validation.
+search, regime-adaptive strategy selection, walk-forward validation, and
+extended diagnostics (drawdown episodes, trade expectancy/MAE-MFE, exposure)
+for any of the built-in strategies above.
 
 IMPORTANT: if a request comes with a signal someone else already computed (an
 explicit list or map of values, not "find me a good strategy"), that is NOT

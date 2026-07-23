@@ -4,3 +4,7 @@ from .risk_metrics import (
     calmar_ratio, var_historical, var_parametric, cvar,
     information_ratio, treynor_ratio, drawdown_series,
 )
+from .diagnostics import (
+    drawdown_periods, top_n_drawdowns,
+    trade_expectancy, trade_excursions, exposure_stats,
+)

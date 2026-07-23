@@ -2,17 +2,17 @@
 Multi-Agent Orchestrator — Anthropic / Claude Haiku.
 
 Demonstrates an orchestrator-workers architecture on top of Standard Quant
-Tools' 26 agent tools: instead of one agent choosing among all 26 tools
+Tools' 27 agent tools: instead of one agent choosing among all 27 tools
 every turn, a top-level orchestrator delegates each sub-task to a specialist
 worker agent (see worker_agents.py) that only ever sees the small subset of
 tools relevant to its own workflow.
 
-The orchestrator's own "tools" are not the library's 26 — they are six
+The orchestrator's own "tools" are not the library's 27 — they are six
 hand-authored delegate_to_<worker>_agent(request) tools, one per worker.
 Calling one spins up a fresh, independently-scoped run_agent() session for
 that worker and returns its final answer as the tool result.
 
-Why this helps over a single flat 26-tool agent: a worker that was never
+Why this helps over a single flat 27-tool agent: a worker that was never
 given run_sma_backtest cannot mistakenly call it instead of
 run_custom_signal_backtest — the confusable tool simply isn't in front of
 the model. Smaller tool lists also mean shorter, more focused system

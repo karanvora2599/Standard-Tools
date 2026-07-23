@@ -31,6 +31,7 @@ from standard_quant_tools.agent import (
     # Supplementary tools
     get_stock_fundamentals, run_backtest_optimization,
     get_advanced_indicators, get_rolling_beta, get_extended_risk_metrics,
+    get_backtest_diagnostics,
 )
 from standard_quant_tools.agent import (
     BacktestInput, BuyAndHoldInput, CompareStrategiesInput,
@@ -39,7 +40,7 @@ from standard_quant_tools.agent import (
     RegimeAdaptiveInput, PairScannerInput, WalkForwardInput,
     RiskAttributionInput, PositionSizerInput,
     FundamentalsInput, BacktestOptInput, AdvancedIndicatorsInput,
-    RollingBetaInput, ExtendedRiskInput,
+    RollingBetaInput, ExtendedRiskInput, BacktestDiagnosticsInput,
 )
 
 # Call any tool directly
@@ -55,13 +56,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **26 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **27 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 26
+print(len(tools))  # 27
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -112,7 +113,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 26 valid names.
+- **`ValueError`** — unknown tool name; message lists all 27 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -195,7 +196,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 26 financial tools:
+You are a quantitative analyst assistant with access to 27 financial tools:
 
 CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
@@ -1217,7 +1218,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 26 tools:
+You are a quantitative investment analyst. You have 27 tools:
 
 Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
 run_bollinger_backtest, run_buy_and_hold (passive baseline),
@@ -1231,11 +1232,12 @@ scan_pairs (find cointegrated pairs in a universe), run_walk_forward_backtest
 (OOS validation), get_portfolio_risk_attribution (MCR + PCA decomposition),
 get_position_size (ATR stop-loss + optional Kelly sizing).
 
-Supplementary (5): get_stock_fundamentals (PE, P/B, D/E, ROE, market cap),
+Supplementary (6): get_stock_fundamentals (PE, P/B, D/E, ROE, market cap),
 run_backtest_optimization (exhaustive parameter grid search, top N combos),
 get_advanced_indicators (Parabolic SAR, Wilder ATR, MFI),
 get_rolling_beta (rolling OLS beta drift over time),
-get_extended_risk_metrics (Calmar, Treynor, parametric VaR 95/99, CVaR 99).
+get_extended_risk_metrics (Calmar, Treynor, parametric VaR 95/99, CVaR 99),
+get_backtest_diagnostics (drawdown episodes, trade expectancy/MAE-MFE, exposure stats).
 
 Custom signal (2): run_custom_signal_backtest (backtest a signal the user/an
 upstream model already computed — never one you invent), run_signal_panel_backtest
@@ -2054,7 +2056,7 @@ print(f"Example params: {playbook['example_params']}")
 | `RiskAttributionInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"`, `n_components=3`, `factor_tickers=None`, `factor_names=None` |
 | `PositionSizerInput` | `symbol`, `start_date`, `end_date`, `account_equity` | `risk_per_trade_pct=0.01` (must be in (0,1]), `atr_period=14`, `atr_multiplier=2.0`, `win_rate=None`, `avg_win_pct=None`, `avg_loss_pct=None` |
 
-**Supplementary tools (5)**
+**Supplementary tools (6)**
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
@@ -2063,6 +2065,7 @@ print(f"Example params: {playbook['example_params']}")
 | `AdvancedIndicatorsInput` | `symbol`, `start_date`, `end_date` | `mfi_period=14`, `atr_period=14`, `sar_af_start=0.02`, `sar_af_max=0.2` |
 | `RollingBetaInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"`, `window=60` |
 | `ExtendedRiskInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"` |
+| `BacktestDiagnosticsInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `top_n_drawdowns=5` |
 
 **Custom signal tools (2)**
 
@@ -2106,10 +2109,11 @@ print(f"Example params: {playbook['example_params']}")
 | Model | Key fields |
 |---|---|
 | `RegimeAdaptiveResult` | `symbol`, `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_parameters`, `grid_combinations`, `backtest` (full `BacktestResult`) |
-| `PairScannerResult` | `n_pairs_tested`, `n_pairs_cointegrated`, `n_pairs_returned`, `pairs` (List[`PairResult`]) |
+| `PairScannerResult` | `n_pairs_tested`, `n_pairs_cointegrated`, `n_pairs_returned`, `pairs` (List[`PairResult`]), `failed_pairs` (List[`PairFailure`]), `failed_tickers` (`Dict[str, str]`) |
 | `PairResult` | `symbol_a`, `symbol_b`, `p_value`, `hedge_ratio`, `half_life_days`, `adf_statistic`, `current_zscore`, `signal` |
-| `WalkForwardResult` | `symbol`, `strategy`, `n_windows`, `windows` (List[`WalkForwardWindow`]), `avg_oos_sharpe`, `avg_oos_return`, `avg_oos_max_drawdown`, `pct_windows_profitable`, `param_stability` |
-| `WalkForwardWindow` | `window_index`, `train_start`, `train_end`, `test_start`, `test_end`, `best_params`, `in_sample_sharpe`, `out_of_sample_sharpe`, `out_of_sample_return`, `out_of_sample_max_drawdown` |
+| `PairFailure` | `symbol_a`, `symbol_b`, `reason` |
+| `WalkForwardResult` | `symbol`, `strategy`, `n_windows`, `windows` (List[`WalkForwardWindow`]), `avg_oos_sharpe`, `avg_oos_return`, `avg_oos_max_drawdown`, `pct_windows_profitable`, `param_stability`, `stitched_oos_return`, `stitched_oos_sharpe`, `stitched_oos_sortino`, `stitched_oos_max_drawdown`, `stitched_oos_calmar`, `is_to_oos_sharpe_decay`, `is_to_oos_return_decay`, `worst_oos_window`, `longest_losing_window_streak`, `parameter_turnover` |
+| `WalkForwardWindow` | `window_index`, `train_start`, `train_end`, `test_start`, `test_end`, `best_params`, `in_sample_sharpe`, `in_sample_return`, `out_of_sample_sharpe`, `out_of_sample_return`, `out_of_sample_max_drawdown` |
 | `RiskAttributionResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio`, `asset_risk_contributions`, `pca_variance_explained`, `portfolio_pc_exposures`, `factor_loadings`, `factor_r_squared`, `factor_alpha` |
 | `PositionSizerResult` | `symbol`, `last_close`, `atr`, `atr_pct`, `stop_distance`, `shares_fixed_risk`, `position_value_fixed_risk`, `portfolio_pct_fixed_risk`, `max_loss_fixed_risk`, `kelly_fraction`, `shares_half_kelly`, `position_value_half_kelly`, `portfolio_pct_half_kelly`, `recommended_sizing`, `recommended_shares`, `recommended_position_value` |
 
@@ -2123,6 +2127,10 @@ print(f"Example params: {playbook['example_params']}")
 | `AdvancedIndicatorsResult` | `symbol`, `last_close`, `sar_value`, `sar_trend`, `sar_signal`, `wilder_atr`, `wilder_atr_pct`, `mfi`, `mfi_signal` |
 | `RollingBetaResult` | `symbol`, `benchmark`, `window`, `current_beta`, `beta_1m_ago`, `beta_3m_ago`, `beta_6m_ago`, `beta_trend`, `beta_min`, `beta_max`, `beta_mean`, `n_obs` |
 | `ExtendedRiskResult` | `symbol`, `benchmark`, `annualized_return`, `calmar_ratio`, `treynor_ratio`, `var_parametric_95`, `var_parametric_99`, `var_historical_99`, `cvar_99`, `beta` |
+| `BacktestDiagnosticsResult` | `symbol`, `strategy_type`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `num_trades`, `top_drawdowns` (List[`DrawdownEpisode`]), `trade_diagnostics` (`TradeDiagnostics`), `exposure` (`ExposureDiagnostics`) |
+| `DrawdownEpisode` | `start`, `trough`, `end`, `depth`, `duration_bars`, `recovery_bars` |
+| `TradeDiagnostics` | `expectancy_pct`, `avg_winner_pct`, `avg_loser_pct`, `payoff_ratio`, `max_consecutive_wins`, `max_consecutive_losses`, `avg_mae_pct`, `avg_mfe_pct` |
+| `ExposureDiagnostics` | `time_in_market`, `avg_gross_exposure`, `avg_net_exposure`, `pct_long`, `pct_short`, `avg_holding_period_bars` |
 
 **Custom signal tools**
 

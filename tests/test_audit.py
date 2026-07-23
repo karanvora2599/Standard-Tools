@@ -93,6 +93,22 @@ class TestDispatchAudit:
         dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
         assert not audit_dir.exists() or _audit_records(audit_dir) == []
 
+    def test_record_includes_reproducibility_provenance(self, patched_factory, audit_dir: Path):
+        """
+        git_commit_sha/package_version are best-effort: this repo's own git
+        context makes git_commit_sha deterministically non-null when running
+        from a checkout, but the assertion tolerates None so it doesn't
+        break in a sandbox without git — the point is the keys are always
+        present and package_version is always resolvable (it's a plain
+        module attribute, no subprocess involved).
+        """
+        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        records = _audit_records(audit_dir)
+        assert len(records) == 1
+        assert "git_commit_sha" in records[0]
+        assert records[0]["git_commit_sha"] is None or isinstance(records[0]["git_commit_sha"], str)
+        assert records[0]["package_version"] == "0.1.0"
+
     def test_request_id_correlates_log_and_record(
         self, patched_factory, audit_dir: Path, caplog: pytest.LogCaptureFixture,
     ):

@@ -25,6 +25,10 @@ from standard_quant_tools.indicators.volume import obv, vwap, mfi
 from standard_quant_tools.backtest.engine import run_strategy, backtest_grid
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.backtest.panel import run_signal_panel_backtest as _signal_panel_backtest
+from standard_quant_tools.backtest.walk_forward import (
+    stitch_oos_returns, compute_stitched_metrics,
+    longest_losing_streak, parameter_turnover,
+)
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.analysis.multi_factor import multi_factor_regression, rolling_factor_loadings
 from standard_quant_tools.analysis.cointegration import cointegration_test, compute_spread, spread_zscore
@@ -35,6 +39,9 @@ from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, sortino_ratio, max_drawdown,
     var_historical, cvar, information_ratio,
     calmar_ratio, treynor_ratio, var_parametric,
+)
+from standard_quant_tools.metrics.diagnostics import (
+    top_n_drawdowns, trade_expectancy, trade_excursions, exposure_stats,
 )
 from standard_quant_tools.portfolio.portfolio import portfolio_metrics, fetch_returns_sync
 from standard_quant_tools.screener.screener import screen_stocks
@@ -49,7 +56,7 @@ from standard_quant_tools.agent.models import (
     PCAInput, PCAResult,
     HurstInput, HurstResult,
     RegimeAdaptiveInput, RegimeAdaptiveResult,
-    PairScannerInput, PairResult, PairScannerResult,
+    PairScannerInput, PairResult, PairFailure, PairScannerResult,
     WalkForwardInput, WalkForwardWindow, WalkForwardResult,
     RiskAttributionInput, RiskAttributionResult,
     PositionSizerInput, PositionSizerResult,
@@ -62,6 +69,8 @@ from standard_quant_tools.agent.models import (
     ExtendedRiskInput, ExtendedRiskResult,
     CustomSignalBacktestInput,
     SignalPanelBacktestInput, SignalPanelBacktestResult,
+    BacktestDiagnosticsInput, DrawdownEpisode, TradeDiagnostics,
+    ExposureDiagnostics, BacktestDiagnosticsResult,
 )
 
 
@@ -833,17 +842,20 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     provider = DataFactory.get_provider()
 
     prices: Dict[str, Optional[pd.Series]] = {}
+    failed_tickers: Dict[str, str] = {}
     for ticker in input_data.tickers:
         try:
             df = provider.get_ohlcv(ticker, input_data.start_date, input_data.end_date)
             prices[ticker] = df["Close"]
-        except Exception:
+        except Exception as exc:
             prices[ticker] = None
+            failed_tickers[ticker] = str(exc)
 
     valid_tickers = [t for t, p in prices.items() if p is not None]
     all_pairs = list(combinations(valid_tickers, 2))
     n_tested = 0
     passing: List[PairResult] = []
+    failed_pairs: List[PairFailure] = []
 
     for a, b in all_pairs:
         try:
@@ -877,19 +889,23 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
                 current_zscore=current_z,
                 signal=signal,
             ))
-        except Exception:
+        except Exception as exc:
             n_tested += 1
+            failed_pairs.append(PairFailure(symbol_a=a, symbol_b=b, reason=str(exc)))
 
     passing.sort(key=lambda p: p.half_life_days)
     top = passing[: input_data.max_pairs]
-    logger.debug("[scan_pairs] tested=%d  cointegrated=%d (%.0f%%)  returning=%d",
-                 n_tested, len(passing), 100 * len(passing) / max(n_tested, 1), len(top))
+    logger.debug("[scan_pairs] tested=%d  cointegrated=%d (%.0f%%)  returning=%d  failed_pairs=%d  failed_tickers=%d",
+                 n_tested, len(passing), 100 * len(passing) / max(n_tested, 1), len(top),
+                 len(failed_pairs), len(failed_tickers))
 
     return PairScannerResult(
         n_pairs_tested=n_tested,
         n_pairs_cointegrated=len(passing),
         n_pairs_returned=len(top),
         pairs=top,
+        failed_pairs=failed_pairs,
+        failed_tickers=failed_tickers,
     )
 
 
@@ -928,6 +944,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         )
 
     windows: List[WalkForwardWindow] = []
+    oos_return_series: List[pd.Series] = []
     cursor = 0
 
     while cursor + train_bars + test_bars <= n:
@@ -954,6 +971,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             for k in param_keys
         }
         is_sharpe = float(best_row.get("sharpe_ratio", 0.0))
+        is_return = float(best_row.get("total_return", 0.0))
 
         oos_signals = STRATEGY_REGISTRY[input_data.strategy](test_df, **best_params)
         oos = run_strategy(
@@ -962,6 +980,10 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
         )
+        # Recovered from the equity curve (always present in run_strategy's
+        # result) — same pattern used in backtest/panel.py — so each window's
+        # OOS returns can be stitched into one chronological series below.
+        oos_return_series.append(oos["equity_curve"].pct_change().fillna(0.0))
 
         windows.append(WalkForwardWindow(
             window_index=len(windows),
@@ -971,6 +993,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             test_end=str(test_df.index[-1].date()),
             best_params=best_params,
             in_sample_sharpe=round(is_sharpe, 4),
+            in_sample_return=round(is_return, 6),
             out_of_sample_sharpe=round(float(oos["sharpe_ratio"]), 4),
             out_of_sample_return=round(float(oos["total_return"]), 4),
             out_of_sample_max_drawdown=round(float(oos["max_drawdown"]), 4),
@@ -991,6 +1014,14 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             "frequency": round(most_common_n / len(windows), 3),
         }
 
+    # Stitched (compounded) OOS metrics — one equity curve across all windows,
+    # not an average of independently-computed per-window stats.
+    stitched_returns = stitch_oos_returns(oos_return_series)
+    stitched = compute_stitched_metrics(stitched_returns, input_data.initial_capital)
+    avg_is_sharpe = float(np.mean([w.in_sample_sharpe for w in windows]))
+    avg_is_return = float(np.mean([w.in_sample_return for w in windows]))
+    worst_window = min(windows, key=lambda w: w.out_of_sample_return)
+
     result_wf = WalkForwardResult(
         symbol=input_data.symbol,
         strategy=input_data.strategy,
@@ -1001,6 +1032,16 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         avg_oos_max_drawdown=round(float(np.mean(oos_mdd)), 4),
         pct_windows_profitable=round(pct_profitable, 4),
         param_stability=param_stability,
+        stitched_oos_return=round(stitched["total_return"], 6),
+        stitched_oos_sharpe=round(stitched["sharpe_ratio"], 4),
+        stitched_oos_sortino=round(stitched["sortino_ratio"], 4),
+        stitched_oos_max_drawdown=round(stitched["max_drawdown"], 6),
+        stitched_oos_calmar=round(stitched["calmar_ratio"], 4),
+        is_to_oos_sharpe_decay=round(avg_is_sharpe - stitched["sharpe_ratio"], 4),
+        is_to_oos_return_decay=round(avg_is_return - stitched["total_return"], 6),
+        worst_oos_window=worst_window.window_index,
+        longest_losing_window_streak=longest_losing_streak(oos_returns),
+        parameter_turnover=parameter_turnover([w.best_params for w in windows]),
     )
     logger.debug("[walk_forward] windows=%d  avg_OOS_sharpe=%.3f  avg_OOS_return=%.2f%%  profitable=%.0f%%",
                  result_wf.n_windows, result_wf.avg_oos_sharpe,
@@ -1570,6 +1611,95 @@ def run_signal_panel_backtest(input_data: SignalPanelBacktestInput) -> SignalPan
 
 
 # ──────────────────────────────────────────────────────────────────
+# Extended Backtest Diagnostics
+# ──────────────────────────────────────────────────────────────────
+
+def get_backtest_diagnostics(input_data: BacktestDiagnosticsInput) -> BacktestDiagnosticsResult:
+    """
+    Extended diagnostics for one of the library's built-in strategies:
+    top drawdown episodes (with recovery time), trade expectancy/payoff/
+    streaks with MAE/MFE, and exposure statistics — the detail Sharpe and
+    total return alone don't surface. Reuses run_strategy for the backtest
+    itself and the pure functions in metrics/diagnostics.py for everything
+    else; no new backtest math.
+    """
+    logger.debug("[backtest_diagnostics] %s  %s  %s → %s",
+                 input_data.symbol, input_data.strategy_type,
+                 input_data.start_date, input_data.end_date)
+    if input_data.strategy_type not in STRATEGY_REGISTRY:
+        raise ValueError(
+            f"Unknown strategy '{input_data.strategy_type}'. "
+            f"Available: {list(STRATEGY_REGISTRY)}"
+        )
+
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    signals = STRATEGY_REGISTRY[input_data.strategy_type](df, **input_data.parameters)
+
+    results = run_strategy(
+        df, signals, input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
+        include_trade_log=True,
+    )
+    equity_curve = results["equity_curve"]
+    trade_log = results.get("trade_log", pd.DataFrame())
+    # Same one-bar-lag convention run_strategy applies internally
+    # (signals.shift(1)) — needed here to report the *held* position,
+    # not the raw pre-lag signal.
+    executed = signals.shift(1).fillna(0.0)
+
+    top_dd = top_n_drawdowns(equity_curve, n=input_data.top_n_drawdowns)
+    drawdown_episodes = [
+        DrawdownEpisode(
+            start=str(row["start"].date()),
+            trough=str(row["trough"].date()),
+            end=None if pd.isna(row["end"]) else str(row["end"].date()),
+            depth=float(row["depth"]),
+            duration_bars=int(row["duration_bars"]),
+            recovery_bars=None if pd.isna(row["recovery_bars"]) else int(row["recovery_bars"]),
+        )
+        for _, row in top_dd.iterrows()
+    ]
+
+    expectancy = trade_expectancy(trade_log)
+    excursions = trade_excursions(trade_log, df)
+    avg_mae = float(excursions["mae_pct"].mean()) if not excursions.empty else 0.0
+    avg_mfe = float(excursions["mfe_pct"].mean()) if not excursions.empty else 0.0
+
+    exposure = exposure_stats(executed, trade_log)
+
+    logger.debug(
+        "[backtest_diagnostics] sharpe=%.3f  drawdowns=%d  expectancy=%.2f%%  time_in_market=%.0f%%",
+        results["sharpe_ratio"], len(drawdown_episodes),
+        expectancy["expectancy_pct"], exposure["time_in_market"] * 100,
+    )
+
+    return BacktestDiagnosticsResult(
+        symbol=input_data.symbol,
+        strategy_type=input_data.strategy_type,
+        total_return=round(float(results["total_return"]), 6),
+        sharpe_ratio=round(float(results["sharpe_ratio"]), 4),
+        sortino_ratio=round(float(results["sortino_ratio"]), 4),
+        max_drawdown=round(float(results["max_drawdown"]), 6),
+        calmar_ratio=round(float(results["calmar_ratio"]), 4),
+        num_trades=int(results["num_trades"]),
+        top_drawdowns=drawdown_episodes,
+        trade_diagnostics=TradeDiagnostics(
+            expectancy_pct=expectancy["expectancy_pct"],
+            avg_winner_pct=expectancy["avg_winner_pct"],
+            avg_loser_pct=expectancy["avg_loser_pct"],
+            payoff_ratio=expectancy["payoff_ratio"],
+            max_consecutive_wins=expectancy["max_consecutive_wins"],
+            max_consecutive_losses=expectancy["max_consecutive_losses"],
+            avg_mae_pct=round(avg_mae, 4),
+            avg_mfe_pct=round(avg_mfe, 4),
+        ),
+        exposure=ExposureDiagnostics(**exposure),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 
 def get_agent_tools() -> List[Dict[str, Any]]:
     """
@@ -1603,6 +1733,7 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("get_extended_risk_metrics", "Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.", ExtendedRiskInput),
         ("run_custom_signal_backtest", "Backtest a signal computed outside this library (your own alpha model) on one symbol.", CustomSignalBacktestInput),
         ("run_signal_panel_backtest", "Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.", SignalPanelBacktestInput),
+        ("get_backtest_diagnostics", "Extended diagnostics for a built-in strategy: top drawdown episodes, trade expectancy/payoff/streaks with MAE/MFE, and exposure stats.", BacktestDiagnosticsInput),
     ]
 
     return [
@@ -1649,6 +1780,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "get_extended_risk_metrics":      (get_extended_risk_metrics,      ExtendedRiskInput),
     "run_custom_signal_backtest":     (run_custom_signal_backtest,     CustomSignalBacktestInput),
     "run_signal_panel_backtest":      (run_signal_panel_backtest,      SignalPanelBacktestInput),
+    "get_backtest_diagnostics":       (get_backtest_diagnostics,       BacktestDiagnosticsInput),
 }
 
 

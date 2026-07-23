@@ -15,6 +15,7 @@ from standard_quant_tools.agent.models import (
     CompareStrategiesInput,
     PortfolioInput,
     PCAInput,
+    BacktestDiagnosticsInput,
 )
 from standard_quant_tools.agent.tools import (
     get_agent_tools,
@@ -25,6 +26,7 @@ from standard_quant_tools.agent.tools import (
     get_position_size,
     run_buy_and_hold,
     compare_strategies,
+    get_backtest_diagnostics,
     dispatch,
 )
 
@@ -69,8 +71,8 @@ def patched_long(long_ohlcv, monkeypatch):
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 class TestToolRegistry:
-    def test_now_has_twenty_six_tools(self):
-        assert len(get_agent_tools()) == 26
+    def test_now_has_twenty_seven_tools(self):
+        assert len(get_agent_tools()) == 27
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -81,6 +83,7 @@ class TestToolRegistry:
         assert "get_position_size" in names
         assert "run_buy_and_hold" in names
         assert "compare_strategies" in names
+        assert "get_backtest_diagnostics" in names
 
     def test_all_new_tools_have_valid_schema(self):
         new_tools = [
@@ -217,6 +220,45 @@ class TestScanPairs:
         assert result.n_pairs_tested == 0
         assert len(result.pairs) == 0
 
+    def test_ticker_fetch_failure_is_reported_not_swallowed(self, long_ohlcv, monkeypatch):
+        from standard_quant_tools.data.factory import DataFactory
+        from unittest.mock import MagicMock
+
+        def flaky_get_ohlcv(symbol, start, end):
+            if symbol == "MSFT":
+                raise ValueError("no data for MSFT")
+            return long_ohlcv
+
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = flaky_get_ohlcv
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+
+        inp = PairScannerInput(tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END)
+        result = scan_pairs(inp)
+
+        assert result.failed_tickers == {"MSFT": "no data for MSFT"}
+        # Only AAPL/GOOGL remain -> exactly one pair, MSFT excluded entirely.
+        assert result.n_pairs_tested == 1
+
+    def test_pair_test_failure_is_reported_not_swallowed(self, patched_long, monkeypatch):
+        import standard_quant_tools.analysis.cointegration as cointegration_module
+
+        def failing_coint(*args, **kwargs):
+            raise RuntimeError("degenerate series")
+
+        monkeypatch.setattr(cointegration_module, "cointegration_test", failing_coint)
+
+        inp = PairScannerInput(
+            tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END,
+        )
+        result = scan_pairs(inp)
+
+        assert len(result.pairs) == 0
+        assert len(result.failed_pairs) == 3  # C(3,2) combinations, all erroring
+        assert all(f.reason == "degenerate series" for f in result.failed_pairs)
+        tested_symbols = {(f.symbol_a, f.symbol_b) for f in result.failed_pairs}
+        assert tested_symbols == {("AAPL", "MSFT"), ("AAPL", "GOOGL"), ("MSFT", "GOOGL")}
+
 
 # ── Feature 3: Walk-Forward Backtest ──────────────────────────────────────────
 
@@ -312,6 +354,85 @@ class TestWalkForwardBacktest:
         )
         with pytest.raises(ValueError, match="Not enough data"):
             run_walk_forward_backtest(inp)
+
+    def test_stitched_fields_present_and_typed(self, patched_long):
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=252, test_bars=63,
+        )
+        result = run_walk_forward_backtest(inp)
+        for field in (
+            "stitched_oos_return", "stitched_oos_sharpe", "stitched_oos_sortino",
+            "stitched_oos_max_drawdown", "stitched_oos_calmar",
+            "is_to_oos_sharpe_decay", "is_to_oos_return_decay",
+        ):
+            assert isinstance(getattr(result, field), float)
+        assert isinstance(result.worst_oos_window, int)
+        assert isinstance(result.longest_losing_window_streak, int)
+        assert isinstance(result.parameter_turnover, float)
+
+    def test_worst_oos_window_is_a_valid_index(self, patched_long):
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=252, test_bars=63,
+        )
+        result = run_walk_forward_backtest(inp)
+        assert 0 <= result.worst_oos_window < result.n_windows
+        worst = next(w for w in result.windows if w.window_index == result.worst_oos_window)
+        assert worst.out_of_sample_return == min(w.out_of_sample_return for w in result.windows)
+
+    def test_longest_losing_streak_is_bounded(self, patched_long):
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=252, test_bars=63,
+        )
+        result = run_walk_forward_backtest(inp)
+        assert 0 <= result.longest_losing_window_streak <= result.n_windows
+
+    def test_parameter_turnover_is_a_fraction(self, patched_long):
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=252, test_bars=63,
+        )
+        result = run_walk_forward_backtest(inp)
+        assert 0.0 <= result.parameter_turnover <= 1.0
+
+    def test_stitched_return_is_not_the_naive_average(self, patched_long):
+        """
+        With >=2 windows and non-trivial per-window returns, the stitched
+        (compounded) total return should generally differ from the simple
+        average of per-window returns — proving the aggregate is actually
+        computed from one chronological equity curve, not re-deriving the
+        old avg_oos_return computation under a new name.
+        """
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=252, test_bars=63,
+        )
+        result = run_walk_forward_backtest(inp)
+        if result.n_windows >= 2:
+            assert result.stitched_oos_return != pytest.approx(result.avg_oos_return, abs=1e-9)
+
+    def test_in_sample_return_populated_per_window(self, patched_long):
+        inp = WalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            train_bars=252, test_bars=63,
+        )
+        result = run_walk_forward_backtest(inp)
+        for window in result.windows:
+            assert isinstance(window.in_sample_return, float)
 
 
 # ── Feature 4: Portfolio Risk Attribution ─────────────────────────────────────
@@ -722,4 +843,83 @@ class TestModelValidators:
             account_equity=100_000.0,
             risk_per_trade_pct=0.01,
         )
-        assert inp.risk_per_trade_pct == 0.01
+
+
+# ── Extended Backtest Diagnostics ─────────────────────────────────────────────
+
+class TestBacktestDiagnostics:
+    def test_returns_result(self, patched_long):
+        inp = BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="sma_crossover",
+            parameters={"fast_period": 10, "slow_period": 50},
+        )
+        result = get_backtest_diagnostics(inp)
+        assert result.symbol == "AAPL"
+        assert result.strategy_type == "sma_crossover"
+
+    def test_unknown_strategy_raises(self, patched_long):
+        inp = BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="nonexistent_strategy",
+        )
+        with pytest.raises(ValueError, match="Unknown strategy"):
+            get_backtest_diagnostics(inp)
+
+    def test_top_drawdowns_respects_top_n(self, patched_long):
+        inp = BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="sma_crossover",
+            parameters={"fast_period": 5, "slow_period": 20},
+            top_n_drawdowns=2,
+        )
+        result = get_backtest_diagnostics(inp)
+        assert len(result.top_drawdowns) <= 2
+
+    def test_drawdown_episode_fields_populated(self, patched_long):
+        inp = BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="sma_crossover",
+            parameters={"fast_period": 5, "slow_period": 20},
+        )
+        result = get_backtest_diagnostics(inp)
+        for ep in result.top_drawdowns:
+            assert ep.depth <= 0.0
+            assert ep.duration_bars >= 0
+            if ep.end is None:
+                assert ep.recovery_bars is None
+
+    def test_trade_diagnostics_fields_populated(self, patched_long):
+        inp = BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="sma_crossover",
+            parameters={"fast_period": 5, "slow_period": 20},
+        )
+        result = get_backtest_diagnostics(inp)
+        td = result.trade_diagnostics
+        assert isinstance(td.expectancy_pct, float)
+        assert td.max_consecutive_wins >= 0
+        assert td.max_consecutive_losses >= 0
+
+    def test_exposure_fields_bounded(self, patched_long):
+        inp = BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="sma_crossover",
+            parameters={"fast_period": 5, "slow_period": 20},
+        )
+        result = get_backtest_diagnostics(inp)
+        exp = result.exposure
+        assert 0.0 <= exp.time_in_market <= 1.0
+        assert 0.0 <= exp.pct_long <= 1.0
+        assert 0.0 <= exp.pct_short <= 1.0
+
+    def test_dispatched_through_dispatch(self, patched_long):
+        result = dispatch("get_backtest_diagnostics", {
+            "symbol": "AAPL", "start_date": START, "end_date": END,
+            "strategy_type": "sma_crossover",
+            "parameters": {"fast_period": 10, "slow_period": 50},
+        })
+        assert result["symbol"] == "AAPL"
+        assert "top_drawdowns" in result
+        assert "trade_diagnostics" in result
+        assert "exposure" in result

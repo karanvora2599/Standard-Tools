@@ -373,11 +373,21 @@ class PairResult(BaseModel):
     signal: str          # "long_a_short_b" | "short_a_long_b" | "neutral"
 
 
+class PairFailure(BaseModel):
+    symbol_a: str
+    symbol_b: str
+    reason: str
+
+
 class PairScannerResult(BaseModel):
     n_pairs_tested: int
     n_pairs_cointegrated: int
     n_pairs_returned: int
     pairs: List[PairResult]
+    # Explicit failure reporting so an errored pair/ticker is never confused
+    # with one that was tested and simply didn't qualify.
+    failed_pairs: List[PairFailure] = []
+    failed_tickers: Dict[str, str] = {}   # ticker -> fetch-error message
 
 
 # ──────────────────────────────────────────────
@@ -411,6 +421,7 @@ class WalkForwardWindow(BaseModel):
     test_end: str
     best_params: Dict[str, Any]
     in_sample_sharpe: float
+    in_sample_return: float
     out_of_sample_sharpe: float
     out_of_sample_return: float
     out_of_sample_max_drawdown: float
@@ -426,6 +437,19 @@ class WalkForwardResult(BaseModel):
     avg_oos_max_drawdown: float
     pct_windows_profitable: float
     param_stability: Dict[str, Any]  # most common best param per key + frequency
+    # Stitched (compounded) out-of-sample metrics — computed from one
+    # chronological equity curve across all OOS windows, not an average of
+    # independent per-window stats. See backtest/walk_forward.py.
+    stitched_oos_return: float
+    stitched_oos_sharpe: float
+    stitched_oos_sortino: float
+    stitched_oos_max_drawdown: float
+    stitched_oos_calmar: float
+    is_to_oos_sharpe_decay: float   # avg in-sample sharpe minus stitched OOS sharpe
+    is_to_oos_return_decay: float   # avg in-sample return minus stitched OOS return
+    worst_oos_window: int           # window_index with the lowest out_of_sample_return
+    longest_losing_window_streak: int
+    parameter_turnover: float       # fraction of consecutive windows whose best_params changed
 
 
 # ──────────────────────────────────────────────
@@ -833,3 +857,68 @@ class SignalPanelBacktestResult(BaseModel):
     tickers: List[str]
     per_ticker: Dict[str, BacktestResult]
     portfolio_metrics: Dict[str, Any]
+
+
+# ──────────────────────────────────────────────
+# Extended Backtest Diagnostics
+# ──────────────────────────────────────────────
+
+class BacktestDiagnosticsInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    strategy_type: str = Field(
+        ...,
+        description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
+                    "'macd_crossover', or 'bollinger_reversion'.",
+    )
+    parameters: Dict[str, Any] = Field(
+        {}, description="Strategy parameters — same shape as run_sma_backtest / run_rsi_backtest / etc.",
+    )
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
+    top_n_drawdowns: int = Field(5, description="Number of worst drawdown episodes to return.")
+
+
+class DrawdownEpisode(BaseModel):
+    start: str
+    trough: str
+    end: Optional[str] = None       # None if still underwater at the end of the series
+    depth: float                    # negative fraction, e.g. -0.15 = -15%
+    duration_bars: int              # peak -> recovery (or peak -> last bar if unrecovered)
+    recovery_bars: Optional[int] = None   # trough -> recovery; None if unrecovered
+
+
+class TradeDiagnostics(BaseModel):
+    expectancy_pct: float
+    avg_winner_pct: float
+    avg_loser_pct: float
+    payoff_ratio: float             # can be inf if there are no losing trades
+    max_consecutive_wins: int
+    max_consecutive_losses: int
+    avg_mae_pct: float              # average maximum adverse excursion across trades
+    avg_mfe_pct: float              # average maximum favorable excursion across trades
+
+
+class ExposureDiagnostics(BaseModel):
+    time_in_market: float
+    avg_gross_exposure: float
+    avg_net_exposure: float
+    pct_long: float
+    pct_short: float
+    avg_holding_period_bars: Optional[float] = None
+
+
+class BacktestDiagnosticsResult(BaseModel):
+    symbol: str
+    strategy_type: str
+    total_return: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    max_drawdown: float
+    calmar_ratio: float
+    num_trades: int
+    top_drawdowns: List[DrawdownEpisode]
+    trade_diagnostics: TradeDiagnostics
+    exposure: ExposureDiagnostics

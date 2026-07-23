@@ -143,6 +143,47 @@ def _cpp_available() -> bool:
         return False
 
 
+_git_sha_cache: Optional[str] = None
+_git_sha_resolved = False
+
+
+def _git_sha() -> Optional[str]:
+    """
+    Best-effort `git rev-parse HEAD` in the repo containing this file.
+    Returns None (never raises) outside a git checkout, without git
+    installed, or in any other failure mode — provenance is a nice-to-have,
+    not something that should ever break a tool call. Resolved once per
+    process and cached.
+    """
+    global _git_sha_cache, _git_sha_resolved
+    if _git_sha_resolved:
+        return _git_sha_cache
+    _git_sha_resolved = True
+    try:
+        import subprocess
+        repo_root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            _git_sha_cache = result.stdout.strip() or None
+    except Exception:
+        _git_sha_cache = None
+    return _git_sha_cache
+
+
+def _package_version() -> Optional[str]:
+    try:
+        from standard_quant_tools import __version__
+        return __version__
+    except Exception:
+        return None
+
+
 # ──────────────────────────────────────────────────────────────────
 # Decision record + writer
 # ──────────────────────────────────────────────────────────────────
@@ -160,6 +201,10 @@ class DecisionRecord(BaseModel):
     status: str
     error_type: Optional[str] = None
     error_message: Optional[str] = None
+    # Reproducibility provenance — None when unavailable (e.g. no git
+    # checkout), never a reason to fail the call itself.
+    git_commit_sha: Optional[str] = None
+    package_version: Optional[str] = None
 
 
 def _audit_enabled() -> bool:
@@ -234,6 +279,8 @@ def _run_and_record(tool_name: str, fn: Callable[[Any], Any], model_instance: An
                     status=status,
                     error_type=error_type,
                     error_message=error_message,
+                    git_commit_sha=_git_sha(),
+                    package_version=_package_version(),
                 )
                 AuditWriter().write(record)
             except Exception:

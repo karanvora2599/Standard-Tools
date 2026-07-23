@@ -40,6 +40,7 @@ from .tools import (
     get_extended_risk_metrics,
     run_custom_signal_backtest,
     run_signal_panel_backtest,
+    get_backtest_diagnostics,
     # LLM wiring
     get_agent_tools,
     dispatch,
@@ -98,6 +99,11 @@ from .models import (
     CustomSignalBacktestInput,
     SignalPanelBacktestInput,
     SignalPanelBacktestResult,
+    BacktestDiagnosticsInput,
+    BacktestDiagnosticsResult,
+    DrawdownEpisode,
+    TradeDiagnostics,
+    ExposureDiagnostics,
 )
 
 __all__ = [
@@ -128,6 +134,7 @@ __all__ = [
     "get_extended_risk_metrics",
     "run_custom_signal_backtest",
     "run_signal_panel_backtest",
+    "get_backtest_diagnostics",
     "get_agent_tools",
     "dispatch",
     # auditability
@@ -184,4 +191,9 @@ __all__ = [
     "CustomSignalBacktestInput",
     "SignalPanelBacktestInput",
     "SignalPanelBacktestResult",
+    "BacktestDiagnosticsInput",
+    "BacktestDiagnosticsResult",
+    "DrawdownEpisode",
+    "TradeDiagnostics",
+    "ExposureDiagnostics",
 ]
