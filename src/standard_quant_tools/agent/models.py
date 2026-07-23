@@ -1,3 +1,4 @@
+from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,15 @@ class BacktestInput(BaseModel):
     initial_capital: float = Field(10_000.0, description="Starting capital.")
     commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
+    fill_price: str = Field(
+        "close",
+        description=(
+            "'close' (default) — signal known at bar t-1's close is filled at that "
+            "same close. 'next_open' — entries/exits/holds are priced off the bar's "
+            "own Open where relevant (see run_strategy docstring for the exact "
+            "overnight/intraday decomposition); more conservative and realistic."
+        ),
+    )
 
 
 class Trade(BaseModel):
@@ -453,6 +463,73 @@ class WalkForwardResult(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# Regime-Adaptive Walk-Forward Backtest (leakage-free counterpart to
+# RegimeAdaptiveInput/Result — regime detection AND strategy/parameter
+# selection happen strictly within each window's training data)
+# ──────────────────────────────────────────────
+
+class RegimeAdaptiveWalkForwardInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    train_bars: int = Field(252, description="In-sample window length in bars (default 252 = ~1 year daily).")
+    test_bars: int = Field(63, description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).")
+    initial_capital: float = Field(10_000.0, description="Starting capital for each window.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    hurst_method: str = Field("dfa", description="Hurst method: 'dfa' or 'rs' — reported as diagnostic context per window, not used to hard-select a strategy family.")
+    sma_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None, description="Custom param grid for SMA crossover. Default: fast_period=[5,10,20], slow_period=[30,50,100].",
+    )
+    rsi_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None, description="Custom param grid for RSI mean-reversion. Default: period=[7,14,21], oversold=[25,30], overbought=[65,70].",
+    )
+    macd_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None, description="Custom param grid for MACD crossover. Default: fast=[8,12], slow=[21,26], signal=[7,9].",
+    )
+    bollinger_param_grid: Optional[Dict[str, List[Any]]] = Field(
+        None, description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
+    )
+    sort_by: str = Field("sharpe_ratio", description="Metric to optimise in-sample, across all four strategies (default: 'sharpe_ratio').")
+
+
+class RegimeAdaptiveWalkForwardWindow(BaseModel):
+    window_index: int
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
+    regime: str          # "trending" | "random_walk" | "mean_reverting" | "unknown" — diagnostic context only
+    hurst: float
+    fit_r_squared: float
+    selected_strategy: str
+    best_params: Dict[str, Any]
+    in_sample_sharpe: float
+    in_sample_return: float
+    out_of_sample_sharpe: float
+    out_of_sample_return: float
+    out_of_sample_max_drawdown: float
+
+
+class RegimeAdaptiveWalkForwardResult(BaseModel):
+    symbol: str
+    n_windows: int
+    windows: List[RegimeAdaptiveWalkForwardWindow]
+    avg_oos_sharpe: float
+    avg_oos_return: float
+    avg_oos_max_drawdown: float
+    pct_windows_profitable: float
+    strategy_stability: Dict[str, Any]   # most common selected_strategy across windows + frequency
+    stitched_oos_return: float
+    stitched_oos_sharpe: float
+    stitched_oos_sortino: float
+    stitched_oos_max_drawdown: float
+    stitched_oos_calmar: float
+    worst_oos_window: int
+    longest_losing_window_streak: int
+
+
+# ──────────────────────────────────────────────
 # Portfolio Risk Attribution
 # ──────────────────────────────────────────────
 
@@ -567,6 +644,7 @@ class BuyAndHoldInput(BaseModel):
     initial_capital: float = Field(10_000.0, description="Starting capital.")
     commission_pct: float = Field(0.001, description="One-time buy commission (fraction, default 0.1%).")
     slippage_pct: float = Field(0.0005, description="One-time buy slippage (fraction, default 0.05%).")
+    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
 
 
 # ──────────────────────────────────────────────
@@ -616,6 +694,7 @@ class CompareStrategiesInput(BaseModel):
         None,
         description="Custom Bollinger reversion params. Default: {period: 20, num_std: 2.0}.",
     )
+    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
 
 
 class CompareStrategiesResult(BaseModel):
@@ -686,6 +765,7 @@ class BacktestOptInput(BaseModel):
     )
     top_n: int = Field(5, description="Number of top parameter combinations to return (default 5, max 20).")
     n_workers: int = Field(1, description="CPU workers for parallel grid search (default 1).")
+    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
 
 
 class OptimizationRun(BaseModel):
@@ -791,6 +871,41 @@ class ExtendedRiskResult(BaseModel):
 # Custom Signal Backtest (bring-your-own signal)
 # ──────────────────────────────────────────────
 
+class SignalType(str, Enum):
+    """
+    What a custom signal's numeric values mean, and how strictly they're
+    validated. Default is SCORE — unrestricted, exactly the behavior every
+    caller already gets today (this enum's whole purpose is to make that
+    contract explicit and opt into stricter validation, not to change the
+    default). run_strategy's math is unchanged either way: it always
+    multiplies the (lagged) signal value by the bar's return, regardless
+    of signal_type.
+    """
+    SCORE = "score"                  # unrestricted float — caller owns the scale/leverage semantics
+    DIRECTION = "direction"          # must be exactly -1, 0, or 1 (within 1e-9)
+    TARGET_WEIGHT = "target_weight"  # must satisfy |value| <= max_abs_weight
+
+
+def _validate_signal_values(values: Dict[Any, float], signal_type: "SignalType", max_abs_weight: float) -> None:
+    if signal_type == SignalType.DIRECTION:
+        bad = {k: v for k, v in values.items() if min(abs(v - d) for d in (-1.0, 0.0, 1.0)) > 1e-9}
+        if bad:
+            sample = dict(list(bad.items())[:5])
+            raise ValueError(
+                f"signal_type='direction' requires every value to be exactly -1, 0, or 1; "
+                f"got out-of-range value(s): {sample}"
+            )
+    elif signal_type == SignalType.TARGET_WEIGHT:
+        bad = {k: v for k, v in values.items() if abs(v) > max_abs_weight}
+        if bad:
+            sample = dict(list(bad.items())[:5])
+            raise ValueError(
+                f"signal_type='target_weight' requires |value| <= max_abs_weight={max_abs_weight}; "
+                f"got out-of-range value(s): {sample}"
+            )
+    # SCORE: unrestricted, matches today's permissive behavior exactly.
+
+
 class CustomSignalBacktestInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -800,14 +915,32 @@ class CustomSignalBacktestInput(BaseModel):
         description=(
             "Map of ISO date (YYYY-MM-DD) -> signal value (1=long, 0=flat, -1=short), "
             "computed entirely outside this library (e.g. your own alpha model). "
-            "This tool does not generate or validate the signal logic — it only "
-            "backtests it. Dates are matched against the fetched OHLCV index; "
-            "any dates on either side with no counterpart are ignored."
+            "This tool does not generate the signal logic — it only backtests it. "
+            "Whether/how the values are validated is controlled by signal_type. "
+            "Dates are matched against the fetched OHLCV index; any dates on "
+            "either side with no counterpart are ignored."
         ),
+    )
+    signal_type: SignalType = Field(
+        SignalType.SCORE,
+        description=(
+            "'score' (default, unrestricted — today's exact behavior) | 'direction' "
+            "(every value must be exactly -1, 0, or 1) | 'target_weight' (every "
+            "|value| must be <= max_abs_weight)."
+        ),
+    )
+    max_abs_weight: float = Field(
+        1.0, description="Bound used only when signal_type='target_weight' (ignored otherwise)."
     )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
     commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
+    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+
+    @model_validator(mode="after")
+    def _check_signal_values(self) -> "CustomSignalBacktestInput":
+        _validate_signal_values(self.signals, self.signal_type, self.max_abs_weight)
+        return self
 
 
 # ──────────────────────────────────────────────
@@ -838,6 +971,18 @@ class SignalPanelBacktestInput(BaseModel):
         None, description="Optional benchmark ticker — adds information_ratio to portfolio_metrics."
     )
     include_trade_log: bool = Field(False, description="If True, include a per-trade log for each ticker.")
+    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+    signal_type: SignalType = Field(
+        SignalType.SCORE,
+        description=(
+            "'score' (default, unrestricted — today's exact behavior) | 'direction' "
+            "(every value must be exactly -1, 0, or 1) | 'target_weight' (every "
+            "|value| must be <= max_abs_weight). Applies uniformly to every ticker's signal map."
+        ),
+    )
+    max_abs_weight: float = Field(
+        1.0, description="Bound used only when signal_type='target_weight' (ignored otherwise)."
+    )
 
     @model_validator(mode="after")
     def _check_panel_and_weights(self) -> "SignalPanelBacktestInput":
@@ -850,6 +995,11 @@ class SignalPanelBacktestInput(BaseModel):
             total = sum(self.weights.values())
             if abs(total - 1.0) > 1e-6:
                 raise ValueError(f"weights must sum to 1.0, got {total:.6f}")
+        for ticker in self.tickers:
+            try:
+                _validate_signal_values(self.signal_panel[ticker], self.signal_type, self.max_abs_weight)
+            except ValueError as exc:
+                raise ValueError(f"ticker '{ticker}': {exc}") from exc
         return self
 
 
@@ -879,6 +1029,7 @@ class BacktestDiagnosticsInput(BaseModel):
     commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
     top_n_drawdowns: int = Field(5, description="Number of worst drawdown episodes to return.")
+    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
 
 
 class DrawdownEpisode(BaseModel):

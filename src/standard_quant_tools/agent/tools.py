@@ -56,6 +56,7 @@ from standard_quant_tools.agent.models import (
     PCAInput, PCAResult,
     HurstInput, HurstResult,
     RegimeAdaptiveInput, RegimeAdaptiveResult,
+    RegimeAdaptiveWalkForwardInput, RegimeAdaptiveWalkForwardWindow, RegimeAdaptiveWalkForwardResult,
     PairScannerInput, PairResult, PairFailure, PairScannerResult,
     WalkForwardInput, WalkForwardWindow, WalkForwardResult,
     RiskAttributionInput, RiskAttributionResult,
@@ -106,6 +107,7 @@ def _run_backtest(
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         include_trade_log=True,
+        fill_price=input_data.fill_price,
     )
 
     trade_log_raw = results.get("trade_log", pd.DataFrame())
@@ -190,6 +192,7 @@ def run_buy_and_hold(input_data: BuyAndHoldInput) -> BacktestResult:
         initial_capital=input_data.initial_capital,
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
+        fill_price=input_data.fill_price,
     )
     return _run_backtest(bt_input, df, signals)
 
@@ -216,6 +219,7 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
         initial_capital=input_data.initial_capital,
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
+        fill_price=input_data.fill_price,
     )
     bh = _run_backtest(bh_input, df, bh_signals)
 
@@ -238,6 +242,7 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
             initial_capital=input_data.initial_capital,
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
+            fill_price=input_data.fill_price,
         )
         bt = _run_backtest(bt_input, df, signals)
         comparisons.append(StrategyComparison(
@@ -820,6 +825,171 @@ def run_regime_adaptive_backtest(input_data: RegimeAdaptiveInput) -> RegimeAdapt
 
 
 # ──────────────────────────────────────────────────────────────────
+# Feature 1b: Regime-Adaptive Walk-Forward Backtest (leakage-free)
+# ──────────────────────────────────────────────────────────────────
+
+def run_regime_adaptive_walkforward_backtest(
+    input_data: RegimeAdaptiveWalkForwardInput,
+) -> RegimeAdaptiveWalkForwardResult:
+    """
+    Leakage-free counterpart to run_regime_adaptive_backtest. That tool
+    computes Hurst, optimises parameters, and backtests all on the same
+    full requested range — useful as a quick exploratory check, but not
+    out-of-sample validated. This tool instead walks forward exactly like
+    run_walk_forward_backtest: at each non-overlapping window, regime
+    detection AND strategy/parameter selection happen strictly on
+    train_df, then the frozen (strategy, params) choice is evaluated
+    strictly on the following test_df.
+
+    Unlike run_regime_adaptive_backtest's hardcoded regime -> strategy map,
+    every window here grid-searches all four registered strategies
+    in-sample and keeps whichever wins by sort_by — the regime/Hurst value
+    is still computed and reported per window, but purely as diagnostic
+    context, not as a hard selector. Reuses backtest/walk_forward.py's
+    stitching helpers for the aggregate OOS metrics — same math as
+    run_walk_forward_backtest, no new stitching logic.
+    """
+    from standard_quant_tools.analysis.hurst import hurst_exponent as _hurst
+    logger.debug("[regime_adaptive_wf] %s  %s → %s  train=%d  test=%d  hurst_method=%s  sort_by=%s",
+                 input_data.symbol, input_data.start_date, input_data.end_date,
+                 input_data.train_bars, input_data.test_bars, input_data.hurst_method, input_data.sort_by)
+
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    n = len(df)
+
+    train_bars = input_data.train_bars
+    test_bars = input_data.test_bars
+    if n < train_bars + test_bars:
+        raise ValueError(
+            f"Not enough data for regime-adaptive walk-forward: need at least "
+            f"{train_bars + test_bars} bars, got {n}."
+        )
+
+    grid_overrides: Dict[str, Optional[Dict[str, List[Any]]]] = {
+        "sma_crossover": input_data.sma_param_grid,
+        "rsi_mean_reversion": input_data.rsi_param_grid,
+        "macd_crossover": input_data.macd_param_grid,
+        "bollinger_reversion": input_data.bollinger_param_grid,
+    }
+
+    windows: List[RegimeAdaptiveWalkForwardWindow] = []
+    oos_return_series: List[pd.Series] = []
+    cursor = 0
+
+    while cursor + train_bars + test_bars <= n:
+        train_df = df.iloc[cursor: cursor + train_bars]
+        test_df = df.iloc[cursor + train_bars: cursor + train_bars + test_bars]
+
+        train_returns = train_df["Close"].pct_change().dropna()
+        hurst_result = _hurst(train_returns, method=input_data.hurst_method)
+        h = hurst_result["hurst"]
+        regime = hurst_result["regime"]
+        fit_r2 = hurst_result["fit_r_squared"]
+
+        best_overall: Optional[Dict[str, Any]] = None
+        for strat_name in STRATEGY_REGISTRY:
+            param_grid = grid_overrides[strat_name] or _DEFAULT_PARAM_GRIDS[strat_name]
+            grid_df = backtest_grid(
+                train_df,
+                strategy=strat_name,
+                param_grid=param_grid,
+                initial_capital=input_data.initial_capital,
+                commission_pct=input_data.commission_pct,
+                slippage_pct=input_data.slippage_pct,
+                sort_by=input_data.sort_by,
+                ascending=False,
+                n_workers=1,
+            )
+            best_row = grid_df.iloc[0]
+            metric_val = float(best_row.get(input_data.sort_by, float("-inf")))
+            if best_overall is None or metric_val > best_overall["metric_val"]:
+                param_keys = list(param_grid.keys())
+                best_params: Dict[str, Any] = {
+                    k: (int(best_row[k]) if isinstance(param_grid[k][0], int) else float(best_row[k]))
+                    for k in param_keys
+                }
+                best_overall = {
+                    "strategy": strat_name,
+                    "params": best_params,
+                    "metric_val": metric_val,
+                    "sharpe": float(best_row.get("sharpe_ratio", 0.0)),
+                    "return": float(best_row.get("total_return", 0.0)),
+                }
+
+        assert best_overall is not None  # STRATEGY_REGISTRY is never empty
+        strategy_name = best_overall["strategy"]
+        best_params = best_overall["params"]
+
+        oos_signals = STRATEGY_REGISTRY[strategy_name](test_df, **best_params)
+        oos = run_strategy(
+            test_df, oos_signals,
+            initial_capital=input_data.initial_capital,
+            commission_pct=input_data.commission_pct,
+            slippage_pct=input_data.slippage_pct,
+        )
+        oos_return_series.append(oos["equity_curve"].pct_change().fillna(0.0))
+
+        windows.append(RegimeAdaptiveWalkForwardWindow(
+            window_index=len(windows),
+            train_start=str(train_df.index[0].date()),
+            train_end=str(train_df.index[-1].date()),
+            test_start=str(test_df.index[0].date()),
+            test_end=str(test_df.index[-1].date()),
+            regime=regime,
+            hurst=round(float(h) if not math.isnan(float(h)) else 0.0, 4),
+            fit_r_squared=round(float(fit_r2) if not math.isnan(float(fit_r2)) else 0.0, 4),
+            selected_strategy=strategy_name,
+            best_params=best_params,
+            in_sample_sharpe=round(best_overall["sharpe"], 4),
+            in_sample_return=round(best_overall["return"], 6),
+            out_of_sample_sharpe=round(float(oos["sharpe_ratio"]), 4),
+            out_of_sample_return=round(float(oos["total_return"]), 4),
+            out_of_sample_max_drawdown=round(float(oos["max_drawdown"]), 4),
+        ))
+        cursor += test_bars
+
+    oos_sharpes = [w.out_of_sample_sharpe for w in windows]
+    oos_returns = [w.out_of_sample_return for w in windows]
+    oos_mdd = [w.out_of_sample_max_drawdown for w in windows]
+    pct_profitable = sum(1 for r in oos_returns if r > 0) / len(windows)
+
+    strat_counts = Counter(w.selected_strategy for w in windows)
+    most_common_strat, most_common_n = strat_counts.most_common(1)[0]
+    strategy_stability = {
+        "most_common": most_common_strat,
+        "frequency": round(most_common_n / len(windows), 3),
+    }
+
+    stitched_returns = stitch_oos_returns(oos_return_series)
+    stitched = compute_stitched_metrics(stitched_returns, input_data.initial_capital)
+    worst_window = min(windows, key=lambda w: w.out_of_sample_return)
+
+    result = RegimeAdaptiveWalkForwardResult(
+        symbol=input_data.symbol,
+        n_windows=len(windows),
+        windows=windows,
+        avg_oos_sharpe=round(float(np.mean(oos_sharpes)), 4),
+        avg_oos_return=round(float(np.mean(oos_returns)), 4),
+        avg_oos_max_drawdown=round(float(np.mean(oos_mdd)), 4),
+        pct_windows_profitable=round(pct_profitable, 4),
+        strategy_stability=strategy_stability,
+        stitched_oos_return=round(stitched["total_return"], 6),
+        stitched_oos_sharpe=round(stitched["sharpe_ratio"], 4),
+        stitched_oos_sortino=round(stitched["sortino_ratio"], 4),
+        stitched_oos_max_drawdown=round(stitched["max_drawdown"], 6),
+        stitched_oos_calmar=round(stitched["calmar_ratio"], 4),
+        worst_oos_window=worst_window.window_index,
+        longest_losing_window_streak=longest_losing_streak(oos_returns),
+    )
+    logger.debug(
+        "[regime_adaptive_wf] windows=%d  stitched_sharpe=%.3f  stitched_return=%.2f%%  strategy_stability=%s",
+        result.n_windows, result.stitched_oos_sharpe, result.stitched_oos_return * 100, strategy_stability,
+    )
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────
 # Feature 2: Cointegration Pair Scanner
 # ──────────────────────────────────────────────────────────────────
 
@@ -1295,6 +1465,7 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         sort_by=input_data.sort_by,
         ascending=False,
         n_workers=input_data.n_workers,
+        fill_price=input_data.fill_price,
     )
 
     n_combinations = len(grid_df)
@@ -1521,6 +1692,7 @@ def run_custom_signal_backtest(input_data: CustomSignalBacktestInput) -> Backtes
         initial_capital=input_data.initial_capital,
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
+        fill_price=input_data.fill_price,
     )
     return _run_backtest(bt_input, df, signal_series)
 
@@ -1564,6 +1736,7 @@ def run_signal_panel_backtest(input_data: SignalPanelBacktestInput) -> SignalPan
         slippage_pct=input_data.slippage_pct,
         benchmark_returns=bench_returns,
         include_trade_log=input_data.include_trade_log,
+        fill_price=input_data.fill_price,
     )
 
     per_ticker: Dict[str, BacktestResult] = {}
@@ -1641,6 +1814,7 @@ def get_backtest_diagnostics(input_data: BacktestDiagnosticsInput) -> BacktestDi
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         include_trade_log=True,
+        fill_price=input_data.fill_price,
     )
     equity_curve = results["equity_curve"]
     trade_log = results.get("trade_log", pd.DataFrame())
@@ -1722,6 +1896,7 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("run_pca_analysis", "PCA on multi-asset returns: explained variance, loadings, factor contributions.", PCAInput),
         ("run_hurst_analysis", "Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.", HurstInput),
         ("run_regime_adaptive_backtest", "Classify market regime via Hurst, auto-select and optimise the best strategy.", RegimeAdaptiveInput),
+        ("run_regime_adaptive_walkforward_backtest", "Leakage-free regime-adaptive backtest: regime/strategy/parameter selection per walk-forward window, evaluated strictly out-of-sample.", RegimeAdaptiveWalkForwardInput),
         ("scan_pairs", "Scan a ticker universe for cointegrated pairs, ranked by half-life.", PairScannerInput),
         ("run_walk_forward_backtest", "Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.", WalkForwardInput),
         ("get_portfolio_risk_attribution", "Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.", RiskAttributionInput),
@@ -1769,6 +1944,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_pca_analysis":               (run_pca_analysis,               PCAInput),
     "run_hurst_analysis":             (run_hurst_analysis,             HurstInput),
     "run_regime_adaptive_backtest":   (run_regime_adaptive_backtest,   RegimeAdaptiveInput),
+    "run_regime_adaptive_walkforward_backtest": (run_regime_adaptive_walkforward_backtest, RegimeAdaptiveWalkForwardInput),
     "scan_pairs":                     (scan_pairs,                     PairScannerInput),
     "run_walk_forward_backtest":      (run_walk_forward_backtest,      WalkForwardInput),
     "get_portfolio_risk_attribution": (get_portfolio_risk_attribution, RiskAttributionInput),

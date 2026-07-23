@@ -30,6 +30,7 @@ def run_signal_panel_backtest(
     slippage_pct: float = 0.0005,
     benchmark_returns: Optional[pd.Series] = None,
     include_trade_log: bool = False,
+    fill_price: str = "close",
 ) -> Dict[str, Any]:
     """
     Backtest a pre-computed signal panel across a ticker universe.
@@ -48,6 +49,8 @@ def run_signal_panel_backtest(
         benchmark_returns: optional benchmark return series for portfolio-level
                       Information Ratio (passed through to portfolio_metrics).
         include_trade_log: passed through to run_strategy per ticker.
+        fill_price:   "close" (default) or "next_open" — passed through to
+                      run_strategy for every ticker; see its docstring.
 
     Returns:
         {
@@ -80,6 +83,7 @@ def run_signal_panel_backtest(
             commission_pct=commission_pct,
             slippage_pct=slippage_pct,
             include_trade_log=include_trade_log,
+            fill_price=fill_price,
         )
         per_ticker_results[ticker] = result
         # Realized per-bar strategy return, recovered from the equity curve —

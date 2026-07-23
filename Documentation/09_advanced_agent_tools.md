@@ -1,20 +1,21 @@
 # Advanced Agent Tools
 
-Twelve high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Fourteen high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 27), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 28), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
 ## Tool Summary
 
-**Advanced tools (5)**
+**Advanced tools (6)**
 
 | Tool | What it does | Key output fields |
 |---|---|---|
-| `run_regime_adaptive_backtest` | Classify regime via Hurst, auto-select and optimise strategy | `regime`, `selected_strategy`, `best_parameters`, `backtest` |
-| `scan_pairs` | Find cointegrated pairs in a universe, ranked by half-life | `pairs[].half_life_days`, `pairs[].signal` |
-| `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `avg_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
+| `run_regime_adaptive_backtest` | Classify regime via Hurst, auto-select and optimise strategy (full-sample, exploratory) | `regime`, `selected_strategy`, `best_parameters`, `backtest` |
+| `run_regime_adaptive_walkforward_backtest` | Leakage-free counterpart: regime + strategy + parameter selection per walk-forward window, evaluated strictly out-of-sample | `windows[].regime`, `windows[].selected_strategy`, `strategy_stability`, `stitched_oos_sharpe` |
+| `scan_pairs` | Find cointegrated pairs in a universe, ranked by half-life | `pairs[].half_life_days`, `pairs[].signal`, `failed_pairs`, `failed_tickers` |
+| `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `stitched_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
 | `get_portfolio_risk_attribution` | Deep risk decomposition: MCR, PCA, optional factor model | `asset_risk_contributions`, `pca_variance_explained` |
 | `get_position_size` | ATR stop-loss sizing with optional Kelly criterion | `shares_fixed_risk`, `kelly_fraction`, `recommended_shares` |
 
@@ -41,6 +42,8 @@ Twelve high-level agentic tools that compose the library's existing primitives i
 ## 1. Regime-Adaptive Strategy Selector
 
 `run_regime_adaptive_backtest` computes the Hurst exponent on the symbol's return series, maps the result to the most appropriate strategy class, optimises parameters via grid search, and returns the best backtest alongside the regime classification — all in one call.
+
+> **In-sample only — not out-of-sample validated:** this tool computes Hurst, optimises parameters, *and* backtests all on the same requested date range. That's fast and useful for a quick exploratory look, but it's in-sample selection bias, not a trustworthy performance estimate — the parameters were chosen using the same data they're then "tested" on. When you need a genuinely out-of-sample answer (or want to avoid the hardcoded regime → strategy map below), use [`run_regime_adaptive_walkforward_backtest`](#14-regime-adaptive-walk-forward-backtest-leakage-free) instead — same idea, walked forward window by window like `run_walk_forward_backtest`, with every window's strategy choice tested against *all four* registered strategies rather than assumed from Hurst alone.
 
 > **Performance:** The dominant cost in this tool is the `hurst_exponent` call on the full return series. With the optional C++ extension (`_sqt_core`) built, this step runs 20–80× faster, reducing total wall-clock time for the tool from ~10–20 s to ~0.5–2 s on a 2 000-bar series. See [Development/build_guide.md](../Development/build_guide.md).
 
@@ -1681,7 +1684,7 @@ print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
 
 ---
 
-## 6. Extended Backtest Diagnostics
+## 13. Extended Backtest Diagnostics
 
 Sharpe and total return don't tell you whether a backtest is trustworthy. `get_backtest_diagnostics` runs one of the library's built-in strategies (same `strategy_type`/`parameters` shape as `run_sma_backtest` etc.) and layers on three additional diagnostic sections: drawdown episodes with recovery time, trade expectancy/payoff with MAE/MFE, and exposure statistics. It reuses `run_strategy` for the backtest itself — no new backtest math, only new analysis of the same equity curve and trade log every other backtest tool already produces.
 
@@ -1729,4 +1732,54 @@ print(f"\nTime in market: {exp.time_in_market:.0%}  "
 `DrawdownEpisode` fields: `start` (peak before the decline), `trough`, `end` (`None` if still underwater), `depth` (negative fraction), `duration_bars` (peak → recovery), `recovery_bars` (trough → recovery, `None` if unrecovered).
 
 `TradeDiagnostics.payoff_ratio` can be `inf` when there are no losing trades — the same convention `BacktestResult.profit_factor` already uses elsewhere in this library.
+
+---
+
+## 14. Regime-Adaptive Walk-Forward Backtest (leakage-free)
+
+`run_regime_adaptive_walkforward_backtest` is the out-of-sample-validated counterpart to `run_regime_adaptive_backtest` (§1). It walks forward exactly like `run_walk_forward_backtest` (§3) — non-overlapping `train_df`/`test_df` windows, cursor only advances — but at each window it also classifies the regime and picks the winning strategy, all strictly within `train_df`:
+
+1. Compute the Hurst exponent on `train_df`'s returns → regime + H, reported per window as **diagnostic context only**.
+2. Grid-search **all four** registered strategies (`sma_crossover`, `rsi_mean_reversion`, `macd_crossover`, `bollinger_reversion`) on `train_df`, using the same default parameter grids as `run_regime_adaptive_backtest` (or your own overrides) — keep whichever `(strategy, params)` wins by `sort_by`.
+3. Freeze that choice; run it on `test_df` only.
+4. Slide forward by `test_bars`; stitch every window's OOS returns into one chronological equity curve (same `backtest/walk_forward.py` helpers `run_walk_forward_backtest` uses — no new stitching math).
+
+This directly answers two criticisms of `run_regime_adaptive_backtest`: the in-sample selection bias (every number here is genuinely out-of-sample), and the hardcoded regime → strategy map (a "trending" window is free to pick `rsi_mean_reversion` if it actually wins in-sample — the regime is context, not a hard rule).
+
+```python
+from standard_quant_tools.agent.tools import run_regime_adaptive_walkforward_backtest
+from standard_quant_tools.agent.models import RegimeAdaptiveWalkForwardInput
+
+result = run_regime_adaptive_walkforward_backtest(RegimeAdaptiveWalkForwardInput(
+    symbol="SPY",
+    start_date="2016-01-01",
+    end_date="2024-01-01",
+    train_bars=252,
+    test_bars=63,
+))
+
+print(f"Windows              : {result.n_windows}")
+print(f"Stitched OOS Sharpe  : {result.stitched_oos_sharpe:.2f}")
+print(f"Stitched OOS Return  : {result.stitched_oos_return:.1%}")
+print(f"Strategy stability   : {result.strategy_stability['most_common']} "
+      f"({result.strategy_stability['frequency']:.0%} of windows)")
+
+for win in result.windows:
+    print(f"[{win.test_start} → {win.test_end}]  regime={win.regime} (H={win.hurst:.2f})  "
+          f"strategy={win.selected_strategy}  OOS Sharpe={win.out_of_sample_sharpe:.2f}")
 ```
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `n_windows`, `windows` | — | Same window-slicing shape as `WalkForwardResult` |
+| `avg_oos_sharpe`, `avg_oos_return`, `avg_oos_max_drawdown`, `pct_windows_profitable` | `float` | Naive per-window averages — see `run_walk_forward_backtest`'s note on why `stitched_oos_*` is preferred for reporting |
+| `strategy_stability` | `dict` | `{"most_common": <strategy>, "frequency": <fraction of windows>}` — the `run_walk_forward_backtest.param_stability` idea, applied to strategy choice instead of parameters |
+| `stitched_oos_return`, `stitched_oos_sharpe`, `stitched_oos_sortino`, `stitched_oos_max_drawdown`, `stitched_oos_calmar` | `float` | Compounded, one chronological equity curve across all windows — prefer these for reporting |
+| `worst_oos_window` | `int` | `window_index` of the window with the lowest `out_of_sample_return` |
+| `longest_losing_window_streak` | `int` | Longest run of consecutive windows with negative OOS return |
+
+Each `RegimeAdaptiveWalkForwardWindow` additionally reports `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_params`, `in_sample_sharpe`, `in_sample_return` alongside the usual `out_of_sample_*` fields.
+
+**Cost:** each window grid-searches four strategies instead of one, so this tool costs roughly 4× a single `run_walk_forward_backtest` call per window. Still fast enough for interactive use at default grid sizes (~35 combinations total per window).

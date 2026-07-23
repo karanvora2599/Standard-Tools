@@ -4,7 +4,7 @@ Shared utilities for the multi-agent example (Anthropic).
 This is a scoped variant of Implementation/Anthropic/_agent_utils.py: the
 core run_agent() loop is identical, but it accepts an optional tool_names
 filter so a worker agent can be given only a small, non-overlapping subset
-of the library's 27 tools instead of all of them. Shrinking the tool list
+of the library's 28 tools instead of all of them. Shrinking the tool list
 per agent is the actual fix for tool-selection confusion between similar
 tools (e.g. run_sma_backtest vs run_custom_signal_backtest) — a worker
 that was never given the other tool cannot call it.
@@ -107,7 +107,7 @@ def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
 
 def _scoped_tools(tool_names: Optional[List[str]]) -> list[ToolParam]:
     """
-    Full 27-tool registry by default; filtered to tool_names when given.
+    Full 28-tool registry by default; filtered to tool_names when given.
     A worker agent should always pass its own fixed subset here.
     """
     all_tools = get_agent_tools()
@@ -135,7 +135,7 @@ def run_agent(
     Run the agentic loop: send user_request to Claude, execute any tool calls
     via dispatch(), feed results back, and repeat until end_turn or exhausted.
 
-    tool_names: if given, the model only ever sees this subset of the 27
+    tool_names: if given, the model only ever sees this subset of the 28
     registered tools (all of them if omitted). This is how a worker agent
     stays scoped to its own workflow.
 

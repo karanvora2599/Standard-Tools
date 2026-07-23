@@ -127,17 +127,31 @@ def run_strategy(
     commission_pct: float = 0.001,
     slippage_pct: float = 0.0005,
     include_trade_log: bool = False,
+    fill_price: str = "close",
 ) -> Dict[str, Any]:
     """
     Vectorized backtesting engine with transaction costs.
 
     Args:
-        price_data: DataFrame with 'Close' column.
+        price_data: DataFrame with 'Close' column (and 'Open' if fill_price="next_open").
         signal_series: Series of 1 (long), 0 (flat), -1 (short).
         initial_capital: Starting capital.
         commission_pct: Commission per unit of position changed (default 0.1%).
         slippage_pct: Slippage per unit of position changed (default 0.05%).
         include_trade_log: If True, build and return per-trade log.
+        fill_price: "close" (default) — a signal known at bar t-1's close is
+            assumed filled at that same close, earning bar t's full
+            close-to-close return. "next_open" — decomposes each bar into
+            an overnight leg (prior close -> this bar's open, priced at
+            yesterday's position) and an intraday leg (this bar's open ->
+            close, priced at today's position), so an entry only earns its
+            own open-to-close move, an exit still bears the overnight gap
+            it was held through before selling at the open, and a held
+            position sums the two legs instead of compounding them (a
+            second-order, daily-bar-negligible approximation). Only
+            entry_price/exit_price in the trade log stay Close-based either
+            way — the aggregate P&L (equity curve, all metrics) is what
+            reflects next_open fills correctly.
 
     Returns:
         Dict with performance metrics, equity curve, and optionally trade_log.
@@ -148,8 +162,8 @@ def run_strategy(
 
     n_bars = len(prices)
     logger.debug(
-        "[run_strategy] bars=%d  capital=%.0f  commission=%.4f  slippage=%.4f",
-        n_bars, initial_capital, commission_pct, slippage_pct,
+        "[run_strategy] bars=%d  capital=%.0f  commission=%.4f  slippage=%.4f  fill_price=%s",
+        n_bars, initial_capital, commission_pct, slippage_pct, fill_price,
     )
 
     returns = prices.pct_change().fillna(0.0)
@@ -158,7 +172,9 @@ def run_strategy(
     # ── C++ fast path ─────────────────────────────────────────────────────────
     # Pass raw signals — C++ applies the one-bar lag internally (executed[i] = signals[i-1]).
     # Do NOT pass `executed` here: it is already shifted, which would cause a 2-bar lag.
-    if HAS_CPP and _cpp_core is not None:
+    # The compiled kernel only knows Close prices, so it's scoped to the default
+    # fill_price="close" — "next_open" always routes to the Python path below.
+    if fill_price == "close" and HAS_CPP and _cpp_core is not None:
         logger.debug("[run_strategy] using C++ kernel")
         prices_arr  = prices.to_numpy(dtype=np.float64)
         signals_arr = signals.to_numpy(dtype=np.float64)
@@ -189,12 +205,34 @@ def run_strategy(
         return result
 
     # ── Python fallback ───────────────────────────────────────────────────────
-    logger.debug("[run_strategy] using Python fallback")
+    logger.debug("[run_strategy] using Python fallback  fill_price=%s", fill_price)
     cost_per_unit = commission_pct + slippage_pct
     pos_diff = executed.diff().fillna(executed.iloc[0])
     transaction_costs = pos_diff.abs() * cost_per_unit
 
-    strategy_returns = executed * returns - transaction_costs
+    if fill_price == "next_open":
+        # Two-leg decomposition, correct for entries, continuations, exits,
+        # and same-bar flips alike:
+        #   overnight leg (Close[t-1] -> Open[t]) priced at YESTERDAY's
+        #     position (executed.shift(1)) — captures the gap a position
+        #     still held overnight is exposed to, including on an exit bar
+        #     (sold at today's open, so still exposed to the overnight gap
+        #     but not today's intraday move).
+        #   intraday leg (Open[t] -> Close[t]) priced at TODAY's position
+        #     (executed) — captures a same-day entry's open-to-close move,
+        #     and a held-through day's intraday move.
+        # For an unchanged position this sums two simple returns instead of
+        # compounding them (their product is the only difference from pure
+        # close-to-close — negligible for daily bars, standard in overnight
+        # vs. intraday P&L attribution).
+        opens = price_data.loc[idx, "Open"]
+        overnight_leg = ((opens - prices.shift(1)) / prices.shift(1)).fillna(0.0)
+        intraday_leg = (prices - opens) / opens
+        executed_prev = executed.shift(1).fillna(0.0)
+        gross_returns = executed_prev * overnight_leg + executed * intraday_leg
+        strategy_returns = gross_returns - transaction_costs
+    else:
+        strategy_returns = executed * returns - transaction_costs
     equity_curve = initial_capital * (1 + strategy_returns).cumprod()
 
     total_ret = cumulative_return(equity_curve)
@@ -254,6 +292,7 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
         initial_capital=job["initial_capital"],
         commission_pct=job["commission_pct"],
         slippage_pct=job["slippage_pct"],
+        fill_price=job.get("fill_price", "close"),
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -268,6 +307,7 @@ def _run_signal_fn_job(
     initial_capital: float,
     commission_pct: float,
     slippage_pct: float,
+    fill_price: str = "close",
 ) -> Dict[str, Any]:
     """
     Sequential-only counterpart to _run_grid_job for a user-supplied signal
@@ -280,6 +320,7 @@ def _run_signal_fn_job(
         initial_capital=initial_capital,
         commission_pct=commission_pct,
         slippage_pct=slippage_pct,
+        fill_price=fill_price,
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -297,6 +338,7 @@ def backtest_grid(
     sort_by: str = "sharpe_ratio",
     ascending: bool = False,
     n_workers: Optional[int] = None,
+    fill_price: str = "close",
 ) -> pd.DataFrame:
     """
     Run a backtest across every parameter combination in param_grid in parallel.
@@ -325,6 +367,9 @@ def backtest_grid(
                         C++ extension is not built — arbitrary callables
                         (lambdas, closures) are frequently unpicklable across
                         the ProcessPoolExecutor spawn boundary.
+        fill_price:     "close" (default) or "next_open" — see run_strategy.
+                        Forces the Python path (the C++ batch kernel only
+                        knows Close prices) regardless of n_workers/HAS_CPP.
 
     Returns:
         pd.DataFrame with one row per parameter combination, sorted by sort_by.
@@ -375,7 +420,8 @@ def backtest_grid(
     # ── C++ batch path ────────────────────────────────────────────────────────
     # Generate all signal arrays in Python, then ship the entire batch to C++
     # in a single call — no subprocess overhead, no per-combo boundary crossing.
-    if HAS_CPP and _cpp_core is not None:
+    # Scoped to fill_price="close" — the compiled kernel only knows Close prices.
+    if fill_price == "close" and HAS_CPP and _cpp_core is not None:
         try:
             prices_arr = price_data["Close"].to_numpy(dtype=np.float64)
 
@@ -466,6 +512,7 @@ def backtest_grid(
             _run_signal_fn_job(
                 price_data, signal_fn, dict(zip(keys, combo)),
                 initial_capital, commission_pct, slippage_pct,
+                fill_price=fill_price,
             )
             for combo in combos
         ]
@@ -478,6 +525,7 @@ def backtest_grid(
                 "initial_capital": initial_capital,
                 "commission_pct": commission_pct,
                 "slippage_pct": slippage_pct,
+                "fill_price": fill_price,
             }
             for combo in combos
         ]

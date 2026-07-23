@@ -56,13 +56,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **27 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **28 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 27
+print(len(tools))  # 28
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -113,7 +113,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 27 valid names.
+- **`ValueError`** — unknown tool name; message lists all 28 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -196,7 +196,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to 27 financial tools:
+You are a quantitative analyst assistant with access to 28 financial tools:
 
 CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
@@ -1218,7 +1218,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have 27 tools:
+You are a quantitative investment analyst. You have 28 tools:
 
 Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
 run_bollinger_backtest, run_buy_and_hold (passive baseline),
@@ -2029,9 +2029,9 @@ print(f"Example params: {playbook['example_params']}")
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
-| `BacktestInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
-| `BuyAndHoldInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
-| `CompareStrategiesInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"`, `sma/rsi/macd/bollinger_parameters=None` |
+| `BacktestInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
+| `BuyAndHoldInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
+| `CompareStrategiesInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"`, `sma/rsi/macd/bollinger_parameters=None`, `fill_price="close"` |
 
 **Analysis tools (8)**
 
@@ -2061,24 +2061,35 @@ print(f"Example params: {playbook['example_params']}")
 | Model | Required | Optional (with defaults) |
 |---|---|---|
 | `FundamentalsInput` | `symbol` | — |
-| `BacktestOptInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `initial_capital=10000`, `sort_by="sharpe_ratio"`, `top_n=5`, `n_workers=1` |
+| `BacktestOptInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `initial_capital=10000`, `sort_by="sharpe_ratio"`, `top_n=5`, `n_workers=1`, `fill_price="close"` |
 | `AdvancedIndicatorsInput` | `symbol`, `start_date`, `end_date` | `mfi_period=14`, `atr_period=14`, `sar_af_start=0.02`, `sar_af_max=0.2` |
 | `RollingBetaInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"`, `window=60` |
 | `ExtendedRiskInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"` |
-| `BacktestDiagnosticsInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `top_n_drawdowns=5` |
+| `BacktestDiagnosticsInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `top_n_drawdowns=5`, `fill_price="close"` |
 
 **Custom signal tools (2)**
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
-| `CustomSignalBacktestInput` | `symbol`, `start_date`, `end_date`, `signals` (`{date: value}`) | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005` |
-| `SignalPanelBacktestInput` | `tickers`, `start_date`, `end_date`, `signal_panel` (`{ticker: {date: value}}`) | `weights=None` (equal weight), `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `benchmark=None`, `include_trade_log=False` |
+| `CustomSignalBacktestInput` | `symbol`, `start_date`, `end_date`, `signals` (`{date: value}`) | `signal_type="score"`, `max_abs_weight=1.0`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
+| `SignalPanelBacktestInput` | `tickers`, `start_date`, `end_date`, `signal_panel` (`{ticker: {date: value}}`) | `weights=None` (equal weight), `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `benchmark=None`, `include_trade_log=False`, `fill_price="close"`, `signal_type="score"`, `max_abs_weight=1.0` |
+
+**`signal_type` — what a custom signal's values mean, opt-in validation:**
+
+| `signal_type` | Meaning | Validation |
+|---|---|---|
+| `"score"` (default) | Unrestricted — you own the scale/leverage semantics | None — exactly today's original permissive behavior |
+| `"direction"` | Position direction | Every value must be exactly `-1`, `0`, or `1` |
+| `"target_weight"` | Portfolio weight for this position | Every `\|value\|` must be ≤ `max_abs_weight` (default `1.0`) |
+
+`run_strategy`'s math never changes based on `signal_type` — it always multiplies the (lagged) signal value by the bar's return, same as today. `signal_type` only controls whether malformed values are rejected up front with a Pydantic `ValidationError` naming the offending date/ticker/value, instead of silently backtesting a typo. The default (`"score"`) is unrestricted specifically so omitting the field is guaranteed identical to pre-`signal_type` behavior — no existing caller is affected. For `SignalPanelBacktestInput`, the chosen mode applies uniformly across every ticker in `signal_panel`, and validation errors name which ticker failed.
 
 **Validation rules (Pydantic v2):**
 - `PortfolioInput` and `RiskAttributionInput`: `weights` must sum to 1.0 and `len(weights) == len(tickers)`.
 - `PCAInput`: `n_components` must be ≥ 1.
 - `PositionSizerInput`: `risk_per_trade_pct` must be in (0, 1].
 - `SignalPanelBacktestInput`: `signal_panel` must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0.
+- `CustomSignalBacktestInput` / `SignalPanelBacktestInput`: signal values must satisfy `signal_type`'s constraint (see table above).
 
 ### Output Models
 

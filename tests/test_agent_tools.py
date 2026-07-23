@@ -3,17 +3,22 @@
 import pandas as pd
 import pytest
 
+from standard_quant_tools.data.factory import DataFactory
+
 from standard_quant_tools.agent.models import (
-    AnalysisInput, BacktestInput, CointegrationInput,
-    FactorRegressionInput, HurstInput, PCAInput,
+    AnalysisInput, BacktestInput, BacktestOptInput, BuyAndHoldInput, CointegrationInput,
+    CompareStrategiesInput, FactorRegressionInput, HurstInput, PCAInput,
     PortfolioInput, ScreenerInput, TechnicalInput,
 )
 from standard_quant_tools.agent.tools import (
     analyze_stock_risk,
+    compare_strategies,
     get_agent_tools,
     get_portfolio_analysis,
     get_technical_analysis,
+    run_backtest_optimization,
     run_bollinger_backtest,
+    run_buy_and_hold,
     run_cointegration_test,
     run_factor_regression,
     run_hurst_analysis,
@@ -29,9 +34,9 @@ START, END = '2023-01-01', '2024-01-01'
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_twenty_seven_tools(self):
+    def test_returns_list_of_twenty_eight_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 27
+        assert len(tools) == 28
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -608,3 +613,76 @@ class TestGetTechnicalAnalysisExtended:
         for key in ('rsi_14', 'bb_upper', 'bb_lower', 'ema_12', 'ema_26',
                     'stoch_k', 'stoch_d', 'vwap', 'williams_r', 'adx', 'obv'):
             assert key in result.last_values, f"missing key: {key}"
+
+
+# ── fill_price integration smoke tests ────────────────────────────────────────
+# One per directly-threaded tool: confirms fill_price="next_open" is actually
+# wired through to run_strategy/backtest_grid (changes the result) and runs
+# without error. The exact next_open economics are hand-verified separately
+# in test_fill_price.py — these just prove the plumbing.
+#
+# patched_factory's Open is constructed as Close.shift(1) exactly (no
+# overnight gap by design), under which "next_open" mathematically collapses
+# to "close" (a correctness property of the engine, not a test bug — see
+# test_fill_price.py). These tests need a fixture with genuine gaps instead.
+
+@pytest.fixture
+def gapped_factory(sample_close, monkeypatch: pytest.MonkeyPatch):
+    """Like patched_factory, but Open has a genuine intraday gap from the
+    prior Close (Open = 0.999 * that same bar's Close), so fill_price
+    actually matters."""
+    from unittest.mock import MagicMock
+    close = sample_close
+    spread = pd.Series(0.5, index=close.index)
+    df = pd.DataFrame({
+        'Open': close * 0.999,
+        'High': close + spread,
+        'Low': close - spread,
+        'Close': close,
+        'Volume': pd.Series(1_000_000.0, index=close.index),
+    })
+    provider = MagicMock()
+    provider.get_ohlcv.return_value = df
+    monkeypatch.setattr(DataFactory, 'get_provider', lambda *a, **kw: provider)
+    return provider
+
+
+class TestFillPriceIntegration:
+    def test_sma_backtest_next_open_differs_from_default(self, gapped_factory):
+        base = run_sma_backtest(BacktestInput(
+            symbol='AAPL', start_date=START, end_date=END,
+            strategy_type='sma_crossover', parameters={'fast_period': 5, 'slow_period': 20},
+        ))
+        next_open = run_sma_backtest(BacktestInput(
+            symbol='AAPL', start_date=START, end_date=END,
+            strategy_type='sma_crossover', parameters={'fast_period': 5, 'slow_period': 20},
+            fill_price='next_open',
+        ))
+        assert base.final_equity != pytest.approx(next_open.final_equity, abs=1e-6)
+
+    def test_buy_and_hold_next_open_runs_and_differs(self, gapped_factory):
+        base = run_buy_and_hold(BuyAndHoldInput(symbol='AAPL', start_date=START, end_date=END))
+        next_open = run_buy_and_hold(
+            BuyAndHoldInput(symbol='AAPL', start_date=START, end_date=END, fill_price='next_open')
+        )
+        assert base.final_equity != pytest.approx(next_open.final_equity, abs=1e-6)
+
+    def test_compare_strategies_next_open_runs_and_differs(self, gapped_factory):
+        base = compare_strategies(CompareStrategiesInput(symbol='AAPL', start_date=START, end_date=END))
+        next_open = compare_strategies(
+            CompareStrategiesInput(symbol='AAPL', start_date=START, end_date=END, fill_price='next_open')
+        )
+        base_returns = {c.strategy: c.total_return for c in base.strategies}
+        next_open_returns = {c.strategy: c.total_return for c in next_open.strategies}
+        assert base_returns != next_open_returns
+
+    def test_backtest_optimization_next_open_runs_and_differs(self, gapped_factory):
+        grid = {"fast_period": [5, 10], "slow_period": [30, 50]}
+        base = run_backtest_optimization(BacktestOptInput(
+            symbol="AAPL", strategy="sma_crossover", start_date=START, end_date=END, param_grid=grid,
+        ))
+        next_open = run_backtest_optimization(BacktestOptInput(
+            symbol="AAPL", strategy="sma_crossover", start_date=START, end_date=END, param_grid=grid,
+            fill_price="next_open",
+        ))
+        assert base.best_sharpe != pytest.approx(next_open.best_sharpe, abs=1e-9)

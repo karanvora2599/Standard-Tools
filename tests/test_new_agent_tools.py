@@ -7,6 +7,7 @@ import pydantic
 
 from standard_quant_tools.agent.models import (
     RegimeAdaptiveInput,
+    RegimeAdaptiveWalkForwardInput,
     PairScannerInput,
     WalkForwardInput,
     RiskAttributionInput,
@@ -20,6 +21,7 @@ from standard_quant_tools.agent.models import (
 from standard_quant_tools.agent.tools import (
     get_agent_tools,
     run_regime_adaptive_backtest,
+    run_regime_adaptive_walkforward_backtest,
     scan_pairs,
     run_walk_forward_backtest,
     get_portfolio_risk_attribution,
@@ -71,8 +73,8 @@ def patched_long(long_ohlcv, monkeypatch):
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 class TestToolRegistry:
-    def test_now_has_twenty_seven_tools(self):
-        assert len(get_agent_tools()) == 27
+    def test_now_has_twenty_eight_tools(self):
+        assert len(get_agent_tools()) == 28
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -153,6 +155,174 @@ class TestRegimeAdaptiveBacktest:
         result = run_regime_adaptive_backtest(inp)
         if result.selected_strategy == "sma_crossover":
             assert result.grid_combinations == 1
+
+
+# ── Feature 1b: Regime-Adaptive Walk-Forward Backtest (leakage-free) ──────────
+
+_RAWF_GRID = {
+    "sma_crossover":       {"fast_period": [5, 10], "slow_period": [30, 50]},
+    "rsi_mean_reversion":  {"period": [7, 14], "oversold": [25, 30], "overbought": [65, 70]},
+    "macd_crossover":      {"fast": [8, 12], "slow": [21, 26], "signal": [7, 9]},
+    "bollinger_reversion": {"period": [15, 20], "num_std": [1.5, 2.0]},
+}
+
+
+class TestRegimeAdaptiveWalkForwardBacktest:
+    def test_returns_result(self, patched_long):
+        inp = RegimeAdaptiveWalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            train_bars=252, test_bars=63,
+            sma_param_grid=_RAWF_GRID["sma_crossover"],
+            rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+            macd_param_grid=_RAWF_GRID["macd_crossover"],
+            bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+        )
+        result = run_regime_adaptive_walkforward_backtest(inp)
+        assert result.symbol == "AAPL"
+        assert result.n_windows >= 1
+        assert len(result.windows) == result.n_windows
+
+    def test_window_dates_sequential(self, patched_long):
+        inp = RegimeAdaptiveWalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            train_bars=252, test_bars=63,
+            sma_param_grid=_RAWF_GRID["sma_crossover"],
+            rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+            macd_param_grid=_RAWF_GRID["macd_crossover"],
+            bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+        )
+        result = run_regime_adaptive_walkforward_backtest(inp)
+        for i, win in enumerate(result.windows):
+            assert win.window_index == i
+            assert win.train_start <= win.train_end
+            assert win.test_start <= win.test_end
+            assert win.train_end < win.test_start
+
+    def test_selected_strategy_is_valid_and_not_hardcoded_by_regime(self, patched_long):
+        """
+        The whole point of this tool vs. run_regime_adaptive_backtest: the
+        regime is diagnostic context, not a hard selector. Every window's
+        selected_strategy must be a real registry name, and — unlike the
+        old tool's fixed regime->strategy map — a "trending" window is not
+        required to pick sma_crossover specifically.
+        """
+        inp = RegimeAdaptiveWalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            train_bars=252, test_bars=63,
+            sma_param_grid=_RAWF_GRID["sma_crossover"],
+            rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+            macd_param_grid=_RAWF_GRID["macd_crossover"],
+            bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+        )
+        result = run_regime_adaptive_walkforward_backtest(inp)
+        valid_strategies = {"sma_crossover", "rsi_mean_reversion", "macd_crossover", "bollinger_reversion"}
+        for win in result.windows:
+            assert win.selected_strategy in valid_strategies
+            assert win.regime in ("trending", "mean_reverting", "random_walk", "unknown")
+            assert 0.0 <= win.hurst <= 1.0 or win.hurst == 0.0
+
+    def test_stitched_and_stability_fields_present(self, patched_long):
+        inp = RegimeAdaptiveWalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            train_bars=252, test_bars=63,
+            sma_param_grid=_RAWF_GRID["sma_crossover"],
+            rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+            macd_param_grid=_RAWF_GRID["macd_crossover"],
+            bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+        )
+        result = run_regime_adaptive_walkforward_backtest(inp)
+        for field in ("stitched_oos_return", "stitched_oos_sharpe", "stitched_oos_sortino",
+                      "stitched_oos_max_drawdown", "stitched_oos_calmar"):
+            assert isinstance(getattr(result, field), float)
+        assert 0 <= result.worst_oos_window < result.n_windows
+        assert 0 <= result.longest_losing_window_streak <= result.n_windows
+        assert "most_common" in result.strategy_stability
+        assert "frequency" in result.strategy_stability
+        assert 0.0 <= result.strategy_stability["frequency"] <= 1.0
+
+    def test_insufficient_data_raises(self, patched_long, long_ohlcv, monkeypatch):
+        from unittest.mock import MagicMock
+        from standard_quant_tools.data.factory import DataFactory
+
+        tiny_df = long_ohlcv.iloc[:50]
+        prov = MagicMock()
+        prov.get_ohlcv.return_value = tiny_df
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: prov)
+
+        inp = RegimeAdaptiveWalkForwardInput(
+            symbol="AAPL", start_date=START, end_date=END, train_bars=252, test_bars=63,
+        )
+        with pytest.raises(ValueError, match="Not enough data"):
+            run_regime_adaptive_walkforward_backtest(inp)
+
+    def test_no_lookahead_window0_unaffected_by_future_mutation(self, long_ohlcv, monkeypatch):
+        """
+        Same regression pattern as run_walk_forward_backtest's no-lookahead
+        test: window 0's regime/hurst/selected_strategy/best_params are all
+        derived from bars [0, train_bars) only. Replacing every bar from
+        train_bars onward with a different synthetic path must leave
+        window 0's in-sample selection untouched, while window 0's own
+        out-of-sample result (which lives inside the mutated region) does
+        change — proving the mutation is actually visible to the tool.
+        """
+        from standard_quant_tools.data.factory import DataFactory
+        from unittest.mock import MagicMock
+
+        train_bars, test_bars = 252, 63
+
+        mutated = long_ohlcv.copy()
+        rng = np.random.default_rng(4242)
+        n_mutate = len(mutated) - train_bars
+        mutated_returns = rng.normal(-0.001, 0.03, n_mutate)
+        last_train_close = float(mutated["Close"].iloc[train_bars - 1])
+        mutated_close = last_train_close * np.cumprod(1 + mutated_returns)
+        spread = rng.uniform(0.2, 1.2, n_mutate)
+        close_col, open_col = mutated.columns.get_loc("Close"), mutated.columns.get_loc("Open")
+        high_col, low_col = mutated.columns.get_loc("High"), mutated.columns.get_loc("Low")
+        mutated.iloc[train_bars:, close_col] = mutated_close
+        mutated.iloc[train_bars:, open_col] = mutated_close * 0.999
+        mutated.iloc[train_bars:, high_col] = mutated_close + spread
+        mutated.iloc[train_bars:, low_col] = mutated_close - spread
+
+        def run_with(df):
+            provider = MagicMock()
+            provider.get_ohlcv.return_value = df
+            monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+            inp = RegimeAdaptiveWalkForwardInput(
+                symbol="AAPL", start_date=START, end_date=END,
+                train_bars=train_bars, test_bars=test_bars,
+                sma_param_grid=_RAWF_GRID["sma_crossover"],
+                rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
+                macd_param_grid=_RAWF_GRID["macd_crossover"],
+                bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
+            )
+            return run_regime_adaptive_walkforward_backtest(inp)
+
+        baseline = run_with(long_ohlcv)
+        mutated_result = run_with(mutated)
+
+        assert baseline.windows[0].regime == mutated_result.windows[0].regime
+        assert baseline.windows[0].hurst == pytest.approx(mutated_result.windows[0].hurst)
+        assert baseline.windows[0].selected_strategy == mutated_result.windows[0].selected_strategy
+        assert baseline.windows[0].best_params == mutated_result.windows[0].best_params
+        assert baseline.windows[0].in_sample_sharpe == pytest.approx(mutated_result.windows[0].in_sample_sharpe)
+
+        assert baseline.windows[0].out_of_sample_return != pytest.approx(
+            mutated_result.windows[0].out_of_sample_return, abs=1e-9
+        )
+
+    def test_dispatched_through_dispatch(self, patched_long):
+        result = dispatch("run_regime_adaptive_walkforward_backtest", {
+            "symbol": "AAPL", "start_date": START, "end_date": END,
+            "train_bars": 252, "test_bars": 63,
+            "sma_param_grid": _RAWF_GRID["sma_crossover"],
+            "rsi_param_grid": _RAWF_GRID["rsi_mean_reversion"],
+            "macd_param_grid": _RAWF_GRID["macd_crossover"],
+            "bollinger_param_grid": _RAWF_GRID["bollinger_reversion"],
+        })
+        assert result["symbol"] == "AAPL"
+        assert "strategy_stability" in result
+        assert "stitched_oos_sharpe" in result
 
 
 # ── Feature 2: Pair Scanner ────────────────────────────────────────────────────
@@ -990,3 +1160,15 @@ class TestBacktestDiagnostics:
         assert "top_drawdowns" in result
         assert "trade_diagnostics" in result
         assert "exposure" in result
+
+    def test_next_open_fill_price_differs_from_default(self, patched_long):
+        base = get_backtest_diagnostics(BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="sma_crossover", parameters={"fast_period": 10, "slow_period": 50},
+        ))
+        next_open = get_backtest_diagnostics(BacktestDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy_type="sma_crossover", parameters={"fast_period": 10, "slow_period": 50},
+            fill_price="next_open",
+        ))
+        assert base.total_return != pytest.approx(next_open.total_return, abs=1e-9)

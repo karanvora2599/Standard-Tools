@@ -27,6 +27,7 @@ from .tools import (
     run_hurst_analysis,
     # advanced strategies
     run_regime_adaptive_backtest,
+    run_regime_adaptive_walkforward_backtest,
     scan_pairs,
     run_walk_forward_backtest,
     # portfolio & sizing
@@ -75,6 +76,9 @@ from .models import (
     # advanced strategy models
     RegimeAdaptiveInput,
     RegimeAdaptiveResult,
+    RegimeAdaptiveWalkForwardInput,
+    RegimeAdaptiveWalkForwardWindow,
+    RegimeAdaptiveWalkForwardResult,
     PairScannerInput,
     PairScannerResult,
     WalkForwardInput,
@@ -123,6 +127,7 @@ __all__ = [
     "run_pca_analysis",
     "run_hurst_analysis",
     "run_regime_adaptive_backtest",
+    "run_regime_adaptive_walkforward_backtest",
     "scan_pairs",
     "run_walk_forward_backtest",
     "get_portfolio_risk_attribution",
@@ -169,6 +174,9 @@ __all__ = [
     "HurstResult",
     "RegimeAdaptiveInput",
     "RegimeAdaptiveResult",
+    "RegimeAdaptiveWalkForwardInput",
+    "RegimeAdaptiveWalkForwardWindow",
+    "RegimeAdaptiveWalkForwardResult",
     "PairScannerInput",
     "PairScannerResult",
     "WalkForwardInput",

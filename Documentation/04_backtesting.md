@@ -88,6 +88,54 @@ print(f"Num Trades     : {result['num_trades']}")
 
 ---
 
+## Execution Timing (`fill_price`)
+
+By default (`fill_price="close"`), a signal known at bar *t-1*'s close is
+assumed filled at that same close, earning bar *t*'s full close-to-close
+return — the standard lookahead-free convention (see Core Concepts above).
+This is optimistic in one sense: it assumes you can transact right at the
+closing price the instant you observe it.
+
+`fill_price="next_open"` is more conservative: entries and exits are priced
+off the bar's own `Open` instead. This decomposes each bar into two legs:
+
+- **Overnight leg** (prior close → this bar's open), priced at *yesterday's*
+  position — an exit still bears the gap risk of the position it was held
+  through overnight, before selling at today's open.
+- **Intraday leg** (this bar's open → close), priced at *today's* position —
+  a same-day entry only earns its own open-to-close move.
+
+A held (unchanged) position sums these two legs rather than compounding them
+— a second-order, daily-bar-negligible difference from pure close-to-close
+(their product is the only gap, e.g. two 0.5% legs differ from true
+compounding by ~0.0025%).
+
+```python
+result_close     = run_strategy(df, signals, fill_price="close")       # default
+result_next_open = run_strategy(df, signals, fill_price="next_open")   # more conservative
+```
+
+`backtest_grid` accepts the same `fill_price` argument and forces the
+Python execution path when it isn't `"close"` — the compiled C++ kernel
+only knows `Close` prices, so `next_open` always runs in Python regardless
+of whether `_sqt_core` is built.
+
+**Known limitation:** the trade log's `entry_price`/`exit_price` always
+report the bar's `Close`, in both modes — only the aggregate P&L (equity
+curve, Sharpe, total return, everything else) reflects `next_open` fills
+correctly. Treat the trade log's prices as a reference marker, not the
+literal assumed fill price, when using `fill_price="next_open"`.
+
+On the agent-tool side, `fill_price` is exposed on `BacktestInput`,
+`BuyAndHoldInput`, `CompareStrategiesInput`, `CustomSignalBacktestInput`,
+`SignalPanelBacktestInput`, `BacktestOptInput`, and `BacktestDiagnosticsInput`
+— i.e. every tool that calls `run_strategy`/`backtest_grid` directly once.
+`run_walk_forward_backtest`, `run_regime_adaptive_backtest`, and
+`run_regime_adaptive_walkforward_backtest` call it from inside another loop
+and currently always use `"close"`.
+
+---
+
 ## Trade Log
 
 When `include_trade_log=True`, the result includes a `pd.DataFrame` with one row per completed trade.
