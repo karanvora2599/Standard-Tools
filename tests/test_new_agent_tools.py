@@ -434,6 +434,73 @@ class TestWalkForwardBacktest:
         for window in result.windows:
             assert isinstance(window.in_sample_return, float)
 
+    def test_no_lookahead_window0_params_unaffected_by_future_mutation(self, long_ohlcv, monkeypatch):
+        """
+        Regression test proving run_walk_forward_backtest has no look-ahead
+        bias: window 0's best_params are selected using backtest_grid on
+        train_df = bars [0, train_bars) only. Replacing every bar from
+        train_bars onward with a completely different synthetic path must
+        leave window 0's in-sample selection untouched, even though it does
+        change window 0's own out-of-sample result (test_df sits entirely
+        inside the mutated region, which is the point — it proves the
+        mutation is actually visible to the tool, so the first assertion
+        isn't passing vacuously).
+        """
+        from standard_quant_tools.data.factory import DataFactory
+        from unittest.mock import MagicMock
+
+        train_bars, test_bars = 252, 63
+
+        mutated = long_ohlcv.copy()
+        rng = np.random.default_rng(4242)
+        n_mutate = len(mutated) - train_bars
+        # Deliberately different regime (negative drift, higher vol) from the
+        # baseline fixture's bars [train_bars:], so if the tool leaked future
+        # data into window 0's parameter search, the result would very
+        # likely change.
+        mutated_returns = rng.normal(-0.001, 0.03, n_mutate)
+        last_train_close = float(mutated["Close"].iloc[train_bars - 1])
+        mutated_close = last_train_close * np.cumprod(1 + mutated_returns)
+        spread = rng.uniform(0.2, 1.2, n_mutate)
+        close_col, open_col = mutated.columns.get_loc("Close"), mutated.columns.get_loc("Open")
+        high_col, low_col = mutated.columns.get_loc("High"), mutated.columns.get_loc("Low")
+        mutated.iloc[train_bars:, close_col] = mutated_close
+        mutated.iloc[train_bars:, open_col] = mutated_close * 0.999
+        mutated.iloc[train_bars:, high_col] = mutated_close + spread
+        mutated.iloc[train_bars:, low_col] = mutated_close - spread
+
+        def run_with(df):
+            provider = MagicMock()
+            provider.get_ohlcv.return_value = df
+            monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+            inp = WalkForwardInput(
+                symbol="AAPL", start_date=START, end_date=END,
+                strategy="sma_crossover",
+                param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+                train_bars=train_bars, test_bars=test_bars,
+            )
+            return run_walk_forward_backtest(inp)
+
+        baseline = run_with(long_ohlcv)
+        mutated_result = run_with(mutated)
+
+        # In-sample selection for window 0 depends only on bars [0, train_bars)
+        # — untouched by the mutation — so it must be bit-for-bit identical.
+        assert baseline.windows[0].best_params == mutated_result.windows[0].best_params
+        assert baseline.windows[0].in_sample_sharpe == pytest.approx(
+            mutated_result.windows[0].in_sample_sharpe
+        )
+        assert baseline.windows[0].in_sample_return == pytest.approx(
+            mutated_result.windows[0].in_sample_return
+        )
+
+        # Sanity check the mutation is actually meaningful: window 0's
+        # out-of-sample result lives entirely inside the mutated region and
+        # should differ — otherwise the assertions above would be vacuous.
+        assert baseline.windows[0].out_of_sample_return != pytest.approx(
+            mutated_result.windows[0].out_of_sample_return, abs=1e-9
+        )
+
 
 # ── Feature 4: Portfolio Risk Attribution ─────────────────────────────────────
 
