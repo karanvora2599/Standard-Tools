@@ -33,3 +33,14 @@ class TestYFinanceProviderMetadata:
         provider = YFinanceProvider()
         meta = provider.get_metadata("AAPL")
         assert meta.frequency == "1d"
+
+    def test_us_symbol_defaults_to_new_york(self):
+        provider = YFinanceProvider()
+        meta = provider.get_metadata("AAPL")
+        assert meta.timezone == "America/New_York"
+
+    def test_suffixed_non_us_symbol_gets_exchange_timezone(self):
+        provider = YFinanceProvider()
+        assert provider.get_metadata("SAP.DE").timezone == "Europe/Berlin"
+        assert provider.get_metadata("0700.HK").timezone == "Asia/Hong_Kong"
+        assert provider.get_metadata("bp.l").timezone == "Europe/London"

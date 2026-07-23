@@ -120,6 +120,11 @@ def run_pair_backtest(
 
     weight_a = gross_leverage / (1.0 + abs(hedge_ratio))
     weight_b = hedge_ratio * weight_a
+    # A large |hedge_ratio| (or gross_leverage > 1) can put one leg's own
+    # weight above run_portfolio_simulation's default max_position_pct=1.0,
+    # which would reject an otherwise-valid gross_leverage. Derive the bound
+    # from the actual larger leg instead of hardcoding 1.0.
+    max_leg_weight = max(abs(weight_a), abs(weight_b))
 
     pos_diff = state.diff()
     pos_diff.iloc[0] = state.iloc[0]
@@ -142,7 +147,8 @@ def run_pair_backtest(
     result = run_portfolio_simulation(
         price_data, target_weights,
         initial_capital=initial_capital, commission_pct=commission_pct, slippage_pct=slippage_pct,
-        max_gross_leverage=gross_leverage + 1e-6, fill_price=fill_price,
+        max_gross_leverage=gross_leverage + 1e-6, max_position_pct=max_leg_weight + 1e-6,
+        fill_price=fill_price,
     )
 
     n_round_trips = int(sum(1 for d in transition_dates if state.loc[d] == 0.0))

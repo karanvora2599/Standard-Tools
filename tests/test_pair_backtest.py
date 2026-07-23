@@ -49,6 +49,23 @@ class TestRunPairBacktest:
                 price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0, entry_z=100.0,
             )
 
+    def test_high_leverage_low_hedge_ratio_does_not_falsely_reject(self):
+        """
+        weight_a = gross_leverage / (1 + |hedge_ratio|) can exceed 1.0 for a
+        small hedge_ratio combined with gross_leverage > 1 (e.g. 2.0 / 1.3 ≈
+        1.54) — this must not be rejected against the engine's default
+        max_position_pct=1.0, since gross_leverage=2.0 is itself a valid,
+        explicitly-requested input.
+        """
+        price_data, _ = _pair_price_data()
+        result = run_pair_backtest(
+            price_data, symbol_a="A", symbol_b="B", hedge_ratio=0.3,
+            entry_z=1.0, exit_z=0.3, gross_leverage=2.0,
+            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
+        )
+        first_rebalance = result["rebalance_log"].iloc[0]
+        assert first_rebalance["gross_leverage_after"] == pytest.approx(2.0, abs=1e-2)
+
     def test_transitions_and_round_trips(self):
         price_data, dates = _pair_price_data()
         result = run_pair_backtest(

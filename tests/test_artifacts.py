@@ -28,6 +28,19 @@ class TestSaveArtifact:
         assert isinstance(uri, str)
         assert uri.endswith("equity_curve.parquet")
 
+    def test_reusing_run_id_and_name_raises_without_overwrite(self):
+        series = pd.Series([1.0, 2.0, 3.0])
+        save_artifact(series, run_id="run1", name="equity_curve")
+        with pytest.raises(ValidationError, match="already exists"):
+            save_artifact(pd.Series([4.0, 5.0]), run_id="run1", name="equity_curve")
+
+    def test_overwrite_true_replaces_existing_artifact(self):
+        save_artifact(pd.Series([1.0, 2.0, 3.0]), run_id="run1", name="equity_curve")
+        new_series = pd.Series([9.0, 9.0])
+        uri = save_artifact(new_series, run_id="run1", name="equity_curve", overwrite=True)
+        loaded = load_artifact(uri).squeeze("columns")
+        pd.testing.assert_series_equal(loaded, new_series, check_names=False)
+
 
 class TestRoundTrip:
     def test_series_round_trip(self):

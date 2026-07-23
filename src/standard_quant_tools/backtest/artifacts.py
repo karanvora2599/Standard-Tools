@@ -23,7 +23,9 @@ def _runs_dir() -> Path:
     ))
 
 
-def save_artifact(data: Union[pd.Series, pd.DataFrame], run_id: str, name: str) -> str:
+def save_artifact(
+    data: Union[pd.Series, pd.DataFrame], run_id: str, name: str, overwrite: bool = False,
+) -> str:
     """
     Write data as Parquet under SQT_RUNS_DIR/<run_id>/<name>.parquet,
     returning the file path as a URI string. A pd.Series is converted to a
@@ -31,8 +33,16 @@ def save_artifact(data: Union[pd.Series, pd.DataFrame], run_id: str, name: str) 
     "value" if unnamed) — Parquet has no native Series concept; see
     load_artifact for how to get an equivalent Series back.
 
+    Args:
+        overwrite: run_id is caller-supplied (e.g. an agent-chosen or
+            user-chosen id, not always a fresh uuid), so by default a
+            second save_artifact call reusing the same (run_id, name) raises
+            instead of silently clobbering the first run's artifact. Pass
+            True to intentionally overwrite.
+
     Raises:
-        ValidationError: data is empty.
+        ValidationError: data is empty, or the target file already exists
+        and overwrite=False.
     """
     if isinstance(data, pd.Series):
         frame = data.to_frame(name=data.name or "value")
@@ -44,6 +54,11 @@ def save_artifact(data: Union[pd.Series, pd.DataFrame], run_id: str, name: str) 
     directory = _runs_dir() / run_id
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{name}.parquet"
+    if path.exists() and not overwrite:
+        raise ValidationError(
+            f"artifact already exists at {path} (run_id={run_id!r}, name={name!r}) — "
+            "pass overwrite=True to replace it, or use a different run_id/name."
+        )
     frame.to_parquet(path)
     return str(path)
 

@@ -22,6 +22,32 @@ from cachetools import TTLCache, cached
 # ── In-process session cache (avoids repeated network calls in the same run) ──
 _session_cache = TTLCache(maxsize=100, ttl=3600)
 
+# ── Yahoo Finance exchange-suffix -> IANA timezone (best-effort, no network
+# call) — used by get_metadata() so a non-US listing isn't silently
+# mislabeled with the NYSE timezone. Not exhaustive; unsuffixed symbols
+# (the common case: US-listed tickers) default to America/New_York.
+_EXCHANGE_SUFFIX_TIMEZONES = {
+    ".L":  "Europe/London",
+    ".DE": "Europe/Berlin",
+    ".PA": "Europe/Paris",
+    ".MI": "Europe/Rome",
+    ".AS": "Europe/Amsterdam",
+    ".SW": "Europe/Zurich",
+    ".ST": "Europe/Stockholm",
+    ".HK": "Asia/Hong_Kong",
+    ".T":  "Asia/Tokyo",
+    ".SS": "Asia/Shanghai",
+    ".SZ": "Asia/Shanghai",
+    ".KS": "Asia/Seoul",
+    ".TW": "Asia/Taipei",
+    ".NS": "Asia/Kolkata",
+    ".BO": "Asia/Kolkata",
+    ".AX": "Australia/Sydney",
+    ".TO": "America/Toronto",
+    ".V":  "America/Toronto",
+    ".SA": "America/Sao_Paulo",
+}
+
 # ── Persistent Parquet disk cache ─────────────────────────────────────────────
 # Historical OHLCV data never changes, so we store it permanently on disk.
 # The cache directory can be overridden with the SQT_CACHE_DIR env variable.
@@ -215,16 +241,28 @@ class YFinanceProvider(DataProvider):
         securities remain queryable (survivorship_free=False) or that
         historical values are never silently revised
         (point_in_time=False) — neither is a yfinance API contract.
-        timezone is a fixed NYSE default since yfinance doesn't expose a
+        timezone is inferred from the symbol's Yahoo Finance exchange suffix
+        (e.g. "SAP.DE" -> Europe/Berlin, "0700.HK" -> Asia/Hong_Kong) via
+        _EXCHANGE_SUFFIX_TIMEZONES when present, so a non-US listing isn't
+        silently mislabeled with the NYSE timezone. Unsuffixed symbols (the
+        common case: US-listed tickers) default to America/New_York. This is
+        a local, no-network heuristic based on ticker convention, not a
+        provider-verified exchange timezone — yfinance doesn't expose a
         reliable per-symbol timezone through this provider's interface.
         """
+        timezone = "America/New_York"
+        upper_symbol = symbol.upper()
+        for suffix, tz_name in _EXCHANGE_SUFFIX_TIMEZONES.items():
+            if upper_symbol.endswith(suffix):
+                timezone = tz_name
+                break
         return DataSetMetadata(
             provider="yfinance",
             adjusted=True,
             survivorship_free=False,
             point_in_time=False,
             frequency=interval,
-            timezone="America/New_York",
+            timezone=timezone,
         )
 
     @retry(times=3, delay=1)

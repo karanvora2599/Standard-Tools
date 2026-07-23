@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "standard_quant_tools"
-authors = [{name = "Antigravity", email = "antigravity@example.com"}]
+authors = [{name = "Karan Vora", email = "kv2154@nyu.edu"}]
 dynamic = ["version", "description"]
 dependencies = [
     "pandas>=2.0.0",
