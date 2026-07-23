@@ -109,6 +109,39 @@ class TestDispatchAudit:
         assert records[0]["git_commit_sha"] is None or isinstance(records[0]["git_commit_sha"], str)
         assert records[0]["package_version"] == "0.1.0"
 
+    def test_record_includes_strategy_source_hash_when_applicable(self, patched_factory, audit_dir: Path):
+        dispatch("run_sma_backtest", {
+            "symbol": "AAPL", "start_date": "2022-01-01", "end_date": "2023-01-01",
+            "strategy_type": "sma_crossover", "parameters": {"fast_period": 10, "slow_period": 30},
+        })
+        records = _audit_records(audit_dir)
+        assert len(records) == 1
+        assert records[0]["strategy_source_hash"] is not None
+        assert isinstance(records[0]["strategy_source_hash"], str)
+
+    def test_strategy_source_hash_none_when_not_applicable(self, patched_factory, audit_dir: Path):
+        """analyze_stock_risk's input model has neither a `strategy` nor a
+        `strategy_type` field — the hash must be None, not an error."""
+        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        records = _audit_records(audit_dir)
+        assert len(records) == 1
+        assert records[0]["strategy_source_hash"] is None
+
+    def test_record_includes_random_seed_when_present(self, patched_factory, audit_dir: Path):
+        dispatch("get_robustness_diagnostics", {
+            "symbol": "AAPL", "start_date": "2022-01-01", "end_date": "2023-01-01",
+            "strategy": "sma_crossover", "param_grid": {"fast_period": [10], "slow_period": [30]},
+            "n_bootstrap_iterations": 20, "random_seed": 42,
+        })
+        records = _audit_records(audit_dir)
+        assert len(records) == 1
+        assert records[0]["random_seed"] == 42
+
+    def test_random_seed_none_when_absent(self, patched_factory, audit_dir: Path):
+        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        records = _audit_records(audit_dir)
+        assert records[0]["random_seed"] is None
+
     def test_request_id_correlates_log_and_record(
         self, patched_factory, audit_dir: Path, caplog: pytest.LogCaptureFixture,
     ):

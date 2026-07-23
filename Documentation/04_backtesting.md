@@ -579,6 +579,79 @@ this library.
 For LLM/JSON tool-calling, see the `run_pair_trade_backtest` agent tool in
 [09_advanced_agent_tools.md](09_advanced_agent_tools.md#16-pair-trade-backtest).
 
+
+---
+
+## Robustness Diagnostics
+
+Sharpe and total return alone don't tell you whether a grid-search result
+is real or a fluke of one lucky parameter combination among many tried.
+`backtest/robustness.py` adds three independent, same-sample checks — none
+of them a substitute for `run_walk_forward_backtest`'s out-of-sample
+validation, which answers a different question ("would this have held up
+on unseen data" vs. "how sure am I this in-sample number is real").
+
+```python
+from standard_quant_tools.backtest.robustness import (
+    block_bootstrap_ci, parameter_sensitivity, deflated_sharpe_ratio,
+)
+from standard_quant_tools.backtest import backtest_grid
+from standard_quant_tools.metrics.risk_metrics import sharpe_ratio
+
+grid_df = backtest_grid(df, strategy="sma_crossover",
+    param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]})
+
+# 1. How much better is the best row than the pack?
+sensitivity = parameter_sensitivity(grid_df, metric_col="sharpe_ratio")
+
+# 2. Does the best Sharpe survive correcting for having been selected as
+#    the max of len(grid_df) attempts?
+dsr = deflated_sharpe_ratio(
+    observed_sharpe=grid_df.iloc[0]["sharpe_ratio"],
+    sharpe_trials_std=grid_df["sharpe_ratio"].std(),
+    n_trials=len(grid_df), n_obs=len(df),
+)
+
+# 3. Confidence interval on the best trial's own Sharpe ratio, via block
+#    bootstrap on its daily returns (preserves short-range autocorrelation
+#    an i.i.d. resample would destroy).
+ci = block_bootstrap_ci(best_trial_returns, sharpe_ratio, block_size=20, seed=42)
+```
+
+**`parameter_sensitivity(grid_df, metric_col="sharpe_ratio")`:** returns
+`n_trials`, `best`, `median`, `best_minus_median`, `best_minus_rank2`, and
+`best_minus_top5_mean`. A large gap on a small grid is a red flag for
+overfitting — the "best" combination may just be the one that happened to
+fit this particular sample.
+
+**`deflated_sharpe_ratio(observed_sharpe, sharpe_trials_std, n_trials, n_obs, skew=0.0, kurtosis=3.0)`:**
+implements Bailey & López de Prado's Deflated Sharpe Ratio (2014).
+`sharpe_trials_std` is the standard deviation of the Sharpe ratios actually
+observed across the grid search (`grid_df["sharpe_ratio"].std()`) — a
+measured quantity from the real search, not an assumed theoretical one.
+Returns `expected_max_sharpe` (the bar `observed_sharpe` must clear, given
+`n_trials` independent attempts) and `deflated_sharpe_ratio` (a probability
+in `[0, 1]`: how likely the true Sharpe ratio exceeds zero after that
+correction). `n_trials <= 1` skips the correction entirely
+(`expected_max_sharpe = 0.0`) — no selection bias to correct for with a
+single trial. Implemented with a self-contained normal CDF/inverse-CDF
+(`math.erf` + Acklam's rational approximation) rather than a hard `scipy`
+dependency.
+
+**`block_bootstrap_ci(returns, metric_fn, n_iterations=1000, block_size=20, confidence=0.95, seed=None)`:**
+resamples overlapping blocks of `block_size` consecutive returns with
+replacement (not an i.i.d. resample, which would destroy short-range
+autocorrelation), recomputes `metric_fn` on each resample, and reports the
+percentile-based confidence interval. `metric_fn` can be any callable
+`pd.Series -> float` — `sharpe_ratio` from
+`metrics/risk_metrics.py` is the typical choice, but total-return or any
+other metric function works identically.
+
+For LLM/JSON tool-calling, see the `get_robustness_diagnostics` agent tool
+in [09_advanced_agent_tools.md](09_advanced_agent_tools.md#17-robustness-diagnostics)
+— runs a grid search internally and reports all three checks on the best
+trial in one call.
+
 ---
 
 ## Understanding the Output

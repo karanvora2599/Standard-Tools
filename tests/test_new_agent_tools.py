@@ -19,6 +19,7 @@ from standard_quant_tools.agent.models import (
     BacktestDiagnosticsInput,
     PortfolioSimulationInput,
     PairTradeBacktestInput,
+    RobustnessDiagnosticsInput,
 )
 from standard_quant_tools.agent.tools import (
     get_agent_tools,
@@ -33,6 +34,7 @@ from standard_quant_tools.agent.tools import (
     get_backtest_diagnostics,
     run_portfolio_simulation,
     run_pair_trade_backtest,
+    get_robustness_diagnostics,
     dispatch,
 )
 
@@ -77,8 +79,8 @@ def patched_long(long_ohlcv, monkeypatch):
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 class TestToolRegistry:
-    def test_now_has_thirty_tools(self):
-        assert len(get_agent_tools()) == 30
+    def test_now_has_thirty_one_tools(self):
+        assert len(get_agent_tools()) == 31
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -1430,3 +1432,94 @@ class TestPairTradeBacktest:
         })
         assert result["symbol_a"] == "A"
         assert result["n_round_trips"] == 1
+
+
+# ── Robustness Diagnostics (parameter sensitivity, DSR, block-bootstrap CI) ──
+
+class TestRobustnessDiagnostics:
+    def test_returns_result(self, patched_long):
+        inp = RobustnessDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            n_bootstrap_iterations=50, random_seed=0,
+        )
+        result = get_robustness_diagnostics(inp)
+        assert result.symbol == "AAPL"
+        assert result.strategy == "sma_crossover"
+        assert "fast_period" in result.best_params
+        assert "slow_period" in result.best_params
+
+    def test_parameter_sensitivity_fields_present(self, patched_long):
+        inp = RobustnessDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50]},
+            n_bootstrap_iterations=50, random_seed=0,
+        )
+        result = get_robustness_diagnostics(inp)
+        for key in ("n_trials", "best", "median", "best_minus_median",
+                    "best_minus_rank2", "best_minus_top5_mean"):
+            assert key in result.parameter_sensitivity
+        assert result.parameter_sensitivity["n_trials"] == 6  # 3 * 2 combos
+
+    def test_dsr_in_unit_interval(self, patched_long):
+        inp = RobustnessDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            n_bootstrap_iterations=50, random_seed=0,
+        )
+        result = get_robustness_diagnostics(inp)
+        assert 0.0 <= result.deflated_sharpe_ratio <= 1.0
+
+    def test_bootstrap_ci_contains_point_estimate(self, patched_long):
+        inp = RobustnessDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            n_bootstrap_iterations=100, bootstrap_block_size=20, random_seed=0,
+        )
+        result = get_robustness_diagnostics(inp)
+        assert result.bootstrap_ci_lower <= result.bootstrap_point_estimate <= result.bootstrap_ci_upper
+
+    def test_reproducible_with_same_seed(self, patched_long):
+        kwargs = dict(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
+            n_bootstrap_iterations=50, random_seed=7,
+        )
+        r1 = get_robustness_diagnostics(RobustnessDiagnosticsInput(**kwargs))
+        r2 = get_robustness_diagnostics(RobustnessDiagnosticsInput(**kwargs))
+        assert r1.bootstrap_ci_lower == r2.bootstrap_ci_lower
+        assert r1.bootstrap_ci_upper == r2.bootstrap_ci_upper
+
+    def test_few_trials_warns(self, patched_long):
+        inp = RobustnessDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="sma_crossover",
+            param_grid={"fast_period": [5], "slow_period": [30]},
+            n_bootstrap_iterations=20, random_seed=0,
+        )
+        result = get_robustness_diagnostics(inp)
+        assert len(result.warnings) == 1
+
+    def test_invalid_strategy_raises(self, patched_long):
+        inp = RobustnessDiagnosticsInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            strategy="nonexistent_strategy",
+            param_grid={"fast_period": [5]},
+        )
+        with pytest.raises(ValueError, match="Unknown strategy"):
+            get_robustness_diagnostics(inp)
+
+    def test_dispatched_through_dispatch(self, patched_long):
+        result = dispatch("get_robustness_diagnostics", {
+            "symbol": "AAPL", "start_date": START, "end_date": END,
+            "strategy": "sma_crossover",
+            "param_grid": {"fast_period": [5, 10], "slow_period": [30, 50]},
+            "n_bootstrap_iterations": 30, "random_seed": 0,
+        })
+        assert result["symbol"] == "AAPL"
+        assert "deflated_sharpe_ratio" in result

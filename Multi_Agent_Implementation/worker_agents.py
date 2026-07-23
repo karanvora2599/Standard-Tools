@@ -1,10 +1,10 @@
 """
 Worker-agent registry for the multi-agent Standard Quant Tools example.
 
-Each worker owns a small, non-overlapping subset of the library's 29 agent
+Each worker owns a small, non-overlapping subset of the library's agent
 tools and a system prompt scoped to exactly that workflow. Together the six
-workers cover all 29 tools exactly once — see test_multi_agent_tool_coverage
-in tests/ for the coverage check.
+workers cover every registered tool exactly once — see
+test_multi_agent_tool_coverage in tests/ for the coverage check.
 
 This is the direct, structural answer to "how do I stop the model confusing
 similar tools like the backtest ones": give each agent so few, so tightly
@@ -76,6 +76,7 @@ your tool calls.""",
             "run_regime_adaptive_walkforward_backtest",
             "run_walk_forward_backtest", "get_backtest_diagnostics",
             "run_portfolio_simulation", "run_pair_trade_backtest",
+            "get_robustness_diagnostics",
         ],
         "system_prompt": """You are a backtesting specialist for the library's BUILT-IN indicator
 strategies: SMA crossover, RSI mean-reversion, MACD crossover, Bollinger
@@ -89,10 +90,14 @@ strategies above, true shared-cash portfolio simulation with rebalancing
 (run_portfolio_simulation — use this instead of anything else when the user
 needs realistic multi-asset accounting: one shared cash balance and
 positions sized against current equity, not each ticker getting its own
-independent capital), and synchronized two-leg pair trades
+independent capital), synchronized two-leg pair trades
 (run_pair_trade_backtest — takes a hedge_ratio, typically from the Quant
 Research Agent's run_cointegration_test, and executes both legs as one
-trade; scan_pairs itself only screens candidates and belongs to that agent).
+trade; scan_pairs itself only screens candidates and belongs to that agent),
+and robustness diagnostics for a grid search (get_robustness_diagnostics —
+parameter sensitivity, Deflated Sharpe Ratio, and a bootstrap confidence
+interval on the best trial; this is a same-sample confidence check, NOT a
+substitute for run_walk_forward_backtest's out-of-sample validation).
 
 IMPORTANT: if a request comes with a signal someone else already computed (an
 explicit list or map of values, not "find me a good strategy"), that is NOT

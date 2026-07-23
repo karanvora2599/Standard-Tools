@@ -1941,3 +1941,56 @@ or if the spread never crosses `entry_z` (nothing to backtest).
 **Scope, stated explicitly:** two legs only — no N-leg basket trades; the
 same flat cost model and no-margin-modeling caveats as §15 apply, since this
 tool is a thin wrapper around `run_portfolio_simulation`.
+
+---
+
+## 17. Robustness Diagnostics
+
+`get_robustness_diagnostics` runs a grid search internally
+(`backtest_grid`) and reports three same-sample confidence checks on the
+winning combination — a different and complementary question from
+`run_walk_forward_backtest`'s out-of-sample validation (§3 in the base
+agent tools): "how sure am I this number is real" vs. "would it have held
+up on unseen data."
+
+```python
+from standard_quant_tools.agent.tools import get_robustness_diagnostics
+from standard_quant_tools.agent.models import RobustnessDiagnosticsInput
+
+result = get_robustness_diagnostics(RobustnessDiagnosticsInput(
+    symbol="AAPL",
+    start_date="2018-01-01", end_date="2024-01-01",
+    strategy="sma_crossover",
+    param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]},
+    random_seed=42,   # set for reproducible bootstrap results
+))
+
+print(f"Best params    : {result.best_params}")
+print(f"Best vs median : {result.parameter_sensitivity['best_minus_median']:.3f}")
+print(f"Expected max SR: {result.expected_max_sharpe:.3f}")
+print(f"Deflated SR    : {result.deflated_sharpe_ratio:.3f}")
+print(f"Sharpe 95% CI  : [{result.bootstrap_ci_lower:.3f}, {result.bootstrap_ci_upper:.3f}]")
+if result.warnings:
+    print("Warnings:", result.warnings)
+```
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `best_params` | `Dict[str, Any]` | Winning combination, picked by `sort_by` |
+| `parameter_sensitivity` | `Dict[str, Any]` | `n_trials`, `best`, `median`, `best_minus_median`, `best_minus_rank2`, `best_minus_top5_mean` |
+| `expected_max_sharpe` | `float` | The bar the best Sharpe must clear given `n_trials` independent attempts (Deflated Sharpe Ratio's SR0) |
+| `deflated_sharpe_ratio` | `float` | Probability in `[0, 1]` that the true Sharpe ratio exceeds zero, after correcting for the multiple-testing selection bias |
+| `bootstrap_point_estimate`, `bootstrap_ci_lower`, `bootstrap_ci_upper`, `bootstrap_confidence` | `float` | Block-bootstrap confidence interval on the best trial's own Sharpe ratio |
+| `warnings` | `List[str]` | Flags `n_trials < 5` — sensitivity/DSR estimates are noisy with very few combinations searched |
+
+**`random_seed`:** set this for reproducible bootstrap results — it's
+recorded in the audit trail (`audit.py`) alongside every other input, so a
+`replay` of the recorded call reproduces the identical confidence interval.
+
+**Scope, stated explicitly:** the Deflated Sharpe Ratio's `sharpe_trials_std`
+is the standard deviation actually observed across the searched grid, not
+an independently-estimated theoretical variance — a practical proxy common
+in applied use of DSR, not the only way to compute it. The bootstrap CI is
+on the best trial's in-sample Sharpe, not an out-of-sample estimate.

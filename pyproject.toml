@@ -21,6 +21,9 @@ dependencies = [
 ]
 requires-python = ">=3.10"
 
+[project.scripts]
+sqt = "standard_quant_tools.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

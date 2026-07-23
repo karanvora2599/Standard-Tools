@@ -205,6 +205,8 @@ class DecisionRecord(BaseModel):
     # checkout), never a reason to fail the call itself.
     git_commit_sha: Optional[str] = None
     package_version: Optional[str] = None
+    random_seed: Optional[int] = None
+    strategy_source_hash: Optional[str] = None
 
 
 def _audit_enabled() -> bool:
@@ -234,6 +236,30 @@ class AuditWriter:
         with open(path, "a", encoding="utf-8") as f:
             f.write(record.model_dump_json() + "\n")
         return path
+
+
+def _strategy_source_hash(model_instance: Any) -> Optional[str]:
+    """
+    Content hash of a registered strategy's source code, when
+    `model_instance` names one via a `strategy` or `strategy_type` field
+    (e.g. WalkForwardInput.strategy, BacktestDiagnosticsInput.strategy_type).
+    None when neither field is present, the name isn't a registered
+    strategy (e.g. a custom-signal tool), or on any lookup failure —
+    provenance is a nice-to-have, not something that should ever break a
+    tool call.
+    """
+    strategy_name = getattr(model_instance, "strategy", None) or getattr(model_instance, "strategy_type", None)
+    if not strategy_name:
+        return None
+    try:
+        import inspect
+        from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+        fn = STRATEGY_REGISTRY.get(strategy_name)
+        if fn is None:
+            return None
+        return hash_payload(inspect.getsource(fn))
+    except Exception:
+        return None
 
 
 def _run_and_record(tool_name: str, fn: Callable[[Any], Any], model_instance: Any) -> Dict[str, Any]:
@@ -281,6 +307,8 @@ def _run_and_record(tool_name: str, fn: Callable[[Any], Any], model_instance: An
                     error_message=error_message,
                     git_commit_sha=_git_sha(),
                     package_version=_package_version(),
+                    random_seed=getattr(model_instance, "random_seed", None),
+                    strategy_source_hash=_strategy_source_hash(model_instance),
                 )
                 AuditWriter().write(record)
             except Exception:

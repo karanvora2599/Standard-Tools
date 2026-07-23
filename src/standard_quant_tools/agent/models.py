@@ -1283,3 +1283,47 @@ class BacktestDiagnosticsResult(BaseModel):
     top_drawdowns: List[DrawdownEpisode]
     trade_diagnostics: TradeDiagnostics
     exposure: ExposureDiagnostics
+
+
+# ──────────────────────────────────────────────
+# Robustness Diagnostics (parameter sensitivity, Deflated Sharpe Ratio,
+# block-bootstrap CI — same-sample confidence checks, NOT a substitute for
+# run_walk_forward_backtest's out-of-sample validation)
+# ──────────────────────────────────────────────
+
+class RobustnessDiagnosticsInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    strategy: str = Field(
+        ..., description="Strategy name: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+    )
+    param_grid: Dict[str, List[Any]] = Field(
+        ..., description="Parameter grid to search — same shape as run_backtest_optimization.",
+    )
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    sort_by: str = Field("sharpe_ratio", description="Metric used to pick the best trial from the grid.")
+    n_bootstrap_iterations: int = Field(1000, description="Block-bootstrap resamples for the best trial's Sharpe CI.")
+    bootstrap_block_size: int = Field(20, description="Block length (bars) for the bootstrap.")
+    bootstrap_confidence: float = Field(0.95, description="Two-sided confidence level for the bootstrap CI.")
+    random_seed: Optional[int] = Field(
+        None, description="Seed for the block-bootstrap RNG — set for reproducible results (recorded in the audit trail).",
+    )
+    skew: float = Field(0.0, description="Return-distribution skew for the Deflated Sharpe Ratio's standard-error formula (0.0 = normal).")
+    kurtosis: float = Field(3.0, description="Return-distribution kurtosis for the Deflated Sharpe Ratio's standard-error formula (3.0 = normal).")
+
+
+class RobustnessDiagnosticsResult(BaseModel):
+    symbol: str
+    strategy: str
+    best_params: Dict[str, Any]
+    parameter_sensitivity: Dict[str, Any]
+    expected_max_sharpe: float
+    deflated_sharpe_ratio: float
+    bootstrap_point_estimate: float
+    bootstrap_ci_lower: float
+    bootstrap_ci_upper: float
+    bootstrap_confidence: float
+    warnings: List[str] = []

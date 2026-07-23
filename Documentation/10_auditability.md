@@ -51,7 +51,9 @@ produces a record like:
   "error_type": null,
   "error_message": null,
   "git_commit_sha": "463b874696913a8ec813c9a789465a443b66a15b",
-  "package_version": "0.1.0"
+  "package_version": "0.1.0",
+  "random_seed": null,
+  "strategy_source_hash": "9f2a7c1e4b8d0356"
 }
 ```
 
@@ -66,6 +68,17 @@ months later can tell "the code changed since this ran" apart from "the
 underlying data changed." Both are best-effort — `git_commit_sha` is `null`
 outside a git checkout or when git isn't installed; resolving them never
 raises or blocks the tool call itself.
+
+`random_seed` is populated whenever the tool's input model has a
+`random_seed` field (currently `get_robustness_diagnostics`, whose block
+bootstrap needs one for reproducibility) — `null` for every other tool.
+`strategy_source_hash` is populated whenever the input model names a
+built-in strategy via a `strategy` or `strategy_type` field (e.g.
+`run_sma_backtest`, `run_walk_forward_backtest`) — a content hash of that
+strategy function's source, so a replay can distinguish "the code for this
+strategy changed" from "the market data changed." `null` for tools with no
+such field (e.g. `run_custom_signal_backtest`) or if the named strategy
+isn't found in the registry — resolving it never raises or blocks the call.
 
 ### Env vars
 
@@ -166,3 +179,39 @@ into whatever decision record is currently open — this happens automatically
 inside `dispatch()`. Calling the provider directly outside of `dispatch()` is
 a no-op for provenance tracking (there's no open decision record to report
 into), but the OHLCV data itself is unaffected.
+
+---
+
+## CLI (`sqt`)
+
+A thin command-line wrapper (`cli.py`, stdlib `argparse` only — no new
+dependency) around the same JSONL decision records, addressed by
+`request_id`. Installed as the `sqt` console script
+(`pip install -e .` registers it via `[project.scripts]` in
+`pyproject.toml`).
+
+```bash
+sqt report <request_id>              # pretty-print one record in full
+sqt replay <request_id>              # re-run the call, report data/output match
+sqt compare <request_id_a> <id_b>    # diff two records' status/output/inputs
+```
+
+```bash
+$ sqt replay e88b5d2a17e440ab84914461f1399b9b
+request_id   : e88b5d2a17e440ab84914461f1399b9b
+tool_name    : run_sma_backtest
+output_match : True
+  data_source: AAPL 2022-01-01 -> 2023-01-01 (1d)  match=True
+```
+
+`sqt replay` is a thin CLI wrapper around `verify_replay()` above — same
+re-run, data/output match semantics, and notes, just formatted for a
+terminal instead of a `ReplayResult` object. `sqt compare` diffs
+`tool_name`, `status`, `output_hash`, `duration_ms`, `git_commit_sha`,
+`package_version`, `strategy_source_hash`, `random_seed`, and every key in
+`input` that differs between the two records — useful for "why did this
+number change between these two runs" without hand-parsing two JSONL lines.
+
+Records are looked up across every `*.jsonl` file in `SQT_AUDIT_DIR`
+(default resolution — same env var as everywhere else), so `request_id`
+alone is enough regardless of which day's file it landed in.

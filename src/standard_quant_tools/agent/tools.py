@@ -30,6 +30,11 @@ from standard_quant_tools.backtest.sizing import (
     rank_weighted, equal_weight_top_bottom, zscore_normalized, vol_scaled, dollar_neutral,
 )
 from standard_quant_tools.backtest.pairs import run_pair_backtest as _pair_backtest_run
+from standard_quant_tools.backtest.robustness import (
+    parameter_sensitivity as _parameter_sensitivity,
+    deflated_sharpe_ratio as _deflated_sharpe_ratio,
+    block_bootstrap_ci as _block_bootstrap_ci,
+)
 from standard_quant_tools.backtest.walk_forward import (
     stitch_oos_returns, compute_stitched_metrics,
     longest_losing_streak, parameter_turnover,
@@ -79,6 +84,7 @@ from standard_quant_tools.agent.models import (
     ExposureDiagnostics, BacktestDiagnosticsResult,
     PortfolioSimulationInput, RebalanceEvent, PortfolioSimulationResult,
     PairTradeBacktestInput, PairTradeBacktestResult,
+    RobustnessDiagnosticsInput, RobustnessDiagnosticsResult,
 )
 
 
@@ -1988,6 +1994,99 @@ def run_pair_trade_backtest(input_data: PairTradeBacktestInput) -> PairTradeBack
 
 
 # ──────────────────────────────────────────────────────────────────
+# Robustness Diagnostics (parameter sensitivity, Deflated Sharpe Ratio,
+# block-bootstrap CI)
+# ──────────────────────────────────────────────────────────────────
+
+def get_robustness_diagnostics(input_data: RobustnessDiagnosticsInput) -> RobustnessDiagnosticsResult:
+    """
+    Same-sample robustness checks for a grid search: how much better is the
+    best trial than the pack (parameter_sensitivity), does the best trial's
+    Sharpe survive correcting for having been selected as the max of
+    n_trials attempts (deflated_sharpe_ratio), and a block-bootstrap
+    confidence interval on the best trial's Sharpe ratio. This is NOT a
+    substitute for run_walk_forward_backtest's out-of-sample validation —
+    it quantifies confidence in a same-sample estimate, a different and
+    complementary question ("how sure am I this number is real" vs. "would
+    it have held up on unseen data").
+    """
+    logger.debug("[robustness_diagnostics] %s  strategy=%s  sort_by=%s  n_combos=%s",
+                 input_data.symbol, input_data.strategy, input_data.sort_by,
+                 {k: len(v) for k, v in input_data.param_grid.items()})
+    if input_data.strategy not in STRATEGY_REGISTRY:
+        raise ValueError(
+            f"Unknown strategy '{input_data.strategy}'. "
+            f"Available: {list(STRATEGY_REGISTRY)}"
+        )
+
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+
+    grid_df = backtest_grid(
+        df, strategy=input_data.strategy, param_grid=input_data.param_grid,
+        initial_capital=input_data.initial_capital, commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct, sort_by=input_data.sort_by, ascending=False,
+    )
+    sensitivity = _parameter_sensitivity(grid_df, metric_col=input_data.sort_by)
+
+    best_row = grid_df.iloc[0]
+    param_keys = list(input_data.param_grid.keys())
+    best_params: Dict[str, Any] = {
+        k: (int(best_row[k]) if isinstance(input_data.param_grid[k][0], int) else float(best_row[k]))
+        for k in param_keys
+    }
+    best_sharpe = float(best_row["sharpe_ratio"])
+    sharpe_trials_std = float(grid_df["sharpe_ratio"].std()) if len(grid_df) > 1 else 0.0
+
+    dsr = _deflated_sharpe_ratio(
+        observed_sharpe=best_sharpe, sharpe_trials_std=sharpe_trials_std,
+        n_trials=len(grid_df), n_obs=len(df),
+        skew=input_data.skew, kurtosis=input_data.kurtosis,
+    )
+
+    best_signals = STRATEGY_REGISTRY[input_data.strategy](df, **best_params)
+    best_result = run_strategy(
+        df, best_signals, initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct, slippage_pct=input_data.slippage_pct,
+    )
+    best_returns = best_result["equity_curve"].pct_change().fillna(0.0)
+
+    bootstrap = _block_bootstrap_ci(
+        best_returns, sharpe_ratio,
+        n_iterations=input_data.n_bootstrap_iterations,
+        block_size=input_data.bootstrap_block_size,
+        confidence=input_data.bootstrap_confidence,
+        seed=input_data.random_seed,
+    )
+
+    warnings: List[str] = []
+    if len(grid_df) < 5:
+        warnings.append(
+            f"Only {len(grid_df)} trial(s) searched — parameter sensitivity and "
+            "deflated Sharpe estimates are noisy with this few combinations."
+        )
+
+    logger.debug(
+        "[robustness_diagnostics] trials=%d  best_sharpe=%.3f  expected_max=%.3f  dsr=%.3f",
+        len(grid_df), best_sharpe, dsr["expected_max_sharpe"], dsr["deflated_sharpe_ratio"],
+    )
+
+    return RobustnessDiagnosticsResult(
+        symbol=input_data.symbol,
+        strategy=input_data.strategy,
+        best_params=best_params,
+        parameter_sensitivity=sensitivity,
+        expected_max_sharpe=dsr["expected_max_sharpe"],
+        deflated_sharpe_ratio=dsr["deflated_sharpe_ratio"],
+        bootstrap_point_estimate=round(bootstrap["point_estimate"], 4),
+        bootstrap_ci_lower=round(bootstrap["ci_lower"], 4),
+        bootstrap_ci_upper=round(bootstrap["ci_upper"], 4),
+        bootstrap_confidence=input_data.bootstrap_confidence,
+        warnings=warnings,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Extended Backtest Diagnostics
 # ──────────────────────────────────────────────────────────────────
 
@@ -2115,6 +2214,7 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("get_backtest_diagnostics", "Extended diagnostics for a built-in strategy: top drawdown episodes, trade expectancy/payoff/streaks with MAE/MFE, and exposure stats.", BacktestDiagnosticsInput),
         ("run_portfolio_simulation", "True shared-cash portfolio simulation with rebalancing at target-weight dates — unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.", PortfolioSimulationInput),
         ("run_pair_trade_backtest", "Backtest a cointegrated pair as one synchronized two-leg trade — both legs enter/exit together and share one cash account, unlike scan_pairs which only screens candidates.", PairTradeBacktestInput),
+        ("get_robustness_diagnostics", "Same-sample robustness checks for a grid search: parameter sensitivity, Deflated Sharpe Ratio, and a block-bootstrap confidence interval on the best trial's Sharpe ratio.", RobustnessDiagnosticsInput),
     ]
 
     return [
@@ -2165,6 +2265,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "get_backtest_diagnostics":       (get_backtest_diagnostics,       BacktestDiagnosticsInput),
     "run_portfolio_simulation":       (run_portfolio_simulation,       PortfolioSimulationInput),
     "run_pair_trade_backtest":        (run_pair_trade_backtest,        PairTradeBacktestInput),
+    "get_robustness_diagnostics":     (get_robustness_diagnostics,     RobustnessDiagnosticsInput),
 }
 
 
