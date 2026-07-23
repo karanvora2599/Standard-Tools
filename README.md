@@ -294,7 +294,7 @@ result = run_portfolio_simulation(
     use_impact_model=True,
     max_adv_participation=0.1,
 )
-print(result['final_equity'], result['avg_gross_leverage'])
+print(result['final_equity'], result['leverage_curve'].mean())
 ```
 
 Pluggable building blocks compose into `run_portfolio_simulation` (or can be used standalone):
@@ -350,7 +350,7 @@ result = screen_stocks(
 
 **Large universes:** Pass `n_workers` to split screening across CPU cores. ≤ 20 tickers run in a single async event loop; larger universes automatically use `ProcessPoolExecutor`.
 
-**Beta filter optimisation:** When `beta_max` / `beta_min` filters are active, SPY data is fetched **once per call** (not once per ticker), eliminating N−1 redundant HTTP round-trips for an N-ticker beta screen.
+**Beta filter optimisation:** When `beta_max` / `beta_min` filters are active, SPY data is pre-fetched once per batch instead of once per ticker — a single HTTP round-trip for the whole universe when `n_workers <= 1` (the default for ≤ 20 tickers), or once per worker process for larger multi-worker universes (still eliminating the N−1 redundant per-ticker fetches within each worker's batch).
 
 ```python
 result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
@@ -478,7 +478,7 @@ Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):
 | ATR true range | 2.8 ms (`pd.concat` + `.max`) | 0.49 ms (`np.maximum`) | **5.6×** | Single-pass; eliminates 3 Series + concat |
 | Trade log serialization | 31 ms (`iterrows`, 500 trades) | 3.6 ms (`to_dict`) | **~9×** | Vectorized dict conversion |
 | CVaR computation | 0.83 ms (two-pass) | 0.44 ms (one-pass) | **1.9×** | Single `np.percentile` + boolean mask |
-| SPY beta screen | N HTTP requests | 1 HTTP request | **N×** | SPY fetched once per `screen_stocks()` call |
+| SPY beta screen | N HTTP requests | 1 request per worker | **~N/workers×** | SPY pre-fetched once per batch — 1 total for single-process runs, once per worker for `n_workers > 1` |
 | Backtesting equity curve | — | NumPy cumprod | vectorized | `(1 + returns).cumprod()` |
 | Portfolio covariance | — | BLAS `pandas.cov` | BLAS-backed | O(n·k²) via LAPACK |
 | Screener (50+ tickers) | — | ProcessPoolExecutor | multi-core | Auto async→multiprocess threshold |
