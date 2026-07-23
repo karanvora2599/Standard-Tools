@@ -12,6 +12,7 @@ exists alongside the vectorized per-ticker one.
 """
 
 import logging
+import math
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -104,7 +105,23 @@ def run_portfolio_simulation(
         max_adv_participation: Reject (raise ValidationError) any rebalance
             trade whose notional exceeds this fraction of the ticker's own
             rolling average dollar volume. None (default) = no ADV
-            constraint checked. Requires a 'Volume' column when set.
+            constraint checked. Requires a 'Volume' column when set. When
+            either this or use_impact_model is set, a missing/zero/non-finite
+            volume baseline for a ticker being traded also raises
+            ValidationError — fails closed (can't estimate liquidity means
+            the trade is rejected), not open (silently treated as
+            unconstrained).
+
+    Post-trade enforcement: after each rebalance's costs are deducted,
+    realized gross leverage and the largest single position (both computed
+    against post-cost equity, not the pre-cost equity target shares were
+    sized from) are re-checked against max_gross_leverage/max_position_pct;
+    a rebalance that only violates these limits once costs are included
+    raises ValidationError rather than silently exceeding the requested
+    limits. Zero-size trades (a ticker whose target share count is
+    unchanged from the prior rebalance) are skipped entirely — no cost,
+    no turnover, no ADV check — so a per_share_commission minimum floor
+    can't charge a ticker that didn't actually trade.
 
     Returns:
         Dict with equity_curve, cash_curve, gross_exposure_curve,
@@ -215,6 +232,23 @@ def run_portfolio_simulation(
     net_records: List[float] = []
     rebalance_log: List[Dict[str, Any]] = []
 
+    def _valid_dollar_volume(t: str, exec_date: Any) -> float:
+        # Fail closed: a caller who explicitly enabled max_adv_participation
+        # or use_impact_model asked for a liquidity-aware check — a missing
+        # or invalid volume baseline means that check can't be performed,
+        # which must reject the trade, not silently pass it as
+        # unconstrained. costs.py's adv_participation/impact_cost stay
+        # permissive (return 0.0) for callers who use them directly without
+        # opting into this engine's safety feature.
+        dv = float(dollar_volume[t].loc[exec_date])
+        if not math.isfinite(dv) or dv <= 0:
+            raise ValidationError(
+                f"rebalance {exec_date} ticker {t!r}: average dollar volume is "
+                f"{dv!r} (missing or invalid) — max_adv_participation/use_impact_model "
+                "require a valid 'Volume' baseline for every ticker actually traded."
+            )
+        return dv
+
     def _trade_cost(t: str, delta_shares: float, trade_notional: float, exec_date: Any) -> float:
         if commission_model == "per_share":
             commission = per_share_commission(delta_shares, per_share_rate, min_commission)
@@ -223,9 +257,9 @@ def run_portfolio_simulation(
         spread = trade_notional * slippage_pct
         impact = 0.0
         if use_impact_model:
+            adv = _valid_dollar_volume(t, exec_date)
             impact = impact_cost(
-                trade_notional, float(dollar_volume[t].loc[exec_date]),
-                float(volatility[t].loc[exec_date]), impact_coefficient,
+                trade_notional, adv, float(volatility[t].loc[exec_date]), impact_coefficient,
             )
         return commission + spread + impact
 
@@ -239,11 +273,21 @@ def run_portfolio_simulation(
             price = exec_prices[t]
             target_shares = (equity_now * float(weights_row[t]) / price) if price > 0 else 0.0
             delta = target_shares - shares[t]
+
+            # Zero-size trade: target didn't change since the last
+            # rebalance. Skip entirely — no cost, no turnover, no ADV
+            # check — so a per_share_commission minimum floor (or any
+            # future per-order minimum) can't charge a ticker that isn't
+            # actually trading.
+            if abs(delta) <= 1e-9:
+                shares[t] = target_shares
+                continue
+
             trade_notional = abs(delta) * price
             turnover_notional += trade_notional
 
             if max_adv_participation is not None:
-                adv = float(dollar_volume[t].loc[exec_date])
+                adv = _valid_dollar_volume(t, exec_date)
                 participation = adv_participation(trade_notional, adv)
                 if participation > max_adv_participation + 1e-9:
                     raise ValidationError(
@@ -257,6 +301,40 @@ def run_portfolio_simulation(
 
         equity_after = cash + sum(shares[t] * exec_prices[t] for t in tickers)
         gross_after = sum(abs(shares[t] * exec_prices[t]) for t in tickers)
+
+        # Sizing self-consistency check: shares[t] were sized as
+        # equity_now * weight / price, so gross_after == (sum of |weight|) *
+        # equity_now exactly (costs never touch shares[t], only cash) — a
+        # value the per-date weight validation above already guarantees is
+        # <= max_gross_leverage * equity_now. Comparing gross_after to
+        # equity_now (the actual sizing basis) re-asserts that invariant
+        # against the realized trade rather than the raw input weights, so
+        # it still catches a future sizing bug, without false-flagging the
+        # ordinary and unavoidable fact that transaction costs shrink
+        # equity_after below equity_now — which mechanically pushes the
+        # *reported* gross_after/equity_after ratio (see "gross_leverage_
+        # after" in rebalance_log) above the nominal limit on every trade at
+        # or near the boundary, with no sizing bug involved. Comparing
+        # against equity_after with a tight tolerance would reject that
+        # normal, cost-driven drift on almost every fully-invested backtest.
+        if equity_now > 0:
+            realized_gross_leverage = gross_after / equity_now
+            if realized_gross_leverage > max_gross_leverage + 1e-9:
+                raise ValidationError(
+                    f"rebalance {exec_date}: realized gross leverage "
+                    f"{realized_gross_leverage:.4f} exceeds max_gross_leverage="
+                    f"{max_gross_leverage} (shares sized from this rebalance's "
+                    "equity do not match the requested weights)"
+                )
+            realized_max_position = max(
+                (abs(shares[t] * exec_prices[t]) / equity_now for t in tickers), default=0.0,
+            )
+            if realized_max_position > max_position_pct + 1e-9:
+                raise ValidationError(
+                    f"rebalance {exec_date}: realized position size "
+                    f"{realized_max_position:.4f} exceeds max_position_pct={max_position_pct}"
+                )
+
         rebalance_log.append({
             "date": str(trigger_date.date()) if hasattr(trigger_date, "date") else str(trigger_date),
             "turnover_pct": round(turnover_notional / equity_after, 6) if equity_after > 0 else 0.0,

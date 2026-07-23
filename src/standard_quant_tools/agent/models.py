@@ -1214,8 +1214,13 @@ class PairTradeBacktestInput(BaseModel):
         1.0, description="sum(|weight|) while in a position, split between the two legs to match hedge_ratio.",
     )
     fill_price: str = Field(
-        "close",
-        description="'close' (default), 'next_open', or 'midpoint' — see run_strategy's fill_price.",
+        "next_open",
+        description=(
+            "'next_open' (default), 'close', or 'midpoint'. Defaults to 'next_open' "
+            "(not 'close') because the z-score signal deciding a transition is itself "
+            "computed from that same bar's Close — executing at that same Close would "
+            "be look-ahead. Pass 'close' only for explicit same-bar/exploratory analysis."
+        ),
     )
 
 

@@ -20,6 +20,12 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 std::vector<double> rsi(const double* prices, std::size_t n, int period) {
     std::vector<double> result(n, kNaN);
 
+    // period <= 0 would index result[period] with a negative/zero-derived
+    // value below — for period < 0 that wraps to a huge size_t via the
+    // implicit int->size_t conversion in operator[], an out-of-bounds write.
+    // Reject up front rather than relying on downstream arithmetic to stay
+    // in range.
+    if (period <= 0) return result;
     if (static_cast<int>(n) <= period) return result;
 
     // Seed: simple mean of first `period` gains/losses
@@ -71,6 +77,9 @@ std::vector<double> adx(
     // 3 columns per bar: DI+, DI-, ADX
     std::vector<double> result(3 * n, kNaN);
 
+    // period <= 0 would index result[period*3+...] with a negative/zero
+    // value and divide by `period` in the Wilder smoothing below.
+    if (period <= 0) return result;
     if (n < 2 || static_cast<int>(n) <= period) return result;
 
     // ── Step 1: raw DM+, DM-, TR ─────────────────────────────────────────────
@@ -232,6 +241,10 @@ std::vector<double> wilder_atr(
 {
     std::vector<double> result(n, kNaN);
 
+    // period <= 0 would index result[period-1] with a negative/zero-derived
+    // value below — for period <= 0 that wraps to a huge size_t, an
+    // out-of-bounds write (this is the exact case the reviewer flagged).
+    if (period <= 0) return result;
     if (static_cast<int>(n) < period) return result;
 
     // ── True range ────────────────────────────────────────────────────────────

@@ -4,6 +4,8 @@ from typing import Any
 import pandas as pd
 import numpy as np
 
+from standard_quant_tools.error import ValidationError
+
 logger = logging.getLogger(__name__)
 
 _cpp_core: Any = None
@@ -141,6 +143,9 @@ def adx(
     Uses C++ fast path when built, then Numba JIT, then pure Python fallback.
     Returns DataFrame with columns ['DI_Plus', 'DI_Minus', 'ADX'].
     """
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
+
     path = "C++" if (HAS_CPP and _cpp_core is not None) else ("numba" if HAS_NUMBA else "python")
     logger.debug("[adx] period=%d  bars=%d  path=%s", period, len(close), path)
     h = high.to_numpy(dtype=np.float64)

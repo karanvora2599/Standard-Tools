@@ -1318,6 +1318,47 @@ class TestPortfolioSimulation:
         result = run_portfolio_simulation(inp)
         assert result.n_rebalances == 2
 
+    def test_total_return_matches_final_over_initial_capital(self, patched_long, long_ohlcv):
+        """
+        Regression test (P0 item 8): a bar-0 rebalance under the default
+        nonzero commission/slippage means equity_curve.iloc[0] is already
+        net of that rebalance's cost. total_return must still be computed
+        against the true starting capital, not against the already-net
+        bar-0 value -- so it must reconcile exactly with
+        final_equity/initial_capital - 1.
+        """
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+        )
+        result = run_portfolio_simulation(inp)
+        expected = result.final_equity / inp.initial_capital - 1.0
+        assert result.total_return == pytest.approx(expected, abs=1e-6)
+
+    def test_day0_cost_reflected_in_risk_metrics(self, patched_long, long_ohlcv):
+        """
+        Regression test (P0 item 8): the day-0 rebalance cost must show up
+        in the return series feeding Sharpe/VaR/CVaR, not be silently
+        replaced by a 0.0 first-day return. Comparing a costed run against
+        an otherwise-identical zero-cost run, the costed run's day-0 loss
+        must make VaR/CVaR at least as large (var_95/cvar_95 are reported
+        as positive loss magnitudes -- bigger means worse).
+        """
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
+        costed = run_portfolio_simulation(PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            commission_pct=0.05, slippage_pct=0.0,
+        ))
+        free = run_portfolio_simulation(PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            commission_pct=0.0, slippage_pct=0.0,
+        ))
+        assert costed.var_95 >= free.var_95
+        assert costed.cvar_95 >= free.cvar_95
+        assert costed.total_return < free.total_return
+
 
 def _score_values(long_ohlcv, tickers, scores_by_ticker, rebalance_indices):
     dates = [str(long_ohlcv.index[i].date()) for i in rebalance_indices]
@@ -1428,6 +1469,19 @@ class TestPairTradeBacktest:
             assert isinstance(getattr(result, field), float)
         assert result.current_spread == pytest.approx(40.0)
         assert result.entry_spread == pytest.approx(40.0)
+
+    def test_total_return_matches_final_over_initial_capital(self, patched_pair):
+        """Regression test (P0 item 8), pair-backtest side: same invariant
+        as TestPortfolioSimulation's version — total_return must reconcile
+        exactly with final_equity/initial_capital, not silently absorb the
+        entry rebalance's cost into a lost bar-0 baseline."""
+        inp = PairTradeBacktestInput(
+            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
+            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3, zscore_window=None,
+        )
+        result = run_pair_trade_backtest(inp)
+        expected = result.final_equity / inp.initial_capital - 1.0
+        assert result.total_return == pytest.approx(expected, abs=1e-6)
 
     def test_no_entry_crossing_raises(self, patched_pair):
         from standard_quant_tools.error import ValidationError

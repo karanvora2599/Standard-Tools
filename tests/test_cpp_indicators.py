@@ -158,6 +158,24 @@ class TestCppRsi:
         assert len(_cpp.rsi(np.array([]), 14)) == 0
 
     @requires_cpp
+    def test_negative_period_returns_all_nan(self, prices_200):
+        """
+        Regression test for the native argument-safety fix: rsi() indexes
+        result[period], which for a negative period previously wrapped to a
+        huge size_t via the implicit int->size_t conversion in operator[]
+        — an out-of-bounds write. The guard must make this a safe all-NaN
+        return instead.
+        """
+        out = _cpp.rsi(prices_200.astype(np.float64), -1)
+        assert len(out) == len(prices_200)
+        assert np.all(np.isnan(out))
+
+    @requires_cpp
+    def test_zero_period_returns_all_nan(self, prices_200):
+        out = _cpp.rsi(prices_200.astype(np.float64), 0)
+        assert np.all(np.isnan(out))
+
+    @requires_cpp
     @pytest.mark.slow
     def test_matches_numba_reference(self, prices_200):
         arr     = prices_200.astype(np.float64)
@@ -324,6 +342,35 @@ class TestAdxWrapper:
         r1 = adx_wrapper(high, low, close)
         r2 = adx_wrapper(high, low, close, period=14)
         pd.testing.assert_frame_equal(r1, r2)
+
+    def test_negative_period_raises(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        with pytest.raises(ValidationError, match="period"):
+            adx_wrapper(high, low, close, period=-1)
+
+    def test_zero_period_raises(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        with pytest.raises(ValidationError, match="period"):
+            adx_wrapper(high, low, close, period=0)
+
+
+class TestCppAdxArgSafety:
+    @requires_cpp
+    def test_negative_period_returns_all_nan(self, ohlc_200):
+        """
+        Regression test: adx() previously divided by a zero/negative
+        `period` and indexed result[period*3+...] with a negative-derived
+        value — the guard must make this a safe all-NaN return.
+        """
+        high, low, close = ohlc_200
+        out = _cpp.adx(high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), -1)
+        assert np.all(np.isnan(out))
+
+    @requires_cpp
+    def test_zero_period_returns_all_nan(self, ohlc_200):
+        high, low, close = ohlc_200
+        out = _cpp.adx(high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), 0)
+        assert np.all(np.isnan(out))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -555,6 +602,28 @@ class TestCppWilderAtr:
         ])
         np.testing.assert_allclose(out, expected_tr, atol=1e-12)
 
+    @requires_cpp
+    def test_zero_period_returns_all_nan(self, ohlc_200):
+        """
+        Regression test for the native argument-safety fix: wilder_atr()
+        previously indexed result[period-1], which for period<=0 wraps to
+        a huge size_t (period=0 -> index -1 -> massive out-of-bounds
+        write). The guard must make this a safe all-NaN return.
+        """
+        high, low, close = ohlc_200
+        out = _cpp.wilder_atr(
+            high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), 0,
+        )
+        assert np.all(np.isnan(out))
+
+    @requires_cpp
+    def test_negative_period_returns_all_nan(self, ohlc_200):
+        high, low, close = ohlc_200
+        out = _cpp.wilder_atr(
+            high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), -1,
+        )
+        assert np.all(np.isnan(out))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Wilder's ATR — Python wrapper tests
@@ -595,6 +664,16 @@ class TestWilderAtrWrapper:
         r1 = wilder_atr_wrapper(high, low, close)
         r2 = wilder_atr_wrapper(high, low, close, period=14)
         pd.testing.assert_series_equal(r1, r2)
+
+    def test_negative_period_raises(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        with pytest.raises(ValidationError, match="period"):
+            wilder_atr_wrapper(high, low, close, period=-1)
+
+    def test_zero_period_raises(self, ohlc_series_200):
+        high, low, close = ohlc_series_200
+        with pytest.raises(ValidationError, match="period"):
+            wilder_atr_wrapper(high, low, close, period=0)
 
     def test_matches_python_reference(self, ohlc_series_200):
         high, low, close = ohlc_series_200

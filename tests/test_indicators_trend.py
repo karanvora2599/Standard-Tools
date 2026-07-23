@@ -7,6 +7,7 @@ import pytest
 from standard_quant_tools.indicators.trend import (
     adx, ema, macd, parabolic_sar, sma, williams_r,
 )
+from standard_quant_tools.error import ValidationError
 
 
 class TestSMA:
@@ -104,6 +105,20 @@ class TestADX:
         result = adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
         assert (result['DI_Plus'].dropna() >= 0).all()
         assert (result['DI_Minus'].dropna() >= 0).all()
+
+    def test_negative_period_raises(self, sample_ohlcv):
+        """
+        Regression test: the native adx() kernel indexes result[period*3+...]
+        and divides by `period` in the Wilder smoothing — a negative or
+        zero period must be rejected before either the C++ or Numba/Python
+        path is reached.
+        """
+        with pytest.raises(ValidationError, match="period"):
+            adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'], period=-1)
+
+    def test_zero_period_raises(self, sample_ohlcv):
+        with pytest.raises(ValidationError, match="period"):
+            adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'], period=0)
 
     def test_strong_trend_yields_high_adx(self):
         """A perfectly linear trend should produce ADX > 25."""

@@ -295,6 +295,98 @@ class TestCostModels:
         with pytest.raises(ValidationError, match="commission_model"):
             run_portfolio_simulation(price_data, target_weights, commission_model="bogus")
 
+    def test_zero_delta_rebalance_charges_no_commission(self):
+        """
+        Regression test: a "rebalance" whose target weight is 0.0 for a
+        ticker that was never bought (shares start at 0, so delta = 0 - 0
+        = 0 exactly — a genuine, unambiguous zero-size trade, not merely a
+        small one) must cost nothing, even under commission_model=
+        'per_share' with a large minimum-commission floor —
+        _apply_rebalance must skip zero-size trades entirely rather than
+        calling _trade_cost (whose minimum floor would otherwise charge a
+        ticker that never actually traded).
+        """
+        dates = pd.date_range("2023-01-02", periods=2, freq="B")
+        price_data = {"AAPL": _price_df([100.0, 100.0], dates)}
+        target_weights = pd.DataFrame({"AAPL": [0.0]}, index=[dates[0]])
+
+        result = run_portfolio_simulation(
+            price_data, target_weights,
+            commission_model="per_share", per_share_rate=0.01, min_commission=100.0,
+        )
+        assert result["final_equity"] == pytest.approx(10_000.0)
+        assert result["final_cash"] == pytest.approx(10_000.0)
+        assert result["rebalance_log"].iloc[0]["turnover_pct"] == 0.0
+
+    def test_use_impact_model_zero_volume_raises(self, two_ticker_price_data):
+        """
+        Regression test: use_impact_model=True with an actual (nonzero-
+        delta) trade against zero Volume must fail closed — a missing
+        liquidity baseline can't be silently treated as "no impact."
+        """
+        price_data, dates = two_ticker_price_data
+        zero_volume = {t: df.assign(Volume=0.0) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="average dollar volume"):
+            run_portfolio_simulation(zero_volume, target_weights, use_impact_model=True)
+
+    def test_max_adv_participation_nan_volume_raises(self, two_ticker_price_data):
+        import numpy as np
+        price_data, dates = two_ticker_price_data
+        nan_volume = {t: df.assign(Volume=np.nan) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="average dollar volume"):
+            run_portfolio_simulation(nan_volume, target_weights, max_adv_participation=0.5)
+
+    def test_unconstrained_backtest_unaffected_by_zero_volume(self, two_ticker_price_data):
+        """
+        Without max_adv_participation/use_impact_model set, zero Volume is
+        fine — proves the fail-closed fix only fires when the caller
+        explicitly opted into a liquidity-aware feature, not for every
+        backtest.
+        """
+        price_data, dates = two_ticker_price_data
+        zero_volume = {t: df.assign(Volume=0.0) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        result = run_portfolio_simulation(zero_volume, target_weights)
+        assert result["final_equity"] > 0
+
+    def test_boundary_weights_with_nonzero_cost_succeed_not_rejected(self, two_ticker_price_data):
+        """
+        Regression test: weights summing to exactly max_gross_leverage pass
+        the upfront (pre-cost) validation. Nonzero commission/slippage then
+        shrinks equity_after below equity_now while gross exposure (shares
+        priced at exec_prices) is unchanged -- so the *reported*
+        gross_leverage_after in rebalance_log is mechanically pushed above
+        max_gross_leverage on every such trade. That is expected, unavoidable
+        cost drag, not a sizing bug, and must NOT raise. (An earlier version
+        of this fix compared realized leverage against equity_after with a
+        tight tolerance, which made every fully-invested backtest with
+        realistic costs fail -- this test guards against reintroducing that.)
+        """
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.6], "MSFT": [0.4]}, index=[dates[0]])  # gross == 1.0 exactly
+        result = run_portfolio_simulation(
+            price_data, target_weights,
+            commission_pct=0.01, slippage_pct=0.01, max_gross_leverage=1.0,
+        )
+        assert result["final_equity"] > 0
+        # The cost-inflated ratio is still honestly reported for auditability...
+        assert result["rebalance_log"].iloc[0]["gross_leverage_after"] > 1.0
+        # ...even though it does not (and should not) block the backtest.
+
+    def test_zero_cost_leverage_at_exact_limit_succeeds(self, two_ticker_price_data):
+        """Same weights as above, but zero costs -> realized leverage equals
+        (not exceeds) the limit, and the rebalance must still succeed."""
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.6], "MSFT": [0.4]}, index=[dates[0]])
+        result = run_portfolio_simulation(
+            price_data, target_weights,
+            commission_pct=0.0, slippage_pct=0.0, max_gross_leverage=1.0,
+        )
+        assert result["final_equity"] > 0
+        assert result["rebalance_log"].iloc[0]["gross_leverage_after"] == pytest.approx(1.0)
+
 
 class TestValidation:
     def test_invalid_fill_price_raises(self, two_ticker_price_data):

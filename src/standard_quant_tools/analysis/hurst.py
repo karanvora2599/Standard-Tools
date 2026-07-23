@@ -4,6 +4,8 @@ from typing import Any, Dict, Literal, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
+
 logger = logging.getLogger(__name__)
 
 # ── Optional C++ fast path ────────────────────────────────────────────────────
@@ -139,6 +141,11 @@ def hurst_exponent(
     -------
     dict with keys: hurst, regime, fit_r_squared, method, n_obs.
     """
+    if min_window <= 0:
+        raise ValidationError(f"min_window must be > 0, got {min_window}")
+    if max_window is not None and max_window <= 0:
+        raise ValidationError(f"max_window must be > 0, got {max_window}")
+
     arr = series.dropna().to_numpy(dtype=float)
     n   = len(arr)
     path = "C++" if (HAS_CPP and _cpp is not None) else "python"
@@ -221,6 +228,13 @@ def rolling_hurst(
     -------
     pd.Series indexed like `series`; first (window-1) rows are NaN.
     """
+    if window <= 0:
+        raise ValidationError(f"window must be > 0, got {window}")
+    if step <= 0:
+        raise ValidationError(f"step must be > 0, got {step}")
+    if min_window <= 0:
+        raise ValidationError(f"min_window must be > 0, got {min_window}")
+
     clean   = series.dropna()
     arr     = clean.to_numpy(dtype=float)
     n       = len(arr)

@@ -59,7 +59,7 @@ def run_pair_backtest(
     commission_pct: float = 0.001,
     slippage_pct: float = 0.0005,
     gross_leverage: float = 1.0,
-    fill_price: str = "close",
+    fill_price: str = "next_open",
 ) -> Dict[str, Any]:
     """
     Backtest a cointegrated pair as one synchronized two-leg trade: long the
@@ -89,11 +89,25 @@ def run_pair_backtest(
             optimistically-biased backtest. Only pass None for exploratory
             analysis, never to evaluate real strategy performance.
         gross_leverage: sum(|weight|) while in a position, split between the
-            two legs so the dollar ratio matches hedge_ratio: weight_a =
-            gross_leverage / (1 + |hedge_ratio|), weight_b = hedge_ratio *
-            weight_a (sign flips with the position direction).
-        initial_capital, commission_pct, slippage_pct, fill_price: passed
-            through to run_portfolio_simulation.
+            two legs so the *share* ratio matches hedge_ratio (1 share of
+            symbol_a per hedge_ratio shares of symbol_b — the same
+            convention compute_spread uses), not a dollar ratio. Converting
+            a share ratio to dollar weights requires that transition date's
+            own prices: weight_a = gross_leverage * Close_a / (Close_a +
+            |hedge_ratio| * Close_b), weight_b = sign(hedge_ratio) *
+            gross_leverage * |hedge_ratio| * Close_b / (Close_a +
+            |hedge_ratio| * Close_b) (sign also flips with the position
+            direction). This is only dollar-neutral when |hedge_ratio| *
+            Close_b ~= Close_a; recomputed at every transition date since
+            Close_a/Close_b drift apart over time.
+        initial_capital, commission_pct, slippage_pct: passed through to
+            run_portfolio_simulation.
+        fill_price: passed through to run_portfolio_simulation; defaults to
+            "next_open" (not "close") because the z-score signal used to
+            decide a transition is itself computed from that same bar's
+            Close — executing at that bar's own Close would be look-ahead
+            (trading at the exact price the signal was computed from).
+            Pass "close" only for explicit same-bar/exploratory analysis.
 
     Returns:
         run_portfolio_simulation's result dict, plus: hedge_ratio,
@@ -118,14 +132,6 @@ def run_pair_backtest(
     z = spread_zscore(spread, window=zscore_window)
     state = _spread_state(z, entry_z=entry_z, exit_z=exit_z)
 
-    weight_a = gross_leverage / (1.0 + abs(hedge_ratio))
-    weight_b = hedge_ratio * weight_a
-    # A large |hedge_ratio| (or gross_leverage > 1) can put one leg's own
-    # weight above run_portfolio_simulation's default max_position_pct=1.0,
-    # which would reject an otherwise-valid gross_leverage. Derive the bound
-    # from the actual larger leg instead of hardcoding 1.0.
-    max_leg_weight = max(abs(weight_a), abs(weight_b))
-
     pos_diff = state.diff()
     pos_diff.iloc[0] = state.iloc[0]
     transition_dates = pos_diff[pos_diff != 0].index
@@ -136,11 +142,33 @@ def run_pair_backtest(
             f"(entry_z={entry_z}, z range=[{float(z.min()):.2f}, {float(z.max()):.2f}])"
         )
 
+    # hedge_ratio is a SHARE ratio (1 share of A per hedge_ratio shares of
+    # B), not a dollar-weight ratio — converting to dollar weights requires
+    # that date's own prices, recomputed at every transition since Close_a/
+    # Close_b drift apart over time (a static split, as if computed once
+    # from a single date's prices, would silently size the hedge leg wrong
+    # as soon as prices move).
+    sign_hedge = 1.0 if hedge_ratio >= 0 else -1.0
+    abs_hedge = abs(hedge_ratio)
+    weight_a_vals = []
+    weight_b_vals = []
+    for d in transition_dates:
+        price_a = float(close_a.loc[d])
+        price_b = float(close_b.loc[d])
+        denom = price_a + abs_hedge * price_b
+        weight_a_d = gross_leverage * price_a / denom
+        weight_b_d = sign_hedge * gross_leverage * abs_hedge * price_b / denom
+        weight_a_vals.append(float(state.loc[d]) * weight_a_d)
+        weight_b_vals.append(-float(state.loc[d]) * weight_b_d)
+
+    # A large |hedge_ratio| (or gross_leverage > 1) can put one leg's own
+    # weight above run_portfolio_simulation's default max_position_pct=1.0,
+    # which would reject an otherwise-valid gross_leverage. Derive the bound
+    # from the actual largest realized leg weight instead of hardcoding 1.0.
+    max_leg_weight = max((abs(w) for w in weight_a_vals + weight_b_vals), default=0.0)
+
     target_weights = pd.DataFrame(
-        {
-            symbol_a: [float(state.loc[d] * weight_a) for d in transition_dates],
-            symbol_b: [float(-state.loc[d] * weight_b) for d in transition_dates],
-        },
+        {symbol_a: weight_a_vals, symbol_b: weight_b_vals},
         index=transition_dates,
     )
 

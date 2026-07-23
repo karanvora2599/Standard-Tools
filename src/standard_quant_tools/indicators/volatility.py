@@ -4,6 +4,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
+
 logger = logging.getLogger(__name__)
 
 _cpp_core: Any = None
@@ -103,6 +105,9 @@ def wilder_atr(
     Uses C++ fast path when built, otherwise falls back to a pure-Python loop.
     First period-1 values are NaN.
     """
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
+
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
     c = close.to_numpy(dtype=np.float64)

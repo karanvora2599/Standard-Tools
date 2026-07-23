@@ -33,6 +33,30 @@ def _pair_price_data():
     return {"A": _df(close_a), "B": _df(close_b)}, dates
 
 
+def _pair_price_data_unequal_prices():
+    """
+    Symbol B held flat at 50 throughout; symbol A at 200 (bars 0-4), dips
+    to 40 for bars 5-9 (entry), back to 200 (bars 10-14, exit), spikes to
+    360 (bars 15-19, short entry). Unlike _pair_price_data (equal price
+    levels, hedge_ratio=1.0 -- exactly why the old sizing bug went
+    uncaught), A and B trade at very different price levels here, so a
+    hedge_ratio != 1.0 exercises the price-aware per-transition-date
+    sizing fix (item 6).
+    """
+    dates = pd.date_range("2023-01-02", periods=20, freq="B")
+    close_a = [200.0] * 5 + [40.0] * 5 + [200.0] * 5 + [360.0] * 5
+    close_b = [50.0] * 20
+
+    def _df(close):
+        return pd.DataFrame(
+            {"Open": close, "High": close, "Low": close, "Close": close,
+             "Volume": [1_000_000.0] * len(close)},
+            index=dates,
+        )
+
+    return {"A": _df(close_a), "B": _df(close_b)}, dates
+
+
 class TestRunPairBacktest:
     def test_missing_symbol_raises(self):
         price_data, _ = _pair_price_data()
@@ -119,6 +143,60 @@ class TestRunPairBacktest:
         assert result["entry_spread"] == pytest.approx(40.0)
         assert result["current_spread"] == pytest.approx(40.0)
         assert result["hedge_ratio"] == 1.0
+
+    def test_hedge_ratio_sizing_is_share_ratio_not_dollar_ratio(self):
+        """
+        Regression test (P0 item 6): hedge_ratio is a SHARE ratio (spread
+        = Close_a - hedge_ratio * Close_b), so hedging 1 share of A means
+        holding hedge_ratio shares of B -- shares_b/shares_a must equal
+        hedge_ratio, using each transition date's own prices. The old
+        formula (weight_a = gross_leverage/(1+|hedge_ratio|)) ignored
+        price entirely and only "happened" to work when Close_a ~=
+        Close_b, exactly the case the pre-existing hedge_ratio=1.0
+        fixture (_pair_price_data, equal price levels) could never catch.
+
+        gross_exposure_curve/net_exposure_curve (both already-public
+        outputs) are used to back out each leg's dollar allocation without
+        needing a new per-ticker-shares output: for a long-spread position
+        (state=+1, long A / short B), dollar_a = (gross+net)/2 and
+        dollar_b = (gross-net)/2.
+        """
+        price_data, dates = _pair_price_data_unequal_prices()
+        result = run_pair_backtest(
+            price_data, symbol_a="A", symbol_b="B", hedge_ratio=2.0,
+            entry_z=1.0, exit_z=0.3, gross_leverage=1.0,
+            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
+            fill_price="close",
+        )
+        entry_date = dates[5]
+        assert result["state"].loc[entry_date] == 1.0  # long A, short B
+        gross = float(result["gross_exposure_curve"].loc[entry_date])
+        net = float(result["net_exposure_curve"].loc[entry_date])
+        dollar_a = (gross + net) / 2.0
+        dollar_b = (gross - net) / 2.0
+        price_a, price_b = 40.0, 50.0  # Close at bar 5 (the entry bar)
+        shares_a = dollar_a / price_a
+        shares_b = dollar_b / price_b
+        assert shares_b / shares_a == pytest.approx(2.0, rel=1e-3)
+
+    def test_default_fill_price_defers_execution_to_next_bar(self):
+        """
+        Regression test (P0 item 7): the z-score signal at a transition
+        date is computed from that date's own Close, so executing at that
+        same Close (the old default) is look-ahead. run_pair_backtest's
+        default must defer execution to the following bar's Open.
+        """
+        price_data, dates = _pair_price_data()
+        result = run_pair_backtest(
+            price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
+            entry_z=1.0, exit_z=0.3, commission_pct=0.0, slippage_pct=0.0,
+            zscore_window=None,
+            # fill_price intentionally omitted -- this proves the new default.
+        )
+        entry_date, day_after = dates[5], dates[6]
+        assert result["cash_curve"].loc[entry_date] == pytest.approx(10_000.0)
+        assert result["gross_exposure_curve"].loc[entry_date] == pytest.approx(0.0)
+        assert result["gross_exposure_curve"].loc[day_after] > 0.0
 
     def test_result_includes_portfolio_simulation_fields(self):
         price_data, _ = _pair_price_data()

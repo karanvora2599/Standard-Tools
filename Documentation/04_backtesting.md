@@ -649,10 +649,12 @@ plain per-symbol `run_strategy` can't execute a pair trade as one
 synchronized position — each leg would need its own independent state
 machine, with no guarantee both legs enter/exit together.
 `run_pair_backtest` (`backtest/pairs.py`) closes that gap by treating a
-pair trade as a **2-asset portfolio with a dollar-neutral weight vector**:
-both legs are columns of the same `target_weights` row passed to
-`run_portfolio_simulation`, so they can never fall out of sync — no new
-execution engine, just a different way to build the weight panel.
+pair trade as a **2-asset portfolio with a share-ratio-hedged, price-scaled
+weight vector** (only dollar-neutral when `|hedge_ratio| * Close_b ≈
+Close_a`, not in general): both legs are columns of the same
+`target_weights` row passed to `run_portfolio_simulation`, so they can
+never fall out of sync — no new execution engine, just a different way to
+build the weight panel.
 
 ```python
 from standard_quant_tools.backtest.pairs import run_pair_backtest
@@ -676,14 +678,34 @@ print(result["rebalance_log"])
 when the z-scored spread (`analysis/cointegration.py`'s `compute_spread` +
 `spread_zscore`, same functions `scan_pairs` already uses) falls to or
 below `-entry_z`; short the spread on the mirror condition; exit to flat
-once the z-score reverts inside `exit_z`. Each leg's weight is sized so the
-dollar ratio matches `hedge_ratio`: `weight_a = gross_leverage / (1 +
-|hedge_ratio|)`, `weight_b = hedge_ratio * weight_a` (sign flips with
-direction) — together they sum to `gross_leverage` at every entry. The
-resulting `max(|weight_a|, |weight_b|)` is passed to `run_portfolio_simulation`
-as its `max_position_pct` (instead of the engine's own default `1.0`), so a
-large `|hedge_ratio|` or `gross_leverage > 1.0` doesn't spuriously trip the
-position-size check on an otherwise-valid pair trade.
+once the z-score reverts inside `exit_z`. `hedge_ratio` is a **share**
+ratio (`spread = Close_a - hedge_ratio * Close_b` — 1 share of `symbol_a`
+hedged by `hedge_ratio` shares of `symbol_b`), not a dollar-weight ratio,
+so converting it to dollar weights needs that transition date's own
+prices, recomputed at every transition (not once, statically) since
+`Close_a`/`Close_b` drift apart over time:
+
+```text
+denom     = Close_a + |hedge_ratio| * Close_b
+weight_a  = gross_leverage * Close_a / denom
+weight_b  = sign(hedge_ratio) * gross_leverage * |hedge_ratio| * Close_b / denom
+```
+
+— together `|weight_a| + |weight_b|` sum to `gross_leverage` at every
+entry, and `shares_b / shares_a == hedge_ratio` by construction. The
+resulting `max(|weight_a|, |weight_b|)` across all transition dates is
+passed to `run_portfolio_simulation` as its `max_position_pct` (instead of
+the engine's own default `1.0`), so a large `|hedge_ratio|` or
+`gross_leverage > 1.0` doesn't spuriously trip the position-size check on
+an otherwise-valid pair trade.
+
+**`fill_price`** defaults to `"next_open"`, not `"close"`: the z-score
+signal that decides a transition is itself computed from that same bar's
+Close, so executing at that same Close would be look-ahead — the trade
+could not actually have been placed at the exact price its own signal was
+computed from. Pass `fill_price="close"` only for explicit same-bar/
+exploratory analysis, mirroring `run_strategy`'s and
+`run_portfolio_simulation`'s own execution-timing convention.
 
 **`zscore_window`** (default `30`): rolling window, in bars, for
 `spread_zscore` — every signal only uses spread history available up to

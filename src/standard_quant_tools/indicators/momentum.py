@@ -4,6 +4,7 @@ from typing import Any
 import pandas as pd
 import numpy as np
 from standard_quant_tools.validation import validate_series
+from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,8 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """
     if series.empty:
         return pd.Series(dtype=float)
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
 
     values: np.ndarray = np.asarray(series.values, dtype=np.float64)
     path = "C++" if (HAS_CPP and _cpp_core is not None) else ("numba" if HAS_NUMBA else "python")

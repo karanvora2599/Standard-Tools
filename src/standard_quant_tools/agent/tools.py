@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import Counter
 from itertools import combinations
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ from standard_quant_tools.analysis.multi_factor import multi_factor_regression, 
 from standard_quant_tools.analysis.cointegration import cointegration_test, compute_spread, spread_zscore
 from standard_quant_tools.analysis.pca import pca_returns, factor_contributions
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
-from standard_quant_tools.metrics.return_metrics import cagr, annualized_volatility, cumulative_return
+from standard_quant_tools.metrics.return_metrics import cagr, annualized_volatility
 from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio, sortino_ratio, max_drawdown,
     var_historical, cvar, information_ratio,
@@ -1815,6 +1815,33 @@ def run_signal_panel_backtest(input_data: SignalPanelBacktestInput) -> SignalPan
 # True Portfolio Simulation (shared cash, rebalancing)
 # ──────────────────────────────────────────────────────────────────
 
+def _metrics_with_day0_cost(
+    equity_curve: pd.Series, initial_capital: float,
+) -> Tuple[pd.Series, float, float]:
+    """
+    Returns (returns, total_return, annualized_return) accounting for a
+    same-bar-0 rebalance cost that would otherwise be invisible:
+    equity_curve.iloc[0] from run_portfolio_simulation/run_pair_backtest is
+    already net of that rebalance's costs, so naively using
+    cumulative_return/cagr (baseline = equity_curve.iloc[0]) and
+    equity_curve.pct_change() (first return = NaN -> filled 0.0) silently
+    drops the day-0 cost's entire effect on every downstream metric.
+    Prepending a synthetic pre-trade observation at initial_capital makes
+    the first real return capture it instead.
+    """
+    if equity_curve.empty:
+        return equity_curve, 0.0, 0.0
+    synthetic_index = equity_curve.index[0] - pd.Timedelta(days=1)
+    equity_with_start = pd.concat([
+        pd.Series([initial_capital], index=[synthetic_index]), equity_curve,
+    ])
+    returns = equity_with_start.pct_change().dropna()
+    total_return = float(equity_curve.iloc[-1]) / initial_capital - 1.0
+    num_years = len(equity_curve) / 252
+    annualized_return = (1.0 + total_return) ** (1.0 / num_years) - 1.0 if num_years > 0 else 0.0
+    return returns, total_return, annualized_return
+
+
 def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioSimulationResult:
     """
     True shared-cash portfolio simulation: one account, position sizing
@@ -1895,7 +1922,9 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
     )
 
     equity_curve = raw["equity_curve"]
-    returns = equity_curve.pct_change().fillna(0.0)
+    returns, total_return, annualized_return = _metrics_with_day0_cost(
+        equity_curve, input_data.initial_capital,
+    )
 
     ir: Optional[float] = None
     if input_data.benchmark:
@@ -1928,8 +1957,8 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
         tickers=input_data.tickers,
         n_rebalances=len(rebalance_events),
         rebalance_log=rebalance_events,
-        total_return=round(float(cumulative_return(equity_curve)), 6),
-        annualized_return=round(float(cagr(equity_curve)), 6),
+        total_return=round(total_return, 6),
+        annualized_return=round(annualized_return, 6),
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
         sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
         sortino_ratio=round(float(sortino_ratio(returns)), 4),
@@ -1978,7 +2007,9 @@ def run_pair_trade_backtest(input_data: PairTradeBacktestInput) -> PairTradeBack
     )
 
     equity_curve = raw["equity_curve"]
-    returns = equity_curve.pct_change().fillna(0.0)
+    returns, total_return, annualized_return = _metrics_with_day0_cost(
+        equity_curve, input_data.initial_capital,
+    )
     rebalance_events = [
         RebalanceEvent(
             date=str(r["date"]), turnover_pct=float(r["turnover_pct"]),
@@ -2001,8 +2032,8 @@ def run_pair_trade_backtest(input_data: PairTradeBacktestInput) -> PairTradeBack
         rebalance_log=rebalance_events,
         entry_spread=raw["entry_spread"],
         current_spread=round(float(raw["current_spread"]), 6),
-        total_return=round(float(cumulative_return(equity_curve)), 6),
-        annualized_return=round(float(cagr(equity_curve)), 6),
+        total_return=round(total_return, 6),
+        annualized_return=round(annualized_return, 6),
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
         sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
         sortino_ratio=round(float(sortino_ratio(returns)), 4),

@@ -1964,8 +1964,12 @@ for r in result.rebalance_log:
 **Position logic:** long the spread (long `symbol_a`, short `symbol_b`)
 when the z-scored spread falls to or below `-entry_z`; short the spread on
 the mirror condition; exit to flat once the z-score reverts inside
-`exit_z`. `gross_leverage` (default `1.0`) is split between the two legs so
-the dollar ratio matches `hedge_ratio`.
+`exit_z`. `hedge_ratio` is a **share** ratio (`spread = Close_a -
+hedge_ratio * Close_b`), not a dollar-weight ratio; `gross_leverage`
+(default `1.0`) is split between the two legs using each transition
+date's own prices so `shares_b / shares_a == hedge_ratio` — only
+dollar-neutral when `|hedge_ratio| * Close_b ≈ Close_a`. See §15's
+"Pair Trade Backtest" section in `04_backtesting.md` for the exact formula.
 
 **`zscore_window`:** `Optional[int]`, default **`30`** — a rolling window
 (bars) so the spread z-score at each bar only uses data available up to
@@ -1987,12 +1991,16 @@ to evaluate strategy performance — the same convention and warning as
 | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio` | `float` | Computed from the engine's `equity_curve` via existing metrics functions |
 | `final_equity`, `final_cash`, `equity_curve`, `warnings` | — | Same meaning as §15 |
 
-**`fill_price`:** `"close"` (default), `"next_open"`, or `"midpoint"` — same
-convention as every other backtest tool. Since this tool is a thin wrapper
-around `run_portfolio_simulation`, the same `fill_price="close"`
-look-ahead-bias warning described in §15 applies here too: with the
-default, `result.warnings` always includes the caveat that each leg fills
-at the same bar's own Close its z-score signal is dated on.
+**`fill_price`:** `"next_open"` (default), `"close"`, or `"midpoint"`.
+Defaults to `"next_open"` because the z-score signal deciding a transition
+is itself computed from that same bar's Close — executing at that same
+Close would be look-ahead (the trade could not actually have been placed
+at the exact price its own signal was computed from). Pass `"close"` only
+for explicit same-bar/exploratory analysis; with `"close"`,
+`result.warnings` includes the caveat that each leg fills at the same
+bar's own Close its z-score signal is dated on (see §15's
+`fill_price="close"` warning, which this tool inherits via
+`run_portfolio_simulation`).
 
 **Validation:** raises `ValidationError` if either symbol is missing OHLCV,
 or if the spread never crosses `entry_z` (nothing to backtest).

@@ -204,6 +204,12 @@ HurstResult hurst_exponent(
 {
     const HurstResult nan_result{kNaN, "unknown", kNaN, method, n};
 
+    // min_window <= 0 would otherwise reach log10() in log_sizes() with a
+    // non-positive argument (NaN, not a crash, but relying on that NaN to
+    // propagate cleanly through every downstream branch is fragile) —
+    // reject explicitly instead.
+    if (min_window <= 0) return nan_result;
+
     // Auto-select max window: n/4 for DFA (less biased), n/2 for R/S
     const int max_w_auto = (method == "dfa")
         ? static_cast<int>(n) / 4
@@ -258,6 +264,12 @@ std::vector<double> rolling_hurst(
     int                min_window)
 {
     std::vector<double> out(n, kNaN);
+
+    // step <= 0 makes the loop below non-progressing (i += step never
+    // advances, or moves backward) — an infinite native loop that hangs
+    // the process rather than raising. window <= 0 is equally nonsensical
+    // (the slice below would be empty or reversed). Reject both up front.
+    if (step <= 0 || window <= 0) return out;
 
     for (int i = window - 1; i < static_cast<int>(n); i += step) {
         const auto result = hurst_exponent(

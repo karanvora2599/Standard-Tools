@@ -303,6 +303,75 @@ class TestPythonWrapper:
         r2 = hurst_exponent(series_500)
         assert r1["hurst"] == r2["hurst"]
 
+    def test_hurst_exponent_negative_min_window_raises(self, series_500):
+        from standard_quant_tools.error import ValidationError
+        with pytest.raises(ValidationError, match="min_window"):
+            hurst_exponent(series_500, min_window=-1)
+
+    def test_hurst_exponent_zero_min_window_raises(self, series_500):
+        from standard_quant_tools.error import ValidationError
+        with pytest.raises(ValidationError, match="min_window"):
+            hurst_exponent(series_500, min_window=0)
+
+    def test_hurst_exponent_negative_max_window_raises(self, series_500):
+        from standard_quant_tools.error import ValidationError
+        with pytest.raises(ValidationError, match="max_window"):
+            hurst_exponent(series_500, max_window=-1)
+
+    def test_rolling_hurst_zero_step_raises(self, series_500):
+        """
+        Regression test: the native rolling_hurst() loop advances by
+        `i += step` — step<=0 previously either raised an unguarded
+        ZeroDivisionError (from the wrapper's own logging line) or, if
+        called directly against _sqt_core, never advanced at all (an
+        infinite native loop that hangs the process). Must now raise a
+        clean ValidationError before either path is reached.
+        """
+        from standard_quant_tools.error import ValidationError
+        with pytest.raises(ValidationError, match="step"):
+            rolling_hurst(series_500, window=100, step=0)
+
+    def test_rolling_hurst_negative_step_raises(self, series_500):
+        from standard_quant_tools.error import ValidationError
+        with pytest.raises(ValidationError, match="step"):
+            rolling_hurst(series_500, window=100, step=-1)
+
+    def test_rolling_hurst_zero_window_raises(self, series_500):
+        from standard_quant_tools.error import ValidationError
+        with pytest.raises(ValidationError, match="window"):
+            rolling_hurst(series_500, window=0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3b.  Direct binding argument-safety tests (require _sqt_core)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCppArgSafety:
+    @requires_cpp
+    def test_hurst_dfa_negative_min_window_returns_nan(self, white_noise_500):
+        """
+        Regression test: hurst_exponent() previously reached log10() with a
+        non-positive min_window inside log_sizes() rather than rejecting it
+        explicitly. The guard must return the NaN sentinel result.
+        """
+        result = _cpp.hurst_dfa(white_noise_500, -1, -1)
+        assert math.isnan(result["hurst"])
+
+    @requires_cpp
+    def test_rolling_hurst_zero_step_returns_all_nan_not_hang(self, white_noise_500):
+        """
+        Regression test: rolling_hurst()'s `i += step` loop previously never
+        advanced for step<=0 — an infinite native loop. This test itself is
+        the safety net: without the guard, it would hang rather than fail.
+        """
+        out = _cpp.rolling_hurst(white_noise_500, 100, 0, "dfa", 10)
+        assert np.all(np.isnan(out))
+
+    @requires_cpp
+    def test_rolling_hurst_negative_window_returns_all_nan(self, white_noise_500):
+        out = _cpp.rolling_hurst(white_noise_500, -1, 1, "dfa", 10)
+        assert np.all(np.isnan(out))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.  Routing test: verify wrapper uses C++ when available

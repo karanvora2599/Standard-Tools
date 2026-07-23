@@ -5,12 +5,28 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
+from standard_quant_tools.error import ValidationError
 
 
 class TestRSI:
     def test_output_length_matches_input(self, sample_close):
         result = rsi(sample_close, 14)
         assert len(result) == len(sample_close)
+
+    def test_negative_period_raises(self, sample_close):
+        """
+        Regression test: the native rsi() kernel indexes result[period],
+        which for a negative period wraps to a huge size_t via the
+        implicit int->size_t conversion in operator[] — an out-of-bounds
+        write, not a Python exception. This validation must run before
+        either the C++ or Numba/Python path is reached.
+        """
+        with pytest.raises(ValidationError, match="period"):
+            rsi(sample_close, -1)
+
+    def test_zero_period_raises(self, sample_close):
+        with pytest.raises(ValidationError, match="period"):
+            rsi(sample_close, 0)
 
     def test_bounded_0_to_100(self, sample_close):
         result = rsi(sample_close, 14).dropna()
