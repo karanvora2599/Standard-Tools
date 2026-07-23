@@ -20,6 +20,8 @@ from standard_quant_tools.agent.models import (
     PortfolioSimulationInput,
     PairTradeBacktestInput,
     RobustnessDiagnosticsInput,
+    CapacityReportInput,
+    DataQualityReportInput,
 )
 from standard_quant_tools.agent.tools import (
     get_agent_tools,
@@ -35,6 +37,8 @@ from standard_quant_tools.agent.tools import (
     run_portfolio_simulation,
     run_pair_trade_backtest,
     get_robustness_diagnostics,
+    get_capacity_report,
+    get_data_quality_report,
     dispatch,
 )
 
@@ -79,8 +83,8 @@ def patched_long(long_ohlcv, monkeypatch):
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 class TestToolRegistry:
-    def test_now_has_thirty_one_tools(self):
-        assert len(get_agent_tools()) == 31
+    def test_now_has_thirty_four_tools(self):
+        assert len(get_agent_tools()) == 34
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -1294,6 +1298,16 @@ class TestPortfolioSimulation:
         assert "rebalance_log" in result
         assert "sharpe_ratio" in result
 
+    def test_per_share_commission_model_accepted(self, patched_long, long_ohlcv):
+        tickers = ["AAPL", "MSFT"]
+        weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
+        inp = PortfolioSimulationInput(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            commission_model="per_share", per_share_rate=0.01,
+        )
+        result = run_portfolio_simulation(inp)
+        assert result.n_rebalances == 1
+
     def test_next_open_fill_price_accepted(self, patched_long, long_ohlcv):
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0, 100])
@@ -1523,3 +1537,102 @@ class TestRobustnessDiagnostics:
         })
         assert result["symbol"] == "AAPL"
         assert "deflated_sharpe_ratio" in result
+
+
+# ── Capacity Report (liquidity/ADV-based capacity) ────────────────────────────
+
+class TestCapacityReport:
+    def test_returns_result(self, patched_factory):
+        inp = CapacityReportInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            target_weights={"AAPL": 0.6, "MSFT": 0.4},
+        )
+        result = get_capacity_report(inp)
+        assert result.tickers == ["AAPL", "MSFT"]
+        assert "AAPL" in result.per_ticker_max_account_size
+        assert "MSFT" in result.per_ticker_max_account_size
+
+    def test_binding_ticker_and_max_account_size_populated(self, patched_factory):
+        inp = CapacityReportInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            target_weights={"AAPL": 0.6, "MSFT": 0.4}, max_participation=0.1,
+        )
+        result = get_capacity_report(inp)
+        assert result.binding_ticker in ("AAPL", "MSFT")
+        assert result.max_account_size is not None
+        assert result.max_account_size > 0
+
+    def test_zero_weight_ticker_has_none_max_account_size(self, patched_factory):
+        inp = CapacityReportInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            target_weights={"AAPL": 0.0, "MSFT": 1.0},
+        )
+        result = get_capacity_report(inp)
+        assert result.per_ticker_max_account_size["AAPL"] is None
+        assert result.days_to_liquidate_at_capacity["AAPL"] == 0.0
+
+    def test_sector_exposure_included_by_default(self, patched_factory):
+        inp = CapacityReportInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            target_weights={"AAPL": 0.6, "MSFT": 0.4},
+        )
+        result = get_capacity_report(inp)
+        assert result.sector_exposure is not None
+        assert sum(result.sector_exposure.values()) == pytest.approx(1.0)
+
+    def test_sector_exposure_excluded_when_disabled(self, patched_factory):
+        inp = CapacityReportInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            target_weights={"AAPL": 0.6, "MSFT": 0.4}, include_sector_exposure=False,
+        )
+        result = get_capacity_report(inp)
+        assert result.sector_exposure is None
+
+    def test_missing_target_weight_raises(self):
+        with pytest.raises(pydantic.ValidationError, match="target_weights"):
+            CapacityReportInput(
+                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                target_weights={"AAPL": 0.6},
+            )
+
+    def test_dispatched_through_dispatch(self, patched_factory):
+        result = dispatch("get_capacity_report", {
+            "tickers": ["AAPL", "MSFT"], "start_date": START, "end_date": END,
+            "target_weights": {"AAPL": 0.6, "MSFT": 0.4},
+        })
+        assert result["tickers"] == ["AAPL", "MSFT"]
+        assert "max_account_size" in result
+
+
+# ── Data Quality Report ────────────────────────────────────────────────────────
+
+class TestDataQualityReport:
+    def test_returns_result(self, patched_factory):
+        inp = DataQualityReportInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_data_quality_report(inp)
+        assert result.symbol == "AAPL"
+        assert result.metadata["provider"] == "yfinance"
+        assert result.metadata["survivorship_free"] is False
+        assert result.metadata["point_in_time"] is False
+
+    def test_findings_are_lists(self, patched_factory):
+        inp = DataQualityReportInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_data_quality_report(inp)
+        assert isinstance(result.missing_bars, list)
+        assert isinstance(result.stale_price_runs, list)
+        assert isinstance(result.price_jumps, list)
+
+    def test_custom_thresholds_accepted(self, patched_factory):
+        inp = DataQualityReportInput(
+            symbol="AAPL", start_date=START, end_date=END,
+            stale_run_length=5, jump_threshold=0.5,
+        )
+        result = get_data_quality_report(inp)
+        assert result.symbol == "AAPL"
+
+    def test_dispatched_through_dispatch(self, patched_factory):
+        result = dispatch("get_data_quality_report", {
+            "symbol": "AAPL", "start_date": START, "end_date": END,
+        })
+        assert result["symbol"] == "AAPL"
+        assert "metadata" in result

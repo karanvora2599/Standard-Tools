@@ -1094,6 +1094,21 @@ class PortfolioSimulationInput(BaseModel):
         "close",
         description="'close' (default), 'next_open', or 'midpoint' — see run_strategy's fill_price / the True Portfolio Simulation docs.",
     )
+    commission_model: str = Field(
+        "pct", description="'pct' (default — commission_pct * notional) or 'per_share' (per_share_rate per share, floored at min_commission).",
+    )
+    per_share_rate: float = Field(0.0, description="Commission per share traded. Only used when commission_model='per_share'.")
+    min_commission: float = Field(0.0, description="Minimum commission per rebalance leg. Only used when commission_model='per_share'.")
+    use_impact_model: bool = Field(
+        False, description="If True, add a square-root market-impact cost on top of commission + spread (backtest/costs.py).",
+    )
+    impact_coefficient: float = Field(1.0, description="Market-impact model coefficient. Only used when use_impact_model=True.")
+    impact_lookback: int = Field(20, description="Rolling window (bars) for average dollar volume / volatility used by the impact model.")
+    borrow_fee_bps: float = Field(0.0, description="Annualized basis-point borrow fee accrued daily on any short position's notional.")
+    margin_interest_rate: float = Field(0.0, description="Annualized rate accrued daily on negative cash (implied margin borrowing).")
+    max_adv_participation: Optional[float] = Field(
+        None, description="Reject any rebalance trade whose notional exceeds this fraction of the ticker's own rolling average dollar volume. Requires a 'Volume' column.",
+    )
     benchmark: Optional[str] = Field(None, description="Optional benchmark ticker — adds information_ratio.")
 
     @model_validator(mode="after")
@@ -1327,3 +1342,145 @@ class RobustnessDiagnosticsResult(BaseModel):
     bootstrap_ci_upper: float
     bootstrap_confidence: float
     warnings: List[str] = []
+
+
+# ──────────────────────────────────────────────
+# Capacity Report (liquidity/ADV-based capacity — how much account size a
+# target-weight portfolio can support before positions become too large
+# relative to each ticker's own trading volume)
+# ──────────────────────────────────────────────
+
+class CapacityReportInput(BaseModel):
+    tickers: List[str] = Field(..., description="Ticker universe. Must match target_weights' keys.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD — used to compute each ticker's average dollar volume.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    target_weights: Dict[str, float] = Field(
+        ..., description="{ticker: target fraction of account equity} — a single snapshot, not a rebalance panel.",
+    )
+    max_participation: float = Field(
+        0.1, description="Max fraction of a ticker's own average dollar volume a position may represent.",
+    )
+    adv_lookback: int = Field(20, description="Rolling window (bars, trailing from the end of the requested range) for average dollar/share volume.")
+    include_sector_exposure: bool = Field(
+        True, description="If True, fetch each ticker's sector via get_stock_fundamentals and report exposure by sector (best-effort — 'Unknown' when unavailable).",
+    )
+
+    @model_validator(mode="after")
+    def _check_weights_match_tickers(self) -> "CapacityReportInput":
+        missing = [t for t in self.tickers if t not in self.target_weights]
+        if missing:
+            raise ValueError(f"target_weights is missing entries for: {missing}")
+        return self
+
+
+class CapacityReportResult(BaseModel):
+    tickers: List[str]
+    per_ticker_max_account_size: Dict[str, Optional[float]]   # None = unbounded (zero target weight)
+    binding_ticker: Optional[str] = None
+    max_account_size: Optional[float] = None                  # None = unbounded (every weight is zero)
+    days_to_liquidate_at_capacity: Dict[str, float]
+    sector_exposure: Optional[Dict[str, float]] = None
+    warnings: List[str] = []
+
+
+# ──────────────────────────────────────────────
+# Data Quality Report (dataset provenance + missing-bar/stale-price/
+# price-jump detection — data/metadata.py + data/quality.py)
+# ──────────────────────────────────────────────
+
+class DataQualityReportInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    stale_run_length: int = Field(3, description="Minimum consecutive-identical-Close run length to flag as stale.")
+    jump_threshold: float = Field(0.15, description="Fractional single-bar Close-to-Close move to flag as a jump (default 0.15 = 15%).")
+
+
+class MissingBar(BaseModel):
+    date: str
+    weekday: str
+
+
+class StalePriceRun(BaseModel):
+    start: str
+    end: str
+    price: float
+    run_length: int
+
+
+class PriceJump(BaseModel):
+    date: str
+    pct_change: float
+
+
+class DataQualityReportResult(BaseModel):
+    symbol: str
+    metadata: Dict[str, Any]
+    missing_bars: List[MissingBar]
+    stale_price_runs: List[StalePriceRun]
+    price_jumps: List[PriceJump]
+
+
+# ──────────────────────────────────────────────
+# Compact Backtest Result (BacktestResultV2 — summary/risk/exposure/cost
+# sub-reports plus artifact URIs instead of embedding the full equity
+# curve/trade log inline, unlike the plain BacktestResult)
+# ──────────────────────────────────────────────
+
+class PerformanceSummary(BaseModel):
+    total_return: float
+    annualized_return: float
+    annualized_volatility: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    calmar_ratio: float
+
+
+class RiskSummary(BaseModel):
+    max_drawdown: float
+    var_95: float
+    cvar_95: float
+
+
+class ExposureSummary(BaseModel):
+    time_in_market: float
+    avg_gross_exposure: float
+    avg_net_exposure: float
+    pct_long: float
+    pct_short: float
+    avg_holding_period_bars: Optional[float] = None
+
+
+class CostSummary(BaseModel):
+    total_commission_pct: float   # sum of commission drag across all bars, as a fraction of capital
+    total_slippage_pct: float     # sum of slippage drag, same units
+    total_cost_pct: float
+    num_trades: int
+
+
+class BacktestCompactInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    strategy_type: str = Field(
+        ..., description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+    )
+    parameters: Dict[str, Any] = Field({}, description="Strategy parameters — same shape as BacktestInput.")
+    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
+    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    fill_price: str = Field("close", description="'close' (default), 'next_open', or 'midpoint' — see BacktestInput.fill_price.")
+    run_id: Optional[str] = Field(None, description="Identifier for the saved artifacts. Auto-generated (a UUID) when not supplied.")
+
+
+class BacktestResultV2(BaseModel):
+    run_id: str
+    strategy_name: str
+    summary: PerformanceSummary
+    risk: RiskSummary
+    exposure: ExposureSummary
+    costs: CostSummary
+    equity_curve_uri: str
+    trades_uri: Optional[str] = None   # None when the strategy never traded
+    warnings: List[str] = []
+    validation_status: str             # "ok" | "warning"

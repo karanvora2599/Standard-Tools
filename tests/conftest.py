@@ -14,6 +14,7 @@ import pytest
 
 from standard_quant_tools.data.base import FinancialRatios, TickerInfo
 from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.data.metadata import DataSetMetadata
 
 
 # ── Synthetic market data ─────────────────────────────────────────────────────
@@ -98,6 +99,14 @@ def mock_provider(sample_ohlcv: pd.DataFrame) -> MagicMock:
         profit_margins=0.25,
         dividend_yield=0.005,
         market_cap=2_800_000_000_000,
+    )
+    provider.get_metadata.return_value = DataSetMetadata(
+        provider="yfinance",
+        adjusted=True,
+        survivorship_free=False,
+        point_in_time=False,
+        frequency="1d",
+        timezone="America/New_York",
     )
     return provider
 

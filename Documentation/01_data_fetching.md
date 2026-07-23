@@ -160,3 +160,16 @@ returns_df = fetch_returns_sync(
 )
 print(returns_df.shape)  # (252, 3)
 ```
+
+---
+
+## Dataset Provenance and Data Quality
+
+Every `DataProvider` also implements `get_metadata(symbol, interval)`,
+reporting what guarantees the fetched data actually carries (adjusted?
+survivorship-free? point-in-time?), plus standalone checks for missing
+bars, stale prices, and large single-bar jumps on data you've already
+fetched. See [11_data_quality.md](11_data_quality.md) for the full
+reference — this is the credibility-of-the-data-itself counterpart to the
+backtesting engine's own trustworthiness work in
+[04_backtesting.md](04_backtesting.md).

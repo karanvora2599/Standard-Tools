@@ -343,6 +343,20 @@ A custom callable still gets the full C++ batch-kernel speedup when
 in-process to build the signal matrix before shipping it to C++ in one call —
 it never inspects *how* the signal was produced.
 
+`backtest/strategy.py`'s `VectorizedStrategy` is the formal type for
+`my_signal` above — every `STRATEGY_REGISTRY` entry already satisfies it
+structurally, so annotating a custom callable as `VectorizedStrategy`
+documents the contract without changing any behavior:
+
+```python
+from standard_quant_tools.backtest.strategy import VectorizedStrategy
+
+def my_signal(price_data: pd.DataFrame, threshold: float) -> pd.Series:
+    ...
+
+_: VectorizedStrategy = my_signal  # type-checker verifies the signature matches
+```
+
 For LLM/JSON tool-calling rather than a direct Python callable, see the
 `run_custom_signal_backtest` agent tool in
 [09_advanced_agent_tools.md](09_advanced_agent_tools.md#11-custom-signal-backtest) —
@@ -492,11 +506,50 @@ result = run_portfolio_simulation(
 )
 ```
 
-**Scope, stated explicitly:** costs are the same flat
-`commission_pct`/`slippage_pct` every other tool uses (no per-share/ADV/
-impact model yet); short-sale proceeds are credited to cash in full with no
-margin/haircut modeling. Both are natural follow-on work, not required for
-the shared-cash architecture itself to be correct.
+**Pluggable cost models (`backtest/costs.py`):** beyond the default flat
+`commission_pct`/`slippage_pct`, `run_portfolio_simulation` accepts:
+
+```python
+result = run_portfolio_simulation(
+    price_data, target_weights,
+    commission_model="per_share", per_share_rate=0.005, min_commission=1.0,
+    use_impact_model=True, impact_coefficient=1.0, impact_lookback=20,
+    borrow_fee_bps=50.0,          # annualized, accrued daily on short notional
+    margin_interest_rate=0.06,    # annualized, accrued daily on negative cash
+)
+```
+
+- `commission_model`: `"pct"` (default, unchanged) or `"per_share"` —
+  `per_share_rate` per share traded, floored at `min_commission`.
+- `use_impact_model`: adds a square-root market-impact cost
+  (`impact_bps = impact_coefficient * volatility * sqrt(participation)`,
+  `participation = trade notional / rolling avg dollar volume`) on top of
+  commission + spread. Requires a `'Volume'` column — no other new data
+  dependency, since `Close * Volume` is already computable from any OHLCV
+  frame.
+- `borrow_fee_bps` / `margin_interest_rate`: daily-accrued financing costs
+  on short notional / negative cash respectively. Both default to `0.0`
+  (today's exact behavior — no financing cost beyond the existing "cash
+  went negative" warning).
+
+**Liquidity constraint (`backtest/constraints.py`):** pass
+`max_adv_participation=0.1` to reject (raise `ValidationError`) any
+rebalance trade whose notional exceeds 10% of the ticker's own rolling
+average dollar volume — same fail-fast pattern as `max_gross_leverage`/
+`max_position_pct`. Requires a `'Volume'` column.
+
+For a **standalone capacity estimate** (not wired into the simulation
+itself) — how much account size a target-weight portfolio can support
+before hitting that same ADV constraint, plus days-to-liquidate and sector
+exposure — see `backtest/constraints.py`'s `capacity_report()` or the
+`get_capacity_report` agent tool
+([09_advanced_agent_tools.md §18](09_advanced_agent_tools.md#18-capacity-report)).
+
+**Scope, stated explicitly:** short-sale proceeds are credited to cash in
+full with no margin haircut modeling beyond the flat `margin_interest_rate`
+accrual above; sector-exposure constraints (as opposed to reporting — see
+`get_capacity_report`) aren't enforced by the engine itself. Neither is
+required for the shared-cash architecture itself to be correct.
 
 **Feeding it SCORE signals:** `target_weights` above assumes you already
 have per-ticker target weights. If you instead have an arbitrary

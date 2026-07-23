@@ -12,15 +12,21 @@ exists alongside the vectorized per-ticker one.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.backtest.costs import (
+    percentage_commission, per_share_commission, impact_cost,
+    short_borrow_cost, margin_interest,
+)
+from standard_quant_tools.backtest.constraints import adv_participation
 
 logger = logging.getLogger(__name__)
 
 _VALID_FILL_PRICES = ("close", "next_open", "midpoint")
+_VALID_COMMISSION_MODELS = ("pct", "per_share")
 
 
 def run_portfolio_simulation(
@@ -32,6 +38,15 @@ def run_portfolio_simulation(
     max_gross_leverage: float = 1.0,
     max_position_pct: float = 1.0,
     fill_price: str = "close",
+    commission_model: str = "pct",
+    per_share_rate: float = 0.0,
+    min_commission: float = 0.0,
+    use_impact_model: bool = False,
+    impact_coefficient: float = 1.0,
+    impact_lookback: int = 20,
+    borrow_fee_bps: float = 0.0,
+    margin_interest_rate: float = 0.0,
+    max_adv_participation: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Simulate a single shared-cash portfolio account rebalanced at the dates
@@ -39,8 +54,9 @@ def run_portfolio_simulation(
 
     Args:
         price_data: Dict mapping ticker -> OHLCV DataFrame (must contain 'Close',
-            plus 'Open' if fill_price="next_open" or 'High'/'Low' if
-            fill_price="midpoint").
+            plus 'Open' if fill_price="next_open", 'High'/'Low' if
+            fill_price="midpoint", or 'Volume' if use_impact_model or
+            max_adv_participation is set).
         target_weights: DataFrame indexed by rebalance date, one column per
             ticker in the universe, values are the target fraction of
             account equity (negative for short). Must be dense — every
@@ -48,8 +64,10 @@ def run_portfolio_simulation(
             run_signal_panel_backtest's existing "must have an entry for
             every ticker" contract.
         initial_capital: Starting cash.
-        commission_pct, slippage_pct: Applied to the notional traded at each
-            rebalance — same convention run_strategy already uses.
+        commission_pct: Commission per trade notional (fraction) when
+            commission_model="pct" (default — today's existing behavior).
+        slippage_pct: Spread cost per trade notional (fraction), applied
+            regardless of commission_model.
         max_gross_leverage: Reject (raise ValidationError) any rebalance date
             whose sum(|weight|) exceeds this (default 1.0 = fully invested,
             no leverage).
@@ -66,6 +84,27 @@ def run_portfolio_simulation(
             of Close, as a bid/ask-free proxy for a midquote fill. Equity is
             always marked to Close regardless of fill_price — only the
             rebalance trade's own execution price changes.
+        commission_model: "pct" (default) — commission_pct * trade notional.
+            "per_share" — per_share_rate per share traded, floored at
+            min_commission (backtest/costs.py: per_share_commission).
+        use_impact_model: If True, adds a square-root market-impact cost
+            (backtest/costs.py: impact_cost) on top of commission + spread,
+            using a rolling impact_lookback-bar average dollar volume
+            (Close * Volume) and return volatility per ticker. Requires a
+            'Volume' column. Default False reproduces today's exact cost
+            behavior.
+        impact_coefficient, impact_lookback: Parameters of the impact model
+            (ignored when use_impact_model=False).
+        borrow_fee_bps: Annualized basis-point borrow fee accrued daily on
+            any short position's notional (0.0 = no borrow cost, today's
+            existing behavior).
+        margin_interest_rate: Annualized rate accrued daily on negative cash
+            (implied margin borrowing); 0.0 = no financing cost charged
+            beyond the existing "cash went negative" warning.
+        max_adv_participation: Reject (raise ValidationError) any rebalance
+            trade whose notional exceeds this fraction of the ticker's own
+            rolling average dollar volume. None (default) = no ADV
+            constraint checked. Requires a 'Volume' column when set.
 
     Returns:
         Dict with equity_curve, cash_curve, gross_exposure_curve,
@@ -78,6 +117,10 @@ def run_portfolio_simulation(
         raise ValidationError(
             f"fill_price must be one of {_VALID_FILL_PRICES}, got {fill_price!r}"
         )
+    if commission_model not in _VALID_COMMISSION_MODELS:
+        raise ValidationError(
+            f"commission_model must be one of {_VALID_COMMISSION_MODELS}, got {commission_model!r}"
+        )
 
     tickers = list(target_weights.columns)
     missing = [t for t in tickers if t not in price_data]
@@ -85,11 +128,16 @@ def run_portfolio_simulation(
         raise ValidationError(f"price_data is missing OHLCV for: {missing}")
 
     required_cols = {"close": ["Close"], "next_open": ["Close", "Open"], "midpoint": ["Close", "High", "Low"]}
+    needs_volume = use_impact_model or (max_adv_participation is not None)
     for t in tickers:
         missing_cols = [c for c in required_cols[fill_price] if c not in price_data[t].columns]
+        if needs_volume and "Volume" not in price_data[t].columns:
+            missing_cols.append("Volume")
         if missing_cols:
             raise ValidationError(
-                f"price_data[{t!r}] is missing column(s) {missing_cols} required for fill_price={fill_price!r}"
+                f"price_data[{t!r}] is missing column(s) {missing_cols} required for "
+                f"fill_price={fill_price!r}"
+                + (", use_impact_model/max_adv_participation" if needs_volume else "")
             )
 
     # Master trading calendar: intersection of every ticker's own index, so
@@ -133,9 +181,22 @@ def run_portfolio_simulation(
                 "bar in the master trading calendar."
             )
 
+    # Rolling average dollar volume / volatility per ticker, needed only
+    # for the impact model and/or the ADV participation check — computed
+    # once upfront rather than per-trade.
+    dollar_volume: Dict[str, pd.Series] = {}
+    volatility: Dict[str, pd.Series] = {}
+    if needs_volume:
+        for t in tickers:
+            dv = (price_data[t]["Volume"] * price_data[t]["Close"]).reindex(master_index)
+            dollar_volume[t] = dv.rolling(impact_lookback, min_periods=1).mean()
+    if use_impact_model:
+        for t in tickers:
+            ret = price_data[t]["Close"].pct_change().reindex(master_index)
+            volatility[t] = ret.rolling(impact_lookback, min_periods=1).std().fillna(0.0)
+
     cash = initial_capital
     shares: Dict[str, float] = {t: 0.0 for t in tickers}
-    cost_rate = commission_pct + slippage_pct
 
     equity_records: List[float] = []
     cash_records: List[float] = []
@@ -143,7 +204,23 @@ def run_portfolio_simulation(
     net_records: List[float] = []
     rebalance_log: List[Dict[str, Any]] = []
 
-    def _apply_rebalance(trigger_date: Any, weights_row: pd.Series, exec_prices: Dict[str, float]) -> None:
+    def _trade_cost(t: str, delta_shares: float, trade_notional: float, exec_date: Any) -> float:
+        if commission_model == "per_share":
+            commission = per_share_commission(delta_shares, per_share_rate, min_commission)
+        else:
+            commission = percentage_commission(trade_notional, commission_pct)
+        spread = trade_notional * slippage_pct
+        impact = 0.0
+        if use_impact_model:
+            impact = impact_cost(
+                trade_notional, float(dollar_volume[t].loc[exec_date]),
+                float(volatility[t].loc[exec_date]), impact_coefficient,
+            )
+        return commission + spread + impact
+
+    def _apply_rebalance(
+        trigger_date: Any, exec_date: Any, weights_row: pd.Series, exec_prices: Dict[str, float],
+    ) -> None:
         nonlocal cash
         equity_now = cash + sum(shares[t] * exec_prices[t] for t in tickers)
         turnover_notional = 0.0
@@ -153,8 +230,18 @@ def run_portfolio_simulation(
             delta = target_shares - shares[t]
             trade_notional = abs(delta) * price
             turnover_notional += trade_notional
+
+            if max_adv_participation is not None:
+                adv = float(dollar_volume[t].loc[exec_date])
+                participation = adv_participation(trade_notional, adv)
+                if participation > max_adv_participation + 1e-9:
+                    raise ValidationError(
+                        f"rebalance {exec_date} ticker {t!r}: ADV participation "
+                        f"{participation:.4f} exceeds max_adv_participation={max_adv_participation}"
+                    )
+
             cash -= delta * price
-            cash -= trade_notional * cost_rate
+            cash -= _trade_cost(t, delta, trade_notional, exec_date)
             shares[t] = target_shares
 
         equity_after = cash + sum(shares[t] * exec_prices[t] for t in tickers)
@@ -173,22 +260,33 @@ def run_portfolio_simulation(
     for date in master_index:
         close_prices = {t: float(price_data[t].loc[date, "Close"]) for t in tickers}
 
+        # Daily-accrued financing costs (borrow fee on shorts, margin
+        # interest on negative cash), based on the position/cash carried
+        # into this bar from the previous one — before today's rebalance,
+        # if any, changes them.
+        if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
+            daily_cost = margin_interest(cash, margin_interest_rate, days=1.0)
+            for t in tickers:
+                if shares[t] < 0:
+                    daily_cost += short_borrow_cost(abs(shares[t]) * close_prices[t], borrow_fee_bps, days=1.0)
+            cash -= daily_cost
+
         if fill_price == "next_open" and pending_rebalance is not None:
             trigger_date, weights_row = pending_rebalance
             open_prices = {t: float(price_data[t].loc[date, "Open"]) for t in tickers}
-            _apply_rebalance(trigger_date, weights_row, open_prices)
+            _apply_rebalance(trigger_date, date, weights_row, open_prices)
             pending_rebalance = None
 
         if date in rebalance_dates:
             weights_row = target_weights.loc[date]
             if fill_price == "close":
-                _apply_rebalance(date, weights_row, close_prices)
+                _apply_rebalance(date, date, weights_row, close_prices)
             elif fill_price == "midpoint":
                 mid_prices = {
                     t: (float(price_data[t].loc[date, "High"]) + float(price_data[t].loc[date, "Low"])) / 2.0
                     for t in tickers
                 }
-                _apply_rebalance(date, weights_row, mid_prices)
+                _apply_rebalance(date, date, weights_row, mid_prices)
             else:  # next_open — defer execution to the following bar's Open
                 pending_rebalance = (date, weights_row)
 

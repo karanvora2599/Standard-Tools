@@ -5,6 +5,8 @@ import pandas as pd
 from pydantic import BaseModel
 import asyncio
 
+from standard_quant_tools.data.metadata import DataSetMetadata
+
 class TickerInfo(BaseModel):
     symbol: str
     name: str = "Unknown"
@@ -81,5 +83,14 @@ class DataProvider(ABC):
     def get_financial_ratios(self, symbol: str) -> FinancialRatios:
         """
         Fetches key financial ratios.
+        """
+        pass
+
+    @abstractmethod
+    def get_metadata(self, symbol: str, interval: str = "1d") -> DataSetMetadata:
+        """
+        Reports this provider's dataset guarantees (or lack thereof) for a
+        given symbol/interval — see DataSetMetadata's docstring. Every
+        provider must answer honestly, not aspirationally.
         """
         pass

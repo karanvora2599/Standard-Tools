@@ -191,6 +191,111 @@ class TestMidpointFill:
             run_portfolio_simulation(no_hl, target_weights, fill_price="midpoint")
 
 
+class TestCostModels:
+    def test_per_share_commission_hand_verified(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        result = run_portfolio_simulation(
+            price_data, target_weights, initial_capital=10_000.0,
+            commission_model="per_share", per_share_rate=0.01, slippage_pct=0.0,
+        )
+        # AAPL: 50 shares @ 0.01 = 0.5; MSFT: 60 shares @ 0.01 = 0.6; total 1.1
+        assert result["cash_curve"].iloc[0] == pytest.approx(10_000.0 - 5_000.0 - 3_000.0 - 1.1)
+        assert result["equity_curve"].iloc[0] == pytest.approx(9_998.9)
+
+    def test_min_commission_floor_applies(self):
+        dates = pd.date_range("2023-01-02", periods=1, freq="B")
+        price_data = {"AAPL": pd.DataFrame(
+            {"Open": [100.0], "High": [100.0], "Low": [100.0], "Close": [100.0], "Volume": [1_000_000.0]},
+            index=dates,
+        )}
+        target_weights = pd.DataFrame({"AAPL": [0.01]}, index=dates)
+        result = run_portfolio_simulation(
+            price_data, target_weights, initial_capital=10_000.0,
+            commission_model="per_share", per_share_rate=0.01, min_commission=1.0, slippage_pct=0.0,
+        )
+        # notional = 100 -> 1 share; raw commission 1*0.01=0.01, floored to 1.0.
+        assert result["equity_curve"].iloc[0] == pytest.approx(10_000.0 - 1.0)
+
+    def test_impact_model_increases_cost_vs_baseline(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        low_volume = {t: df.assign(Volume=1_000.0) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[3]])
+
+        baseline = run_portfolio_simulation(
+            low_volume, target_weights, commission_pct=0.0, slippage_pct=0.0,
+        )
+        with_impact = run_portfolio_simulation(
+            low_volume, target_weights, commission_pct=0.0, slippage_pct=0.0,
+            use_impact_model=True, impact_coefficient=5.0,
+        )
+        assert with_impact["final_equity"] < baseline["final_equity"]
+
+    def test_impact_model_requires_volume_column(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        no_volume = {t: df.drop(columns=["Volume"]) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="Volume"):
+            run_portfolio_simulation(no_volume, target_weights, use_impact_model=True)
+
+    def test_borrow_fee_reduces_equity_for_short_position(self):
+        dates = pd.date_range("2023-01-02", periods=3, freq="B")
+        price_data = {"AAPL": pd.DataFrame(
+            {"Open": [100.0] * 3, "High": [100.0] * 3, "Low": [100.0] * 3, "Close": [100.0] * 3,
+             "Volume": [1_000_000.0] * 3},
+            index=dates,
+        )}
+        target_weights = pd.DataFrame({"AAPL": [-0.5]}, index=[dates[0]])
+
+        no_fee = run_portfolio_simulation(
+            price_data, target_weights, commission_pct=0.0, slippage_pct=0.0,
+        )
+        with_fee = run_portfolio_simulation(
+            price_data, target_weights, commission_pct=0.0, slippage_pct=0.0, borrow_fee_bps=500.0,
+        )
+        assert with_fee["final_equity"] < no_fee["final_equity"]
+
+    def test_margin_interest_accrues_on_negative_cash(self):
+        dates = pd.date_range("2023-01-02", periods=3, freq="B")
+        price_data = {"AAPL": pd.DataFrame(
+            {"Open": [100.0] * 3, "High": [100.0] * 3, "Low": [100.0] * 3, "Close": [100.0] * 3,
+             "Volume": [1_000_000.0] * 3},
+            index=dates,
+        )}
+        # max_gross_leverage > 1.0 needed for cash to go negative on a long-only book.
+        target_weights = pd.DataFrame({"AAPL": [1.5]}, index=[dates[0]])
+
+        no_interest = run_portfolio_simulation(
+            price_data, target_weights, commission_pct=0.0, slippage_pct=0.0,
+            max_gross_leverage=1.5, max_position_pct=1.5,
+        )
+        with_interest = run_portfolio_simulation(
+            price_data, target_weights, commission_pct=0.0, slippage_pct=0.0,
+            max_gross_leverage=1.5, max_position_pct=1.5, margin_interest_rate=0.10,
+        )
+        assert with_interest["final_cash"] < no_interest["final_cash"]
+
+    def test_max_adv_participation_exceeded_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        low_volume = {t: df.assign(Volume=10.0) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="ADV participation"):
+            run_portfolio_simulation(low_volume, target_weights, max_adv_participation=0.01)
+
+    def test_max_adv_participation_requires_volume_column(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        no_volume = {t: df.drop(columns=["Volume"]) for t, df in price_data.items()}
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="Volume"):
+            run_portfolio_simulation(no_volume, target_weights, max_adv_participation=0.5)
+
+    def test_invalid_commission_model_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="commission_model"):
+            run_portfolio_simulation(price_data, target_weights, commission_model="bogus")
+
+
 class TestValidation:
     def test_invalid_fill_price_raises(self, two_ticker_price_data):
         price_data, dates = two_ticker_price_data

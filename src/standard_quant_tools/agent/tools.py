@@ -7,6 +7,7 @@ import datetime
 import logging
 import math
 import time
+import uuid
 from collections import Counter
 from itertools import combinations
 from typing import Any, Dict, List, Optional
@@ -30,6 +31,15 @@ from standard_quant_tools.backtest.sizing import (
     rank_weighted, equal_weight_top_bottom, zscore_normalized, vol_scaled, dollar_neutral,
 )
 from standard_quant_tools.backtest.pairs import run_pair_backtest as _pair_backtest_run
+from standard_quant_tools.backtest.constraints import (
+    capacity_report as _capacity_report,
+    days_to_liquidate as _days_to_liquidate,
+    sector_exposure as _sector_exposure,
+)
+from standard_quant_tools.data.quality import (
+    detect_missing_bars, detect_stale_prices, detect_price_jumps,
+)
+from standard_quant_tools.backtest.artifacts import save_artifact
 from standard_quant_tools.backtest.robustness import (
     parameter_sensitivity as _parameter_sensitivity,
     deflated_sharpe_ratio as _deflated_sharpe_ratio,
@@ -85,6 +95,9 @@ from standard_quant_tools.agent.models import (
     PortfolioSimulationInput, RebalanceEvent, PortfolioSimulationResult,
     PairTradeBacktestInput, PairTradeBacktestResult,
     RobustnessDiagnosticsInput, RobustnessDiagnosticsResult,
+    CapacityReportInput, CapacityReportResult,
+    DataQualityReportInput, MissingBar, StalePriceRun, PriceJump, DataQualityReportResult,
+    BacktestCompactInput, PerformanceSummary, RiskSummary, ExposureSummary, CostSummary, BacktestResultV2,
 )
 
 
@@ -1870,6 +1883,15 @@ def run_portfolio_simulation(input_data: PortfolioSimulationInput) -> PortfolioS
         max_gross_leverage=input_data.max_gross_leverage,
         max_position_pct=input_data.max_position_pct,
         fill_price=input_data.fill_price,
+        commission_model=input_data.commission_model,
+        per_share_rate=input_data.per_share_rate,
+        min_commission=input_data.min_commission,
+        use_impact_model=input_data.use_impact_model,
+        impact_coefficient=input_data.impact_coefficient,
+        impact_lookback=input_data.impact_lookback,
+        borrow_fee_bps=input_data.borrow_fee_bps,
+        margin_interest_rate=input_data.margin_interest_rate,
+        max_adv_participation=input_data.max_adv_participation,
     )
 
     equity_curve = raw["equity_curve"]
@@ -2087,6 +2109,210 @@ def get_robustness_diagnostics(input_data: RobustnessDiagnosticsInput) -> Robust
 
 
 # ──────────────────────────────────────────────────────────────────
+# Capacity Report (liquidity/ADV-based capacity)
+# ──────────────────────────────────────────────────────────────────
+
+def get_capacity_report(input_data: CapacityReportInput) -> CapacityReportResult:
+    """
+    How much account size a target-weight portfolio can support before
+    positions become too large relative to each ticker's own trading
+    volume. Reuses backtest/constraints.py's capacity_report/
+    days_to_liquidate — no new math, just data fetching and formatting for
+    JSON tool-calling.
+    """
+    logger.debug("[capacity_report] tickers=%d  max_participation=%.3f",
+                 len(input_data.tickers), input_data.max_participation)
+    provider = DataFactory.get_provider()
+
+    avg_dollar_volumes: Dict[str, float] = {}
+    avg_share_volumes: Dict[str, float] = {}
+    last_close: Dict[str, float] = {}
+    for t in input_data.tickers:
+        df = provider.get_ohlcv(t, input_data.start_date, input_data.end_date)
+        if "Volume" not in df.columns:
+            raise ValueError(f"OHLCV for {t!r} is missing a 'Volume' column")
+        dollar_vol = (df["Close"] * df["Volume"]).rolling(input_data.adv_lookback, min_periods=1).mean()
+        share_vol = df["Volume"].rolling(input_data.adv_lookback, min_periods=1).mean()
+        avg_dollar_volumes[t] = float(dollar_vol.iloc[-1])
+        avg_share_volumes[t] = float(share_vol.iloc[-1])
+        last_close[t] = float(df["Close"].iloc[-1])
+
+    raw = _capacity_report(
+        input_data.tickers, avg_dollar_volumes, input_data.target_weights, input_data.max_participation,
+    )
+
+    per_ticker_out: Dict[str, Optional[float]] = {
+        t: (None if v == float("inf") else round(v, 2)) for t, v in raw["per_ticker"].items()
+    }
+    max_account_size = raw["max_account_size"]
+    max_account_size_out: Optional[float] = None if max_account_size == float("inf") else round(max_account_size, 2)
+
+    days_to_liquidate_out: Dict[str, float] = {}
+    for t in input_data.tickers:
+        weight = abs(input_data.target_weights[t])
+        if weight <= 0 or max_account_size_out is None or avg_share_volumes[t] <= 0:
+            days_to_liquidate_out[t] = 0.0
+            continue
+        notional_at_capacity = max_account_size_out * weight
+        shares_at_capacity = notional_at_capacity / last_close[t] if last_close[t] > 0 else 0.0
+        days_to_liquidate_out[t] = round(
+            _days_to_liquidate(shares_at_capacity, avg_share_volumes[t], input_data.max_participation), 2,
+        )
+
+    warnings: List[str] = []
+    sector_exp: Optional[Dict[str, float]] = None
+    if input_data.include_sector_exposure:
+        sectors: Dict[str, str] = {}
+        for t in input_data.tickers:
+            try:
+                info = provider.get_ticker_info(t)
+                sectors[t] = info.sector
+            except Exception as exc:
+                sectors[t] = "Unknown"
+                warnings.append(f"could not fetch sector for {t!r}: {exc}")
+        sector_exp = _sector_exposure(input_data.target_weights, sectors)
+
+    logger.debug(
+        "[capacity_report] binding=%s  max_account_size=%s",
+        raw["binding_ticker"], max_account_size_out,
+    )
+
+    return CapacityReportResult(
+        tickers=input_data.tickers,
+        per_ticker_max_account_size=per_ticker_out,
+        binding_ticker=raw["binding_ticker"],
+        max_account_size=max_account_size_out,
+        days_to_liquidate_at_capacity=days_to_liquidate_out,
+        sector_exposure=sector_exp,
+        warnings=warnings,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Data Quality Report (dataset provenance + missing-bar/stale-price/
+# price-jump detection)
+# ──────────────────────────────────────────────────────────────────
+
+def get_data_quality_report(input_data: DataQualityReportInput) -> DataQualityReportResult:
+    """
+    Dataset provenance (data/metadata.py — what this provider does and
+    doesn't guarantee) plus missing-bar/stale-price/price-jump detection
+    (data/quality.py) on the fetched OHLCV. All checks are heuristics on
+    data already fetched, not a new data source — see each function's
+    docstring for known false-positive modes (e.g. missing_bars has no
+    market-holiday calendar).
+    """
+    logger.debug("[data_quality_report] %s  %s → %s", input_data.symbol, input_data.start_date, input_data.end_date)
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    metadata = provider.get_metadata(input_data.symbol)
+
+    missing = [MissingBar(**m) for m in detect_missing_bars(df)]
+    stale = [StalePriceRun(**s) for s in detect_stale_prices(df, n=input_data.stale_run_length)]
+    jumps = [PriceJump(**j) for j in detect_price_jumps(df, threshold=input_data.jump_threshold)]
+
+    logger.debug(
+        "[data_quality_report] missing_bars=%d  stale_runs=%d  price_jumps=%d",
+        len(missing), len(stale), len(jumps),
+    )
+
+    return DataQualityReportResult(
+        symbol=input_data.symbol,
+        metadata=metadata.model_dump(),
+        missing_bars=missing,
+        stale_price_runs=stale,
+        price_jumps=jumps,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Compact Backtest Result (BacktestResultV2)
+# ──────────────────────────────────────────────────────────────────
+
+def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
+    """
+    Compact counterpart to run_sma_backtest/run_rsi_backtest/run_macd_backtest/
+    run_bollinger_backtest: instead of embedding the full equity_curve/
+    trade_log inline (BacktestResult), saves them via backtest/artifacts.py
+    and returns summary/risk/exposure/cost sub-reports plus URIs — closes
+    the "agent tool result can contain the complete equity curve" gap for
+    callers who opt into this shape. Reuses run_strategy and
+    metrics/diagnostics.py's exposure_stats; no new backtest or metric math.
+    """
+    if input_data.strategy_type not in STRATEGY_REGISTRY:
+        raise ValueError(
+            f"Unknown strategy '{input_data.strategy_type}'. "
+            f"Available: {list(STRATEGY_REGISTRY)}"
+        )
+    run_id = input_data.run_id or uuid.uuid4().hex
+    logger.debug("[backtest_compact] run_id=%s  %s  %s", run_id, input_data.symbol, input_data.strategy_type)
+
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(input_data.symbol, input_data.start_date, input_data.end_date)
+    signals = STRATEGY_REGISTRY[input_data.strategy_type](df, **input_data.parameters)
+
+    results = run_strategy(
+        df, signals, input_data.initial_capital,
+        commission_pct=input_data.commission_pct, slippage_pct=input_data.slippage_pct,
+        include_trade_log=True, fill_price=input_data.fill_price,
+    )
+    equity_curve = results["equity_curve"]
+    returns = equity_curve.pct_change().fillna(0.0)
+    trade_log = results.get("trade_log", pd.DataFrame())
+    executed = signals.shift(1).fillna(0.0)
+
+    exposure = exposure_stats(executed, trade_log)
+
+    pos_diff = executed.diff().fillna(executed.iloc[0])
+    turnover = float(pos_diff.abs().sum())
+    total_commission_pct = turnover * input_data.commission_pct
+    total_slippage_pct = turnover * input_data.slippage_pct
+
+    equity_curve_uri = save_artifact(equity_curve, run_id, "equity_curve")
+    trades_uri = save_artifact(trade_log, run_id, "trades") if not trade_log.empty else None
+
+    warnings: List[str] = []
+    validation_status = "ok"
+    if int(results["num_trades"]) < 5:
+        warnings.append(f"Only {results['num_trades']} trade(s) — too few to draw reliable conclusions.")
+        validation_status = "warning"
+
+    logger.debug(
+        "[backtest_compact] run_id=%s  trades=%d  sharpe=%.3f  status=%s",
+        run_id, results["num_trades"], results["sharpe_ratio"], validation_status,
+    )
+
+    return BacktestResultV2(
+        run_id=run_id,
+        strategy_name=input_data.strategy_type,
+        summary=PerformanceSummary(
+            total_return=round(float(results["total_return"]), 6),
+            annualized_return=round(float(cagr(equity_curve)), 6),
+            annualized_volatility=round(float(results["annualized_volatility"]), 6),
+            sharpe_ratio=round(float(results["sharpe_ratio"]), 4),
+            sortino_ratio=round(float(results["sortino_ratio"]), 4),
+            calmar_ratio=round(float(results["calmar_ratio"]), 4),
+        ),
+        risk=RiskSummary(
+            max_drawdown=round(float(results["max_drawdown"]), 6),
+            var_95=round(float(var_historical(returns, 0.95)), 6),
+            cvar_95=round(float(cvar(returns, 0.95)), 6),
+        ),
+        exposure=ExposureSummary(**exposure),
+        costs=CostSummary(
+            total_commission_pct=round(total_commission_pct, 6),
+            total_slippage_pct=round(total_slippage_pct, 6),
+            total_cost_pct=round(total_commission_pct + total_slippage_pct, 6),
+            num_trades=int(results["num_trades"]),
+        ),
+        equity_curve_uri=equity_curve_uri,
+        trades_uri=trades_uri,
+        warnings=warnings,
+        validation_status=validation_status,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Extended Backtest Diagnostics
 # ──────────────────────────────────────────────────────────────────
 
@@ -2215,6 +2441,9 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ("run_portfolio_simulation", "True shared-cash portfolio simulation with rebalancing at target-weight dates — unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.", PortfolioSimulationInput),
         ("run_pair_trade_backtest", "Backtest a cointegrated pair as one synchronized two-leg trade — both legs enter/exit together and share one cash account, unlike scan_pairs which only screens candidates.", PairTradeBacktestInput),
         ("get_robustness_diagnostics", "Same-sample robustness checks for a grid search: parameter sensitivity, Deflated Sharpe Ratio, and a block-bootstrap confidence interval on the best trial's Sharpe ratio.", RobustnessDiagnosticsInput),
+        ("get_capacity_report", "How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume, plus days-to-liquidate and sector exposure.", CapacityReportInput),
+        ("get_data_quality_report", "Dataset provenance (adjusted/survivorship-free/point-in-time guarantees) plus missing-bar/stale-price/price-jump detection on a symbol's OHLCV.", DataQualityReportInput),
+        ("run_backtest_compact", "Compact backtest result: summary/risk/exposure/cost sub-reports plus equity-curve/trade-log artifact URIs, instead of embedding the full data inline like run_sma_backtest etc.", BacktestCompactInput),
     ]
 
     return [
@@ -2266,6 +2495,9 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_portfolio_simulation":       (run_portfolio_simulation,       PortfolioSimulationInput),
     "run_pair_trade_backtest":        (run_pair_trade_backtest,        PairTradeBacktestInput),
     "get_robustness_diagnostics":     (get_robustness_diagnostics,     RobustnessDiagnosticsInput),
+    "get_capacity_report":            (get_capacity_report,            CapacityReportInput),
+    "get_data_quality_report":        (get_data_quality_report,        DataQualityReportInput),
+    "run_backtest_compact":           (run_backtest_compact,           BacktestCompactInput),
 }
 
 

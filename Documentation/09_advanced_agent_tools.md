@@ -1878,11 +1878,27 @@ uses, since a per-position weight bound is exactly that check).
 convention as every other backtest tool (see
 [04_backtesting.md](04_backtesting.md#execution-timing-fill_price)).
 
-**Scope, stated explicitly (see [04_backtesting.md](04_backtesting.md#true-portfolio-simulation-shared-cash) for the full list):**
-flat `commission_pct`/`slippage_pct` costs (no pluggable per-share/ADV
-impact cost model yet), and short-sale proceeds credited to cash in full
-with no margin/haircut modeling. Neither is required for the shared-cash
-accounting itself to be correct — they're natural follow-on work.
+**Cost models and liquidity (`04_backtesting.md`'s
+[Pluggable cost models](04_backtesting.md#pluggable-cost-models-backtestcostspy)
+section has the full reference):** `commission_model` (`"pct"` default or
+`"per_share"` with `per_share_rate`/`min_commission`), `use_impact_model`
+(+ `impact_coefficient`/`impact_lookback`), `borrow_fee_bps`,
+`margin_interest_rate`, and `max_adv_participation` — all optional,
+defaulting to today's exact flat-cost, no-constraint behavior.
+
+```python
+result = run_portfolio_simulation(PortfolioSimulationInput(
+    tickers=["AAPL", "MSFT"], start_date="2022-01-01", end_date="2024-01-01",
+    target_weights={"AAPL": {"2022-01-03": 0.5}, "MSFT": {"2022-01-03": 0.5}},
+    use_impact_model=True, max_adv_participation=0.1,
+))
+```
+
+**Scope, stated explicitly:** short-sale proceeds are credited to cash in
+full with no margin haircut beyond the flat `margin_interest_rate` accrual;
+sector-exposure limits (as opposed to reporting — see §18) aren't enforced
+by this tool. Neither is required for the shared-cash accounting itself to
+be correct — natural follow-on work.
 
 ---
 
@@ -1994,3 +2010,163 @@ is the standard deviation actually observed across the searched grid, not
 an independently-estimated theoretical variance — a practical proxy common
 in applied use of DSR, not the only way to compute it. The bootstrap CI is
 on the best trial's in-sample Sharpe, not an out-of-sample estimate.
+
+---
+
+## 18. Capacity Report
+
+`get_capacity_report` answers "how much account size can this target-weight
+portfolio actually support?" — a strategy that works with $10,000 may be
+unusable at $10 million once positions start moving their own market.
+Reuses `backtest/constraints.py`'s `capacity_report`/`days_to_liquidate` —
+no new math, just data fetching (`Volume`-derived average dollar/share
+volume) and formatting for JSON tool-calling.
+
+```python
+from standard_quant_tools.agent.tools import get_capacity_report
+from standard_quant_tools.agent.models import CapacityReportInput
+
+result = get_capacity_report(CapacityReportInput(
+    tickers=["AAPL", "MSFT", "GOOGL"],
+    start_date="2023-01-01", end_date="2024-01-01",
+    target_weights={"AAPL": 0.5, "MSFT": 0.3, "GOOGL": 0.2},
+    max_participation=0.1,   # max 10% of a ticker's own ADV per position
+))
+
+print(f"Binding ticker    : {result.binding_ticker}")
+print(f"Max account size  : ${result.max_account_size:,.0f}" if result.max_account_size else "Unbounded")
+for t, size in result.per_ticker_max_account_size.items():
+    print(f"  {t}: {'unbounded' if size is None else f'${size:,.0f}'}")
+print(f"Sector exposure   : {result.sector_exposure}")
+```
+
+**How it works:** for each ticker, `max account size = (max_participation *
+avg_dollar_volume) / target_weight` — a name with a large target weight and
+thin volume caps the *whole portfolio's* capacity, not just its own
+position; the overall `max_account_size` is the smallest (binding) of these
+across the universe. `days_to_liquidate_at_capacity` then estimates how
+many trading days it would take to unwind each position if the account
+were run at exactly that capacity.
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `per_ticker_max_account_size` | `Dict[str, float?]` | Max account size per ticker; `None` = unbounded (zero target weight for that name) |
+| `binding_ticker` | `str?` | The name imposing the tightest capacity constraint; `None` if every weight is 0 |
+| `max_account_size` | `float?` | Overall capacity — the smallest per-ticker max; `None` if unbounded |
+| `days_to_liquidate_at_capacity` | `Dict[str, float]` | Trading days to unwind each position at `max_participation`, assuming the account were sized at `max_account_size` |
+| `sector_exposure` | `Dict[str, float]?` | Weight aggregated by sector (via `get_stock_fundamentals`' underlying provider call), `None` when `include_sector_exposure=False` |
+| `warnings` | `List[str]` | E.g. a per-ticker sector lookup failure (falls back to `"Unknown"`, doesn't fail the call) |
+
+**Scope, stated explicitly:** `target_weights` is a single snapshot (not a
+rebalance panel like `run_portfolio_simulation`'s) — capacity is inherently
+a point-in-time estimate, not a backtest. Sector data is best-effort
+(yfinance's `sector` field defaults to `"Unknown"` for many tickers — see
+`data/base.py`'s `TickerInfo`); sector *limits* (as opposed to reporting)
+aren't enforced anywhere in this library yet.
+
+---
+
+## 19. Data Quality Report
+
+`get_data_quality_report` reports what a data provider actually guarantees
+about a symbol's OHLCV, plus missing-bar/stale-price/price-jump detection
+on the fetched data. See [11_data_quality.md](11_data_quality.md) for the
+full conceptual reference (including the calendar-free heuristic
+limitation of missing-bar detection) — this section covers the tool's
+input/output shape.
+
+```python
+from standard_quant_tools.agent.tools import get_data_quality_report
+from standard_quant_tools.agent.models import DataQualityReportInput
+
+result = get_data_quality_report(DataQualityReportInput(
+    symbol="AAPL", start_date="2023-01-01", end_date="2024-01-01",
+))
+
+print(result.metadata)  # {'provider': 'yfinance', 'adjusted': True,
+                         #  'survivorship_free': False, 'point_in_time': False, ...}
+for gap in result.missing_bars:
+    print(f"Missing bar: {gap['date']} ({gap['weekday']})")
+for run in result.stale_price_runs:
+    print(f"Stale: {run['start']} -> {run['end']} @ {run['price']} ({run['run_length']} bars)")
+for jump in result.price_jumps:
+    print(f"Jump: {jump['date']}  {jump['pct_change']:+.1%}")
+```
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `metadata` | `Dict[str, Any]` | `DataSetMetadata` as a dict — `provider`, `adjusted`, `survivorship_free`, `point_in_time`, `frequency`, `timezone`, `retrieved_at` |
+| `missing_bars` | `List[{date, weekday}]` | Weekday gaps in the index — includes false positives for U.S. market holidays (no calendar dependency) |
+| `stale_price_runs` | `List[{start, end, price, run_length}]` | Runs of `stale_run_length`+ consecutive identical `Close` values |
+| `price_jumps` | `List[{date, pct_change}]` | Single-bar moves exceeding `jump_threshold` |
+
+**`stale_run_length`** (default `3`) and **`jump_threshold`** (default
+`0.15`) tune the two detectors' sensitivity.
+
+**Scope, stated explicitly:** every finding is a lead to investigate, not a
+proven defect — a genuinely volatile session produces the same signature
+as a data error, and a real market holiday produces the same signature as
+a missing bar.
+
+---
+
+## 20. Compact Backtest Result (`BacktestResultV2`)
+
+`run_backtest_compact` is the same four built-in strategies as
+`run_sma_backtest`/`run_rsi_backtest`/`run_macd_backtest`/
+`run_bollinger_backtest`, but returns a **compact result** instead of
+embedding the full `equity_curve`/`trade_log` inline — closes the "agent
+tool result can contain the complete equity curve" concern for callers who
+don't need the raw arrays. Reuses `run_strategy` and
+`metrics/diagnostics.py`'s `exposure_stats`; no new backtest or metric math.
+
+```python
+from standard_quant_tools.agent.tools import run_backtest_compact
+from standard_quant_tools.agent.models import BacktestCompactInput
+from standard_quant_tools.backtest.artifacts import load_artifact
+
+result = run_backtest_compact(BacktestCompactInput(
+    symbol="AAPL", start_date="2020-01-01", end_date="2024-01-01",
+    strategy_type="sma_crossover", parameters={"fast_period": 10, "slow_period": 50},
+))
+
+print(f"Sharpe        : {result.summary.sharpe_ratio:.2f}")
+print(f"Max drawdown  : {result.risk.max_drawdown:.1%}")
+print(f"Time in market: {result.exposure.time_in_market:.1%}")
+print(f"Total cost    : {result.costs.total_cost_pct:.2%} of capital turnover")
+print(f"Status        : {result.validation_status}")
+
+# Load the full equity curve back when actually needed:
+equity_curve = load_artifact(result.equity_curve_uri).squeeze("columns")
+```
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `run_id` | `str` | Identifier for the saved artifacts — auto-generated (UUID) unless supplied in the input |
+| `strategy_name` | `str` | Echoed `strategy_type` |
+| `summary` | `PerformanceSummary` | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio` |
+| `risk` | `RiskSummary` | `max_drawdown`, `var_95`, `cvar_95` |
+| `exposure` | `ExposureSummary` | Same shape as `get_backtest_diagnostics`' `exposure` field |
+| `costs` | `CostSummary` | `total_commission_pct`, `total_slippage_pct`, `total_cost_pct` (sums of per-bar cost drag as a fraction of capital, not dollarized), `num_trades` |
+| `equity_curve_uri`, `trades_uri` | `str`, `str?` | Parquet file paths from `backtest/artifacts.py`'s `save_artifact` — load with `load_artifact(uri)`. `trades_uri` is `None` when the strategy never traded |
+| `warnings` | `List[str]` | E.g. too few trades to draw reliable conclusions |
+| `validation_status` | `str` | `"ok"` or `"warning"` (currently: `< 5` trades) |
+
+**Artifact storage:** `SQT_RUNS_DIR` (default
+`~/.cache/standard_quant_tools/runs/`, same env-var-override convention as
+`SQT_AUDIT_DIR`/`SQT_CACHE_DIR`), one subdirectory per `run_id`.
+
+**Scope, stated explicitly:** no `positions_uri`/`orders_uri` from the
+original design doc — this signal-array engine has no per-order or
+per-position time series to expose (only equity and completed trades);
+exposing those would need an event-driven execution engine, which
+`backtest/strategy.py`'s module docstring explicitly defers (no execution
+loop exists to consume it). `costs` reports cost **drag as a fraction of
+capital**, not a dollarized total, since `run_strategy` operates on
+returns, not share counts/notional.

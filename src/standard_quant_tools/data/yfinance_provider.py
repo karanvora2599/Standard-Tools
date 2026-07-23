@@ -15,6 +15,7 @@ import yfinance as yf
 
 from standard_quant_tools import audit
 from .base import DataProvider, TickerInfo, FinancialRatios
+from .metadata import DataSetMetadata
 from standard_quant_tools.error import APIError, DataNotFoundError, InvalidSymbolError
 from cachetools import TTLCache, cached
 
@@ -206,6 +207,25 @@ class YFinanceProvider(DataProvider):
             raise
         except Exception as e:
             raise APIError(f"Error fetching ticker info for '{symbol}': {e}") from e
+
+    def get_metadata(self, symbol: str, interval: str = "1d") -> DataSetMetadata:
+        """
+        Honest self-report, not aspirational: yfinance auto-adjusts prices
+        by default (adjusted=True), but makes no guarantee that delisted
+        securities remain queryable (survivorship_free=False) or that
+        historical values are never silently revised
+        (point_in_time=False) — neither is a yfinance API contract.
+        timezone is a fixed NYSE default since yfinance doesn't expose a
+        reliable per-symbol timezone through this provider's interface.
+        """
+        return DataSetMetadata(
+            provider="yfinance",
+            adjusted=True,
+            survivorship_free=False,
+            point_in_time=False,
+            frequency=interval,
+            timezone="America/New_York",
+        )
 
     @retry(times=3, delay=1)
     def get_financial_ratios(self, symbol: str) -> FinancialRatios:
