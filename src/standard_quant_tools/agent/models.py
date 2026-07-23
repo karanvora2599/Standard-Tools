@@ -1369,7 +1369,7 @@ class CapacityReportInput(BaseModel):
     )
     adv_lookback: int = Field(20, description="Rolling window (bars, trailing from the end of the requested range) for average dollar/share volume.")
     include_sector_exposure: bool = Field(
-        True, description="If True, fetch each ticker's sector via get_stock_fundamentals and report exposure by sector (best-effort — 'Unknown' when unavailable).",
+        True, description="If True, fetch each ticker's sector via the data provider's get_ticker_info and report exposure by sector (best-effort — 'Unknown' when unavailable).",
     )
 
     @model_validator(mode="after")
@@ -1423,7 +1423,15 @@ class PriceJump(BaseModel):
 class DataQualityReportResult(BaseModel):
     symbol: str
     metadata: Dict[str, Any]
-    missing_bars: List[MissingBar]
+    missing_bars: List[MissingBar] = Field(
+        ...,
+        description=(
+            "Weekday gaps in the price history. WARNING: detected with a weekday-only "
+            "heuristic, not a real market-holiday calendar — every U.S. market holiday "
+            "(Thanksgiving, Christmas, etc.) in the requested range will appear here as a "
+            "false positive. Treat entries as leads to investigate, not confirmed data gaps."
+        ),
+    )
     stale_price_runs: List[StalePriceRun]
     price_jumps: List[PriceJump]
 

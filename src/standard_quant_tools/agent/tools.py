@@ -2207,8 +2207,10 @@ def get_data_quality_report(input_data: DataQualityReportInput) -> DataQualityRe
     doesn't guarantee) plus missing-bar/stale-price/price-jump detection
     (data/quality.py) on the fetched OHLCV. All checks are heuristics on
     data already fetched, not a new data source — see each function's
-    docstring for known false-positive modes (e.g. missing_bars has no
-    market-holiday calendar).
+    docstring for known false-positive modes. In particular, missing_bars
+    has no market-holiday calendar: every U.S. market holiday in the
+    requested range will be reported as a gap, not just genuine missing
+    data — treat entries as leads to investigate, not confirmed defects.
     """
     logger.debug("[data_quality_report] %s  %s → %s", input_data.symbol, input_data.start_date, input_data.end_date)
     provider = DataFactory.get_provider()

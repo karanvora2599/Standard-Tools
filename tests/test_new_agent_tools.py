@@ -1636,3 +1636,44 @@ class TestDataQualityReport:
         })
         assert result["symbol"] == "AAPL"
         assert "metadata" in result
+
+    def test_non_empty_findings_map_correctly_to_pydantic_fields(self, patched_factory):
+        """
+        The three detect_* functions in data/quality.py return plain dicts
+        that get_data_quality_report converts to MissingBar/StalePriceRun/
+        PriceJump via **kwargs unpacking — this only exercises that mapping
+        if the fixture data actually produces at least one finding of each
+        kind (the default sample_ohlcv fixture is dense/noisy and produces
+        none, so the dict->model field-name mapping was previously untested
+        at the tool-integration layer).
+        """
+        dates = pd.date_range("2023-01-02", periods=10, freq="B")
+        # Drop the 4th business day to create a weekday gap; hold Close flat
+        # for the remaining bars (a stale run) except a >15% jump at the end.
+        gapped_dates = dates.delete(3)  # 9 dates remain
+        close = [100.0] * (len(gapped_dates) - 1) + [140.0]
+        df = pd.DataFrame(
+            {"Open": close, "High": close, "Low": close, "Close": close,
+             "Volume": [1_000_000.0] * len(close)},
+            index=gapped_dates,
+        )
+        patched_factory.get_ohlcv.return_value = df
+
+        inp = DataQualityReportInput(
+            symbol="AAPL", start_date=START, end_date=END, stale_run_length=3, jump_threshold=0.15,
+        )
+        result = get_data_quality_report(inp)
+
+        assert len(result.missing_bars) == 1
+        assert result.missing_bars[0].date == str(dates[3].date())
+        assert result.missing_bars[0].weekday == dates[3].strftime("%A")
+
+        assert len(result.stale_price_runs) == 1
+        stale = result.stale_price_runs[0]
+        assert stale.price == pytest.approx(100.0)
+        assert stale.run_length == len(gapped_dates) - 1  # all bars but the final jump
+
+        assert len(result.price_jumps) == 1
+        jump = result.price_jumps[0]
+        assert jump.date == str(gapped_dates[-1].date())
+        assert jump.pct_change == pytest.approx(0.4, abs=1e-6)
