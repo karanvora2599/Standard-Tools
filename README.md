@@ -1,6 +1,11 @@
 # Standard Quant Tools for AI Agents
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+
 A high-performance, modular Python library for quantitative financial analysis. Designed to give AI agents and automated workflows **clean structured data**, **mathematical accuracy**, and **robust error handling**.
+
+Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora2599/Standard-Tools](https://github.com/karanvora2599/Standard-Tools).
 
 ## Key Features
 
@@ -567,3 +572,39 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/11_data_quality.md` | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
+
+---
+
+## Contributing
+
+Bug reports, doc fixes, and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
+for the development workflow, code conventions, and PR expectations.
+
+## Security
+
+Found a security issue? Please don't open a public issue — see
+[SECURITY.md](SECURITY.md) for how to report it privately.
+
+## Changelog
+
+Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
+
+```
+Copyright 2026 Karan Vora
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```

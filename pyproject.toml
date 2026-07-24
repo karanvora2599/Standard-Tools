@@ -5,6 +5,19 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "standard_quant_tools"
 authors = [{name = "Karan Vora", email = "kv2154@nyu.edu"}]
+maintainers = [{name = "Karan Vora", email = "kv2154@nyu.edu"}]
+license = {file = "LICENSE"}
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dynamic = ["version", "description"]
 dependencies = [
     "pandas>=2.0.0",
@@ -20,6 +33,12 @@ dependencies = [
     "pyarrow>=12.0.0"
 ]
 requires-python = ">=3.10"
+
+[project.urls]
+Homepage = "https://github.com/karanvora2599/Standard-Tools"
+Repository = "https://github.com/karanvora2599/Standard-Tools"
+Issues = "https://github.com/karanvora2599/Standard-Tools/issues"
+Changelog = "https://github.com/karanvora2599/Standard-Tools/blob/main/CHANGELOG.md"
 
 [project.scripts]
 sqt = "standard_quant_tools.cli:main"
