@@ -4,7 +4,7 @@ Shared utilities for the multi-agent example (Anthropic).
 This is a scoped variant of Implementation/Anthropic/_agent_utils.py: the
 core run_agent() loop is identical, but it accepts an optional tool_names
 filter so a worker agent can be given only a small, non-overlapping subset
-of the library's 29 tools instead of all of them. Shrinking the tool list
+of the library's 34 tools instead of all of them. Shrinking the tool list
 per agent is the actual fix for tool-selection confusion between similar
 tools (e.g. run_sma_backtest vs run_custom_signal_backtest) — a worker
 that was never given the other tool cannot call it.

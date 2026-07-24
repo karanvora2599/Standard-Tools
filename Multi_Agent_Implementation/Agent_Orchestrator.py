@@ -2,12 +2,12 @@
 Multi-Agent Orchestrator — Anthropic / Claude Haiku.
 
 Demonstrates an orchestrator-workers architecture on top of Standard Quant
-Tools' 29 agent tools: instead of one agent choosing among all 29 tools
+Tools' 34 agent tools: instead of one agent choosing among all 34 tools
 every turn, a top-level orchestrator delegates each sub-task to a specialist
 worker agent (see worker_agents.py) that only ever sees the small subset of
 tools relevant to its own workflow.
 
-The orchestrator's own "tools" are not the library's 29 — they are six
+The orchestrator's own "tools" are not the library's 34 — they are six
 hand-authored delegate_to_<worker>_agent(request) tools, one per worker.
 Calling one spins up a fresh, independently-scoped run_agent() session for
 that worker and returns its final answer as the tool result.
@@ -198,15 +198,24 @@ if __name__ == "__main__":
     _header("Multi-Agent Orchestrator — Claude Haiku")
     _log("Log file", str(log_file))
 
-    # Deliberately spans three different workers in sequence — screener,
-    # backtest, and portfolio_risk — to demonstrate real delegation, not
-    # just a single tool call routed to a single worker.
+    # Deliberately spans four different workers in sequence — screener,
+    # analysis, backtest, and portfolio_risk — to demonstrate real
+    # delegation across the newer tools too (get_data_quality_report,
+    # get_robustness_diagnostics, get_capacity_report), not just a single
+    # tool call routed to a single worker.
     request = (
         "Screen these mega-cap tech stocks for forward PE under 35 and RSI "
         "under 55: AAPL, MSFT, GOOGL, NVDA, META, AMZN. "
-        "For any that pass, run a regime-adaptive backtest from 2022-01-01 "
-        "to 2024-01-01 and tell me which one has the best Sharpe ratio. "
-        "Then size a position in that best performer for a $100,000 account "
+        "For any that pass, first check the data quality of its price "
+        "history for red flags. "
+        "Then run a regime-adaptive backtest from 2022-01-01 to 2024-01-01 "
+        "and tell me which one has the best Sharpe ratio. "
+        "For that best performer, also run robustness diagnostics on an SMA "
+        "crossover grid search (fast_period 5/10/20, slow_period 30/50/100) "
+        "over the same period — is the edge statistically real? "
+        "Then check whether a $250,000 account could actually trade a "
+        "full position in it given its own liquidity (capacity report), "
+        "and finally size an individual entry for a $100,000 account "
         "risking 1% per trade."
     )
 
