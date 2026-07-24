@@ -50,6 +50,16 @@ class Trade(BaseModel):
     direction: str
     entry_price: float
     exit_price: float
+    position_size: float = Field(
+        1.0,
+        description=(
+            "The actual executed signal value held during this trade (its sign gives "
+            "`direction`) — e.g. 2.5 for a SCORE signal sized at 2.5x leverage, or "
+            "exactly 1.0/-1.0 for a DIRECTION signal. return_pct already scales with "
+            "this value; it is exposed here so a fractional or leveraged position size "
+            "is visible in the trade log itself, not just implicit in return_pct."
+        ),
+    )
     return_pct: float
 
 
@@ -190,6 +200,26 @@ class ScreenerResult(BaseModel):
     num_passed: int
     tickers_passed: List[str]
     results: List[Dict[str, Any]]
+    failed_filters: Dict[str, str] = Field(
+        default_factory=dict,
+        description="ticker -> the specific filter key it failed (genuine rejection).",
+    )
+    failed_tickers: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "ticker -> error message for a data-fetch/compute exception — kept "
+            "separate from failed_filters so a broken data fetch is never "
+            "indistinguishable from a ticker that simply didn't meet the bar."
+        ),
+    )
+    failed_batches: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Error message per worker-process batch that raised before returning "
+            "any per-ticker result (n_workers > 1 only) — a crashed batch is never "
+            "silently discarded without a trace."
+        ),
+    )
 
 
 # ──────────────────────────────────────────────
@@ -469,7 +499,7 @@ class WalkForwardInput(BaseModel):
     )
     fill_price: str = Field(
         "close",
-        description="'close' (default), 'next_open', or 'midpoint' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
+        description="'close' (default), 'next_open', or 'hl2_exploratory' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
     )
 
 
@@ -564,7 +594,7 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
     )
     fill_price: str = Field(
         "close",
-        description="'close' (default), 'next_open', or 'midpoint' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
+        description="'close' (default), 'next_open', or 'hl2_exploratory' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
     )
 
 
@@ -860,6 +890,12 @@ class BacktestOptInput(BaseModel):
         ),
     )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
+    commission_pct: float = Field(
+        0.001, description="Commission per trade (fraction, default 0.1%)."
+    )
+    slippage_pct: float = Field(
+        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+    )
     sort_by: str = Field(
         "sharpe_ratio",
         description=(
@@ -996,12 +1032,18 @@ class ExtendedRiskResult(BaseModel):
 class SignalType(str, Enum):
     """
     What a custom signal's numeric values mean, and how strictly they're
-    validated. Default is SCORE — unrestricted, exactly the behavior every
-    caller already gets today (this enum's whole purpose is to make that
-    contract explicit and opt into stricter validation, not to change the
-    default). run_strategy's math is unchanged either way: it always
-    multiplies the (lagged) signal value by the bar's return, regardless
-    of signal_type.
+    validated. run_strategy's math is unchanged regardless of signal_type:
+    it always multiplies the (lagged) signal value directly into
+    strategy_return = lagged_signal * market_return — SCORE's "unrestricted"
+    values are not a normalized "confidence score" in that multiplication,
+    they are a literal leverage multiplier (a value of 10 means a 10x
+    position). CustomSignalBacktestInput (single-asset) defaults to
+    DIRECTION for this reason — an LLM-facing tool should not silently
+    accept an arbitrary "score" as if it were a bounded confidence value.
+    SignalPanelBacktestInput and PortfolioSimulationInput still default to
+    SCORE: in both, a SCORE value is converted into a bounded weight via an
+    explicit construction_method (backtest/sizing.py) before it ever
+    reaches a return calculation, so the same hazard doesn't apply there.
     """
 
     SCORE = "score"  # unrestricted float — caller owns the scale/leverage semantics
@@ -1051,11 +1093,14 @@ class CustomSignalBacktestInput(BaseModel):
         ),
     )
     signal_type: SignalType = Field(
-        SignalType.SCORE,
+        SignalType.DIRECTION,
         description=(
-            "'score' (default, unrestricted — today's exact behavior) | 'direction' "
-            "(every value must be exactly -1, 0, or 1) | 'target_weight' (every "
-            "|value| must be <= max_abs_weight)."
+            "'direction' (default — every value must be exactly -1, 0, or 1) | "
+            "'target_weight' (every |value| must be <= max_abs_weight) | 'score' "
+            "(unrestricted float, multiplied directly into strategy_return = "
+            "lagged_signal * market_return — a value of 10 means a 10x position, "
+            "not '10x more bullish'; only use this if you have already converted "
+            "your own alpha model's output into a leverage multiplier yourself)."
         ),
     )
     max_abs_weight: float = Field(
@@ -1233,16 +1278,18 @@ class PortfolioSimulationInput(BaseModel):
     )
     gross_leverage: float = Field(
         1.0,
+        gt=0,
         description="Target sum(|weight|) per date when signal_type='score' (ignored otherwise).",
     )
     n_long: Optional[int] = Field(
-        None, description="Required when construction_method='equal_weight_top_bottom'."
+        None, ge=0, description="Required when construction_method='equal_weight_top_bottom'."
     )
     n_short: Optional[int] = Field(
-        None, description="Required when construction_method='equal_weight_top_bottom'."
+        None, ge=0, description="Required when construction_method='equal_weight_top_bottom'."
     )
     vol_lookback: int = Field(
         20,
+        gt=0,
         description="Rolling window (bars) used when construction_method='vol_scaled'.",
     )
     make_dollar_neutral: bool = Field(
@@ -1253,16 +1300,17 @@ class PortfolioSimulationInput(BaseModel):
         ),
     )
     initial_capital: float = Field(
-        10_000.0, description="Starting cash for the whole account."
+        10_000.0, gt=0, description="Starting cash for the whole account."
     )
     commission_pct: float = Field(
-        0.001, description="Commission per trade notional (fraction)."
+        0.001, ge=0, description="Commission per trade notional (fraction)."
     )
     slippage_pct: float = Field(
-        0.0005, description="Slippage per trade notional (fraction)."
+        0.0005, ge=0, description="Slippage per trade notional (fraction)."
     )
     max_gross_leverage: float = Field(
         1.0,
+        gt=0,
         description=(
             "Reject any rebalance date whose sum(|weight|) exceeds this (default 1.0 = "
             "fully invested, no leverage). Bounds the TARGET weights / sizing basis, not "
@@ -1274,6 +1322,7 @@ class PortfolioSimulationInput(BaseModel):
     )
     max_position_pct: float = Field(
         1.0,
+        gt=0,
         description=(
             "Reject any single position whose |weight| exceeds this. Same target-weight/"
             "sizing-basis scope as max_gross_leverage — see its description."
@@ -1281,7 +1330,7 @@ class PortfolioSimulationInput(BaseModel):
     )
     fill_price: str = Field(
         "close",
-        description="'close' (default), 'next_open', or 'midpoint' — see run_strategy's fill_price / the True Portfolio Simulation docs.",
+        description="'close' (default), 'next_open', or 'hl2_exploratory' — see run_strategy's fill_price / the True Portfolio Simulation docs.",
     )
     commission_model: str = Field(
         "pct",
@@ -1289,10 +1338,12 @@ class PortfolioSimulationInput(BaseModel):
     )
     per_share_rate: float = Field(
         0.0,
+        ge=0,
         description="Commission per share traded. Only used when commission_model='per_share'.",
     )
     min_commission: float = Field(
         0.0,
+        ge=0,
         description="Minimum commission per rebalance leg. Only used when commission_model='per_share'.",
     )
     use_impact_model: bool = Field(
@@ -1301,22 +1352,27 @@ class PortfolioSimulationInput(BaseModel):
     )
     impact_coefficient: float = Field(
         1.0,
+        ge=0,
         description="Market-impact model coefficient. Only used when use_impact_model=True.",
     )
     impact_lookback: int = Field(
         20,
+        gt=0,
         description="Rolling window (bars) for average dollar volume / volatility used by the impact model.",
     )
     borrow_fee_bps: float = Field(
         0.0,
+        ge=0,
         description="Annualized basis-point borrow fee accrued daily on any short position's notional.",
     )
     margin_interest_rate: float = Field(
         0.0,
+        ge=0,
         description="Annualized rate accrued daily on negative cash (implied margin borrowing).",
     )
     max_adv_participation: Optional[float] = Field(
         None,
+        gt=0,
         description="Reject any rebalance trade whose notional exceeds this fraction of the ticker's own rolling average dollar volume. Requires a 'Volume' column.",
     )
     benchmark: Optional[str] = Field(
@@ -1426,22 +1482,23 @@ class PairTradeBacktestInput(BaseModel):
         ),
     )
     initial_capital: float = Field(
-        10_000.0, description="Starting cash for the whole account."
+        10_000.0, gt=0, description="Starting cash for the whole account."
     )
     commission_pct: float = Field(
-        0.001, description="Commission per trade notional (fraction)."
+        0.001, ge=0, description="Commission per trade notional (fraction)."
     )
     slippage_pct: float = Field(
-        0.0005, description="Slippage per trade notional (fraction)."
+        0.0005, ge=0, description="Slippage per trade notional (fraction)."
     )
     gross_leverage: float = Field(
         1.0,
+        gt=0,
         description="sum(|weight|) while in a position, split between the two legs to match hedge_ratio.",
     )
     fill_price: str = Field(
         "next_open",
         description=(
-            "'next_open' (default), 'close', or 'midpoint'. Defaults to 'next_open' "
+            "'next_open' (default), 'close', or 'hl2_exploratory'. Defaults to 'next_open' "
             "(not 'close') because the z-score signal deciding a transition is itself "
             "computed from that same bar's Close — executing at that same Close would "
             "be look-ahead. Pass 'close' only for explicit same-bar/exploratory analysis."
@@ -1772,7 +1829,7 @@ class BacktestCompactInput(BaseModel):
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
     fill_price: str = Field(
         "close",
-        description="'close' (default), 'next_open', or 'midpoint' — see BacktestInput.fill_price.",
+        description="'close' (default), 'next_open', or 'hl2_exploratory' — see BacktestInput.fill_price.",
     )
     run_id: Optional[str] = Field(
         None,

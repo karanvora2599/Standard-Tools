@@ -40,6 +40,63 @@ from standard_quant_tools.data.factory import DataFactory
 START, END = "2023-01-01", "2024-01-01"
 
 
+class TestSanitizeForJson:
+    """
+    Regression tests (operational item B): sortino_ratio/calmar_ratio can
+    legitimately return float('inf') (no downside deviation / no drawdown
+    at all) -- valid math, but not valid JSON per RFC 8259. dispatch()'s
+    own docstring recommends json.dumps(result) for sending its output to
+    an LLM, and Python's json.dumps emits the non-standard Infinity/NaN
+    tokens by default, which many strict JSON parsers reject. inf/-inf/nan
+    must be sanitized to None before dispatch() returns.
+    """
+
+    def test_sanitizes_top_level_inf(self):
+        from standard_quant_tools.agent.tools import _sanitize_for_json
+
+        result = _sanitize_for_json({"calmar_ratio": float("inf"), "sharpe_ratio": 1.5})
+        assert result == {"calmar_ratio": None, "sharpe_ratio": 1.5}
+
+    def test_sanitizes_negative_inf_and_nan(self):
+        from standard_quant_tools.agent.tools import _sanitize_for_json
+
+        result = _sanitize_for_json(
+            {"a": float("-inf"), "b": float("nan"), "c": 0.0}
+        )
+        assert result["a"] is None
+        assert result["b"] is None
+        assert result["c"] == 0.0
+
+    def test_sanitizes_nested_dicts_and_lists(self):
+        from standard_quant_tools.agent.tools import _sanitize_for_json
+
+        result = _sanitize_for_json(
+            {"windows": [{"sharpe": float("inf")}, {"sharpe": 0.5}]}
+        )
+        assert result == {"windows": [{"sharpe": None}, {"sharpe": 0.5}]}
+
+    def test_leaves_finite_values_and_non_float_types_untouched(self):
+        from standard_quant_tools.agent.tools import _sanitize_for_json
+
+        result = _sanitize_for_json(
+            {"n": 5, "s": "text", "b": True, "f": 1.23, "none": None}
+        )
+        assert result == {"n": 5, "s": "text", "b": True, "f": 1.23, "none": None}
+
+    def test_json_dumps_succeeds_without_allow_nan_after_sanitizing(self):
+        """The whole point: standard-compliant json.dumps(..., allow_nan=False)
+        must succeed on the sanitized output where it would have raised on
+        the raw inf value."""
+        import json
+        from standard_quant_tools.agent.tools import _sanitize_for_json
+
+        raw = {"calmar_ratio": float("inf")}
+        with pytest.raises(ValueError):
+            json.dumps(raw, allow_nan=False)
+        sanitized = _sanitize_for_json(raw)
+        assert json.dumps(sanitized, allow_nan=False) == '{"calmar_ratio": null}'
+
+
 class TestGetAgentTools:
     def test_returns_list_of_thirty_four_tools(self):
         tools = get_agent_tools()
@@ -850,3 +907,36 @@ class TestFillPriceIntegration:
             )
         )
         assert base.best_sharpe != pytest.approx(next_open.best_sharpe, abs=1e-9)
+
+    def test_backtest_optimization_respects_requested_costs(self, gapped_factory):
+        """
+        Regression test (high-severity item 1): run_backtest_optimization
+        must pass commission_pct/slippage_pct through to backtest_grid
+        instead of silently using backtest_grid's own hardcoded defaults
+        (0.001/0.0005) regardless of what the caller requested. A zero-cost
+        request must produce materially different (better) results than
+        the (nonzero-cost) default.
+        """
+        grid = {"fast_period": [5, 10], "slow_period": [30, 50]}
+        default_cost = run_backtest_optimization(
+            BacktestOptInput(
+                symbol="AAPL",
+                strategy="sma_crossover",
+                start_date=START,
+                end_date=END,
+                param_grid=grid,
+            )
+        )
+        zero_cost = run_backtest_optimization(
+            BacktestOptInput(
+                symbol="AAPL",
+                strategy="sma_crossover",
+                start_date=START,
+                end_date=END,
+                param_grid=grid,
+                commission_pct=0.0,
+                slippage_pct=0.0,
+            )
+        )
+        assert zero_cost.best_sharpe != pytest.approx(default_cost.best_sharpe, abs=1e-9)
+        assert zero_cost.best_return != pytest.approx(default_cost.best_return, abs=1e-9)

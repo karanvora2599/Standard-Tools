@@ -4,11 +4,19 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.analysis.regression import calculate_beta
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import validate_series
 
 from .return_metrics import cagr
 
 logger = logging.getLogger(__name__)
+
+
+def _check_confidence(confidence: float) -> None:
+    if not (0.0 < confidence < 1.0):
+        raise ValidationError(
+            f"confidence must be strictly between 0 and 1, got {confidence!r}"
+        )
 
 _scipy_stats = None
 try:
@@ -75,7 +83,11 @@ def var_historical(returns: pd.Series, confidence: float = 0.95) -> float:
     Historical Value at Risk (VaR) at the given confidence level.
     Returns the loss (positive number) not exceeded with probability `confidence`.
     Uses the empirical distribution — no normality assumption.
+
+    Raises:
+        ValidationError: confidence is not strictly between 0 and 1.
     """
+    _check_confidence(confidence)
     arr = returns.dropna().to_numpy(dtype=np.float64)
     return float(-np.percentile(arr, (1 - confidence) * 100))
 
@@ -84,14 +96,30 @@ def var_historical(returns: pd.Series, confidence: float = 0.95) -> float:
 def var_parametric(returns: pd.Series, confidence: float = 0.95) -> float:
     """
     Parametric (Gaussian) VaR. Faster but assumes normally distributed returns.
-    Uses scipy.stats if available; falls back to a precomputed z-table.
+    Uses scipy.stats if available; falls back to a precomputed z-table for a
+    small set of common confidence levels.
+
+    Raises:
+        ValidationError: confidence is not strictly between 0 and 1, or scipy
+            is not installed and confidence isn't one of the precomputed
+            z-table levels (0.90, 0.95, 0.99, 0.999) — silently substituting
+            the 95% z-score for an unsupported confidence would misreport
+            the actual risk at the level the caller asked for.
     """
+    _check_confidence(confidence)
     mu = float(returns.mean())
     sigma = float(returns.std())
     if HAS_SCIPY and _scipy_stats is not None:
         z = float(_scipy_stats.norm.ppf(1 - confidence))  # type: ignore[union-attr]
+    elif confidence in _Z_TABLE:
+        z = -_Z_TABLE[confidence]
     else:
-        z = -_Z_TABLE.get(confidence, 1.645)
+        raise ValidationError(
+            f"var_parametric(confidence={confidence}) requires scipy for an "
+            f"arbitrary confidence level; scipy is not installed and {confidence} "
+            f"is not one of the precomputed z-table levels {sorted(_Z_TABLE)}. "
+            "Install scipy, or use one of the precomputed levels."
+        )
     return float(-(mu + z * sigma))
 
 
@@ -101,7 +129,11 @@ def cvar(returns: pd.Series, confidence: float = 0.95) -> float:
     Conditional VaR / Expected Shortfall (CVaR).
     The expected loss given that the loss exceeds the VaR threshold.
     More conservative and coherent than VaR.
+
+    Raises:
+        ValidationError: confidence is not strictly between 0 and 1.
     """
+    _check_confidence(confidence)
     arr = returns.dropna().to_numpy(dtype=np.float64)
     threshold = np.percentile(arr, (1 - confidence) * 100)
     tail = arr[arr <= threshold]
@@ -136,14 +168,17 @@ def treynor_ratio(
     Complements Sharpe (which uses total risk).
     """
     common_idx = returns.index.intersection(benchmark_returns.index)
-    beta_stats = calculate_beta(
-        returns.loc[common_idx], benchmark_returns.loc[common_idx]
-    )
+    aligned_returns = returns.loc[common_idx]
+    beta_stats = calculate_beta(aligned_returns, benchmark_returns.loc[common_idx])
     beta = beta_stats["beta"]
     if beta == 0:
         return 0.0
+    # Use the SAME aligned window beta was estimated from -- the full,
+    # unaligned `returns` series can cover a different date range (extra
+    # dates the benchmark doesn't have), which would silently mix a mean
+    # computed over one window with a beta computed over another.
     excess_return = (
-        returns.mean() - risk_free_rate / periods_per_year
+        aligned_returns.mean() - risk_free_rate / periods_per_year
     ) * periods_per_year
     return float(excess_return / beta)
 

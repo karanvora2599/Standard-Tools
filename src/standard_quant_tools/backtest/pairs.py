@@ -51,7 +51,7 @@ def _execution_prices_for_weights(
         # raises a clear ValidationError for this case; fall back to Close here
         # so weight construction doesn't crash before that error surfaces.
         return float(close_a.loc[d]), float(close_b.loc[d])
-    if fill_price == "midpoint":
+    if fill_price == "hl2_exploratory":
         return (
             float(
                 (price_data[symbol_a]["High"].loc[d] + price_data[symbol_a]["Low"].loc[d])

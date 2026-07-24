@@ -42,7 +42,7 @@ def pct_of_range_spread(
     Spread cost as a fraction of the bar's own (High - Low) range, scaled
     to notional terms via the bar's Close. No real bid/ask data exists in
     this library's OHLCV frames, so this is a documented proxy — the same
-    spirit as run_strategy's fill_price="midpoint" mode.
+    spirit as run_strategy's fill_price="hl2_exploratory" mode.
 
     Raises:
         ValidationError: close <= 0 (can't scale a range into a fraction).

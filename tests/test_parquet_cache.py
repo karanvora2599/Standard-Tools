@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 import standard_quant_tools.data.yfinance_provider as provider_module
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.data.yfinance_provider import (
     YFinanceProvider,
     _is_historical,
@@ -99,6 +100,65 @@ class TestParquetPath:
         p1 = _parquet_path("AAPL", "2022-01-01", "2023-01-01", "1d")
         p2 = _parquet_path("AAPL", "2022-01-01", "2023-01-01", "1h")
         assert p1 != p2
+
+    def test_resolved_path_is_inside_cache_root(self, tmp_path: Path):
+        p = _parquet_path("AAPL", "2022-01-01", "2023-01-01", "1d")
+        assert p.resolve().is_relative_to(tmp_path.resolve())
+
+
+class TestParquetPathContainment:
+    """
+    Regression tests (operational item C): symbol/start/end/interval are
+    all LLM-reachable via get_ohlcv's own parameters and go straight into
+    the cache filename -- only "/" in symbol was ever sanitized. Applies
+    the same slug-plus-resolved-containment approach as artifacts.py.
+    """
+
+    @pytest.mark.parametrize("bad_symbol", [
+        "../../etc/passwd", "..\\..\\Windows\\System32", "AAPL/../../x",
+        "AAPL\x00.txt", "C:\\Windows", "",
+    ])
+    def test_path_traversal_symbol_raises(self, bad_symbol):
+        with pytest.raises(ValidationError, match="not a valid identifier|empty"):
+            _parquet_path(bad_symbol, "2022-01-01", "2023-01-01", "1d")
+
+    def test_invalid_interval_raises(self):
+        with pytest.raises(ValidationError, match="interval"):
+            _parquet_path("AAPL", "2022-01-01", "2023-01-01", "../../etc")
+
+    def test_unnormalized_start_date_raises(self):
+        with pytest.raises(ValidationError, match="start"):
+            _parquet_path("AAPL", "../../etc/passwd", "2023-01-01", "1d")
+
+    def test_unnormalized_end_date_raises(self):
+        with pytest.raises(ValidationError, match="end"):
+            _parquet_path("AAPL", "2022-01-01", "../../etc/passwd", "1d")
+
+    def test_legitimate_slash_ticker_still_works(self):
+        """BRK/B (and similar real tickers) must still work -- only actual
+        traversal attempts are rejected, not every symbol containing '/'."""
+        p = _parquet_path("BRK/B", "2022-01-01", "2023-01-01", "1d")
+        assert "/" not in p.name
+        assert "BRK-B" in p.name
+
+
+class TestNormDateValidation:
+    """
+    _norm_date's job here is rejecting non-date-SHAPED strings before they
+    reach the cache filename (a path-traversal concern), not full calendar
+    validation (e.g. month=13) -- so these cases are all strings that don't
+    even match the YYYY-MM-DD shape after truncation to 10 characters.
+    """
+
+    @pytest.mark.parametrize("bad_date", [
+        "../../etc/passwd", "not-a-date", "2022/01/01",
+    ])
+    def test_malformed_date_string_raises(self, bad_date):
+        with pytest.raises(ValidationError, match="YYYY-MM-DD"):
+            _norm_date(bad_date)
+
+    def test_valid_date_string_passes(self):
+        assert _norm_date("2022-01-01") == "2022-01-01"
 
 
 # ── Integration tests for the caching behaviour ───────────────────────────────
@@ -293,3 +353,156 @@ class TestTimezoneNormalization:
         assert str(custom_dir) in str(provider_module._CACHE_ROOT)
         # Restore
         importlib.reload(provider_module)
+
+
+class TestCacheHardening:
+    """
+    Regression tests for get_ohlcv's cache-hit paths: an in-memory
+    session-cache hit must still be audited, both cache-hit paths must
+    return data a caller can't corrupt for other callers by mutating it,
+    a corrupt Parquet file must be evicted and refetched rather than
+    raising, and concurrent disk writes must never collide on a temp
+    filename.
+    """
+
+    def test_session_cache_hit_still_records_audit(
+        self, minimal_ohlcv: pd.DataFrame
+    ):
+        with patch("yfinance.Ticker") as mock_ticker, patch.object(
+            provider_module.audit, "record_data_access"
+        ) as mock_record:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            prov = YFinanceProvider()
+            prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+            prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")  # session-cache hit
+
+        assert mock_record.call_count == 2
+        sources = [c.kwargs.get("source") for c in mock_record.call_args_list]
+        assert sources == ["live_fetch", "session_cache"]
+
+    def test_session_cache_hit_returns_independent_copy(
+        self, minimal_ohlcv: pd.DataFrame
+    ):
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            prov = YFinanceProvider()
+            first = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+            first.iloc[0, first.columns.get_loc("Close")] = -999.0
+
+            second = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+        assert second["Close"].iloc[0] != -999.0
+
+    def test_disk_cache_hit_returns_independent_copy(
+        self, minimal_ohlcv: pd.DataFrame
+    ):
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            prov = YFinanceProvider()
+            prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+            provider_module._session_cache.clear()
+            second = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")  # disk hit
+            second.iloc[0, second.columns.get_loc("Close")] = -999.0
+
+            provider_module._session_cache.clear()
+            third = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")  # disk hit
+
+        assert third["Close"].iloc[0] != -999.0
+
+    def test_corrupt_parquet_evicted_and_refetched(
+        self, minimal_ohlcv: pd.DataFrame
+    ):
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            prov = YFinanceProvider()
+            prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+            first_call_count = mock_ticker.call_count
+
+            pq_path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
+            pq_path.write_bytes(b"this is not a valid parquet file")
+            provider_module._session_cache.clear()
+
+            result = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+        assert mock_ticker.call_count == first_call_count + 1, (
+            "a corrupt cache file must trigger a live refetch, not propagate "
+            "the read error"
+        )
+        assert pq_path.exists(), "a fresh, valid Parquet file must be rewritten"
+        pd.testing.assert_frame_equal(
+            result.reset_index(drop=True), minimal_ohlcv.reset_index(drop=True)
+        )
+        pd.testing.assert_frame_equal(
+            pd.read_parquet(pq_path).reset_index(drop=True),
+            minimal_ohlcv.reset_index(drop=True),
+        )
+
+    def test_temp_filename_unique_across_writes_same_process_same_thread(
+        self, minimal_ohlcv: pd.DataFrame
+    ):
+        """
+        Two sequential disk-cache writes in the same process and thread
+        (so os.getpid() and threading.get_ident() are identical both times)
+        must still use different temp filenames — proving uniqueness comes
+        from more than just the PID, which alone doesn't protect against
+        two threads in the same process racing on the same cache file.
+        """
+        tmp_names = []
+        orig_replace = Path.replace
+
+        def spy_replace(self, target):
+            tmp_names.append(self.name)
+            return orig_replace(self, target)
+
+        with patch("yfinance.Ticker") as mock_ticker, patch.object(
+            Path, "replace", spy_replace
+        ):
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            prov = YFinanceProvider()
+            prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+            pq_path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
+            pq_path.unlink()
+            provider_module._session_cache.clear()
+
+            prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+        assert len(tmp_names) == 2
+        assert tmp_names[0] != tmp_names[1]
+
+    def test_fresh_provider_instance_does_not_share_session_cache_entry(
+        self, minimal_ohlcv: pd.DataFrame
+    ):
+        """
+        The session-cache key must be scoped per provider instance (like the
+        old @cached decorator's default hashkey, which included self) — a
+        fresh instance must re-check the disk/network rather than silently
+        reuse another instance's cached result. This matters for audit
+        replay, which constructs a fresh provider specifically to re-read
+        data and detect tampering.
+        """
+        with patch("yfinance.Ticker") as mock_ticker, patch.object(
+            provider_module.audit, "record_data_access"
+        ) as mock_record:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            YFinanceProvider().get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+            YFinanceProvider().get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+        sources = [c.kwargs.get("source") for c in mock_record.call_args_list]
+        assert sources == ["live_fetch", "disk_cache"], (
+            "a second, distinct provider instance must not transparently "
+            "hit the first instance's session-cache entry"
+        )

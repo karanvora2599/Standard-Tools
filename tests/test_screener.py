@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.screener.screener import screen_stocks
 
 
@@ -143,6 +144,73 @@ class TestScreenerProcessPool:
         result = screen_stocks(tickers, filters={})
         assert len(result) == 5
 
+class TestScreenerErrorReporting:
+    """
+    Regression tests (operational item A): a ticker whose data fetch raises
+    must be reported distinctly from one that genuinely failed a filter —
+    both used to collapse to the same "excluded" outcome, making a
+    zero-result run indistinguishable from a broken data pipeline. Also:
+    unknown filter keys must be rejected, not silently ignored.
+    """
+
+    def test_unknown_filter_key_raises(self, patched_factory):
+        with pytest.raises(ValidationError, match="Unknown filter key"):
+            screen_stocks(["AAPL"], filters={"pe_ratio_mx": 30.0})
+
+    def test_typo_in_filter_key_is_not_silently_ignored(self, patched_factory):
+        """A near-miss typo (extra/missing letter) must raise, not silently
+        apply no filter at all while still returning ticker as "passed"."""
+        with pytest.raises(ValidationError):
+            screen_stocks(["AAPL"], filters={"roe_minn": 0.1})
+
+    def test_filter_failure_reported_in_failed_filters(
+        self, failing_fundamentals_provider
+    ):
+        result = screen_stocks(["AAPL"], filters={"pe_ratio_max": 30.0})
+        assert len(result) == 0
+        assert result.attrs["failed_filters"] == {"AAPL": "pe_ratio_max"}
+        assert result.attrs["failed_tickers"] == {}
+
+    def test_data_fetch_exception_reported_in_failed_tickers_not_failed_filters(
+        self, mock_provider, monkeypatch
+    ):
+        from standard_quant_tools.data.factory import DataFactory
+
+        mock_provider.get_financial_ratios.side_effect = RuntimeError("API down")
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: mock_provider)
+
+        result = screen_stocks(["AAPL"], filters={"pe_ratio_max": 30.0})
+        assert len(result) == 0
+        # The exception must show up as an error, NOT as a filter rejection --
+        # this is exactly the distinction the old bare `return None` erased.
+        assert result.attrs["failed_filters"] == {}
+        assert "AAPL" in result.attrs["failed_tickers"]
+        assert "API down" in result.attrs["failed_tickers"]["AAPL"]
+
+    def test_mixed_pass_fail_error_all_reported_correctly(self, mock_provider, monkeypatch):
+        from standard_quant_tools.data.factory import DataFactory
+        from standard_quant_tools.data.base import FinancialRatios
+
+        def get_ratios(ticker):
+            if ticker == "AAPL":
+                return FinancialRatios(forward_pe=10.0)  # passes pe_ratio_max=30
+            if ticker == "MSFT":
+                return FinancialRatios(forward_pe=999.0)  # fails pe_ratio_max=30
+            raise RuntimeError("network timeout")  # GOOGL: error
+
+        mock_provider.get_financial_ratios.side_effect = get_ratios
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: mock_provider)
+
+        result = screen_stocks(
+            ["AAPL", "MSFT", "GOOGL"], filters={"pe_ratio_max": 30.0}
+        )
+        assert list(result.index) == ["AAPL"]
+        assert result.attrs["failed_filters"] == {"MSFT": "pe_ratio_max"}
+        assert "GOOGL" in result.attrs["failed_tickers"]
+
+
+@pytest.mark.integration
+class TestScreenerProcessPoolIntegration:
     @pytest.mark.integration
     def test_process_pool_same_as_sequential(self):
         """

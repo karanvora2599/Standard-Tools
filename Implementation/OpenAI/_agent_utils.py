@@ -8,8 +8,15 @@ Provides:
 
 Note: get_agent_tools() already returns the OpenAI tool format, so no
 conversion step is needed unlike the Anthropic provider.
+
+This is demo/example code, not production agent infrastructure. In
+particular it prints full user requests and tool call arguments/results to
+stdout and a log file by default (`verbose=True` below) — fine for a local
+demo run, but do not reuse this as-is anywhere those payloads could contain
+data you don't want on disk or on a shared console.
 """
 
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -33,6 +40,13 @@ _fmt_file    = logging.Formatter(
     datefmt="%H:%M:%S",
 )
 
+# Marker attribute so repeated setup_logging() calls in the same process
+# (e.g. re-running a script's __main__ from a REPL, or importing two of
+# these example scripts into one session) replace the previous run's
+# handlers instead of piling up duplicates that would print every log
+# line once per prior call.
+_HANDLER_MARKER = "_sqt_example_handler"
+
 
 def setup_logging(name: str) -> Path:
     """Attach a per-run FileHandler + StreamHandler to the standard_quant_tools logger."""
@@ -40,15 +54,21 @@ def setup_logging(name: str) -> Path:
     ts       = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     log_file = _LOGS_DIR / f"{name}_{ts}.log"
 
+    lib = logging.getLogger("standard_quant_tools")
+    for h in list(lib.handlers):
+        if getattr(h, _HANDLER_MARKER, False):
+            lib.removeHandler(h)
+
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(_fmt_file)
     fh.setLevel(logging.DEBUG)
+    setattr(fh, _HANDLER_MARKER, True)
 
     sh = logging.StreamHandler()
     sh.setFormatter(_fmt_console)
     sh.setLevel(logging.DEBUG)
+    setattr(sh, _HANDLER_MARKER, True)
 
-    lib = logging.getLogger("standard_quant_tools")
     lib.setLevel(logging.DEBUG)
     lib.addHandler(fh)
     lib.addHandler(sh)
@@ -89,6 +109,9 @@ def run_agent(
     model: str = "gpt-4o-mini",
     max_iterations: int = 15,
     max_tokens: int = 4096,
+    request_timeout_s: float = 60.0,
+    tool_timeout_s: float = 120.0,
+    verbose: bool = True,
 ) -> str:
     """
     Run the agentic loop: send user_request to GPT, execute any tool calls
@@ -99,9 +122,17 @@ def run_agent(
       "tool_calls" — model wants to call tools
       "length"     — hit max_tokens mid-response (continuation logic applies)
 
+    request_timeout_s bounds each OpenAI API call; tool_timeout_s bounds
+    each individual dispatch() call (run in a worker thread so a hung tool
+    can't block the loop forever — the worker itself is left running to
+    completion in the background since there's no safe way to force-kill a
+    Python thread, but the loop reports the timeout and moves on rather
+    than hanging). verbose=False suppresses printing full user/tool
+    payloads (see the module docstring) while keeping status-line output.
+
     Returns the final text response from the model.
     """
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=request_timeout_s)
     tools  = get_agent_tools()  # already in OpenAI format
 
     _header("AGENT SESSION STARTED  (OpenAI)")
@@ -110,8 +141,9 @@ def run_agent(
     _log("Max iterations", str(max_iterations))
     _log("Tools loaded",   str(len(tools)))
     _log("Tool names",     ", ".join(t["function"]["name"] for t in tools))
-    _section("USER REQUEST")
-    print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+    if verbose:
+        _section("USER REQUEST")
+        print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -152,7 +184,7 @@ def run_agent(
         _log("Latency",        f"{elapsed:.2f}s")
 
         _section("MODEL OUTPUT")
-        if msg.content:
+        if msg.content and verbose:
             print(textwrap.fill(
                 msg.content, width=68,
                 initial_indent="    ", subsequent_indent="    ",
@@ -160,10 +192,11 @@ def run_agent(
         if msg.tool_calls:
             for tc in msg.tool_calls:
                 print(f"\n  [tool_use]  {tc.function.name}  id={tc.id}")
-                try:
-                    print(_pretty_json(json.loads(tc.function.arguments), indent=4))
-                except json.JSONDecodeError:
-                    print(f"    {tc.function.arguments}")
+                if verbose:
+                    try:
+                        print(_pretty_json(json.loads(tc.function.arguments), indent=4))
+                    except json.JSONDecodeError:
+                        print(f"    {tc.function.arguments}")
 
         if msg.content:
             accumulated_text.append(msg.content)
@@ -211,22 +244,63 @@ def run_agent(
         for tc in (msg.tool_calls or []):
             print(f"\n  ┌─ {tc.function.name}")
             print(f"  │  id : {tc.id}")
+
             try:
                 args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                args = {}
-            print(_pretty_json(args, indent=5))
-
-            t0 = time.perf_counter()
-            try:
-                result = dispatch(tc.function.name, args)
-                ms = (time.perf_counter() - t0) * 1000
-                print(f"  │  ✓  completed in {ms:.0f}ms")
-                print(_pretty_json(result, indent=5))
+            except json.JSONDecodeError as exc:
+                # Don't silently substitute {} for malformed arguments — an
+                # empty dict can pass validation via field defaults and
+                # produce a confusing "successful" result for a call the
+                # model never actually intended. Report the parse failure
+                # back to the model instead of guessing its intent.
+                print(f"  │  ✗  malformed tool-call JSON — {exc}")
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": json.dumps(result, default=str),
+                    "content": (
+                        f"Error: could not parse tool call arguments as JSON: {exc}. "
+                        "Raw arguments were: " + tc.function.arguments
+                    ),
+                })
+                print("  └" + "─" * 50)
+                continue
+
+            if verbose:
+                print(_pretty_json(args, indent=5))
+
+            t0 = time.perf_counter()
+            # Not `with ThreadPoolExecutor() as ex:` — that context manager's
+            # __exit__ calls shutdown(wait=True), which blocks until the
+            # submitted call finishes regardless of the result() timeout
+            # below, defeating the entire point of bounding a hung tool
+            # call. shutdown(wait=False) in `finally` lets this loop move on
+            # immediately while the orphaned thread runs out on its own.
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                result = ex.submit(dispatch, tc.function.name, args).result(
+                    timeout=tool_timeout_s
+                )
+                ms = (time.perf_counter() - t0) * 1000
+                print(f"  │  ✓  completed in {ms:.0f}ms")
+                if verbose:
+                    print(_pretty_json(result, indent=5))
+                # allow_nan=False: fail loudly here rather than silently
+                # emitting non-standard Infinity/NaN JSON tokens to the API
+                # if a non-finite float ever slipped past dispatch()'s own
+                # sanitization.
+                content = json.dumps(result, default=str, allow_nan=False)
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": content,
+                })
+            except concurrent.futures.TimeoutError:
+                ms = (time.perf_counter() - t0) * 1000
+                print(f"  │  ✗  TIMED OUT after {ms:.0f}ms (limit {tool_timeout_s}s)")
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"Error: tool call timed out after {tool_timeout_s}s",
                 })
             except Exception as exc:
                 ms = (time.perf_counter() - t0) * 1000
@@ -236,9 +310,10 @@ def run_agent(
                     "tool_call_id": tc.id,
                     "content": f"Error: {exc}",
                 })
+            finally:
+                ex.shutdown(wait=False)
             print("  └" + "─" * 50)
 
-        accumulated_text.clear()
         messages.extend(tool_results)
 
     # ── Session summary ──────────────────────────────────────────────

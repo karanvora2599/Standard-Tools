@@ -333,17 +333,31 @@ class TestSignalTypeValidation:
     guarantee in, alongside the new opt-in DIRECTION/TARGET_WEIGHT checks.
     """
 
-    def test_default_signal_type_is_score_and_unrestricted(self):
-        # 2.5 is out of range for direction/target_weight but must be
-        # accepted silently under the default — this is today's exact
-        # pre-existing permissive behavior, unchanged.
+    def test_default_signal_type_is_direction_and_rejects_out_of_range(self):
+        """
+        Regression test (high-severity item 4): SCORE values are not a
+        normalized "confidence score" -- run_strategy multiplies them
+        directly into strategy_return = lagged_signal * market_return, so
+        a value of 10 means a 10x position, not "strongly bullish". The
+        default must be DIRECTION (values constrained to exactly -1/0/1),
+        not the unrestricted SCORE this test used to lock in.
+        """
+        with pytest.raises(ValidationError, match="direction"):
+            CustomSignalBacktestInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                signals={"2023-01-03": 2.5, "2023-01-04": -3.7},
+            )
+
+    def test_direction_values_accepted_under_default_signal_type(self):
         inp = CustomSignalBacktestInput(
             symbol="AAPL",
             start_date=START,
             end_date=END,
-            signals={"2023-01-03": 2.5, "2023-01-04": -3.7},
+            signals={"2023-01-03": 1.0, "2023-01-04": -1.0, "2023-01-05": 0.0},
         )
-        assert inp.signal_type == SignalType.SCORE
+        assert inp.signal_type == SignalType.DIRECTION
 
     def test_score_accepts_anything(self):
         CustomSignalBacktestInput(

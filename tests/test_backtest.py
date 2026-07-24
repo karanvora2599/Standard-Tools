@@ -217,12 +217,47 @@ class TestTradeLog:
         # fraction, while the equity curve compounds (1 + return - cost) at
         # each bar, so cost/return cross terms create a tiny difference,
         # same second-order approximation already documented for the
-        # next_open/midpoint two-leg decomposition.
+        # next_open/hl2_exploratory two-leg decomposition.
         equity = result["equity_curve"]
         span_multiplier = float(equity.iloc[4] / equity.iloc[0])
         assert row["return_pct"] == pytest.approx(
             (span_multiplier - 1.0) * 100, abs=0.05
         )
+
+    def test_trade_log_return_scales_with_leveraged_position_size(self):
+        """
+        Regression test (high-severity item 4): a SCORE-type signal's
+        magnitude is a literal leverage multiplier (run_strategy multiplies
+        it directly into strategy_return = lagged_signal * market_return),
+        not just a direction. The trade log must scale return_pct by the
+        actual executed position size (2.5x here), not silently treat
+        every trade as if it were exactly 1x/-1x -- and must report that
+        magnitude via the position_size column, not just a "long"/"short"
+        label. Same 6-bar deterministic series as the close-mode
+        reconciliation test above, but signals=[2.5,2.5,2.5,0,0,0] instead
+        of [1,1,1,0,0,0]: raw price return 100->103 is still 3.0%, but the
+        trade's realized return is 3.0% * 2.5 = 7.5%, minus 2 * cost_per_unit
+        (0.3%) = 7.2%.
+        """
+        dates = pd.date_range("2023-01-02", periods=6, freq="B")
+        close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
+        df = pd.DataFrame(
+            {
+                "Open": close, "High": close, "Low": close, "Close": close,
+                "Volume": [1_000_000.0] * 6,
+            },
+            index=dates,
+        )
+        signals = pd.Series([2.5, 2.5, 2.5, 0, 0, 0], index=dates, dtype=float)
+        result = run_strategy(
+            df, signals, commission_pct=0.001, slippage_pct=0.0005, include_trade_log=True,
+        )
+        trade_log = result["trade_log"]
+        assert len(trade_log) == 1
+        row = trade_log.iloc[0]
+        assert row["position_size"] == pytest.approx(2.5)
+        assert row["direction"] == "long"
+        assert row["return_pct"] == pytest.approx(7.2, abs=1e-9)
 
     def test_trade_log_reconciles_with_equity_curve_next_open_mode(self):
         """

@@ -15,6 +15,7 @@ import logging
 import math
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.backtest.constraints import adv_participation
@@ -29,7 +30,7 @@ from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
-_VALID_FILL_PRICES = ("close", "next_open", "midpoint")
+_VALID_FILL_PRICES = ("close", "next_open", "hl2_exploratory")
 _VALID_COMMISSION_MODELS = ("pct", "per_share")
 
 
@@ -59,7 +60,7 @@ def run_portfolio_simulation(
     Args:
         price_data: Dict mapping ticker -> OHLCV DataFrame (must contain 'Close',
             plus 'Open' if fill_price="next_open", 'High'/'Low' if
-            fill_price="midpoint", or 'Volume' if use_impact_model or
+            fill_price="hl2_exploratory", or 'Volume' if use_impact_model or
             max_adv_participation is set).
         target_weights: DataFrame indexed by rebalance date, one column per
             ticker in the universe, values are the target fraction of
@@ -86,11 +87,15 @@ def run_portfolio_simulation(
             rebalance instead executes at the following bar's Open (one-bar
             delay, mirroring run_strategy's lookahead-free convention);
             raises ValidationError if the last rebalance date has no
-            following bar to fill against. "midpoint" — executes on the
-            same bar as "close" does, but at that bar's (High+Low)/2 instead
-            of Close, as a bid/ask-free proxy for a midquote fill. Equity is
-            always marked to Close regardless of fill_price — only the
-            rebalance trade's own execution price changes.
+            following bar to fill against. "hl2_exploratory" — executes on
+            the same bar as "close" does, but at that bar's own (High+Low)/2
+            ("HL2") instead of Close. This is NOT a bid/ask midpoint quote —
+            it requires knowing the bar's High and Low, only determined once
+            the bar has already completed, so it is look-ahead the same way
+            "close" is (see the emitted warning); intended for exploratory
+            analysis only, never for evaluating real strategy performance.
+            Equity is always marked to Close regardless of fill_price — only
+            the rebalance trade's own execution price changes.
         commission_model: "pct" (default) — commission_pct * trade notional.
             "per_share" — per_share_rate per share traded, floored at
             min_commission (backtest/costs.py: per_share_commission).
@@ -167,7 +172,67 @@ def run_portfolio_simulation(
             f"commission_model must be one of {_VALID_COMMISSION_MODELS}, got {commission_model!r}"
         )
 
+    if not math.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValidationError(
+            f"initial_capital must be a positive finite number, got {initial_capital!r}"
+        )
+
+    _non_negative_params = {
+        "commission_pct": commission_pct,
+        "slippage_pct": slippage_pct,
+        "per_share_rate": per_share_rate,
+        "min_commission": min_commission,
+        "borrow_fee_bps": borrow_fee_bps,
+        "margin_interest_rate": margin_interest_rate,
+        "impact_coefficient": impact_coefficient,
+    }
+    for name, value in _non_negative_params.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValidationError(
+                f"{name} must be a non-negative finite number, got {value!r}"
+            )
+    if impact_lookback <= 0:
+        raise ValidationError(f"impact_lookback must be > 0, got {impact_lookback}")
+
+    if not math.isfinite(max_gross_leverage) or max_gross_leverage <= 0:
+        raise ValidationError(
+            f"max_gross_leverage must be a positive finite number, got {max_gross_leverage!r}"
+        )
+    if not math.isfinite(max_position_pct) or max_position_pct <= 0:
+        raise ValidationError(
+            f"max_position_pct must be a positive finite number, got {max_position_pct!r}"
+        )
+    if max_adv_participation is not None and (
+        not math.isfinite(max_adv_participation) or max_adv_participation <= 0
+    ):
+        raise ValidationError(
+            f"max_adv_participation must be a positive finite number, got {max_adv_participation!r}"
+        )
+
     tickers = list(target_weights.columns)
+    if not tickers:
+        raise ValidationError("target_weights has no ticker columns — empty universe")
+    if target_weights.empty:
+        raise ValidationError(
+            "target_weights has no rebalance dates — nothing to simulate"
+        )
+    if target_weights.index.has_duplicates:
+        dupes = (
+            target_weights.index[target_weights.index.duplicated()].unique().tolist()
+        )
+        raise ValidationError(
+            "target_weights.index has duplicate rebalance date(s): "
+            f"{[str(d) for d in dupes[:5]]}"
+        )
+    if not target_weights.index.is_monotonic_increasing:
+        raise ValidationError(
+            "target_weights.index must be sorted in increasing order"
+        )
+    if np.isinf(target_weights.to_numpy(dtype=float)).any():
+        raise ValidationError(
+            "target_weights contains an infinite value — every weight must be finite"
+        )
+
     missing = [t for t in tickers if t not in price_data]
     if missing:
         raise ValidationError(f"price_data is missing OHLCV for: {missing}")
@@ -175,7 +240,7 @@ def run_portfolio_simulation(
     required_cols = {
         "close": ["Close"],
         "next_open": ["Close", "Open"],
-        "midpoint": ["Close", "High", "Low"],
+        "hl2_exploratory": ["Close", "High", "Low"],
     }
     needs_volume = use_impact_model or (max_adv_participation is not None)
     for t in tickers:
@@ -198,6 +263,23 @@ def run_portfolio_simulation(
     for t in tickers[1:]:
         master_index = master_index.intersection(price_data[t].index)
     master_index = master_index.sort_values()
+    if master_index.empty:
+        raise ValidationError(
+            "price_data tickers share no common trading dates — empty master "
+            "trading calendar, nothing to simulate"
+        )
+
+    for t in tickers:
+        for col in required_cols[fill_price]:
+            series = price_data[t].loc[master_index, col]
+            arr = series.to_numpy(dtype=float)
+            if not np.isfinite(arr).all() or (arr <= 0).any():
+                bad = series[(~np.isfinite(arr)) | (arr <= 0)]
+                raise ValidationError(
+                    f"price_data[{t!r}][{col!r}] has nonpositive or non-finite "
+                    f"value(s) on the trading calendar, e.g. at: "
+                    f"{[str(d) for d in bad.index[:5]]}"
+                )
 
     missing_dates = [d for d in target_weights.index if d not in master_index]
     if missing_dates:
@@ -322,9 +404,24 @@ def run_portfolio_simulation(
         turnover_notional = 0.0
         for t in tickers:
             price = exec_prices[t]
-            target_shares = (
-                (equity_now * float(weights_row[t]) / price) if price > 0 else 0.0
-            )
+            weight = float(weights_row[t])
+            if not math.isfinite(price) or price <= 0:
+                # Upfront validation already rejects nonpositive/non-finite
+                # prices anywhere on the master trading calendar, so this
+                # should be structurally unreachable -- kept as a defensive
+                # invariant, same pattern as the sizing self-consistency
+                # check below. A zero target weight needs no valid price to
+                # size (there's nothing to buy), so only raise when this
+                # ticker was actually being sized to a nonzero position.
+                if abs(weight) > 1e-12:
+                    raise ValidationError(
+                        f"rebalance {exec_date} ticker {t!r}: execution price "
+                        f"{price!r} is nonpositive or non-finite — cannot size "
+                        "a nonzero target weight from it."
+                    )
+                target_shares = 0.0
+            else:
+                target_shares = equity_now * weight / price
             delta = target_shares - shares[t]
 
             # Zero-size trade: target didn't change since the last
@@ -354,6 +451,22 @@ def run_portfolio_simulation(
 
         equity_after = cash + sum(shares[t] * exec_prices[t] for t in tickers)
         gross_after = sum(abs(shares[t] * exec_prices[t]) for t in tickers)
+
+        # Insolvency: this engine models a cash-settled account with no
+        # forced-liquidation/margin-call machinery, so zero or negative
+        # equity has no meaningful next state to simulate — continuing
+        # would let leverage_curve divide by a negative equity (producing a
+        # nonsensical negative leverage value) and let downstream
+        # annualized-return calculations raise on a negative base raised to
+        # a fractional power. Fail fast instead of returning a result that
+        # looks like a number but isn't economically meaningful.
+        if equity_after <= 0:
+            raise ValidationError(
+                f"rebalance {exec_date}: account equity is {equity_after!r} "
+                "(zero or negative) after this rebalance's costs — insolvent; "
+                "this engine does not model forced liquidation/margin calls, "
+                "so the simulation cannot continue meaningfully."
+            )
 
         # Sizing self-consistency check: shares[t] were sized as
         # equity_now * weight / price, so gross_after == (sum of |weight|) *
@@ -411,6 +524,7 @@ def run_portfolio_simulation(
     # (trigger_date, weights_row) awaiting execution at the *next* bar's Open
     # — only used when fill_price == "next_open".
     pending_rebalance: Any = None
+    prev_date: Any = None
 
     for date in master_index:
         close_prices = {t: float(price_data[t].loc[date, "Close"]) for t in tickers}
@@ -418,13 +532,17 @@ def run_portfolio_simulation(
         # Daily-accrued financing costs (borrow fee on shorts, margin
         # interest on negative cash), based on the position/cash carried
         # into this bar from the previous one — before today's rebalance,
-        # if any, changes them.
+        # if any, changes them. Uses the actual elapsed CALENDAR days since
+        # the prior bar (e.g. 3 for a Friday->Monday gap over a weekend),
+        # not a hardcoded 1 — a fixed days=1 would under-accrue financing
+        # across every weekend/holiday gap in the trading calendar.
         if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
-            daily_cost = margin_interest(cash, margin_interest_rate, days=1.0)
+            days = float((date - prev_date).days) if prev_date is not None else 1.0
+            daily_cost = margin_interest(cash, margin_interest_rate, days=days)
             for t in tickers:
                 if shares[t] < 0:
                     daily_cost += short_borrow_cost(
-                        abs(shares[t]) * close_prices[t], borrow_fee_bps, days=1.0
+                        abs(shares[t]) * close_prices[t], borrow_fee_bps, days=days
                     )
             cash -= daily_cost
 
@@ -438,7 +556,7 @@ def run_portfolio_simulation(
             weights_row = target_weights.loc[date]
             if fill_price == "close":
                 _apply_rebalance(date, date, weights_row, close_prices)
-            elif fill_price == "midpoint":
+            elif fill_price == "hl2_exploratory":
                 mid_prices = {
                     t: (
                         float(price_data[t].loc[date, "High"])
@@ -455,10 +573,23 @@ def run_portfolio_simulation(
         # the rebalance trade's own execution price changes.
         equity = cash + sum(shares[t] * close_prices[t] for t in tickers)
 
+        # Insolvency (see the identical check in _apply_rebalance): a
+        # position that drifts to zero/negative equity purely from price
+        # moves between rebalances (no trade involved) is just as
+        # meaningless to continue marking as one that goes insolvent AT a
+        # rebalance — same fail-fast rationale.
+        if equity <= 0:
+            raise ValidationError(
+                f"{date}: account equity is {equity!r} (zero or negative) — "
+                "insolvent; this engine does not model forced liquidation/"
+                "margin calls, so the simulation cannot continue meaningfully."
+            )
+
         equity_records.append(equity)
         cash_records.append(cash)
         gross_records.append(sum(abs(shares[t] * close_prices[t]) for t in tickers))
         net_records.append(sum(shares[t] * close_prices[t] for t in tickers))
+        prev_date = date
 
     warnings: List[str] = []
     if fill_price == "close" and rebalance_dates:
@@ -470,6 +601,15 @@ def run_portfolio_simulation(
             "time. Use fill_price='next_open' for a lookahead-free simulation, or confirm "
             "target_weights was already known before this bar's Close (e.g. computed from "
             "the prior bar's data)."
+        )
+    if fill_price == "hl2_exploratory" and rebalance_dates:
+        warnings.append(
+            "fill_price='hl2_exploratory': each rebalance executes at the same bar's "
+            "own (High + Low) / 2 ('HL2') — not a real bid/ask midpoint quote, and not "
+            "knowable until that bar has already completed (High/Low are only "
+            "determined in retrospect), so this is look-ahead the same way "
+            "fill_price='close' is. Intended for exploratory analysis only; use "
+            "fill_price='next_open' for a lookahead-free simulation."
         )
     if any(c < 0 for c in cash_records):
         warnings.append(

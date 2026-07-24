@@ -207,8 +207,8 @@ class TestNextOpenFill:
             run_portfolio_simulation(no_open, target_weights, fill_price="next_open")
 
 
-class TestMidpointFill:
-    def test_rebalance_executes_at_same_bar_midpoint(self):
+class TestHl2ExploratoryFill:
+    def test_rebalance_executes_at_same_bar_hl2(self):
         dates = pd.date_range("2023-01-02", periods=2, freq="B")
         prices = pd.DataFrame(
             {
@@ -229,10 +229,10 @@ class TestMidpointFill:
             initial_capital=10_000.0,
             commission_pct=0.0,
             slippage_pct=0.0,
-            fill_price="midpoint",
+            fill_price="hl2_exploratory",
         )
-        # Midpoint of bar 0 = (104 + 96) / 2 = 100.0 -> shares = 100.
-        # Equity still marked to Close at bar 0 (100.0 == midpoint here, so
+        # HL2 of bar 0 = (104 + 96) / 2 = 100.0 -> shares = 100.
+        # Equity still marked to Close at bar 0 (100.0 == HL2 here, so
         # equity is unaffected either way); bar 1 equity = 100 shares * 105.
         assert result["equity_curve"].iloc[1] == pytest.approx(100.0 * 105.0)
 
@@ -241,7 +241,7 @@ class TestMidpointFill:
         no_hl = {t: df.drop(columns=["High", "Low"]) for t, df in price_data.items()}
         target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
         with pytest.raises(ValidationError, match="High"):
-            run_portfolio_simulation(no_hl, target_weights, fill_price="midpoint")
+            run_portfolio_simulation(no_hl, target_weights, fill_price="hl2_exploratory")
 
 
 class TestCostModels:
@@ -554,3 +554,146 @@ class TestValidation:
         target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[bad_date])
         with pytest.raises(ValidationError, match="no price data"):
             run_portfolio_simulation(price_data, target_weights)
+
+    def test_empty_ticker_universe_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame(index=[dates[0]])  # no columns
+        with pytest.raises(ValidationError, match="empty universe"):
+            run_portfolio_simulation(price_data, target_weights)
+
+    def test_empty_rebalance_panel_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame(columns=["AAPL", "MSFT"])  # no rows
+        with pytest.raises(ValidationError, match="no rebalance dates"):
+            run_portfolio_simulation(price_data, target_weights)
+
+    def test_duplicate_rebalance_dates_raise(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame(
+            {"AAPL": [0.5, 0.5], "MSFT": [0.3, 0.3]}, index=[dates[0], dates[0]]
+        )
+        with pytest.raises(ValidationError, match="duplicate"):
+            run_portfolio_simulation(price_data, target_weights)
+
+    def test_unsorted_rebalance_dates_raise(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame(
+            {"AAPL": [0.5, 0.2], "MSFT": [0.3, 0.6]}, index=[dates[3], dates[0]]
+        )
+        with pytest.raises(ValidationError, match="sorted"):
+            run_portfolio_simulation(price_data, target_weights)
+
+    def test_infinite_weight_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame(
+            {"AAPL": [float("inf")], "MSFT": [0.3]}, index=[dates[0]]
+        )
+        with pytest.raises(ValidationError, match="infinite"):
+            run_portfolio_simulation(price_data, target_weights)
+
+    def test_nonpositive_close_price_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        bad_data = {t: df.copy() for t, df in price_data.items()}
+        bad_data["AAPL"].loc[dates[2], "Close"] = 0.0
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="nonpositive or non-finite"):
+            run_portfolio_simulation(bad_data, target_weights)
+
+    def test_nonfinite_close_price_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        bad_data = {t: df.copy() for t, df in price_data.items()}
+        bad_data["MSFT"].loc[dates[1], "Close"] = float("nan")
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="nonpositive or non-finite"):
+            run_portfolio_simulation(bad_data, target_weights)
+
+    def test_nonpositive_initial_capital_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="initial_capital"):
+            run_portfolio_simulation(price_data, target_weights, initial_capital=0.0)
+
+    def test_negative_commission_pct_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="commission_pct"):
+            run_portfolio_simulation(price_data, target_weights, commission_pct=-0.01)
+
+    def test_nonpositive_impact_lookback_raises(self, two_ticker_price_data):
+        price_data, dates = two_ticker_price_data
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="impact_lookback"):
+            run_portfolio_simulation(price_data, target_weights, impact_lookback=0)
+
+    def test_empty_common_trading_calendar_raises(self):
+        dates_a = pd.date_range("2023-01-02", periods=3, freq="B")
+        dates_b = pd.date_range("2024-01-02", periods=3, freq="B")  # no overlap
+        price_data = {
+            "AAPL": _price_df([100.0, 101.0, 102.0], dates_a),
+            "MSFT": _price_df([50.0, 51.0, 52.0], dates_b),
+        }
+        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates_a[0]])
+        with pytest.raises(ValidationError, match="no common trading dates"):
+            run_portfolio_simulation(price_data, target_weights)
+
+
+class TestInsolvency:
+    def test_negative_equity_from_rebalance_cost_raises(self, two_ticker_price_data):
+        """
+        Regression test (high-severity item 7): a rebalance whose costs
+        alone exceed the account's equity must raise, not silently continue
+        with negative equity (which would make leverage_curve divide by a
+        negative number, producing a nonsensical negative leverage value,
+        and would make downstream annualized-return calculations raise on
+        a negative base raised to a fractional power).
+        """
+        dates = pd.date_range("2023-01-02", periods=2, freq="B")
+        price_data = {"AAPL": _price_df([100.0, 100.0], dates)}
+        target_weights = pd.DataFrame({"AAPL": [1.0]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="insolvent"):
+            run_portfolio_simulation(
+                price_data, target_weights,
+                initial_capital=100.0, commission_pct=2.0, slippage_pct=0.0,
+            )
+
+    def test_negative_equity_from_price_move_raises(self):
+        """A short position whose losses exceed initial capital purely from
+        price drift (no further rebalance) must also raise, not silently
+        mark a negative-equity bar into the returned equity_curve."""
+        dates = pd.date_range("2023-01-02", periods=3, freq="B")
+        price_data = {"AAPL": _price_df([100.0, 100.0, 500.0], dates)}
+        target_weights = pd.DataFrame({"AAPL": [-1.0]}, index=[dates[0]])
+        with pytest.raises(ValidationError, match="insolvent"):
+            run_portfolio_simulation(
+                price_data, target_weights,
+                initial_capital=10_000.0, commission_pct=0.0, slippage_pct=0.0,
+            )
+
+
+class TestFinancingCalendarGaps:
+    def test_weekend_gap_charges_three_days_not_one(self):
+        """
+        Regression test (high-severity item 6): financing (borrow fee on a
+        short position) must accrue based on the actual elapsed CALENDAR
+        days since the prior bar, not a hardcoded 1 -- a Friday-to-Monday
+        gap must charge 3 days' worth, not 1. Business-day bars
+        (freq="B") naturally include this gap: Thu 2023-01-05, Fri
+        2023-01-06, Mon 2023-01-09.
+
+        Price held constant (no further rebalance after bar 0) isolates
+        the cash change on each subsequent bar to financing alone, so the
+        Fri->Mon cash delta must be exactly 3x the Thu->Fri cash delta.
+        """
+        dates = pd.to_datetime(["2023-01-05", "2023-01-06", "2023-01-09", "2023-01-10"])
+        price_data = {"AAPL": _price_df([100.0] * 4, dates)}
+        target_weights = pd.DataFrame({"AAPL": [-1.0]}, index=[dates[0]])
+        result = run_portfolio_simulation(
+            price_data, target_weights,
+            initial_capital=10_000.0, commission_pct=0.0, slippage_pct=0.0,
+            borrow_fee_bps=500.0,
+        )
+        cash = result["cash_curve"]
+        weekday_gap_cost = float(cash.iloc[0] - cash.iloc[1])  # Thu -> Fri (1 day)
+        weekend_gap_cost = float(cash.iloc[1] - cash.iloc[2])  # Fri -> Mon (3 days)
+        assert weekday_gap_cost > 0
+        assert weekend_gap_cost == pytest.approx(3.0 * weekday_gap_cost, rel=1e-6)

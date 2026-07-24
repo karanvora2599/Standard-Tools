@@ -9,6 +9,7 @@ from standard_quant_tools.metrics.return_metrics import (
     cagr,
     cumulative_return,
 )
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     cvar,
@@ -181,6 +182,48 @@ class TestVaR:
         param = var_parametric(returns, 0.95)
         assert abs(hist - param) / param < 0.15  # within 15%
 
+    @pytest.mark.parametrize("bad_confidence", [0.0, 1.0, -0.1, 1.5])
+    def test_var_historical_rejects_out_of_range_confidence(
+        self, sample_returns, bad_confidence
+    ):
+        with pytest.raises(ValidationError, match="confidence"):
+            var_historical(sample_returns, bad_confidence)
+
+    @pytest.mark.parametrize("bad_confidence", [0.0, 1.0, -0.1, 1.5])
+    def test_var_parametric_rejects_out_of_range_confidence(
+        self, sample_returns, bad_confidence
+    ):
+        with pytest.raises(ValidationError, match="confidence"):
+            var_parametric(sample_returns, bad_confidence)
+
+    def test_var_parametric_without_scipy_rejects_unsupported_confidence(
+        self, sample_returns, monkeypatch
+    ):
+        """
+        Regression test (operational item B): without scipy, an arbitrary
+        confidence level not in the precomputed z-table must raise, not
+        silently substitute the 95% z-score for whatever level was
+        actually requested.
+        """
+        import standard_quant_tools.metrics.risk_metrics as risk_metrics_mod
+
+        monkeypatch.setattr(risk_metrics_mod, "HAS_SCIPY", False)
+        monkeypatch.setattr(risk_metrics_mod, "_scipy_stats", None)
+        with pytest.raises(ValidationError, match="scipy"):
+            var_parametric(sample_returns, 0.975)
+
+    def test_var_parametric_without_scipy_accepts_table_confidence(
+        self, sample_returns, monkeypatch
+    ):
+        """A confidence level that IS in the precomputed z-table must still
+        work fine without scipy."""
+        import standard_quant_tools.metrics.risk_metrics as risk_metrics_mod
+
+        monkeypatch.setattr(risk_metrics_mod, "HAS_SCIPY", False)
+        monkeypatch.setattr(risk_metrics_mod, "_scipy_stats", None)
+        result = var_parametric(sample_returns, 0.95)
+        assert isinstance(result, float)
+
 
 class TestCVaR:
     def test_cvar_greater_than_or_equal_to_var(self, sample_returns):
@@ -191,6 +234,48 @@ class TestCVaR:
 
     def test_cvar_nonnegative(self, sample_returns):
         assert cvar(sample_returns) >= 0
+
+    @pytest.mark.parametrize("bad_confidence", [0.0, 1.0, -0.1, 1.5])
+    def test_cvar_rejects_out_of_range_confidence(self, sample_returns, bad_confidence):
+        with pytest.raises(ValidationError, match="confidence"):
+            cvar(sample_returns, bad_confidence)
+
+
+class TestTreynorRatio:
+    def test_numerator_uses_aligned_window_not_full_series(self):
+        """
+        Regression test (operational item B): the numerator (mean excess
+        return) must use the SAME date-aligned window beta was estimated
+        from, not the full, unaligned `returns` series. Constructs a
+        `returns` series with extra dates the benchmark doesn't cover, at a
+        return level clearly different from the aligned-window returns --
+        if the numerator wrongly used the full series, the result would
+        differ from a version computed with `returns` pre-trimmed to
+        exactly the common index.
+        """
+        common_dates = pd.date_range("2023-01-02", periods=50, freq="B")
+        extra_dates = pd.date_range("2023-06-01", periods=20, freq="B")
+
+        np.random.seed(42)
+        common_returns = np.random.normal(0.0005, 0.01, 50)
+        common_bench = np.random.normal(0.0003, 0.008, 50)
+        # Extra dates the benchmark never covers, at a very different (much
+        # higher) return level -- would visibly skew a wrongly-unaligned mean.
+        extra_returns = np.full(20, 0.05)
+
+        returns = pd.Series(
+            np.concatenate([common_returns, extra_returns]),
+            index=common_dates.append(extra_dates),
+        )
+        benchmark_returns = pd.Series(common_bench, index=common_dates)
+
+        result = treynor_ratio(returns, benchmark_returns)
+        # Reference: compute Treynor by hand on the pre-trimmed, aligned
+        # series only -- this must match exactly, proving the numerator
+        # never touched the extra out-of-window dates.
+        aligned_returns = pd.Series(common_returns, index=common_dates)
+        reference = treynor_ratio(aligned_returns, benchmark_returns)
+        assert result == pytest.approx(reference, rel=1e-9)
 
 
 class TestInformationRatio:

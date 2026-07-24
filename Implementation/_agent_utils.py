@@ -6,8 +6,15 @@ Provides:
   - _to_anthropic_tools()        → convert OpenAI-format tools to Anthropic format
   - _header / _section / _log / _pretty_json → console formatting helpers
   - run_agent()                  → the core agentic loop (Claude + tool dispatch)
+
+This is demo/example code, not production agent infrastructure. In
+particular it prints full user requests and tool call arguments/results to
+stdout and a log file by default (`verbose=True` below) — fine for a local
+demo run, but do not reuse this as-is anywhere those payloads could contain
+data you don't want on disk or on a shared console.
 """
 
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -32,6 +39,11 @@ _fmt_file    = logging.Formatter(
     datefmt="%H:%M:%S",
 )
 
+# Marker attribute so repeated setup_logging() calls in the same process
+# replace the previous run's handlers instead of piling up duplicates that
+# would print every log line once per prior call.
+_HANDLER_MARKER = "_sqt_example_handler"
+
 
 def setup_logging(name: str) -> Path:
     """
@@ -44,15 +56,21 @@ def setup_logging(name: str) -> Path:
     ts       = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     log_file = _LOGS_DIR / f"{name}_{ts}.log"
 
+    lib = logging.getLogger("standard_quant_tools")
+    for h in list(lib.handlers):
+        if getattr(h, _HANDLER_MARKER, False):
+            lib.removeHandler(h)
+
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(_fmt_file)
     fh.setLevel(logging.DEBUG)
+    setattr(fh, _HANDLER_MARKER, True)
 
     sh = logging.StreamHandler()
     sh.setFormatter(_fmt_console)
     sh.setLevel(logging.DEBUG)
+    setattr(sh, _HANDLER_MARKER, True)
 
-    lib = logging.getLogger("standard_quant_tools")
     lib.setLevel(logging.DEBUG)
     lib.addHandler(fh)
     lib.addHandler(sh)
@@ -107,6 +125,9 @@ def run_agent(
     model: str = "claude-haiku-4-5",
     max_iterations: int = 15,
     max_tokens: int = 8096,
+    request_timeout_s: float = 60.0,
+    tool_timeout_s: float = 120.0,
+    verbose: bool = True,
 ) -> str:
     """
     Run the agentic loop: send user_request to Claude, execute any tool calls
@@ -115,9 +136,15 @@ def run_agent(
     max_tokens applies to each individual API call (not the whole session).
     Haiku 4.5 supports up to 8096 output tokens per call; Opus 4.8 supports 32000.
 
+    request_timeout_s bounds each Anthropic API call; tool_timeout_s bounds
+    each individual dispatch() call (run in a worker thread so a hung tool
+    can't block the loop forever). verbose=False suppresses printing full
+    user/tool payloads (see the module docstring) while keeping status-line
+    output.
+
     Returns the final text response from the model.
     """
-    client = Anthropic(api_key=api_key)
+    client = Anthropic(api_key=api_key, timeout=request_timeout_s)
     tools  = _to_anthropic_tools(get_agent_tools())
 
     _header("AGENT SESSION STARTED")
@@ -126,8 +153,9 @@ def run_agent(
     _log("Max iterations", str(max_iterations))
     _log("Tools loaded",   str(len(tools)))
     _log("Tool names",     ", ".join(t["name"] for t in tools))
-    _section("USER REQUEST")
-    print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+    if verbose:
+        _section("USER REQUEST")
+        print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
 
     messages: list[MessageParam] = [
         cast(MessageParam, {"role": "user", "content": user_request})
@@ -170,14 +198,16 @@ def run_agent(
         for i, block in enumerate(response.content):
             print(f"\n  [Block {i+1}]  type={block.type}")
             if block.type == "text":
-                print(textwrap.fill(
-                    block.text, width=68,
-                    initial_indent="    ", subsequent_indent="    ",
-                ))
+                if verbose:
+                    print(textwrap.fill(
+                        block.text, width=68,
+                        initial_indent="    ", subsequent_indent="    ",
+                    ))
             elif block.type == "tool_use":
                 _log(f"  Tool call → {block.name}", indent=4)
                 _log(f"  Call ID   → {block.id}",   indent=4)
-                print(_pretty_json(block.input, indent=6))
+                if verbose:
+                    print(_pretty_json(block.input, indent=6))
 
         # Collect any text produced this turn
         for block in response.content:
@@ -224,18 +254,43 @@ def run_agent(
 
             print(f"\n  ┌─ {block.name}")
             print(f"  │  id : {block.id}")
-            print(_pretty_json(block.input, indent=5))
+            if verbose:
+                print(_pretty_json(block.input, indent=5))
 
             t0 = time.perf_counter()
+            # Not `with ThreadPoolExecutor() as ex:` — that context manager's
+            # __exit__ calls shutdown(wait=True), which blocks until the
+            # submitted call finishes regardless of the result() timeout
+            # below, defeating the entire point of bounding a hung tool
+            # call. shutdown(wait=False) in `finally` lets this loop move on
+            # immediately while the orphaned thread runs out on its own.
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                result = dispatch(block.name, block.input)
+                result = ex.submit(dispatch, block.name, block.input).result(
+                    timeout=tool_timeout_s
+                )
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✓  completed in {ms:.0f}ms")
-                print(_pretty_json(result, indent=5))
+                if verbose:
+                    print(_pretty_json(result, indent=5))
+                # allow_nan=False: fail loudly here rather than silently
+                # emitting non-standard Infinity/NaN JSON tokens to the API
+                # if a non-finite float ever slipped past dispatch()'s own
+                # sanitization.
+                content = json.dumps(result, default=str, allow_nan=False)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": json.dumps(result, default=str),
+                    "content": content,
+                })
+            except concurrent.futures.TimeoutError:
+                ms = (time.perf_counter() - t0) * 1000
+                print(f"  │  ✗  TIMED OUT after {ms:.0f}ms (limit {tool_timeout_s}s)")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": f"Error: tool call timed out after {tool_timeout_s}s",
+                    "is_error": True,
                 })
             except Exception as exc:
                 ms = (time.perf_counter() - t0) * 1000
@@ -246,11 +301,10 @@ def run_agent(
                     "content": f"Error: {exc}",
                     "is_error": True,
                 })
+            finally:
+                ex.shutdown(wait=False)
             print("  └" + "─" * 50)
 
-        # Text collected during a tool-calling turn belongs to the reasoning
-        # preamble, not the final answer — clear it so we don't duplicate it.
-        accumulated_text.clear()
         messages.append(cast(MessageParam, {"role": "user", "content": tool_results}))
 
     # ── Session summary ──────────────────────────────────────────────

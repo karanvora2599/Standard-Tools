@@ -1900,18 +1900,21 @@ engine runs, before any bar is processed, and raises `ValidationError`
 naming every offending `(date, ticker)` pair, same as a missing-entry or
 leverage-limit violation.
 
-**`fill_price`:** `"close"` (default), `"next_open"`, or `"midpoint"` — same
-convention as every other backtest tool (see
+**`fill_price`:** `"close"` (default), `"next_open"`, or `"hl2_exploratory"`
+— same convention as every other backtest tool (see
 [04_backtesting.md](04_backtesting.md#execution-timing-fill_price)). With
-`fill_price="close"` (the default), the result's `warnings` list **always**
-includes a look-ahead-bias caveat: each rebalance executes at the same
-bar's own Close that its target weight is dated on, so if `target_weights`
-was derived from that same bar's Close (e.g. a same-day signal/score), the
-trade could not actually have been placed at that price in real time. Use
+`fill_price="close"` (the default) or `"hl2_exploratory"`, the result's
+`warnings` list **always** includes a look-ahead-bias caveat: each
+rebalance executes at the same bar's own Close (or, for
+`"hl2_exploratory"`, that bar's own `(High + Low) / 2` — not a real bid/ask
+midpoint, and only knowable after the bar has already completed) that its
+target weight is dated on, so if `target_weights` was derived from that
+same bar's data (e.g. a same-day signal/score), the trade could not
+actually have been placed at that price in real time. Use
 `fill_price="next_open"` for a lookahead-free simulation, or confirm
 `target_weights` was already known before that bar's Close (e.g. computed
-from the prior bar's data) before trusting a `"close"`-filled run's
-numbers.
+from the prior bar's data) before trusting a `"close"`/`"hl2_exploratory"`-
+filled run's numbers.
 
 **Cost models and liquidity (`04_backtesting.md`'s
 [Pluggable cost models](04_backtesting.md#pluggable-cost-models-backtestcostspy)
@@ -1996,16 +1999,16 @@ to evaluate strategy performance — the same convention and warning as
 | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio` | `float` | Computed from the engine's `equity_curve` via existing metrics functions |
 | `final_equity`, `final_cash`, `equity_curve`, `warnings` | — | Same meaning as §15 |
 
-**`fill_price`:** `"next_open"` (default), `"close"`, or `"midpoint"`.
+**`fill_price`:** `"next_open"` (default), `"close"`, or `"hl2_exploratory"`.
 Defaults to `"next_open"` because the z-score signal deciding a transition
 is itself computed from that same bar's Close — executing at that same
 Close would be look-ahead (the trade could not actually have been placed
-at the exact price its own signal was computed from). Pass `"close"` only
-for explicit same-bar/exploratory analysis; with `"close"`,
-`result.warnings` includes the caveat that each leg fills at the same
-bar's own Close its z-score signal is dated on (see §15's
-`fill_price="close"` warning, which this tool inherits via
-`run_portfolio_simulation`).
+at the exact price its own signal was computed from). Pass `"close"` or
+`"hl2_exploratory"` only for explicit same-bar/exploratory analysis; with
+either, `result.warnings` includes the caveat that each leg fills at a
+price derived from the same bar its z-score signal is dated on (see §15's
+`fill_price="close"`/`"hl2_exploratory"` warnings, which this tool inherits
+via `run_portfolio_simulation`).
 
 **Validation:** raises `ValidationError` if either symbol is missing OHLCV,
 or if the spread never crosses `entry_z` (nothing to backtest).

@@ -71,8 +71,20 @@ def equal_weight_top_bottom(
             f"n_long + n_short ({n_long + n_short}) exceeds the number of tickers ({n_tickers})"
         )
 
-    long_w = gross_leverage / (2 * n_long) if n_long > 0 else 0.0
-    short_w = gross_leverage / (2 * n_short) if n_short > 0 else 0.0
+    # Split gross_leverage 50/50 between the two sides only when BOTH sides
+    # are active. A long-only (n_short=0) or short-only (n_long=0) request
+    # must allocate the FULL gross_leverage to its one active side -- always
+    # halving it regardless would silently size a long-only portfolio at
+    # half the requested gross exposure.
+    if n_long > 0 and n_short > 0:
+        long_w = gross_leverage / (2 * n_long)
+        short_w = gross_leverage / (2 * n_short)
+    elif n_long > 0:
+        long_w = gross_leverage / n_long
+        short_w = 0.0
+    else:  # n_short > 0 (n_long == 0) -- validated above that at least one is > 0
+        long_w = 0.0
+        short_w = gross_leverage / n_short
 
     weights = pd.DataFrame(0.0, index=scores.index, columns=scores.columns)
     for date, row in scores.iterrows():
@@ -124,7 +136,13 @@ def vol_scaled(
     if missing:
         raise ValidationError(f"returns_df is missing columns for: {missing}")
 
-    vol = returns_df[scores.columns].reindex(scores.index).rolling(lookback).std()
+    # Rolling window FIRST, on returns_df's own (daily) frequency, THEN
+    # reindex onto scores.index -- reindexing before rolling would silently
+    # turn a `lookback`-bar volatility window into `lookback` SCORE-DATE
+    # observations, e.g. a "20-bar" window becomes ~20 months of history
+    # when scores are submitted monthly against daily returns.
+    vol = returns_df[scores.columns].rolling(lookback).std()
+    vol = vol.reindex(scores.index)
     vol_safe = vol.where(vol > 1e-12, other=np.nan)
     adjusted = (scores / vol_safe).fillna(0.0)
     gross = adjusted.abs().sum(axis=1)
@@ -136,7 +154,16 @@ def dollar_neutral(weights: pd.DataFrame) -> pd.DataFrame:
     """
     Post-process any weight panel so sum(weight) == 0 per row (equal dollar
     long and short), by subtracting each row's mean weight from every
-    position. Preserves every pairwise weight difference exactly — only the
-    common offset changes.
+    position, THEN rescaling each row back to its own original
+    sum(|weight|) — mean-centering alone preserves every pairwise weight
+    difference exactly (only the common offset changes) but does not
+    preserve gross exposure, contradicting this module's own stated
+    invariant that every sizing function returns the requested gross
+    leverage. Rescaling by a single positive per-row scalar preserves the
+    zero-sum property exactly (sum(c*x_i) = c*sum(x_i) = 0 for any c).
     """
-    return weights.sub(weights.mean(axis=1), axis=0)
+    original_gross = weights.abs().sum(axis=1)
+    centered = weights.sub(weights.mean(axis=1), axis=0)
+    centered_gross = centered.abs().sum(axis=1)
+    centered_gross_safe = centered_gross.where(centered_gross > 1e-12, other=1.0)
+    return centered.div(centered_gross_safe, axis=0).mul(original_gross, axis=0)

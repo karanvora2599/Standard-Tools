@@ -288,3 +288,161 @@ class TestVerifyReplay:
         result = audit.verify_replay(record)
         assert any(not m["match"] for m in result.data_source_matches)
         assert result.notes  # a diagnostic note should explain the mismatch
+
+
+class TestReplayDataSourceAsymmetry:
+    def test_source_missing_from_replay_is_still_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """
+        verify_replay used to only iterate the replay's *new* data sources,
+        so a symbol/range present in the original record but no longer
+        touched by the replay (e.g. the tool changed which tickers it
+        fetches) was silently dropped from data_source_matches instead of
+        being surfaced as a mismatch.
+        """
+        from pydantic import BaseModel
+
+        from standard_quant_tools.agent import tools as tools_module
+
+        class DummyInput(BaseModel):
+            symbol: str = "AAPL"
+
+        class DummyOutput(BaseModel):
+            value: float = 1.0
+
+        def dummy_fn(inp: DummyInput) -> DummyOutput:
+            # The replay only re-touches AAPL — MSFT has "disappeared".
+            audit.record_data_access(
+                "AAPL",
+                "2022-01-01",
+                "2022-06-01",
+                "1d",
+                source="live_fetch",
+                content_hash="new-aapl-hash",
+            )
+            return DummyOutput()
+
+        monkeypatch.setitem(
+            tools_module._TOOL_DISPATCH, "dummy_tool", (dummy_fn, DummyInput)
+        )
+
+        record = {
+            "request_id": "test-req",
+            "tool_name": "dummy_tool",
+            "input": {"symbol": "AAPL"},
+            "data_sources": [
+                {
+                    "symbol": "AAPL",
+                    "start": "2022-01-01",
+                    "end": "2022-06-01",
+                    "interval": "1d",
+                    "source": "live_fetch",
+                    "content_hash": "old-aapl-hash",
+                },
+                {
+                    "symbol": "MSFT",
+                    "start": "2022-01-01",
+                    "end": "2022-06-01",
+                    "interval": "1d",
+                    "source": "live_fetch",
+                    "content_hash": "old-msft-hash",
+                },
+            ],
+            "output_hash": None,
+        }
+
+        result = audit.verify_replay(record)
+
+        msft_entries = [m for m in result.data_source_matches if m["symbol"] == "MSFT"]
+        assert len(msft_entries) == 1, (
+            "a source present in the original record but absent from the "
+            "replay must still appear in data_source_matches"
+        )
+        assert msft_entries[0]["match"] is False
+        assert msft_entries[0]["new_hash"] is None
+        assert msft_entries[0]["old_hash"] == "old-msft-hash"
+
+
+# ── Hash-chain tamper evidence ─────────────────────────────────────────────────
+
+
+class TestHashChainIntegrity:
+    def test_chained_records_pass_integrity_check(
+        self, patched_factory, audit_dir: Path
+    ):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        dispatch(
+            "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
+        )
+        records = _audit_records(audit_dir)
+        assert len(records) == 2
+        assert records[0]["prev_record_hash"] == audit._GENESIS_HASH
+        assert records[1]["prev_record_hash"] == records[0]["record_hash"]
+        assert records[0]["record_hash"] is not None
+        assert records[0]["record_hash"] != records[1]["record_hash"]
+
+        jsonl_files = list(audit_dir.glob("*.jsonl"))
+        assert len(jsonl_files) == 1
+        assert audit.verify_audit_log_integrity(jsonl_files[0]) == []
+
+    def test_editing_a_record_breaks_the_chain(
+        self, patched_factory, audit_dir: Path
+    ):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        dispatch(
+            "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
+        )
+        jsonl_path = next(iter(audit_dir.glob("*.jsonl")))
+        lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+
+        first = json.loads(lines[0])
+        first["status"] = "tampered"  # alter content without recomputing hashes
+        lines[0] = json.dumps(first)
+        jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        problems = audit.verify_audit_log_integrity(jsonl_path)
+        assert problems, "editing a record's content must be detected"
+        assert any("record_hash" in p for p in problems)
+
+    def test_removing_a_record_breaks_the_chain(
+        self, patched_factory, audit_dir: Path
+    ):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        dispatch(
+            "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
+        )
+        dispatch(
+            "analyze_stock_risk", {"symbol": "GOOGL", "benchmark": "SPY", "period": "1y"}
+        )
+        jsonl_path = next(iter(audit_dir.glob("*.jsonl")))
+        lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+        del lines[1]  # remove the middle record
+        jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        problems = audit.verify_audit_log_integrity(jsonl_path)
+        assert problems, "removing a record must break the chain for what follows"
+        assert any("chain broken" in p for p in problems)
+
+    def test_clean_nonexistent_file_reports_no_problems(self, tmp_path: Path):
+        assert audit.verify_audit_log_integrity(tmp_path / "no-such-file.jsonl") == []
+
+    def test_write_creates_and_releases_a_sidecar_lock_file(
+        self, patched_factory, audit_dir: Path
+    ):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        lock_files = list(audit_dir.glob("*.jsonl.lock"))
+        assert len(lock_files) == 1
+        # A second write must succeed without the earlier lock being held.
+        dispatch(
+            "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
+        )
+        assert len(_audit_records(audit_dir)) == 2

@@ -7,8 +7,15 @@ Provides:
   - run_agent()           → the core agentic loop (Gemini + tool dispatch)
 
 Requires: pip install google-genai
+
+This is demo/example code, not production agent infrastructure. In
+particular it prints full user requests and tool call arguments/results to
+stdout and a log file by default (`verbose=True` below) — fine for a local
+demo run, but do not reuse this as-is anywhere those payloads could contain
+data you don't want on disk or on a shared console.
 """
 
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -34,6 +41,11 @@ _fmt_file    = logging.Formatter(
     datefmt="%H:%M:%S",
 )
 
+# Marker attribute so repeated setup_logging() calls in the same process
+# replace the previous run's handlers instead of piling up duplicates that
+# would print every log line once per prior call.
+_HANDLER_MARKER = "_sqt_example_handler"
+
 
 def setup_logging(name: str) -> Path:
     """Attach a per-run FileHandler + StreamHandler to the standard_quant_tools logger."""
@@ -41,15 +53,21 @@ def setup_logging(name: str) -> Path:
     ts       = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     log_file = _LOGS_DIR / f"{name}_{ts}.log"
 
+    lib = logging.getLogger("standard_quant_tools")
+    for h in list(lib.handlers):
+        if getattr(h, _HANDLER_MARKER, False):
+            lib.removeHandler(h)
+
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(_fmt_file)
     fh.setLevel(logging.DEBUG)
+    setattr(fh, _HANDLER_MARKER, True)
 
     sh = logging.StreamHandler()
     sh.setFormatter(_fmt_console)
     sh.setLevel(logging.DEBUG)
+    setattr(sh, _HANDLER_MARKER, True)
 
-    lib = logging.getLogger("standard_quant_tools")
     lib.setLevel(logging.DEBUG)
     lib.addHandler(fh)
     lib.addHandler(sh)
@@ -144,6 +162,9 @@ def run_agent(
     model: str = "gemini-2.0-flash",
     max_iterations: int = 15,
     max_tokens: int = 8192,
+    request_timeout_s: float = 60.0,
+    tool_timeout_s: float = 120.0,
+    verbose: bool = True,
 ) -> str:
     """
     Run the agentic loop: send user_request to Gemini, execute any function
@@ -153,9 +174,18 @@ def run_agent(
       "STOP"       — model finished normally
       "MAX_TOKENS" — hit token limit mid-response (continuation logic applies)
 
+    request_timeout_s bounds each Gemini API call; tool_timeout_s bounds each
+    individual dispatch() call (run in a worker thread so a hung tool can't
+    block the loop forever). verbose=False suppresses printing full
+    user/tool payloads (see the module docstring) while keeping status-line
+    output.
+
     Returns the final text response from the model.
     """
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=int(request_timeout_s * 1000)),
+    )
     tools  = _to_gemini_tools(get_agent_tools())
 
     _header("AGENT SESSION STARTED  (Gemini)")
@@ -166,8 +196,9 @@ def run_agent(
     _log("Tool names",     ", ".join(
         fd.name for t in tools for fd in (t.function_declarations or [])
     ))
-    _section("USER REQUEST")
-    print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+    if verbose:
+        _section("USER REQUEST")
+        print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
 
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
@@ -225,11 +256,13 @@ def run_agent(
             fn   = getattr(part, "function_call", None)
             if text:
                 print(f"\n  [Part {i+1}]  type=text")
-                print(textwrap.fill(text, width=68, initial_indent="    ", subsequent_indent="    "))
+                if verbose:
+                    print(textwrap.fill(text, width=68, initial_indent="    ", subsequent_indent="    "))
                 accumulated_text.append(text)
             elif fn:
                 print(f"\n  [Part {i+1}]  type=function_call  name={fn.name}")
-                print(_pretty_json(dict(fn.args), indent=4))
+                if verbose:
+                    print(_pretty_json(dict(fn.args), indent=4))
 
         # Append model turn to history
         contents.append(candidate.content)  # type: ignore[arg-type]
@@ -274,18 +307,36 @@ def run_agent(
             args = dict(fn.args)
 
             print(f"\n  ┌─ {name}")
-            print(_pretty_json(args, indent=5))
+            if verbose:
+                print(_pretty_json(args, indent=5))
 
             t0 = time.perf_counter()
+            # Not `with ThreadPoolExecutor() as ex:` — that context manager's
+            # __exit__ calls shutdown(wait=True), which blocks until the
+            # submitted call finishes regardless of the result() timeout
+            # below, defeating the entire point of bounding a hung tool
+            # call. shutdown(wait=False) in `finally` lets this loop move on
+            # immediately while the orphaned thread runs out on its own.
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                result = dispatch(name, args)
+                result = ex.submit(dispatch, name, args).result(timeout=tool_timeout_s)
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✓  completed in {ms:.0f}ms")
-                print(_pretty_json(result, indent=5))
+                if verbose:
+                    print(_pretty_json(result, indent=5))
                 fn_response_parts.append(
                     types.Part(function_response=types.FunctionResponse(
                         name=name,
                         response=result,
+                    ))
+                )
+            except concurrent.futures.TimeoutError:
+                ms = (time.perf_counter() - t0) * 1000
+                print(f"  │  ✗  TIMED OUT after {ms:.0f}ms (limit {tool_timeout_s}s)")
+                fn_response_parts.append(
+                    types.Part(function_response=types.FunctionResponse(
+                        name=name,
+                        response={"error": f"tool call timed out after {tool_timeout_s}s"},
                     ))
                 )
             except Exception as exc:
@@ -297,9 +348,10 @@ def run_agent(
                         response={"error": str(exc)},
                     ))
                 )
+            finally:
+                ex.shutdown(wait=False)
             print("  └" + "─" * 50)
 
-        accumulated_text.clear()
         contents.append(types.Content(role="user", parts=fn_response_parts))
 
     # ── Session summary ──────────────────────────────────────────────

@@ -97,10 +97,15 @@ This is optimistic in one sense: it assumes you can transact right at the
 closing price the instant you observe it.
 
 `fill_price="next_open"` is more conservative: entries and exits are priced
-off the bar's own `Open` instead. `fill_price="midpoint"` uses that bar's
-`(High + Low) / 2` instead — a bid/ask-free proxy for a midquote fill, for
-data sources that don't carry a real bid/ask. Both decompose each bar into
-two legs:
+off the bar's own `Open` instead. `fill_price="hl2_exploratory"` uses that
+bar's own `(High + Low) / 2` ("HL2") instead — this is **not** a real
+bid/ask midpoint quote, and it requires knowing the bar's High and Low,
+which are only determined once that bar has already completed, so pricing
+a fill at a bar's own HL2 is look-ahead the same way `fill_price="close"`
+is (a warning is emitted, same as for `"close"`) — the name says
+"exploratory" deliberately, so it's never mistaken for a real, tradable
+execution price. Both `"next_open"` and `"hl2_exploratory"` decompose each
+bar into two legs:
 
 - **Overnight leg** (prior close → this bar's reference price), priced at
   *yesterday's* position — an exit still bears the gap risk of the position
@@ -114,19 +119,19 @@ A held (unchanged) position sums these two legs rather than compounding them
 compounding by ~0.0025%).
 
 ```python
-result_close     = run_strategy(df, signals, fill_price="close")       # default
-result_next_open = run_strategy(df, signals, fill_price="next_open")   # more conservative
-result_midpoint  = run_strategy(df, signals, fill_price="midpoint")    # bid/ask-free midquote proxy
+result_close = run_strategy(df, signals, fill_price="close")             # default
+result_next_open = run_strategy(df, signals, fill_price="next_open")     # more conservative
+result_hl2 = run_strategy(df, signals, fill_price="hl2_exploratory")     # exploratory only — see above
 ```
 
 `backtest_grid` accepts the same `fill_price` argument and forces the
 Python execution path when it isn't `"close"` — the compiled C++ kernel
-only knows `Close` prices, so `next_open`/`midpoint` always run in Python
-regardless of whether `_sqt_core` is built.
+only knows `Close` prices, so `next_open`/`hl2_exploratory` always run in
+Python regardless of whether `_sqt_core` is built.
 
 **Validation:** `run_strategy` raises `ValidationError` if `fill_price` isn't
-one of `"close"`, `"next_open"`, `"midpoint"` — the same self-correcting-error
-pattern used everywhere else in this library.
+one of `"close"`, `"next_open"`, `"hl2_exploratory"` — the same
+self-correcting-error pattern used everywhere else in this library.
 
 **Trade log price convention:** `entry_price`/`exit_price` use the same
 reference price the equity curve's P&L is actually computed from, per
@@ -136,9 +141,9 @@ series at bar *i* actually earns its first return over `Close[i-1] ->
 Close[i]`: the trade log reports `Close[i-1]` as that entry (and, at exit,
 the analogous `Close[j-1]` for the closing event at bar *j*) — not
 `Close[i]`/`Close[j]`, which would be one bar later than the price the
-equity curve actually used. Under `next_open`/`midpoint`, the two-leg
-decomposition already prices entries/exits at that bar's own reference
-price (`Open`/midpoint), so no shift is needed there — `entry_price`/
+equity curve actually used. Under `next_open`/`hl2_exploratory`, the
+two-leg decomposition already prices entries/exits at that bar's own
+reference price (`Open`/HL2), so no shift is needed there — `entry_price`/
 `exit_price` equal that bar's reference price directly. `return_pct` is
 also net of commission+slippage (2× `cost_per_unit`, for the entry and
 exit; 1× for a position still open at the final bar, since no real exit
@@ -167,7 +172,7 @@ When `include_trade_log=True`, the result includes a `pd.DataFrame` with one row
 ```python
 trade_log = result['trade_log']
 print(trade_log.columns)
-# ['entry_date', 'exit_date', 'direction', 'entry_price', 'exit_price', 'return_pct']
+# ['entry_date', 'exit_date', 'direction', 'entry_price', 'exit_price', 'position_size', 'return_pct']
 
 # Best and worst trades
 print(trade_log.nlargest(3, 'return_pct'))
@@ -178,6 +183,14 @@ trade_log['holding_days'] = (pd.to_datetime(trade_log['exit_date'])
                              - pd.to_datetime(trade_log['entry_date'])).dt.days
 print(f"Avg holding: {trade_log['holding_days'].mean():.0f} days")
 ```
+
+**`position_size`:** the actual signal value held during the trade (its
+sign gives `direction`) — exactly `1.0`/`-1.0` for a `DIRECTION`-type
+signal, but a fractional or leveraged number (e.g. `2.5`) for a `SCORE`-type
+signal, since `run_strategy` multiplies the signal value directly into
+`strategy_return = lagged_signal * market_return`. `return_pct` already
+scales with `position_size` — it is not silently treated as if every trade
+were exactly 1x/-1x.
 
 ---
 
@@ -520,10 +533,12 @@ trading calendar is the **intersection** of every ticker's own index).
 (default — a rebalance dated D executes at D's own Close), `"next_open"`
 (the rebalance instead executes at the *following* bar's Open — one-bar
 delay; raises `ValidationError` if the last rebalance date has no following
-bar to fill against), or `"midpoint"` (same bar as `"close"`, but at that
-bar's `(High + Low) / 2` instead — a bid/ask-free proxy for a midquote
-fill). Equity is always marked to Close regardless of `fill_price` — only
-the rebalance trade's own execution price changes.
+bar to fill against), or `"hl2_exploratory"` (same bar as `"close"`, but at
+that bar's own `(High + Low) / 2` instead — **not** a real bid/ask midpoint
+quote, and only knowable after that bar has already completed, so this is
+look-ahead the same way `"close"` is; a warning is emitted, same as for
+`"close"`). Equity is always marked to Close regardless of `fill_price` —
+only the rebalance trade's own execution price changes.
 
 ```python
 result = run_portfolio_simulation(

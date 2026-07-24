@@ -138,7 +138,7 @@ class TestFillPriceNextOpen:
         assert result["final_equity"] == pytest.approx(10_000.0)
 
 
-class TestFillPriceMidpoint:
+class TestFillPriceHl2Exploratory:
     def test_hand_verified_equity_curve(self, small_ohlcv, small_signals):
         """
         Same two-leg decomposition as next_open, but the reference price
@@ -151,7 +151,7 @@ class TestFillPriceMidpoint:
             10_000.0,
             commission_pct=0.0,
             slippage_pct=0.0,
-            fill_price="midpoint",
+            fill_price="hl2_exploratory",
         )
         equity = result["equity_curve"]
         expected = [10000.0, 10000.0, 9901.9608, 10290.5655, 10241.5628]
@@ -159,7 +159,7 @@ class TestFillPriceMidpoint:
             assert actual == pytest.approx(exp, abs=0.05)
         assert result["final_equity"] == pytest.approx(10241.5628, abs=0.05)
 
-    def test_midpoint_differs_from_close_and_next_open(
+    def test_hl2_exploratory_differs_from_close_and_next_open(
         self, small_ohlcv, small_signals
     ):
         close_result = run_strategy(
@@ -173,18 +173,18 @@ class TestFillPriceMidpoint:
             slippage_pct=0.0,
             fill_price="next_open",
         )
-        midpoint_result = run_strategy(
+        hl2_result = run_strategy(
             small_ohlcv,
             small_signals,
             10_000.0,
             commission_pct=0.0,
             slippage_pct=0.0,
-            fill_price="midpoint",
+            fill_price="hl2_exploratory",
         )
-        assert midpoint_result["final_equity"] != pytest.approx(
+        assert hl2_result["final_equity"] != pytest.approx(
             close_result["final_equity"], abs=1e-6
         )
-        assert midpoint_result["final_equity"] != pytest.approx(
+        assert hl2_result["final_equity"] != pytest.approx(
             next_open_result["final_equity"], abs=1e-6
         )
 
@@ -196,7 +196,7 @@ class TestFillPriceMidpoint:
             10_000.0,
             commission_pct=0.0,
             slippage_pct=0.0,
-            fill_price="midpoint",
+            fill_price="hl2_exploratory",
         )
         assert result["final_equity"] == pytest.approx(10_000.0)
 
@@ -224,7 +224,7 @@ class TestFillPriceBacktestGrid:
             grid_next_open.iloc[0]["final_equity"], abs=1e-6
         )
 
-    def test_backtest_grid_threads_midpoint_fill_price(self, small_ohlcv):
+    def test_backtest_grid_threads_hl2_exploratory_fill_price(self, small_ohlcv):
         def my_signal(df: pd.DataFrame, level: float) -> pd.Series:
             return (df["Close"] > level).astype(float)
 
@@ -235,15 +235,15 @@ class TestFillPriceBacktestGrid:
             n_workers=1,
             fill_price="close",
         )
-        grid_midpoint = backtest_grid(
+        grid_hl2 = backtest_grid(
             small_ohlcv,
             strategy=my_signal,
             param_grid={"level": [100.0]},
             n_workers=1,
-            fill_price="midpoint",
+            fill_price="hl2_exploratory",
         )
         assert grid_close.iloc[0]["final_equity"] != pytest.approx(
-            grid_midpoint.iloc[0]["final_equity"], abs=1e-6
+            grid_hl2.iloc[0]["final_equity"], abs=1e-6
         )
 
     def test_backtest_grid_default_fill_price_is_close(self, small_ohlcv):

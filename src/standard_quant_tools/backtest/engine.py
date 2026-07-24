@@ -23,7 +23,7 @@ from standard_quant_tools.metrics.risk_metrics import (
     sortino_ratio,
 )
 
-_VALID_FILL_PRICES = ("close", "next_open", "midpoint")
+_VALID_FILL_PRICES = ("close", "next_open", "hl2_exploratory")
 
 # ── Optional C++ fast path ────────────────────────────────────────────────────
 from typing import Any as _Any
@@ -60,9 +60,9 @@ def _build_trade_log(
     "appears" in `executed` at event date i actually earns its first
     return over Close[i-1] -> Close[i], so i-1's close is its true economic
     entry/exit point — the review's finding), or Open[i] / (High[i]+Low[i])/2
-    directly under "next_open"/"midpoint", where the two-leg decomposition
-    already prices entries/exits at that bar's own reference price (no
-    shift needed there).
+    directly under "next_open"/"hl2_exploratory", where the two-leg
+    decomposition already prices entries/exits at that bar's own reference
+    price (no shift needed there).
 
     return_pct is reduced by 2 * cost_per_unit (entry + exit — matching the
     two separate pos_diff-triggered cost deductions run_strategy applies to
@@ -70,6 +70,14 @@ def _build_trade_log(
     a position still open at the final bar (a synthesized mark-to-market
     "exit", not a real exit event — the equity curve never deducted a
     second cost for it either).
+
+    position_size is the actual executed signal value held during the
+    trade (e.g. 2.5 for a SCORE signal sized at 2.5x leverage), not just
+    its sign — run_strategy's own return calculation multiplies the raw
+    price return by this same value (strategy_returns[i] = executed[i] *
+    returns[i]), so return_pct must scale with it too, not silently treat
+    every trade as if it were exactly 1x/-1x. direction ("long"/"short") is
+    still reported as a readable label derived from position_size's sign.
 
     Vectorized detection of position changes; only iterates over trade
     events (orders-of-magnitude fewer than bars).
@@ -86,6 +94,7 @@ def _build_trade_log(
                 "direction",
                 "entry_price",
                 "exit_price",
+                "position_size",
                 "return_pct",
             ]
         )
@@ -98,17 +107,18 @@ def _build_trade_log(
         new_pos = executed[date]
 
         if open_trade:
-            direction = open_trade["direction"]
+            position_size = open_trade["position_size"]
             entry_price = open_trade["entry_price"]
-            raw_pnl = (ref_price - entry_price) / entry_price * direction
+            raw_pnl = (ref_price - entry_price) / entry_price * position_size
             net_pnl = raw_pnl - 2 * cost_per_unit
             records.append(
                 {
                     "entry_date": open_trade["entry_date"],
                     "exit_date": date,
-                    "direction": "long" if direction == 1 else "short",
+                    "direction": "long" if position_size > 0 else "short",
                     "entry_price": round(entry_price, 4),
                     "exit_price": round(ref_price, 4),
+                    "position_size": round(position_size, 4),
                     "return_pct": round(net_pnl * 100, 4),
                 }
             )
@@ -118,7 +128,7 @@ def _build_trade_log(
             open_trade = {
                 "entry_date": date,
                 "entry_price": ref_price,
-                "direction": 1 if new_pos > 0 else -1,
+                "position_size": float(new_pos),
             }
 
     # Close any position still open at the last bar (e.g. buy-and-hold, trend strategies
@@ -128,9 +138,9 @@ def _build_trade_log(
     if open_trade:
         last_date = close_prices.index[-1]
         last_price = close_prices.iloc[-1]
-        direction = open_trade["direction"]
+        position_size = open_trade["position_size"]
         entry_price = open_trade["entry_price"]
-        raw_pnl = (last_price - entry_price) / entry_price * direction
+        raw_pnl = (last_price - entry_price) / entry_price * position_size
         net_pnl = (
             raw_pnl - cost_per_unit
         )  # entry cost only -- no real exit event occurred
@@ -138,9 +148,10 @@ def _build_trade_log(
             {
                 "entry_date": open_trade["entry_date"],
                 "exit_date": last_date,
-                "direction": "long" if direction == 1 else "short",
+                "direction": "long" if position_size > 0 else "short",
                 "entry_price": round(entry_price, 4),
                 "exit_price": round(float(last_price), 4),
+                "position_size": round(position_size, 4),
                 "return_pct": round(net_pnl * 100, 4),
             }
         )
@@ -207,19 +218,26 @@ def run_strategy(
             own open-to-close move, an exit still bears the overnight gap
             it was held through before selling at the open, and a held
             position sums the two legs instead of compounding them (a
-            second-order, daily-bar-negligible approximation). "midpoint" —
-            identical two-leg decomposition, but using that bar's
-            (High + Low) / 2 as the reference fill price instead of Open —
-            a bid/ask-free proxy for a midquote fill (requires 'High' and
-            'Low' columns). Only entry_price/exit_price in the trade log
-            stay Close-based either way — the aggregate P&L (equity curve,
-            all metrics) is what reflects next_open/midpoint fills correctly.
+            second-order, daily-bar-negligible approximation).
+            "hl2_exploratory" — identical two-leg decomposition, but using
+            that bar's own (High + Low) / 2 ("HL2") as the reference fill
+            price instead of Open. This is NOT a bid/ask midpoint quote —
+            it requires knowing the bar's High and Low, which are only
+            determined once the bar has already completed, so pricing a
+            fill at a bar's own HL2 is look-ahead the same way fill_price=
+            "close" is (see the warning below); the name says "exploratory"
+            deliberately, so it's never mistaken for a real, tradable
+            execution price. entry_price/exit_price in the trade log use
+            this same fill-mode-aware reference price, not always Close —
+            see _build_trade_log.
 
     Returns:
-        Dict with performance metrics, equity curve, and optionally trade_log.
+        Dict with performance metrics, equity curve, and optionally
+        trade_log. When fill_price is "close" or "hl2_exploratory",
+        result["warnings"] includes a look-ahead-bias caveat (see below).
 
     Raises:
-        ValidationError: fill_price is not one of "close", "next_open", "midpoint".
+        ValidationError: fill_price is not one of "close", "next_open", "hl2_exploratory".
     """
     if fill_price not in _VALID_FILL_PRICES:
         raise ValidationError(
@@ -242,6 +260,25 @@ def run_strategy(
 
     returns = prices.pct_change().fillna(0.0)
     executed = signals.shift(1).fillna(0.0)
+
+    warnings: List[str] = []
+    if fill_price == "close":
+        warnings.append(
+            "fill_price='close': a signal known at bar t-1's close is assumed filled "
+            "at that same close. If signal_series was derived from that bar's own "
+            "Close (e.g. a same-day indicator/score), this is a look-ahead bias — the "
+            "trade could not actually have been placed at that price in real time. "
+            "Use fill_price='next_open' for a lookahead-free simulation."
+        )
+    elif fill_price == "hl2_exploratory":
+        warnings.append(
+            "fill_price='hl2_exploratory': fills at a bar's own (High + Low) / 2 — "
+            "not a real bid/ask midpoint quote, and not knowable until that bar has "
+            "already completed (High/Low are only determined in retrospect), so this "
+            "is look-ahead the same way fill_price='close' is. Intended for "
+            "exploratory analysis only; use fill_price='next_open' for a "
+            "lookahead-free simulation."
+        )
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
     # Pass raw signals — C++ applies the one-bar lag internally (executed[i] = signals[i-1]).
@@ -280,6 +317,7 @@ def run_strategy(
             "max_drawdown": round(float(r["max_drawdown"]), 6),
             "calmar_ratio": round(float(r["calmar_ratio"]), 4),
             "equity_curve": equity_curve,
+            "warnings": warnings,
             **trade_stats,
         }
         if include_trade_log:
@@ -299,7 +337,7 @@ def run_strategy(
     pos_diff = executed.diff().fillna(executed.iloc[0])
     transaction_costs = pos_diff.abs() * cost_per_unit
 
-    if fill_price in ("next_open", "midpoint"):
+    if fill_price in ("next_open", "hl2_exploratory"):
         # Two-leg decomposition, correct for entries, continuations, exits,
         # and same-bar flips alike:
         #   overnight leg (Close[t-1] -> ref_price[t]) priced at YESTERDAY's
@@ -315,8 +353,9 @@ def run_strategy(
         # compounding them (their product is the only difference from pure
         # close-to-close — negligible for daily bars, standard in overnight
         # vs. intraday P&L attribution). "next_open" uses that bar's Open as
-        # the reference price; "midpoint" uses (High + Low) / 2 as a
-        # bid/ask-free proxy for a midquote fill.
+        # the reference price; "hl2_exploratory" uses (High + Low) / 2 —
+        # NOT a real bid/ask midpoint, and only knowable after the bar has
+        # already completed (see the look-ahead warning above).
         if fill_price == "next_open":
             ref_prices = price_data.loc[idx, "Open"]
         else:
@@ -357,6 +396,7 @@ def run_strategy(
         "max_drawdown": round(mdd, 6),
         "calmar_ratio": round(cal, 4),
         "equity_curve": equity_curve,
+        "warnings": warnings,
     }
 
     trade_log = _build_trade_log(ref_prices, prices, executed, cost_per_unit)
@@ -476,7 +516,7 @@ def backtest_grid(
                         C++ extension is not built — arbitrary callables
                         (lambdas, closures) are frequently unpicklable across
                         the ProcessPoolExecutor spawn boundary.
-        fill_price:     "close" (default), "next_open", or "midpoint" — see
+        fill_price:     "close" (default), "next_open", or "hl2_exploratory" — see
                         run_strategy. Forces the Python path for the latter
                         two (the C++ batch kernel only knows Close prices)
                         regardless of n_workers/HAS_CPP.

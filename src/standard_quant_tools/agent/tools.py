@@ -282,6 +282,7 @@ def _run_backtest(
                 direction=str(r["direction"]),
                 entry_price=float(r["entry_price"]),
                 exit_price=float(r["exit_price"]),
+                position_size=float(r.get("position_size", 1.0)),
                 return_pct=float(r["return_pct"]),
             )
             for r in trade_log_raw.to_dict(orient="records")
@@ -722,15 +723,25 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
         sort_by=input_data.sort_by,
         ascending=input_data.ascending,
     )
+    failed_filters = dict(result_df.attrs.get("failed_filters", {}))
+    failed_tickers = dict(result_df.attrs.get("failed_tickers", {}))
+    failed_batches = list(result_df.attrs.get("failed_batches", []))
 
     if result_df.empty:
-        return ScreenerResult(num_passed=0, tickers_passed=[], results=[])
+        return ScreenerResult(
+            num_passed=0, tickers_passed=[], results=[],
+            failed_filters=failed_filters, failed_tickers=failed_tickers,
+            failed_batches=failed_batches,
+        )
 
     records = result_df.reset_index().to_dict(orient="records")
     return ScreenerResult(
         num_passed=len(result_df),
         tickers_passed=list(result_df.index),
         results=records,
+        failed_filters=failed_filters,
+        failed_tickers=failed_tickers,
+        failed_batches=failed_batches,
     )
 
 
@@ -1952,6 +1963,8 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         strategy=input_data.strategy,
         param_grid=input_data.param_grid,
         initial_capital=input_data.initial_capital,
+        commission_pct=input_data.commission_pct,
+        slippage_pct=input_data.slippage_pct,
         sort_by=input_data.sort_by,
         ascending=False,
         n_workers=input_data.n_workers,
@@ -2339,6 +2352,7 @@ def run_signal_panel_backtest(
                     direction=str(r["direction"]),
                     entry_price=float(r["entry_price"]),
                     exit_price=float(r["exit_price"]),
+                    position_size=float(r.get("position_size", 1.0)),
                     return_pct=float(r["return_pct"]),
                 )
                 for r in trade_log_raw.to_dict(orient="records")
@@ -3484,4 +3498,27 @@ def dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         raise
     elapsed_ms = (time.perf_counter() - t0) * 1000
     logger.debug("[dispatch] ✓ %s  completed in %.0fms", tool_name, elapsed_ms)
-    return result
+    return _sanitize_for_json(result)
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """
+    Recursively replace float('inf')/float('-inf')/float('nan') with None.
+
+    A legitimately "infinite" metric (e.g. sortino_ratio/calmar_ratio when
+    there's no downside deviation or drawdown at all) is valid math but not
+    valid JSON per RFC 8259 — Python's json.dumps (the exact call this
+    module's own docstring recommends for sending dispatch()'s result to an
+    LLM) emits the non-standard tokens Infinity/-Infinity/NaN by default,
+    which many strict JSON parsers (including some LLM API backends) reject
+    outright. None is the JSON-safe way to say "this metric is undefined/
+    unbounded" without silently substituting a made-up finite number that
+    would misrepresent the actual result.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj

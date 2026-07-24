@@ -33,7 +33,7 @@ import datetime
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,25 @@ import pandas as pd
 
 from standard_quant_tools.analysis.regression import calculate_beta
 from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi as calc_rsi
 from standard_quant_tools.indicators.trend import sma as calc_sma
+
+_VALID_FILTER_KEYS = frozenset((
+    "pe_ratio_max", "pb_ratio_max", "debt_equity_max", "roe_min",
+    "profit_margin_min", "div_yield_min", "market_cap_min",
+    "rsi_max", "rsi_min", "price_above_sma", "price_below_sma",
+    "beta_max", "beta_min",
+))
+
+
+def _validate_filter_keys(filters: Dict[str, Any]) -> None:
+    unknown = set(filters) - _VALID_FILTER_KEYS
+    if unknown:
+        raise ValidationError(
+            f"Unknown filter key(s): {sorted(unknown)}. Valid keys: "
+            f"{sorted(_VALID_FILTER_KEYS)}"
+        )
 
 # ── Per-ticker async evaluation ───────────────────────────────────────────────
 
@@ -54,10 +71,23 @@ async def _fetch_ticker_data(
     end_date: str,
     filters: Dict[str, Any],
     spy_df: Optional[pd.DataFrame] = None,
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[str, str, Any]:
     """
     Fetch all required data for one ticker and evaluate filters.
-    Returns a result dict if the ticker passes, None if it fails any filter.
+
+    Returns a 3-tuple (status, ticker, payload):
+      ("passed", ticker, row_dict) — passed every filter.
+      ("failed_filter", ticker, filter_key) — failed a specific filter
+          condition (genuine rejection: the ticker's own data didn't meet
+          the requested bound).
+      ("error", ticker, error_message) — a data-fetch/compute exception
+          (network error, missing data, bad response, etc.).
+
+    A ticker that raised an exception must never be indistinguishable from
+    one that simply failed a filter — both used to collapse to `None`,
+    which meant a screener run silently returning zero results couldn't
+    tell you whether every ticker was genuinely rejected or every ticker's
+    data fetch was broken.
     """
     row: Dict[str, Any] = {"ticker": ticker}
 
@@ -105,37 +135,37 @@ async def _fetch_ticker_data(
             if "pe_ratio_max" in filters and (
                 ratios.forward_pe is None or ratios.forward_pe > filters["pe_ratio_max"]
             ):
-                return None
+                return ("failed_filter", ticker, "pe_ratio_max")
             if "pb_ratio_max" in filters and (
                 ratios.price_to_book is None
                 or ratios.price_to_book > filters["pb_ratio_max"]
             ):
-                return None
+                return ("failed_filter", ticker, "pb_ratio_max")
             if "debt_equity_max" in filters and (
                 ratios.debt_to_equity is None
                 or ratios.debt_to_equity > filters["debt_equity_max"]
             ):
-                return None
+                return ("failed_filter", ticker, "debt_equity_max")
             if "roe_min" in filters and (
                 ratios.return_on_equity is None
                 or ratios.return_on_equity < filters["roe_min"]
             ):
-                return None
+                return ("failed_filter", ticker, "roe_min")
             if "profit_margin_min" in filters and (
                 ratios.profit_margins is None
                 or ratios.profit_margins < filters["profit_margin_min"]
             ):
-                return None
+                return ("failed_filter", ticker, "profit_margin_min")
             if "div_yield_min" in filters and (
                 ratios.dividend_yield is None
                 or ratios.dividend_yield < filters["div_yield_min"]
             ):
-                return None
+                return ("failed_filter", ticker, "div_yield_min")
             if "market_cap_min" in filters and (
                 ratios.market_cap is None
                 or ratios.market_cap < filters["market_cap_min"]
             ):
-                return None
+                return ("failed_filter", ticker, "market_cap_min")
 
         if needs_ohlcv:
             df = await provider.get_ohlcv_async(ticker, start_date, end_date)
@@ -148,22 +178,22 @@ async def _fetch_ticker_data(
                 last_rsi = float(rsi_vals.dropna().iloc[-1])
                 row["rsi_14"] = round(last_rsi, 2)
                 if "rsi_max" in filters and last_rsi > filters["rsi_max"]:
-                    return None
+                    return ("failed_filter", ticker, "rsi_max")
                 if "rsi_min" in filters and last_rsi < filters["rsi_min"]:
-                    return None
+                    return ("failed_filter", ticker, "rsi_min")
 
             if "price_above_sma" in filters:
                 n = int(filters["price_above_sma"])
                 sma_vals = calc_sma(close, n)
                 if last_close <= float(sma_vals.dropna().iloc[-1]):
-                    return None
+                    return ("failed_filter", ticker, "price_above_sma")
                 row[f"sma_{n}"] = round(float(sma_vals.dropna().iloc[-1]), 2)
 
             if "price_below_sma" in filters:
                 n = int(filters["price_below_sma"])
                 sma_vals = calc_sma(close, n)
                 if last_close >= float(sma_vals.dropna().iloc[-1]):
-                    return None
+                    return ("failed_filter", ticker, "price_below_sma")
                 row[f"sma_{n}"] = round(float(sma_vals.dropna().iloc[-1]), 2)
 
             if "beta_max" in filters or "beta_min" in filters:
@@ -178,14 +208,14 @@ async def _fetch_ticker_data(
                 beta = stats["beta"]
                 row["beta"] = round(beta, 4)
                 if "beta_max" in filters and beta > filters["beta_max"]:
-                    return None
+                    return ("failed_filter", ticker, "beta_max")
                 if "beta_min" in filters and beta < filters["beta_min"]:
-                    return None
+                    return ("failed_filter", ticker, "beta_min")
 
-    except Exception:
-        return None
+    except Exception as exc:
+        return ("error", ticker, str(exc))
 
-    return row
+    return ("passed", ticker, row)
 
 
 # ── Async screener (single process) ──────────────────────────────────────────
@@ -212,7 +242,16 @@ async def screen_stocks_async(
 
     Returns:
         pd.DataFrame with one row per passing ticker, sorted if requested.
+        df.attrs["failed_filters"] maps ticker -> the specific filter key it
+        failed (genuine rejection). df.attrs["failed_tickers"] maps ticker
+        -> error message for a data-fetch/compute exception — kept
+        separate from failed_filters so a broken data fetch is never
+        indistinguishable from a ticker that simply didn't meet the bar.
+
+    Raises:
+        ValidationError: filters contains an unrecognized key.
     """
+    _validate_filter_keys(filters)
     end: str = end_date or datetime.date.today().isoformat()
     start: str = (
         start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
@@ -241,21 +280,28 @@ async def screen_stocks_async(
     ]
     raw = await asyncio.gather(*tasks)
 
-    passing = [r for r in raw if r is not None]
+    passing = [payload for status, _, payload in raw if status == "passed"]
+    failed_filters = {
+        t: reason for status, t, reason in raw if status == "failed_filter"
+    }
+    failed_tickers = {t: reason for status, t, reason in raw if status == "error"}
     logger.debug(
-        "[screener] passed=%d / %d (%.0f%%)",
+        "[screener] passed=%d  failed_filter=%d  error=%d / %d (%.0f%% passed)",
         len(passing),
+        len(failed_filters),
+        len(failed_tickers),
         len(tickers),
         100 * len(passing) / len(tickers) if tickers else 0,
     )
     if not passing:
-        return pd.DataFrame()
+        df = pd.DataFrame()
+    else:
+        df = pd.DataFrame(passing).set_index("ticker")
+        if sort_by and sort_by in df.columns:
+            df = df.sort_values(sort_by, ascending=ascending)
 
-    df = pd.DataFrame(passing).set_index("ticker")
-
-    if sort_by and sort_by in df.columns:
-        df = df.sort_values(sort_by, ascending=ascending)
-
+    df.attrs["failed_filters"] = failed_filters
+    df.attrs["failed_tickers"] = failed_tickers
     return df
 
 
@@ -303,6 +349,16 @@ def screen_stocks(
 
     Returns:
         pd.DataFrame with one row per passing ticker, sorted if requested.
+        df.attrs carries "failed_filters" (ticker -> filter key it failed),
+        "failed_tickers" (ticker -> error message for a data-fetch/compute
+        exception), and "failed_batches" (list of error messages for a
+        whole worker-process batch that raised before returning any
+        per-ticker result — n_workers > 1 only). A ticker's exception is
+        never indistinguishable from a genuine filter rejection, and a
+        crashed batch is never silently discarded without a trace.
+
+    Raises:
+        ValidationError: filters contains an unrecognized key.
 
     Example (large universe)::
 
@@ -313,6 +369,7 @@ def screen_stocks(
             n_workers=8,
         )
     """
+    _validate_filter_keys(filters)
     end: str = end_date or datetime.date.today().isoformat()
     start: str = (
         start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
@@ -332,15 +389,18 @@ def screen_stocks(
     )
 
     if n_workers <= 1:
-        return asyncio.run(
+        result = asyncio.run(
             screen_stocks_async(tickers, filters, start, end, sort_by, ascending)
         )
+        result.attrs.setdefault("failed_batches", [])
+        return result
 
     # Split tickers into roughly equal batches across workers
     batch_size = (n + n_workers - 1) // n_workers
     batches = [tickers[i : i + batch_size] for i in range(0, n, batch_size)]
 
     batch_results: List[pd.DataFrame] = []
+    failed_batches: List[str] = []
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = [
             executor.submit(_screen_batch, (batch, filters, start, end))
@@ -349,14 +409,27 @@ def screen_stocks(
         for future in futures:
             try:
                 batch_results.append(future.result())
-            except Exception:
-                pass  # failed batches contribute nothing; individual tickers already silenced
+            except Exception as exc:
+                # A whole batch (one worker process) raised before returning
+                # any per-ticker result -- record it rather than silently
+                # discarding every ticker in that batch with no trace.
+                failed_batches.append(str(exc))
+
+    failed_filters: Dict[str, str] = {}
+    failed_tickers: Dict[str, str] = {}
+    for df in batch_results:
+        failed_filters.update(df.attrs.get("failed_filters", {}))
+        failed_tickers.update(df.attrs.get("failed_tickers", {}))
 
     non_empty = [df for df in batch_results if not df.empty]
     if not non_empty:
-        return pd.DataFrame()
+        combined = pd.DataFrame()
+    else:
+        combined = pd.concat(non_empty)
+        if sort_by and sort_by in combined.columns:
+            combined = combined.sort_values(sort_by, ascending=ascending)
 
-    combined = pd.concat(non_empty)
-    if sort_by and sort_by in combined.columns:
-        combined = combined.sort_values(sort_by, ascending=ascending)
+    combined.attrs["failed_filters"] = failed_filters
+    combined.attrs["failed_tickers"] = failed_tickers
+    combined.attrs["failed_batches"] = failed_batches
     return combined

@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -218,6 +219,15 @@ class DecisionRecord(BaseModel):
     package_version: Optional[str] = None
     random_seed: Optional[int] = None
     strategy_source_hash: Optional[str] = None
+    # Hash-chain tamper-evidence: each record's hash covers its own content
+    # plus the previous record's hash, so editing a past line changes that
+    # line's hash and breaks the chain for every record after it (unless an
+    # attacker also rewrites every subsequent line to match — this detects
+    # accidental/partial tampering, not a fully-rewritten log; there is no
+    # external anchor/signature to detect a wholesale rewrite). "0" * 16 for
+    # the first record of a day's file.
+    prev_record_hash: Optional[str] = None
+    record_hash: Optional[str] = None
 
 
 def _audit_enabled() -> bool:
@@ -233,6 +243,56 @@ def _audit_dir() -> Path:
     )
 
 
+_GENESIS_HASH = "0" * 16
+
+
+def _acquire_lock(lock_path: Path) -> Optional[Any]:
+    """
+    Best-effort cross-process exclusive lock via a small sidecar file (not
+    the growing JSONL file itself — locking a fixed, tiny file avoids the
+    platform-specific complexity of byte-range-locking a file whose EOF
+    offset keeps moving). Returns an open file handle the caller must pass
+    to `_release_lock`, or None if locking isn't available on this platform
+    — in which case writes proceed unlocked rather than blocking a tool
+    call on a missing OS primitive.
+    """
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lf = open(lock_path, "a+b")
+        if sys.platform == "win32":
+            import msvcrt
+
+            lf.seek(0)
+            msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        return lf
+    except Exception:
+        logger.debug("[audit] advisory file lock unavailable", exc_info=True)
+        return None
+
+
+def _release_lock(lf: Optional[Any]) -> None:
+    if lf is None:
+        return
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            lf.seek(0)
+            msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    finally:
+        lf.close()
+
+
 class AuditWriter:
     """Append-only JSONL writer, one file per UTC day."""
 
@@ -243,12 +303,85 @@ class AuditWriter:
         self._dir.mkdir(parents=True, exist_ok=True)
         return self._dir / f"{when.strftime('%Y-%m-%d')}.jsonl"
 
+    def _last_record_hash(self, path: Path) -> str:
+        """Hash of the last line in `path`, or the genesis hash if the file
+        doesn't exist/is empty. Must be called while the write lock is held,
+        since it establishes the chain link the new record commits to."""
+        if not path.exists():
+            return _GENESIS_HASH
+        last_line: Optional[str] = None
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line
+        if last_line is None:
+            return _GENESIS_HASH
+        try:
+            return json.loads(last_line).get("record_hash") or _GENESIS_HASH
+        except Exception:
+            return _GENESIS_HASH
+
     def write(self, record: DecisionRecord) -> Path:
         when = datetime.now(timezone.utc)
         path = self._path_for(when)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(record.model_dump_json() + "\n")
+        lock_path = path.with_name(path.name + ".lock")
+
+        lf = _acquire_lock(lock_path)
+        try:
+            record.prev_record_hash = self._last_record_hash(path)
+            # Hash over the record with record_hash itself left unset, so
+            # the chain link (prev_record_hash) and the record's own content
+            # are both covered without the field hashing itself.
+            record.record_hash = hash_payload(
+                {**record.model_dump(exclude={"record_hash"}), "record_hash": None}
+            )
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(record.model_dump_json() + "\n")
+        finally:
+            _release_lock(lf)
         return path
+
+
+def verify_audit_log_integrity(path: Union[str, Path]) -> List[str]:
+    """
+    Walk a single day's JSONL audit file and confirm its hash chain is
+    intact. Returns a list of human-readable problems (empty if the file is
+    clean or doesn't exist). Detects a record whose content was edited after
+    the fact, or a record removed/reordered/inserted — as long as every
+    later record in the file wasn't *also* rewritten to match, which is a
+    fundamentally unreachable guarantee without an external, independently
+    stored anchor (e.g. signing the last hash of each day into a separate
+    system) — this function does not attempt that.
+    """
+    path = Path(path)
+    if not path.exists():
+        return []
+    problems: List[str] = []
+    prev_hash = _GENESIS_HASH
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            claimed_prev = record.get("prev_record_hash")
+            if claimed_prev != prev_hash:
+                problems.append(
+                    f"line {lineno} (request_id={record.get('request_id')}): "
+                    f"prev_record_hash={claimed_prev!r} does not match the "
+                    f"preceding record's hash {prev_hash!r} — chain broken "
+                    "(a record was edited, removed, reordered, or inserted)."
+                )
+            recomputed = hash_payload({**record, "record_hash": None})
+            claimed_hash = record.get("record_hash")
+            if recomputed != claimed_hash:
+                problems.append(
+                    f"line {lineno} (request_id={record.get('request_id')}): "
+                    f"record_hash={claimed_hash!r} does not match its own "
+                    f"recomputed content hash {recomputed!r} — this line's "
+                    "content was altered after it was written."
+                )
+            prev_hash = claimed_hash or prev_hash
+    return problems
 
 
 def _strategy_source_hash(model_instance: Any) -> Optional[str]:
@@ -391,19 +524,29 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
         (s["symbol"], s["start"], s["end"], s["interval"]): s["content_hash"]
         for s in record.get("data_sources", [])
     }
+    new_by_key = {
+        (s["symbol"], s["start"], s["end"], s["interval"]): s["content_hash"]
+        for s in new_sources
+    }
+    # Iterate the union of old and new keys, not just new_sources — a key
+    # present in the original record but absent from the replay (e.g. the
+    # tool no longer fetches a symbol/range it used to) must still be
+    # reported, not silently dropped just because the loop only walked
+    # what the replay happened to touch.
     data_matches: List[Dict[str, Any]] = []
-    for s in new_sources:
-        key = (s["symbol"], s["start"], s["end"], s["interval"])
+    for key in sorted(set(old_by_key) | set(new_by_key)):
+        symbol, start, end, interval = key
         old_hash = old_by_key.get(key)
+        new_hash = new_by_key.get(key)
         data_matches.append(
             {
-                "symbol": s["symbol"],
-                "start": s["start"],
-                "end": s["end"],
-                "interval": s["interval"],
+                "symbol": symbol,
+                "start": start,
+                "end": end,
+                "interval": interval,
                 "old_hash": old_hash,
-                "new_hash": s["content_hash"],
-                "match": old_hash == s["content_hash"],
+                "new_hash": new_hash,
+                "match": old_hash == new_hash,
             }
         )
 

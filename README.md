@@ -26,6 +26,8 @@ poetry install
 
 **Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `scikit-learn`, `plotly`, `pyarrow`
 
+> **Note on the C++ extension:** the package uses a Flit build backend, so `pip install .` / `poetry install` above installs the **pure-Python package only** — every indicator, backtest, and analysis function works via its Numba/pure-Python fallback, but the compiled `_sqt_core` speedups in the table below are not built by this step. Building `_sqt_core` is a separate, manual CMake step; see [Development/build_guide.md](Development/build_guide.md).
+
 ---
 
 ## Quick Start
