@@ -3,9 +3,14 @@
 Every call routed through `dispatch()` can produce an immutable **decision
 record**: the tool name and inputs, the market data it pulled (with content
 hashes), whether the C++ accelerated path was available, a hash of the
-output, and how long it took. `verify_replay()` re-runs a recorded call and
-reports whether the data and output still match — enough to tell a stale or
-tampered cache apart from a genuine code change.
+output, and how long it took. Records are also **hash-chained** — each one
+commits to the previous record's hash — so `verify_audit_log_integrity()`
+can detect a line that was edited, removed, reordered, or inserted after
+the fact (see [Tamper evidence](#tamper-evidence-hash-chain) below).
+`verify_replay()` re-runs a recorded call and reports whether the data and
+output still match — enough to tell a stale or tampered cache apart from a
+genuine code change. JSONL writes are guarded by a cross-process file lock,
+so two callers writing at once can't interleave and corrupt a day's file.
 
 Nothing here runs automatically. The package attaches only a `NullHandler`
 by default, and decision records are the only side effect that requires
@@ -53,14 +58,20 @@ produces a record like:
   "git_commit_sha": "463b874696913a8ec813c9a789465a443b66a15b",
   "package_version": "0.1.0",
   "random_seed": null,
-  "strategy_source_hash": "9f2a7c1e4b8d0356"
+  "strategy_source_hash": "9f2a7c1e4b8d0356",
+  "prev_record_hash": "0000000000000000",
+  "record_hash": "7c3a9e21f6b4d805"
 }
 ```
 
-`data_sources` has one entry per OHLCV pull, tagged `disk_cache` or
-`live_fetch`, with a content hash of the DataFrame actually used. Failed
-calls still produce a record — `status: "error"` with `error_type` /
-`error_message` set, and `output_hash: null`.
+`data_sources` has one entry per OHLCV pull, tagged `disk_cache`,
+`live_fetch`, or `session_cache`, with a content hash of the DataFrame
+actually used. `session_cache` fires on every in-memory-cache hit inside
+`YFinanceProvider.get_ohlcv()`, not just misses — a call that only ever
+touches the process's warm cache still produces a complete, auditable data
+lineage instead of an empty `data_sources` list. Failed calls still produce
+a record — `status: "error"` with `error_type` / `error_message` set, and
+`output_hash: null`.
 
 `git_commit_sha` and `package_version` are reproducibility provenance: the
 exact commit and library version that produced this record, so a replay
@@ -80,6 +91,10 @@ strategy changed" from "the market data changed." `null` for tools with no
 such field (e.g. `run_custom_signal_backtest`) or if the named strategy
 isn't found in the registry — resolving it never raises or blocks the call.
 
+`prev_record_hash`/`record_hash` are the hash-chain link that makes the log
+tamper-evident — see [Tamper evidence](#tamper-evidence-hash-chain) below
+for what they cover and how to verify them.
+
 ### Env vars
 
 | Variable | Default | Purpose |
@@ -94,6 +109,62 @@ surface for OpenAI/Anthropic tool calling (see
 [07_agent_tools.md](07_agent_tools.md)). Calling a tool function directly
 (`run_sma_backtest(BacktestInput(...))`, bypassing `dispatch`) does not
 produce a decision record.
+
+---
+
+## Tamper evidence (hash chain)
+
+Each record commits to the record immediately before it in the same day's
+file: `record_hash` is a content hash of the record itself (every field
+except `record_hash`), and `prev_record_hash` is the *preceding* record's
+`record_hash` — `"0" * 16` (the genesis hash) for the first record of a
+day's file. Editing a record's content after the fact changes its
+`record_hash`; removing, reordering, or inserting a record breaks the
+`prev_record_hash` link for every record that follows it.
+
+```python
+from standard_quant_tools.audit import verify_audit_log_integrity
+
+problems = verify_audit_log_integrity(
+    "~/.cache/standard_quant_tools/audit/2026-07-19.jsonl"
+)
+if problems:
+    for p in problems:
+        print(p)
+else:
+    print("chain intact")
+```
+
+`verify_audit_log_integrity(path: str | Path) -> List[str]` walks the file
+top to bottom and returns one human-readable problem per broken link —
+empty if the file is clean or doesn't exist. Each problem names the
+offending `request_id` and line number, and distinguishes:
+
+- **content altered** — `record_hash` no longer matches that line's
+  recomputed content hash.
+- **chain broken** — `prev_record_hash` doesn't match the preceding line's
+  `record_hash` (a record was edited, removed, reordered, or inserted).
+
+**What this does and doesn't guarantee:** an attacker who edits one line
+without also rewriting every later line's `prev_record_hash`/`record_hash`
+to match is caught. An attacker who consistently rewrites the *entire* file
+from the edited point forward is not — there's no external anchor (e.g.
+signing each day's final hash into a separate system) to detect a
+wholesale rewrite; this function doesn't attempt that. Not wired into the
+`sqt` CLI — call it directly from Python.
+
+### Concurrent writes
+
+Each day's JSONL file is protected by a small sidecar lock file (e.g.
+`2026-07-19.jsonl.lock`, not the growing JSONL file itself) held for the
+duration of one record's read-modify-write — read the current last line's
+hash to compute `prev_record_hash`, append the new line, release.
+`AuditWriter.write()` acquires it via `msvcrt.locking` on Windows or
+`fcntl.flock` on POSIX before touching the file, so two processes (or
+threads/async tasks) writing at the same instant can't interleave and
+corrupt a line or break the hash chain. If neither locking primitive is
+available, writes proceed unlocked rather than blocking a tool call on a
+missing OS feature — best-effort, not a hard guarantee.
 
 ---
 
@@ -124,6 +195,14 @@ hashes:
   under a price rebase) — still worth a closer look.
 - **Data matches, output mismatch** — the code/logic changed since the
   record was written.
+
+`data_source_matches` also reports a data source that was in the original
+record but **disappeared** from the replay (e.g. the tool changed which
+tickers/ranges it fetches, or a symbol was dropped along the way) — that
+entry gets `new_hash: null` and `match: false`, the same as any other
+mismatch, rather than being silently left out just because the replay
+never touched it. Comparing only `set(new_sources)` against the original
+would have hidden exactly this case.
 
 Note that `verify_replay` re-executes the tool function directly (not
 through `dispatch()`), so it does not itself write a new decision record.
@@ -174,11 +253,13 @@ through the `standard_quant_tools` hierarchy.
 
 ## Data provenance without `dispatch()`
 
-`YFinanceProvider.get_ohlcv()` reports every disk-cache-hit and live-fetch
-into whatever decision record is currently open — this happens automatically
-inside `dispatch()`. Calling the provider directly outside of `dispatch()` is
-a no-op for provenance tracking (there's no open decision record to report
-into), but the OHLCV data itself is unaffected.
+`YFinanceProvider.get_ohlcv()` reports every session-cache hit, disk-cache
+hit, and live fetch into whatever decision record is currently open — this
+happens automatically inside `dispatch()`, and now covers the in-memory
+session cache as well (a call that never leaves the warm cache used to
+report nothing at all). Calling the provider directly outside of
+`dispatch()` is a no-op for provenance tracking (there's no open decision
+record to report into), but the OHLCV data itself is unaffected.
 
 ---
 

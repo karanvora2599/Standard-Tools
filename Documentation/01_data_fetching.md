@@ -75,9 +75,10 @@ All ratio fields are `Optional[float]` — missing data returns `None` rather th
 
 ## Caching & Retry
 
-- **TTL cache**: identical calls within 1 hour return the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that
+- **TTL cache**: identical calls within 1 hour return a `.copy()` of the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that
 - **Retry**: up to 3 attempts, waiting 1s then 2s between attempts (exponential backoff, factor 2) on transient failures
-- **Cache key**: `(self, symbol, start_date, end_date, interval)` — `self` is part of the key because caching wraps a bound method, so although the underlying `TTLCache` is one shared module-level object, each provider instance's calls land on distinct keys. It's not lock-guarded (`@cached()` is used without a `lock=`), so it isn't safe against races between concurrent threads hitting the same instance/args at once
+- **Cache key**: `(id(self), symbol, start_date, end_date, interval)` — `get_ohlcv` checks the session cache itself rather than via a `@cached()` decorator wrapping the whole method, so an audit record is written on every call, including a session-cache hit, not just on a live fetch. `id(self)` (not just the call args) keeps a fresh provider instance from transparently reusing another instance's cached result. It's not lock-guarded, so it isn't safe against races between concurrent threads hitting the same instance/args at once
+- **Copy-on-return**: every `get_ohlcv` call — session-cache hit, disk-cache hit, or live fetch — returns a fresh copy, so a caller mutating the result in place can't corrupt the cached object shared with the next caller
 
 To force a fresh fetch, create a new provider instance (cache is per-instance):
 
@@ -96,7 +97,7 @@ Every `get_ohlcv` call for a **historical date range** (end date before today) i
 ~/.cache/standard_quant_tools/ohlcv/AAPL_2020-01-01_2024-01-01_1d.parquet
 ```
 
-**Why only historical ranges?** Historical OHLCV data is immutable. Today's data might still be updating during market hours, so it uses only the in-process TTL cache (1 hour).
+**Why only historical ranges?** "Historical" here means the bar is no longer forming — it does *not* mean the cached values can never change. Data is fetched with `auto_adjust=True`, so a later corporate action (split, special dividend) can retroactively revise the adjusted Close/Open/High/Low for dates already on disk. The cache trades that small staleness risk for avoiding repeated network calls; a symbol with a recent corporate action needs the cache cleared or bypassed (`SQT_CACHE_DIR`) rather than assuming it self-heals. Today's still-forming bar always goes through the in-process TTL cache (1 hour) instead, never the disk cache.
 
 ```python
 import time
@@ -115,6 +116,10 @@ df = provider.get_ohlcv("NVDA", "2020-01-01", "2024-01-01")
 print(f"Cached call: {time.perf_counter() - t0:.3f}s")
 ```
 
+**Corrupt cache files evict themselves**: if a Parquet file on disk fails to read (truncated write, disk corruption, etc.), it's logged, deleted, and the data is transparently refetched from yfinance and rewritten — callers never see the corrupt file or an exception because of it.
+
+**Cache path safety**: `symbol`, `start_date`/`end_date`, and `interval` are all validated (allow-listed characters, `..` rejected) before being used to build the Parquet filename, and the resolved path is checked to still resolve inside the cache root — a malformed or adversarial symbol string (these are LLM-reachable via `get_ohlcv`'s own parameters) can't write outside `SQT_CACHE_DIR`.
+
 **Override the cache directory** via the `SQT_CACHE_DIR` environment variable:
 
 ```bash
@@ -122,7 +127,7 @@ export SQT_CACHE_DIR=/data/market_cache   # Linux/Mac
 set SQT_CACHE_DIR=D:\market_cache         # Windows
 ```
 
-The cache is safe for concurrent access — each process writes to a PID-unique temp file and atomically renames it, so races between workers (e.g. parallel screener) are handled correctly.
+The cache is safe for concurrent access — each write goes to a temp file unique to the process, the thread, and a random suffix, then is atomically renamed into place, so races between workers (e.g. parallel screener) — including multiple threads writing the same symbol/range within one process — are handled correctly.
 
 ---
 

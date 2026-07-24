@@ -217,7 +217,7 @@ adaptive = run_regime_adaptive_backtest(RegimeAdaptiveInput(
 print(f"Strategy          {'Fixed SMA':>12}  {'Adaptive':>12}")
 print(f"Regime / selected {'SMA 10/50':>12}  {adaptive.selected_strategy:>12}")
 print(f"Sharpe ratio      {fixed.sharpe_ratio:>12.2f}  {adaptive.backtest.sharpe_ratio:>12.2f}")
-print(f"Total return      {fixed.total_return_pct:>11.1f}%  {adaptive.backtest.total_return_pct:>11.1f}%")
+print(f"Total return      {fixed.total_return:>11.1%}  {adaptive.backtest.total_return:>11.1%}")
 print(f"Max drawdown      {fixed.max_drawdown:>11.1%}  {adaptive.backtest.max_drawdown:>11.1%}")
 print(f"Trades            {fixed.num_trades:>12}  {adaptive.backtest.num_trades:>12}")
 
@@ -1593,7 +1593,7 @@ print(f"Num Trades    : {result.num_trades}")
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
 | `signals` | `Dict[str, float]` | — | `{date: value}`, computed entirely outside this library. Reindexed onto the **full daily price calendar** per `signal_fill_policy` before backtesting — a sparse (e.g. monthly) signal no longer silently collapses the backtest onto only those dates. Whether/how values are validated is controlled by `signal_type`. |
-| `signal_type` | `SignalType` | `"score"` | `"score"` (default — unrestricted float, today's original behavior) \| `"direction"` (every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) |
+| `signal_type` | `SignalType` | `"direction"` | `"direction"` (default — every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) \| `"score"` (unrestricted float, multiplied directly into `strategy_return = lagged_signal * market_return` — a value of 10 means a 10x position, not "10x more bullish"; only use this if you've already converted your own model's output into a leverage multiplier yourself) |
 | `max_abs_weight` | float | `1.0` | Bound used only when `signal_type="target_weight"` (ignored otherwise) |
 | `signal_fill_policy` | str | `"hold"` | How a sparse `signals` map is extended onto the full price calendar: `"hold"` (default) forward-fills between submitted dates, flat before the first one — correct for a target-position signal meant to persist until changed. `"flat"` does not forward-fill; only the exact submitted dates carry a nonzero signal. `"error"` requires every price date to have an explicit entry. |
 | `initial_capital` | float | `10000` | Starting capital |
@@ -1900,6 +1900,22 @@ engine runs, before any bar is processed, and raises `ValidationError`
 naming every offending `(date, ticker)` pair, same as a missing-entry or
 leverage-limit violation.
 
+**Post-trade enforcement (what `max_gross_leverage`/`max_position_pct`
+actually bound) and insolvency:** each rebalance's shares are sized from
+equity *before* that rebalance's own costs are deducted, so after costs,
+the *reported* `gross_leverage_after` (`rebalance_log`/`leverage_curve`)
+is mechanically inflated above `sum(|weight|)` whenever costs are
+nonzero — this is expected cost drag, **not** rejected. What the engine
+does re-check post-trade (and can raise `ValidationError` for) is a sizing
+self-consistency invariant — realized `gross_after` vs. the equity the
+trade was actually sized from — which should already be guaranteed by the
+pre-trade weight validation above, so a violation here means an actual
+sizing bug, not ordinary cost drag. Separately, if a rebalance's costs
+leave account equity at zero or below, the engine raises `ValidationError`
+immediately (`"...insolvent..."`) rather than continuing — it has no
+forced-liquidation/margin-call machinery, so a non-positive equity state
+has no meaningful next step to simulate.
+
 **`fill_price`:** `"close"` (default), `"next_open"`, or `"hl2_exploratory"`
 — same convention as every other backtest tool (see
 [04_backtesting.md](04_backtesting.md#execution-timing-fill_price)). With
@@ -1923,6 +1939,10 @@ section has the full reference):** `commission_model` (`"pct"` default or
 (+ `impact_coefficient`/`impact_lookback`), `borrow_fee_bps`,
 `margin_interest_rate`, and `max_adv_participation` — all optional,
 defaulting to today's exact flat-cost, no-constraint behavior.
+`borrow_fee_bps`/`margin_interest_rate` accrue using the actual elapsed
+**calendar** days since the previous bar (e.g. 3 days over a Friday →
+Monday gap), not a hardcoded 1 — so financing cost is not under-accrued
+across weekends/holidays.
 
 ```python
 result = run_portfolio_simulation(PortfolioSimulationInput(

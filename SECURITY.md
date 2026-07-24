@@ -53,9 +53,16 @@ callables passed to `run_custom_signal_backtest` / `run_signal_panel_backtest`
 - **Agent tool dispatch** (`standard_quant_tools.agent.dispatch`): tool
   arguments are validated through Pydantic models before reaching any
   underlying function, and filesystem-path-adjacent inputs are further
-  restricted (e.g. `backtest.artifacts.save_artifact`'s `run_id`/`name`
-  are validated against a plain-slug pattern and the resolved path is
-  confirmed to stay inside `SQT_RUNS_DIR` before any read/write). If you
-  find an input that bypasses one of these checks and reaches an
-  unintended path or code branch, that's a legitimate report — please
-  include the specific tool name and payload.
+  restricted — `backtest.artifacts.save_artifact`'s `run_id`/`name` are
+  validated against a plain-slug pattern and the resolved path is confirmed
+  to stay inside `SQT_RUNS_DIR`, and `data.yfinance_provider`'s Parquet
+  cache path similarly contains the symbol/date/interval used to build the
+  cache file path before any read/write. If you find an input that bypasses
+  one of these checks and reaches an unintended path or code branch, that's
+  a legitimate report — please include the specific tool name and payload.
+- **Audit trail integrity**: `standard_quant_tools.audit`'s decision-record
+  log is hash-chained (`prev_record_hash`/`record_hash` on every JSONL
+  record, checked by `verify_audit_log_integrity()`) so tampering with a
+  past record is detectable, not prevented — the log is append-only advisory
+  evidence, not a cryptographically-signed ledger. A gap in
+  `verify_audit_log_integrity()`'s tamper detection is a legitimate report.

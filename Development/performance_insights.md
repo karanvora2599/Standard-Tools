@@ -21,7 +21,7 @@ Of the ~20 distinct computational modules in this library, several components ac
 | 3 | Engle-Granger Cointegration (OLS + ADF + MacKinnon 2010) | ✅ IMPLEMENTED | 5–15× vs statsmodels |
 | 4 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | ✅ IMPLEMENTED | 10–20× vs `lstsq` |
 | 5 | Backtest kernel (`run_strategy` — equity + all metrics in one C++ pass) | ✅ IMPLEMENTED | 3–8× vs pandas |
-| 6 | Batch backtest grid (`batch_run_strategy` — all combos in one C++ call) | ✅ IMPLEMENTED | 10–50× vs per-combo C++ calls |
+| 6 | Batch backtest grid (`batch_run_strategy` — all combos in one C++ call) | ✅ IMPLEMENTED — win_rate/profit_factor/num_trades/avg_trade_return_pct use the native kernel's own uncorrected trade-log accounting (known divergence from `_build_trade_log`, unfixed as of 2026-07-24 — see Item 5) | 10–50× vs per-combo C++ calls |
 | 7 | Rolling factor loadings (`rolling_factor_loadings` — incremental Cholesky) | ✅ IMPLEMENTED | 50–200× vs per-window `lstsq` |
 | 8 | Rolling beta (`rolling_beta` — incremental sum updates) | ✅ IMPLEMENTED | 10–40× vs 2× pandas rolling |
 | 9 | Bollinger Bands (`bollinger_bands` — fused Σx / Σx² pass) | ✅ IMPLEMENTED | 3–8× vs 2× pandas rolling |
@@ -160,7 +160,7 @@ Implemented the full Engle-Granger test in `cointegration.cpp`: OLS residuals, A
 The pandas-vectorized `run_strategy` created multiple intermediate Series objects (`returns`, `executed`, `pos_diff`, `transaction_costs`, `strategy_returns`, `equity_curve`) before calling six separate metric functions, each with their own pandas overhead. Each `backtest_grid` worker absorbed this overhead for every parameter combination.
 
 **C++ approach:**  
-A single `sqt::run_strategy` function accepts close prices and signal arrays directly, and in one pass computes: strategy returns, equity curve (cumprod), all six metrics (total return, annualized vol, Sharpe, Sortino, max drawdown, Calmar), and trade statistics (num trades, win rate, profit factor, avg trade return). This matches the Python algorithm exactly — one-bar lag execution, sample standard deviation, same trade state machine as `_build_trade_log`. The optional per-trade log (with dates and direction labels) still runs in Python when `include_trade_log=True`, since it requires DatetimeIndex aware iteration.
+A single `sqt::run_strategy` function accepts close prices and signal arrays directly, and in one pass computes: strategy returns, equity curve (cumprod), all six metrics (total return, annualized vol, Sharpe, Sortino, max drawdown, Calmar), and its own trade statistics (num trades, win rate, profit factor, avg trade return). The six equity/return metrics do match the Python algorithm exactly (one-bar lag execution, sample standard deviation). The trade statistics did not: a 2026-07-24 review found the native kernel's own trade-log logic records entry one bar later than the true economic reference and excludes commission/slippage from each trade's return — a real divergence from `_build_trade_log`, not a rounding difference. **This was not fixed in `backtest.cpp`** (the native kernel logic is unchanged); instead `backtest/engine.py`'s `run_strategy()` now always discards the C++ kernel's own trade-stat fields and recomputes `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct` in Python via `_build_trade_log`/`_compute_trade_stats`, so callers get identical trade statistics whether or not `_sqt_core` is built. The optional per-trade log (with dates and direction labels) still runs in Python when `include_trade_log=True`, since it requires DatetimeIndex aware iteration — and now uses the same corrected accounting as the trade stats above. **The batch grid kernel (`batch_run_strategy`, Item 6 below) still has the uncorrected native trade-stat bug.**
 
 **Realized speedup:**
 | Scenario | Python (pandas) | C++ | Speedup |
@@ -223,13 +223,20 @@ if profiling shows it's a bottleneck for `run_portfolio_simulation` /
 |---|---|---|---|
 | `run_regime_adaptive_backtest` | `hurst_exponent` + `backtest_grid` | Hurst ✅; backtest ✅ | **10–30×** |
 | `scan_pairs` (100 tickers) | cointegration ADF loop | ✅ Realized | **5–15×** |
-| `run_walk_forward_backtest` | repeated `backtest_grid` calls | ✅ Realized (batch kernel) | **10–50×** |
+| `run_walk_forward_backtest` | repeated `backtest_grid` calls | ✅ Realized (batch kernel)* | **10–50×** |
 | `get_technical_analysis` | RSI + ADX + PSAR + Wilder's ATR + Bollinger + Stochastic | ✅ Realized | **10–30×** |
 | `run_screener` (S&P 500) | RSI + beta per ticker × 500 | RSI ✅; OLS ✅ | **5–15×** (compute path only; I/O still dominates) |
 | `run_sma_backtest` | `run_strategy` kernel | ✅ Realized | **3–8×** |
-| `run_backtest_optimization` | `backtest_grid` parameter sweep | ✅ Realized (batch kernel) | **10–50×** |
+| `run_backtest_optimization` | `backtest_grid` parameter sweep | ✅ Realized (batch kernel)* | **10–50×** |
 | `run_factor_regression` (rolling) | `rolling_factor_loadings` window loop | ✅ Realized (Cholesky) | **50–200×** |
 | `get_rolling_beta` | `rolling_beta` two rolling passes | ✅ Realized (incremental) | **10–40×** |
+
+\* Speedup figure is for the 6 return/equity metrics only. Win_rate/profit_factor/
+num_trades/avg_trade_return_pct in these two tools' output come from
+`batch_run_strategy`'s uncorrected native trade-log accounting — see Item 6 in
+Implementation Status and the Risk Factors table — so a grid ranked or filtered
+on those fields can disagree with a single `run_strategy` call on the same
+parameters.
 
 ---
 
@@ -298,8 +305,8 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 2b. ✅ **`wilder_atr`** — sequential Wilder-smoothing recurrence; added to `indicators.cpp` alongside RSI/ADX/PSAR. **Done.**
 3. ✅ **ADF test / `scan_pairs`** — replaces statsmodels dependency with a well-understood algorithm; unlocks large-universe pair scanning. Full Engle-Granger (OLS + ADF + MacKinnon 2010) in `cointegration.cpp`. **Done.**
 4. ✅ **2-variable OLS** — `sqt::ols2` was already in `cointegration.cpp`; added `m.def("ols2", ...)` in `bindings.cpp` and wired `calculate_beta`, `half_life`, `compute_spread` to the fast path. **Done.**
-5. ✅ **`run_strategy` backtest kernel** — single C++ pass computes equity curve + all 6 metrics + trade stats; replaces 6 pandas intermediate Series and 6 separate metric function calls per combo. **Done.**
-6. ✅ **`batch_run_strategy` grid kernel** — all parameter-combination signal arrays stacked into one 2D matrix and passed to C++ in a single call; eliminates Python re-entry overhead between combinations. Yields 10–50× on grid searches. **Done.**
+5. ✅ **`run_strategy` backtest kernel** — single C++ pass computes equity curve + all 6 metrics; replaces 6 pandas intermediate Series and 6 separate metric function calls per combo. **Done**, with a 2026-07-24 caveat: the kernel's own trade stats (win_rate/profit_factor/num_trades/avg_trade_return_pct) had a real accounting bug (wrong entry bar, no commission/slippage), so `backtest/engine.py` now always overwrites them with a Python-computed `_build_trade_log`/`_compute_trade_stats` pass — `backtest.cpp` itself is unchanged.
+6. ✅ **`batch_run_strategy` grid kernel** — all parameter-combination signal arrays stacked into one 2D matrix and passed to C++ in a single call; eliminates Python re-entry overhead between combinations. Yields 10–50× on grid searches. **Done**, but unlike Item 5 its trade stats still come straight from the native kernel's uncorrected accounting (rebuilding a Python trade log per grid combo would defeat the batch path's speed) — not fixed as of 2026-07-24.
 7. ✅ **`rolling_factor_loadings`** — incremental rank-1 XtX/Xty updates with Cholesky re-solve; periodic full recompute every `window` steps prevents floating-point drift. Replaces per-window `lstsq` loop; 50–200×. **Done.**
 8. ✅ **`rolling_beta`** — incremental O(1)-per-bar sum updates (Sxy, Sxx, Sx, Sy); beta = (W·Sxy − Sx·Sy)/(W·Sxx − Sx²); NaN when denominator ≤ 1e-14. Replaces two sequential pandas rolling passes; 10–40×. **Done.**
 9. ✅ **`bollinger_bands`** — fused single-pass Σx / Σx² sliding window; mean = Σx/W, var = (Σx² − Σx²/W)/(W−1); computes upper/middle/lower in one pass. Replaces two pandas rolling calls; 3–8×. **Done.**
@@ -323,6 +330,7 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 |---|---|
 | Windows build toolchain (MSVC vs MinGW) | `build_guide.md` documents the MSVC path only (Build Tools for Visual Studio 2022). CI (`build-cpp.yml`) only builds/tests on `ubuntu-latest` with gcc — there is no Windows or MinGW job, so the Windows path is currently unverified by CI. |
 | Floating-point result divergence from pandas fallback | Unit test C++ output against Python reference implementation with `atol=1e-10` |
+| Logic divergence, not just floating-point, between the native kernel and Python (realized, not hypothetical: `run_strategy`'s native trade-log accounting was found wrong on 2026-07-24 — wrong entry bar, costs excluded) | Fixed for `run_strategy` by having `backtest/engine.py` always recompute trade stats in Python regardless of which path ran (interim fix — `backtest.cpp` itself still has the bug); **not yet fixed for `batch_run_strategy`** — `backtest_grid`'s C++ path still returns the uncorrected native trade stats, so grid rankings by win_rate/profit_factor can differ with `_sqt_core` built vs. not |
 | Maintenance burden (dual Python + C++ paths) | Keep Python fallback; C++ path is additive, not a replacement |
 | NumPy ABI changes (same problem as Numba) | Pin to `numpy>=2.0` ABI stable tag in the extension; re-test on each numpy major bump |
 | Debugging (C++ segfault inside Python) | Develop with address sanitiser (`-fsanitize=address`) in debug builds |

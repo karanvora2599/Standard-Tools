@@ -156,12 +156,13 @@ matching how the equity curve itself is always marked to `Close`.
 On the agent-tool side, `fill_price` is exposed on `BacktestInput`,
 `BuyAndHoldInput`, `CompareStrategiesInput`, `CustomSignalBacktestInput`,
 `SignalPanelBacktestInput`, `BacktestOptInput`, `BacktestDiagnosticsInput`,
-`WalkForwardInput`, `RegimeAdaptiveWalkForwardInput`, and
-`PortfolioSimulationInput` — every tool whose out-of-sample/simulated leg
-ultimately calls `run_strategy` or `run_portfolio_simulation`. The one
-holdout is `run_regime_adaptive_backtest` (the older, in-sample exploratory
-tool, kept deliberately simple — see its own docstring), which still always
-uses `"close"`.
+`WalkForwardInput`, `RegimeAdaptiveWalkForwardInput`, `PortfolioSimulationInput`,
+`PairTradeBacktestInput`, and `BacktestCompactInput` — every tool whose
+out-of-sample/simulated leg ultimately calls `run_strategy`,
+`run_portfolio_simulation`, or `run_pair_backtest`. The one holdout is
+`run_regime_adaptive_backtest` (the older, in-sample exploratory tool, kept
+deliberately simple — see its own docstring), which still always uses
+`"close"`.
 
 ---
 
@@ -520,14 +521,64 @@ for a lookahead-free simulation to silence it. It also flags if cash ever
 went negative (implied margin borrowing).
 
 **Validation (raises `ValidationError` — same self-correcting-error pattern
-as everywhere else in this library):** `target_weights` must be dense — every
-ticker must be present at every rebalance date, and no cell may be `NaN`
-(a `NaN` used to silently corrupt the equity curve; it now fails fast with
-the offending dates/tickers listed); `sum(|weight|)` per rebalance date can't
-exceed `max_gross_leverage` (default `1.0` = fully invested, no leverage); no
-single `|weight|` can exceed `max_position_pct` (default `1.0`); every
-rebalance date must fall on a day all tickers have price data for (the master
-trading calendar is the **intersection** of every ticker's own index).
+as everywhere else in this library):**
+- `target_weights` must have at least one ticker column (empty universe
+  rejected) and at least one rebalance date.
+- `target_weights.index` must be free of duplicate dates and sorted in
+  increasing order — an unsorted or duplicated rebalance calendar is
+  rejected outright rather than silently re-sorted or silently only
+  honoring one of the duplicates.
+- `target_weights` must be dense — every ticker must be present at every
+  rebalance date, and no cell may be `NaN` (a `NaN` used to silently
+  corrupt the equity curve; it now fails fast with the offending
+  dates/tickers listed) or infinite.
+- `sum(|weight|)` per rebalance date can't exceed `max_gross_leverage`
+  (default `1.0` = fully invested, no leverage); no single `|weight|` can
+  exceed `max_position_pct` (default `1.0`). See "Post-trade enforcement"
+  below for what these two limits do and do not guarantee once costs are
+  applied.
+- Every rebalance date must fall on a day all tickers have price data for
+  (the master trading calendar is the **intersection** of every ticker's
+  own index), and every price on that calendar (for the columns
+  `fill_price` actually needs) must be finite and strictly positive —
+  a `NaN`/`inf`/zero/negative price anywhere on the calendar is rejected
+  upfront rather than surfacing as a corrupted downstream number.
+- `initial_capital` and every cost parameter (`commission_pct`,
+  `slippage_pct`, `per_share_rate`, `min_commission`, `borrow_fee_bps`,
+  `margin_interest_rate`, `impact_coefficient`) must be finite and
+  non-negative (`initial_capital` strictly positive); `max_gross_leverage`,
+  `max_position_pct`, `impact_lookback`, and `max_adv_participation` (when
+  set) must be finite and strictly positive.
+
+**Post-trade enforcement — target weights vs. realized, post-cost state:**
+`max_gross_leverage`/`max_position_pct` bound the *target* weights (validated
+upfront, as above), and each rebalance's `target_shares` are sized from
+`equity_now` — account equity immediately **before** that rebalance's own
+costs are deducted — so the resulting gross exposure is exactly
+`sum(|weight|) * equity_now` by construction. Once that rebalance's costs are
+deducted, `equity_after < equity_now` while the share positions (hence gross
+exposure) are unchanged, which mechanically pushes the **realized**,
+post-cost ratio `gross_after / equity_after` — reported as
+`gross_leverage_after` in `rebalance_log` and continuously in
+`leverage_curve` — slightly *above* `sum(|weight|)`. This is expected,
+unavoidable cost drag, not a limit violation, and is **not** rejected. What
+**is** re-checked after every rebalance, and **can** raise `ValidationError`,
+is `gross_after / equity_now` (and the largest single position's
+`weight / equity_now`) exceeding the limit — a sizing self-consistency
+invariant that should already be guaranteed by the per-date weight
+validation above, so a violation here indicates an actual sizing bug, not
+ordinary cost drag. If you need a hard ceiling on realized, cost-inclusive
+leverage, monitor `leverage_curve`/`rebalance_log`'s `gross_leverage_after`
+yourself, or request a `max_gross_leverage` a little below your true risk
+limit to absorb the cost-drag headroom.
+
+**Insolvency:** this engine models a cash-settled account with no
+forced-liquidation/margin-call machinery, so account equity reaching zero or
+negative — whether from a rebalance's own costs or simply from price moves
+between rebalances — has no meaningful next state to simulate. Both cases
+raise `ValidationError` immediately rather than continuing with a
+`leverage_curve` divide-by-negative-equity or an annualized-return
+calculation raising on a negative base.
 
 **Execution timing (`fill_price`):** like `run_strategy`, accepts `"close"`
 (default — a rebalance dated D executes at D's own Close), `"next_open"`
@@ -567,10 +618,15 @@ result = run_portfolio_simulation(
   commission + spread. Requires a `'Volume'` column — no other new data
   dependency, since `Close * Volume` is already computable from any OHLCV
   frame.
-- `borrow_fee_bps` / `margin_interest_rate`: daily-accrued financing costs
-  on short notional / negative cash respectively. Both default to `0.0`
-  (today's exact behavior — no financing cost beyond the existing "cash
-  went negative" warning).
+- `borrow_fee_bps` / `margin_interest_rate`: financing costs accrued on
+  short notional / negative cash respectively, charged once per bar based
+  on the position/cash carried in from the previous bar. The accrual uses
+  the **actual elapsed calendar days** since the prior bar (`(date -
+  prev_date).days` — e.g. 3 over a Friday→Monday weekend gap, or more
+  across a holiday), not a hardcoded `days=1.0` — a fixed 1-day assumption
+  would under-accrue financing across every weekend/holiday gap in the
+  trading calendar. Both default to `0.0` (today's exact behavior — no
+  financing cost beyond the existing "cash went negative" warning).
 
 **Liquidity constraint:** pass `max_adv_participation=0.1` to reject (raise
 `ValidationError`) any rebalance trade whose notional exceeds 10% of the
@@ -600,10 +656,10 @@ first. Every function takes/returns a `pd.DataFrame` of the same shape
 | Function | Signature | Behavior |
 |---|---|---|
 | `rank_weighted` | `(scores, gross_leverage=1.0)` | Weight ∝ cross-sectional rank, centered on the row's mean rank (long top, short bottom); `sum(weight) ≈ 0` automatically. |
-| `equal_weight_top_bottom` | `(scores, n_long, n_short, gross_leverage=1.0)` | Equal-weight the top `n_long` and bottom `n_short` names each row; everything else gets 0. Raises if `n_long + n_short` exceeds the ticker count. |
+| `equal_weight_top_bottom` | `(scores, n_long, n_short, gross_leverage=1.0)` | Equal-weight the top `n_long` and bottom `n_short` names each row; everything else gets 0. When **both** sides are active, `gross_leverage` is split 50/50 between them. When only one side is active (`n_long=0` or `n_short=0`), that one side gets the **full** `gross_leverage` — not half of it — so a long-only or short-only request isn't silently sized at half the requested gross exposure. Raises if `n_long + n_short` exceeds the ticker count, or if both are 0. |
 | `zscore_normalized` | `(scores, gross_leverage=1.0)` | Weight ∝ cross-sectional z-score; a row with zero cross-sectional std gets all-zero weight rather than a division-by-zero blowup. |
-| `vol_scaled` | `(scores, returns_df, lookback=20, gross_leverage=1.0)` | Divide each score by its trailing realized volatility (rolling std of `returns_df` over `lookback` bars), then apply the same normalization as `zscore_normalized`. |
-| `dollar_neutral` | `(weights)` | Post-process any weight panel so `sum(weight) == 0` per row, by subtracting each row's mean weight. |
+| `vol_scaled` | `(scores, returns_df, lookback=20, gross_leverage=1.0)` | Divide each score by its trailing realized volatility, then apply the same normalization as `zscore_normalized`. The rolling-std window runs on `returns_df`'s own (daily) frequency **first**, and is only reindexed onto `scores.index` afterward — reindexing first would silently turn a "`lookback`-bar" volatility window into `lookback` *score-date* observations (e.g. a nominal 20-bar window quietly becoming ~20 months of history when scores are submitted monthly against daily returns). Dates without `lookback` observations of trailing volatility yet get zero weight for that name rather than a division blowup. |
+| `dollar_neutral` | `(weights)` | Post-process any weight panel so `sum(weight) == 0` per row, by subtracting each row's mean weight — then **rescaling back to that row's original `sum(\|weight\|)`**, since mean-centering alone shrinks gross exposure and would otherwise silently drift a portfolio's leverage away from what it was sized to. |
 
 ```python
 from standard_quant_tools.backtest.sizing import zscore_normalized

@@ -3,7 +3,7 @@
 The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
 
 - **Hurst exponent** — 20–80× faster (DFA/R-S); 30–100× for rolling Hurst. Pure-Python fallback is automatic when the extension is not built.
-- **Cointegration** — 5–15× faster (Engle-Granger OLS + ADF + MacKinnon 2010); replaces the statsmodels dependency entirely when built.
+- **Cointegration** — 5–15× faster (Engle-Granger OLS + ADF + MacKinnon 2010); bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
 - **`calculate_beta`, `half_life`, `compute_spread`** — 10–20× faster (2-variable OLS via closed-form normal equations, avoids LAPACK `lstsq` overhead).
 - **`rolling_beta`** — 10–40× faster (incremental O(1)-per-bar sum updates replace two sequential pandas `.rolling().cov()/.var()` passes).
 - **`rolling_factor_loadings`** — 50–200× faster (incremental rank-1 XtX/Xty updates with periodic Cholesky re-solve to prevent drift; each bar costs O(k²) instead of a full O(n·k²) `lstsq`).

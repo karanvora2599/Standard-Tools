@@ -9,6 +9,103 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `fill_price="midpoint"` renamed to `fill_price="hl2_exploratory"`
+  everywhere (`run_strategy`, `run_portfolio_simulation`, `run_pair_backtest`,
+  their agent-tool input models, and docs) — it was never a real bid/ask
+  midpoint (just `(High+Low)/2`), and the old name implied a market-quote
+  guarantee it didn't have. Every reference now carries an explicit
+  look-ahead-bias caveat.
+- **Breaking:** `CustomSignalBacktestInput`/`SignalPanelBacktestInput`'s
+  `signal_type` now defaults to `DIRECTION` (values must be exactly -1/0/1)
+  instead of `SCORE` (unrestricted float, multiplied directly into position
+  size) — `SCORE` is raw leverage, not a bounded confidence value, and was an
+  unsafe default for anyone passing an un-normalized signal.
+- `run_pair_trade_backtest`'s `fill_price` now defaults to `"next_open"`
+  instead of `"close"` — the z-score signal deciding a transition is computed
+  from that same bar's Close, so executing at that same Close was look-ahead
+  bias by default. `"close"` is still available for explicit same-bar/
+  exploratory analysis.
+- `run_backtest_optimization` (the `backtest_grid` agent-tool wrapper) now
+  threads `commission_pct`/`slippage_pct` into every grid combination
+  instead of silently ignoring them — `backtest_grid` itself already did
+  this correctly; the gap was specific to the agent-tool wrapper.
+
+### Added
+
+- `audit.py`: a hash-chain (`prev_record_hash`/`record_hash` on every JSONL
+  decision record) and `verify_audit_log_integrity()`, so the audit log
+  itself is tamper-evident, not just each record's replay. JSONL writes are
+  now guarded by a cross-process advisory lock (`msvcrt` on Windows,
+  `fcntl.flock` on POSIX; falls back to unlocked with a debug log if neither
+  is available, rather than blocking a tool call on a missing OS primitive).
+- `verify_replay()` now reports data sources that disappeared between the
+  original call and the replay (previously silently dropped from the
+  comparison).
+- `screener.py` now reports fetch/filter failures via `DataFrame.attrs`
+  (`failed_filters`, `failed_tickers`, and `failed_batches` for the
+  multi-worker path) instead of returning `None` — previously
+  indistinguishable from a ticker that legitimately didn't pass a filter.
+- Project governance: Apache 2.0 `LICENSE`/`NOTICE`, `SECURITY.md`,
+  `CONTRIBUTING.md`, this `CHANGELOG.md`, license/URL metadata in
+  `pyproject.toml`, and a local `v0.1.0` release tag.
+- `black`/`isort` now actually pass in CI — added shared `[tool.black]`/
+  `[tool.isort]` config (`profile = "black"`) and reformatted the full
+  `src/`/`tests/` tree, which had never matched the CI check before.
+
+### Fixed
+
+- `portfolio_engine.py`: `max_gross_leverage`/`max_position_pct` are now
+  enforced against realized post-cost state, not just pre-trade intent;
+  added insolvency checks (a rebalance that leaves the account with
+  zero/negative equity now raises instead of silently continuing); financing
+  (borrow fee, margin interest) now accrues on actual elapsed calendar days
+  instead of a hardcoded 1-day assumption; added validation for an empty
+  universe, duplicate/unsorted rebalance dates, and non-finite weights/prices.
+- `sizing.py`: fixed `vol_scaled`'s rolling-window frequency mismatch,
+  `equal_weight_top_bottom`'s long/short-only allocation, and
+  `dollar_neutral`'s gross-leverage drift.
+- `risk_metrics.py`: `var_historical`/`var_parametric`/`cvar` now validate
+  `confidence` is a valid probability bound; fixed `var_parametric`'s silent
+  fallback when scipy isn't available; fixed `treynor_ratio`'s misaligned
+  numerator/denominator index (the excess-return numerator previously used
+  the full unaligned series while beta used only the intersected dates).
+- `yfinance_provider.py`: path-traversal containment on the Parquet cache
+  path (symbol/date/interval), the audit trail now fires on session-cache
+  hits (not just misses), cache-hit results are copied so callers can't
+  mutate shared cached state, corrupt Parquet files on disk are detected and
+  evicted/refetched instead of failing or serving bad data, and atomic-write
+  temp filenames are now thread-unique.
+- `dispatch()` sanitizes `inf`/`nan` to `None` before returning a result,
+  since raw `json.dumps()` would otherwise emit non-standard tokens.
+- `run_strategy` (`backtest/engine.py`) now always recomputes
+  `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct` in Python
+  (`_build_trade_log`/`_compute_trade_stats`) instead of trusting the C++
+  kernel's own native trade-log values, which record each entry one bar late
+  and exclude commission/slippage. This is a Python-side workaround, not a
+  native-code fix — see Known Issues below for the path that's still affected.
+- Fixed a day-0 drawdown edge case (see git history for the exact commit).
+- The four provider example agent loops (`Implementation/*/_agent_utils.py`)
+  fixed duplicate logging handlers on repeated setup, malformed tool-call
+  JSON silently becoming `{}`, missing request/tool timeouts, non-strict
+  JSON allowing `NaN`/`Infinity` tokens, and narrative text being discarded
+  after each tool round.
+- CI: dropped the unused `pytest-freezegun` dependency (it imported
+  `distutils`, which Python 3.12 removed, and nothing in the suite actually
+  used it) and added `anthropic` to the `test` extras, since
+  `test_multi_agent_tool_coverage.py` transitively imports it.
+
+### Known Issues
+
+- `backtest_grid`'s `_sqt_core` batch kernel (`batch_run_strategy`) still
+  returns the native C++ trade stats uncorrected — the one-bar-late entry
+  and missing commission/slippage bug that `run_strategy` now works around
+  in Python is still present for grid-search results, including the
+  aggregate speedups reported for `run_walk_forward_backtest` and
+  `run_backtest_optimization`, which route through the batch path. Not yet
+  fixed at the native level.
+
 ## [0.1.0] - 2026-07-24
 
 Initial documented release. `main` had no prior tags — this release
@@ -43,7 +140,8 @@ Hurst exponent (DFA / R-S / rolling), several with C++ fast paths.
 
 **Backtesting** (`standard_quant_tools.backtest`)
 - Vectorized single-ticker engine (`run_strategy`) with transaction costs,
-  trade log, and three execution-timing modes (`close`/`next_open`/`midpoint`).
+  trade log, and three execution-timing modes (`close`/`next_open`/a
+  same-bar approximate-fill mode, renamed `hl2_exploratory` — see Unreleased).
 - Parameter grid search (`backtest_grid`) and walk-forward / regime-adaptive
   (leakage-free) backtesting.
 - Multi-ticker signal-panel backtesting (`run_signal_panel_backtest`).

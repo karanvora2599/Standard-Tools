@@ -8,7 +8,24 @@ The screener evaluates a list of tickers concurrently against fundamental and te
 
 **Beta filter optimisation:** When `beta_max` or `beta_min` filters are present, SPY OHLCV data is fetched **once per `screen_stocks_async()` invocation** and reused for every ticker in that invocation that needs a beta computation. For a single-process run (≤ 20 tickers, or `n_workers=1`) that means one SPY fetch total; when the universe is split across a `ProcessPoolExecutor`, each worker independently prefetches SPY once for its own batch, i.e. one fetch per worker. On a 500-ticker universe where 200 tickers require beta, screened with the default 8-worker split, this means 8 SPY fetches instead of up to 200 — eliminating roughly 192 redundant HTTP requests compared to the naïve per-ticker fetch. If the SPY prefetch itself fails, it is silently skipped and each ticker needing beta falls back to fetching SPY individually.
 
-**Error handling:** a per-ticker failure (network error, missing data, bad ratio, indicator that can't be computed, etc.) is caught inside `_fetch_ticker_data` and causes that ticker to be dropped by returning `None` — the exact same return value used when a ticker simply fails a filter condition. `screen_stocks` / `screen_stocks_async` do not distinguish the two cases: there is no `failed_tickers` list or error field in the result. A ticker missing from the output may have failed a filter, or it may have errored out entirely — enable debug logging (`logger.debug` in the `standard_quant_tools.screener` logger) to see aggregate passed/total counts, or wrap individual `provider` calls yourself if you need per-ticker failure visibility.
+**Error handling:** a per-ticker failure (network error, missing data, bad ratio, indicator that can't be computed, etc.) is never indistinguishable from a ticker that simply failed a filter condition. `_fetch_ticker_data` returns a `(status, ticker, payload)` tuple — `"passed"`, `"failed_filter"`, or `"error"` — and both `screen_stocks_async` and `screen_stocks` surface the non-passing cases via `DataFrame.attrs` on every DataFrame they return (including the empty-result case):
+
+| `attrs` key | Type | Meaning |
+|---|---|---|
+| `failed_filters` | `Dict[ticker, str]` | Genuine rejection — maps to the specific filter key the ticker failed, e.g. `{"AAPL": "pe_ratio_max"}` |
+| `failed_tickers` | `Dict[ticker, str]` | Data-fetch/compute exception — maps to the exception's string message |
+| `failed_batches` | `List[str]` | `screen_stocks` only. Error message per worker process that raised *before* returning any per-ticker result at all (`n_workers > 1` only — always `[]` for single-process runs) |
+
+```python
+result = screen_stocks(tickers, filters={"pe_ratio_max": 15})
+print(result.attrs["failed_filters"])   # {"AAPL": "pe_ratio_max", ...}
+print(result.attrs["failed_tickers"])   # {"XYZ": "HTTPError: 429 ...", ...}
+print(result.attrs["failed_batches"])   # [] unless a whole worker process died
+```
+
+Unknown filter keys are rejected up front: `screen_stocks` / `screen_stocks_async` raise `ValidationError` before making any network call if `filters` contains a key outside the fixed set documented below.
+
+**Multi-worker `attrs` merging:** `pd.concat` does not reliably propagate `.attrs` — pandas only keeps them when every concatenated frame's `.attrs` are identical, and drops them otherwise, so naively concatenating each worker's batch DataFrame would silently lose `failed_filters` / `failed_tickers` from all but (at best) one batch. `.attrs` itself *does* survive the trip through `ProcessPoolExecutor` (pandas includes `_attrs` in `__getstate__`/`__setstate__`, so pickling a DataFrame back from a worker via `future.result()` preserves it) — `screen_stocks` relies on that and works around the `pd.concat` limitation explicitly: it reads `.attrs["failed_filters"]` / `.attrs["failed_tickers"]` off each worker's batch DataFrame individually, merges them into two dicts in the parent process, then assigns the merged dicts onto the final concatenated DataFrame's `.attrs` after `pd.concat` runs — overwriting whatever (if anything) `pd.concat` produced on its own. So failure info from every worker batch is preserved, not just the last one.
 
 ---
 
@@ -178,6 +195,12 @@ print(f"Passed: {result.num_passed} / {5}")
 print(f"Tickers: {result.tickers_passed}")
 for row in result.results:
     print(row)
+
+# Same failed_filters / failed_tickers / failed_batches breakdown as the
+# DataFrame .attrs, but as plain Pydantic fields on the result:
+print(result.failed_filters)   # {ticker: filter key it failed}
+print(result.failed_tickers)   # {ticker: error message}
+print(result.failed_batches)   # [error message, ...] (n_workers > 1 only)
 ```
 
 The `ScreenerResult` Pydantic model is directly JSON-serializable for LLM consumption.
@@ -202,6 +225,8 @@ async def main():
 
 df = asyncio.run(main())
 ```
+
+`screen_stocks_async` sets `df.attrs["failed_filters"]` and `df.attrs["failed_tickers"]` on its result (see Error handling above), but never `failed_batches` — that key only exists on results from `screen_stocks`, since it's specific to the `ProcessPoolExecutor` batch-splitting path.
 
 ---
 

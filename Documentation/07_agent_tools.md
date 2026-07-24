@@ -1062,6 +1062,8 @@ print(f"Survivors: {result.tickers_passed}")
 print(json.dumps(result.model_dump(), indent=2))
 ```
 
+**Distinguishing "didn't pass" from "couldn't be evaluated":** a ticker missing from `tickers_passed` isn't necessarily one that failed a filter. `result.failed_filters` (`ticker -> filter key`) names genuine rejections; `result.failed_tickers` (`ticker -> error message`) is a separate bucket for data-fetch/compute exceptions, so a broken fetch is never silently indistinguishable from a ticker that simply didn't meet the bar. When `n_workers > 1`, `result.failed_batches` also carries any worker-process error that prevented an entire batch from returning results.
+
 **All supported filters:**
 
 | Filter | Type | Description | Example |
@@ -2097,18 +2099,18 @@ print(f"Example params: {playbook['example_params']}")
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
-| `CustomSignalBacktestInput` | `symbol`, `start_date`, `end_date`, `signals` (`{date: value}`) | `signal_type="score"`, `max_abs_weight=1.0`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
-| `SignalPanelBacktestInput` | `tickers`, `start_date`, `end_date`, `signal_panel` (`{ticker: {date: value}}`) | `weights=None` (equal weight), `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `benchmark=None`, `include_trade_log=False`, `fill_price="close"`, `signal_type="score"`, `max_abs_weight=1.0` |
+| `CustomSignalBacktestInput` | `symbol`, `start_date`, `end_date`, `signals` (`{date: value}`) | `signal_type="direction"`, `max_abs_weight=1.0`, `signal_fill_policy="hold"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
+| `SignalPanelBacktestInput` | `tickers`, `start_date`, `end_date`, `signal_panel` (`{ticker: {date: value}}`) | `weights=None` (equal weight), `signal_fill_policy="hold"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `benchmark=None`, `include_trade_log=False`, `fill_price="close"`, `signal_type="score"`, `max_abs_weight=1.0` |
 
 **`signal_type` — what a custom signal's values mean, opt-in validation:**
 
 | `signal_type` | Meaning | Validation |
 |---|---|---|
-| `"score"` (default) | Unrestricted — you own the scale/leverage semantics | None — exactly today's original permissive behavior |
-| `"direction"` | Position direction | Every value must be exactly `-1`, `0`, or `1` |
+| `"score"` | Unrestricted — you own the scale/leverage semantics | None — exactly today's original permissive behavior |
+| `"direction"` (default for `CustomSignalBacktestInput`) | Position direction | Every value must be exactly `-1`, `0`, or `1` |
 | `"target_weight"` | Portfolio weight for this position | Every `\|value\|` must be ≤ `max_abs_weight` (default `1.0`) |
 
-`run_strategy`'s math never changes based on `signal_type` — it always multiplies the (lagged) signal value by the bar's return, same as today. `signal_type` only controls whether malformed values are rejected up front with a Pydantic `ValidationError` naming the offending date/ticker/value, instead of silently backtesting a typo. The default (`"score"`) is unrestricted specifically so omitting the field is guaranteed identical to pre-`signal_type` behavior — no existing caller is affected. For `SignalPanelBacktestInput`, the chosen mode applies uniformly across every ticker in `signal_panel`, and validation errors name which ticker failed.
+`run_strategy`'s math never changes based on `signal_type` — it always multiplies the (lagged) signal value by the bar's return: `strategy_return = lagged_signal * market_return`. Under `"score"`, that value is a literal leverage multiplier (a value of 10 means a 10x position), not a normalized "confidence score" — which is why `CustomSignalBacktestInput` defaults to `"direction"` rather than `"score"`: an LLM-facing single-asset tool should not silently accept an arbitrary score as if it were a bounded confidence value (an approved breaking change from the prior default). `SignalPanelBacktestInput` and `PortfolioSimulationInput` still default to `"score"`, because in both of those a score is converted into a bounded weight via an explicit `construction_method` (`backtest/sizing.py`) before it ever reaches a return calculation, so the same hazard doesn't apply. `signal_type` only controls whether malformed values are rejected up front with a Pydantic `ValidationError` naming the offending date/ticker/value, instead of silently backtesting a typo. For `SignalPanelBacktestInput`, the chosen mode applies uniformly across every ticker in `signal_panel`, and validation errors name which ticker failed.
 
 **Validation rules (Pydantic v2):**
 - `PortfolioInput` and `RiskAttributionInput`: `weights` must sum to 1.0 and `len(weights) == len(tickers)`.
@@ -2124,7 +2126,7 @@ print(f"Example params: {playbook['example_params']}")
 
 | Model | Key fields |
 |---|---|
-| `BacktestResult` | `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `profit_factor`, `num_trades`, `avg_trade_return_pct`, `final_equity`, `equity_curve`, `trade_log` |
+| `BacktestResult` | `total_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `profit_factor`, `num_trades`, `avg_trade_return_pct`, `final_equity`, `equity_curve`, `trade_log` |
 | `StrategyComparison` | `strategy`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `num_trades`, `final_equity` |
 | `CompareStrategiesResult` | `symbol`, `sort_by`, `best_strategy`, `buy_and_hold_return`, `strategies` (List[StrategyComparison]) |
 
@@ -2135,7 +2137,7 @@ print(f"Example params: {playbook['example_params']}")
 | `AnalysisResult` | `symbol`, `benchmark`, `alpha`, `beta`, `r_squared`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio` |
 | `TechnicalResult` | `symbol`, `last_close`, `last_values` (dict), `signals` (dict) |
 | `PortfolioResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `information_ratio`, `total_return`, `correlation_matrix` |
-| `ScreenerResult` | `num_passed`, `tickers_passed`, `results` (list of dicts) |
+| `ScreenerResult` | `num_passed`, `tickers_passed`, `results` (list of dicts), `failed_filters` (`Dict[str, str]` — ticker → filter key it failed), `failed_tickers` (`Dict[str, str]` — ticker → data-fetch/compute error), `failed_batches` (`List[str]` — worker-batch errors when `n_workers > 1`) |
 | `Trade` | `entry_date`, `exit_date`, `direction`, `entry_price`, `exit_price`, `position_size` (actual signal value held — 1.0/-1.0 for DIRECTION, fractional/leveraged for SCORE; `return_pct` scales with it), `return_pct` |
 | `FactorRegressionResult` | `symbol`, `factors`, `alpha`, `loadings`, `t_stats`, `p_values`, `r_squared`, `adj_r_squared`, `n_obs`, `rolling_alpha_tail`, `rolling_loadings_tail` |
 | `CointegrationResult` | `symbol_a`, `symbol_b`, `cointegrated`, `p_value`, `hedge_ratio`, `adf_statistic`, `half_life_days`, `critical_values`, `spread_mean`, `spread_std`, `current_zscore`, `signal`, `n_obs` |

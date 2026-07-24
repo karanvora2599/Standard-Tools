@@ -355,6 +355,8 @@ result = screen_stocks(
 
 **Available filters:** `pe_ratio_max`, `pb_ratio_max`, `debt_equity_max`, `roe_min`, `profit_margin_min`, `div_yield_min`, `market_cap_min`, `rsi_max`, `rsi_min`, `price_above_sma`, `price_below_sma`, `beta_max`, `beta_min`
 
+**Failure reporting:** A ticker that raised an exception (bad symbol, fetch error) is never indistinguishable from one that simply failed a filter — both used to collapse to being silently dropped. The returned `DataFrame` now carries this on `.attrs`: `failed_filters` maps ticker → the specific filter key it failed (genuine rejection), `failed_tickers` maps ticker → the exception message (fetch/computation error), and `failed_batches` (multi-worker runs only) lists any worker batch that failed outright.
+
 **Large universes:** Pass `n_workers` to split screening across CPU cores. ≤ 20 tickers run in a single async event loop; larger universes automatically use `ProcessPoolExecutor`.
 
 **Beta filter optimisation:** When `beta_max` / `beta_min` filters are active, SPY data is pre-fetched once per batch instead of once per ticker — a single HTTP round-trip for the whole universe when `n_workers <= 1` (the default for ≤ 20 tickers), or once per worker process for larger multi-worker universes (still eliminating the N−1 redundant per-ticker fetches within each worker's batch).
@@ -513,7 +515,7 @@ except InvalidSymbolError as e:
 
 ## Audit Trail & CLI (`standard_quant_tools.audit`, `sqt`)
 
-Every call routed through `agent.tools.dispatch()` can produce an immutable JSONL decision record capturing its inputs, the market data it pulled (with content hashes), which execution path ran, and a hash of its output — enough to tell a stale/tampered cache apart from a genuine code change. Nothing runs automatically; set `SQT_AUDIT_ENABLED=0` to disable record writes, and override the storage directory with `SQT_AUDIT_DIR`.
+Every call routed through `agent.tools.dispatch()` can produce an immutable JSONL decision record capturing its inputs, the market data it pulled (with content hashes), which execution path ran, and a hash of its output — enough to tell a stale/tampered cache apart from a genuine code change. Records are hash-chained (`prev_record_hash` / `record_hash`, verified via `verify_audit_log_integrity()`) so a record edited or deleted after the fact breaks the chain instead of going unnoticed, and JSONL writes are guarded by a cross-process file lock. Nothing runs automatically; set `SQT_AUDIT_ENABLED=0` to disable record writes, and override the storage directory with `SQT_AUDIT_DIR`.
 
 The `sqt` command (installed with the package) inspects and verifies these records by `request_id`:
 
@@ -553,7 +555,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1033 Python tests total** (892 passing; 141 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**1180 Python tests total** (1022 passing; 158 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 

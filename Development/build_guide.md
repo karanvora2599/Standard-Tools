@@ -188,8 +188,8 @@ Or run all six at once:
 pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py -v
 ```
 
-Once the extension is built all skipped tests activate (145 total across the
-six files above — 22 Hurst, 36 indicators, 23 new-indicators, 23 cointegration,
+Once the extension is built all skipped tests activate (154 total across the
+six files above — 25 Hurst, 42 indicators, 23 new-indicators, 23 cointegration,
 25 backtest, 16 regression — counted from each file's `@requires_cpp` markers).
 
 ### C++ unit tests
@@ -300,7 +300,7 @@ Standard Tools/
     ├── test_cpp_regression.py               ← Python integration tests (rolling beta/factor loadings)
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
-        ├── test_hurst.cpp                   ← 19 C++ unit tests (no framework needed)
+        ├── test_hurst.cpp                   ← 17 C++ unit tests (no framework needed)
         ├── test_indicators.cpp              ← 24 C++ unit tests
         ├── test_cointegration.cpp           ← 18 C++ unit tests
         ├── test_backtest.cpp                ← 17 C++ unit tests
@@ -323,10 +323,28 @@ Standard Tools/
 | Stochastic Oscillator (fused min+max pass) | `indicators.hpp` | `indicators.cpp` | `indicators/momentum.py` |
 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | `cointegration.hpp` | `cointegration.cpp` | `analysis/regression.py`, `analysis/cointegration.py` |
 | Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
-| Backtest kernel (`run_strategy` — returns, equity, all metrics, trade stats) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
-| Batch backtest grid kernel (`batch_run_strategy`) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
+| Backtest kernel (`run_strategy` — returns, equity, all 6 metrics; trade stats also computed but see note below) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
+| Batch backtest grid kernel (`batch_run_strategy` — returns, equity, all 6 metrics, trade stats) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
 | Rolling beta (incremental sum updates) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/regression.py` |
 | Rolling factor loadings (incremental Cholesky) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
+
+**Known trade-stat divergence (`run_strategy` vs. `batch_run_strategy`), fixed 2026-07-24 for one path only:**
+`sqt::run_strategy`'s own trade-log logic in `backtest.cpp` records entry one bar
+later than the true economic reference and excludes commission/slippage from
+each trade's return — a real bug in the native kernel itself (not touched by
+the 2026-07-24 fix; `backtest.cpp` is unchanged). `backtest/engine.py`'s
+`run_strategy()` now works around it: it always discards the C++ kernel's own
+`win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct` and recomputes
+them in Python via `_build_trade_log`/`_compute_trade_stats` — the same
+fill-aware, cost-aware accounting used by the pure-Python path — so a caller
+gets identical trade statistics whether or not `_sqt_core` is built. This is
+an interim, Python-side fix, not a native-code fix. `backtest_grid()`'s C++
+batch path (`batch_run_strategy`) still returns the uncorrected native trade
+stats as-is — rebuilding a Python-side trade log per grid combination would
+defeat the point of the batch kernel's speed — so a grid search sorted by
+`win_rate`/`profit_factor` can rank parameters differently with `_sqt_core`
+built vs. not. See `run_strategy`/`backtest_grid` in `backtest/engine.py` for
+the inline comments tracking this gap.
 
 All Python callers follow the same guard pattern:
 

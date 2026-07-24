@@ -87,6 +87,10 @@ print(f"CVaR/ES(95%)        : {cvar95:.4f}")  # always >= VaR
 
 **Use historical VaR** unless you have a specific reason to assume normality — most financial return distributions have fat tails.
 
+> **Confidence validation:** all three functions raise `ValidationError` unless `0.0 < confidence < 1.0`. Passing `confidence=1.5` or `confidence=-0.2` (or `0.0`/`1.0` themselves) raises rather than silently producing a nonsensical result.
+
+> **`var_parametric` without scipy:** when scipy is not installed, `var_parametric` uses a precomputed z-table covering exactly four confidence levels — `0.90`, `0.95`, `0.99`, `0.999`. Calling it with any other confidence level (e.g. `0.975`) and no scipy available raises `ValidationError` rather than silently substituting the 95% z-score. Install scipy to support arbitrary confidence levels.
+
 > **Performance:** `cvar` computes the quantile threshold and tail mean in a single NumPy pass (~1.9× faster than a two-pass approach that calls `var_historical` first, then filters). This matters when computing CVaR across many assets or rolling windows.
 
 ---
@@ -107,7 +111,7 @@ print(f"Information Ratio : {ir:.2f}")   # > 0.5 = strong active management
 print(f"Treynor Ratio     : {tr:.4f}")
 ```
 
-> **Index alignment in `treynor_ratio`** — `beta` is computed via `calculate_beta` restricted to the dates common to `returns` and `benchmark_returns` (`returns.index.intersection(benchmark_returns.index)`). The numerator, however, is `(returns.mean() - risk_free_rate/periods_per_year) * periods_per_year`, computed on the **full, unaligned** `returns` series — it does not get restricted to the common index first. When `returns` and `benchmark_returns` already share an identical index (the normal case, e.g. both built from `.pct_change().dropna()` over the same date range) this is a non-issue. If they don't, align both series yourself before calling `treynor_ratio`, since the numerator and the beta denominator would otherwise be computed over different date ranges. `information_ratio`, by contrast, restricts both legs to the common index before computing active returns.
+> **Index alignment in `treynor_ratio`** — both the beta denominator and the excess-return numerator are computed on `returns.loc[common_idx]`, where `common_idx = returns.index.intersection(benchmark_returns.index)`. `beta` comes from `calculate_beta` on that same aligned slice, so the numerator and denominator always cover the identical date range, even when `returns` and `benchmark_returns` don't already share an identical index. `information_ratio` uses the same common-index-first approach for its active returns.
 
 ---
 
