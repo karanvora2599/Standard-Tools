@@ -563,7 +563,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1246 Python tests total** (1085 passing; 161 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**1263 Python tests total** (1092 passing; 171 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 

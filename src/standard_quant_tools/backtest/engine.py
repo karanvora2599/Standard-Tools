@@ -313,9 +313,9 @@ def run_strategy(
         # with trade_log below regardless of path. backtest.cpp's own
         # trade-log logic was itself corrected to use this same convention
         # (entry_price = prices[i-1], entry_size = signal magnitude, cost
-        # deducted per round trip) — see tests/test_cpp_indicators.py's
-        # TestCppTradeStatsParity for the gated (CI-only, no local C++
-        # toolchain to verify against here) equivalence check. This
+        # deducted per round trip) — see tests/test_backtest.py's
+        # TestNativeTradeStatsCorrectness for the gated (CI-only, no local
+        # C++ toolchain to verify against here) equivalence check. This
         # override is kept in place as belt-and-suspenders until that CI
         # run has actually confirmed native and Python agree exactly; it's
         # otherwise redundant computation, not a correctness requirement,
@@ -637,8 +637,8 @@ def backtest_grid(
             # fill-aware, cost-aware accounting as _build_trade_log directly,
             # so these native stats should already agree with the Python
             # recomputation without an override -- see
-            # tests/test_cpp_indicators.py's TestCppTradeStatsParity for the
-            # gated equivalence check.
+            # tests/test_backtest.py's TestNativeTradeStatsCorrectness for
+            # the gated equivalence check.
             cpp_results = _cpp_core.batch_run_strategy(
                 prices_arr,
                 signals_mat,

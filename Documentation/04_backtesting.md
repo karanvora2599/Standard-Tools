@@ -25,7 +25,9 @@ print(f"C++ kernel active: {HAS_CPP}")
 
 **`backtest_grid` batch kernel:** When `_sqt_core` is built, `backtest_grid` uses an additional C++ batch path. All signal arrays for every parameter combination are generated in Python (the strategy logic is Python), stacked into a single 2D matrix, and passed to `_sqt_core.batch_run_strategy` in **one call**. This eliminates Python re-entry overhead between combinations and is significantly faster than the previous approach of calling the C++ kernel once per combination from a `ProcessPoolExecutor` worker.
 
-The optional per-trade log (`include_trade_log=True`) still runs in Python — it requires DatetimeIndex-aware iteration to produce labeled entry/exit dates. All numeric results are identical to the Python fallback.
+The optional per-trade log (`include_trade_log=True`) still runs in Python — it requires DatetimeIndex-aware iteration to produce labeled entry/exit dates.
+
+**Trade-stat parity (single-call vs. batch) — current status:** `run_strategy`'s single-call C++ path and `backtest_grid`'s batch kernel used to disagree on `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct`: the native kernel's own trade-log construction recorded entries one bar late and excluded commission/slippage, so `run_strategy` masked this by overwriting those four fields with a correct Python recomputation (`_build_trade_log`), while `backtest_grid`'s batch path had no such override and returned the native kernel's uncorrected numbers as-is. `backtest.cpp`'s native trade-log construction has since been rewritten to match `_build_trade_log`'s accounting exactly (entry size = signal magnitude rather than just its sign, `prices[i-1]` as the reference price, correct commission/slippage deduction), so the batch path's stats *should* now agree with the single-call/Python path. **This has not yet been verified against a real compiled `_sqt_core` extension** — the fix was written in an environment with no C++ toolchain available, so confirmation is deferred to CI, via a gated test (`tests/test_backtest.py::TestNativeTradeStatsCorrectness`) that only runs once `_sqt_core` is actually built (e.g. in `build-cpp.yml`). Until a CI run confirms agreement, `run_strategy`'s Python-side override of the native trade stats is being left in place as a safety net rather than removed.
 
 | Scenario | Python (pandas) | C++ single calls | C++ batch kernel | Speedup (batch) |
 |---|---|---|---|---|
@@ -85,6 +87,13 @@ print(f"Win Rate       : {result['win_rate']:.1%}")
 print(f"Profit Factor  : {result['profit_factor']:.2f}")
 print(f"Num Trades     : {result['num_trades']}")
 ```
+
+**Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
+isn't finite and `> 0`, or if `commission_pct`/`slippage_pct` isn't finite
+and `>= 0` — the same self-correcting-error pattern used everywhere else in
+this library. Previously a zero, negative, or non-finite `initial_capital`
+was accepted silently and produced `inf`/`nan` in `total_return`/
+`calmar_ratio` instead of raising.
 
 ---
 
@@ -304,6 +313,13 @@ results = backtest_grid(df, strategy="bollinger_reversion",
 ```
 
 Pass `n_workers=1` to run sequentially (no subprocess overhead — useful in notebooks).
+
+**Validation:** `backtest_grid` applies the same checks as `run_strategy`
+(see [Running a Backtest](#running-a-backtest) above) — `initial_capital`
+must be finite and `> 0`, and `commission_pct`/`slippage_pct` must each be
+finite and `>= 0` — raising `ValidationError` up front rather than letting a
+bad value silently produce `inf`/`nan` metrics across every combination in
+the grid.
 
 ---
 

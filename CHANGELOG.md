@@ -103,10 +103,43 @@ bump, consistent with SemVer's pre-1.0 clause.
 - `run_strategy` (`backtest/engine.py`) now always recomputes
   `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct` in Python
   (`_build_trade_log`/`_compute_trade_stats`) instead of trusting the C++
-  kernel's own native trade-log values, which record each entry one bar late
-  and exclude commission/slippage. This is a Python-side workaround, not a
-  native-code fix — see Known Issues below for the path that's still affected.
+  kernel's own native trade-log values, which used to record each entry one
+  bar late and exclude commission/slippage. This Python-side override
+  remains in place as a safety net even after the underlying native bug was
+  also fixed directly (see below) — see Known Issues for the exact pending
+  verification status.
 - Fixed a day-0 drawdown edge case (see git history for the exact commit).
+- `_cpp/src/backtest.cpp`'s `run_strategy` native trade-log construction
+  rewritten to match `_build_trade_log`'s accounting exactly (entry size =
+  signal magnitude not just sign, `prices[i-1]` as the reference price,
+  correct commission/slippage deduction) — this is the fix for the exact bug
+  the Python-side override above works around, now applied at the native
+  level too, including `backtest_grid`'s batch path (`batch_run_strategy`)
+  which had no equivalent Python override. **Not yet verified against a
+  real compiled `_sqt_core`** (no C++ toolchain available where this was
+  written) — see Known Issues.
+- `stochastic_oscillator`: `k_period<=0`/`d_period<=0` now raise
+  `ValidationError` in both the C++ kernel and its Python wrapper —
+  `d_period<=0` previously reached the native kernel unchecked, causing an
+  out-of-bounds vector read (an uncatchable segfault, not a Python
+  exception), not just a wrong result.
+- `hurst_exponent`/`rolling_hurst`: `method` must now be exactly `"dfa"` or
+  `"rs"` (raises `ValidationError` otherwise, in both paths) —
+  previously any other string was silently treated as `"rs"` while the
+  result's own `"method"` field echoed back the typo, making the mistake
+  invisible. `HurstInput.method`, `RegimeAdaptiveInput.hurst_method`, and
+  `RegimeAdaptiveWalkForwardInput.hurst_method` are now
+  `Literal["dfa", "rs"]` instead of a bare `str` so a bad value is rejected
+  by Pydantic before it ever reaches the function.
+- `parabolic_sar`: `af_start`/`af_step`/`af_max` are now validated (finite;
+  `af_start>0`; `af_step>=0`; `af_max>0`; `af_max>=af_start`) in both the
+  C++ kernel and the Python wrapper — a nonsensical combination previously
+  produced a silently meaningless SAR series instead of raising.
+- `run_strategy`/`backtest_grid`: `initial_capital`, `commission_pct`, and
+  `slippage_pct` are now validated (finite, correct sign) before reaching
+  the native kernel — a zero/negative/non-finite `initial_capital`
+  previously produced silent `inf`/`nan` in `total_return`/`calmar_ratio`
+  instead of raising.
 - The four provider example agent loops (`Implementation/*/_agent_utils.py`)
   fixed duplicate logging handlers on repeated setup, malformed tool-call
   JSON silently becoming `{}`, missing request/tool timeouts, non-strict
@@ -119,13 +152,19 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Known Issues
 
-- `backtest_grid`'s `_sqt_core` batch kernel (`batch_run_strategy`) still
-  returns the native C++ trade stats uncorrected — the one-bar-late entry
-  and missing commission/slippage bug that `run_strategy` now works around
-  in Python is still present for grid-search results, including the
-  aggregate speedups reported for `run_walk_forward_backtest` and
-  `run_backtest_optimization`, which route through the batch path. Not yet
-  fixed at the native level.
+- **Update:** the native trade-stat parity gap described in earlier drafts
+  of this section (`backtest_grid`'s C++ batch kernel returning uncorrected
+  trade stats) has a fix implemented at the native level (see Fixed above),
+  but it is **unverified** — there is no C++ toolchain available in the
+  environment that wrote the fix, so it hasn't been built and run locally.
+  Verification is deferred to CI via a new gated test,
+  `tests/test_backtest.py::TestNativeTradeStatsCorrectness`, which only runs
+  once `_sqt_core` is actually built (e.g. by `build-cpp.yml`). Until that
+  CI run confirms the native and Python trade-stat accounting genuinely
+  agree, treat `backtest_grid`'s C++-path `win_rate`/`profit_factor`/
+  `num_trades`/`avg_trade_return_pct` (and anything built on top of it,
+  e.g. `run_walk_forward_backtest`/`run_backtest_optimization`) as
+  not yet confirmed trustworthy when `_sqt_core` is built.
 
 ## [0.1.0] - 2026-07-24
 

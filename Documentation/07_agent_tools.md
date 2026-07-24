@@ -1873,7 +1873,7 @@ if result.rolling_current is not None:
 | `symbol` | str | — | Ticker symbol |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
-| `method` | str | `"dfa"` | `"dfa"` (Detrended Fluctuation Analysis) or `"rs"` (Rescaled Range) |
+| `method` | `Literal["dfa","rs"]` | `"dfa"` | `"dfa"` (Detrended Fluctuation Analysis) or `"rs"` (Rescaled Range) — any other value is rejected at input validation with a Pydantic error, not silently treated as `"rs"` |
 | `rolling_window` | int | None | If set, compute rolling Hurst and return regime fractions |
 
 **Regime table:**
@@ -2070,14 +2070,14 @@ print(f"Example params: {playbook['example_params']}")
 | `FactorRegressionInput` | `symbol`, `factor_tickers`, `start_date`, `end_date` | `factor_names=None`, `rolling_window=None` |
 | `CointegrationInput` | `symbol_a`, `symbol_b`, `start_date`, `end_date` | `zscore_window=30` |
 | `PCAInput` | `tickers`, `start_date`, `end_date` | `n_components=3` (must be ≥ 1) |
-| `HurstInput` | `symbol`, `start_date`, `end_date` | `method="dfa"`, `rolling_window=None` |
+| `HurstInput` | `symbol`, `start_date`, `end_date` | `method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `rolling_window=None` |
 
 **Advanced tools (7)**
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
-| `RegimeAdaptiveInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"`, `sma/rsi/macd/bollinger_param_grid=None`, `n_workers=1` |
-| `RegimeAdaptiveWalkForwardInput` | `symbol`, `start_date`, `end_date` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"`, `sma/rsi/macd/bollinger_param_grid=None`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"hl2_exploratory"`, applied to each window's OOS leg) |
+| `RegimeAdaptiveInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `sma/rsi/macd/bollinger_param_grid=None`, `n_workers=1` |
+| `RegimeAdaptiveWalkForwardInput` | `symbol`, `start_date`, `end_date` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `sma/rsi/macd/bollinger_param_grid=None`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"hl2_exploratory"`, applied to each window's OOS leg) |
 | `PairScannerInput` | `tickers`, `start_date`, `end_date` | `max_pairs=10`, `min_half_life=5.0`, `max_half_life=126.0`, `p_value_threshold=0.05`, `zscore_window=30` |
 | `WalkForwardInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"hl2_exploratory"`, applied to each window's OOS leg) |
 | `RiskAttributionInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"`, `n_components=3`, `factor_tickers=None`, `factor_names=None` |

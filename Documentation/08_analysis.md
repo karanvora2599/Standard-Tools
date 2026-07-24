@@ -673,6 +673,8 @@ Two methods are available:
 
 Both methods are implemented in the C++ extension and in the Python fallback. DFA is the better default for financial time series of typical length.
 
+> **`method` is validated** — `hurst_exponent` and `rolling_hurst` require `method` to be exactly `"dfa"` or `"rs"`; any other value (e.g. a typo like `"dfs"`) raises `ValidationError` immediately, in both the C++ and Python paths. Previously a typo silently fell back to `"rs"` while `result["method"]` echoed back the typo'd string, making the mistake invisible.
+
 ---
 
 ### Basic usage

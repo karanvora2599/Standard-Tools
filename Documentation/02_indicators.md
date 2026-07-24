@@ -86,6 +86,11 @@ df['Trend'] = sar_df['Trend']   # 1 = rising, -1 = falling
 df['sar_flip_bull'] = (df['Trend'] == 1) & (df['Trend'].shift(1) == -1)
 ```
 
+**Validation:** raises `ValidationError` if `af_start`, `af_step`, or `af_max`
+isn't finite, if `af_start <= 0`, if `af_step < 0`, if `af_max <= 0`, or if
+`af_max < af_start` — a nonsensical AF combination otherwise produced a
+meaningless SAR series silently.
+
 ### Williams %R
 
 Momentum oscillator ranging from −100 to 0. Below −80 = oversold; above −20 = overbought.
@@ -127,6 +132,10 @@ df['Stoch_D'] = stoch['Stoch_D']
 # Bullish stochastic cross
 df['stoch_bull'] = (df['Stoch_K'] > df['Stoch_D']) & (df['Stoch_K'] < 20)
 ```
+
+**Validation:** raises `ValidationError` if `k_period <= 0` or `d_period <= 0`
+(a `d_period <= 0` previously reached the C++ kernel unchecked and caused an
+out-of-bounds read rather than a catchable Python error).
 
 ---
 

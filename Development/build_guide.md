@@ -188,9 +188,19 @@ Or run all six at once:
 pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py -v
 ```
 
-Once the extension is built all skipped tests activate (154 total across the
-six files above — 25 Hurst, 42 indicators, 23 new-indicators, 23 cointegration,
+Once the extension is built all skipped tests activate (156 total across the
+six files above — 25 Hurst, 43 indicators, 24 new-indicators, 23 cointegration,
 25 backtest, 16 regression — counted from each file's `@requires_cpp` markers).
+`tests/test_cpp_indicators.py` and `tests/test_cpp_new_indicators.py` each
+gained one gated test on 2026-07-24 (commit `2242d63`) for the new
+`stochastic_oscillator` `d_period<=0` guard and `parabolic_sar`
+`af_start`/`af_step`/`af_max` validation.
+
+A separate gated test class outside these six files, `TestNativeTradeStatsCorrectness`
+in `tests/test_backtest.py`, was added the same day to verify `run_strategy`'s
+and `batch_run_strategy`'s native trade-log accounting against hand-computed
+values once `_sqt_core` is built — see `Development/performance_insights.md`
+for the trade-stat parity background.
 
 ### C++ unit tests
 
@@ -328,23 +338,41 @@ Standard Tools/
 | Rolling beta (incremental sum updates) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/regression.py` |
 | Rolling factor loadings (incremental Cholesky) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
 
-**Known trade-stat divergence (`run_strategy` vs. `batch_run_strategy`), fixed 2026-07-24 for one path only:**
-`sqt::run_strategy`'s own trade-log logic in `backtest.cpp` records entry one bar
-later than the true economic reference and excludes commission/slippage from
-each trade's return — a real bug in the native kernel itself (not touched by
-the 2026-07-24 fix; `backtest.cpp` is unchanged). `backtest/engine.py`'s
-`run_strategy()` now works around it: it always discards the C++ kernel's own
-`win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct` and recomputes
-them in Python via `_build_trade_log`/`_compute_trade_stats` — the same
-fill-aware, cost-aware accounting used by the pure-Python path — so a caller
-gets identical trade statistics whether or not `_sqt_core` is built. This is
-an interim, Python-side fix, not a native-code fix. `backtest_grid()`'s C++
-batch path (`batch_run_strategy`) still returns the uncorrected native trade
-stats as-is — rebuilding a Python-side trade log per grid combination would
-defeat the point of the batch kernel's speed — so a grid search sorted by
-`win_rate`/`profit_factor` can rank parameters differently with `_sqt_core`
-built vs. not. See `run_strategy`/`backtest_grid` in `backtest/engine.py` for
-the inline comments tracking this gap.
+**Trade-stat parity (`run_strategy` vs. `batch_run_strategy`) — native fix implemented 2026-07-24, awaiting CI verification:**
+`sqt::run_strategy`'s own trade-log logic in `backtest.cpp` used to record entry
+one bar later than the true economic reference and exclude commission/slippage
+from each trade's return — a real bug in the native kernel itself.
+`backtest/engine.py`'s `run_strategy()` worked around it on the Python side: it
+always discards the C++ kernel's own `win_rate`/`profit_factor`/`num_trades`/
+`avg_trade_return_pct` and recomputes them in Python via
+`_build_trade_log`/`_compute_trade_stats` — the same fill-aware, cost-aware
+accounting used by the pure-Python path — so a caller gets identical trade
+statistics whether or not `_sqt_core` is built. `backtest_grid()`'s C++ batch
+path (`batch_run_strategy`) has no such override — rebuilding a Python-side
+trade log per grid combination would defeat the point of the batch kernel's
+speed — so it depends entirely on the native kernel's own accounting.
+
+On 2026-07-24 (commit `2242d63`), `backtest.cpp`'s native trade-log
+construction itself was rewritten to match `_build_trade_log`'s accounting
+exactly (entry_size = signal magnitude rather than sign only, `prices[i-1]` as
+the entry/exit reference price, commission+slippage deducted per completed
+round trip). This applies to both `run_strategy` and `batch_run_strategy`,
+since they share the same trade-log code in `backtest.cpp`. It was verified by
+hand and against a line-for-line Python re-implementation on plain and
+2.5x-leveraged scenarios, but **not yet against a real compiled `_sqt_core`**
+— there is no C++ toolchain available locally to build and run it. Verification
+is deferred to CI via a new gated test class, `TestNativeTradeStatsCorrectness`
+in `tests/test_backtest.py` (skipped unless `_sqt_core` is actually built, e.g.
+by `.github/workflows/build-cpp.yml`).
+
+**Current status: fix implemented, awaiting CI verification with the real
+compiled kernel — neither "known unfixed" nor "confirmed fixed."** Until CI
+confirms native/Python agreement, `backtest/engine.py`'s Python-side override
+for `run_strategy()` is being kept in place as a safety net rather than
+removed on unverified native code, and a `batch_run_strategy` grid search
+sorted by `win_rate`/`profit_factor` should still be treated as unverified
+relative to `run_strategy` on the same parameters. See `run_strategy`/
+`backtest_grid` in `backtest/engine.py` for the inline comments tracking this.
 
 All Python callers follow the same guard pattern:
 
