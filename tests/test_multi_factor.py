@@ -9,8 +9,8 @@ from standard_quant_tools.analysis.multi_factor import (
     rolling_factor_loadings,
 )
 
-
 # ── Shared fixtures ────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="module")
 def two_factor_data():
@@ -39,13 +39,19 @@ def single_factor_data(sample_returns, benchmark_returns):
 
 # ── multi_factor_regression ────────────────────────────────────────────────────
 
+
 class TestMultiFactorRegressionKeys:
     def test_returns_all_required_keys(self, two_factor_data):
         asset, factors = two_factor_data
         result = multi_factor_regression(asset, factors)
         assert set(result.keys()) == {
-            "alpha", "loadings", "t_stats", "p_values",
-            "r_squared", "adj_r_squared", "n_obs",
+            "alpha",
+            "loadings",
+            "t_stats",
+            "p_values",
+            "r_squared",
+            "adj_r_squared",
+            "n_obs",
         }
 
     def test_loadings_keys_match_factor_columns(self, two_factor_data):
@@ -133,21 +139,28 @@ class TestMultiFactorRegressionValues:
         n = 300
         dates = pd.date_range("2022-01-01", periods=n, freq="B")
         asset = pd.Series(np.random.normal(0, 0.01, n), index=dates)
-        factors = pd.DataFrame({
-            "f1": np.random.normal(0, 0.01, n),
-            "f2": np.random.normal(0, 0.01, n),
-        }, index=dates)
+        factors = pd.DataFrame(
+            {
+                "f1": np.random.normal(0, 0.01, n),
+                "f2": np.random.normal(0, 0.01, n),
+            },
+            index=dates,
+        )
         result = multi_factor_regression(asset, factors)
         assert result["r_squared"] < 0.05
 
     def test_index_alignment_on_partial_overlap(self, two_factor_data):
         """Should run cleanly even when factor index is longer than asset index."""
         asset, factors = two_factor_data
-        extended_factors = pd.concat([
-            factors,
-            pd.DataFrame({"mkt": [0.0], "smb": [0.0]},
-                         index=pd.date_range("2100-01-01", periods=1, freq="B")),
-        ])
+        extended_factors = pd.concat(
+            [
+                factors,
+                pd.DataFrame(
+                    {"mkt": [0.0], "smb": [0.0]},
+                    index=pd.date_range("2100-01-01", periods=1, freq="B"),
+                ),
+            ]
+        )
         result = multi_factor_regression(asset, extended_factors)
         assert result["n_obs"] == len(asset)
 
@@ -155,11 +168,14 @@ class TestMultiFactorRegressionValues:
         """Fewer observations than parameters should return NaN for all metrics."""
         dates = pd.date_range("2022-01-01", periods=3, freq="B")
         asset = pd.Series([0.01, 0.02, -0.01], index=dates)
-        factors = pd.DataFrame({
-            "f1": [0.005, 0.01, -0.005],
-            "f2": [0.003, -0.002, 0.007],
-            "f3": [0.001, 0.002, 0.003],
-        }, index=dates)
+        factors = pd.DataFrame(
+            {
+                "f1": [0.005, 0.01, -0.005],
+                "f2": [0.003, -0.002, 0.007],
+                "f3": [0.001, 0.002, 0.003],
+            },
+            index=dates,
+        )
         # n=3, k=4 (3 factors + intercept) → n < k+1
         result = multi_factor_regression(asset, factors)
         assert np.isnan(result["r_squared"])
@@ -183,6 +199,7 @@ class TestMultiFactorRegressionValues:
 
 
 # ── rolling_factor_loadings ────────────────────────────────────────────────────
+
 
 class TestRollingFactorLoadings:
     def test_returns_dataframe(self, two_factor_data):
@@ -212,7 +229,7 @@ class TestRollingFactorLoadings:
         asset, factors = two_factor_data
         window = 60
         result = rolling_factor_loadings(asset, factors, window=window)
-        assert not result.iloc[window - 1:].isna().any(axis=None)
+        assert not result.iloc[window - 1 :].isna().any(axis=None)
 
     def test_stable_loadings_converge_to_true_values(self, two_factor_data):
         """

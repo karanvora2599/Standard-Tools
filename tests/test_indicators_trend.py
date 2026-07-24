@@ -4,10 +4,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.indicators.trend import (
-    adx, ema, macd, parabolic_sar, sma, williams_r,
-)
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators.trend import (
+    adx,
+    ema,
+    macd,
+    parabolic_sar,
+    sma,
+    williams_r,
+)
 
 
 class TestSMA:
@@ -65,11 +70,11 @@ class TestEMA:
 class TestMACD:
     def test_returns_correct_columns(self, sample_close):
         result = macd(sample_close)
-        assert set(result.columns) == {'MACD', 'Signal', 'Histogram'}
+        assert set(result.columns) == {"MACD", "Signal", "Histogram"}
 
     def test_histogram_equals_macd_minus_signal(self, sample_close):
         result = macd(sample_close)
-        diff = (result['MACD'] - result['Signal'] - result['Histogram']).dropna()
+        diff = (result["MACD"] - result["Signal"] - result["Histogram"]).dropna()
         assert diff.abs().max() < 1e-10
 
     def test_output_length_matches_input(self, sample_close):
@@ -78,33 +83,33 @@ class TestMACD:
 
     def test_custom_periods(self, sample_close):
         result = macd(sample_close, fast=5, slow=10, signal=3)
-        assert result['MACD'].notna().any()
+        assert result["MACD"].notna().any()
 
     def test_bullish_crossover_positive_histogram(self):
         """Strongly trending up price should produce positive MACD histogram."""
         trend = pd.Series(np.linspace(100, 200, 100))
         result = macd(trend)
-        assert float(result['Histogram'].dropna().iloc[-1]) > 0
+        assert float(result["Histogram"].dropna().iloc[-1]) > 0
 
 
 class TestADX:
     def test_returns_correct_columns(self, sample_ohlcv):
-        result = adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
-        assert set(result.columns) == {'DI_Plus', 'DI_Minus', 'ADX'}
+        result = adx(sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"])
+        assert set(result.columns) == {"DI_Plus", "DI_Minus", "ADX"}
 
     def test_output_length_matches_input(self, sample_ohlcv):
-        result = adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
+        result = adx(sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"])
         assert len(result) == len(sample_ohlcv)
 
     def test_adx_bounded_0_to_100(self, sample_ohlcv):
-        result = adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
-        valid = result['ADX'].dropna()
+        result = adx(sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"])
+        valid = result["ADX"].dropna()
         assert (valid >= 0).all() and (valid <= 100).all()
 
     def test_di_plus_minus_nonnegative(self, sample_ohlcv):
-        result = adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
-        assert (result['DI_Plus'].dropna() >= 0).all()
-        assert (result['DI_Minus'].dropna() >= 0).all()
+        result = adx(sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"])
+        assert (result["DI_Plus"].dropna() >= 0).all()
+        assert (result["DI_Minus"].dropna() >= 0).all()
 
     def test_negative_period_raises(self, sample_ohlcv):
         """
@@ -114,11 +119,21 @@ class TestADX:
         path is reached.
         """
         with pytest.raises(ValidationError, match="period"):
-            adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'], period=-1)
+            adx(
+                sample_ohlcv["High"],
+                sample_ohlcv["Low"],
+                sample_ohlcv["Close"],
+                period=-1,
+            )
 
     def test_zero_period_raises(self, sample_ohlcv):
         with pytest.raises(ValidationError, match="period"):
-            adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'], period=0)
+            adx(
+                sample_ohlcv["High"],
+                sample_ohlcv["Low"],
+                sample_ohlcv["Close"],
+                period=0,
+            )
 
     def test_strong_trend_yields_high_adx(self):
         """A perfectly linear trend should produce ADX > 25."""
@@ -127,56 +142,60 @@ class TestADX:
         high = prices + 1.0
         low = prices - 1.0
         result = adx(high, low, prices, period=14)
-        assert float(result['ADX'].dropna().iloc[-1]) > 25
+        assert float(result["ADX"].dropna().iloc[-1]) > 25
 
     def test_wilder_smoothing_stable(self, sample_ohlcv):
         """ADX should not have extreme spikes — Wilder smoothing keeps it stable."""
-        result = adx(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
-        adx_vals = result['ADX'].dropna()
+        result = adx(sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"])
+        adx_vals = result["ADX"].dropna()
         # No single bar should jump more than 30 points
         assert adx_vals.diff().abs().dropna().max() < 30
 
 
 class TestParabolicSAR:
     def test_returns_correct_columns(self, sample_ohlcv):
-        result = parabolic_sar(sample_ohlcv['High'], sample_ohlcv['Low'])
-        assert set(result.columns) == {'SAR', 'Trend'}
+        result = parabolic_sar(sample_ohlcv["High"], sample_ohlcv["Low"])
+        assert set(result.columns) == {"SAR", "Trend"}
 
     def test_output_length_matches_input(self, sample_ohlcv):
-        result = parabolic_sar(sample_ohlcv['High'], sample_ohlcv['Low'])
+        result = parabolic_sar(sample_ohlcv["High"], sample_ohlcv["Low"])
         assert len(result) == len(sample_ohlcv)
 
     def test_trend_values_are_plus_or_minus_one(self, sample_ohlcv):
-        result = parabolic_sar(sample_ohlcv['High'], sample_ohlcv['Low'])
-        trends = result['Trend'].dropna().unique()
+        result = parabolic_sar(sample_ohlcv["High"], sample_ohlcv["Low"])
+        trends = result["Trend"].dropna().unique()
         assert set(trends).issubset({1.0, -1.0})
 
     def test_sar_below_price_on_rising_trend(self, sample_ohlcv):
         """When trend is rising (1), SAR must be below the close price."""
-        close = sample_ohlcv['Close']
-        result = parabolic_sar(sample_ohlcv['High'], sample_ohlcv['Low'])
-        rising_mask = result['Trend'] == 1.0
+        close = sample_ohlcv["Close"]
+        result = parabolic_sar(sample_ohlcv["High"], sample_ohlcv["Low"])
+        rising_mask = result["Trend"] == 1.0
         # At least 80% of rising-trend bars should have SAR below close
-        rising_sar = result.loc[rising_mask, 'SAR']
+        rising_sar = result.loc[rising_mask, "SAR"]
         rising_close = close.loc[rising_mask]
         fraction_correct = (rising_sar.values < rising_close.values).mean()
         assert fraction_correct > 0.80
 
     def test_reversals_occur(self, sample_ohlcv):
         """SAR should reverse at least once in 500 bars of real price data."""
-        result = parabolic_sar(sample_ohlcv['High'], sample_ohlcv['Low'])
-        trend_series: pd.Series = result['Trend']  # type: ignore[assignment]
+        result = parabolic_sar(sample_ohlcv["High"], sample_ohlcv["Low"])
+        trend_series: pd.Series = result["Trend"]  # type: ignore[assignment]
         trend_changes = int(trend_series.diff().dropna().ne(0).sum())
         assert trend_changes >= 1
 
 
 class TestWilliamsR:
     def test_output_length_matches_input(self, sample_ohlcv):
-        result = williams_r(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
+        result = williams_r(
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
+        )
         assert len(result) == len(sample_ohlcv)
 
     def test_bounded_minus_100_to_zero(self, sample_ohlcv):
-        result = williams_r(sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'])
+        result = williams_r(
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
+        )
         valid = result.dropna()
         assert (valid >= -100).all() and (valid <= 0).all()
 

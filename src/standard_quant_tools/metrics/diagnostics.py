@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Drawdown episodes
 # ──────────────────────────────────────────────────────────────────
 
+
 def drawdown_periods(equity_curve: pd.Series) -> pd.DataFrame:
     """
     One row per drawdown episode: the peak before the decline, the trough,
@@ -35,7 +36,16 @@ def drawdown_periods(equity_curve: pd.Series) -> pd.DataFrame:
     unrecovered).
     """
     if equity_curve.empty:
-        return pd.DataFrame(columns=["start", "trough", "end", "depth", "duration_bars", "recovery_bars"])
+        return pd.DataFrame(
+            columns=[
+                "start",
+                "trough",
+                "end",
+                "depth",
+                "duration_bars",
+                "recovery_bars",
+            ]
+        )
 
     dd = drawdown_series(equity_curve)
     idx = equity_curve.index
@@ -59,29 +69,36 @@ def drawdown_periods(equity_curve: pd.Series) -> pd.DataFrame:
         else:
             if in_dd:
                 assert trough_i is not None
-                records.append({
-                    "start": idx[peak_i],
-                    "trough": idx[trough_i],
-                    "end": idx[i],
-                    "depth": round(trough_val, 6),
-                    "duration_bars": i - peak_i,
-                    "recovery_bars": i - trough_i,
-                })
+                records.append(
+                    {
+                        "start": idx[peak_i],
+                        "trough": idx[trough_i],
+                        "end": idx[i],
+                        "depth": round(trough_val, 6),
+                        "duration_bars": i - peak_i,
+                        "recovery_bars": i - trough_i,
+                    }
+                )
                 in_dd = False
             peak_i = i
 
     if in_dd:
         assert trough_i is not None
-        records.append({
-            "start": idx[peak_i],
-            "trough": idx[trough_i],
-            "end": None,
-            "depth": round(trough_val, 6),
-            "duration_bars": (n - 1) - peak_i,
-            "recovery_bars": None,
-        })
+        records.append(
+            {
+                "start": idx[peak_i],
+                "trough": idx[trough_i],
+                "end": None,
+                "depth": round(trough_val, 6),
+                "duration_bars": (n - 1) - peak_i,
+                "recovery_bars": None,
+            }
+        )
 
-    return pd.DataFrame(records, columns=["start", "trough", "end", "depth", "duration_bars", "recovery_bars"])
+    return pd.DataFrame(
+        records,
+        columns=["start", "trough", "end", "depth", "duration_bars", "recovery_bars"],
+    )
 
 
 def top_n_drawdowns(equity_curve: pd.Series, n: int = 5) -> pd.DataFrame:
@@ -95,6 +112,7 @@ def top_n_drawdowns(equity_curve: pd.Series, n: int = 5) -> pd.DataFrame:
 # ──────────────────────────────────────────────────────────────────
 # Trade diagnostics
 # ──────────────────────────────────────────────────────────────────
+
 
 def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
     """
@@ -139,7 +157,9 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
         "expectancy_pct": round(expectancy, 4),
         "avg_winner_pct": round(avg_winner, 4),
         "avg_loser_pct": round(avg_loser, 4),
-        "payoff_ratio": round(payoff_ratio, 4) if np.isfinite(payoff_ratio) else float("inf"),
+        "payoff_ratio": (
+            round(payoff_ratio, 4) if np.isfinite(payoff_ratio) else float("inf")
+        ),
         "max_consecutive_wins": int(max_w),
         "max_consecutive_losses": int(max_l),
     }
@@ -164,7 +184,7 @@ def trade_excursions(trade_log: pd.DataFrame, price_data: pd.DataFrame) -> pd.Da
     mae_list: List[float] = []
     mfe_list: List[float] = []
     for _, row in trade_log.iterrows():
-        window = price_data.loc[row["entry_date"]: row["exit_date"]]
+        window = price_data.loc[row["entry_date"] : row["exit_date"]]
         entry_price = float(row["entry_price"])
         if window.empty or entry_price == 0:
             mae_list.append(0.0)
@@ -192,8 +212,10 @@ def trade_excursions(trade_log: pd.DataFrame, price_data: pd.DataFrame) -> pd.Da
 # Exposure diagnostics
 # ──────────────────────────────────────────────────────────────────
 
+
 def exposure_stats(
-    executed_signal: pd.Series, trade_log: Optional[pd.DataFrame] = None,
+    executed_signal: pd.Series,
+    trade_log: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     Exposure profile from the already-shifted (one-bar-lag) executed
@@ -205,8 +227,12 @@ def exposure_stats(
     values = executed_signal.to_numpy(dtype=float)
     if len(values) == 0:
         return {
-            "time_in_market": 0.0, "avg_gross_exposure": 0.0, "avg_net_exposure": 0.0,
-            "pct_long": 0.0, "pct_short": 0.0, "avg_holding_period_bars": None,
+            "time_in_market": 0.0,
+            "avg_gross_exposure": 0.0,
+            "avg_net_exposure": 0.0,
+            "pct_long": 0.0,
+            "pct_short": 0.0,
+            "avg_holding_period_bars": None,
         }
 
     avg_holding_period_bars: Optional[float] = None

@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 _scipy_stats = None
 try:
     from scipy import stats as _scipy_stats  # type: ignore[assignment]
+
     HAS_SCIPY = True
 except ImportError:
     HAS_SCIPY = False
@@ -17,7 +18,10 @@ except ImportError:
 _cpp_core: Any = None
 HAS_CPP = False
 try:
-    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
     HAS_CPP = True
 except ImportError:
     pass
@@ -66,7 +70,9 @@ def multi_factor_regression(
     n = len(y)
     k = X_f.shape[1] + 1  # +1 for intercept
     cdf_path = "scipy" if HAS_SCIPY else "math.erf"
-    logger.debug("[multi_factor] factors=%s  n_obs=%d  cdf=%s", factor_names, n, cdf_path)
+    logger.debug(
+        "[multi_factor] factors=%s  n_obs=%d  cdf=%s", factor_names, n, cdf_path
+    )
 
     _nan = float("nan")
     if n < k + 1:
@@ -123,8 +129,13 @@ def multi_factor_regression(
         "n_obs": n,
     }
     sig = [f for f in factor_names if p_values.get(f, 1.0) < 0.05]
-    logger.debug("[multi_factor] alpha=%.6f  R²=%.4f  adj_R²=%.4f  significant=%s",
-                 result["alpha"], r_squared, adj_r_squared, sig)
+    logger.debug(
+        "[multi_factor] alpha=%.6f  R²=%.4f  adj_R²=%.4f  significant=%s",
+        result["alpha"],
+        r_squared,
+        adj_r_squared,
+        sig,
+    )
     return result
 
 
@@ -142,20 +153,23 @@ def rolling_factor_loadings(
     Uses C++ incremental Cholesky path when available (50-200× faster than
     the Python numpy.linalg.lstsq loop).
     """
-    common_idx  = asset_returns.index.intersection(factor_returns.index)
-    y_arr       = asset_returns.loc[common_idx].to_numpy(dtype=np.float64)
-    X_arr       = np.ascontiguousarray(
+    common_idx = asset_returns.index.intersection(factor_returns.index)
+    y_arr = asset_returns.loc[common_idx].to_numpy(dtype=np.float64)
+    X_arr = np.ascontiguousarray(
         factor_returns.loc[common_idx].to_numpy(dtype=np.float64)
     )
     factor_names = list(factor_returns.columns)
-    col_names    = ["alpha"] + factor_names
+    col_names = ["alpha"] + factor_names
 
-    n    = len(y_arr)
-    k    = X_arr.shape[1] if X_arr.ndim == 2 else 1
+    n = len(y_arr)
+    k = X_arr.shape[1] if X_arr.ndim == 2 else 1
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "python"
     logger.debug(
         "[rolling_factor_loadings] window=%d  factors=%d  bars=%d  path=%s",
-        window, k, n, path,
+        window,
+        k,
+        n,
+        path,
     )
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
@@ -171,8 +185,8 @@ def rolling_factor_loadings(
     # ── Python fallback ───────────────────────────────────────────────────────
     out = np.full((n, len(col_names)), np.nan)
     for i in range(window - 1, n):
-        y_w   = y_arr[i - window + 1: i + 1]
-        X_w   = X_arr[i - window + 1: i + 1]
+        y_w = y_arr[i - window + 1 : i + 1]
+        X_w = X_arr[i - window + 1 : i + 1]
         X_des = np.column_stack([np.ones(window), X_w])
         beta, *_ = np.linalg.lstsq(X_des, y_w, rcond=None)
         out[i] = beta

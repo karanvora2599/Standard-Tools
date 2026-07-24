@@ -1,8 +1,8 @@
 import logging
 from typing import Any
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
@@ -10,16 +10,21 @@ logger = logging.getLogger(__name__)
 
 _cpp_core: Any = None
 try:
-    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
     HAS_CPP = True
 except ImportError:
     HAS_CPP = False
 
 try:
     from numba import njit
+
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
+
     def njit(func):
         return func
 
@@ -27,6 +32,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Existing indicators
 # ──────────────────────────────────────────────
+
 
 def sma(series: pd.Series, period: int = 14) -> pd.Series:
     """Simple Moving Average."""
@@ -38,25 +44,35 @@ def ema(series: pd.Series, period: int = 14) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
-def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+def macd(
+    series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
+) -> pd.DataFrame:
     """
     MACD: Moving Average Convergence Divergence.
     Returns DataFrame with columns ['MACD', 'Signal', 'Histogram'].
     """
-    logger.debug("[macd] fast=%d  slow=%d  signal=%d  bars=%d", fast, slow, signal, len(series))
+    logger.debug(
+        "[macd] fast=%d  slow=%d  signal=%d  bars=%d", fast, slow, signal, len(series)
+    )
     exp1 = ema(series, fast)
     exp2 = ema(series, slow)
     macd_line = exp1 - exp2
     signal_line = ema(macd_line, signal)
-    result = pd.DataFrame({
-        'MACD': macd_line,
-        'Signal': signal_line,
-        'Histogram': macd_line - signal_line,
-    })
+    result = pd.DataFrame(
+        {
+            "MACD": macd_line,
+            "Signal": signal_line,
+            "Histogram": macd_line - signal_line,
+        }
+    )
     valid = result.dropna()
     if not valid.empty:
-        logger.debug("[macd] last MACD=%.4f  Signal=%.4f  Hist=%.4f",
-                     float(valid["MACD"].iloc[-1]), float(valid["Signal"].iloc[-1]), float(valid["Histogram"].iloc[-1]))
+        logger.debug(
+            "[macd] last MACD=%.4f  Signal=%.4f  Hist=%.4f",
+            float(valid["MACD"].iloc[-1]),
+            float(valid["Signal"].iloc[-1]),
+            float(valid["Histogram"].iloc[-1]),
+        )
     return result
 
 
@@ -64,8 +80,11 @@ def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> 
 # ADX — Average Directional Index (Numba JIT)
 # ──────────────────────────────────────────────
 
+
 @njit
-def _adx_numba(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+def _adx_numba(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
+) -> np.ndarray:
     """
     Wilder's ADX using the same smoothing as RSI.
     Returns a (n, 3) array: [:, 0] = DI+, [:, 1] = DI-, [:, 2] = ADX.
@@ -146,7 +165,11 @@ def adx(
     if period <= 0:
         raise ValidationError(f"period must be > 0, got {period}")
 
-    path = "C++" if (HAS_CPP and _cpp_core is not None) else ("numba" if HAS_NUMBA else "python")
+    path = (
+        "C++"
+        if (HAS_CPP and _cpp_core is not None)
+        else ("numba" if HAS_NUMBA else "python")
+    )
     logger.debug("[adx] period=%d  bars=%d  path=%s", period, len(close), path)
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
@@ -158,21 +181,25 @@ def adx(
         raw = _adx_numba(h, l, c, period)
 
     result = pd.DataFrame(
-        {'DI_Plus': raw[:, 0], 'DI_Minus': raw[:, 1], 'ADX': raw[:, 2]},
+        {"DI_Plus": raw[:, 0], "DI_Minus": raw[:, 1], "ADX": raw[:, 2]},
         index=close.index,
     )
     valid = result.dropna()
     if not valid.empty:
-        logger.debug("[adx] last DI+=%.2f  DI-=%.2f  ADX=%.2f  trend=%s",
-                     float(valid["DI_Plus"].iloc[-1]), float(valid["DI_Minus"].iloc[-1]),
-                     float(valid["ADX"].iloc[-1]),
-                     "strong" if float(valid["ADX"].iloc[-1]) > 25 else "weak")
+        logger.debug(
+            "[adx] last DI+=%.2f  DI-=%.2f  ADX=%.2f  trend=%s",
+            float(valid["DI_Plus"].iloc[-1]),
+            float(valid["DI_Minus"].iloc[-1]),
+            float(valid["ADX"].iloc[-1]),
+            "strong" if float(valid["ADX"].iloc[-1]) > 25 else "weak",
+        )
     return result
 
 
 # ──────────────────────────────────────────────
 # Parabolic SAR (Numba JIT)
 # ──────────────────────────────────────────────
+
 
 @njit
 def _psar_numba(
@@ -266,7 +293,7 @@ def parabolic_sar(
         raw = _psar_numba(h, l, af_start, af_step, af_max)
 
     return pd.DataFrame(
-        {'SAR': raw[:, 0], 'Trend': raw[:, 1]},
+        {"SAR": raw[:, 0], "Trend": raw[:, 1]},
         index=high.index,
     )
 
@@ -274,6 +301,7 @@ def parabolic_sar(
 # ──────────────────────────────────────────────
 # Williams %R
 # ──────────────────────────────────────────────
+
 
 def williams_r(
     high: pd.Series,
@@ -289,4 +317,4 @@ def williams_r(
     highest_high = high.rolling(window=period).max()
     lowest_low = low.rolling(window=period).min()
     wr = -100.0 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.rename('Williams_R')
+    return wr.rename("Williams_R")

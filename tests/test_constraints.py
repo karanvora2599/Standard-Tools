@@ -3,7 +3,10 @@
 import pytest
 
 from standard_quant_tools.backtest.constraints import (
-    adv_participation, days_to_liquidate, sector_exposure, capacity_report,
+    adv_participation,
+    capacity_report,
+    days_to_liquidate,
+    sector_exposure,
 )
 from standard_quant_tools.error import ValidationError
 
@@ -22,7 +25,9 @@ class TestAdvParticipation:
 class TestDaysToLiquidate:
     def test_basic(self):
         # tradeable_per_day = 1,000,000 * 0.1 = 100,000; shares=500,000 -> 5 days
-        assert days_to_liquidate(500_000, avg_daily_volume=1_000_000, max_participation=0.1) == pytest.approx(5.0)
+        assert days_to_liquidate(
+            500_000, avg_daily_volume=1_000_000, max_participation=0.1
+        ) == pytest.approx(5.0)
 
     def test_zero_avg_daily_volume_raises(self):
         with pytest.raises(ValidationError, match="avg_daily_volume"):
@@ -41,7 +46,10 @@ class TestSectorExposure:
         weights = {"AAPL": 0.3, "MSFT": 0.2, "XOM": 0.5}
         sectors = {"AAPL": "Technology", "MSFT": "Technology", "XOM": "Energy"}
         result = sector_exposure(weights, sectors)
-        assert result == {"Technology": pytest.approx(0.5), "Energy": pytest.approx(0.5)}
+        assert result == {
+            "Technology": pytest.approx(0.5),
+            "Energy": pytest.approx(0.5),
+        }
 
     def test_missing_sector_buckets_as_unknown(self):
         weights = {"AAPL": 0.6, "ZZZZ": 0.4}
@@ -75,17 +83,23 @@ class TestCapacityReport:
 
     def test_all_zero_weights_returns_infinite_capacity_and_no_binding_ticker(self):
         tickers = ["A"]
-        result = capacity_report(tickers, {"A": 1_000_000.0}, {"A": 0.0}, max_participation=0.1)
+        result = capacity_report(
+            tickers, {"A": 1_000_000.0}, {"A": 0.0}, max_participation=0.1
+        )
         assert result["binding_ticker"] is None
         assert result["max_account_size"] == float("inf")
 
     def test_missing_adv_raises(self):
         with pytest.raises(ValidationError, match="avg_dollar_volumes"):
-            capacity_report(["A", "B"], {"A": 1.0}, {"A": 0.5, "B": 0.5}, max_participation=0.1)
+            capacity_report(
+                ["A", "B"], {"A": 1.0}, {"A": 0.5, "B": 0.5}, max_participation=0.1
+            )
 
     def test_missing_weight_raises(self):
         with pytest.raises(ValidationError, match="target_weights"):
-            capacity_report(["A", "B"], {"A": 1.0, "B": 1.0}, {"A": 0.5}, max_participation=0.1)
+            capacity_report(
+                ["A", "B"], {"A": 1.0, "B": 1.0}, {"A": 0.5}, max_participation=0.1
+            )
 
     def test_invalid_max_participation_raises(self):
         with pytest.raises(ValidationError, match="max_participation"):

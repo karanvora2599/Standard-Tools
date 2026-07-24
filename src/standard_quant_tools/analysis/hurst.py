@@ -13,12 +13,13 @@ logger = logging.getLogger(__name__)
 _cpp = None
 try:
     from standard_quant_tools import _sqt_core as _cpp  # type: ignore[attr-defined]
+
     HAS_CPP = True
 except ImportError:
     HAS_CPP = False
 
 # Regime thresholds — buffer of ±0.05 around the random-walk boundary (0.5)
-_TRENDING_THRESHOLD      = 0.55
+_TRENDING_THRESHOLD = 0.55
 _MEAN_REVERTING_THRESHOLD = 0.45
 
 
@@ -57,12 +58,12 @@ def _dfa(arr: np.ndarray, min_w: int, max_w: int) -> tuple:
         x_var = ((x - x_mean) ** 2).mean()
         rms_acc = 0.0
         for i in range(n_chunks):
-            seg = y[i * sz: (i + 1) * sz]
+            seg = y[i * sz : (i + 1) * sz]
             seg_mean = seg.mean()
             b = ((x - x_mean) * (seg - seg_mean)).mean() / x_var if x_var > 0 else 0.0
             a = seg_mean - b * x_mean
             residuals = seg - (a + b * x)
-            rms_acc += (residuals ** 2).mean()
+            rms_acc += (residuals**2).mean()
         fluctuations.append(np.sqrt(rms_acc / n_chunks))
         valid.append(sz)
 
@@ -85,7 +86,7 @@ def _rs(arr: np.ndarray, min_w: int, max_w: int) -> tuple:
         rs_acc = 0.0
         count = 0
         for i in range(n_chunks):
-            chunk = arr[i * sz: (i + 1) * sz]
+            chunk = arr[i * sz : (i + 1) * sz]
             mad = chunk - chunk.mean()
             cum = np.cumsum(mad)
             R = cum.max() - cum.min()
@@ -113,6 +114,7 @@ def _ols_slope_r2(log_n: np.ndarray, log_f: np.ndarray):
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def hurst_exponent(
     series: pd.Series,
@@ -147,16 +149,18 @@ def hurst_exponent(
         raise ValidationError(f"max_window must be > 0, got {max_window}")
 
     arr = series.dropna().to_numpy(dtype=float)
-    n   = len(arr)
+    n = len(arr)
     path = "C++" if (HAS_CPP and _cpp is not None) else "python"
-    logger.debug("[hurst] method=%s  n_obs=%d  min_w=%d  path=%s", method, n, min_window, path)
+    logger.debug(
+        "[hurst] method=%s  n_obs=%d  min_w=%d  path=%s", method, n, min_window, path
+    )
 
     _nan_result: Dict[str, Any] = {
-        "hurst":         float("nan"),
-        "regime":        "unknown",
+        "hurst": float("nan"),
+        "regime": "unknown",
         "fit_r_squared": float("nan"),
-        "method":        method,
-        "n_obs":         n,
+        "method": method,
+        "n_obs": n,
     }
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
@@ -189,11 +193,11 @@ def hurst_exponent(
     h = float(np.clip(h, 0.0, 1.5))
 
     result = {
-        "hurst":         h,
-        "regime":        _classify(h),
+        "hurst": h,
+        "regime": _classify(h),
         "fit_r_squared": r2,
-        "method":        method,
-        "n_obs":         n,
+        "method": method,
+        "n_obs": n,
     }
     logger.debug("[hurst] H=%.4f  regime=%s  R²=%.4f", h, result["regime"], r2)
     return result
@@ -235,13 +239,20 @@ def rolling_hurst(
     if min_window <= 0:
         raise ValidationError(f"min_window must be > 0, got {min_window}")
 
-    clean   = series.dropna()
-    arr     = clean.to_numpy(dtype=float)
-    n       = len(arr)
+    clean = series.dropna()
+    arr = clean.to_numpy(dtype=float)
+    n = len(arr)
     path = "C++" if (HAS_CPP and _cpp is not None) else "python"
     n_positions = max(0, (n - window) // step + 1)
-    logger.debug("[rolling_hurst] window=%d  step=%d  method=%s  n_obs=%d  positions=%d  path=%s",
-                 window, step, method, n, n_positions, path)
+    logger.debug(
+        "[rolling_hurst] window=%d  step=%d  method=%s  n_obs=%d  positions=%d  path=%s",
+        window,
+        step,
+        method,
+        n,
+        n_positions,
+        path,
+    )
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
     if HAS_CPP and _cpp is not None:
@@ -251,10 +262,8 @@ def rolling_hurst(
     # ── Python fallback ───────────────────────────────────────────────────────
     out = np.full(n, np.nan)
     for i in range(window - 1, n, step):
-        chunk  = arr[i - window + 1: i + 1]
-        result = hurst_exponent(
-            pd.Series(chunk), method=method, min_window=min_window
-        )
+        chunk = arr[i - window + 1 : i + 1]
+        result = hurst_exponent(pd.Series(chunk), method=method, min_window=min_window)
         out[i] = result["hurst"]
 
     return pd.Series(out, index=clean.index, name="hurst")

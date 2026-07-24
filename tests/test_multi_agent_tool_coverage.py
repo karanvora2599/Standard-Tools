@@ -21,6 +21,7 @@ MULTI_AGENT_DIR = Path(__file__).resolve().parent.parent / "Multi_Agent_Implemen
 def worker_agents():
     sys.path.insert(0, str(MULTI_AGENT_DIR))
     from worker_agents import WORKER_AGENTS
+
     return WORKER_AGENTS
 
 
@@ -50,9 +51,9 @@ class TestWorkerToolCoverage:
                 if tool in seen:
                     duplicates.append((tool, seen[tool], key))
                 seen[tool] = key
-        assert not duplicates, (
-            f"Tools assigned to more than one worker (confusion risk): {duplicates}"
-        )
+        assert (
+            not duplicates
+        ), f"Tools assigned to more than one worker (confusion risk): {duplicates}"
 
     def test_confusable_backtest_tools_are_split_across_workers(self, worker_agents):
         # The whole point of the split: built-in strategy tools and

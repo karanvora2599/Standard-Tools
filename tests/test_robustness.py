@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.backtest.robustness import (
-    block_bootstrap_ci, parameter_sensitivity, deflated_sharpe_ratio,
+    block_bootstrap_ci,
+    deflated_sharpe_ratio,
+    parameter_sensitivity,
 )
 from standard_quant_tools.error import ValidationError
 
@@ -23,7 +25,9 @@ class TestBlockBootstrapCi:
     def test_invalid_confidence_raises(self):
         returns = pd.Series([0.01] * 30)
         with pytest.raises(ValidationError, match="confidence"):
-            block_bootstrap_ci(returns, lambda r: float(r.mean()), block_size=5, confidence=1.5)
+            block_bootstrap_ci(
+                returns, lambda r: float(r.mean()), block_size=5, confidence=1.5
+            )
 
     def test_constant_series_ci_collapses_to_point_estimate(self):
         """Every resampled block of a constant series is identical, so the
@@ -31,7 +35,11 @@ class TestBlockBootstrapCi:
         doesn't depend on RNG behavior."""
         returns = pd.Series([0.002] * 100)
         result = block_bootstrap_ci(
-            returns, lambda r: float(r.mean()), n_iterations=50, block_size=10, seed=0,
+            returns,
+            lambda r: float(r.mean()),
+            n_iterations=50,
+            block_size=10,
+            seed=0,
         )
         assert result["point_estimate"] == pytest.approx(0.002)
         assert result["ci_lower"] == pytest.approx(0.002, abs=1e-9)
@@ -41,14 +49,27 @@ class TestBlockBootstrapCi:
         rng = np.random.default_rng(42)
         returns = pd.Series(rng.normal(0.0005, 0.01, 500))
         result = block_bootstrap_ci(
-            returns, lambda r: float(r.mean()), n_iterations=300, block_size=20, seed=1,
+            returns,
+            lambda r: float(r.mean()),
+            n_iterations=300,
+            block_size=20,
+            seed=1,
         )
         assert result["ci_lower"] <= result["point_estimate"] <= result["ci_upper"]
 
     def test_output_keys_present(self):
         returns = pd.Series(np.random.default_rng(3).normal(0, 0.01, 50))
-        result = block_bootstrap_ci(returns, lambda r: float(r.mean()), n_iterations=20, block_size=5)
-        for key in ("point_estimate", "ci_lower", "ci_upper", "confidence", "n_iterations", "block_size"):
+        result = block_bootstrap_ci(
+            returns, lambda r: float(r.mean()), n_iterations=20, block_size=5
+        )
+        for key in (
+            "point_estimate",
+            "ci_lower",
+            "ci_upper",
+            "confidence",
+            "n_iterations",
+            "block_size",
+        ):
             assert key in result
 
 
@@ -67,7 +88,9 @@ class TestParameterSensitivity:
         result = parameter_sensitivity(grid)
         assert result["n_trials"] == 6
         assert result["best"] == pytest.approx(2.0)
-        assert result["median"] == pytest.approx(0.75)  # median of [2,1.5,1,0.5,0.2,0.1]
+        assert result["median"] == pytest.approx(
+            0.75
+        )  # median of [2,1.5,1,0.5,0.2,0.1]
         assert result["best_minus_median"] == pytest.approx(1.25)
         assert result["best_minus_rank2"] == pytest.approx(0.5)  # 2.0 - 1.5
         # ranks 2-5: [1.5, 1.0, 0.5, 0.2], mean = 0.8
@@ -89,11 +112,18 @@ class TestDeflatedSharpeRatio:
     def test_degenerate_skew_kurtosis_raises(self):
         with pytest.raises(ValidationError, match="degenerate"):
             deflated_sharpe_ratio(
-                1.0, sharpe_trials_std=0.5, n_trials=10, n_obs=252, skew=100.0, kurtosis=3.0,
+                1.0,
+                sharpe_trials_std=0.5,
+                n_trials=10,
+                n_obs=252,
+                skew=100.0,
+                kurtosis=3.0,
             )
 
     def test_single_trial_has_no_deflation(self):
-        result = deflated_sharpe_ratio(1.0, sharpe_trials_std=0.5, n_trials=1, n_obs=252)
+        result = deflated_sharpe_ratio(
+            1.0, sharpe_trials_std=0.5, n_trials=1, n_obs=252
+        )
         assert result["expected_max_sharpe"] == 0.0
 
     def test_more_trials_deflates_more(self):
@@ -106,7 +136,9 @@ class TestDeflatedSharpeRatio:
         assert many["deflated_sharpe_ratio"] < few["deflated_sharpe_ratio"]
 
     def test_dsr_in_unit_interval(self):
-        result = deflated_sharpe_ratio(1.2, sharpe_trials_std=0.4, n_trials=50, n_obs=500)
+        result = deflated_sharpe_ratio(
+            1.2, sharpe_trials_std=0.4, n_trials=50, n_obs=500
+        )
         assert 0.0 <= result["deflated_sharpe_ratio"] <= 1.0
 
     def test_higher_observed_sharpe_gives_higher_dsr(self):

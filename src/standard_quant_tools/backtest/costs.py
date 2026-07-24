@@ -20,7 +20,9 @@ def percentage_commission(notional: float, rate: float) -> float:
     return abs(notional) * rate
 
 
-def per_share_commission(shares: float, rate_per_share: float, minimum: float = 0.0) -> float:
+def per_share_commission(
+    shares: float, rate_per_share: float, minimum: float = 0.0
+) -> float:
     """
     Commission as a flat rate per share traded, with an optional minimum
     floor (e.g. many brokers charge max($0.005/share, $1.00) per order).
@@ -33,7 +35,9 @@ def fixed_bps_spread(notional: float, bps: float) -> float:
     return abs(notional) * (bps / 10_000.0)
 
 
-def pct_of_range_spread(notional: float, high: float, low: float, close: float, pct: float) -> float:
+def pct_of_range_spread(
+    notional: float, high: float, low: float, close: float, pct: float
+) -> float:
     """
     Spread cost as a fraction of the bar's own (High - Low) range, scaled
     to notional terms via the bar's Close. No real bid/ask data exists in
@@ -49,7 +53,9 @@ def pct_of_range_spread(notional: float, high: float, low: float, close: float, 
     return abs(notional) * range_frac * pct
 
 
-def sqrt_impact_bps(participation: float, volatility: float, coefficient: float = 1.0) -> float:
+def sqrt_impact_bps(
+    participation: float, volatility: float, coefficient: float = 1.0
+) -> float:
     """
     Square-root market impact model: impact_bps = coefficient * volatility
     * sqrt(participation), the standard form used in practitioner impact
@@ -69,7 +75,12 @@ def sqrt_impact_bps(participation: float, volatility: float, coefficient: float 
     return coefficient * volatility * math.sqrt(participation) * 10_000.0
 
 
-def impact_cost(notional: float, avg_dollar_volume: float, volatility: float, coefficient: float = 1.0) -> float:
+def impact_cost(
+    notional: float,
+    avg_dollar_volume: float,
+    volatility: float,
+    coefficient: float = 1.0,
+) -> float:
     """
     Dollar impact cost for a trade, combining sqrt_impact_bps with the
     trade's own notional. avg_dollar_volume <= 0 (e.g. no volume data for

@@ -10,7 +10,7 @@ from standard_quant_tools.indicators.volatility import atr, bollinger_bands
 class TestBollingerBands:
     def test_returns_correct_columns(self, sample_close):
         result = bollinger_bands(sample_close)
-        assert set(result.columns) == {'BB_Upper', 'BB_Middle', 'BB_Lower'}
+        assert set(result.columns) == {"BB_Upper", "BB_Middle", "BB_Lower"}
 
     def test_output_length_matches_input(self, sample_close):
         result = bollinger_bands(sample_close)
@@ -19,17 +19,18 @@ class TestBollingerBands:
     def test_upper_greater_than_middle_greater_than_lower(self, sample_close):
         result = bollinger_bands(sample_close, period=20, num_std=2.0)
         valid = result.dropna()
-        assert (valid['BB_Upper'] > valid['BB_Middle']).all()
-        assert (valid['BB_Middle'] > valid['BB_Lower']).all()
+        assert (valid["BB_Upper"] > valid["BB_Middle"]).all()
+        assert (valid["BB_Middle"] > valid["BB_Lower"]).all()
 
     def test_middle_equals_sma(self, sample_close):
         """BB_Middle must exactly equal SMA(period)."""
         from standard_quant_tools.indicators.trend import sma
+
         period = 20
         result = bollinger_bands(sample_close, period=period)
         expected_middle = sma(sample_close, period)
         pd.testing.assert_series_equal(
-            result['BB_Middle'].dropna(),
+            result["BB_Middle"].dropna(),
             expected_middle.dropna(),
             check_names=False,
             rtol=1e-10,
@@ -41,22 +42,22 @@ class TestBollingerBands:
         result = bollinger_bands(sample_close, period=period, num_std=num_std)
         rolling_std = sample_close.rolling(period).std()
         expected_half_width = rolling_std * num_std
-        actual_half_width = result['BB_Upper'] - result['BB_Middle']
+        actual_half_width = result["BB_Upper"] - result["BB_Middle"]
         diff = (actual_half_width - expected_half_width).dropna().abs()
         assert diff.max() < 1e-10
 
     def test_wider_bands_with_higher_num_std(self, sample_close):
         bb2 = bollinger_bands(sample_close, num_std=2.0)
         bb3 = bollinger_bands(sample_close, num_std=3.0)
-        width2 = (bb2['BB_Upper'] - bb2['BB_Lower']).dropna()
-        width3 = (bb3['BB_Upper'] - bb3['BB_Lower']).dropna()
+        width2 = (bb2["BB_Upper"] - bb2["BB_Lower"]).dropna()
+        width3 = (bb3["BB_Upper"] - bb3["BB_Lower"]).dropna()
         assert (width3 > width2).all()
 
     def test_constant_series_yields_zero_width(self):
         """A flat price series has zero volatility → bands collapse to SMA."""
         s = pd.Series([50.0] * 50)
         result = bollinger_bands(s, period=10)
-        width = (result['BB_Upper'] - result['BB_Lower']).dropna()
+        width = (result["BB_Upper"] - result["BB_Lower"]).dropna()
         assert width.abs().max() < 1e-10
 
     def test_nan_prefix_length(self, sample_close):
@@ -67,14 +68,12 @@ class TestBollingerBands:
 
 class TestATR:
     def test_output_length_matches_input(self, sample_ohlcv):
-        result = atr(
-            sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close']
-        )
+        result = atr(sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"])
         assert len(result) == len(sample_ohlcv)
 
     def test_atr_is_nonnegative(self, sample_ohlcv):
         result = atr(
-            sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close']
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
         ).dropna()
         assert (result >= 0).all()
 

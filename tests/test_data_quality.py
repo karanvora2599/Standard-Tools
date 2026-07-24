@@ -4,15 +4,23 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.data.quality import (
-    detect_missing_bars, detect_stale_prices, detect_price_jumps,
+    detect_missing_bars,
+    detect_price_jumps,
+    detect_stale_prices,
 )
 
 
 def _ohlcv(closes, dates):
-    return pd.DataFrame({
-        "Open": closes, "High": closes, "Low": closes, "Close": closes,
-        "Volume": [1_000_000.0] * len(closes),
-    }, index=dates)
+    return pd.DataFrame(
+        {
+            "Open": closes,
+            "High": closes,
+            "Low": closes,
+            "Close": closes,
+            "Volume": [1_000_000.0] * len(closes),
+        },
+        index=dates,
+    )
 
 
 class TestDetectMissingBars:

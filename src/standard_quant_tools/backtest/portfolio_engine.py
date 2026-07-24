@@ -17,12 +17,15 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from standard_quant_tools.error import ValidationError
-from standard_quant_tools.backtest.costs import (
-    percentage_commission, per_share_commission, impact_cost,
-    short_borrow_cost, margin_interest,
-)
 from standard_quant_tools.backtest.constraints import adv_participation
+from standard_quant_tools.backtest.costs import (
+    impact_cost,
+    margin_interest,
+    per_share_commission,
+    percentage_commission,
+    short_borrow_cost,
+)
+from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -144,10 +147,16 @@ def run_portfolio_simulation(
     if missing:
         raise ValidationError(f"price_data is missing OHLCV for: {missing}")
 
-    required_cols = {"close": ["Close"], "next_open": ["Close", "Open"], "midpoint": ["Close", "High", "Low"]}
+    required_cols = {
+        "close": ["Close"],
+        "next_open": ["Close", "Open"],
+        "midpoint": ["Close", "High", "Low"],
+    }
     needs_volume = use_impact_model or (max_adv_participation is not None)
     for t in tickers:
-        missing_cols = [c for c in required_cols[fill_price] if c not in price_data[t].columns]
+        missing_cols = [
+            c for c in required_cols[fill_price] if c not in price_data[t].columns
+        ]
         if needs_volume and "Volume" not in price_data[t].columns:
             missing_cols.append("Volume")
         if missing_cols:
@@ -175,8 +184,11 @@ def run_portfolio_simulation(
     nan_mask = target_weights.isna()
     if nan_mask.to_numpy().any():
         bad = {
-            str(date): [t for t in target_weights.columns if bool(nan_mask.loc[date, t])]
-            for date in target_weights.index if nan_mask.loc[date].any()
+            str(date): [
+                t for t in target_weights.columns if bool(nan_mask.loc[date, t])
+            ]
+            for date in target_weights.index
+            if nan_mask.loc[date].any()
         }
         raise ValidationError(
             "target_weights contains NaN — every ticker must have a value at "
@@ -216,12 +228,16 @@ def run_portfolio_simulation(
     volatility: Dict[str, pd.Series] = {}
     if needs_volume:
         for t in tickers:
-            dv = (price_data[t]["Volume"] * price_data[t]["Close"]).reindex(master_index)
+            dv = (price_data[t]["Volume"] * price_data[t]["Close"]).reindex(
+                master_index
+            )
             dollar_volume[t] = dv.rolling(impact_lookback, min_periods=1).mean()
     if use_impact_model:
         for t in tickers:
             ret = price_data[t]["Close"].pct_change().reindex(master_index)
-            volatility[t] = ret.rolling(impact_lookback, min_periods=1).std().fillna(0.0)
+            volatility[t] = (
+                ret.rolling(impact_lookback, min_periods=1).std().fillna(0.0)
+            )
 
     cash = initial_capital
     shares: Dict[str, float] = {t: 0.0 for t in tickers}
@@ -249,9 +265,13 @@ def run_portfolio_simulation(
             )
         return dv
 
-    def _trade_cost(t: str, delta_shares: float, trade_notional: float, exec_date: Any) -> float:
+    def _trade_cost(
+        t: str, delta_shares: float, trade_notional: float, exec_date: Any
+    ) -> float:
         if commission_model == "per_share":
-            commission = per_share_commission(delta_shares, per_share_rate, min_commission)
+            commission = per_share_commission(
+                delta_shares, per_share_rate, min_commission
+            )
         else:
             commission = percentage_commission(trade_notional, commission_pct)
         spread = trade_notional * slippage_pct
@@ -259,19 +279,27 @@ def run_portfolio_simulation(
         if use_impact_model:
             adv = _valid_dollar_volume(t, exec_date)
             impact = impact_cost(
-                trade_notional, adv, float(volatility[t].loc[exec_date]), impact_coefficient,
+                trade_notional,
+                adv,
+                float(volatility[t].loc[exec_date]),
+                impact_coefficient,
             )
         return commission + spread + impact
 
     def _apply_rebalance(
-        trigger_date: Any, exec_date: Any, weights_row: pd.Series, exec_prices: Dict[str, float],
+        trigger_date: Any,
+        exec_date: Any,
+        weights_row: pd.Series,
+        exec_prices: Dict[str, float],
     ) -> None:
         nonlocal cash
         equity_now = cash + sum(shares[t] * exec_prices[t] for t in tickers)
         turnover_notional = 0.0
         for t in tickers:
             price = exec_prices[t]
-            target_shares = (equity_now * float(weights_row[t]) / price) if price > 0 else 0.0
+            target_shares = (
+                (equity_now * float(weights_row[t]) / price) if price > 0 else 0.0
+            )
             delta = target_shares - shares[t]
 
             # Zero-size trade: target didn't change since the last
@@ -327,7 +355,8 @@ def run_portfolio_simulation(
                     "equity do not match the requested weights)"
                 )
             realized_max_position = max(
-                (abs(shares[t] * exec_prices[t]) / equity_now for t in tickers), default=0.0,
+                (abs(shares[t] * exec_prices[t]) / equity_now for t in tickers),
+                default=0.0,
             )
             if realized_max_position > max_position_pct + 1e-9:
                 raise ValidationError(
@@ -335,12 +364,24 @@ def run_portfolio_simulation(
                     f"{realized_max_position:.4f} exceeds max_position_pct={max_position_pct}"
                 )
 
-        rebalance_log.append({
-            "date": str(trigger_date.date()) if hasattr(trigger_date, "date") else str(trigger_date),
-            "turnover_pct": round(turnover_notional / equity_after, 6) if equity_after > 0 else 0.0,
-            "gross_leverage_after": round(gross_after / equity_after, 6) if equity_after > 0 else 0.0,
-            "n_positions": int(sum(1 for t in tickers if abs(shares[t]) > 1e-9)),
-        })
+        rebalance_log.append(
+            {
+                "date": (
+                    str(trigger_date.date())
+                    if hasattr(trigger_date, "date")
+                    else str(trigger_date)
+                ),
+                "turnover_pct": (
+                    round(turnover_notional / equity_after, 6)
+                    if equity_after > 0
+                    else 0.0
+                ),
+                "gross_leverage_after": (
+                    round(gross_after / equity_after, 6) if equity_after > 0 else 0.0
+                ),
+                "n_positions": int(sum(1 for t in tickers if abs(shares[t]) > 1e-9)),
+            }
+        )
 
     # (trigger_date, weights_row) awaiting execution at the *next* bar's Open
     # — only used when fill_price == "next_open".
@@ -357,7 +398,9 @@ def run_portfolio_simulation(
             daily_cost = margin_interest(cash, margin_interest_rate, days=1.0)
             for t in tickers:
                 if shares[t] < 0:
-                    daily_cost += short_borrow_cost(abs(shares[t]) * close_prices[t], borrow_fee_bps, days=1.0)
+                    daily_cost += short_borrow_cost(
+                        abs(shares[t]) * close_prices[t], borrow_fee_bps, days=1.0
+                    )
             cash -= daily_cost
 
         if fill_price == "next_open" and pending_rebalance is not None:
@@ -372,7 +415,11 @@ def run_portfolio_simulation(
                 _apply_rebalance(date, date, weights_row, close_prices)
             elif fill_price == "midpoint":
                 mid_prices = {
-                    t: (float(price_data[t].loc[date, "High"]) + float(price_data[t].loc[date, "Low"])) / 2.0
+                    t: (
+                        float(price_data[t].loc[date, "High"])
+                        + float(price_data[t].loc[date, "Low"])
+                    )
+                    / 2.0
                     for t in tickers
                 }
                 _apply_rebalance(date, date, weights_row, mid_prices)
@@ -400,17 +447,24 @@ def run_portfolio_simulation(
             "the prior bar's data)."
         )
     if any(c < 0 for c in cash_records):
-        warnings.append("cash went negative at one or more bars — implied margin borrowing")
+        warnings.append(
+            "cash went negative at one or more bars — implied margin borrowing"
+        )
 
     equity_curve = pd.Series(equity_records, index=master_index, name="equity")
     cash_curve = pd.Series(cash_records, index=master_index, name="cash")
-    gross_exposure_curve = pd.Series(gross_records, index=master_index, name="gross_exposure")
+    gross_exposure_curve = pd.Series(
+        gross_records, index=master_index, name="gross_exposure"
+    )
     equity_safe = equity_curve.where(equity_curve.abs() > 1e-9, other=1e-9)
     leverage_curve = (gross_exposure_curve / equity_safe).rename("leverage")
 
     logger.debug(
         "[portfolio_engine] tickers=%d  bars=%d  rebalances=%d  fill_price=%s  final_equity=%.2f",
-        len(tickers), len(master_index), len(rebalance_log), fill_price,
+        len(tickers),
+        len(master_index),
+        len(rebalance_log),
+        fill_price,
         float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital,
     )
 
@@ -418,13 +472,19 @@ def run_portfolio_simulation(
         "equity_curve": equity_curve,
         "cash_curve": cash_curve,
         "gross_exposure_curve": gross_exposure_curve,
-        "net_exposure_curve": pd.Series(net_records, index=master_index, name="net_exposure"),
+        "net_exposure_curve": pd.Series(
+            net_records, index=master_index, name="net_exposure"
+        ),
         "leverage_curve": leverage_curve,
         "rebalance_log": pd.DataFrame(
             rebalance_log,
             columns=["date", "turnover_pct", "gross_leverage_after", "n_positions"],
         ),
-        "final_equity": float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital,
-        "final_cash": float(cash_curve.iloc[-1]) if not cash_curve.empty else initial_capital,
+        "final_equity": (
+            float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital
+        ),
+        "final_cash": (
+            float(cash_curve.iloc[-1]) if not cash_curve.empty else initial_capital
+        ),
         "warnings": warnings,
     }

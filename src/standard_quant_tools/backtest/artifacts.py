@@ -21,10 +21,12 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _runs_dir() -> Path:
-    return Path(os.environ.get(
-        "SQT_RUNS_DIR",
-        str(Path.home() / ".cache" / "standard_quant_tools" / "runs"),
-    ))
+    return Path(
+        os.environ.get(
+            "SQT_RUNS_DIR",
+            str(Path.home() / ".cache" / "standard_quant_tools" / "runs"),
+        )
+    )
 
 
 def _validate_identifier(value: str, field_name: str) -> None:
@@ -52,7 +54,10 @@ def _resolved_within_runs_dir(path: Path) -> Path:
 
 
 def save_artifact(
-    data: Union[pd.Series, pd.DataFrame], run_id: str, name: str, overwrite: bool = False,
+    data: Union[pd.Series, pd.DataFrame],
+    run_id: str,
+    name: str,
+    overwrite: bool = False,
 ) -> str:
     """
     Write data as Parquet under SQT_RUNS_DIR/<run_id>/<name>.parquet,

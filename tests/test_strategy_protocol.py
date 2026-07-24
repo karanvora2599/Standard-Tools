@@ -12,14 +12,16 @@ these tests) for real signature enforcement.
 
 import pandas as pd
 
-from standard_quant_tools.backtest.strategy import VectorizedStrategy
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+from standard_quant_tools.backtest.strategy import VectorizedStrategy
 
 
 class TestVectorizedStrategyProtocol:
     def test_every_registered_strategy_satisfies_protocol(self):
         for name, fn in STRATEGY_REGISTRY.items():
-            assert isinstance(fn, VectorizedStrategy), f"{name} does not satisfy VectorizedStrategy"
+            assert isinstance(
+                fn, VectorizedStrategy
+            ), f"{name} does not satisfy VectorizedStrategy"
 
     def test_custom_callable_satisfies_protocol(self):
         def my_signal(price_data: pd.DataFrame, threshold: float) -> pd.Series:

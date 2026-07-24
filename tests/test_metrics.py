@@ -5,16 +5,25 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.metrics.return_metrics import (
-    annualized_volatility, cagr, cumulative_return,
+    annualized_volatility,
+    cagr,
+    cumulative_return,
 )
 from standard_quant_tools.metrics.risk_metrics import (
-    calmar_ratio, cvar, drawdown_series, information_ratio,
-    max_drawdown, sharpe_ratio, sortino_ratio, treynor_ratio,
-    var_historical, var_parametric,
+    calmar_ratio,
+    cvar,
+    drawdown_series,
+    information_ratio,
+    max_drawdown,
+    sharpe_ratio,
+    sortino_ratio,
+    treynor_ratio,
+    var_historical,
+    var_parametric,
 )
 
-
 # ── Return Metrics ────────────────────────────────────────────────────────────
+
 
 class TestCumulativeReturn:
     def test_zero_return_on_flat_equity(self):
@@ -57,7 +66,9 @@ class TestAnnualizedVolatility:
         np.random.seed(0)
         returns = pd.Series(np.random.normal(0, 0.01, 252))
         daily_std = returns.std()
-        assert annualized_volatility(returns) == pytest.approx(daily_std * np.sqrt(252), rel=1e-10)
+        assert annualized_volatility(returns) == pytest.approx(
+            daily_std * np.sqrt(252), rel=1e-10
+        )
 
     def test_zero_for_constant_returns(self):
         returns = pd.Series([0.001] * 100)
@@ -65,6 +76,7 @@ class TestAnnualizedVolatility:
 
 
 # ── Risk Metrics ──────────────────────────────────────────────────────────────
+
 
 class TestSharpeRatio:
     def test_positive_for_positive_expected_return(self, sample_returns):
@@ -135,7 +147,7 @@ class TestCalmarRatio:
     def test_infinite_for_no_drawdown(self):
         equity = pd.Series(np.linspace(100, 200, 252))
         result = calmar_ratio(equity)
-        assert result == float('inf') or result > 1000
+        assert result == float("inf") or result > 1000
 
     def test_formula_cagr_over_abs_mdd(self, sample_equity):
         cal = calmar_ratio(sample_equity)
@@ -195,7 +207,10 @@ class TestInformationRatio:
 
     def test_scales_with_active_return(self, sample_returns):
         np.random.seed(5)
-        bench = pd.Series(np.random.normal(0.0002, 0.009, len(sample_returns)), index=sample_returns.index)
+        bench = pd.Series(
+            np.random.normal(0.0002, 0.009, len(sample_returns)),
+            index=sample_returns.index,
+        )
         ir = information_ratio(sample_returns, bench)
         assert isinstance(ir, float) and not np.isnan(ir)
 

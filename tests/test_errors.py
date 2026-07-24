@@ -30,9 +30,16 @@ class TestExceptionHierarchy:
         assert issubclass(APIError, DataProviderError)
 
     def test_all_errors_are_exceptions(self):
-        for exc in (QuantError, DataProviderError, DataNotFoundError,
-                    InvalidSymbolError, APIError, CalculationError,
-                    ValidationError, BacktestError):
+        for exc in (
+            QuantError,
+            DataProviderError,
+            DataNotFoundError,
+            InvalidSymbolError,
+            APIError,
+            CalculationError,
+            ValidationError,
+            BacktestError,
+        ):
             assert issubclass(exc, Exception)
 
     def test_quant_error_stores_original_exception(self):
@@ -68,23 +75,28 @@ class TestValidateSeriesDecorator:
 
     def test_non_empty_series_does_not_raise(self):
         import numpy as np
+
         s = pd.Series(np.random.normal(0, 0.01, 50))
         sharpe_ratio(s)  # should not raise
 
 
 class TestDataProviderErrors:
-    def test_invalid_symbol_raises_invalid_symbol_error(self, patched_factory, mock_provider):
-        from standard_quant_tools.error import InvalidSymbolError
+    def test_invalid_symbol_raises_invalid_symbol_error(
+        self, patched_factory, mock_provider
+    ):
         from standard_quant_tools.data.factory import DataFactory
+        from standard_quant_tools.error import InvalidSymbolError
+
         mock_provider.get_ohlcv.side_effect = InvalidSymbolError("bad ticker")
         provider = DataFactory.get_provider()
         with pytest.raises(InvalidSymbolError):
-            provider.get_ohlcv('', '2023-01-01', '2024-01-01')
+            provider.get_ohlcv("", "2023-01-01", "2024-01-01")
 
     def test_data_not_found_error_on_missing_data(self, patched_factory, mock_provider):
-        from standard_quant_tools.error import DataNotFoundError
         from standard_quant_tools.data.factory import DataFactory
+        from standard_quant_tools.error import DataNotFoundError
+
         mock_provider.get_ohlcv.side_effect = DataNotFoundError("no data")
         provider = DataFactory.get_provider()
         with pytest.raises(DataNotFoundError):
-            provider.get_ohlcv('FAKE', '2023-01-01', '2024-01-01')
+            provider.get_ohlcv("FAKE", "2023-01-01", "2024-01-01")

@@ -19,8 +19,8 @@ from standard_quant_tools.data.yfinance_provider import (
     _parquet_path,
 )
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def redirect_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -47,16 +47,19 @@ def minimal_ohlcv() -> pd.DataFrame:
 
 # ── Unit tests for helper functions ──────────────────────────────────────────
 
+
 class TestNormDate:
     def test_string_passthrough(self):
         assert _norm_date("2023-06-15") == "2023-06-15"
 
     def test_datetime_truncated(self):
         from datetime import datetime
+
         assert _norm_date(datetime(2023, 6, 15, 10, 30)) == "2023-06-15"
 
     def test_date_object(self):
         from datetime import date
+
         assert _norm_date(date(2023, 6, 15)) == "2023-06-15"
 
 
@@ -69,10 +72,12 @@ class TestIsHistorical:
 
     def test_today_not_historical(self):
         from datetime import date
+
         assert _is_historical(date.today().isoformat()) is False
 
     def test_yesterday_is_historical(self):
         from datetime import date, timedelta
+
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         assert _is_historical(yesterday) is True
 
@@ -98,10 +103,18 @@ class TestParquetPath:
 
 # ── Integration tests for the caching behaviour ───────────────────────────────
 
+
 class TestParquetCacheWrite:
-    def test_cache_file_created_after_fetch(self, tmp_path: Path, minimal_ohlcv: pd.DataFrame):
+    def test_cache_file_created_after_fetch(
+        self, tmp_path: Path, minimal_ohlcv: pd.DataFrame
+    ):
         """A Parquet file should be written for historical ranges after a live fetch."""
-        with patch.object(YFinanceProvider, "_fetch_from_yfinance", return_value=minimal_ohlcv, create=True):
+        with patch.object(
+            YFinanceProvider,
+            "_fetch_from_yfinance",
+            return_value=minimal_ohlcv,
+            create=True,
+        ):
             prov = YFinanceProvider()
             # Patch the internal yfinance call so no network is needed
             with patch("yfinance.Ticker") as mock_ticker:
@@ -114,30 +127,39 @@ class TestParquetCacheWrite:
         expected = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
         # Redirect to tmp_path (done by autouse fixture)
         from standard_quant_tools.data.yfinance_provider import _CACHE_ROOT
+
         pq = _CACHE_ROOT / expected.name
         assert pq.exists(), f"Expected Parquet file at {pq}"
 
-    def test_no_cache_for_current_data(self, tmp_path: Path, minimal_ohlcv: pd.DataFrame):
+    def test_no_cache_for_current_data(
+        self, tmp_path: Path, minimal_ohlcv: pd.DataFrame
+    ):
         """Data fetched with today as end_date should NOT be written to Parquet."""
         from datetime import date
+
         today = date.today().isoformat()
 
         with patch("yfinance.Ticker") as mock_ticker:
-            mock_ticker.return_value.history.return_value = (
-                minimal_ohlcv.copy().rename(columns=str.lower)
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.copy().rename(
+                columns=str.lower
             )
             prov = YFinanceProvider()
             prov.get_ohlcv("AAPL", "2022-01-01", today)
 
         from standard_quant_tools.data.yfinance_provider import _CACHE_ROOT
-        parquets = list(_CACHE_ROOT.glob("*.parquet"))
-        assert len(parquets) == 0, "No Parquet file should be written for current-day data"
 
-    def test_cache_loaded_on_second_call(self, tmp_path: Path, minimal_ohlcv: pd.DataFrame):
+        parquets = list(_CACHE_ROOT.glob("*.parquet"))
+        assert (
+            len(parquets) == 0
+        ), "No Parquet file should be written for current-day data"
+
+    def test_cache_loaded_on_second_call(
+        self, tmp_path: Path, minimal_ohlcv: pd.DataFrame
+    ):
         """Second call for a historical range must read from Parquet, not yfinance."""
         with patch("yfinance.Ticker") as mock_ticker:
-            mock_ticker.return_value.history.return_value = (
-                minimal_ohlcv.copy().rename(columns=str.lower)
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.copy().rename(
+                columns=str.lower
             )
             prov = YFinanceProvider()
             # First call — writes to yfinance + saves Parquet
@@ -150,17 +172,19 @@ class TestParquetCacheWrite:
             # Second call — should read Parquet, not call yfinance again
             result2 = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
 
-        assert mock_ticker.call_count == first_call_count, (
-            "yfinance.Ticker should not be called again when Parquet cache exists"
-        )
+        assert (
+            mock_ticker.call_count == first_call_count
+        ), "yfinance.Ticker should not be called again when Parquet cache exists"
         # Parquet round-trip drops DatetimeIndex freq metadata — ignore it
         pd.testing.assert_frame_equal(result1, result2, check_freq=False)
 
-    def test_cache_returns_correct_columns(self, tmp_path: Path, minimal_ohlcv: pd.DataFrame):
+    def test_cache_returns_correct_columns(
+        self, tmp_path: Path, minimal_ohlcv: pd.DataFrame
+    ):
         """Data loaded from Parquet must have the same five columns as a live fetch."""
         with patch("yfinance.Ticker") as mock_ticker:
-            mock_ticker.return_value.history.return_value = (
-                minimal_ohlcv.copy().rename(columns=str.lower)
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.copy().rename(
+                columns=str.lower
             )
             prov = YFinanceProvider()
             prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
@@ -169,12 +193,15 @@ class TestParquetCacheWrite:
 
         assert list(result.columns) == ["Open", "High", "Low", "Close", "Volume"]
 
-    def test_cache_dir_uses_env_var(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_cache_dir_uses_env_var(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """SQT_CACHE_DIR env variable should control the cache directory."""
         custom_dir = tmp_path / "custom_cache"
         monkeypatch.setenv("SQT_CACHE_DIR", str(custom_dir))
         # Re-import to pick up the env var (simulate fresh import)
         import importlib
+
         importlib.reload(provider_module)
         assert str(custom_dir) in str(provider_module._CACHE_ROOT)
         # Restore

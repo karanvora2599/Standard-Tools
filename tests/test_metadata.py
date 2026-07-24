@@ -7,8 +7,12 @@ from standard_quant_tools.data.yfinance_provider import YFinanceProvider
 class TestDataSetMetadata:
     def test_retrieved_at_defaults_to_now(self):
         meta = DataSetMetadata(
-            provider="test", adjusted=True, survivorship_free=False,
-            point_in_time=False, frequency="1d", timezone="UTC",
+            provider="test",
+            adjusted=True,
+            survivorship_free=False,
+            point_in_time=False,
+            frequency="1d",
+            timezone="UTC",
         )
         assert meta.retrieved_at  # non-empty ISO string
         assert "T" in meta.retrieved_at

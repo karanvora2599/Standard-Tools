@@ -64,3 +64,11 @@ dev = [
     "isort>=5.0.0",
     "mypy>=1.0.0"
 ]
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88

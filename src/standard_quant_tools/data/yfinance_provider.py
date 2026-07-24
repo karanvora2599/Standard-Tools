@@ -4,7 +4,8 @@ import functools
 import logging
 import os
 import time
-from datetime import date as _date, datetime
+from datetime import date as _date
+from datetime import datetime
 from pathlib import Path
 from typing import Union
 
@@ -12,12 +13,13 @@ logger = logging.getLogger(__name__)
 
 import pandas as pd
 import yfinance as yf
+from cachetools import TTLCache, cached
 
 from standard_quant_tools import audit
-from .base import DataProvider, TickerInfo, FinancialRatios
-from .metadata import DataSetMetadata
 from standard_quant_tools.error import APIError, DataNotFoundError, InvalidSymbolError
-from cachetools import TTLCache, cached
+
+from .base import DataProvider, FinancialRatios, TickerInfo
+from .metadata import DataSetMetadata
 
 # ── In-process session cache (avoids repeated network calls in the same run) ──
 _session_cache = TTLCache(maxsize=100, ttl=3600)
@@ -27,7 +29,7 @@ _session_cache = TTLCache(maxsize=100, ttl=3600)
 # mislabeled with the NYSE timezone. Not exhaustive; unsuffixed symbols
 # (the common case: US-listed tickers) default to America/New_York.
 _EXCHANGE_SUFFIX_TIMEZONES = {
-    ".L":  "Europe/London",
+    ".L": "Europe/London",
     ".DE": "Europe/Berlin",
     ".PA": "Europe/Paris",
     ".MI": "Europe/Rome",
@@ -35,7 +37,7 @@ _EXCHANGE_SUFFIX_TIMEZONES = {
     ".SW": "Europe/Zurich",
     ".ST": "Europe/Stockholm",
     ".HK": "Asia/Hong_Kong",
-    ".T":  "Asia/Tokyo",
+    ".T": "Asia/Tokyo",
     ".SS": "Asia/Shanghai",
     ".SZ": "Asia/Shanghai",
     ".KS": "Asia/Seoul",
@@ -44,7 +46,7 @@ _EXCHANGE_SUFFIX_TIMEZONES = {
     ".BO": "Asia/Kolkata",
     ".AX": "Australia/Sydney",
     ".TO": "America/Toronto",
-    ".V":  "America/Toronto",
+    ".V": "America/Toronto",
     ".SA": "America/Sao_Paulo",
 }
 
@@ -94,17 +96,21 @@ def retry(times: int = 3, delay: float = 1, backoff: float = 2):
                         raise
                     logger.warning(
                         "[retry] %s attempt %d/%d failed: %s — retrying in %.1fs",
-                        func.__name__, i + 1, times, e, t_delay,
+                        func.__name__,
+                        i + 1,
+                        times,
+                        e,
+                        t_delay,
                     )
                     time.sleep(t_delay)
                     t_delay *= backoff
                 except Exception as e:
-                    raise APIError(
-                        f"Unexpected error in {func.__name__}: {e}"
-                    ) from e
+                    raise APIError(f"Unexpected error in {func.__name__}: {e}") from e
             if last_exc:
                 raise last_exc
+
         return wrapper
+
     return decorator
 
 
@@ -128,22 +134,40 @@ class YFinanceProvider(DataProvider):
         # ── Parquet disk cache (historical ranges only) ────────────────────
         pq_path = _parquet_path(symbol, start_str, end_str, interval)
         if _is_historical(end_date) and pq_path.exists():
-            logger.debug("[cache] disk hit  %s  %s → %s  (%s)", symbol, start_str, end_str, pq_path.name)
+            logger.debug(
+                "[cache] disk hit  %s  %s → %s  (%s)",
+                symbol,
+                start_str,
+                end_str,
+                pq_path.name,
+            )
             cached_df = pd.read_parquet(pq_path)
             audit.record_data_access(
-                symbol, start_str, end_str, interval,
-                source="disk_cache", content_hash=audit.hash_dataframe(cached_df),
+                symbol,
+                start_str,
+                end_str,
+                interval,
+                source="disk_cache",
+                content_hash=audit.hash_dataframe(cached_df),
             )
             return cached_df
 
         # ── Fetch from yfinance ────────────────────────────────────────────
-        logger.debug("[fetch] yfinance   %s  %s → %s  interval=%s", symbol, start_str, end_str, interval)
+        logger.debug(
+            "[fetch] yfinance   %s  %s → %s  interval=%s",
+            symbol,
+            start_str,
+            end_str,
+            interval,
+        )
         t0 = time.perf_counter()
         try:
             ticker = yf.Ticker(symbol)
             df = ticker.history(
-                start=start_date, end=end_date,
-                interval=interval, auto_adjust=True,
+                start=start_date,
+                end=end_date,
+                interval=interval,
+                auto_adjust=True,
             )
 
             if df.empty:
@@ -173,8 +197,12 @@ class YFinanceProvider(DataProvider):
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.debug("[fetch] ✓ %s  %d rows  %.0fms", symbol, len(result), elapsed_ms)
         audit.record_data_access(
-            symbol, start_str, end_str, interval,
-            source="live_fetch", content_hash=audit.hash_dataframe(result),
+            symbol,
+            start_str,
+            end_str,
+            interval,
+            source="live_fetch",
+            content_hash=audit.hash_dataframe(result),
         )
 
         # ── Persist to Parquet for future sessions ─────────────────────────
@@ -183,14 +211,14 @@ class YFinanceProvider(DataProvider):
                 _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
                 # Write to a per-PID temp file then atomically replace the
                 # target so concurrent processes don't corrupt each other.
-                tmp = pq_path.with_name(
-                    f"{pq_path.stem}.{os.getpid()}.tmp.parquet"
-                )
+                tmp = pq_path.with_name(f"{pq_path.stem}.{os.getpid()}.tmp.parquet")
                 result.to_parquet(tmp)
                 tmp.replace(pq_path)  # atomic on all platforms
                 logger.debug("[cache] disk write %s  → %s", symbol, pq_path.name)
             except Exception as cache_exc:
-                logger.warning("[cache] disk write failed for %s: %s", symbol, cache_exc)
+                logger.warning(
+                    "[cache] disk write failed for %s: %s", symbol, cache_exc
+                )
 
         return result
 

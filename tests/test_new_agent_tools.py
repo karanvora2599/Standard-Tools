@@ -1,51 +1,52 @@
 """Tests for the advanced agentic tools (mocked data provider)."""
 
-import pandas as pd
 import numpy as np
-import pytest
+import pandas as pd
 import pydantic
+import pytest
 
 from standard_quant_tools.agent.models import (
+    BacktestDiagnosticsInput,
+    BuyAndHoldInput,
+    CapacityReportInput,
+    CompareStrategiesInput,
+    DataQualityReportInput,
+    PairScannerInput,
+    PairTradeBacktestInput,
+    PCAInput,
+    PortfolioInput,
+    PortfolioSimulationInput,
+    PositionSizerInput,
     RegimeAdaptiveInput,
     RegimeAdaptiveWalkForwardInput,
-    PairScannerInput,
-    WalkForwardInput,
     RiskAttributionInput,
-    PositionSizerInput,
-    BuyAndHoldInput,
-    CompareStrategiesInput,
-    PortfolioInput,
-    PCAInput,
-    BacktestDiagnosticsInput,
-    PortfolioSimulationInput,
-    PairTradeBacktestInput,
     RobustnessDiagnosticsInput,
-    CapacityReportInput,
-    DataQualityReportInput,
+    WalkForwardInput,
 )
 from standard_quant_tools.agent.tools import (
-    get_agent_tools,
-    run_regime_adaptive_backtest,
-    run_regime_adaptive_walkforward_backtest,
-    scan_pairs,
-    run_walk_forward_backtest,
-    get_portfolio_risk_attribution,
-    get_position_size,
-    run_buy_and_hold,
     compare_strategies,
+    dispatch,
+    get_agent_tools,
     get_backtest_diagnostics,
-    run_portfolio_simulation,
-    run_pair_trade_backtest,
-    get_robustness_diagnostics,
     get_capacity_report,
     get_data_quality_report,
-    dispatch,
+    get_portfolio_risk_attribution,
+    get_position_size,
+    get_robustness_diagnostics,
+    run_buy_and_hold,
+    run_pair_trade_backtest,
+    run_portfolio_simulation,
+    run_regime_adaptive_backtest,
+    run_regime_adaptive_walkforward_backtest,
+    run_walk_forward_backtest,
+    scan_pairs,
 )
 
 START, END = "2022-01-01", "2024-01-01"
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="module")
 def long_ohlcv() -> pd.DataFrame:
@@ -62,7 +63,9 @@ def long_ohlcv() -> pd.DataFrame:
             "High": pd.Series(close + spread, index=dates),
             "Low": pd.Series(close - spread, index=dates),
             "Close": pd.Series(close, index=dates),
-            "Volume": pd.Series(np.random.randint(1_000_000, 5_000_000, n).astype(float), index=dates),
+            "Volume": pd.Series(
+                np.random.randint(1_000_000, 5_000_000, n).astype(float), index=dates
+            ),
         }
     )
 
@@ -71,6 +74,7 @@ def long_ohlcv() -> pd.DataFrame:
 def patched_long(long_ohlcv, monkeypatch):
     """Patch DataFactory to return the long OHLCV for every symbol."""
     from unittest.mock import AsyncMock, MagicMock
+
     from standard_quant_tools.data.factory import DataFactory
 
     provider = MagicMock()
@@ -81,6 +85,7 @@ def patched_long(long_ohlcv, monkeypatch):
 
 
 # ── Tool registry ──────────────────────────────────────────────────────────────
+
 
 class TestToolRegistry:
     def test_now_has_thirty_four_tools(self):
@@ -99,10 +104,14 @@ class TestToolRegistry:
 
     def test_all_new_tools_have_valid_schema(self):
         new_tools = [
-            t for t in get_agent_tools()
-            if t["function"]["name"] in {
-                "run_regime_adaptive_backtest", "scan_pairs",
-                "run_walk_forward_backtest", "get_portfolio_risk_attribution",
+            t
+            for t in get_agent_tools()
+            if t["function"]["name"]
+            in {
+                "run_regime_adaptive_backtest",
+                "scan_pairs",
+                "run_walk_forward_backtest",
+                "get_portfolio_risk_attribution",
                 "get_position_size",
             }
         ]
@@ -114,10 +123,13 @@ class TestToolRegistry:
 
 # ── Feature 1: Regime-Adaptive Strategy Selector ──────────────────────────────
 
+
 class TestRegimeAdaptiveBacktest:
     def test_returns_result(self, patched_long):
         inp = RegimeAdaptiveInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             n_workers=1,
         )
         result = run_regime_adaptive_backtest(inp)
@@ -132,7 +144,10 @@ class TestRegimeAdaptiveBacktest:
         inp = RegimeAdaptiveInput(symbol="AAPL", start_date=START, end_date=END)
         result = run_regime_adaptive_backtest(inp)
         assert result.selected_strategy in (
-            "sma_crossover", "rsi_mean_reversion", "macd_crossover", "bollinger_reversion"
+            "sma_crossover",
+            "rsi_mean_reversion",
+            "macd_crossover",
+            "bollinger_reversion",
         )
 
     def test_hurst_bounded(self, patched_long):
@@ -159,7 +174,9 @@ class TestRegimeAdaptiveBacktest:
 
     def test_custom_param_grid_respected(self, patched_long):
         inp = RegimeAdaptiveInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             sma_param_grid={"fast_period": [5], "slow_period": [20]},
         )
         result = run_regime_adaptive_backtest(inp)
@@ -170,9 +187,13 @@ class TestRegimeAdaptiveBacktest:
 # ── Feature 1b: Regime-Adaptive Walk-Forward Backtest (leakage-free) ──────────
 
 _RAWF_GRID = {
-    "sma_crossover":       {"fast_period": [5, 10], "slow_period": [30, 50]},
-    "rsi_mean_reversion":  {"period": [7, 14], "oversold": [25, 30], "overbought": [65, 70]},
-    "macd_crossover":      {"fast": [8, 12], "slow": [21, 26], "signal": [7, 9]},
+    "sma_crossover": {"fast_period": [5, 10], "slow_period": [30, 50]},
+    "rsi_mean_reversion": {
+        "period": [7, 14],
+        "oversold": [25, 30],
+        "overbought": [65, 70],
+    },
+    "macd_crossover": {"fast": [8, 12], "slow": [21, 26], "signal": [7, 9]},
     "bollinger_reversion": {"period": [15, 20], "num_std": [1.5, 2.0]},
 }
 
@@ -180,8 +201,11 @@ _RAWF_GRID = {
 class TestRegimeAdaptiveWalkForwardBacktest:
     def test_returns_result(self, patched_long):
         inp = RegimeAdaptiveWalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            train_bars=252, test_bars=63,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=252,
+            test_bars=63,
             sma_param_grid=_RAWF_GRID["sma_crossover"],
             rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
             macd_param_grid=_RAWF_GRID["macd_crossover"],
@@ -194,8 +218,11 @@ class TestRegimeAdaptiveWalkForwardBacktest:
 
     def test_window_dates_sequential(self, patched_long):
         inp = RegimeAdaptiveWalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            train_bars=252, test_bars=63,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=252,
+            test_bars=63,
             sma_param_grid=_RAWF_GRID["sma_crossover"],
             rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
             macd_param_grid=_RAWF_GRID["macd_crossover"],
@@ -217,32 +244,53 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         required to pick sma_crossover specifically.
         """
         inp = RegimeAdaptiveWalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            train_bars=252, test_bars=63,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=252,
+            test_bars=63,
             sma_param_grid=_RAWF_GRID["sma_crossover"],
             rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
             macd_param_grid=_RAWF_GRID["macd_crossover"],
             bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
         )
         result = run_regime_adaptive_walkforward_backtest(inp)
-        valid_strategies = {"sma_crossover", "rsi_mean_reversion", "macd_crossover", "bollinger_reversion"}
+        valid_strategies = {
+            "sma_crossover",
+            "rsi_mean_reversion",
+            "macd_crossover",
+            "bollinger_reversion",
+        }
         for win in result.windows:
             assert win.selected_strategy in valid_strategies
-            assert win.regime in ("trending", "mean_reverting", "random_walk", "unknown")
+            assert win.regime in (
+                "trending",
+                "mean_reverting",
+                "random_walk",
+                "unknown",
+            )
             assert 0.0 <= win.hurst <= 1.0 or win.hurst == 0.0
 
     def test_stitched_and_stability_fields_present(self, patched_long):
         inp = RegimeAdaptiveWalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            train_bars=252, test_bars=63,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=252,
+            test_bars=63,
             sma_param_grid=_RAWF_GRID["sma_crossover"],
             rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
             macd_param_grid=_RAWF_GRID["macd_crossover"],
             bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
         )
         result = run_regime_adaptive_walkforward_backtest(inp)
-        for field in ("stitched_oos_return", "stitched_oos_sharpe", "stitched_oos_sortino",
-                      "stitched_oos_max_drawdown", "stitched_oos_calmar"):
+        for field in (
+            "stitched_oos_return",
+            "stitched_oos_sharpe",
+            "stitched_oos_sortino",
+            "stitched_oos_max_drawdown",
+            "stitched_oos_calmar",
+        ):
             assert isinstance(getattr(result, field), float)
         assert 0 <= result.worst_oos_window < result.n_windows
         assert 0 <= result.longest_losing_window_streak <= result.n_windows
@@ -252,6 +300,7 @@ class TestRegimeAdaptiveWalkForwardBacktest:
 
     def test_insufficient_data_raises(self, patched_long, long_ohlcv, monkeypatch):
         from unittest.mock import MagicMock
+
         from standard_quant_tools.data.factory import DataFactory
 
         tiny_df = long_ohlcv.iloc[:50]
@@ -260,7 +309,11 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: prov)
 
         inp = RegimeAdaptiveWalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END, train_bars=252, test_bars=63,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=252,
+            test_bars=63,
         )
         with pytest.raises(ValueError, match="Not enough data"):
             run_regime_adaptive_walkforward_backtest(inp)
@@ -269,8 +322,11 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         """Same fix as WalkForwardInput: fill_price used to be hardcoded to
         "close" for the OOS leg (04_backtesting.md's own documented gap)."""
         base_kwargs = dict(
-            symbol="AAPL", start_date=START, end_date=END,
-            train_bars=252, test_bars=63,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=252,
+            test_bars=63,
             sma_param_grid=_RAWF_GRID["sma_crossover"],
             rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
             macd_param_grid=_RAWF_GRID["macd_crossover"],
@@ -286,7 +342,9 @@ class TestRegimeAdaptiveWalkForwardBacktest:
             default_result.stitched_oos_return, abs=1e-9
         )
 
-    def test_no_lookahead_window0_unaffected_by_future_mutation(self, long_ohlcv, monkeypatch):
+    def test_no_lookahead_window0_unaffected_by_future_mutation(
+        self, long_ohlcv, monkeypatch
+    ):
         """
         Same regression pattern as run_walk_forward_backtest's no-lookahead
         test: window 0's regime/hurst/selected_strategy/best_params are all
@@ -296,8 +354,9 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         out-of-sample result (which lives inside the mutated region) does
         change — proving the mutation is actually visible to the tool.
         """
-        from standard_quant_tools.data.factory import DataFactory
         from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
 
         train_bars, test_bars = 252, 63
 
@@ -308,8 +367,12 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         last_train_close = float(mutated["Close"].iloc[train_bars - 1])
         mutated_close = last_train_close * np.cumprod(1 + mutated_returns)
         spread = rng.uniform(0.2, 1.2, n_mutate)
-        close_col, open_col = mutated.columns.get_loc("Close"), mutated.columns.get_loc("Open")
-        high_col, low_col = mutated.columns.get_loc("High"), mutated.columns.get_loc("Low")
+        close_col, open_col = mutated.columns.get_loc("Close"), mutated.columns.get_loc(
+            "Open"
+        )
+        high_col, low_col = mutated.columns.get_loc("High"), mutated.columns.get_loc(
+            "Low"
+        )
         mutated.iloc[train_bars:, close_col] = mutated_close
         mutated.iloc[train_bars:, open_col] = mutated_close * 0.999
         mutated.iloc[train_bars:, high_col] = mutated_close + spread
@@ -320,8 +383,11 @@ class TestRegimeAdaptiveWalkForwardBacktest:
             provider.get_ohlcv.return_value = df
             monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
             inp = RegimeAdaptiveWalkForwardInput(
-                symbol="AAPL", start_date=START, end_date=END,
-                train_bars=train_bars, test_bars=test_bars,
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                train_bars=train_bars,
+                test_bars=test_bars,
                 sma_param_grid=_RAWF_GRID["sma_crossover"],
                 rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
                 macd_param_grid=_RAWF_GRID["macd_crossover"],
@@ -333,16 +399,25 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         mutated_result = run_with(mutated)
 
         assert baseline.windows[0].regime == mutated_result.windows[0].regime
-        assert baseline.windows[0].hurst == pytest.approx(mutated_result.windows[0].hurst)
-        assert baseline.windows[0].selected_strategy == mutated_result.windows[0].selected_strategy
+        assert baseline.windows[0].hurst == pytest.approx(
+            mutated_result.windows[0].hurst
+        )
+        assert (
+            baseline.windows[0].selected_strategy
+            == mutated_result.windows[0].selected_strategy
+        )
         assert baseline.windows[0].best_params == mutated_result.windows[0].best_params
-        assert baseline.windows[0].in_sample_sharpe == pytest.approx(mutated_result.windows[0].in_sample_sharpe)
+        assert baseline.windows[0].in_sample_sharpe == pytest.approx(
+            mutated_result.windows[0].in_sample_sharpe
+        )
 
         assert baseline.windows[0].out_of_sample_return != pytest.approx(
             mutated_result.windows[0].out_of_sample_return, abs=1e-9
         )
 
-    def test_oos_signal_generation_receives_train_plus_test_warm_up(self, patched_long, monkeypatch):
+    def test_oos_signal_generation_receives_train_plus_test_warm_up(
+        self, patched_long, monkeypatch
+    ):
         """
         Regression test (P0 item 5), regime-adaptive walk-forward: same
         warm-up guarantee as run_walk_forward_backtest -- OOS signals must
@@ -360,14 +435,18 @@ class TestRegimeAdaptiveWalkForwardBacktest:
             def spy(df, **kwargs):
                 call_lengths.append(len(df))
                 return real_fn(df, **kwargs)
+
             return spy
 
         for name, fn in list(strategies_mod.STRATEGY_REGISTRY.items()):
             monkeypatch.setitem(strategies_mod.STRATEGY_REGISTRY, name, make_spy(fn))
 
         inp = RegimeAdaptiveWalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            train_bars=train_bars, test_bars=test_bars,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=train_bars,
+            test_bars=test_bars,
             sma_param_grid=_RAWF_GRID["sma_crossover"],
             rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
             macd_param_grid=_RAWF_GRID["macd_crossover"],
@@ -381,7 +460,9 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         assert test_bars not in call_lengths
         assert (train_bars + test_bars) in call_lengths
 
-    def test_stitched_oos_is_one_continuous_backtest_not_reset_per_window(self, patched_long, monkeypatch):
+    def test_stitched_oos_is_one_continuous_backtest_not_reset_per_window(
+        self, patched_long, monkeypatch
+    ):
         """Same continuity guarantee as run_walk_forward_backtest's version:
         the stitched OOS aggregate comes from one continuous run_strategy
         call spanning the whole OOS region, not a per-window reset."""
@@ -398,8 +479,11 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         monkeypatch.setattr(tools_mod, "run_strategy", spy)
 
         inp = RegimeAdaptiveWalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            train_bars=train_bars, test_bars=test_bars,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            train_bars=train_bars,
+            test_bars=test_bars,
             sma_param_grid=_RAWF_GRID["sma_crossover"],
             rsi_param_grid=_RAWF_GRID["rsi_mean_reversion"],
             macd_param_grid=_RAWF_GRID["macd_crossover"],
@@ -411,14 +495,20 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         assert call_lengths.count(result.n_windows * test_bars) == 1
 
     def test_dispatched_through_dispatch(self, patched_long):
-        result = dispatch("run_regime_adaptive_walkforward_backtest", {
-            "symbol": "AAPL", "start_date": START, "end_date": END,
-            "train_bars": 252, "test_bars": 63,
-            "sma_param_grid": _RAWF_GRID["sma_crossover"],
-            "rsi_param_grid": _RAWF_GRID["rsi_mean_reversion"],
-            "macd_param_grid": _RAWF_GRID["macd_crossover"],
-            "bollinger_param_grid": _RAWF_GRID["bollinger_reversion"],
-        })
+        result = dispatch(
+            "run_regime_adaptive_walkforward_backtest",
+            {
+                "symbol": "AAPL",
+                "start_date": START,
+                "end_date": END,
+                "train_bars": 252,
+                "test_bars": 63,
+                "sma_param_grid": _RAWF_GRID["sma_crossover"],
+                "rsi_param_grid": _RAWF_GRID["rsi_mean_reversion"],
+                "macd_param_grid": _RAWF_GRID["macd_crossover"],
+                "bollinger_param_grid": _RAWF_GRID["bollinger_reversion"],
+            },
+        )
         assert result["symbol"] == "AAPL"
         assert "strategy_stability" in result
         assert "stitched_oos_sharpe" in result
@@ -426,11 +516,13 @@ class TestRegimeAdaptiveWalkForwardBacktest:
 
 # ── Feature 2: Pair Scanner ────────────────────────────────────────────────────
 
+
 class TestScanPairs:
     def test_returns_result(self, patched_long):
         inp = PairScannerInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = scan_pairs(inp)
         assert result.n_pairs_tested >= 0
@@ -438,7 +530,8 @@ class TestScanPairs:
     def test_result_structure(self, patched_long):
         inp = PairScannerInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = scan_pairs(inp)
         assert isinstance(result.n_pairs_tested, int)
@@ -448,7 +541,8 @@ class TestScanPairs:
     def test_pairs_respect_max_pairs(self, patched_long):
         inp = PairScannerInput(
             tickers=["AAPL", "MSFT", "GOOGL", "TSLA"],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
             max_pairs=2,
         )
         result = scan_pairs(inp)
@@ -458,7 +552,8 @@ class TestScanPairs:
     def test_pair_fields_populated(self, patched_long):
         inp = PairScannerInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = scan_pairs(inp)
         for pair in result.pairs:
@@ -477,7 +572,8 @@ class TestScanPairs:
     def test_pairs_sorted_by_half_life(self, patched_long):
         inp = PairScannerInput(
             tickers=["AAPL", "MSFT", "GOOGL", "TSLA"],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = scan_pairs(inp)
         hls = [p.half_life_days for p in result.pairs]
@@ -489,9 +585,12 @@ class TestScanPairs:
         assert result.n_pairs_tested == 0
         assert len(result.pairs) == 0
 
-    def test_ticker_fetch_failure_is_reported_not_swallowed(self, long_ohlcv, monkeypatch):
-        from standard_quant_tools.data.factory import DataFactory
+    def test_ticker_fetch_failure_is_reported_not_swallowed(
+        self, long_ohlcv, monkeypatch
+    ):
         from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
 
         def flaky_get_ohlcv(symbol, start, end):
             if symbol == "MSFT":
@@ -502,14 +601,18 @@ class TestScanPairs:
         provider.get_ohlcv.side_effect = flaky_get_ohlcv
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
-        inp = PairScannerInput(tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END)
+        inp = PairScannerInput(
+            tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END
+        )
         result = scan_pairs(inp)
 
         assert result.failed_tickers == {"MSFT": "no data for MSFT"}
         # Only AAPL/GOOGL remain -> exactly one pair, MSFT excluded entirely.
         assert result.n_pairs_tested == 1
 
-    def test_pair_test_failure_is_reported_not_swallowed(self, patched_long, monkeypatch):
+    def test_pair_test_failure_is_reported_not_swallowed(
+        self, patched_long, monkeypatch
+    ):
         import standard_quant_tools.analysis.cointegration as cointegration_module
 
         def failing_coint(*args, **kwargs):
@@ -518,7 +621,9 @@ class TestScanPairs:
         monkeypatch.setattr(cointegration_module, "cointegration_test", failing_coint)
 
         inp = PairScannerInput(
-            tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END,
+            tickers=["AAPL", "MSFT", "GOOGL"],
+            start_date=START,
+            end_date=END,
         )
         result = scan_pairs(inp)
 
@@ -526,18 +631,26 @@ class TestScanPairs:
         assert len(result.failed_pairs) == 3  # C(3,2) combinations, all erroring
         assert all(f.reason == "degenerate series" for f in result.failed_pairs)
         tested_symbols = {(f.symbol_a, f.symbol_b) for f in result.failed_pairs}
-        assert tested_symbols == {("AAPL", "MSFT"), ("AAPL", "GOOGL"), ("MSFT", "GOOGL")}
+        assert tested_symbols == {
+            ("AAPL", "MSFT"),
+            ("AAPL", "GOOGL"),
+            ("MSFT", "GOOGL"),
+        }
 
 
 # ── Feature 3: Walk-Forward Backtest ──────────────────────────────────────────
 
+
 class TestWalkForwardBacktest:
     def test_returns_result(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         assert result.symbol == "AAPL"
@@ -545,10 +658,13 @@ class TestWalkForwardBacktest:
 
     def test_windows_populated(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         assert result.n_windows >= 1
@@ -556,10 +672,13 @@ class TestWalkForwardBacktest:
 
     def test_window_dates_sequential(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         for i, win in enumerate(result.windows):
@@ -570,10 +689,13 @@ class TestWalkForwardBacktest:
 
     def test_aggregate_metrics_are_floats(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         assert isinstance(result.avg_oos_sharpe, float)
@@ -583,10 +705,13 @@ class TestWalkForwardBacktest:
 
     def test_param_stability_has_correct_keys(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         assert "fast_period" in result.param_stability
@@ -598,16 +723,20 @@ class TestWalkForwardBacktest:
 
     def test_invalid_strategy_raises(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="nonexistent_strategy",
             param_grid={"fast_period": [5]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         with pytest.raises(ValueError, match="Unknown strategy"):
             run_walk_forward_backtest(inp)
 
     def test_insufficient_data_raises(self, patched_long, long_ohlcv, monkeypatch):
         from unittest.mock import MagicMock
+
         from standard_quant_tools.data.factory import DataFactory
 
         tiny_df = long_ohlcv.iloc[:50]
@@ -616,26 +745,36 @@ class TestWalkForwardBacktest:
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: prov)
 
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5], "slow_period": [30]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         with pytest.raises(ValueError, match="Not enough data"):
             run_walk_forward_backtest(inp)
 
     def test_stitched_fields_present_and_typed(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         for field in (
-            "stitched_oos_return", "stitched_oos_sharpe", "stitched_oos_sortino",
-            "stitched_oos_max_drawdown", "stitched_oos_calmar",
-            "is_to_oos_sharpe_decay", "is_to_oos_return_decay",
+            "stitched_oos_return",
+            "stitched_oos_sharpe",
+            "stitched_oos_sortino",
+            "stitched_oos_max_drawdown",
+            "stitched_oos_calmar",
+            "is_to_oos_sharpe_decay",
+            "is_to_oos_return_decay",
         ):
             assert isinstance(getattr(result, field), float)
         assert isinstance(result.worst_oos_window, int)
@@ -644,32 +783,45 @@ class TestWalkForwardBacktest:
 
     def test_worst_oos_window_is_a_valid_index(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         assert 0 <= result.worst_oos_window < result.n_windows
-        worst = next(w for w in result.windows if w.window_index == result.worst_oos_window)
-        assert worst.out_of_sample_return == min(w.out_of_sample_return for w in result.windows)
+        worst = next(
+            w for w in result.windows if w.window_index == result.worst_oos_window
+        )
+        assert worst.out_of_sample_return == min(
+            w.out_of_sample_return for w in result.windows
+        )
 
     def test_longest_losing_streak_is_bounded(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         assert 0 <= result.longest_losing_window_streak <= result.n_windows
 
     def test_parameter_turnover_is_a_fraction(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         assert 0.0 <= result.parameter_turnover <= 1.0
@@ -683,21 +835,29 @@ class TestWalkForwardBacktest:
         old avg_oos_return computation under a new name.
         """
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         if result.n_windows >= 2:
-            assert result.stitched_oos_return != pytest.approx(result.avg_oos_return, abs=1e-9)
+            assert result.stitched_oos_return != pytest.approx(
+                result.avg_oos_return, abs=1e-9
+            )
 
     def test_in_sample_return_populated_per_window(self, patched_long):
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         result = run_walk_forward_backtest(inp)
         for window in result.windows:
@@ -711,18 +871,25 @@ class TestWalkForwardBacktest:
         stitched OOS result relative to the default.
         """
         kwargs = dict(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=252, test_bars=63,
+            train_bars=252,
+            test_bars=63,
         )
         default_result = run_walk_forward_backtest(WalkForwardInput(**kwargs))
-        next_open_result = run_walk_forward_backtest(WalkForwardInput(**kwargs, fill_price="next_open"))
+        next_open_result = run_walk_forward_backtest(
+            WalkForwardInput(**kwargs, fill_price="next_open")
+        )
         assert next_open_result.stitched_oos_return != pytest.approx(
             default_result.stitched_oos_return, abs=1e-9
         )
 
-    def test_no_lookahead_window0_params_unaffected_by_future_mutation(self, long_ohlcv, monkeypatch):
+    def test_no_lookahead_window0_params_unaffected_by_future_mutation(
+        self, long_ohlcv, monkeypatch
+    ):
         """
         Regression test proving run_walk_forward_backtest has no look-ahead
         bias: window 0's best_params are selected using backtest_grid on
@@ -734,8 +901,9 @@ class TestWalkForwardBacktest:
         mutation is actually visible to the tool, so the first assertion
         isn't passing vacuously).
         """
-        from standard_quant_tools.data.factory import DataFactory
         from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
 
         train_bars, test_bars = 252, 63
 
@@ -750,8 +918,12 @@ class TestWalkForwardBacktest:
         last_train_close = float(mutated["Close"].iloc[train_bars - 1])
         mutated_close = last_train_close * np.cumprod(1 + mutated_returns)
         spread = rng.uniform(0.2, 1.2, n_mutate)
-        close_col, open_col = mutated.columns.get_loc("Close"), mutated.columns.get_loc("Open")
-        high_col, low_col = mutated.columns.get_loc("High"), mutated.columns.get_loc("Low")
+        close_col, open_col = mutated.columns.get_loc("Close"), mutated.columns.get_loc(
+            "Open"
+        )
+        high_col, low_col = mutated.columns.get_loc("High"), mutated.columns.get_loc(
+            "Low"
+        )
         mutated.iloc[train_bars:, close_col] = mutated_close
         mutated.iloc[train_bars:, open_col] = mutated_close * 0.999
         mutated.iloc[train_bars:, high_col] = mutated_close + spread
@@ -762,10 +934,13 @@ class TestWalkForwardBacktest:
             provider.get_ohlcv.return_value = df
             monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
             inp = WalkForwardInput(
-                symbol="AAPL", start_date=START, end_date=END,
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
                 strategy="sma_crossover",
                 param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-                train_bars=train_bars, test_bars=test_bars,
+                train_bars=train_bars,
+                test_bars=test_bars,
             )
             return run_walk_forward_backtest(inp)
 
@@ -790,7 +965,9 @@ class TestWalkForwardBacktest:
         )
 
     def test_stitched_oos_is_one_continuous_backtest_not_reset_per_window(
-        self, patched_long, monkeypatch,
+        self,
+        patched_long,
+        monkeypatch,
     ):
         """
         Regression test (P0 item 5): the stitched OOS aggregate must come
@@ -815,10 +992,13 @@ class TestWalkForwardBacktest:
         monkeypatch.setattr(tools_mod, "run_strategy", spy)
 
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=train_bars, test_bars=test_bars,
+            train_bars=train_bars,
+            test_bars=test_bars,
         )
         result = run_walk_forward_backtest(inp)
 
@@ -826,7 +1006,9 @@ class TestWalkForwardBacktest:
         assert call_lengths.count(result.n_windows * test_bars) == 1
 
     def test_oos_signal_generation_receives_train_plus_test_warm_up(
-        self, patched_long, monkeypatch,
+        self,
+        patched_long,
+        monkeypatch,
     ):
         """
         Regression test (P0 item 5): OOS signals must be generated from
@@ -852,10 +1034,13 @@ class TestWalkForwardBacktest:
         monkeypatch.setitem(strategies_mod.STRATEGY_REGISTRY, "sma_crossover", spy)
 
         inp = WalkForwardInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            train_bars=train_bars, test_bars=test_bars,
+            train_bars=train_bars,
+            test_bars=test_bars,
         )
         result = run_walk_forward_backtest(inp)
 
@@ -867,12 +1052,14 @@ class TestWalkForwardBacktest:
 
 # ── Feature 4: Portfolio Risk Attribution ─────────────────────────────────────
 
+
 class TestPortfolioRiskAttribution:
     def test_returns_result(self, patched_long):
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
             weights=[0.4, 0.35, 0.25],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = get_portfolio_risk_attribution(inp)
         assert result.tickers == ["AAPL", "MSFT", "GOOGL"]
@@ -881,18 +1068,28 @@ class TestPortfolioRiskAttribution:
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
             weights=[0.4, 0.35, 0.25],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = get_portfolio_risk_attribution(inp)
-        for field in ("annualized_return", "annualized_volatility", "sharpe_ratio",
-                      "sortino_ratio", "max_drawdown", "var_95", "cvar_95", "information_ratio"):
+        for field in (
+            "annualized_return",
+            "annualized_volatility",
+            "sharpe_ratio",
+            "sortino_ratio",
+            "max_drawdown",
+            "var_95",
+            "cvar_95",
+            "information_ratio",
+        ):
             assert isinstance(getattr(result, field), float), f"{field} not float"
 
     def test_risk_contributions_sum_to_one(self, patched_long):
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
             weights=[0.4, 0.35, 0.25],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = get_portfolio_risk_attribution(inp)
         total = sum(result.asset_risk_contributions.values())
@@ -902,7 +1099,8 @@ class TestPortfolioRiskAttribution:
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
             weights=[0.4, 0.35, 0.25],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = get_portfolio_risk_attribution(inp)
         assert set(result.asset_risk_contributions.keys()) == {"AAPL", "MSFT", "GOOGL"}
@@ -911,7 +1109,8 @@ class TestPortfolioRiskAttribution:
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
             weights=[0.4, 0.35, 0.25],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
             n_components=2,
         )
         result = get_portfolio_risk_attribution(inp)
@@ -922,7 +1121,8 @@ class TestPortfolioRiskAttribution:
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT"],
             weights=[0.6, 0.4],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = get_portfolio_risk_attribution(inp)
         assert result.factor_loadings is None
@@ -933,7 +1133,8 @@ class TestPortfolioRiskAttribution:
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT"],
             weights=[0.6, 0.4],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
             factor_tickers=["SPY"],
             factor_names=["mkt"],
         )
@@ -947,7 +1148,8 @@ class TestPortfolioRiskAttribution:
         inp = RiskAttributionInput(
             tickers=["AAPL", "MSFT"],
             weights=[0.6, 0.4],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         result = get_portfolio_risk_attribution(inp)
         assert result.max_drawdown <= 0.0
@@ -955,10 +1157,13 @@ class TestPortfolioRiskAttribution:
 
 # ── Feature 5: Position Sizer ──────────────────────────────────────────────────
 
+
 class TestPositionSizer:
     def test_returns_result(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
         )
         result = get_position_size(inp)
@@ -966,7 +1171,9 @@ class TestPositionSizer:
 
     def test_last_close_positive(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
         )
         result = get_position_size(inp)
@@ -974,7 +1181,9 @@ class TestPositionSizer:
 
     def test_atr_positive(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
         )
         result = get_position_size(inp)
@@ -982,7 +1191,9 @@ class TestPositionSizer:
 
     def test_fixed_risk_sizing_math(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
             risk_per_trade_pct=0.01,
             atr_multiplier=2.0,
@@ -995,7 +1206,9 @@ class TestPositionSizer:
 
     def test_max_loss_bounded_by_risk_pct(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
             risk_per_trade_pct=0.01,
         )
@@ -1004,7 +1217,9 @@ class TestPositionSizer:
 
     def test_without_kelly_inputs_recommendation_is_fixed_risk(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
         )
         result = get_position_size(inp)
@@ -1013,9 +1228,13 @@ class TestPositionSizer:
 
     def test_with_kelly_inputs_populated(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
-            win_rate=0.55, avg_win_pct=0.05, avg_loss_pct=0.03,
+            win_rate=0.55,
+            avg_win_pct=0.05,
+            avg_loss_pct=0.03,
         )
         result = get_position_size(inp)
         assert result.kelly_fraction is not None
@@ -1025,9 +1244,13 @@ class TestPositionSizer:
 
     def test_negative_edge_falls_back_to_fixed_risk(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
-            win_rate=0.30, avg_win_pct=0.02, avg_loss_pct=0.05,
+            win_rate=0.30,
+            avg_win_pct=0.02,
+            avg_loss_pct=0.05,
         )
         result = get_position_size(inp)
         assert result.kelly_fraction == 0.0
@@ -1035,9 +1258,13 @@ class TestPositionSizer:
 
     def test_recommended_shares_is_int(self, patched_long):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=50_000.0,
-            win_rate=0.6, avg_win_pct=0.06, avg_loss_pct=0.03,
+            win_rate=0.6,
+            avg_win_pct=0.06,
+            avg_loss_pct=0.03,
         )
         result = get_position_size(inp)
         assert isinstance(result.recommended_shares, int)
@@ -1045,6 +1272,7 @@ class TestPositionSizer:
 
 
 # ── Feature: "unknown" regime fallback ────────────────────────────────────────
+
 
 class TestRegimeUnknownFallback:
     """When hurst_exponent returns 'unknown', the tool should not raise and
@@ -1057,7 +1285,11 @@ class TestRegimeUnknownFallback:
         monkeypatch.setattr(
             hurst_module,
             "hurst_exponent",
-            lambda *a, **kw: {"hurst": float("nan"), "regime": "unknown", "fit_r_squared": 0.0},
+            lambda *a, **kw: {
+                "hurst": float("nan"),
+                "regime": "unknown",
+                "fit_r_squared": 0.0,
+            },
         )
         inp = RegimeAdaptiveInput(symbol="AAPL", start_date=START, end_date=END)
         result = run_regime_adaptive_backtest(inp)
@@ -1067,6 +1299,7 @@ class TestRegimeUnknownFallback:
 
 
 # ── Feature 6: Buy-and-Hold Baseline ──────────────────────────────────────────
+
 
 class TestBuyAndHold:
     """run_buy_and_hold returns a BacktestResult (same as active strategies)."""
@@ -1100,12 +1333,15 @@ class TestBuyAndHold:
     def test_custom_capital_reflected(self, patched_long):
         # With 50k capital, final equity should scale proportionally from the 50k base.
         # Even a 50% loss leaves 25k — much larger than the 10k default.
-        inp = BuyAndHoldInput(symbol="AAPL", start_date=START, end_date=END, initial_capital=50_000.0)
+        inp = BuyAndHoldInput(
+            symbol="AAPL", start_date=START, end_date=END, initial_capital=50_000.0
+        )
         result = run_buy_and_hold(inp)
         assert result.final_equity > 25_000.0
 
 
 # ── Feature 7: Compare Strategies ─────────────────────────────────────────────
+
 
 class TestCompareStrategies:
     def test_returns_result(self, patched_long):
@@ -1122,21 +1358,32 @@ class TestCompareStrategies:
         inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END)
         result = compare_strategies(inp)
         names = {s.strategy for s in result.strategies}
-        assert names == {"sma_crossover", "rsi_mean_reversion", "macd_crossover", "bollinger_reversion"}
+        assert names == {
+            "sma_crossover",
+            "rsi_mean_reversion",
+            "macd_crossover",
+            "bollinger_reversion",
+        }
 
     def test_best_strategy_is_first(self, patched_long):
-        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="sharpe_ratio")
+        inp = CompareStrategiesInput(
+            symbol="AAPL", start_date=START, end_date=END, sort_by="sharpe_ratio"
+        )
         result = compare_strategies(inp)
         assert result.best_strategy == result.strategies[0].strategy
 
     def test_sorted_descending_by_sharpe(self, patched_long):
-        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="sharpe_ratio")
+        inp = CompareStrategiesInput(
+            symbol="AAPL", start_date=START, end_date=END, sort_by="sharpe_ratio"
+        )
         result = compare_strategies(inp)
         sharpes = [s.sharpe_ratio for s in result.strategies]
         assert sharpes == sorted(sharpes, reverse=True)
 
     def test_sorted_descending_by_total_return(self, patched_long):
-        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="total_return")
+        inp = CompareStrategiesInput(
+            symbol="AAPL", start_date=START, end_date=END, sort_by="total_return"
+        )
         result = compare_strategies(inp)
         returns = [s.total_return for s in result.strategies]
         assert returns == sorted(returns, reverse=True)
@@ -1157,25 +1404,38 @@ class TestCompareStrategies:
             assert 0.0 <= s.win_rate <= 1.0
 
     def test_sort_by_in_result(self, patched_long):
-        inp = CompareStrategiesInput(symbol="AAPL", start_date=START, end_date=END, sort_by="calmar_ratio")
+        inp = CompareStrategiesInput(
+            symbol="AAPL", start_date=START, end_date=END, sort_by="calmar_ratio"
+        )
         result = compare_strategies(inp)
         assert result.sort_by == "calmar_ratio"
 
 
 # ── Feature 8: Dispatch ────────────────────────────────────────────────────────
 
+
 class TestDispatch:
     def test_routes_buy_and_hold(self, patched_long):
-        result = dispatch("run_buy_and_hold", {
-            "symbol": "AAPL", "start_date": START, "end_date": END,
-        })
+        result = dispatch(
+            "run_buy_and_hold",
+            {
+                "symbol": "AAPL",
+                "start_date": START,
+                "end_date": END,
+            },
+        )
         assert "total_return" in result
         assert "final_equity" in result
 
     def test_routes_analyze_stock_risk(self, patched_long):
-        result = dispatch("analyze_stock_risk", {
-            "symbol": "AAPL", "benchmark": "SPY", "period": "1y",
-        })
+        result = dispatch(
+            "analyze_stock_risk",
+            {
+                "symbol": "AAPL",
+                "benchmark": "SPY",
+                "period": "1y",
+            },
+        )
         assert "sharpe_ratio" in result
 
     def test_unknown_tool_raises_value_error(self):
@@ -1188,11 +1448,13 @@ class TestDispatch:
 
     def test_dispatch_covers_all_registry_tools(self):
         from standard_quant_tools.agent.tools import _TOOL_DISPATCH
+
         registry_names = {t["function"]["name"] for t in get_agent_tools()}
         assert registry_names == set(_TOOL_DISPATCH.keys())
 
 
 # ── Feature 9: Model Validators ───────────────────────────────────────────────
+
 
 class TestModelValidators:
     def test_portfolio_weights_must_sum_to_one(self):
@@ -1200,7 +1462,8 @@ class TestModelValidators:
             PortfolioInput(
                 tickers=["AAPL", "MSFT"],
                 weights=[0.6, 0.6],
-                start_date=START, end_date=END,
+                start_date=START,
+                end_date=END,
             )
 
     def test_portfolio_weights_length_must_match_tickers(self):
@@ -1208,14 +1471,16 @@ class TestModelValidators:
             PortfolioInput(
                 tickers=["AAPL", "MSFT", "GOOGL"],
                 weights=[0.5, 0.5],
-                start_date=START, end_date=END,
+                start_date=START,
+                end_date=END,
             )
 
     def test_portfolio_valid_weights_accepted(self):
         inp = PortfolioInput(
             tickers=["AAPL", "MSFT"],
             weights=[0.5, 0.5],
-            start_date=START, end_date=END,
+            start_date=START,
+            end_date=END,
         )
         assert inp.tickers == ["AAPL", "MSFT"]
 
@@ -1224,7 +1489,8 @@ class TestModelValidators:
             RiskAttributionInput(
                 tickers=["AAPL", "MSFT"],
                 weights=[0.7, 0.7],
-                start_date=START, end_date=END,
+                start_date=START,
+                end_date=END,
             )
 
     def test_risk_attribution_weights_length_mismatch(self):
@@ -1232,14 +1498,16 @@ class TestModelValidators:
             RiskAttributionInput(
                 tickers=["AAPL", "MSFT", "GOOGL"],
                 weights=[0.5, 0.5],
-                start_date=START, end_date=END,
+                start_date=START,
+                end_date=END,
             )
 
     def test_pca_n_components_must_be_positive(self):
         with pytest.raises(pydantic.ValidationError):
             PCAInput(
                 tickers=["AAPL", "MSFT"],
-                start_date=START, end_date=END,
+                start_date=START,
+                end_date=END,
                 n_components=0,
             )
 
@@ -1247,14 +1515,17 @@ class TestModelValidators:
         with pytest.raises(pydantic.ValidationError):
             PCAInput(
                 tickers=["AAPL", "MSFT"],
-                start_date=START, end_date=END,
+                start_date=START,
+                end_date=END,
                 n_components=-1,
             )
 
     def test_position_sizer_risk_pct_must_be_positive(self):
         with pytest.raises(pydantic.ValidationError):
             PositionSizerInput(
-                symbol="AAPL", start_date=START, end_date=END,
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
                 account_equity=100_000.0,
                 risk_per_trade_pct=0.0,
             )
@@ -1262,14 +1533,18 @@ class TestModelValidators:
     def test_position_sizer_risk_pct_cannot_exceed_one(self):
         with pytest.raises(pydantic.ValidationError):
             PositionSizerInput(
-                symbol="AAPL", start_date=START, end_date=END,
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
                 account_equity=100_000.0,
                 risk_per_trade_pct=1.5,
             )
 
     def test_position_sizer_valid_risk_pct_accepted(self):
         inp = PositionSizerInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             account_equity=100_000.0,
             risk_per_trade_pct=0.01,
         )
@@ -1277,10 +1552,13 @@ class TestModelValidators:
 
 # ── Extended Backtest Diagnostics ─────────────────────────────────────────────
 
+
 class TestBacktestDiagnostics:
     def test_returns_result(self, patched_long):
         inp = BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy_type="sma_crossover",
             parameters={"fast_period": 10, "slow_period": 50},
         )
@@ -1290,7 +1568,9 @@ class TestBacktestDiagnostics:
 
     def test_unknown_strategy_raises(self, patched_long):
         inp = BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy_type="nonexistent_strategy",
         )
         with pytest.raises(ValueError, match="Unknown strategy"):
@@ -1298,7 +1578,9 @@ class TestBacktestDiagnostics:
 
     def test_top_drawdowns_respects_top_n(self, patched_long):
         inp = BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy_type="sma_crossover",
             parameters={"fast_period": 5, "slow_period": 20},
             top_n_drawdowns=2,
@@ -1308,7 +1590,9 @@ class TestBacktestDiagnostics:
 
     def test_drawdown_episode_fields_populated(self, patched_long):
         inp = BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy_type="sma_crossover",
             parameters={"fast_period": 5, "slow_period": 20},
         )
@@ -1321,7 +1605,9 @@ class TestBacktestDiagnostics:
 
     def test_trade_diagnostics_fields_populated(self, patched_long):
         inp = BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy_type="sma_crossover",
             parameters={"fast_period": 5, "slow_period": 20},
         )
@@ -1333,7 +1619,9 @@ class TestBacktestDiagnostics:
 
     def test_exposure_fields_bounded(self, patched_long):
         inp = BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy_type="sma_crossover",
             parameters={"fast_period": 5, "slow_period": 20},
         )
@@ -1344,30 +1632,46 @@ class TestBacktestDiagnostics:
         assert 0.0 <= exp.pct_short <= 1.0
 
     def test_dispatched_through_dispatch(self, patched_long):
-        result = dispatch("get_backtest_diagnostics", {
-            "symbol": "AAPL", "start_date": START, "end_date": END,
-            "strategy_type": "sma_crossover",
-            "parameters": {"fast_period": 10, "slow_period": 50},
-        })
+        result = dispatch(
+            "get_backtest_diagnostics",
+            {
+                "symbol": "AAPL",
+                "start_date": START,
+                "end_date": END,
+                "strategy_type": "sma_crossover",
+                "parameters": {"fast_period": 10, "slow_period": 50},
+            },
+        )
         assert result["symbol"] == "AAPL"
         assert "top_drawdowns" in result
         assert "trade_diagnostics" in result
         assert "exposure" in result
 
     def test_next_open_fill_price_differs_from_default(self, patched_long):
-        base = get_backtest_diagnostics(BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            strategy_type="sma_crossover", parameters={"fast_period": 10, "slow_period": 50},
-        ))
-        next_open = get_backtest_diagnostics(BacktestDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            strategy_type="sma_crossover", parameters={"fast_period": 10, "slow_period": 50},
-            fill_price="next_open",
-        ))
+        base = get_backtest_diagnostics(
+            BacktestDiagnosticsInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy_type="sma_crossover",
+                parameters={"fast_period": 10, "slow_period": 50},
+            )
+        )
+        next_open = get_backtest_diagnostics(
+            BacktestDiagnosticsInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy_type="sma_crossover",
+                parameters={"fast_period": 10, "slow_period": 50},
+                fill_price="next_open",
+            )
+        )
         assert base.total_return != pytest.approx(next_open.total_return, abs=1e-9)
 
 
 # ── True Portfolio Simulation (shared cash, rebalancing) ──────────────────────
+
 
 def _rebalance_weights(long_ohlcv, tickers, weight_per_ticker, rebalance_indices):
     dates = [str(long_ohlcv.index[i].date()) for i in rebalance_indices]
@@ -1379,7 +1683,10 @@ class TestPortfolioSimulation:
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0, 100, 300])
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=weights,
         )
         result = run_portfolio_simulation(inp)
         assert result.tickers == tickers
@@ -1390,31 +1697,54 @@ class TestPortfolioSimulation:
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0, 150])
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=weights,
         )
         result = run_portfolio_simulation(inp)
-        for field in ("total_return", "annualized_return", "annualized_volatility",
-                      "sharpe_ratio", "sortino_ratio", "max_drawdown", "calmar_ratio",
-                      "var_95", "cvar_95", "avg_gross_leverage", "max_gross_leverage_used"):
+        for field in (
+            "total_return",
+            "annualized_return",
+            "annualized_volatility",
+            "sharpe_ratio",
+            "sortino_ratio",
+            "max_drawdown",
+            "calmar_ratio",
+            "var_95",
+            "cvar_95",
+            "avg_gross_leverage",
+            "max_gross_leverage_used",
+        ):
             assert isinstance(getattr(result, field), float)
         assert result.final_equity > 0
         assert len(result.equity_curve) > 0
 
-    def test_rebalance_log_reports_gross_leverage_near_target(self, patched_long, long_ohlcv):
+    def test_rebalance_log_reports_gross_leverage_near_target(
+        self, patched_long, long_ohlcv
+    ):
         tickers = ["AAPL", "MSFT", "GOOGL"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.25, [0])  # gross = 0.75
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
-            commission_pct=0.0, slippage_pct=0.0,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=weights,
+            commission_pct=0.0,
+            slippage_pct=0.0,
         )
         result = run_portfolio_simulation(inp)
-        assert result.rebalance_log[0].gross_leverage_after == pytest.approx(0.75, abs=1e-6)
+        assert result.rebalance_log[0].gross_leverage_after == pytest.approx(
+            0.75, abs=1e-6
+        )
         assert result.rebalance_log[0].n_positions == 3
 
     def test_gross_leverage_exceeded_raises(self, patched_long, long_ohlcv):
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.8, [0])  # gross = 1.6
-        inp_kwargs = dict(tickers=tickers, start_date=START, end_date=END, target_weights=weights)
+        inp_kwargs = dict(
+            tickers=tickers, start_date=START, end_date=END, target_weights=weights
+        )
         with pytest.raises(pydantic.ValidationError, match="leverage"):
             PortfolioSimulationInput(**inp_kwargs)
 
@@ -1423,7 +1753,9 @@ class TestPortfolioSimulation:
         dates_b = [str(long_ohlcv.index[10].date())]
         with pytest.raises(pydantic.ValidationError, match="rebalance calendar"):
             PortfolioSimulationInput(
-                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
                 target_weights={
                     "AAPL": {dates_a[0]: 0.4},
                     "MSFT": {dates_b[0]: 0.4},
@@ -1433,10 +1765,15 @@ class TestPortfolioSimulation:
     def test_dispatched_through_dispatch(self, patched_long, long_ohlcv):
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
-        result = dispatch("run_portfolio_simulation", {
-            "tickers": tickers, "start_date": START, "end_date": END,
-            "target_weights": weights,
-        })
+        result = dispatch(
+            "run_portfolio_simulation",
+            {
+                "tickers": tickers,
+                "start_date": START,
+                "end_date": END,
+                "target_weights": weights,
+            },
+        )
         assert result["tickers"] == tickers
         assert "rebalance_log" in result
         assert "sharpe_ratio" in result
@@ -1445,8 +1782,12 @@ class TestPortfolioSimulation:
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
-            commission_model="per_share", per_share_rate=0.01,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=weights,
+            commission_model="per_share",
+            per_share_rate=0.01,
         )
         result = run_portfolio_simulation(inp)
         assert result.n_rebalances == 1
@@ -1455,13 +1796,18 @@ class TestPortfolioSimulation:
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0, 100])
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=weights,
             fill_price="next_open",
         )
         result = run_portfolio_simulation(inp)
         assert result.n_rebalances == 2
 
-    def test_total_return_matches_final_over_initial_capital(self, patched_long, long_ohlcv):
+    def test_total_return_matches_final_over_initial_capital(
+        self, patched_long, long_ohlcv
+    ):
         """
         Regression test (P0 item 8): a bar-0 rebalance under the default
         nonzero commission/slippage means equity_curve.iloc[0] is already
@@ -1473,7 +1819,10 @@ class TestPortfolioSimulation:
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=weights,
         )
         result = run_portfolio_simulation(inp)
         expected = result.final_equity / inp.initial_capital - 1.0
@@ -1490,14 +1839,26 @@ class TestPortfolioSimulation:
         """
         tickers = ["AAPL", "MSFT"]
         weights = _rebalance_weights(long_ohlcv, tickers, 0.4, [0])
-        costed = run_portfolio_simulation(PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
-            commission_pct=0.05, slippage_pct=0.0,
-        ))
-        free = run_portfolio_simulation(PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=weights,
-            commission_pct=0.0, slippage_pct=0.0,
-        ))
+        costed = run_portfolio_simulation(
+            PortfolioSimulationInput(
+                tickers=tickers,
+                start_date=START,
+                end_date=END,
+                target_weights=weights,
+                commission_pct=0.05,
+                slippage_pct=0.0,
+            )
+        )
+        free = run_portfolio_simulation(
+            PortfolioSimulationInput(
+                tickers=tickers,
+                start_date=START,
+                end_date=END,
+                target_weights=weights,
+                commission_pct=0.0,
+                slippage_pct=0.0,
+            )
+        )
         assert costed.var_95 >= free.var_95
         assert costed.cvar_95 >= free.cvar_95
         assert costed.total_return < free.total_return
@@ -1511,22 +1872,38 @@ def _score_values(long_ohlcv, tickers, scores_by_ticker, rebalance_indices):
 class TestPortfolioSimulationScoreSignals:
     def test_zscore_normalized_gross_leverage_matches(self, patched_long, long_ohlcv):
         tickers = ["AAPL", "MSFT", "GOOGL"]
-        scores = _score_values(long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0, "GOOGL": 0.5}, [0])
+        scores = _score_values(
+            long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0, "GOOGL": 0.5}, [0]
+        )
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=scores,
-            signal_type="score", construction_method="zscore_normalized", gross_leverage=1.0,
-            commission_pct=0.0, slippage_pct=0.0,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=scores,
+            signal_type="score",
+            construction_method="zscore_normalized",
+            gross_leverage=1.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
         )
         result = run_portfolio_simulation(inp)
-        assert result.rebalance_log[0].gross_leverage_after == pytest.approx(1.0, abs=1e-3)
+        assert result.rebalance_log[0].gross_leverage_after == pytest.approx(
+            1.0, abs=1e-3
+        )
 
     def test_equal_weight_top_bottom_requires_n_long_n_short(self, long_ohlcv):
         tickers = ["AAPL", "MSFT", "GOOGL"]
-        scores = _score_values(long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0, "GOOGL": 0.5}, [0])
+        scores = _score_values(
+            long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0, "GOOGL": 0.5}, [0]
+        )
         with pytest.raises(pydantic.ValidationError, match="n_long"):
             PortfolioSimulationInput(
-                tickers=tickers, start_date=START, end_date=END, target_weights=scores,
-                signal_type="score", construction_method="equal_weight_top_bottom",
+                tickers=tickers,
+                start_date=START,
+                end_date=END,
+                target_weights=scores,
+                signal_type="score",
+                construction_method="equal_weight_top_bottom",
             )
 
     def test_missing_construction_method_raises(self, long_ohlcv):
@@ -1534,7 +1911,10 @@ class TestPortfolioSimulationScoreSignals:
         scores = _score_values(long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": -1.0}, [0])
         with pytest.raises(pydantic.ValidationError, match="construction_method"):
             PortfolioSimulationInput(
-                tickers=tickers, start_date=START, end_date=END, target_weights=scores,
+                tickers=tickers,
+                start_date=START,
+                end_date=END,
+                target_weights=scores,
                 signal_type="score",
             )
 
@@ -1544,11 +1924,18 @@ class TestPortfolioSimulationScoreSignals:
         # through the agent tool without erroring.
         tickers = ["AAPL", "MSFT", "GOOGL", "AMZN"]
         scores = _score_values(
-            long_ohlcv, tickers, {"AAPL": 2.0, "MSFT": 1.0, "GOOGL": 0.5, "AMZN": -1.5}, [0],
+            long_ohlcv,
+            tickers,
+            {"AAPL": 2.0, "MSFT": 1.0, "GOOGL": 0.5, "AMZN": -1.5},
+            [0],
         )
         inp = PortfolioSimulationInput(
-            tickers=tickers, start_date=START, end_date=END, target_weights=scores,
-            signal_type="score", construction_method="rank_weighted",
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            target_weights=scores,
+            signal_type="score",
+            construction_method="rank_weighted",
             make_dollar_neutral=True,
         )
         result = run_portfolio_simulation(inp)
@@ -1557,6 +1944,7 @@ class TestPortfolioSimulationScoreSignals:
 
 
 # ── Pair Trade Backtest (synchronized two-leg execution) ─────────────────────
+
 
 def _diverging_pair_ohlcv():
     """symbol_a dips then spikes relative to a flat symbol_b — same
@@ -1568,8 +1956,13 @@ def _diverging_pair_ohlcv():
 
     def _df(close):
         return pd.DataFrame(
-            {"Open": close, "High": close, "Low": close, "Close": close,
-             "Volume": [1_000_000.0] * len(close)},
+            {
+                "Open": close,
+                "High": close,
+                "Low": close,
+                "Close": close,
+                "Volume": [1_000_000.0] * len(close),
+            },
             index=dates,
         )
 
@@ -1579,6 +1972,7 @@ def _diverging_pair_ohlcv():
 @pytest.fixture
 def patched_pair(monkeypatch):
     from unittest.mock import MagicMock
+
     from standard_quant_tools.data.factory import DataFactory
 
     price_data = _diverging_pair_ohlcv()
@@ -1591,9 +1985,16 @@ def patched_pair(monkeypatch):
 class TestPairTradeBacktest:
     def test_returns_result(self, patched_pair):
         inp = PairTradeBacktestInput(
-            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
-            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3,
-            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
+            symbol_a="A",
+            symbol_b="B",
+            start_date=START,
+            end_date=END,
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            zscore_window=None,
         )
         result = run_pair_trade_backtest(inp)
         assert result.symbol_a == "A"
@@ -1603,12 +2004,25 @@ class TestPairTradeBacktest:
 
     def test_summary_fields_typed(self, patched_pair):
         inp = PairTradeBacktestInput(
-            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
-            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3, zscore_window=None,
+            symbol_a="A",
+            symbol_b="B",
+            start_date=START,
+            end_date=END,
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            zscore_window=None,
         )
         result = run_pair_trade_backtest(inp)
-        for field in ("total_return", "annualized_return", "annualized_volatility",
-                      "sharpe_ratio", "sortino_ratio", "max_drawdown", "calmar_ratio"):
+        for field in (
+            "total_return",
+            "annualized_return",
+            "annualized_volatility",
+            "sharpe_ratio",
+            "sortino_ratio",
+            "max_drawdown",
+            "calmar_ratio",
+        ):
             assert isinstance(getattr(result, field), float)
         assert result.current_spread == pytest.approx(40.0)
         assert result.entry_spread == pytest.approx(40.0)
@@ -1619,8 +2033,14 @@ class TestPairTradeBacktest:
         exactly with final_equity/initial_capital, not silently absorb the
         entry rebalance's cost into a lost bar-0 baseline."""
         inp = PairTradeBacktestInput(
-            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
-            hedge_ratio=1.0, entry_z=1.0, exit_z=0.3, zscore_window=None,
+            symbol_a="A",
+            symbol_b="B",
+            start_date=START,
+            end_date=END,
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            zscore_window=None,
         )
         result = run_pair_trade_backtest(inp)
         expected = result.final_equity / inp.initial_capital - 1.0
@@ -1630,30 +2050,47 @@ class TestPairTradeBacktest:
         from standard_quant_tools.error import ValidationError
 
         inp = PairTradeBacktestInput(
-            symbol_a="A", symbol_b="B", start_date=START, end_date=END,
-            hedge_ratio=1.0, entry_z=100.0,
+            symbol_a="A",
+            symbol_b="B",
+            start_date=START,
+            end_date=END,
+            hedge_ratio=1.0,
+            entry_z=100.0,
         )
         with pytest.raises(ValidationError, match="never crossed"):
             run_pair_trade_backtest(inp)
 
     def test_dispatched_through_dispatch(self, patched_pair):
-        result = dispatch("run_pair_trade_backtest", {
-            "symbol_a": "A", "symbol_b": "B", "start_date": START, "end_date": END,
-            "hedge_ratio": 1.0, "entry_z": 1.0, "exit_z": 0.3, "zscore_window": None,
-        })
+        result = dispatch(
+            "run_pair_trade_backtest",
+            {
+                "symbol_a": "A",
+                "symbol_b": "B",
+                "start_date": START,
+                "end_date": END,
+                "hedge_ratio": 1.0,
+                "entry_z": 1.0,
+                "exit_z": 0.3,
+                "zscore_window": None,
+            },
+        )
         assert result["symbol_a"] == "A"
         assert result["n_round_trips"] == 1
 
 
 # ── Robustness Diagnostics (parameter sensitivity, DSR, block-bootstrap CI) ──
 
+
 class TestRobustnessDiagnostics:
     def test_returns_result(self, patched_long):
         inp = RobustnessDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            n_bootstrap_iterations=50, random_seed=0,
+            n_bootstrap_iterations=50,
+            random_seed=0,
         )
         result = get_robustness_diagnostics(inp)
         assert result.symbol == "AAPL"
@@ -1663,43 +2100,66 @@ class TestRobustnessDiagnostics:
 
     def test_parameter_sensitivity_fields_present(self, patched_long):
         inp = RobustnessDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50]},
-            n_bootstrap_iterations=50, random_seed=0,
+            n_bootstrap_iterations=50,
+            random_seed=0,
         )
         result = get_robustness_diagnostics(inp)
-        for key in ("n_trials", "best", "median", "best_minus_median",
-                    "best_minus_rank2", "best_minus_top5_mean"):
+        for key in (
+            "n_trials",
+            "best",
+            "median",
+            "best_minus_median",
+            "best_minus_rank2",
+            "best_minus_top5_mean",
+        ):
             assert key in result.parameter_sensitivity
         assert result.parameter_sensitivity["n_trials"] == 6  # 3 * 2 combos
 
     def test_dsr_in_unit_interval(self, patched_long):
         inp = RobustnessDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            n_bootstrap_iterations=50, random_seed=0,
+            n_bootstrap_iterations=50,
+            random_seed=0,
         )
         result = get_robustness_diagnostics(inp)
         assert 0.0 <= result.deflated_sharpe_ratio <= 1.0
 
     def test_bootstrap_ci_contains_point_estimate(self, patched_long):
         inp = RobustnessDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            n_bootstrap_iterations=100, bootstrap_block_size=20, random_seed=0,
+            n_bootstrap_iterations=100,
+            bootstrap_block_size=20,
+            random_seed=0,
         )
         result = get_robustness_diagnostics(inp)
-        assert result.bootstrap_ci_lower <= result.bootstrap_point_estimate <= result.bootstrap_ci_upper
+        assert (
+            result.bootstrap_ci_lower
+            <= result.bootstrap_point_estimate
+            <= result.bootstrap_ci_upper
+        )
 
     def test_reproducible_with_same_seed(self, patched_long):
         kwargs = dict(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5, 10], "slow_period": [30, 50]},
-            n_bootstrap_iterations=50, random_seed=7,
+            n_bootstrap_iterations=50,
+            random_seed=7,
         )
         r1 = get_robustness_diagnostics(RobustnessDiagnosticsInput(**kwargs))
         r2 = get_robustness_diagnostics(RobustnessDiagnosticsInput(**kwargs))
@@ -1708,17 +2168,22 @@ class TestRobustnessDiagnostics:
 
     def test_few_trials_warns(self, patched_long):
         inp = RobustnessDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="sma_crossover",
             param_grid={"fast_period": [5], "slow_period": [30]},
-            n_bootstrap_iterations=20, random_seed=0,
+            n_bootstrap_iterations=20,
+            random_seed=0,
         )
         result = get_robustness_diagnostics(inp)
         assert len(result.warnings) == 1
 
     def test_invalid_strategy_raises(self, patched_long):
         inp = RobustnessDiagnosticsInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             strategy="nonexistent_strategy",
             param_grid={"fast_period": [5]},
         )
@@ -1726,22 +2191,31 @@ class TestRobustnessDiagnostics:
             get_robustness_diagnostics(inp)
 
     def test_dispatched_through_dispatch(self, patched_long):
-        result = dispatch("get_robustness_diagnostics", {
-            "symbol": "AAPL", "start_date": START, "end_date": END,
-            "strategy": "sma_crossover",
-            "param_grid": {"fast_period": [5, 10], "slow_period": [30, 50]},
-            "n_bootstrap_iterations": 30, "random_seed": 0,
-        })
+        result = dispatch(
+            "get_robustness_diagnostics",
+            {
+                "symbol": "AAPL",
+                "start_date": START,
+                "end_date": END,
+                "strategy": "sma_crossover",
+                "param_grid": {"fast_period": [5, 10], "slow_period": [30, 50]},
+                "n_bootstrap_iterations": 30,
+                "random_seed": 0,
+            },
+        )
         assert result["symbol"] == "AAPL"
         assert "deflated_sharpe_ratio" in result
 
 
 # ── Capacity Report (liquidity/ADV-based capacity) ────────────────────────────
 
+
 class TestCapacityReport:
     def test_returns_result(self, patched_factory):
         inp = CapacityReportInput(
-            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
             target_weights={"AAPL": 0.6, "MSFT": 0.4},
         )
         result = get_capacity_report(inp)
@@ -1751,8 +2225,11 @@ class TestCapacityReport:
 
     def test_binding_ticker_and_max_account_size_populated(self, patched_factory):
         inp = CapacityReportInput(
-            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
-            target_weights={"AAPL": 0.6, "MSFT": 0.4}, max_participation=0.1,
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
+            target_weights={"AAPL": 0.6, "MSFT": 0.4},
+            max_participation=0.1,
         )
         result = get_capacity_report(inp)
         assert result.binding_ticker in ("AAPL", "MSFT")
@@ -1761,7 +2238,9 @@ class TestCapacityReport:
 
     def test_zero_weight_ticker_has_none_max_account_size(self, patched_factory):
         inp = CapacityReportInput(
-            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
             target_weights={"AAPL": 0.0, "MSFT": 1.0},
         )
         result = get_capacity_report(inp)
@@ -1770,7 +2249,9 @@ class TestCapacityReport:
 
     def test_sector_exposure_included_by_default(self, patched_factory):
         inp = CapacityReportInput(
-            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
             target_weights={"AAPL": 0.6, "MSFT": 0.4},
         )
         result = get_capacity_report(inp)
@@ -1779,8 +2260,11 @@ class TestCapacityReport:
 
     def test_sector_exposure_excluded_when_disabled(self, patched_factory):
         inp = CapacityReportInput(
-            tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
-            target_weights={"AAPL": 0.6, "MSFT": 0.4}, include_sector_exposure=False,
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
+            target_weights={"AAPL": 0.6, "MSFT": 0.4},
+            include_sector_exposure=False,
         )
         result = get_capacity_report(inp)
         assert result.sector_exposure is None
@@ -1788,20 +2272,28 @@ class TestCapacityReport:
     def test_missing_target_weight_raises(self):
         with pytest.raises(pydantic.ValidationError, match="target_weights"):
             CapacityReportInput(
-                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
                 target_weights={"AAPL": 0.6},
             )
 
     def test_dispatched_through_dispatch(self, patched_factory):
-        result = dispatch("get_capacity_report", {
-            "tickers": ["AAPL", "MSFT"], "start_date": START, "end_date": END,
-            "target_weights": {"AAPL": 0.6, "MSFT": 0.4},
-        })
+        result = dispatch(
+            "get_capacity_report",
+            {
+                "tickers": ["AAPL", "MSFT"],
+                "start_date": START,
+                "end_date": END,
+                "target_weights": {"AAPL": 0.6, "MSFT": 0.4},
+            },
+        )
         assert result["tickers"] == ["AAPL", "MSFT"]
         assert "max_account_size" in result
 
 
 # ── Data Quality Report ────────────────────────────────────────────────────────
+
 
 class TestDataQualityReport:
     def test_returns_result(self, patched_factory):
@@ -1821,16 +2313,24 @@ class TestDataQualityReport:
 
     def test_custom_thresholds_accepted(self, patched_factory):
         inp = DataQualityReportInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            stale_run_length=5, jump_threshold=0.5,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            stale_run_length=5,
+            jump_threshold=0.5,
         )
         result = get_data_quality_report(inp)
         assert result.symbol == "AAPL"
 
     def test_dispatched_through_dispatch(self, patched_factory):
-        result = dispatch("get_data_quality_report", {
-            "symbol": "AAPL", "start_date": START, "end_date": END,
-        })
+        result = dispatch(
+            "get_data_quality_report",
+            {
+                "symbol": "AAPL",
+                "start_date": START,
+                "end_date": END,
+            },
+        )
         assert result["symbol"] == "AAPL"
         assert "metadata" in result
 
@@ -1850,14 +2350,23 @@ class TestDataQualityReport:
         gapped_dates = dates.delete(3)  # 9 dates remain
         close = [100.0] * (len(gapped_dates) - 1) + [140.0]
         df = pd.DataFrame(
-            {"Open": close, "High": close, "Low": close, "Close": close,
-             "Volume": [1_000_000.0] * len(close)},
+            {
+                "Open": close,
+                "High": close,
+                "Low": close,
+                "Close": close,
+                "Volume": [1_000_000.0] * len(close),
+            },
             index=gapped_dates,
         )
         patched_factory.get_ohlcv.return_value = df
 
         inp = DataQualityReportInput(
-            symbol="AAPL", start_date=START, end_date=END, stale_run_length=3, jump_threshold=0.15,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            stale_run_length=3,
+            jump_threshold=0.15,
         )
         result = get_data_quality_report(inp)
 

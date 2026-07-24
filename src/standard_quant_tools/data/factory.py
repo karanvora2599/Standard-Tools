@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+
 from .base import DataProvider
 from .yfinance_provider import YFinanceProvider
 
@@ -10,19 +11,21 @@ class DataFactory:
     """
     Factory class to create DataProvider instances.
     """
-    
+
     @staticmethod
-    def get_provider(source: str = "yfinance", api_key: Optional[str] = None) -> DataProvider:
+    def get_provider(
+        source: str = "yfinance", api_key: Optional[str] = None
+    ) -> DataProvider:
         """
         Returns a DataProvider instance based on the source.
-        
+
         Args:
             source: The name of the data provider (e.g., 'yfinance', 'alpaca', 'polygon').
             api_key: Optional API key for providers that require it.
-            
+
         Returns:
             DataProvider: An instance of a data provider.
-            
+
         Raises:
             ValueError: If the source is unknown.
         """

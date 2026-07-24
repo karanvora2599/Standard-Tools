@@ -124,7 +124,11 @@ def run_pair_backtest(
     if missing:
         raise ValidationError(f"price_data is missing OHLCV for: {missing}")
 
-    common_idx = price_data[symbol_a].index.intersection(price_data[symbol_b].index).sort_values()
+    common_idx = (
+        price_data[symbol_a]
+        .index.intersection(price_data[symbol_b].index)
+        .sort_values()
+    )
     close_a = price_data[symbol_a]["Close"].loc[common_idx]
     close_b = price_data[symbol_b]["Close"].loc[common_idx]
 
@@ -173,9 +177,13 @@ def run_pair_backtest(
     )
 
     result = run_portfolio_simulation(
-        price_data, target_weights,
-        initial_capital=initial_capital, commission_pct=commission_pct, slippage_pct=slippage_pct,
-        max_gross_leverage=gross_leverage + 1e-6, max_position_pct=max_leg_weight + 1e-6,
+        price_data,
+        target_weights,
+        initial_capital=initial_capital,
+        commission_pct=commission_pct,
+        slippage_pct=slippage_pct,
+        max_gross_leverage=gross_leverage + 1e-6,
+        max_position_pct=max_leg_weight + 1e-6,
         fill_price=fill_price,
     )
 
@@ -185,7 +193,12 @@ def run_pair_backtest(
 
     logger.debug(
         "[pair_backtest] %s/%s  hedge_ratio=%.4f  transitions=%d  round_trips=%d  final_equity=%.2f",
-        symbol_a, symbol_b, hedge_ratio, len(transition_dates), n_round_trips, result["final_equity"],
+        symbol_a,
+        symbol_b,
+        hedge_ratio,
+        len(transition_dates),
+        n_round_trips,
+        result["final_equity"],
     )
 
     result["hedge_ratio"] = hedge_ratio

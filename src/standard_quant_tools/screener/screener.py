@@ -39,13 +39,13 @@ logger = logging.getLogger(__name__)
 
 import pandas as pd
 
+from standard_quant_tools.analysis.regression import calculate_beta
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.indicators.momentum import rsi as calc_rsi
 from standard_quant_tools.indicators.trend import sma as calc_sma
-from standard_quant_tools.analysis.regression import calculate_beta
-
 
 # ── Per-ticker async evaluation ───────────────────────────────────────────────
+
 
 async def _fetch_ticker_data(
     provider,
@@ -61,56 +61,79 @@ async def _fetch_ticker_data(
     """
     row: Dict[str, Any] = {"ticker": ticker}
 
-    needs_fundamentals = any(k in filters for k in (
-        "pe_ratio_max", "pb_ratio_max", "debt_equity_max",
-        "roe_min", "profit_margin_min", "div_yield_min", "market_cap_min",
-    ))
-    needs_ohlcv = any(k in filters for k in (
-        "rsi_max", "rsi_min", "price_above_sma", "price_below_sma",
-        "beta_max", "beta_min",
-    ))
+    needs_fundamentals = any(
+        k in filters
+        for k in (
+            "pe_ratio_max",
+            "pb_ratio_max",
+            "debt_equity_max",
+            "roe_min",
+            "profit_margin_min",
+            "div_yield_min",
+            "market_cap_min",
+        )
+    )
+    needs_ohlcv = any(
+        k in filters
+        for k in (
+            "rsi_max",
+            "rsi_min",
+            "price_above_sma",
+            "price_below_sma",
+            "beta_max",
+            "beta_min",
+        )
+    )
 
     try:
         if needs_fundamentals:
             ratios = await asyncio.get_event_loop().run_in_executor(
                 None, provider.get_financial_ratios, ticker
             )
-            row.update({
-                "forward_pe": ratios.forward_pe,
-                "price_to_book": ratios.price_to_book,
-                "debt_to_equity": ratios.debt_to_equity,
-                "return_on_equity": ratios.return_on_equity,
-                "profit_margins": ratios.profit_margins,
-                "dividend_yield": ratios.dividend_yield,
-                "market_cap": ratios.market_cap,
-            })
+            row.update(
+                {
+                    "forward_pe": ratios.forward_pe,
+                    "price_to_book": ratios.price_to_book,
+                    "debt_to_equity": ratios.debt_to_equity,
+                    "return_on_equity": ratios.return_on_equity,
+                    "profit_margins": ratios.profit_margins,
+                    "dividend_yield": ratios.dividend_yield,
+                    "market_cap": ratios.market_cap,
+                }
+            )
 
             if "pe_ratio_max" in filters and (
                 ratios.forward_pe is None or ratios.forward_pe > filters["pe_ratio_max"]
             ):
                 return None
             if "pb_ratio_max" in filters and (
-                ratios.price_to_book is None or ratios.price_to_book > filters["pb_ratio_max"]
+                ratios.price_to_book is None
+                or ratios.price_to_book > filters["pb_ratio_max"]
             ):
                 return None
             if "debt_equity_max" in filters and (
-                ratios.debt_to_equity is None or ratios.debt_to_equity > filters["debt_equity_max"]
+                ratios.debt_to_equity is None
+                or ratios.debt_to_equity > filters["debt_equity_max"]
             ):
                 return None
             if "roe_min" in filters and (
-                ratios.return_on_equity is None or ratios.return_on_equity < filters["roe_min"]
+                ratios.return_on_equity is None
+                or ratios.return_on_equity < filters["roe_min"]
             ):
                 return None
             if "profit_margin_min" in filters and (
-                ratios.profit_margins is None or ratios.profit_margins < filters["profit_margin_min"]
+                ratios.profit_margins is None
+                or ratios.profit_margins < filters["profit_margin_min"]
             ):
                 return None
             if "div_yield_min" in filters and (
-                ratios.dividend_yield is None or ratios.dividend_yield < filters["div_yield_min"]
+                ratios.dividend_yield is None
+                or ratios.dividend_yield < filters["div_yield_min"]
             ):
                 return None
             if "market_cap_min" in filters and (
-                ratios.market_cap is None or ratios.market_cap < filters["market_cap_min"]
+                ratios.market_cap is None
+                or ratios.market_cap < filters["market_cap_min"]
             ):
                 return None
 
@@ -144,7 +167,11 @@ async def _fetch_ticker_data(
                 row[f"sma_{n}"] = round(float(sma_vals.dropna().iloc[-1]), 2)
 
             if "beta_max" in filters or "beta_min" in filters:
-                _spy = spy_df if spy_df is not None else await provider.get_ohlcv_async("SPY", start_date, end_date)
+                _spy = (
+                    spy_df
+                    if spy_df is not None
+                    else await provider.get_ohlcv_async("SPY", start_date, end_date)
+                )
                 asset_ret = close.pct_change().dropna()
                 spy_ret = _spy["Close"].pct_change().dropna()
                 stats = calculate_beta(asset_ret, spy_ret)
@@ -162,6 +189,7 @@ async def _fetch_ticker_data(
 
 
 # ── Async screener (single process) ──────────────────────────────────────────
+
 
 async def screen_stocks_async(
     tickers: List[str],
@@ -186,10 +214,16 @@ async def screen_stocks_async(
         pd.DataFrame with one row per passing ticker, sorted if requested.
     """
     end: str = end_date or datetime.date.today().isoformat()
-    start: str = start_date or (
-        datetime.date.today() - datetime.timedelta(days=365)
-    ).isoformat()
-    logger.debug("[screener] tickers=%d  filters=%s  %s → %s", len(tickers), list(filters.keys()), start, end)
+    start: str = (
+        start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
+    )
+    logger.debug(
+        "[screener] tickers=%d  filters=%s  %s → %s",
+        len(tickers),
+        list(filters.keys()),
+        start,
+        end,
+    )
 
     provider = DataFactory.get_provider()
 
@@ -208,8 +242,12 @@ async def screen_stocks_async(
     raw = await asyncio.gather(*tasks)
 
     passing = [r for r in raw if r is not None]
-    logger.debug("[screener] passed=%d / %d (%.0f%%)", len(passing), len(tickers),
-                 100 * len(passing) / len(tickers) if tickers else 0)
+    logger.debug(
+        "[screener] passed=%d / %d (%.0f%%)",
+        len(passing),
+        len(tickers),
+        100 * len(passing) / len(tickers) if tickers else 0,
+    )
     if not passing:
         return pd.DataFrame()
 
@@ -223,18 +261,18 @@ async def screen_stocks_async(
 
 # ── Module-level batch worker (picklable for ProcessPoolExecutor) ─────────────
 
+
 def _screen_batch(args: tuple) -> pd.DataFrame:
     """
     Worker: screen a batch of tickers in a child process.
     Each worker runs its own asyncio event loop so there is no shared state.
     """
     tickers, filters, start_date, end_date = args
-    return asyncio.run(
-        screen_stocks_async(tickers, filters, start_date, end_date)
-    )
+    return asyncio.run(screen_stocks_async(tickers, filters, start_date, end_date))
 
 
 # ── Public sync entry point ───────────────────────────────────────────────────
+
 
 def screen_stocks(
     tickers: List[str],
@@ -276,9 +314,9 @@ def screen_stocks(
         )
     """
     end: str = end_date or datetime.date.today().isoformat()
-    start: str = start_date or (
-        datetime.date.today() - datetime.timedelta(days=365)
-    ).isoformat()
+    start: str = (
+        start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
+    )
 
     n = len(tickers)
 
@@ -286,7 +324,12 @@ def screen_stocks(
     if n_workers is None:
         # Single process is faster for small universes (no spawn overhead)
         n_workers = 1 if n <= 20 else min(os.cpu_count() or 4, max(n // 10, 2))
-    logger.debug("[screener:screen_stocks] universe=%d  workers=%d  filters=%s", n, n_workers, list(filters.keys()))
+    logger.debug(
+        "[screener:screen_stocks] universe=%d  workers=%d  filters=%s",
+        n,
+        n_workers,
+        list(filters.keys()),
+    )
 
     if n_workers <= 1:
         return asyncio.run(
@@ -295,7 +338,7 @@ def screen_stocks(
 
     # Split tickers into roughly equal batches across workers
     batch_size = (n + n_workers - 1) // n_workers
-    batches = [tickers[i: i + batch_size] for i in range(0, n, batch_size)]
+    batches = [tickers[i : i + batch_size] for i in range(0, n, batch_size)]
 
     batch_results: List[pd.DataFrame] = []
     with ProcessPoolExecutor(max_workers=n_workers) as executor:

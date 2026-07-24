@@ -7,7 +7,7 @@ import pytest
 from standard_quant_tools.indicators.volume import mfi, obv, vwap
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope="module")
 def vol_data():
     """Small, deterministic OHLCV data for volume indicator tests."""
     np.random.seed(99)

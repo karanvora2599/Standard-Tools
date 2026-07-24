@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
 
 
 class TestRSI:
@@ -86,6 +86,7 @@ class TestRSI:
 
     def test_empty_series_returns_empty(self):
         from standard_quant_tools.error import ValidationError
+
         with pytest.raises(ValidationError):
             rsi(pd.Series(dtype=float), 14)
 
@@ -93,28 +94,28 @@ class TestRSI:
 class TestStochasticOscillator:
     def test_returns_correct_columns(self, sample_ohlcv):
         result = stochastic_oscillator(
-            sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close']
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
         )
-        assert set(result.columns) == {'Stoch_K', 'Stoch_D'}
+        assert set(result.columns) == {"Stoch_K", "Stoch_D"}
 
     def test_output_length_matches_input(self, sample_ohlcv):
         result = stochastic_oscillator(
-            sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close']
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
         )
         assert len(result) == len(sample_ohlcv)
 
     def test_k_bounded_0_to_100(self, sample_ohlcv):
         result = stochastic_oscillator(
-            sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close']
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
         )
-        k = result['Stoch_K'].dropna()
+        k = result["Stoch_K"].dropna()
         assert (k >= 0).all() and (k <= 100).all()
 
     def test_d_bounded_0_to_100(self, sample_ohlcv):
         result = stochastic_oscillator(
-            sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close']
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
         )
-        d = result['Stoch_D'].dropna()
+        d = result["Stoch_D"].dropna()
         assert (d >= 0).all() and (d <= 100).all()
 
     def test_close_at_high_yields_k_100(self):
@@ -124,7 +125,7 @@ class TestStochasticOscillator:
         low = pd.Series([5.0] * n)
         close = pd.Series([10.0] * n)
         result = stochastic_oscillator(high, low, close, k_period=5, d_period=3)
-        assert result['Stoch_K'].dropna().eq(100.0).all()
+        assert result["Stoch_K"].dropna().eq(100.0).all()
 
     def test_close_at_low_yields_k_0(self):
         """When close equals low, %K = 0."""
@@ -133,16 +134,22 @@ class TestStochasticOscillator:
         low = pd.Series([5.0] * n)
         close = pd.Series([5.0] * n)
         result = stochastic_oscillator(high, low, close, k_period=5, d_period=3)
-        assert result['Stoch_K'].dropna().eq(0.0).all()
+        assert result["Stoch_K"].dropna().eq(0.0).all()
 
     def test_d_is_rolling_mean_of_k(self, sample_ohlcv):
         """%D should equal a 3-period SMA of %K."""
         k_period, d_period = 14, 3
         result = stochastic_oscillator(
-            sample_ohlcv['High'], sample_ohlcv['Low'], sample_ohlcv['Close'],
-            k_period=k_period, d_period=d_period,
+            sample_ohlcv["High"],
+            sample_ohlcv["Low"],
+            sample_ohlcv["Close"],
+            k_period=k_period,
+            d_period=d_period,
         )
-        expected_d = result['Stoch_K'].rolling(d_period).mean()
+        expected_d = result["Stoch_K"].rolling(d_period).mean()
         pd.testing.assert_series_equal(
-            result['Stoch_D'].dropna(), expected_d.dropna(), check_names=False, rtol=1e-10
+            result["Stoch_D"].dropna(),
+            expected_d.dropna(),
+            check_names=False,
+            rtol=1e-10,
         )

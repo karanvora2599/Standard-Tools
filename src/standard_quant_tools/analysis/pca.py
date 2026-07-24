@@ -42,8 +42,13 @@ def pca_returns(
     """
     data = returns_df.dropna()
     n_obs, n_assets = data.shape
-    logger.debug("[pca] assets=%d  obs=%d  n_components=%s  standardize=%s",
-                 n_assets, n_obs, n_components, standardize)
+    logger.debug(
+        "[pca] assets=%d  obs=%d  n_components=%s  standardize=%s",
+        n_assets,
+        n_obs,
+        n_components,
+        standardize,
+    )
 
     if n_obs < 2 or n_assets < 1:
         raise ValueError(
@@ -66,7 +71,7 @@ def pca_returns(
             Vt[i] = -Vt[i]
             U[:, i] = -U[:, i]
 
-    eigenvalues = s ** 2 / (n_obs - 1)
+    eigenvalues = s**2 / (n_obs - 1)
     total_var = eigenvalues.sum()
     evr = eigenvalues / total_var if total_var > 0 else eigenvalues
 
@@ -90,11 +95,15 @@ def pca_returns(
         columns=comp_names,
     )
 
-    evr_series = pd.Series(evr[:n_comp], index=comp_names, name="explained_variance_ratio")
+    evr_series = pd.Series(
+        evr[:n_comp], index=comp_names, name="explained_variance_ratio"
+    )
     cumvar_series = evr_series.cumsum().rename("cumulative_variance_ratio")
 
     evr_strs = "  ".join(f"{k}={v:.3f}" for k, v in evr_series.items())
-    logger.debug("[pca] EVR: %s  (cumulative=%.3f)", evr_strs, float(cumvar_series.iloc[-1]))
+    logger.debug(
+        "[pca] EVR: %s  (cumulative=%.3f)", evr_strs, float(cumvar_series.iloc[-1])
+    )
 
     return {
         "explained_variance_ratio": evr_series,
@@ -133,7 +142,11 @@ def factor_contributions(
     pd.DataFrame  – shape (n_assets × n_components), indexed by ticker.
         Each cell is the marginal fraction of variance explained.
     """
-    result = pca_result if pca_result is not None else pca_returns(returns_df, n_components=n_components)
+    result = (
+        pca_result
+        if pca_result is not None
+        else pca_returns(returns_df, n_components=n_components)
+    )
     factor_rets = result["factor_returns"]
     comp_names = list(factor_rets.columns)
 

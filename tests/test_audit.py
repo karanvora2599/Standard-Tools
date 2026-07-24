@@ -22,8 +22,8 @@ from standard_quant_tools.agent import dispatch
 from standard_quant_tools.data.yfinance_provider import _parquet_path
 from standard_quant_tools.error import DataNotFoundError
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def audit_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -52,9 +52,12 @@ def _audit_records(directory: Path):
 
 # ── Hashing ──────────────────────────────────────────────────────────────────
 
+
 class TestHashing:
     def test_hash_dataframe_deterministic(self, sample_ohlcv: pd.DataFrame):
-        assert audit.hash_dataframe(sample_ohlcv) == audit.hash_dataframe(sample_ohlcv.copy())
+        assert audit.hash_dataframe(sample_ohlcv) == audit.hash_dataframe(
+            sample_ohlcv.copy()
+        )
 
     def test_hash_dataframe_differs_on_change(self, sample_ohlcv: pd.DataFrame):
         mutated = sample_ohlcv.copy()
@@ -62,7 +65,9 @@ class TestHashing:
         assert audit.hash_dataframe(sample_ohlcv) != audit.hash_dataframe(mutated)
 
     def test_hash_payload_ignores_key_order(self):
-        assert audit.hash_payload({"b": 1, "a": 2}) == audit.hash_payload({"a": 2, "b": 1})
+        assert audit.hash_payload({"b": 1, "a": 2}) == audit.hash_payload(
+            {"a": 2, "b": 1}
+        )
 
     def test_hash_payload_differs_on_change(self):
         assert audit.hash_payload({"a": 1}) != audit.hash_payload({"a": 2})
@@ -70,30 +75,44 @@ class TestHashing:
 
 # ── dispatch() → decision record ──────────────────────────────────────────────
 
+
 class TestDispatchAudit:
     def test_successful_call_writes_one_record(self, patched_factory, audit_dir: Path):
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
         records = _audit_records(audit_dir)
         assert len(records) == 1
         assert records[0]["tool_name"] == "analyze_stock_risk"
         assert records[0]["status"] == "ok"
         assert records[0]["output_hash"] is not None
 
-    def test_error_call_writes_error_record(self, patched_factory, mock_provider, audit_dir: Path):
+    def test_error_call_writes_error_record(
+        self, patched_factory, mock_provider, audit_dir: Path
+    ):
         mock_provider.get_ohlcv.side_effect = DataNotFoundError("symbol not found")
         with pytest.raises(DataNotFoundError):
-            dispatch("analyze_stock_risk", {"symbol": "NOPE", "benchmark": "SPY", "period": "1y"})
+            dispatch(
+                "analyze_stock_risk",
+                {"symbol": "NOPE", "benchmark": "SPY", "period": "1y"},
+            )
         records = _audit_records(audit_dir)
         assert len(records) == 1
         assert records[0]["status"] == "error"
         assert records[0]["error_type"] == "DataNotFoundError"
 
-    def test_disabled_audit_writes_nothing(self, patched_factory, audit_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_disabled_audit_writes_nothing(
+        self, patched_factory, audit_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         monkeypatch.setenv("SQT_AUDIT_ENABLED", "0")
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
         assert not audit_dir.exists() or _audit_records(audit_dir) == []
 
-    def test_record_includes_reproducibility_provenance(self, patched_factory, audit_dir: Path):
+    def test_record_includes_reproducibility_provenance(
+        self, patched_factory, audit_dir: Path
+    ):
         """
         git_commit_sha/package_version are best-effort: this repo's own git
         context makes git_commit_sha deterministically non-null when running
@@ -102,53 +121,85 @@ class TestDispatchAudit:
         present and package_version is always resolvable (it's a plain
         module attribute, no subprocess involved).
         """
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
         records = _audit_records(audit_dir)
         assert len(records) == 1
         assert "git_commit_sha" in records[0]
-        assert records[0]["git_commit_sha"] is None or isinstance(records[0]["git_commit_sha"], str)
+        assert records[0]["git_commit_sha"] is None or isinstance(
+            records[0]["git_commit_sha"], str
+        )
         assert records[0]["package_version"] == "0.1.0"
 
-    def test_record_includes_strategy_source_hash_when_applicable(self, patched_factory, audit_dir: Path):
-        dispatch("run_sma_backtest", {
-            "symbol": "AAPL", "start_date": "2022-01-01", "end_date": "2023-01-01",
-            "strategy_type": "sma_crossover", "parameters": {"fast_period": 10, "slow_period": 30},
-        })
+    def test_record_includes_strategy_source_hash_when_applicable(
+        self, patched_factory, audit_dir: Path
+    ):
+        dispatch(
+            "run_sma_backtest",
+            {
+                "symbol": "AAPL",
+                "start_date": "2022-01-01",
+                "end_date": "2023-01-01",
+                "strategy_type": "sma_crossover",
+                "parameters": {"fast_period": 10, "slow_period": 30},
+            },
+        )
         records = _audit_records(audit_dir)
         assert len(records) == 1
         assert records[0]["strategy_source_hash"] is not None
         assert isinstance(records[0]["strategy_source_hash"], str)
 
-    def test_strategy_source_hash_none_when_not_applicable(self, patched_factory, audit_dir: Path):
+    def test_strategy_source_hash_none_when_not_applicable(
+        self, patched_factory, audit_dir: Path
+    ):
         """analyze_stock_risk's input model has neither a `strategy` nor a
         `strategy_type` field — the hash must be None, not an error."""
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
         records = _audit_records(audit_dir)
         assert len(records) == 1
         assert records[0]["strategy_source_hash"] is None
 
-    def test_record_includes_random_seed_when_present(self, patched_factory, audit_dir: Path):
-        dispatch("get_robustness_diagnostics", {
-            "symbol": "AAPL", "start_date": "2022-01-01", "end_date": "2023-01-01",
-            "strategy": "sma_crossover", "param_grid": {"fast_period": [10], "slow_period": [30]},
-            "n_bootstrap_iterations": 20, "random_seed": 42,
-        })
+    def test_record_includes_random_seed_when_present(
+        self, patched_factory, audit_dir: Path
+    ):
+        dispatch(
+            "get_robustness_diagnostics",
+            {
+                "symbol": "AAPL",
+                "start_date": "2022-01-01",
+                "end_date": "2023-01-01",
+                "strategy": "sma_crossover",
+                "param_grid": {"fast_period": [10], "slow_period": [30]},
+                "n_bootstrap_iterations": 20,
+                "random_seed": 42,
+            },
+        )
         records = _audit_records(audit_dir)
         assert len(records) == 1
         assert records[0]["random_seed"] == 42
 
     def test_random_seed_none_when_absent(self, patched_factory, audit_dir: Path):
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
         records = _audit_records(audit_dir)
         assert records[0]["random_seed"] is None
 
     def test_request_id_correlates_log_and_record(
-        self, patched_factory, audit_dir: Path, caplog: pytest.LogCaptureFixture,
+        self,
+        patched_factory,
+        audit_dir: Path,
+        caplog: pytest.LogCaptureFixture,
     ):
         caplog.set_level(logging.DEBUG, logger="standard_quant_tools")
         caplog.handler.addFilter(audit.RequestIdFilter())
 
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
 
         records = _audit_records(audit_dir)
         assert len(records) == 1
@@ -160,9 +211,12 @@ class TestDispatchAudit:
 
 # ── Async context propagation (get_portfolio_analysis) ────────────────────────
 
+
 class TestAsyncProvenance:
     def test_portfolio_call_captures_all_ticker_sources(
-        self, audit_dir: Path, sample_ohlcv: pd.DataFrame,
+        self,
+        audit_dir: Path,
+        sample_ohlcv: pd.DataFrame,
     ):
         """
         get_portfolio_analysis fetches per-ticker data via get_ohlcv_async,
@@ -172,14 +226,19 @@ class TestAsyncProvenance:
         the synchronously-fetched benchmark would show up.
         """
         with patch("yfinance.Ticker") as mock_ticker:
-            mock_ticker.return_value.history.return_value = sample_ohlcv.rename(columns=str.lower)
-            dispatch("get_portfolio_analysis", {
-                "tickers": ["AAPL", "MSFT"],
-                "weights": [0.5, 0.5],
-                "start_date": "2022-01-01",
-                "end_date": "2022-06-01",
-                "benchmark": "SPY",
-            })
+            mock_ticker.return_value.history.return_value = sample_ohlcv.rename(
+                columns=str.lower
+            )
+            dispatch(
+                "get_portfolio_analysis",
+                {
+                    "tickers": ["AAPL", "MSFT"],
+                    "weights": [0.5, 0.5],
+                    "start_date": "2022-01-01",
+                    "end_date": "2022-06-01",
+                    "benchmark": "SPY",
+                },
+            )
 
         records = _audit_records(audit_dir)
         assert len(records) == 1
@@ -189,23 +248,33 @@ class TestAsyncProvenance:
 
 # ── verify_replay() ────────────────────────────────────────────────────────────
 
+
 class TestVerifyReplay:
     def test_replay_matches_unmodified_record(self, patched_factory, audit_dir: Path):
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
         record = _audit_records(audit_dir)[0]
 
         result = audit.verify_replay(record)
         assert result.output_match is True
 
-    def test_replay_flags_tampered_cache(self, audit_dir: Path, tmp_path: Path, sample_ohlcv: pd.DataFrame):
+    def test_replay_flags_tampered_cache(
+        self, audit_dir: Path, tmp_path: Path, sample_ohlcv: pd.DataFrame
+    ):
         with patch("yfinance.Ticker") as mock_ticker:
-            mock_ticker.return_value.history.return_value = sample_ohlcv.rename(columns=str.lower)
-            dispatch("run_hurst_analysis", {
-                "symbol": "AAPL",
-                "start_date": "2022-01-01",
-                "end_date": "2022-06-01",
-                "method": "dfa",
-            })
+            mock_ticker.return_value.history.return_value = sample_ohlcv.rename(
+                columns=str.lower
+            )
+            dispatch(
+                "run_hurst_analysis",
+                {
+                    "symbol": "AAPL",
+                    "start_date": "2022-01-01",
+                    "end_date": "2022-06-01",
+                    "method": "dfa",
+                },
+            )
         record = _audit_records(audit_dir)[0]
 
         # Rewrite the cached Parquet file with altered values — simulates the

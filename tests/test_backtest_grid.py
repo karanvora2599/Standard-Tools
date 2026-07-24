@@ -8,8 +8,8 @@ import pytest
 from standard_quant_tools.backtest import backtest_grid
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="module")
 def price_df(sample_ohlcv) -> pd.DataFrame:
@@ -18,10 +18,14 @@ def price_df(sample_ohlcv) -> pd.DataFrame:
 
 # ── Strategy registry ─────────────────────────────────────────────────────────
 
+
 class TestStrategyRegistry:
     def test_all_strategies_present(self):
         assert set(STRATEGY_REGISTRY) == {
-            "sma_crossover", "rsi_mean_reversion", "macd_crossover", "bollinger_reversion"
+            "sma_crossover",
+            "rsi_mean_reversion",
+            "macd_crossover",
+            "bollinger_reversion",
         }
 
     def test_all_strategies_callable(self):
@@ -38,6 +42,7 @@ class TestStrategyRegistry:
 
 
 # ── backtest_grid output structure ────────────────────────────────────────────
+
 
 class TestBacktestGridOutput:
     def test_returns_dataframe(self, price_df):
@@ -77,7 +82,13 @@ class TestBacktestGridOutput:
             param_grid={"fast_period": [10], "slow_period": [30]},
             n_workers=1,
         )
-        for col in ["sharpe_ratio", "total_return", "max_drawdown", "win_rate", "num_trades"]:
+        for col in [
+            "sharpe_ratio",
+            "total_return",
+            "max_drawdown",
+            "win_rate",
+            "num_trades",
+        ]:
             assert col in result.columns, f"Missing column: {col}"
 
     def test_sorted_by_sharpe_descending_by_default(self, price_df):
@@ -124,20 +135,30 @@ class TestBacktestGridOutput:
 
 # ── All four strategies ───────────────────────────────────────────────────────
 
+
 class TestAllStrategies:
-    @pytest.mark.parametrize("strategy,grid", [
-        ("sma_crossover",      {"fast_period": [5, 10], "slow_period": [30]}),
-        ("rsi_mean_reversion", {"period": [14], "oversold": [30], "overbought": [70]}),
-        ("macd_crossover",     {"fast": [12], "slow": [26], "signal": [9]}),
-        ("bollinger_reversion",{"period": [20], "num_std": [2.0]}),
-    ])
+    @pytest.mark.parametrize(
+        "strategy,grid",
+        [
+            ("sma_crossover", {"fast_period": [5, 10], "slow_period": [30]}),
+            (
+                "rsi_mean_reversion",
+                {"period": [14], "oversold": [30], "overbought": [70]},
+            ),
+            ("macd_crossover", {"fast": [12], "slow": [26], "signal": [9]}),
+            ("bollinger_reversion", {"period": [20], "num_std": [2.0]}),
+        ],
+    )
     def test_strategy_runs(self, strategy, grid, price_df):
-        result = backtest_grid(price_df, strategy=strategy, param_grid=grid, n_workers=1)
+        result = backtest_grid(
+            price_df, strategy=strategy, param_grid=grid, n_workers=1
+        )
         assert not result.empty
         assert "sharpe_ratio" in result.columns
 
 
 # ── Single-combo edge case ────────────────────────────────────────────────────
+
 
 class TestEdgeCases:
     def test_single_combination(self, price_df):
@@ -156,13 +177,21 @@ class TestEdgeCases:
     def test_parallel_same_as_sequential(self, price_df):
         """n_workers=2 must produce the same rows as n_workers=1 (order may differ)."""
         grid = {"fast_period": [5, 10, 20], "slow_period": [30, 50]}
-        seq = backtest_grid(
-            price_df, strategy="sma_crossover", param_grid=grid, n_workers=1
-        ).sort_values(["fast_period", "slow_period"]).reset_index(drop=True)
+        seq = (
+            backtest_grid(
+                price_df, strategy="sma_crossover", param_grid=grid, n_workers=1
+            )
+            .sort_values(["fast_period", "slow_period"])
+            .reset_index(drop=True)
+        )
 
-        par = backtest_grid(
-            price_df, strategy="sma_crossover", param_grid=grid, n_workers=2
-        ).sort_values(["fast_period", "slow_period"]).reset_index(drop=True)
+        par = (
+            backtest_grid(
+                price_df, strategy="sma_crossover", param_grid=grid, n_workers=2
+            )
+            .sort_values(["fast_period", "slow_period"])
+            .reset_index(drop=True)
+        )
 
         assert len(seq) == len(par)
         pd.testing.assert_frame_equal(

@@ -53,7 +53,10 @@ def rank_weighted(scores: pd.DataFrame, gross_leverage: float = 1.0) -> pd.DataF
 
 
 def equal_weight_top_bottom(
-    scores: pd.DataFrame, n_long: int, n_short: int, gross_leverage: float = 1.0,
+    scores: pd.DataFrame,
+    n_long: int,
+    n_short: int,
+    gross_leverage: float = 1.0,
 ) -> pd.DataFrame:
     """
     Long the top n_long scores and short the bottom n_short scores each row,
@@ -81,7 +84,9 @@ def equal_weight_top_bottom(
     return weights
 
 
-def zscore_normalized(scores: pd.DataFrame, gross_leverage: float = 1.0) -> pd.DataFrame:
+def zscore_normalized(
+    scores: pd.DataFrame, gross_leverage: float = 1.0
+) -> pd.DataFrame:
     """
     Weight each name proportional to its cross-sectional z-score, scaled so
     sum(|weight|) == gross_leverage. A row with zero cross-sectional std

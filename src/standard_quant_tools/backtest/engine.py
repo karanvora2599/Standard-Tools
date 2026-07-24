@@ -10,21 +10,31 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools.metrics.return_metrics import cumulative_return, annualized_volatility
-from standard_quant_tools.metrics.risk_metrics import (
-    sharpe_ratio, max_drawdown, calmar_ratio, sortino_ratio,
-)
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.return_metrics import (
+    annualized_volatility,
+    cumulative_return,
+)
+from standard_quant_tools.metrics.risk_metrics import (
+    calmar_ratio,
+    max_drawdown,
+    sharpe_ratio,
+    sortino_ratio,
+)
 
 _VALID_FILL_PRICES = ("close", "next_open", "midpoint")
 
 # ── Optional C++ fast path ────────────────────────────────────────────────────
 from typing import Any as _Any
+
 _cpp_core: _Any = None
 HAS_CPP = False
 try:
-    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
     HAS_CPP = True
 except ImportError:
     pass
@@ -33,6 +43,7 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def _build_trade_log(
     ref_prices: pd.Series,
@@ -68,10 +79,16 @@ def _build_trade_log(
 
     trade_event_idx = pos_diff[pos_diff != 0].index
     if len(trade_event_idx) == 0:
-        return pd.DataFrame(columns=[
-            "entry_date", "exit_date", "direction",
-            "entry_price", "exit_price", "return_pct",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "entry_date",
+                "exit_date",
+                "direction",
+                "entry_price",
+                "exit_price",
+                "return_pct",
+            ]
+        )
 
     records: List[Dict[str, Any]] = []
     open_trade: Dict[str, Any] = {}
@@ -85,14 +102,16 @@ def _build_trade_log(
             entry_price = open_trade["entry_price"]
             raw_pnl = (ref_price - entry_price) / entry_price * direction
             net_pnl = raw_pnl - 2 * cost_per_unit
-            records.append({
-                "entry_date": open_trade["entry_date"],
-                "exit_date": date,
-                "direction": "long" if direction == 1 else "short",
-                "entry_price": round(entry_price, 4),
-                "exit_price": round(ref_price, 4),
-                "return_pct": round(net_pnl * 100, 4),
-            })
+            records.append(
+                {
+                    "entry_date": open_trade["entry_date"],
+                    "exit_date": date,
+                    "direction": "long" if direction == 1 else "short",
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(ref_price, 4),
+                    "return_pct": round(net_pnl * 100, 4),
+                }
+            )
             open_trade = {}
 
         if new_pos != 0:
@@ -112,22 +131,31 @@ def _build_trade_log(
         direction = open_trade["direction"]
         entry_price = open_trade["entry_price"]
         raw_pnl = (last_price - entry_price) / entry_price * direction
-        net_pnl = raw_pnl - cost_per_unit  # entry cost only -- no real exit event occurred
-        records.append({
-            "entry_date": open_trade["entry_date"],
-            "exit_date": last_date,
-            "direction": "long" if direction == 1 else "short",
-            "entry_price": round(entry_price, 4),
-            "exit_price": round(float(last_price), 4),
-            "return_pct": round(net_pnl * 100, 4),
-        })
+        net_pnl = (
+            raw_pnl - cost_per_unit
+        )  # entry cost only -- no real exit event occurred
+        records.append(
+            {
+                "entry_date": open_trade["entry_date"],
+                "exit_date": last_date,
+                "direction": "long" if direction == 1 else "short",
+                "entry_price": round(entry_price, 4),
+                "exit_price": round(float(last_price), 4),
+                "return_pct": round(net_pnl * 100, 4),
+            }
+        )
 
     return pd.DataFrame(records)
 
 
 def _compute_trade_stats(trade_log: pd.DataFrame) -> Dict[str, float]:
     if trade_log.empty:
-        return {"win_rate": 0.0, "profit_factor": 0.0, "num_trades": 0, "avg_trade_return_pct": 0.0}
+        return {
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "num_trades": 0,
+            "avg_trade_return_pct": 0.0,
+        }
 
     num_trades = len(trade_log)
     winners = trade_log[trade_log["return_pct"] > 0]
@@ -149,6 +177,7 @@ def _compute_trade_stats(trade_log: pd.DataFrame) -> Dict[str, float]:
 # ──────────────────────────────────────────────────────────────────────────────
 # Core engine
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def run_strategy(
     price_data: pd.DataFrame,
@@ -204,7 +233,11 @@ def run_strategy(
     n_bars = len(prices)
     logger.debug(
         "[run_strategy] bars=%d  capital=%.0f  commission=%.4f  slippage=%.4f  fill_price=%s",
-        n_bars, initial_capital, commission_pct, slippage_pct, fill_price,
+        n_bars,
+        initial_capital,
+        commission_pct,
+        slippage_pct,
+        fill_price,
     )
 
     returns = prices.pct_change().fillna(0.0)
@@ -217,33 +250,39 @@ def run_strategy(
     # fill_price="close" — "next_open" always routes to the Python path below.
     if fill_price == "close" and HAS_CPP and _cpp_core is not None:
         logger.debug("[run_strategy] using C++ kernel")
-        prices_arr  = prices.to_numpy(dtype=np.float64)
+        prices_arr = prices.to_numpy(dtype=np.float64)
         signals_arr = signals.to_numpy(dtype=np.float64)
-        r = _cpp_core.run_strategy(prices_arr, signals_arr,
-                                   initial_capital, commission_pct, slippage_pct)
+        r = _cpp_core.run_strategy(
+            prices_arr, signals_arr, initial_capital, commission_pct, slippage_pct
+        )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
         result: Dict[str, Any] = {
-            "final_equity":          round(float(r["final_equity"]),         2),
-            "total_return":          round(float(r["total_return"]),          6),
+            "final_equity": round(float(r["final_equity"]), 2),
+            "total_return": round(float(r["total_return"]), 6),
             "annualized_volatility": round(float(r["annualized_volatility"]), 6),
-            "sharpe_ratio":          round(float(r["sharpe_ratio"]),          4),
-            "sortino_ratio":         round(float(r["sortino_ratio"]),         4),
-            "max_drawdown":          round(float(r["max_drawdown"]),          6),
-            "calmar_ratio":          round(float(r["calmar_ratio"]),          4),
-            "equity_curve":          equity_curve,
-            "win_rate":              round(float(r["win_rate"]),              4),
-            "profit_factor":         round(float(r["profit_factor"]),         4),
-            "num_trades":            int(r["num_trades"]),
-            "avg_trade_return_pct":  round(float(r["avg_trade_return_pct"]), 4),
+            "sharpe_ratio": round(float(r["sharpe_ratio"]), 4),
+            "sortino_ratio": round(float(r["sortino_ratio"]), 4),
+            "max_drawdown": round(float(r["max_drawdown"]), 6),
+            "calmar_ratio": round(float(r["calmar_ratio"]), 4),
+            "equity_curve": equity_curve,
+            "win_rate": round(float(r["win_rate"]), 4),
+            "profit_factor": round(float(r["profit_factor"]), 4),
+            "num_trades": int(r["num_trades"]),
+            "avg_trade_return_pct": round(float(r["avg_trade_return_pct"]), 4),
         }
         if include_trade_log:
             result["trade_log"] = _build_trade_log(
-                prices.shift(1), prices, executed, commission_pct + slippage_pct,
+                prices.shift(1),
+                prices,
+                executed,
+                commission_pct + slippage_pct,
             )
         logger.debug(
             "[run_strategy] C++  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
-            result["total_return"] * 100, result["sharpe_ratio"],
-            result["num_trades"], result["max_drawdown"] * 100,
+            result["total_return"] * 100,
+            result["sharpe_ratio"],
+            result["num_trades"],
+            result["max_drawdown"] * 100,
         )
         return result
 
@@ -274,7 +313,9 @@ def run_strategy(
         if fill_price == "next_open":
             ref_prices = price_data.loc[idx, "Open"]
         else:
-            ref_prices = (price_data.loc[idx, "High"] + price_data.loc[idx, "Low"]) / 2.0
+            ref_prices = (
+                price_data.loc[idx, "High"] + price_data.loc[idx, "Low"]
+            ) / 2.0
         overnight_leg = ((ref_prices - prices.shift(1)) / prices.shift(1)).fillna(0.0)
         intraday_leg = (prices - ref_prices) / ref_prices
         executed_prev = executed.shift(1).fillna(0.0)
@@ -296,7 +337,9 @@ def run_strategy(
     srt = sortino_ratio(strategy_returns)
     mdd = max_drawdown(equity_curve)
     cal = calmar_ratio(equity_curve)
-    final_eq = float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital
+    final_eq = (
+        float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital
+    )
 
     result = {
         "final_equity": round(final_eq, 2),
@@ -317,8 +360,10 @@ def run_strategy(
 
     logger.debug(
         "[run_strategy] Python  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
-        result["total_return"] * 100, result["sharpe_ratio"],
-        result["num_trades"], result["max_drawdown"] * 100,
+        result["total_return"] * 100,
+        result["sharpe_ratio"],
+        result["num_trades"],
+        result["max_drawdown"] * 100,
     )
     return result
 
@@ -326,6 +371,7 @@ def run_strategy(
 # ──────────────────────────────────────────────────────────────────────────────
 # Grid search — module-level worker (must be picklable for ProcessPoolExecutor)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -371,7 +417,8 @@ def _run_signal_fn_job(
     """
     signals = signal_fn(price_data, **params)
     result = run_strategy(
-        price_data, signals,
+        price_data,
+        signals,
         initial_capital=initial_capital,
         commission_pct=commission_pct,
         slippage_pct=slippage_pct,
@@ -494,37 +541,44 @@ def backtest_grid(
 
             logger.debug(
                 "[backtest_grid] strategy=%s  combos=%d  path=C++  sort_by=%s",
-                strategy_label, len(combos), sort_by,
+                strategy_label,
+                len(combos),
+                sort_by,
             )
 
             cpp_results = _cpp_core.batch_run_strategy(
-                prices_arr, signals_mat,
-                initial_capital, commission_pct, slippage_pct,
+                prices_arr,
+                signals_mat,
+                initial_capital,
+                commission_pct,
+                slippage_pct,
             )
 
             rows = []
             for combo, r in zip(combos, cpp_results):
                 row = {
-                    "final_equity":          round(float(r["final_equity"]),          2),
-                    "total_return":          round(float(r["total_return"]),           6),
-                    "annualized_volatility": round(float(r["annualized_volatility"]),  6),
-                    "sharpe_ratio":          round(float(r["sharpe_ratio"]),           4),
-                    "sortino_ratio":         round(float(r["sortino_ratio"]),          4),
-                    "max_drawdown":          round(float(r["max_drawdown"]),           6),
-                    "calmar_ratio":          round(float(r["calmar_ratio"]),           4),
-                    "win_rate":              round(float(r["win_rate"]),               4),
-                    "profit_factor":         round(float(r["profit_factor"]),          4),
-                    "num_trades":            int(r["num_trades"]),
-                    "avg_trade_return_pct":  round(float(r["avg_trade_return_pct"]),  4),
+                    "final_equity": round(float(r["final_equity"]), 2),
+                    "total_return": round(float(r["total_return"]), 6),
+                    "annualized_volatility": round(
+                        float(r["annualized_volatility"]), 6
+                    ),
+                    "sharpe_ratio": round(float(r["sharpe_ratio"]), 4),
+                    "sortino_ratio": round(float(r["sortino_ratio"]), 4),
+                    "max_drawdown": round(float(r["max_drawdown"]), 6),
+                    "calmar_ratio": round(float(r["calmar_ratio"]), 4),
+                    "win_rate": round(float(r["win_rate"]), 4),
+                    "profit_factor": round(float(r["profit_factor"]), 4),
+                    "num_trades": int(r["num_trades"]),
+                    "avg_trade_return_pct": round(float(r["avg_trade_return_pct"]), 4),
                 }
                 row.update(dict(zip(keys, combo)))
                 rows.append(row)
 
             df_out = pd.DataFrame(rows)
             if sort_by in df_out.columns:
-                df_out = df_out.sort_values(
-                    sort_by, ascending=ascending
-                ).reset_index(drop=True)
+                df_out = df_out.sort_values(sort_by, ascending=ascending).reset_index(
+                    drop=True
+                )
 
             elapsed_ms = (time.perf_counter() - t0) * 1000
             if not df_out.empty and sort_by in df_out.columns:
@@ -532,18 +586,23 @@ def backtest_grid(
                 best_params = {k: best[k] for k in keys if k in best}
                 logger.debug(
                     "[backtest_grid] ✓ %.0fms (C++)  best %s=%.4f  params=%s",
-                    elapsed_ms, sort_by, best[sort_by], best_params,
+                    elapsed_ms,
+                    sort_by,
+                    best[sort_by],
+                    best_params,
                 )
             else:
                 logger.debug(
                     "[backtest_grid] ✓ %.0fms (C++)  %d results",
-                    elapsed_ms, len(df_out),
+                    elapsed_ms,
+                    len(df_out),
                 )
             return df_out
 
         except Exception as exc:
             logger.warning(
-                "[backtest_grid] C++ batch path failed (%s) — falling back to Python", exc
+                "[backtest_grid] C++ batch path failed (%s) — falling back to Python",
+                exc,
             )
 
     # ── Python fallback ───────────────────────────────────────────────────────
@@ -558,16 +617,23 @@ def backtest_grid(
         if n_workers is not None and n_workers != 1:
             logger.debug(
                 "[backtest_grid] custom strategy without C++ extension — "
-                "forcing sequential execution (n_workers=%s ignored)", n_workers
+                "forcing sequential execution (n_workers=%s ignored)",
+                n_workers,
             )
         logger.debug(
             "[backtest_grid] strategy=%s  combos=%d  workers=1 (forced)  path=Python  sort_by=%s",
-            strategy_label, len(combos), sort_by,
+            strategy_label,
+            len(combos),
+            sort_by,
         )
         results = [
             _run_signal_fn_job(
-                price_data, signal_fn, dict(zip(keys, combo)),
-                initial_capital, commission_pct, slippage_pct,
+                price_data,
+                signal_fn,
+                dict(zip(keys, combo)),
+                initial_capital,
+                commission_pct,
+                slippage_pct,
                 fill_price=fill_price,
             )
             for combo in combos
@@ -588,7 +654,10 @@ def backtest_grid(
         workers = n_workers if n_workers is not None else (os.cpu_count() or 4)
         logger.debug(
             "[backtest_grid] strategy=%s  combos=%d  workers=%d  path=Python  sort_by=%s",
-            strategy_label, len(jobs), workers, sort_by,
+            strategy_label,
+            len(jobs),
+            workers,
+            sort_by,
         )
 
         if workers == 1 or len(jobs) == 1:
@@ -607,7 +676,10 @@ def backtest_grid(
         best_params = {k: best[k] for k in keys if k in best}
         logger.debug(
             "[backtest_grid] ✓ %.0fms (Python)  best %s=%.4f  params=%s",
-            elapsed_ms, sort_by, best[sort_by], best_params,
+            elapsed_ms,
+            sort_by,
+            best[sort_by],
+            best_params,
         )
     else:
         logger.debug(

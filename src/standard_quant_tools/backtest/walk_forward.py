@@ -23,7 +23,10 @@ import pandas as pd
 
 from standard_quant_tools.metrics.return_metrics import cumulative_return
 from standard_quant_tools.metrics.risk_metrics import (
-    sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio,
+    calmar_ratio,
+    max_drawdown,
+    sharpe_ratio,
+    sortino_ratio,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +45,8 @@ def stitch_oos_returns(window_returns: List[pd.Series]) -> pd.Series:
 
 
 def compute_stitched_metrics(
-    oos_returns: pd.Series, initial_capital: float = 10_000.0,
+    oos_returns: pd.Series,
+    initial_capital: float = 10_000.0,
 ) -> Dict[str, float]:
     """
     Build one equity curve from the stitched OOS returns and compute

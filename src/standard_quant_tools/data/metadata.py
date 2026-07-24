@@ -18,16 +18,25 @@ class DataSetMetadata(BaseModel):
     point_in_time=False because yfinance makes neither guarantee, not
     because the concepts don't apply.
     """
-    provider: str = Field(..., description="Name of the data provider, e.g. 'yfinance'.")
-    adjusted: bool = Field(..., description="Whether prices are split/dividend-adjusted.")
+
+    provider: str = Field(
+        ..., description="Name of the data provider, e.g. 'yfinance'."
+    )
+    adjusted: bool = Field(
+        ..., description="Whether prices are split/dividend-adjusted."
+    )
     survivorship_free: bool = Field(
-        ..., description="Whether delisted/defunct securities remain queryable (no survivorship bias)."
+        ...,
+        description="Whether delisted/defunct securities remain queryable (no survivorship bias).",
     )
     point_in_time: bool = Field(
-        ..., description="Whether historical values are guaranteed not to be silently revised after the fact."
+        ...,
+        description="Whether historical values are guaranteed not to be silently revised after the fact.",
     )
     frequency: str = Field(..., description="Bar interval, e.g. '1d'.")
-    timezone: str = Field(..., description="Timezone the OHLCV timestamps are reported in.")
+    timezone: str = Field(
+        ..., description="Timezone the OHLCV timestamps are reported in."
+    )
     retrieved_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),
         description="UTC timestamp this metadata was generated.",

@@ -29,11 +29,14 @@ def audit_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def redirect_ohlcv_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Redirect the parquet OHLCV cache so tests never touch the real user cache."""
     import standard_quant_tools.data.yfinance_provider as provider_module
+
     monkeypatch.setattr(provider_module, "_CACHE_ROOT", tmp_path / "ohlcv")
     provider_module._session_cache.clear()
 
 
-def _write_record(directory: Path, record: dict, filename: str = "2026-01-01.jsonl") -> None:
+def _write_record(
+    directory: Path, record: dict, filename: str = "2026-01-01.jsonl"
+) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     with open(directory / filename, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
@@ -96,12 +99,20 @@ class TestCmdCompare:
         assert "input: identical" in output
 
     def test_differing_inputs_are_listed(self, audit_dir: Path):
-        _write_record(audit_dir, _minimal_record(
-            "aaa", input={"symbol": "AAPL", "benchmark": "SPY", "period": "1y"},
-        ))
-        _write_record(audit_dir, _minimal_record(
-            "bbb", input={"symbol": "MSFT", "benchmark": "SPY", "period": "1y"},
-        ))
+        _write_record(
+            audit_dir,
+            _minimal_record(
+                "aaa",
+                input={"symbol": "AAPL", "benchmark": "SPY", "period": "1y"},
+            ),
+        )
+        _write_record(
+            audit_dir,
+            _minimal_record(
+                "bbb",
+                input={"symbol": "MSFT", "benchmark": "SPY", "period": "1y"},
+            ),
+        )
         output = cli.cmd_compare("aaa", "bbb", audit_dir)
         assert "symbol" in output
         assert "'AAPL'" in output
@@ -117,7 +128,9 @@ class TestCmdCompare:
 
 class TestCmdReplay:
     def test_replay_matches_unmodified_record(self, patched_factory, audit_dir: Path):
-        dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"})
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
         record_path = next(audit_dir.glob("*.jsonl"))
         record = json.loads(record_path.read_text(encoding="utf-8").splitlines()[0])
 

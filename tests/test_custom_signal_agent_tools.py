@@ -9,11 +9,15 @@ import pytest
 from pydantic import ValidationError
 
 from standard_quant_tools.agent.models import (
-    CustomSignalBacktestInput, SignalPanelBacktestInput, SignalType,
+    CustomSignalBacktestInput,
+    SignalPanelBacktestInput,
+    SignalType,
 )
 from standard_quant_tools.agent.tools import (
-    get_agent_tools, dispatch,
-    run_custom_signal_backtest, run_signal_panel_backtest,
+    dispatch,
+    get_agent_tools,
+    run_custom_signal_backtest,
+    run_signal_panel_backtest,
 )
 from standard_quant_tools.data.factory import DataFactory
 
@@ -35,15 +39,18 @@ def gapped_factory(sample_close, monkeypatch: pytest.MonkeyPatch):
     by construction (no gap to price differently) — see test_fill_price.py.
     """
     from unittest.mock import MagicMock
+
     close = sample_close
     spread = pd.Series(0.5, index=close.index)
-    df = pd.DataFrame({
-        "Open": close * 0.999,
-        "High": close + spread,
-        "Low": close - spread,
-        "Close": close,
-        "Volume": pd.Series(1_000_000.0, index=close.index),
-    })
+    df = pd.DataFrame(
+        {
+            "Open": close * 0.999,
+            "High": close + spread,
+            "Low": close - spread,
+            "Close": close,
+            "Volume": pd.Series(1_000_000.0, index=close.index),
+        }
+    )
     provider = MagicMock()
     provider.get_ohlcv.return_value = df
     monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
@@ -61,7 +68,9 @@ class TestCustomSignalBacktest:
     def test_returns_backtest_result(self, patched_factory):
         df = patched_factory.get_ohlcv("AAPL", START, END)
         inp = CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             signals=_toy_signal(df),
         )
         result = run_custom_signal_backtest(inp)
@@ -70,10 +79,15 @@ class TestCustomSignalBacktest:
 
     def test_dispatch_returns_plain_dict(self, patched_factory):
         df = patched_factory.get_ohlcv("AAPL", START, END)
-        result = dispatch("run_custom_signal_backtest", {
-            "symbol": "AAPL", "start_date": START, "end_date": END,
-            "signals": _toy_signal(df),
-        })
+        result = dispatch(
+            "run_custom_signal_backtest",
+            {
+                "symbol": "AAPL",
+                "start_date": START,
+                "end_date": END,
+                "signals": _toy_signal(df),
+            },
+        )
         assert isinstance(result, dict)
         assert "sharpe_ratio" in result
 
@@ -81,7 +95,10 @@ class TestCustomSignalBacktest:
         df = patched_factory.get_ohlcv("AAPL", START, END)
         flat_signal = {str(d.date()): 0.0 for d in df.index}
         inp = CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END, signals=flat_signal,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            signals=flat_signal,
         )
         result = run_custom_signal_backtest(inp)
         assert result.num_trades == 0
@@ -91,11 +108,17 @@ class TestCustomSignalBacktest:
         df = gapped_factory.get_ohlcv("AAPL", START, END)
         signal = _toy_signal(df)
         base = run_custom_signal_backtest(
-            CustomSignalBacktestInput(symbol="AAPL", start_date=START, end_date=END, signals=signal)
+            CustomSignalBacktestInput(
+                symbol="AAPL", start_date=START, end_date=END, signals=signal
+            )
         )
         next_open = run_custom_signal_backtest(
             CustomSignalBacktestInput(
-                symbol="AAPL", start_date=START, end_date=END, signals=signal, fill_price="next_open",
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                signals=signal,
+                fill_price="next_open",
             )
         )
         assert base.final_equity != pytest.approx(next_open.final_equity, abs=1e-6)
@@ -108,7 +131,9 @@ class TestSignalPanelBacktestTool:
         panel = {t: _toy_signal(df) for t in tickers}
 
         inp = SignalPanelBacktestInput(
-            tickers=tickers, start_date=START, end_date=END,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
             signal_panel=panel,
         )
         result = run_signal_panel_backtest(inp)
@@ -121,10 +146,15 @@ class TestSignalPanelBacktestTool:
         df = patched_factory.get_ohlcv("AAPL", START, END)
         panel = {t: _toy_signal(df) for t in tickers}
 
-        result = dispatch("run_signal_panel_backtest", {
-            "tickers": tickers, "start_date": START, "end_date": END,
-            "signal_panel": panel,
-        })
+        result = dispatch(
+            "run_signal_panel_backtest",
+            {
+                "tickers": tickers,
+                "start_date": START,
+                "end_date": END,
+                "signal_panel": panel,
+            },
+        )
         assert isinstance(result, dict)
         assert set(result["per_ticker"].keys()) == set(tickers)
 
@@ -134,8 +164,11 @@ class TestSignalPanelBacktestTool:
         panel = {t: _toy_signal(df) for t in tickers}
 
         inp = SignalPanelBacktestInput(
-            tickers=tickers, start_date=START, end_date=END,
-            signal_panel=panel, weights={"AAPL": 0.7, "MSFT": 0.3},
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            signal_panel=panel,
+            weights={"AAPL": 0.7, "MSFT": 0.3},
         )
         result = run_signal_panel_backtest(inp)
         assert result.portfolio_metrics["weights"] == pytest.approx([0.7, 0.3])
@@ -143,14 +176,18 @@ class TestSignalPanelBacktestTool:
     def test_missing_ticker_in_panel_raises_validation_error(self):
         with pytest.raises(ValidationError, match="MSFT"):
             SignalPanelBacktestInput(
-                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
                 signal_panel={"AAPL": {"2023-01-03": 1.0}},
             )
 
     def test_weights_not_summing_to_one_raises_validation_error(self):
         with pytest.raises(ValidationError, match="sum to 1"):
             SignalPanelBacktestInput(
-                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
                 signal_panel={"AAPL": {"2023-01-03": 1.0}, "MSFT": {"2023-01-03": 0.0}},
                 weights={"AAPL": 0.5, "MSFT": 0.6},
             )
@@ -158,7 +195,9 @@ class TestSignalPanelBacktestTool:
     def test_weights_keys_must_match_tickers(self):
         with pytest.raises(ValidationError, match="weights keys"):
             SignalPanelBacktestInput(
-                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
                 signal_panel={"AAPL": {"2023-01-03": 1.0}, "MSFT": {"2023-01-03": 0.0}},
                 weights={"AAPL": 0.5, "GOOGL": 0.5},
             )
@@ -169,11 +208,17 @@ class TestSignalPanelBacktestTool:
         panel = {t: _toy_signal(df) for t in tickers}
 
         base = run_signal_panel_backtest(
-            SignalPanelBacktestInput(tickers=tickers, start_date=START, end_date=END, signal_panel=panel)
+            SignalPanelBacktestInput(
+                tickers=tickers, start_date=START, end_date=END, signal_panel=panel
+            )
         )
         next_open = run_signal_panel_backtest(
             SignalPanelBacktestInput(
-                tickers=tickers, start_date=START, end_date=END, signal_panel=panel, fill_price="next_open",
+                tickers=tickers,
+                start_date=START,
+                end_date=END,
+                signal_panel=panel,
+                fill_price="next_open",
             )
         )
         assert base.portfolio_metrics["total_return"] != pytest.approx(
@@ -190,24 +235,34 @@ class TestSignalFillPolicy:
     silently wrong.
     """
 
-    def test_sparse_monthly_signal_holds_across_full_daily_calendar(self, patched_factory):
+    def test_sparse_monthly_signal_holds_across_full_daily_calendar(
+        self, patched_factory
+    ):
         df = patched_factory.get_ohlcv("AAPL", START, END)
         monthly_dates = df.index[::21]  # ~monthly cadence over a 1-year daily calendar
         sparse_signal = {str(d.date()): 1.0 for d in monthly_dates}
         inp = CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            signals=sparse_signal,
         )
         result = run_custom_signal_backtest(inp)
         assert len(result.equity_curve) == len(df)
 
-    def test_signal_panel_sparse_signal_holds_across_full_daily_calendar(self, patched_factory):
+    def test_signal_panel_sparse_signal_holds_across_full_daily_calendar(
+        self, patched_factory
+    ):
         tickers = ["AAPL", "MSFT"]
         df = patched_factory.get_ohlcv("AAPL", START, END)
         monthly_dates = df.index[::21]
         sparse_signal = {str(d.date()): 1.0 for d in monthly_dates}
         panel = {t: sparse_signal for t in tickers}
         inp = SignalPanelBacktestInput(
-            tickers=tickers, start_date=START, end_date=END, signal_panel=panel,
+            tickers=tickers,
+            start_date=START,
+            end_date=END,
+            signal_panel=panel,
         )
         result = run_signal_panel_backtest(inp)
         for ticker in tickers:
@@ -217,17 +272,29 @@ class TestSignalFillPolicy:
         df = patched_factory.get_ohlcv("AAPL", START, END)
         d0, d1 = df.index[0], df.index[21]
         sparse_signal = {str(d0.date()): 1.0, str(d1.date()): 1.0}
-        hold_result = run_custom_signal_backtest(CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
-            signal_fill_policy="hold",
-        ))
-        flat_result = run_custom_signal_backtest(CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
-            signal_fill_policy="flat",
-        ))
+        hold_result = run_custom_signal_backtest(
+            CustomSignalBacktestInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                signals=sparse_signal,
+                signal_fill_policy="hold",
+            )
+        )
+        flat_result = run_custom_signal_backtest(
+            CustomSignalBacktestInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                signals=sparse_signal,
+                signal_fill_policy="flat",
+            )
+        )
         # "hold" stays long between d0 and d1; "flat" is only long on the two
         # exact submitted dates -- materially different exposure/final equity.
-        assert hold_result.final_equity != pytest.approx(flat_result.final_equity, abs=1e-6)
+        assert hold_result.final_equity != pytest.approx(
+            flat_result.final_equity, abs=1e-6
+        )
 
     def test_error_fill_policy_raises_on_incomplete_calendar(self, patched_factory):
         from standard_quant_tools.error import ValidationError as SQTValidationError
@@ -235,7 +302,10 @@ class TestSignalFillPolicy:
         df = patched_factory.get_ohlcv("AAPL", START, END)
         sparse_signal = {str(df.index[0].date()): 1.0}
         inp = CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END, signals=sparse_signal,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            signals=sparse_signal,
             signal_fill_policy="error",
         )
         with pytest.raises(SQTValidationError, match="signal_fill_policy"):
@@ -245,7 +315,10 @@ class TestSignalFillPolicy:
         df = patched_factory.get_ohlcv("AAPL", START, END)
         dense_signal = {str(d.date()): 1.0 for d in df.index}
         inp = CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END, signals=dense_signal,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            signals=dense_signal,
             signal_fill_policy="error",
         )
         result = run_custom_signal_backtest(inp)
@@ -265,27 +338,37 @@ class TestSignalTypeValidation:
         # accepted silently under the default — this is today's exact
         # pre-existing permissive behavior, unchanged.
         inp = CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             signals={"2023-01-03": 2.5, "2023-01-04": -3.7},
         )
         assert inp.signal_type == SignalType.SCORE
 
     def test_score_accepts_anything(self):
         CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            signals={"2023-01-03": 100.0}, signal_type=SignalType.SCORE,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            signals={"2023-01-03": 100.0},
+            signal_type=SignalType.SCORE,
         )
 
     def test_direction_rejects_out_of_range_value(self):
         with pytest.raises(ValidationError, match="direction"):
             CustomSignalBacktestInput(
-                symbol="AAPL", start_date=START, end_date=END,
-                signals={"2023-01-03": 0.5}, signal_type=SignalType.DIRECTION,
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                signals={"2023-01-03": 0.5},
+                signal_type=SignalType.DIRECTION,
             )
 
     def test_direction_accepts_exact_values(self):
         CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
             signals={"2023-01-03": 1.0, "2023-01-04": -1.0, "2023-01-05": 0.0},
             signal_type=SignalType.DIRECTION,
         )
@@ -293,41 +376,57 @@ class TestSignalTypeValidation:
     def test_target_weight_rejects_over_bound(self):
         with pytest.raises(ValidationError, match="target_weight"):
             CustomSignalBacktestInput(
-                symbol="AAPL", start_date=START, end_date=END,
-                signals={"2023-01-03": 1.5}, signal_type=SignalType.TARGET_WEIGHT,
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                signals={"2023-01-03": 1.5},
+                signal_type=SignalType.TARGET_WEIGHT,
                 max_abs_weight=1.0,
             )
 
     def test_target_weight_accepts_within_bound(self):
         CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            signals={"2023-01-03": 0.8}, signal_type=SignalType.TARGET_WEIGHT,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            signals={"2023-01-03": 0.8},
+            signal_type=SignalType.TARGET_WEIGHT,
             max_abs_weight=1.0,
         )
 
     def test_target_weight_respects_custom_max_abs_weight(self):
         CustomSignalBacktestInput(
-            symbol="AAPL", start_date=START, end_date=END,
-            signals={"2023-01-03": 1.8}, signal_type=SignalType.TARGET_WEIGHT,
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            signals={"2023-01-03": 1.8},
+            signal_type=SignalType.TARGET_WEIGHT,
             max_abs_weight=2.0,
         )
         with pytest.raises(ValidationError, match="target_weight"):
             CustomSignalBacktestInput(
-                symbol="AAPL", start_date=START, end_date=END,
-                signals={"2023-01-03": 1.8}, signal_type=SignalType.TARGET_WEIGHT,
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                signals={"2023-01-03": 1.8},
+                signal_type=SignalType.TARGET_WEIGHT,
                 max_abs_weight=1.0,
             )
 
     def test_signal_panel_default_is_score_and_unrestricted(self):
         SignalPanelBacktestInput(
-            tickers=["AAPL"], start_date=START, end_date=END,
+            tickers=["AAPL"],
+            start_date=START,
+            end_date=END,
             signal_panel={"AAPL": {"2023-01-03": 5.0}},
         )
 
     def test_signal_panel_direction_rejects_out_of_range_and_names_ticker(self):
         with pytest.raises(ValidationError, match="MSFT"):
             SignalPanelBacktestInput(
-                tickers=["AAPL", "MSFT"], start_date=START, end_date=END,
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
                 signal_panel={
                     "AAPL": {"2023-01-03": 1.0},
                     "MSFT": {"2023-01-03": 0.5},
@@ -338,7 +437,10 @@ class TestSignalTypeValidation:
     def test_signal_panel_target_weight_rejects_over_bound(self):
         with pytest.raises(ValidationError, match="target_weight"):
             SignalPanelBacktestInput(
-                tickers=["AAPL"], start_date=START, end_date=END,
+                tickers=["AAPL"],
+                start_date=START,
+                end_date=END,
                 signal_panel={"AAPL": {"2023-01-03": 3.0}},
-                signal_type=SignalType.TARGET_WEIGHT, max_abs_weight=1.0,
+                signal_type=SignalType.TARGET_WEIGHT,
+                max_abs_weight=1.0,
             )

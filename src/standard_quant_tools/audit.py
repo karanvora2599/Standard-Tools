@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 _request_id_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
     "sqt_request_id", default=None
 )
-_data_sources_var: "contextvars.ContextVar[Optional[List[Dict[str, Any]]]]" = contextvars.ContextVar(
-    "sqt_data_sources", default=None
+_data_sources_var: "contextvars.ContextVar[Optional[List[Dict[str, Any]]]]" = (
+    contextvars.ContextVar("sqt_data_sources", default=None)
 )
 
 
@@ -79,9 +79,11 @@ def configure_logging(
     else:
         handler = logging.StreamHandler()
     handler.setLevel(level)
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s"
-    ))
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s"
+        )
+    )
     handler.addFilter(RequestIdFilter())
     pkg_logger.addHandler(handler)
     return handler
@@ -91,10 +93,12 @@ def configure_logging(
 # Hashing
 # ──────────────────────────────────────────────────────────────────
 
+
 def hash_dataframe(df: Any) -> str:
     """Content fingerprint of a DataFrame (values + index), stable across runs."""
     import numpy as np
     import pandas as pd
+
     hashed = pd.util.hash_pandas_object(df, index=True)
     return hashlib.sha256(np.asarray(hashed.values).tobytes()).hexdigest()[:16]
 
@@ -108,6 +112,7 @@ def hash_payload(obj: Any) -> str:
 # ──────────────────────────────────────────────────────────────────
 # Data provenance
 # ──────────────────────────────────────────────────────────────────
+
 
 def record_data_access(
     symbol: str,
@@ -125,19 +130,22 @@ def record_data_access(
     sources = _data_sources_var.get()
     if sources is None:
         return
-    sources.append({
-        "symbol": symbol,
-        "start": start,
-        "end": end,
-        "interval": interval,
-        "source": source,
-        "content_hash": content_hash,
-    })
+    sources.append(
+        {
+            "symbol": symbol,
+            "start": start,
+            "end": end,
+            "interval": interval,
+            "source": source,
+            "content_hash": content_hash,
+        }
+    )
 
 
 def _cpp_available() -> bool:
     try:
         import standard_quant_tools._sqt_core  # type: ignore[attr-defined]  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -161,6 +169,7 @@ def _git_sha() -> Optional[str]:
     _git_sha_resolved = True
     try:
         import subprocess
+
         repo_root = Path(__file__).resolve().parents[2]
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -179,6 +188,7 @@ def _git_sha() -> Optional[str]:
 def _package_version() -> Optional[str]:
     try:
         from standard_quant_tools import __version__
+
         return __version__
     except Exception:
         return None
@@ -187,6 +197,7 @@ def _package_version() -> Optional[str]:
 # ──────────────────────────────────────────────────────────────────
 # Decision record + writer
 # ──────────────────────────────────────────────────────────────────
+
 
 class DecisionRecord(BaseModel):
     request_id: str
@@ -214,10 +225,12 @@ def _audit_enabled() -> bool:
 
 
 def _audit_dir() -> Path:
-    return Path(os.environ.get(
-        "SQT_AUDIT_DIR",
-        str(Path.home() / ".cache" / "standard_quant_tools" / "audit"),
-    ))
+    return Path(
+        os.environ.get(
+            "SQT_AUDIT_DIR",
+            str(Path.home() / ".cache" / "standard_quant_tools" / "audit"),
+        )
+    )
 
 
 class AuditWriter:
@@ -248,12 +261,16 @@ def _strategy_source_hash(model_instance: Any) -> Optional[str]:
     provenance is a nice-to-have, not something that should ever break a
     tool call.
     """
-    strategy_name = getattr(model_instance, "strategy", None) or getattr(model_instance, "strategy_type", None)
+    strategy_name = getattr(model_instance, "strategy", None) or getattr(
+        model_instance, "strategy_type", None
+    )
     if not strategy_name:
         return None
     try:
         import inspect
+
         from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+
         fn = STRATEGY_REGISTRY.get(strategy_name)
         if fn is None:
             return None
@@ -262,7 +279,9 @@ def _strategy_source_hash(model_instance: Any) -> Optional[str]:
         return None
 
 
-def _run_and_record(tool_name: str, fn: Callable[[Any], Any], model_instance: Any) -> Dict[str, Any]:
+def _run_and_record(
+    tool_name: str, fn: Callable[[Any], Any], model_instance: Any
+) -> Dict[str, Any]:
     """
     Shared core used by `agent.tools.dispatch()`: runs `fn(model_instance)`,
     and — unless disabled via `SQT_AUDIT_ENABLED=0` — writes a DecisionRecord
@@ -312,7 +331,11 @@ def _run_and_record(tool_name: str, fn: Callable[[Any], Any], model_instance: An
                 )
                 AuditWriter().write(record)
             except Exception:
-                logger.warning("[audit] failed to write decision record for %s", tool_name, exc_info=True)
+                logger.warning(
+                    "[audit] failed to write decision record for %s",
+                    tool_name,
+                    exc_info=True,
+                )
         _request_id_var.reset(token_req)
         _data_sources_var.reset(token_data)
 
@@ -320,6 +343,7 @@ def _run_and_record(tool_name: str, fn: Callable[[Any], Any], model_instance: An
 # ──────────────────────────────────────────────────────────────────
 # Replay verification
 # ──────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class ReplayResult:
@@ -358,7 +382,9 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     new_output_hash = hash_payload(new_output)
     stored_output_hash = record.get("output_hash")
     output_match: Optional[bool] = (
-        new_output_hash == stored_output_hash if stored_output_hash is not None else None
+        new_output_hash == stored_output_hash
+        if stored_output_hash is not None
+        else None
     )
 
     old_by_key = {
@@ -369,10 +395,17 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     for s in new_sources:
         key = (s["symbol"], s["start"], s["end"], s["interval"])
         old_hash = old_by_key.get(key)
-        data_matches.append({
-            "symbol": s["symbol"], "start": s["start"], "end": s["end"], "interval": s["interval"],
-            "old_hash": old_hash, "new_hash": s["content_hash"], "match": old_hash == s["content_hash"],
-        })
+        data_matches.append(
+            {
+                "symbol": s["symbol"],
+                "start": s["start"],
+                "end": s["end"],
+                "interval": s["interval"],
+                "old_hash": old_hash,
+                "new_hash": s["content_hash"],
+                "match": old_hash == s["content_hash"],
+            }
+        )
 
     notes: List[str] = []
     data_all_match = all(m["match"] for m in data_matches) if data_matches else True

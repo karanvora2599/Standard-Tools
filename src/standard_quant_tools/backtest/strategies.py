@@ -13,23 +13,27 @@ import logging
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools.indicators.trend import sma, macd
 from standard_quant_tools.indicators.momentum import rsi
+from standard_quant_tools.indicators.trend import macd, sma
 from standard_quant_tools.indicators.volatility import bollinger_bands
 
 logger = logging.getLogger(__name__)
 
 try:
     from numba import njit
+
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
+
     def njit(func):  # type: ignore[misc]
         return func
 
 
 @njit
-def _rsi_state_machine(rsi_arr: np.ndarray, oversold: float, overbought: float) -> np.ndarray:
+def _rsi_state_machine(
+    rsi_arr: np.ndarray, oversold: float, overbought: float
+) -> np.ndarray:
     n = len(rsi_arr)
     values = np.zeros(n)
     in_pos = False
@@ -65,15 +69,19 @@ def _bollinger_state_machine(
 def _log_signals(name: str, signals: pd.Series) -> None:
     arr = signals.to_numpy()
     n = len(arr)
-    n_long  = int((arr == 1).sum())
+    n_long = int((arr == 1).sum())
     n_short = int((arr == -1).sum())
-    n_flat  = n - n_long - n_short
+    n_flat = n - n_long - n_short
     logger.debug(
         "[signal] %s  bars=%d  long=%d(%.0f%%)  flat=%d(%.0f%%)  short=%d(%.0f%%)",
-        name, n,
-        n_long,  100 * n_long  / n if n else 0,
-        n_flat,  100 * n_flat  / n if n else 0,
-        n_short, 100 * n_short / n if n else 0,
+        name,
+        n,
+        n_long,
+        100 * n_long / n if n else 0,
+        n_flat,
+        100 * n_flat / n if n else 0,
+        n_short,
+        100 * n_short / n if n else 0,
     )
 
 
@@ -84,7 +92,12 @@ def _sma_signals(
     **_,
 ) -> pd.Series:
     """Long when fast SMA > slow SMA, flat otherwise."""
-    logger.debug("[signal] sma_crossover  fast=%d  slow=%d  bars=%d", fast_period, slow_period, len(df))
+    logger.debug(
+        "[signal] sma_crossover  fast=%d  slow=%d  bars=%d",
+        fast_period,
+        slow_period,
+        len(df),
+    )
     result = pd.Series(
         np.where(sma(df["Close"], fast_period) > sma(df["Close"], slow_period), 1, 0),
         index=df.index,
@@ -101,10 +114,17 @@ def _rsi_signals(
     **_,
 ) -> pd.Series:
     """Enter long when RSI < oversold; hold until RSI > overbought."""
-    logger.debug("[signal] rsi_mean_reversion  period=%d  oversold=%.0f  overbought=%.0f  bars=%d",
-                 period, oversold, overbought, len(df))
+    logger.debug(
+        "[signal] rsi_mean_reversion  period=%d  oversold=%.0f  overbought=%.0f  bars=%d",
+        period,
+        oversold,
+        overbought,
+        len(df),
+    )
     rsi_arr = rsi(df["Close"], period).to_numpy(dtype=float)
-    result = pd.Series(_rsi_state_machine(rsi_arr, oversold, overbought), index=df.index)
+    result = pd.Series(
+        _rsi_state_machine(rsi_arr, oversold, overbought), index=df.index
+    )
     _log_signals("rsi_mean_reversion", result)
     return result
 
@@ -117,7 +137,13 @@ def _macd_signals(
     **_,
 ) -> pd.Series:
     """Long when MACD line > signal line, flat otherwise."""
-    logger.debug("[signal] macd_crossover  fast=%d  slow=%d  signal=%d  bars=%d", fast, slow, signal, len(df))
+    logger.debug(
+        "[signal] macd_crossover  fast=%d  slow=%d  signal=%d  bars=%d",
+        fast,
+        slow,
+        signal,
+        len(df),
+    )
     m = macd(df["Close"], fast, slow, signal)
     result = pd.Series(
         np.where(m["MACD"] > m["Signal"], 1, 0),
@@ -134,12 +160,19 @@ def _bollinger_signals(
     **_,
 ) -> pd.Series:
     """Enter long when price touches lower band; exit at middle band."""
-    logger.debug("[signal] bollinger_reversion  period=%d  std=%.1f  bars=%d", period, num_std, len(df))
+    logger.debug(
+        "[signal] bollinger_reversion  period=%d  std=%.1f  bars=%d",
+        period,
+        num_std,
+        len(df),
+    )
     bb = bollinger_bands(df["Close"], period, num_std)
     close_arr = df["Close"].to_numpy(dtype=float)
     lower_arr = bb["BB_Lower"].to_numpy(dtype=float)
     middle_arr = bb["BB_Middle"].to_numpy(dtype=float)
-    result = pd.Series(_bollinger_state_machine(close_arr, lower_arr, middle_arr), index=df.index)
+    result = pd.Series(
+        _bollinger_state_machine(close_arr, lower_arr, middle_arr), index=df.index
+    )
     _log_signals("bollinger_reversion", result)
     return result
 

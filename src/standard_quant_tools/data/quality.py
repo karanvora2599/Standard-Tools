@@ -63,17 +63,21 @@ def detect_stale_prices(df: pd.DataFrame, n: int = 3) -> List[Dict[str, Any]]:
         if changed:
             run_length = i - run_start
             if run_length >= n:
-                runs.append({
-                    "start": str(close.index[run_start].date()),
-                    "end": str(close.index[i - 1].date()),
-                    "price": float(close.iloc[run_start]),
-                    "run_length": run_length,
-                })
+                runs.append(
+                    {
+                        "start": str(close.index[run_start].date()),
+                        "end": str(close.index[i - 1].date()),
+                        "price": float(close.iloc[run_start]),
+                        "run_length": run_length,
+                    }
+                )
             run_start = i
     return runs
 
 
-def detect_price_jumps(df: pd.DataFrame, threshold: float = 0.15) -> List[Dict[str, Any]]:
+def detect_price_jumps(
+    df: pd.DataFrame, threshold: float = 0.15
+) -> List[Dict[str, Any]]:
     """
     Flag single-bar Close-to-Close moves exceeding threshold — a proxy for
     an unadjusted split/dividend or a data error, not a proven one (a

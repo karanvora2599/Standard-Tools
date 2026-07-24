@@ -1,10 +1,13 @@
 import logging
-import pandas as pd
-import numpy as np
 from typing import Optional
+
+import numpy as np
+import pandas as pd
+
 from standard_quant_tools.validation import validate_series
 
 logger = logging.getLogger(__name__)
+
 
 @validate_series()
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
@@ -19,9 +22,12 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
         np.sign(close.diff().fillna(0.0).to_numpy(dtype=np.float64)),
         index=close.index,
     )
-    result = (direction * volume).cumsum().rename('OBV')
-    logger.debug("[obv] final=%.0f  trend=%s", float(result.iloc[-1]),
-                 "up" if float(result.iloc[-1]) > float(result.iloc[0]) else "down")
+    result = (direction * volume).cumsum().rename("OBV")
+    logger.debug(
+        "[obv] final=%.0f  trend=%s",
+        float(result.iloc[-1]),
+        "up" if float(result.iloc[-1]) > float(result.iloc[0]) else "down",
+    )
     return result
 
 
@@ -46,12 +52,12 @@ def vwap(
     tp_vol = typical_price * volume
 
     if period is None:
-        result = (tp_vol.cumsum() / volume.cumsum()).rename('VWAP')
+        result = (tp_vol.cumsum() / volume.cumsum()).rename("VWAP")
     else:
         result = (
             tp_vol.rolling(window=period, min_periods=period).sum()
             / volume.rolling(window=period, min_periods=period).sum()
-        ).rename('VWAP')
+        ).rename("VWAP")
     valid = result.dropna()
     if not valid.empty:
         logger.debug("[vwap] last=%.4f", float(valid.iloc[-1]))
@@ -85,4 +91,4 @@ def mfi(
     result = 100.0 - (100.0 / (1.0 + mfr))
     result = result.where(neg_flow != 0, 100.0)
     result = result.where(pos_flow != 0, 0.0)
-    return result.rename('MFI')
+    return result.rename("MFI")

@@ -6,8 +6,8 @@ import pytest
 
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
 
-
 # ── Shared fixtures ────────────────────────────────────────────────────────────
+
 
 def _make_returns(seed, n, phi):
     """AR(1) return series with given persistence phi."""
@@ -43,11 +43,16 @@ def mean_reverting_returns():
 
 # ── hurst_exponent — output structure ─────────────────────────────────────────
 
+
 class TestHurstExponentKeys:
     def test_returns_required_keys(self, iid_returns):
         result = hurst_exponent(iid_returns)
         assert set(result.keys()) == {
-            "hurst", "regime", "fit_r_squared", "method", "n_obs"
+            "hurst",
+            "regime",
+            "fit_r_squared",
+            "method",
+            "n_obs",
         }
 
     def test_hurst_is_float(self, iid_returns):
@@ -66,6 +71,7 @@ class TestHurstExponentKeys:
 
 
 # ── hurst_exponent — regime detection (DFA) ───────────────────────────────────
+
 
 class TestHurstDFARegimes:
     def test_iid_returns_near_half(self, iid_returns):
@@ -109,13 +115,16 @@ class TestHurstDFARegimes:
         r2 = hurst_exponent(iid_returns, method="dfa")["fit_r_squared"]
         assert 0.0 <= r2 <= 1.0
 
-    def test_hurst_bounded_0_to_1(self, iid_returns, trending_returns, mean_reverting_returns):
+    def test_hurst_bounded_0_to_1(
+        self, iid_returns, trending_returns, mean_reverting_returns
+    ):
         for s in [iid_returns, trending_returns, mean_reverting_returns]:
             h = hurst_exponent(s)["hurst"]
             assert 0.0 <= h <= 1.5  # clipped at 1.5 in implementation
 
 
 # ── hurst_exponent — RS method ────────────────────────────────────────────────
+
 
 class TestHurstRSMethod:
     def test_rs_trending_above_dfa_for_same_series(self, trending_returns):
@@ -135,6 +144,7 @@ class TestHurstRSMethod:
 
 
 # ── hurst_exponent — edge cases ───────────────────────────────────────────────
+
 
 class TestHurstEdgeCases:
     def test_insufficient_data_returns_nan(self):
@@ -168,6 +178,7 @@ class TestHurstEdgeCases:
 
 # ── rolling_hurst ──────────────────────────────────────────────────────────────
 
+
 class TestRollingHurst:
     def test_returns_series(self, iid_returns):
         assert isinstance(rolling_hurst(iid_returns, window=200), pd.Series)
@@ -184,7 +195,7 @@ class TestRollingHurst:
     def test_no_nan_after_warmup(self, iid_returns):
         window = 200
         result = rolling_hurst(iid_returns, window=window)
-        assert not result.iloc[window - 1:].isna().any()
+        assert not result.iloc[window - 1 :].isna().any()
 
     def test_rolling_values_in_valid_range(self, iid_returns):
         result = rolling_hurst(iid_returns, window=200).dropna()
@@ -218,9 +229,9 @@ class TestRollingHurst:
         ret = np.zeros(n)
         half = n // 2
         for i in range(1, half):
-            ret[i] = 0.4 * ret[i - 1] + innov[i]     # trending first half
+            ret[i] = 0.4 * ret[i - 1] + innov[i]  # trending first half
         for i in range(half, n):
-            ret[i] = -0.4 * ret[i - 1] + innov[i]    # mean-reverting second half
+            ret[i] = -0.4 * ret[i - 1] + innov[i]  # mean-reverting second half
 
         dates = pd.date_range("2020-01-01", periods=n, freq="B")
         s = pd.Series(ret, index=dates)
@@ -229,9 +240,9 @@ class TestRollingHurst:
         # Compare means in second and fourth quarters (avoid transition zone)
         q2_end = 3 * n // 4
         q2_start = n // 4
-        mean_early = rolling.iloc[q2_start: half].dropna().mean()
+        mean_early = rolling.iloc[q2_start:half].dropna().mean()
         mean_late = rolling.iloc[q2_end:].dropna().mean()
 
-        assert mean_early > mean_late, (
-            f"Expected early H ({mean_early:.3f}) > late H ({mean_late:.3f})"
-        )
+        assert (
+            mean_early > mean_late
+        ), f"Expected early H ({mean_early:.3f}) > late H ({mean_late:.3f})"

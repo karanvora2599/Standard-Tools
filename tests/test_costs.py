@@ -3,9 +3,14 @@
 import pytest
 
 from standard_quant_tools.backtest.costs import (
-    percentage_commission, per_share_commission, fixed_bps_spread,
-    pct_of_range_spread, sqrt_impact_bps, impact_cost,
-    short_borrow_cost, margin_interest,
+    fixed_bps_spread,
+    impact_cost,
+    margin_interest,
+    pct_of_range_spread,
+    per_share_commission,
+    percentage_commission,
+    short_borrow_cost,
+    sqrt_impact_bps,
 )
 from standard_quant_tools.error import ValidationError
 
@@ -37,7 +42,9 @@ class TestFixedBpsSpread:
 class TestPctOfRangeSpread:
     def test_basic(self):
         # range_frac = (102-98)/100 = 0.04; cost = 10000 * 0.04 * 0.5 = 200
-        assert pct_of_range_spread(10_000.0, high=102.0, low=98.0, close=100.0, pct=0.5) == pytest.approx(200.0)
+        assert pct_of_range_spread(
+            10_000.0, high=102.0, low=98.0, close=100.0, pct=0.5
+        ) == pytest.approx(200.0)
 
     def test_zero_close_raises(self):
         with pytest.raises(ValidationError, match="close"):
@@ -47,7 +54,9 @@ class TestPctOfRangeSpread:
 class TestSqrtImpactBps:
     def test_basic(self):
         # 1.0 * 0.02 * sqrt(0.25) * 10000 = 0.02*0.5*10000 = 100
-        assert sqrt_impact_bps(participation=0.25, volatility=0.02, coefficient=1.0) == pytest.approx(100.0)
+        assert sqrt_impact_bps(
+            participation=0.25, volatility=0.02, coefficient=1.0
+        ) == pytest.approx(100.0)
 
     def test_zero_participation_is_zero_impact(self):
         assert sqrt_impact_bps(0.0, 0.02) == pytest.approx(0.0)
@@ -81,7 +90,9 @@ class TestImpactCost:
 class TestShortBorrowCost:
     def test_basic(self):
         # 10000 * (200/10000) * (365/365) = 200
-        assert short_borrow_cost(10_000.0, annual_bps=200.0, days=365.0) == pytest.approx(200.0)
+        assert short_borrow_cost(
+            10_000.0, annual_bps=200.0, days=365.0
+        ) == pytest.approx(200.0)
 
     def test_one_day_accrual(self):
         one_day = short_borrow_cost(10_000.0, annual_bps=200.0, days=1.0)
@@ -95,7 +106,9 @@ class TestMarginInterest:
 
     def test_negative_cash_accrues(self):
         # |−5000| * 0.05 * (365/365) = 250
-        assert margin_interest(-5_000.0, annual_rate=0.05, days=365.0) == pytest.approx(250.0)
+        assert margin_interest(-5_000.0, annual_rate=0.05, days=365.0) == pytest.approx(
+            250.0
+        )
 
     def test_zero_cash_is_zero(self):
         assert margin_interest(0.0, annual_rate=0.05, days=1.0) == 0.0

@@ -22,6 +22,7 @@ import pytest
 _cpp: Any = None
 try:
     from standard_quant_tools import _sqt_core as _cpp  # type: ignore[attr-defined]
+
     HAS_CPP = True
 except ImportError:
     HAS_CPP = False
@@ -30,12 +31,16 @@ requires_cpp = pytest.mark.skipif(not HAS_CPP, reason="_sqt_core not built")
 
 # ── Python reference implementations ─────────────────────────────────────────
 
-from standard_quant_tools.indicators.momentum import _rsi_numba, HAS_CPP as RSI_HAS_CPP, HAS_NUMBA as RSI_HAS_NUMBA
-from standard_quant_tools.indicators.trend import _adx_numba, _psar_numba
-from standard_quant_tools.indicators.momentum import rsi as rsi_wrapper
-from standard_quant_tools.indicators.trend import adx as adx_wrapper, parabolic_sar as psar_wrapper
-from standard_quant_tools.indicators.volatility import wilder_atr as wilder_atr_wrapper, HAS_CPP as WATR_HAS_CPP
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators.momentum import HAS_CPP as RSI_HAS_CPP
+from standard_quant_tools.indicators.momentum import HAS_NUMBA as RSI_HAS_NUMBA
+from standard_quant_tools.indicators.momentum import _rsi_numba
+from standard_quant_tools.indicators.momentum import rsi as rsi_wrapper
+from standard_quant_tools.indicators.trend import _adx_numba, _psar_numba
+from standard_quant_tools.indicators.trend import adx as adx_wrapper
+from standard_quant_tools.indicators.trend import parabolic_sar as psar_wrapper
+from standard_quant_tools.indicators.volatility import HAS_CPP as WATR_HAS_CPP
+from standard_quant_tools.indicators.volatility import wilder_atr as wilder_atr_wrapper
 
 # True when the rsi wrapper uses Wilder's SMA seed (C++ or Numba), not EWM.
 RSI_USES_WILDERS = RSI_HAS_CPP or RSI_HAS_NUMBA
@@ -53,8 +58,8 @@ def prices_200():
 @pytest.fixture
 def ohlc_200(prices_200):
     close = prices_200
-    high  = close + RNG.uniform(0.1, 1.0, len(close))
-    low   = close - RNG.uniform(0.1, 1.0, len(close))
+    high = close + RNG.uniform(0.1, 1.0, len(close))
+    low = close - RNG.uniform(0.1, 1.0, len(close))
     return high, low, close
 
 
@@ -68,13 +73,14 @@ def ohlc_series_200(ohlc_200):
     high, low, close = ohlc_200
     idx = pd.date_range("2020-01-01", periods=len(close), freq="B")
     return (
-        pd.Series(high,  index=idx, name="High"),
-        pd.Series(low,   index=idx, name="Low"),
+        pd.Series(high, index=idx, name="High"),
+        pd.Series(low, index=idx, name="Low"),
         pd.Series(close, index=idx, name="Close"),
     )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _py_rsi(prices: np.ndarray, period: int = 14) -> np.ndarray:
     """Pure Python Wilder's RSI matching the C++ and Numba implementations."""
@@ -85,18 +91,24 @@ def _py_rsi(prices: np.ndarray, period: int = 14) -> np.ndarray:
     avg_gain = avg_loss = 0.0
     for i in range(1, period + 1):
         ch = prices[i] - prices[i - 1]
-        if ch > 0:   avg_gain += ch
-        elif ch < 0: avg_loss -= ch
+        if ch > 0:
+            avg_gain += ch
+        elif ch < 0:
+            avg_loss -= ch
     avg_gain /= period
     avg_loss /= period
-    result[period] = 100.0 if avg_loss == 0.0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    result[period] = (
+        100.0 if avg_loss == 0.0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    )
     for i in range(period + 1, n):
-        ch   = prices[i] - prices[i - 1]
+        ch = prices[i] - prices[i - 1]
         gain = ch if ch > 0 else 0.0
         loss = -ch if ch < 0 else 0.0
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
-        result[i] = 100.0 if avg_loss == 0.0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+        result[i] = (
+            100.0 if avg_loss == 0.0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+        )
     return result
 
 
@@ -104,30 +116,31 @@ def _py_rsi(prices: np.ndarray, period: int = 14) -> np.ndarray:
 # RSI — C++ extension tests
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class TestCppRsi:
 
     @requires_cpp
     def test_matches_python_reference(self, prices_200):
-        cpp_out  = _cpp.rsi(prices_200.astype(np.float64), 14)
-        py_ref   = _py_rsi(prices_200, 14)
+        cpp_out = _cpp.rsi(prices_200.astype(np.float64), 14)
+        py_ref = _py_rsi(prices_200, 14)
         np.testing.assert_allclose(cpp_out, py_ref, rtol=1e-10, equal_nan=True)
 
     @requires_cpp
     def test_nan_prefix(self, prices_200):
-        period  = 14
+        period = 14
         cpp_out = _cpp.rsi(prices_200.astype(np.float64), period)
         assert np.all(np.isnan(cpp_out[:period]))
         assert np.all(~np.isnan(cpp_out[period:]))
 
     @requires_cpp
     def test_all_rising_equals_100(self):
-        prices  = np.arange(1.0, 21.0)
+        prices = np.arange(1.0, 21.0)
         cpp_out = _cpp.rsi(prices, 5)
         np.testing.assert_allclose(cpp_out[5:], 100.0, atol=1e-9)
 
     @requires_cpp
     def test_all_falling_equals_0(self):
-        prices  = np.arange(20.0, 0.0, -1.0)
+        prices = np.arange(20.0, 0.0, -1.0)
         cpp_out = _cpp.rsi(prices, 5)
         np.testing.assert_allclose(cpp_out[5:], 0.0, atol=1e-9)
 
@@ -135,7 +148,7 @@ class TestCppRsi:
     def test_known_value(self):
         # prices = {10, 11, 12, 11}, period=3
         # avg_gain=2/3, avg_loss=1/3 → RSI = 200/3
-        prices  = np.array([10.0, 11.0, 12.0, 11.0])
+        prices = np.array([10.0, 11.0, 12.0, 11.0])
         cpp_out = _cpp.rsi(prices, 3)
         assert np.all(np.isnan(cpp_out[:3]))
         np.testing.assert_allclose(cpp_out[3], 200.0 / 3.0, rtol=1e-10)
@@ -143,14 +156,14 @@ class TestCppRsi:
     @requires_cpp
     def test_bounds(self, prices_200):
         cpp_out = _cpp.rsi(prices_200.astype(np.float64), 14)
-        valid   = cpp_out[~np.isnan(cpp_out)]
+        valid = cpp_out[~np.isnan(cpp_out)]
         assert np.all(valid >= 0.0)
         assert np.all(valid <= 100.0)
 
     @requires_cpp
     def test_short_series(self):
         prices = np.arange(5.0)
-        assert np.all(np.isnan(_cpp.rsi(prices, 5)))   # n == period
+        assert np.all(np.isnan(_cpp.rsi(prices, 5)))  # n == period
         assert np.all(np.isnan(_cpp.rsi(prices[:3], 5)))  # n < period
 
     @requires_cpp
@@ -178,7 +191,7 @@ class TestCppRsi:
     @requires_cpp
     @pytest.mark.slow
     def test_matches_numba_reference(self, prices_200):
-        arr     = prices_200.astype(np.float64)
+        arr = prices_200.astype(np.float64)
         cpp_out = _cpp.rsi(arr, 14)
         num_out = _rsi_numba(arr, 14)
         np.testing.assert_allclose(cpp_out, num_out, rtol=1e-10, equal_nan=True)
@@ -187,6 +200,7 @@ class TestCppRsi:
 # ══════════════════════════════════════════════════════════════════════════════
 # RSI — Python wrapper tests (run always, verify fallback + routing)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestRsiWrapper:
 
@@ -211,7 +225,7 @@ class TestRsiWrapper:
 
     def test_bounds(self, prices_series_200):
         result = rsi_wrapper(prices_series_200, period=14)
-        valid  = result.dropna()
+        valid = result.dropna()
         assert (valid >= 0.0).all()
         assert (valid <= 100.0).all()
 
@@ -229,14 +243,18 @@ class TestRsiWrapper:
 # ADX — C++ extension tests
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class TestCppAdx:
 
     @requires_cpp
     def test_shape(self, ohlc_200):
         high, low, close = ohlc_200
-        out = _cpp.adx(high.astype(np.float64),
-                       low.astype(np.float64),
-                       close.astype(np.float64), 14)
+        out = _cpp.adx(
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            14,
+        )
         assert out.shape == (200, 3)
 
     @requires_cpp
@@ -244,53 +262,64 @@ class TestCppAdx:
         high, low, close = ohlc_200
         h, l, c = (x.astype(np.float64) for x in (high, low, close))
         cpp_out = _cpp.adx(h, l, c, 14)
-        py_ref  = _adx_numba(h, l, c, 14)
+        py_ref = _adx_numba(h, l, c, 14)
         np.testing.assert_allclose(cpp_out, py_ref, rtol=1e-10, equal_nan=True)
 
     @requires_cpp
     def test_nan_prefix_di(self, ohlc_200):
         high, low, close = ohlc_200
         period = 7
-        out = _cpp.adx(high.astype(np.float64),
-                       low.astype(np.float64),
-                       close.astype(np.float64), period)
+        out = _cpp.adx(
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            period,
+        )
         # DI+, DI- NaN before row `period`
         assert np.all(np.isnan(out[:period, 0]))
         assert np.all(np.isnan(out[:period, 1]))
         # ADX NaN before row 2*period-1
-        assert np.all(np.isnan(out[:2 * period - 1, 2]))
+        assert np.all(np.isnan(out[: 2 * period - 1, 2]))
 
     @requires_cpp
     def test_valid_after_warmup(self, ohlc_200):
         high, low, close = ohlc_200
         period = 7
-        out = _cpp.adx(high.astype(np.float64),
-                       low.astype(np.float64),
-                       close.astype(np.float64), period)
-        assert np.all(~np.isnan(out[period:, :2]))           # DI+ / DI-
-        assert np.all(~np.isnan(out[2 * period - 1:, 2]))   # ADX
+        out = _cpp.adx(
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            period,
+        )
+        assert np.all(~np.isnan(out[period:, :2]))  # DI+ / DI-
+        assert np.all(~np.isnan(out[2 * period - 1 :, 2]))  # ADX
 
     @requires_cpp
     def test_bounds(self, ohlc_200):
         high, low, close = ohlc_200
-        out   = _cpp.adx(high.astype(np.float64),
-                         low.astype(np.float64),
-                         close.astype(np.float64), 14)
+        out = _cpp.adx(
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            14,
+        )
         valid = out[~np.isnan(out)]
         assert np.all(valid >= 0.0)
         assert np.all(valid <= 100.0)
 
     @requires_cpp
     def test_uptrend_di_plus_dominates(self):
-        n     = 100
+        n = 100
         close = np.arange(100.0, 100.0 + n)
-        high  = close + 0.5
-        low   = close - 0.5
+        high = close + 0.5
+        low = close - 0.5
         period = 5
-        out   = _cpp.adx(high, low, close, period)
+        out = _cpp.adx(high, low, close, period)
         # After burn-in, DI+ > DI- for a monotonically rising price series
         for i in range(2 * period, n):
-            assert out[i, 0] > out[i, 1], f"row {i}: DI+={out[i,0]:.3f} not > DI-={out[i,1]:.3f}"
+            assert (
+                out[i, 0] > out[i, 1]
+            ), f"row {i}: DI+={out[i,0]:.3f} not > DI-={out[i,1]:.3f}"
 
     @requires_cpp
     def test_short_series(self):
@@ -310,6 +339,7 @@ class TestCppAdx:
 # ══════════════════════════════════════════════════════════════════════════════
 # ADX — Python wrapper tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestAdxWrapper:
 
@@ -363,19 +393,27 @@ class TestCppAdxArgSafety:
         value — the guard must make this a safe all-NaN return.
         """
         high, low, close = ohlc_200
-        out = _cpp.adx(high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), -1)
+        out = _cpp.adx(
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            -1,
+        )
         assert np.all(np.isnan(out))
 
     @requires_cpp
     def test_zero_period_returns_all_nan(self, ohlc_200):
         high, low, close = ohlc_200
-        out = _cpp.adx(high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), 0)
+        out = _cpp.adx(
+            high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), 0
+        )
         assert np.all(np.isnan(out))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Parabolic SAR — C++ extension tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestCppPsar:
 
@@ -390,7 +428,7 @@ class TestCppPsar:
         high, low, _ = ohlc_200
         h, l = high.astype(np.float64), low.astype(np.float64)
         cpp_out = _cpp.parabolic_sar(h, l, 0.02, 0.02, 0.2)
-        py_ref  = _psar_numba(h, l, 0.02, 0.02, 0.2)
+        py_ref = _psar_numba(h, l, 0.02, 0.02, 0.2)
         np.testing.assert_allclose(cpp_out, py_ref, rtol=1e-12, equal_nan=True)
 
     @requires_cpp
@@ -402,36 +440,38 @@ class TestCppPsar:
     @requires_cpp
     def test_trend_values_are_pm1(self, ohlc_200):
         high, low, _ = ohlc_200
-        out   = _cpp.parabolic_sar(high.astype(np.float64), low.astype(np.float64))
+        out = _cpp.parabolic_sar(high.astype(np.float64), low.astype(np.float64))
         trend = out[:, 1]
         assert np.all((trend == 1.0) | (trend == -1.0))
 
     @requires_cpp
     def test_bootstrap_rising(self):
         high = np.array([105.0, 106.0, 107.0])
-        low  = np.array([100.0, 101.0, 102.0])
-        out  = _cpp.parabolic_sar(high, low, 0.02, 0.02, 0.2)
+        low = np.array([100.0, 101.0, 102.0])
+        out = _cpp.parabolic_sar(high, low, 0.02, 0.02, 0.2)
         # Bar 0: SAR = low[0], Trend = 1.0
         np.testing.assert_allclose(out[0, 0], 100.0, atol=1e-12)
         assert out[0, 1] == 1.0
 
     @requires_cpp
     def test_rising_sar_below_low(self):
-        n     = 60
+        n = 60
         close = np.arange(100.0, 100.0 + n)
-        high  = close + 0.5
-        low   = close - 0.5
-        out   = _cpp.parabolic_sar(high, low, 0.02, 0.02, 0.2)
+        high = close + 0.5
+        low = close - 0.5
+        out = _cpp.parabolic_sar(high, low, 0.02, 0.02, 0.2)
         # In a strong uptrend the SAR stays below each bar's low (skip bar 0)
         for i in range(1, n):
             if out[i, 1] == 1.0:
-                assert out[i, 0] < low[i], f"bar {i}: SAR {out[i,0]:.4f} >= low {low[i]:.4f}"
+                assert (
+                    out[i, 0] < low[i]
+                ), f"bar {i}: SAR {out[i,0]:.4f} >= low {low[i]:.4f}"
 
     @requires_cpp
     def test_single_bar(self):
         high = np.array([101.0])
-        low  = np.array([99.0])
-        out  = _cpp.parabolic_sar(high, low, 0.02, 0.02, 0.2)
+        low = np.array([99.0])
+        out = _cpp.parabolic_sar(high, low, 0.02, 0.02, 0.2)
         assert out.shape == (1, 2)
         assert not np.isnan(out[0, 0])
         assert out[0, 1] == 1.0
@@ -459,6 +499,7 @@ class TestCppPsar:
 # ══════════════════════════════════════════════════════════════════════════════
 # Parabolic SAR — Python wrapper tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestPsarWrapper:
 
@@ -494,7 +535,10 @@ class TestPsarWrapper:
 # Wilder's ATR — Python reference helper
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _py_wilder_atr(h: np.ndarray, l: np.ndarray, c: np.ndarray, period: int) -> np.ndarray:
+
+def _py_wilder_atr(
+    h: np.ndarray, l: np.ndarray, c: np.ndarray, period: int
+) -> np.ndarray:
     """Pure-Python Wilder's ATR matching the C++ implementation exactly."""
     n = len(h)
     tr = np.empty(n)
@@ -513,6 +557,7 @@ def _py_wilder_atr(h: np.ndarray, l: np.ndarray, c: np.ndarray, period: int) -> 
 # Wilder's ATR — C++ extension tests
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class TestCppWilderAtr:
 
     @requires_cpp
@@ -520,7 +565,7 @@ class TestCppWilderAtr:
         high, low, close = ohlc_200
         h, l, c = (x.astype(np.float64) for x in (high, low, close))
         cpp_out = _cpp.wilder_atr(h, l, c, 14)
-        py_ref  = _py_wilder_atr(h, l, c, 14)
+        py_ref = _py_wilder_atr(h, l, c, 14)
         np.testing.assert_allclose(cpp_out, py_ref, rtol=1e-12, equal_nan=True)
 
     @requires_cpp
@@ -528,31 +573,35 @@ class TestCppWilderAtr:
         high, low, close = ohlc_200
         period = 14
         out = _cpp.wilder_atr(
-            high.astype(np.float64), low.astype(np.float64),
-            close.astype(np.float64), period,
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            period,
         )
         assert len(out) == len(close)
-        assert np.all(np.isnan(out[:period - 1]))
-        assert np.all(~np.isnan(out[period - 1:]))
+        assert np.all(np.isnan(out[: period - 1]))
+        assert np.all(~np.isnan(out[period - 1 :]))
 
     @requires_cpp
     def test_known_value(self):
         # H=[10,11,12], L=[9,9,10], C=[9.5,10,11], period=2
         # TR = [1, 2, 2]; ATR[1]=1.5; ATR[2]=1.75
         h = np.array([10.0, 11.0, 12.0])
-        l = np.array([ 9.0,  9.0, 10.0])
-        c = np.array([ 9.5, 10.0, 11.0])
+        l = np.array([9.0, 9.0, 10.0])
+        c = np.array([9.5, 10.0, 11.0])
         out = _cpp.wilder_atr(h, l, c, 2)
         assert np.isnan(out[0])
-        np.testing.assert_allclose(out[1], 1.5,  rtol=1e-12)
+        np.testing.assert_allclose(out[1], 1.5, rtol=1e-12)
         np.testing.assert_allclose(out[2], 1.75, rtol=1e-12)
 
     @requires_cpp
     def test_non_negative(self, ohlc_200):
         high, low, close = ohlc_200
-        out   = _cpp.wilder_atr(
-            high.astype(np.float64), low.astype(np.float64),
-            close.astype(np.float64), 14,
+        out = _cpp.wilder_atr(
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            14,
         )
         valid = out[~np.isnan(out)]
         assert np.all(valid >= 0.0)
@@ -592,14 +641,17 @@ class TestCppWilderAtr:
     def test_period_1_equals_tr(self):
         # period=1: ATR[i] = TR[i] for all i (seed = TR[0], no smoothing thereafter)
         h = np.array([10.0, 12.0, 11.0, 13.0])
-        l = np.array([ 9.0, 10.0,  9.5, 11.0])
-        c = np.array([ 9.5, 11.0, 10.0, 12.0])
+        l = np.array([9.0, 10.0, 9.5, 11.0])
+        c = np.array([9.5, 11.0, 10.0, 12.0])
         out = _cpp.wilder_atr(h, l, c, 1)
         # Compute expected TR independently
-        expected_tr = np.array([h[0] - l[0]] + [
-            max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
-            for i in range(1, len(h))
-        ])
+        expected_tr = np.array(
+            [h[0] - l[0]]
+            + [
+                max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
+                for i in range(1, len(h))
+            ]
+        )
         np.testing.assert_allclose(out, expected_tr, atol=1e-12)
 
     @requires_cpp
@@ -612,7 +664,10 @@ class TestCppWilderAtr:
         """
         high, low, close = ohlc_200
         out = _cpp.wilder_atr(
-            high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), 0,
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            0,
         )
         assert np.all(np.isnan(out))
 
@@ -620,7 +675,10 @@ class TestCppWilderAtr:
     def test_negative_period_returns_all_nan(self, ohlc_200):
         high, low, close = ohlc_200
         out = _cpp.wilder_atr(
-            high.astype(np.float64), low.astype(np.float64), close.astype(np.float64), -1,
+            high.astype(np.float64),
+            low.astype(np.float64),
+            close.astype(np.float64),
+            -1,
         )
         assert np.all(np.isnan(out))
 
@@ -628,6 +686,7 @@ class TestCppWilderAtr:
 # ══════════════════════════════════════════════════════════════════════════════
 # Wilder's ATR — Python wrapper tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestWilderAtrWrapper:
 
@@ -651,8 +710,8 @@ class TestWilderAtrWrapper:
         high, low, close = ohlc_series_200
         period = 14
         result = wilder_atr_wrapper(high, low, close, period=period)
-        assert np.all(np.isnan(result.iloc[:period - 1]))
-        assert np.all(~np.isnan(result.iloc[period - 1:]))
+        assert np.all(np.isnan(result.iloc[: period - 1]))
+        assert np.all(~np.isnan(result.iloc[period - 1 :]))
 
     def test_non_negative(self, ohlc_series_200):
         high, low, close = ohlc_series_200

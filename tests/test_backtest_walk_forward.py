@@ -5,14 +5,16 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.backtest.walk_forward import (
-    stitch_oos_returns,
     compute_stitched_metrics,
     longest_losing_streak,
     parameter_turnover,
+    stitch_oos_returns,
 )
 
 
-def _daily_returns_for_total(total_return: float, n_bars: int, dates: pd.DatetimeIndex) -> pd.Series:
+def _daily_returns_for_total(
+    total_return: float, n_bars: int, dates: pd.DatetimeIndex
+) -> pd.Series:
     """Constant daily return series that compounds to exactly total_return over n_bars."""
     daily = (1.0 + total_return) ** (1.0 / n_bars) - 1.0
     return pd.Series(daily, index=dates)
@@ -37,8 +39,11 @@ class TestComputeStitchedMetrics:
     def test_empty_series_returns_zeros(self):
         metrics = compute_stitched_metrics(pd.Series(dtype=float))
         assert metrics == {
-            "total_return": 0.0, "sharpe_ratio": 0.0, "sortino_ratio": 0.0,
-            "max_drawdown": 0.0, "calmar_ratio": 0.0,
+            "total_return": 0.0,
+            "sharpe_ratio": 0.0,
+            "sortino_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "calmar_ratio": 0.0,
         }
 
     def test_compounding_beats_naive_average_on_plus20_minus20_example(self):
@@ -75,9 +80,17 @@ class TestComputeStitchedMetrics:
 
     def test_metrics_keys_present(self):
         dates = pd.date_range("2022-01-01", periods=50, freq="B")
-        returns = pd.Series(np.random.default_rng(0).normal(0.0005, 0.01, 50), index=dates)
+        returns = pd.Series(
+            np.random.default_rng(0).normal(0.0005, 0.01, 50), index=dates
+        )
         metrics = compute_stitched_metrics(returns)
-        for key in ("total_return", "sharpe_ratio", "sortino_ratio", "max_drawdown", "calmar_ratio"):
+        for key in (
+            "total_return",
+            "sharpe_ratio",
+            "sortino_ratio",
+            "max_drawdown",
+            "calmar_ratio",
+        ):
             assert key in metrics
             assert isinstance(metrics[key], float)
 
@@ -93,7 +106,9 @@ class TestLongestLosingStreak:
         assert longest_losing_streak([0.01, -0.01, -0.02]) == 2
 
     def test_picks_longest_of_multiple_streaks(self):
-        assert longest_losing_streak([-0.01, 0.01, -0.01, -0.01, -0.01, 0.01, -0.01]) == 3
+        assert (
+            longest_losing_streak([-0.01, 0.01, -0.01, -0.01, -0.01, 0.01, -0.01]) == 3
+        )
 
     def test_empty_list(self):
         assert longest_losing_streak([]) == 0

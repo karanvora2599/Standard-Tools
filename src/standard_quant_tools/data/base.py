@@ -1,11 +1,13 @@
+import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Dict, List, Optional, Union
+
 import pandas as pd
 from pydantic import BaseModel
-import asyncio
 
 from standard_quant_tools.data.metadata import DataSetMetadata
+
 
 class TickerInfo(BaseModel):
     symbol: str
@@ -17,6 +19,7 @@ class TickerInfo(BaseModel):
     country: Optional[str] = None
     website: Optional[str] = None
 
+
 class FinancialRatios(BaseModel):
     forward_pe: Optional[float] = None
     trailing_pe: Optional[float] = None
@@ -27,6 +30,7 @@ class FinancialRatios(BaseModel):
     dividend_yield: Optional[float] = None
     market_cap: Optional[int] = None
 
+
 class DataProvider(ABC):
     """
     Abstract Base Class for Data Providers.
@@ -35,15 +39,15 @@ class DataProvider(ABC):
 
     @abstractmethod
     def get_ohlcv(
-        self, 
-        symbol: str, 
-        start_date: Union[str, datetime], 
-        end_date: Union[str, datetime], 
-        interval: str = "1d"
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        interval: str = "1d",
     ) -> pd.DataFrame:
         """
         Fetches historical OHLCV data.
-        
+
         Args:
             symbol: Ticker symbol (e.g., 'AAPL').
             start_date: Start date (YYYY-MM-DD or datetime).
@@ -53,7 +57,7 @@ class DataProvider(ABC):
         Returns:
             pd.DataFrame: A DataFrame with columns ['Open', 'High', 'Low', 'Close', 'Volume']
                           and a DatetimeIndex.
-        
+
         Raises:
             ValueError: If data cannot be fetched or symbol is invalid.
         """
@@ -61,11 +65,11 @@ class DataProvider(ABC):
 
     @abstractmethod
     async def get_ohlcv_async(
-        self, 
-        symbol: str, 
-        start_date: Union[str, datetime], 
-        end_date: Union[str, datetime], 
-        interval: str = "1d"
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        interval: str = "1d",
     ) -> pd.DataFrame:
         """
         Async version of get_ohlcv.

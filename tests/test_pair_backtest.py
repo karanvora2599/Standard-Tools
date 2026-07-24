@@ -25,8 +25,13 @@ def _pair_price_data():
 
     def _df(close):
         return pd.DataFrame(
-            {"Open": close, "High": close, "Low": close, "Close": close,
-             "Volume": [1_000_000.0] * len(close)},
+            {
+                "Open": close,
+                "High": close,
+                "Low": close,
+                "Close": close,
+                "Volume": [1_000_000.0] * len(close),
+            },
             index=dates,
         )
 
@@ -49,8 +54,13 @@ def _pair_price_data_unequal_prices():
 
     def _df(close):
         return pd.DataFrame(
-            {"Open": close, "High": close, "Low": close, "Close": close,
-             "Volume": [1_000_000.0] * len(close)},
+            {
+                "Open": close,
+                "High": close,
+                "Low": close,
+                "Close": close,
+                "Volume": [1_000_000.0] * len(close),
+            },
             index=dates,
         )
 
@@ -62,7 +72,10 @@ class TestRunPairBacktest:
         price_data, _ = _pair_price_data()
         with pytest.raises(ValidationError, match="C"):
             run_pair_backtest(
-                {"A": price_data["A"]}, symbol_a="A", symbol_b="C", hedge_ratio=1.0,
+                {"A": price_data["A"]},
+                symbol_a="A",
+                symbol_b="C",
+                hedge_ratio=1.0,
             )
 
     def test_no_entry_crossing_raises(self):
@@ -70,7 +83,11 @@ class TestRunPairBacktest:
         with pytest.raises(ValidationError, match="never crossed"):
             # entry_z=100 is unreachable given the z-range of this scenario
             run_pair_backtest(
-                price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0, entry_z=100.0,
+                price_data,
+                symbol_a="A",
+                symbol_b="B",
+                hedge_ratio=1.0,
+                entry_z=100.0,
             )
 
     def test_high_leverage_low_hedge_ratio_does_not_falsely_reject(self):
@@ -83,9 +100,16 @@ class TestRunPairBacktest:
         """
         price_data, _ = _pair_price_data()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=0.3,
-            entry_z=1.0, exit_z=0.3, gross_leverage=2.0,
-            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=0.3,
+            entry_z=1.0,
+            exit_z=0.3,
+            gross_leverage=2.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            zscore_window=None,
         )
         first_rebalance = result["rebalance_log"].iloc[0]
         assert first_rebalance["gross_leverage_after"] == pytest.approx(2.0, abs=1e-2)
@@ -93,8 +117,14 @@ class TestRunPairBacktest:
     def test_transitions_and_round_trips(self):
         price_data, dates = _pair_price_data()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3, commission_pct=0.0, slippage_pct=0.0,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            commission_pct=0.0,
+            slippage_pct=0.0,
             zscore_window=None,
         )
         # 3 transitions: enter long-spread (bar 5), exit to flat (bar 10),
@@ -115,19 +145,38 @@ class TestRunPairBacktest:
         """
         price_data, dates = _pair_price_data()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3, commission_pct=0.0, slippage_pct=0.0,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            commission_pct=0.0,
+            slippage_pct=0.0,
             zscore_window=None,
         )
-        rebalance_dates = [r["date"] for r in result["rebalance_log"].to_dict(orient="records")]
-        assert rebalance_dates == [str(dates[5].date()), str(dates[10].date()), str(dates[15].date())]
+        rebalance_dates = [
+            r["date"] for r in result["rebalance_log"].to_dict(orient="records")
+        ]
+        assert rebalance_dates == [
+            str(dates[5].date()),
+            str(dates[10].date()),
+            str(dates[15].date()),
+        ]
 
     def test_dollar_neutral_sizing_matches_hedge_ratio(self):
         price_data, dates = _pair_price_data()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3, gross_leverage=1.0,
-            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            gross_leverage=1.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            zscore_window=None,
         )
         # hedge_ratio=1.0 -> equal-magnitude legs: weight_a = weight_b = 0.5.
         first_rebalance = result["rebalance_log"].iloc[0]
@@ -136,8 +185,13 @@ class TestRunPairBacktest:
     def test_entry_and_current_spread_reported(self):
         price_data, _ = _pair_price_data()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3, zscore_window=None,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            zscore_window=None,
         )
         # Most recent entry is the bar-15 short-spread entry, spread = 40.0.
         assert result["entry_spread"] == pytest.approx(40.0)
@@ -163,9 +217,16 @@ class TestRunPairBacktest:
         """
         price_data, dates = _pair_price_data_unequal_prices()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=2.0,
-            entry_z=1.0, exit_z=0.3, gross_leverage=1.0,
-            commission_pct=0.0, slippage_pct=0.0, zscore_window=None,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=2.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            gross_leverage=1.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            zscore_window=None,
             fill_price="close",
         )
         entry_date = dates[5]
@@ -188,8 +249,14 @@ class TestRunPairBacktest:
         """
         price_data, dates = _pair_price_data()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3, commission_pct=0.0, slippage_pct=0.0,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            commission_pct=0.0,
+            slippage_pct=0.0,
             zscore_window=None,
             # fill_price intentionally omitted -- this proves the new default.
         )
@@ -201,9 +268,21 @@ class TestRunPairBacktest:
     def test_result_includes_portfolio_simulation_fields(self):
         price_data, _ = _pair_price_data()
         result = run_pair_backtest(
-            price_data, symbol_a="A", symbol_b="B", hedge_ratio=1.0,
-            entry_z=1.0, exit_z=0.3, zscore_window=None,
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=1.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            zscore_window=None,
         )
-        for key in ("equity_curve", "cash_curve", "gross_exposure_curve",
-                    "leverage_curve", "final_equity", "final_cash", "warnings"):
+        for key in (
+            "equity_curve",
+            "cash_curve",
+            "gross_exposure_curve",
+            "leverage_curve",
+            "final_equity",
+            "final_cash",
+            "warnings",
+        ):
             assert key in result

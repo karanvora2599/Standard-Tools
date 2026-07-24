@@ -6,8 +6,8 @@ import pytest
 
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 
-
 # ── Shared fixtures ────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="module")
 def one_factor_data():
@@ -19,12 +19,15 @@ def one_factor_data():
     n = 500
     dates = pd.date_range("2020-01-01", periods=n, freq="B")
     factor = np.random.normal(0, 1, n)
-    returns = pd.DataFrame({
-        "A": factor * 1.0 + np.random.normal(0, 0.1, n),
-        "B": factor * 0.8 + np.random.normal(0, 0.1, n),
-        "C": factor * 1.2 + np.random.normal(0, 0.1, n),
-        "D": factor * 0.9 + np.random.normal(0, 0.1, n),
-    }, index=dates)
+    returns = pd.DataFrame(
+        {
+            "A": factor * 1.0 + np.random.normal(0, 0.1, n),
+            "B": factor * 0.8 + np.random.normal(0, 0.1, n),
+            "C": factor * 1.2 + np.random.normal(0, 0.1, n),
+            "D": factor * 0.9 + np.random.normal(0, 0.1, n),
+        },
+        index=dates,
+    )
     return returns
 
 
@@ -39,14 +42,17 @@ def two_factor_data():
     dates = pd.date_range("2020-01-01", periods=n, freq="B")
     f1 = np.random.normal(0, 1, n)
     f2 = np.random.normal(0, 1, n)
-    returns = pd.DataFrame({
-        "A1": f1 + np.random.normal(0, 0.15, n),
-        "A2": f1 * 0.9 + np.random.normal(0, 0.15, n),
-        "A3": f1 * 1.1 + np.random.normal(0, 0.15, n),
-        "B1": f2 + np.random.normal(0, 0.15, n),
-        "B2": f2 * 0.8 + np.random.normal(0, 0.15, n),
-        "B3": f2 * 1.2 + np.random.normal(0, 0.15, n),
-    }, index=dates)
+    returns = pd.DataFrame(
+        {
+            "A1": f1 + np.random.normal(0, 0.15, n),
+            "A2": f1 * 0.9 + np.random.normal(0, 0.15, n),
+            "A3": f1 * 1.1 + np.random.normal(0, 0.15, n),
+            "B1": f2 + np.random.normal(0, 0.15, n),
+            "B2": f2 * 0.8 + np.random.normal(0, 0.15, n),
+            "B3": f2 * 1.2 + np.random.normal(0, 0.15, n),
+        },
+        index=dates,
+    )
     return returns
 
 
@@ -61,6 +67,7 @@ def pca_two_factor(two_factor_data):
 
 
 # ── pca_returns — output structure ─────────────────────────────────────────────
+
 
 class TestPcaReturnsKeys:
     def test_returns_required_keys(self, pca_one_factor):
@@ -102,13 +109,22 @@ class TestPcaReturnsShapes:
 
     def test_columns_named_pc1_pc2(self, pca_one_factor):
         assert list(pca_one_factor["loadings"].columns) == ["PC1", "PC2", "PC3", "PC4"]
-        assert list(pca_one_factor["factor_returns"].columns) == ["PC1", "PC2", "PC3", "PC4"]
+        assert list(pca_one_factor["factor_returns"].columns) == [
+            "PC1",
+            "PC2",
+            "PC3",
+            "PC4",
+        ]
 
-    def test_loadings_index_matches_asset_tickers(self, one_factor_data, pca_one_factor):
+    def test_loadings_index_matches_asset_tickers(
+        self, one_factor_data, pca_one_factor
+    ):
         assert list(pca_one_factor["loadings"].index) == list(one_factor_data.columns)
 
     def test_factor_returns_index_matches_dates(self, one_factor_data, pca_one_factor):
-        assert list(pca_one_factor["factor_returns"].index) == list(one_factor_data.index)
+        assert list(pca_one_factor["factor_returns"].index) == list(
+            one_factor_data.index
+        )
 
     def test_n_obs_matches_non_nan_rows(self, one_factor_data, pca_one_factor):
         assert pca_one_factor["n_obs"] == len(one_factor_data.dropna())
@@ -117,14 +133,18 @@ class TestPcaReturnsShapes:
 class TestPcaReturnsVariance:
     def test_evr_sums_to_one(self, pca_one_factor):
         """Full decomposition must account for all variance."""
-        assert pca_one_factor["explained_variance_ratio"].sum() == pytest.approx(1.0, abs=1e-9)
+        assert pca_one_factor["explained_variance_ratio"].sum() == pytest.approx(
+            1.0, abs=1e-9
+        )
 
     def test_cumvar_is_monotone(self, pca_one_factor):
         cumvar = pca_one_factor["cumulative_variance_ratio"]
         assert (cumvar.diff().dropna() >= 0).all()
 
     def test_cumvar_ends_at_one(self, pca_one_factor):
-        assert pca_one_factor["cumulative_variance_ratio"].iloc[-1] == pytest.approx(1.0, abs=1e-9)
+        assert pca_one_factor["cumulative_variance_ratio"].iloc[-1] == pytest.approx(
+            1.0, abs=1e-9
+        )
 
     def test_each_evr_bounded_0_to_1(self, pca_one_factor):
         evr = pca_one_factor["explained_variance_ratio"]
@@ -196,6 +216,7 @@ class TestPcaReturnsEdgeCases:
 
 
 # ── factor_contributions ───────────────────────────────────────────────────────
+
 
 class TestFactorContributions:
     def test_returns_dataframe(self, one_factor_data):

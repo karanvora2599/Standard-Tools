@@ -96,15 +96,23 @@ def cmd_replay(request_id: str, audit_dir: Optional[Path] = None) -> str:
     return _format_replay(result)
 
 
-def cmd_compare(request_id_a: str, request_id_b: str, audit_dir: Optional[Path] = None) -> str:
+def cmd_compare(
+    request_id_a: str, request_id_b: str, audit_dir: Optional[Path] = None
+) -> str:
     """Human-readable diff of two records' status/output/provenance/inputs."""
     a = find_record(request_id_a, audit_dir)
     b = find_record(request_id_b, audit_dir)
 
     lines = [f"Comparing {request_id_a} vs {request_id_b}", ""]
     fields = [
-        "tool_name", "status", "output_hash", "duration_ms",
-        "git_commit_sha", "package_version", "strategy_source_hash", "random_seed",
+        "tool_name",
+        "status",
+        "output_hash",
+        "duration_ms",
+        "git_commit_sha",
+        "package_version",
+        "strategy_source_hash",
+        "random_seed",
     ]
     for field in fields:
         va, vb = a.get(field), b.get(field)
@@ -126,10 +134,14 @@ def cmd_compare(request_id_a: str, request_id_b: str, audit_dir: Optional[Path] 
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="sqt", description="standard_quant_tools audit-trail CLI")
+    parser = argparse.ArgumentParser(
+        prog="sqt", description="standard_quant_tools audit-trail CLI"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_replay = sub.add_parser("replay", help="Re-run a recorded tool call and check data/output match.")
+    p_replay = sub.add_parser(
+        "replay", help="Re-run a recorded tool call and check data/output match."
+    )
     p_replay.add_argument("request_id")
 
     p_compare = sub.add_parser("compare", help="Diff two recorded tool calls.")

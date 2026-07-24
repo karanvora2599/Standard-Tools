@@ -1,16 +1,22 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional, Union, Any
-import pandas as pd
+from typing import Any, Dict, List, Optional, Union
+
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
-from standard_quant_tools.metrics.risk_metrics import (
-    sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio,
-    var_historical, cvar, information_ratio
-)
-from standard_quant_tools.metrics.return_metrics import cagr, annualized_volatility
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.return_metrics import annualized_volatility, cagr
+from standard_quant_tools.metrics.risk_metrics import (
+    calmar_ratio,
+    cvar,
+    information_ratio,
+    max_drawdown,
+    sharpe_ratio,
+    sortino_ratio,
+    var_historical,
+)
 
 
 def build_portfolio(
@@ -28,8 +34,12 @@ def build_portfolio(
         pd.Series of daily portfolio returns.
     """
     w = np.asarray(weights, dtype=np.float64)
-    logger.debug("[portfolio] build  assets=%d  weights=%s  weight_sum=%.4f",
-                 returns_df.shape[1], [round(float(x), 4) for x in w], float(w.sum()))
+    logger.debug(
+        "[portfolio] build  assets=%d  weights=%s  weight_sum=%.4f",
+        returns_df.shape[1],
+        [round(float(x), 4) for x in w],
+        float(w.sum()),
+    )
     if len(w) != returns_df.shape[1]:
         raise ValidationError(
             f"weights length ({len(w)}) must match number of tickers ({returns_df.shape[1]})"
@@ -38,7 +48,7 @@ def build_portfolio(
         raise ValidationError(f"weights must sum to 1.0, got {w.sum():.4f}")
 
     # Matrix multiply: (n_days, n_assets) @ (n_assets,) → (n_days,)
-    return pd.Series(returns_df.values @ w, index=returns_df.index, name='Portfolio')
+    return pd.Series(returns_df.values @ w, index=returns_df.index, name="Portfolio")
 
 
 def portfolio_metrics(
@@ -70,27 +80,34 @@ def portfolio_metrics(
     sr = excess / port_vol if port_vol != 0 else 0.0
 
     metrics: Dict[str, Any] = {
-        'annualized_return': round(annual_ret, 6),
-        'annualized_volatility': round(port_vol, 6),
-        'sharpe_ratio': round(sr, 4),
-        'sortino_ratio': round(sortino_ratio(port_returns, risk_free_rate, periods_per_year), 4),
-        'max_drawdown': round(max_drawdown(equity_curve), 6),
-        'calmar_ratio': round(calmar_ratio(equity_curve, periods_per_year), 4),
-        'var_95': round(var_historical(port_returns, 0.95), 6),
-        'cvar_95': round(cvar(port_returns, 0.95), 6),
-        'total_return': round(float(equity_curve.iloc[-1] - 1), 6),
-        'tickers': list(returns_df.columns),
-        'weights': w.tolist(),
+        "annualized_return": round(annual_ret, 6),
+        "annualized_volatility": round(port_vol, 6),
+        "sharpe_ratio": round(sr, 4),
+        "sortino_ratio": round(
+            sortino_ratio(port_returns, risk_free_rate, periods_per_year), 4
+        ),
+        "max_drawdown": round(max_drawdown(equity_curve), 6),
+        "calmar_ratio": round(calmar_ratio(equity_curve, periods_per_year), 4),
+        "var_95": round(var_historical(port_returns, 0.95), 6),
+        "cvar_95": round(cvar(port_returns, 0.95), 6),
+        "total_return": round(float(equity_curve.iloc[-1] - 1), 6),
+        "tickers": list(returns_df.columns),
+        "weights": w.tolist(),
     }
 
     if benchmark_returns is not None:
-        metrics['information_ratio'] = round(
+        metrics["information_ratio"] = round(
             information_ratio(port_returns, benchmark_returns, periods_per_year), 4
         )
 
-    logger.debug("[portfolio] metrics  return=%.2f%%  vol=%.2f%%  sharpe=%.3f  sortino=%.3f  maxdd=%.2f%%",
-                 metrics["annualized_return"] * 100, metrics["annualized_volatility"] * 100,
-                 metrics["sharpe_ratio"], metrics["sortino_ratio"], metrics["max_drawdown"] * 100)
+    logger.debug(
+        "[portfolio] metrics  return=%.2f%%  vol=%.2f%%  sharpe=%.3f  sortino=%.3f  maxdd=%.2f%%",
+        metrics["annualized_return"] * 100,
+        metrics["annualized_volatility"] * 100,
+        metrics["sharpe_ratio"],
+        metrics["sortino_ratio"],
+        metrics["max_drawdown"] * 100,
+    )
     return metrics
 
 
@@ -109,13 +126,14 @@ async def fetch_returns_async(
     tickers: List[str],
     start_date: str,
     end_date: str,
-    interval: str = '1d',
+    interval: str = "1d",
 ) -> pd.DataFrame:
     """
     Fetch OHLCV for multiple tickers concurrently and return a returns DataFrame.
     One network round-trip per ticker, fully async.
     """
     from standard_quant_tools.data.factory import DataFactory
+
     provider = DataFactory.get_provider()
 
     tasks = [
@@ -126,7 +144,7 @@ async def fetch_returns_async(
 
     # Build aligned close-price matrix then compute returns
     close_prices = pd.DataFrame(
-        {ticker: df['Close'] for ticker, df in zip(tickers, dfs)}
+        {ticker: df["Close"] for ticker, df in zip(tickers, dfs)}
     )
     return close_prices.pct_change().dropna()
 
@@ -135,7 +153,7 @@ def fetch_returns_sync(
     tickers: List[str],
     start_date: str,
     end_date: str,
-    interval: str = '1d',
+    interval: str = "1d",
 ) -> pd.DataFrame:
     """Synchronous wrapper around fetch_returns_async."""
     return asyncio.run(fetch_returns_async(tickers, start_date, end_date, interval))

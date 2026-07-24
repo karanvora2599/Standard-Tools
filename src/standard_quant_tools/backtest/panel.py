@@ -15,8 +15,8 @@ from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 
 from standard_quant_tools.backtest.engine import run_strategy
-from standard_quant_tools.portfolio.portfolio import build_portfolio, portfolio_metrics
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.portfolio.portfolio import build_portfolio, portfolio_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,8 @@ def run_signal_panel_backtest(
 
     logger.debug(
         "[signal_panel] portfolio  sharpe=%.3f  return=%.2f%%  maxdd=%.2f%%",
-        metrics["sharpe_ratio"], metrics["annualized_return"] * 100,
+        metrics["sharpe_ratio"],
+        metrics["annualized_return"] * 100,
         metrics["max_drawdown"] * 100,
     )
 

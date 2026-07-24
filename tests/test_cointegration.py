@@ -11,8 +11,8 @@ from standard_quant_tools.analysis.cointegration import (
     spread_zscore,
 )
 
-
 # ── Shared fixtures ────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="module")
 def cointegrated_pair():
@@ -55,13 +55,19 @@ def mean_reverting_spread():
 
 # ── cointegration_test ─────────────────────────────────────────────────────────
 
+
 class TestCointegrationTestKeys:
     def test_returns_required_keys(self, cointegrated_pair):
         a, b = cointegrated_pair
         result = cointegration_test(a, b)
         assert set(result.keys()) == {
-            "cointegrated", "hedge_ratio", "adf_statistic",
-            "p_value", "critical_values", "half_life_days", "n_obs",
+            "cointegrated",
+            "hedge_ratio",
+            "adf_statistic",
+            "p_value",
+            "critical_values",
+            "half_life_days",
+            "n_obs",
         }
 
     def test_cointegrated_is_bool(self, cointegrated_pair):
@@ -145,6 +151,7 @@ class TestCointegrationTestValues:
 
 # ── compute_spread ─────────────────────────────────────────────────────────────
 
+
 class TestComputeSpread:
     def test_returns_series(self, cointegrated_pair):
         a, b = cointegrated_pair
@@ -190,6 +197,7 @@ class TestComputeSpread:
 
 # ── half_life ──────────────────────────────────────────────────────────────────
 
+
 class TestHalfLife:
     def test_returns_float(self, mean_reverting_spread):
         hl = half_life(mean_reverting_spread)
@@ -233,6 +241,7 @@ class TestHalfLife:
 
 # ── spread_zscore ──────────────────────────────────────────────────────────────
 
+
 class TestSpreadZscore:
     def test_static_has_zero_mean(self, cointegrated_pair):
         a, b = cointegrated_pair
@@ -258,7 +267,7 @@ class TestSpreadZscore:
         spread = compute_spread(a, b)
         window = 20
         z = spread_zscore(spread, window=window)
-        assert not z.iloc[window - 1:].isna().any()
+        assert not z.iloc[window - 1 :].isna().any()
 
     def test_rolling_values_reasonable(self, cointegrated_pair):
         """Rolling z-score of a bounded spread should stay within ±5."""

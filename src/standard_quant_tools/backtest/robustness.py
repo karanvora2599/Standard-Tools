@@ -52,30 +52,56 @@ def _norm_ppf(p: float) -> float:
     if p >= 1.0:
         return float("inf")
 
-    a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
-         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
-    b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
-         6.680131188771972e+01, -1.328068155288572e+01]
-    c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
-         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00]
-    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
-         3.754408661907416e+00]
+    a = [
+        -3.969683028665376e01,
+        2.209460984245205e02,
+        -2.759285104469687e02,
+        1.383577518672690e02,
+        -3.066479806614716e01,
+        2.506628277459239e00,
+    ]
+    b = [
+        -5.447609879822406e01,
+        1.615858368580409e02,
+        -1.556989798598866e02,
+        6.680131188771972e01,
+        -1.328068155288572e01,
+    ]
+    c = [
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e00,
+        -2.549732539343734e00,
+        4.374664141464968e00,
+        2.938163982698783e00,
+    ]
+    d = [
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e00,
+        3.754408661907416e00,
+    ]
 
     p_low = 0.02425
     p_high = 1.0 - p_low
 
     if p < p_low:
         q = math.sqrt(-2.0 * math.log(p))
-        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+        )
     if p <= p_high:
         q = p - 0.5
         r = q * q
-        return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / \
-               (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+        return (
+            (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5])
+            * q
+            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+        )
     q = math.sqrt(-2.0 * math.log(1.0 - p))
-    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-            ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+        (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+    )
 
 
 def block_bootstrap_ci(
@@ -128,7 +154,7 @@ def block_bootstrap_ci(
     boot_metrics = np.empty(n_iterations, dtype=float)
     for i in range(n_iterations):
         starts = rng.integers(0, max_start + 1, size=n_blocks)
-        resampled = np.concatenate([values[s: s + block_size] for s in starts])[:n]
+        resampled = np.concatenate([values[s : s + block_size] for s in starts])[:n]
         boot_metrics[i] = metric_fn(pd.Series(resampled))
 
     alpha = 1.0 - confidence
@@ -137,7 +163,12 @@ def block_bootstrap_ci(
 
     logger.debug(
         "[robustness] block_bootstrap_ci  n=%d  block_size=%d  iterations=%d  point=%.4f  ci=[%.4f, %.4f]",
-        n, block_size, n_iterations, point_estimate, lower, upper,
+        n,
+        block_size,
+        n_iterations,
+        point_estimate,
+        lower,
+        upper,
     )
 
     return {
@@ -150,7 +181,9 @@ def block_bootstrap_ci(
     }
 
 
-def parameter_sensitivity(grid_df: pd.DataFrame, metric_col: str = "sharpe_ratio") -> Dict[str, Any]:
+def parameter_sensitivity(
+    grid_df: pd.DataFrame, metric_col: str = "sharpe_ratio"
+) -> Dict[str, Any]:
     """
     Cheap overfitting proxy from an existing backtest_grid /
     run_backtest_optimization result: how much better is the best trial
@@ -186,7 +219,7 @@ def parameter_sensitivity(grid_df: pd.DataFrame, metric_col: str = "sharpe_ratio
 
     best_minus_rank2 = float(best - sorted_desc[1]) if n > 1 else 0.0
     if n > 1:
-        top_pack = sorted_desc[1: min(5, n)]
+        top_pack = sorted_desc[1 : min(5, n)]
         best_minus_top5_mean = float(best - top_pack.mean())
     else:
         best_minus_top5_mean = 0.0
@@ -258,7 +291,9 @@ def deflated_sharpe_ratio(
             + _EULER_MASCHERONI * _norm_ppf(1.0 - 1.0 / (n_trials * math.e))
         )
 
-    denom_sq = 1.0 - skew * observed_sharpe + ((kurtosis - 1.0) / 4.0) * observed_sharpe ** 2
+    denom_sq = (
+        1.0 - skew * observed_sharpe + ((kurtosis - 1.0) / 4.0) * observed_sharpe**2
+    )
     if denom_sq <= 0:
         raise ValidationError(
             "degenerate skew/kurtosis input: Sharpe standard-error denominator "
@@ -272,7 +307,11 @@ def deflated_sharpe_ratio(
 
     logger.debug(
         "[robustness] deflated_sharpe_ratio  observed=%.4f  sr0=%.4f  n_trials=%d  n_obs=%d  dsr=%.4f",
-        observed_sharpe, sr0, n_trials, n_obs, dsr,
+        observed_sharpe,
+        sr0,
+        n_trials,
+        n_obs,
+        dsr,
     )
 
     return {

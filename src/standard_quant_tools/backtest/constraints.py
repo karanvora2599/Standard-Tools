@@ -27,7 +27,9 @@ def adv_participation(notional: float, avg_dollar_volume: float) -> float:
     return abs(notional) / avg_dollar_volume
 
 
-def days_to_liquidate(shares: float, avg_daily_volume: float, max_participation: float) -> float:
+def days_to_liquidate(
+    shares: float, avg_daily_volume: float, max_participation: float
+) -> float:
     """
     Estimated trading days to fully unwind a position without exceeding
     max_participation of the ticker's own average daily (share) volume.
@@ -46,7 +48,9 @@ def days_to_liquidate(shares: float, avg_daily_volume: float, max_participation:
     return abs(shares) / tradeable_per_day
 
 
-def sector_exposure(weights: Dict[str, float], sectors: Dict[str, str]) -> Dict[str, float]:
+def sector_exposure(
+    weights: Dict[str, float], sectors: Dict[str, str]
+) -> Dict[str, float]:
     """
     Aggregate portfolio weight by sector. Tickers missing from `sectors`
     (or whose sector is the "Unknown" yfinance falls back to — see
@@ -97,7 +101,9 @@ def capacity_report(
         raise ValidationError(f"max_participation must be > 0, got {max_participation}")
     missing_adv = [t for t in tickers if t not in avg_dollar_volumes]
     if missing_adv:
-        raise ValidationError(f"avg_dollar_volumes is missing entries for: {missing_adv}")
+        raise ValidationError(
+            f"avg_dollar_volumes is missing entries for: {missing_adv}"
+        )
     missing_w = [t for t in tickers if t not in target_weights]
     if missing_w:
         raise ValidationError(f"target_weights is missing entries for: {missing_w}")
@@ -125,6 +131,9 @@ def capacity_report(
         "binding_ticker": binding_ticker,
         "max_account_size": max_account_size,
     }
-    logger.debug("[constraints] capacity_report  binding=%s  max_account_size=%.0f",
-                 binding_ticker, max_account_size if max_account_size != float("inf") else -1.0)
+    logger.debug(
+        "[constraints] capacity_report  binding=%s  max_account_size=%.0f",
+        binding_ticker,
+        max_account_size if max_account_size != float("inf") else -1.0,
+    )
     return result

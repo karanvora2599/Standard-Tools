@@ -1,11 +1,12 @@
 from enum import Enum
-from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Literal, Optional
 
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ──────────────────────────────────────────────
 # Backtest
 # ──────────────────────────────────────────────
+
 
 class BacktestInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
@@ -14,7 +15,7 @@ class BacktestInput(BaseModel):
     strategy_type: str = Field(
         ...,
         description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
-                    "'macd_crossover', or 'bollinger_reversion'.",
+        "'macd_crossover', or 'bollinger_reversion'.",
     )
     parameters: Dict[str, Any] = Field(
         {},
@@ -26,8 +27,12 @@ class BacktestInput(BaseModel):
         ),
     )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
+    commission_pct: float = Field(
+        0.001, description="Commission per trade (fraction, default 0.1%)."
+    )
+    slippage_pct: float = Field(
+        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+    )
     fill_price: str = Field(
         "close",
         description=(
@@ -68,6 +73,7 @@ class BacktestResult(BaseModel):
 # Risk Analysis
 # ──────────────────────────────────────────────
 
+
 class AnalysisInput(BaseModel):
     symbol: str = Field(..., description="Target asset symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol.")
@@ -92,12 +98,13 @@ class AnalysisResult(BaseModel):
 # Technical Analysis
 # ──────────────────────────────────────────────
 
+
 class TechnicalInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     indicators: List[str] = Field(
-        ['rsi', 'macd', 'bollinger', 'atr'],
+        ["rsi", "macd", "bollinger", "atr"],
         description=(
             "List of indicators to compute. Options: "
             "'sma', 'ema', 'macd', 'rsi', 'stochastic', "
@@ -117,9 +124,12 @@ class TechnicalResult(BaseModel):
 # Portfolio Analysis
 # ──────────────────────────────────────────────
 
+
 class PortfolioInput(BaseModel):
     tickers: List[str] = Field(..., description="List of ticker symbols.")
-    weights: List[float] = Field(..., description="Portfolio weights (must sum to 1.0).")
+    weights: List[float] = Field(
+        ..., description="Portfolio weights (must sum to 1.0)."
+    )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     benchmark: str = Field("SPY", description="Benchmark for Information Ratio.")
@@ -156,6 +166,7 @@ class PortfolioResult(BaseModel):
 # Screener
 # ──────────────────────────────────────────────
 
+
 class ScreenerInput(BaseModel):
     tickers: List[str] = Field(..., description="Universe of tickers to screen.")
     filters: Dict[str, Any] = Field(
@@ -167,7 +178,9 @@ class ScreenerInput(BaseModel):
             "price_below_sma (int), beta_max, beta_min."
         ),
     )
-    start_date: Optional[str] = Field(None, description="Historical start for technicals.")
+    start_date: Optional[str] = Field(
+        None, description="Historical start for technicals."
+    )
     end_date: Optional[str] = Field(None, description="Historical end for technicals.")
     sort_by: Optional[str] = Field(None, description="Column to sort results by.")
     ascending: bool = Field(True, description="Sort direction.")
@@ -182,6 +195,7 @@ class ScreenerResult(BaseModel):
 # ──────────────────────────────────────────────
 # Factor Regression
 # ──────────────────────────────────────────────
+
 
 class FactorRegressionInput(BaseModel):
     symbol: str = Field(..., description="Asset to analyse (e.g. 'AAPL').")
@@ -228,6 +242,7 @@ class FactorRegressionResult(BaseModel):
 # Cointegration
 # ──────────────────────────────────────────────
 
+
 class CointegrationInput(BaseModel):
     symbol_a: str = Field(..., description="First asset symbol (the 'long' leg).")
     symbol_b: str = Field(..., description="Second asset symbol (the 'short' leg).")
@@ -251,7 +266,7 @@ class CointegrationResult(BaseModel):
     spread_mean: float
     spread_std: float
     current_zscore: float
-    signal: str   # "long_a_short_b" | "short_a_long_b" | "neutral"
+    signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
     n_obs: int
 
 
@@ -259,11 +274,14 @@ class CointegrationResult(BaseModel):
 # PCA
 # ──────────────────────────────────────────────
 
+
 class PCAInput(BaseModel):
     tickers: List[str] = Field(..., description="Universe of tickers to decompose.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    n_components: int = Field(3, description="Number of principal components to extract (default 3).")
+    n_components: int = Field(
+        3, description="Number of principal components to extract (default 3)."
+    )
 
     @field_validator("n_components")
     @classmethod
@@ -277,15 +295,18 @@ class PCAResult(BaseModel):
     tickers: List[str]
     n_components: int
     n_obs: int
-    explained_variance_ratio: Dict[str, float]       # {"PC1": 0.42, "PC2": 0.12, ...}
-    cumulative_variance_ratio: Dict[str, float]      # {"PC1": 0.42, "PC2": 0.54, ...}
-    loadings: Dict[str, Dict[str, float]]            # {"PC1": {"AAPL": 0.35, ...}, ...}
-    factor_contributions: Dict[str, Dict[str, float]] # {"AAPL": {"PC1": 0.38, ...}, ...}
+    explained_variance_ratio: Dict[str, float]  # {"PC1": 0.42, "PC2": 0.12, ...}
+    cumulative_variance_ratio: Dict[str, float]  # {"PC1": 0.42, "PC2": 0.54, ...}
+    loadings: Dict[str, Dict[str, float]]  # {"PC1": {"AAPL": 0.35, ...}, ...}
+    factor_contributions: Dict[
+        str, Dict[str, float]
+    ]  # {"AAPL": {"PC1": 0.38, ...}, ...}
 
 
 # ──────────────────────────────────────────────
 # Hurst Exponent
 # ──────────────────────────────────────────────
+
 
 class HurstInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
@@ -307,7 +328,7 @@ class HurstInput(BaseModel):
 class HurstResult(BaseModel):
     symbol: str
     hurst: float
-    regime: str   # "trending" | "random_walk" | "mean_reverting"
+    regime: str  # "trending" | "random_walk" | "mean_reverting"
     fit_r_squared: float
     method: str
     n_obs: int
@@ -318,6 +339,7 @@ class HurstResult(BaseModel):
 # ──────────────────────────────────────────────
 # Regime-Adaptive Strategy Selector
 # ──────────────────────────────────────────────
+
 
 class RegimeAdaptiveInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
@@ -343,12 +365,14 @@ class RegimeAdaptiveInput(BaseModel):
         None,
         description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
     )
-    n_workers: int = Field(1, description="Worker processes for grid search (default 1 for agent use).")
+    n_workers: int = Field(
+        1, description="Worker processes for grid search (default 1 for agent use)."
+    )
 
 
 class RegimeAdaptiveResult(BaseModel):
     symbol: str
-    regime: str          # "trending" | "random_walk" | "mean_reverting"
+    regime: str  # "trending" | "random_walk" | "mean_reverting"
     hurst: float
     fit_r_squared: float
     selected_strategy: str
@@ -361,15 +385,24 @@ class RegimeAdaptiveResult(BaseModel):
 # Cointegration Pair Scanner
 # ──────────────────────────────────────────────
 
+
 class PairScannerInput(BaseModel):
-    tickers: List[str] = Field(..., description="Universe of tickers to test for cointegration.")
+    tickers: List[str] = Field(
+        ..., description="Universe of tickers to test for cointegration."
+    )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     max_pairs: int = Field(10, description="Maximum number of top pairs to return.")
-    min_half_life: float = Field(5.0, description="Minimum mean-reversion half-life in bars.")
-    max_half_life: float = Field(126.0, description="Maximum half-life in bars (~6 months).")
+    min_half_life: float = Field(
+        5.0, description="Minimum mean-reversion half-life in bars."
+    )
+    max_half_life: float = Field(
+        126.0, description="Maximum half-life in bars (~6 months)."
+    )
     p_value_threshold: float = Field(0.05, description="Maximum cointegration p-value.")
-    zscore_window: int = Field(30, description="Rolling window for spread z-score signal.")
+    zscore_window: int = Field(
+        30, description="Rolling window for spread z-score signal."
+    )
 
 
 class PairResult(BaseModel):
@@ -380,7 +413,7 @@ class PairResult(BaseModel):
     half_life_days: float
     adf_statistic: float
     current_zscore: float
-    signal: str          # "long_a_short_b" | "short_a_long_b" | "neutral"
+    signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
 
 
 class PairFailure(BaseModel):
@@ -397,12 +430,13 @@ class PairScannerResult(BaseModel):
     # Explicit failure reporting so an errored pair/ticker is never confused
     # with one that was tested and simply didn't qualify.
     failed_pairs: List[PairFailure] = []
-    failed_tickers: Dict[str, str] = {}   # ticker -> fetch-error message
+    failed_tickers: Dict[str, str] = {}  # ticker -> fetch-error message
 
 
 # ──────────────────────────────────────────────
 # Walk-Forward Backtest
 # ──────────────────────────────────────────────
+
 
 class WalkForwardInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
@@ -413,14 +447,26 @@ class WalkForwardInput(BaseModel):
         description="Strategy name: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
     )
     param_grid: Dict[str, List[Any]] = Field(
-        ..., description="Parameter grid, e.g. {'fast_period': [5, 10, 20], 'slow_period': [30, 50]}.",
+        ...,
+        description="Parameter grid, e.g. {'fast_period': [5, 10, 20], 'slow_period': [30, 50]}.",
     )
-    train_bars: int = Field(252, description="In-sample window length in bars (default 252 = ~1 year daily).")
-    test_bars: int = Field(63, description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).")
-    initial_capital: float = Field(10_000.0, description="Starting capital for each window.")
+    train_bars: int = Field(
+        252,
+        description="In-sample window length in bars (default 252 = ~1 year daily).",
+    )
+    test_bars: int = Field(
+        63,
+        description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).",
+    )
+    initial_capital: float = Field(
+        10_000.0, description="Starting capital for each window."
+    )
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    sort_by: str = Field("sharpe_ratio", description="Metric to optimise in-sample (default: 'sharpe_ratio').")
+    sort_by: str = Field(
+        "sharpe_ratio",
+        description="Metric to optimise in-sample (default: 'sharpe_ratio').",
+    )
     fill_price: str = Field(
         "close",
         description="'close' (default), 'next_open', or 'midpoint' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
@@ -459,11 +505,13 @@ class WalkForwardResult(BaseModel):
     stitched_oos_sortino: float
     stitched_oos_max_drawdown: float
     stitched_oos_calmar: float
-    is_to_oos_sharpe_decay: float   # avg in-sample sharpe minus stitched OOS sharpe
-    is_to_oos_return_decay: float   # avg in-sample return minus stitched OOS return
-    worst_oos_window: int           # window_index with the lowest out_of_sample_return
+    is_to_oos_sharpe_decay: float  # avg in-sample sharpe minus stitched OOS sharpe
+    is_to_oos_return_decay: float  # avg in-sample return minus stitched OOS return
+    worst_oos_window: int  # window_index with the lowest out_of_sample_return
     longest_losing_window_streak: int
-    parameter_turnover: float       # fraction of consecutive windows whose best_params changed
+    parameter_turnover: (
+        float  # fraction of consecutive windows whose best_params changed
+    )
 
 
 # ──────────────────────────────────────────────
@@ -472,29 +520,48 @@ class WalkForwardResult(BaseModel):
 # selection happen strictly within each window's training data)
 # ──────────────────────────────────────────────
 
+
 class RegimeAdaptiveWalkForwardInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    train_bars: int = Field(252, description="In-sample window length in bars (default 252 = ~1 year daily).")
-    test_bars: int = Field(63, description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).")
-    initial_capital: float = Field(10_000.0, description="Starting capital for each window.")
+    train_bars: int = Field(
+        252,
+        description="In-sample window length in bars (default 252 = ~1 year daily).",
+    )
+    test_bars: int = Field(
+        63,
+        description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).",
+    )
+    initial_capital: float = Field(
+        10_000.0, description="Starting capital for each window."
+    )
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    hurst_method: str = Field("dfa", description="Hurst method: 'dfa' or 'rs' — reported as diagnostic context per window, not used to hard-select a strategy family.")
+    hurst_method: str = Field(
+        "dfa",
+        description="Hurst method: 'dfa' or 'rs' — reported as diagnostic context per window, not used to hard-select a strategy family.",
+    )
     sma_param_grid: Optional[Dict[str, List[Any]]] = Field(
-        None, description="Custom param grid for SMA crossover. Default: fast_period=[5,10,20], slow_period=[30,50,100].",
+        None,
+        description="Custom param grid for SMA crossover. Default: fast_period=[5,10,20], slow_period=[30,50,100].",
     )
     rsi_param_grid: Optional[Dict[str, List[Any]]] = Field(
-        None, description="Custom param grid for RSI mean-reversion. Default: period=[7,14,21], oversold=[25,30], overbought=[65,70].",
+        None,
+        description="Custom param grid for RSI mean-reversion. Default: period=[7,14,21], oversold=[25,30], overbought=[65,70].",
     )
     macd_param_grid: Optional[Dict[str, List[Any]]] = Field(
-        None, description="Custom param grid for MACD crossover. Default: fast=[8,12], slow=[21,26], signal=[7,9].",
+        None,
+        description="Custom param grid for MACD crossover. Default: fast=[8,12], slow=[21,26], signal=[7,9].",
     )
     bollinger_param_grid: Optional[Dict[str, List[Any]]] = Field(
-        None, description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
+        None,
+        description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
     )
-    sort_by: str = Field("sharpe_ratio", description="Metric to optimise in-sample, across all four strategies (default: 'sharpe_ratio').")
+    sort_by: str = Field(
+        "sharpe_ratio",
+        description="Metric to optimise in-sample, across all four strategies (default: 'sharpe_ratio').",
+    )
     fill_price: str = Field(
         "close",
         description="'close' (default), 'next_open', or 'midpoint' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
@@ -507,7 +574,7 @@ class RegimeAdaptiveWalkForwardWindow(BaseModel):
     train_end: str
     test_start: str
     test_end: str
-    regime: str          # "trending" | "random_walk" | "mean_reverting" | "unknown" — diagnostic context only
+    regime: str  # "trending" | "random_walk" | "mean_reverting" | "unknown" — diagnostic context only
     hurst: float
     fit_r_squared: float
     selected_strategy: str
@@ -527,7 +594,9 @@ class RegimeAdaptiveWalkForwardResult(BaseModel):
     avg_oos_return: float
     avg_oos_max_drawdown: float
     pct_windows_profitable: float
-    strategy_stability: Dict[str, Any]   # most common selected_strategy across windows + frequency
+    strategy_stability: Dict[
+        str, Any
+    ]  # most common selected_strategy across windows + frequency
     stitched_oos_return: float
     stitched_oos_sharpe: float
     stitched_oos_sortino: float
@@ -540,6 +609,7 @@ class RegimeAdaptiveWalkForwardResult(BaseModel):
 # ──────────────────────────────────────────────
 # Portfolio Risk Attribution
 # ──────────────────────────────────────────────
+
 
 class RiskAttributionInput(BaseModel):
     tickers: List[str] = Field(..., description="Portfolio asset symbols.")
@@ -581,10 +651,12 @@ class RiskAttributionResult(BaseModel):
     cvar_95: float
     information_ratio: float
     # Asset risk decomposition
-    asset_risk_contributions: Dict[str, float]   # fractional contribution to portfolio vol (sums to 1)
+    asset_risk_contributions: Dict[
+        str, float
+    ]  # fractional contribution to portfolio vol (sums to 1)
     # PCA decomposition
-    pca_variance_explained: Dict[str, float]     # EVR per PC across the asset universe
-    portfolio_pc_exposures: Dict[str, float]     # portfolio's loading on each PC
+    pca_variance_explained: Dict[str, float]  # EVR per PC across the asset universe
+    portfolio_pc_exposures: Dict[str, float]  # portfolio's loading on each PC
     # Factor model (optional)
     factor_loadings: Optional[Dict[str, float]] = None
     factor_r_squared: Optional[float] = None
@@ -595,21 +667,31 @@ class RiskAttributionResult(BaseModel):
 # ATR-Based Position Sizer
 # ──────────────────────────────────────────────
 
+
 class PositionSizerInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
-    start_date: str = Field(..., description="Start date YYYY-MM-DD (for ATR calculation).")
+    start_date: str = Field(
+        ..., description="Start date YYYY-MM-DD (for ATR calculation)."
+    )
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     account_equity: float = Field(..., description="Total account equity in dollars.")
     risk_per_trade_pct: float = Field(
-        0.01, description="Fraction of account to risk per trade (default 0.01 = 1%). Must be in (0, 1]."
+        0.01,
+        description="Fraction of account to risk per trade (default 0.01 = 1%). Must be in (0, 1].",
     )
     atr_period: int = Field(14, description="ATR lookback period (default 14).")
     atr_multiplier: float = Field(
         2.0, description="Stop distance = atr_multiplier × ATR (default 2.0)."
     )
-    win_rate: Optional[float] = Field(None, description="Strategy win rate [0,1]. Required for Kelly sizing.")
-    avg_win_pct: Optional[float] = Field(None, description="Average winning trade return (e.g. 0.05 = 5%).")
-    avg_loss_pct: Optional[float] = Field(None, description="Average losing trade return magnitude (e.g. 0.02 = 2%).")
+    win_rate: Optional[float] = Field(
+        None, description="Strategy win rate [0,1]. Required for Kelly sizing."
+    )
+    avg_win_pct: Optional[float] = Field(
+        None, description="Average winning trade return (e.g. 0.05 = 5%)."
+    )
+    avg_loss_pct: Optional[float] = Field(
+        None, description="Average losing trade return magnitude (e.g. 0.02 = 2%)."
+    )
 
     @field_validator("risk_per_trade_pct")
     @classmethod
@@ -623,20 +705,20 @@ class PositionSizerResult(BaseModel):
     symbol: str
     last_close: float
     atr: float
-    atr_pct: float               # ATR as % of price
-    stop_distance: float         # atr_multiplier × ATR in $
+    atr_pct: float  # ATR as % of price
+    stop_distance: float  # atr_multiplier × ATR in $
     # Fixed-risk (ATR-based) sizing
     shares_fixed_risk: int
     position_value_fixed_risk: float
     portfolio_pct_fixed_risk: float
-    max_loss_fixed_risk: float   # worst-case $ loss if stop is hit
+    max_loss_fixed_risk: float  # worst-case $ loss if stop is hit
     # Kelly sizing (populated when win_rate/avg_win/avg_loss are provided)
     kelly_fraction: Optional[float] = None
     shares_half_kelly: Optional[int] = None
     position_value_half_kelly: Optional[float] = None
     portfolio_pct_half_kelly: Optional[float] = None
     # Recommendation
-    recommended_sizing: str      # "fixed_risk" | "half_kelly"
+    recommended_sizing: str  # "fixed_risk" | "half_kelly"
     recommended_shares: int
     recommended_position_value: float
 
@@ -645,19 +727,28 @@ class PositionSizerResult(BaseModel):
 # Buy-and-Hold Baseline
 # ──────────────────────────────────────────────
 
+
 class BuyAndHoldInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="One-time buy commission (fraction, default 0.1%).")
-    slippage_pct: float = Field(0.0005, description="One-time buy slippage (fraction, default 0.05%).")
-    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+    commission_pct: float = Field(
+        0.001, description="One-time buy commission (fraction, default 0.1%)."
+    )
+    slippage_pct: float = Field(
+        0.0005, description="One-time buy slippage (fraction, default 0.05%)."
+    )
+    fill_price: str = Field(
+        "close",
+        description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
 
 
 # ──────────────────────────────────────────────
 # Strategy Comparison
 # ──────────────────────────────────────────────
+
 
 class StrategyComparison(BaseModel):
     strategy: str
@@ -702,7 +793,10 @@ class CompareStrategiesInput(BaseModel):
         None,
         description="Custom Bollinger reversion params. Default: {period: 20, num_std: 2.0}.",
     )
-    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+    fill_price: str = Field(
+        "close",
+        description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
 
 
 class CompareStrategiesResult(BaseModel):
@@ -716,6 +810,7 @@ class CompareStrategiesResult(BaseModel):
 # ──────────────────────────────────────────────
 # Stock Fundamentals
 # ──────────────────────────────────────────────
+
 
 class FundamentalsInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
@@ -741,6 +836,7 @@ class FundamentalsResult(BaseModel):
 # ──────────────────────────────────────────────
 # Backtest Optimization
 # ──────────────────────────────────────────────
+
 
 class BacktestOptInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
@@ -771,9 +867,17 @@ class BacktestOptInput(BaseModel):
             "Options: 'sharpe_ratio', 'total_return', 'calmar_ratio', 'sortino_ratio', 'max_drawdown'."
         ),
     )
-    top_n: int = Field(5, description="Number of top parameter combinations to return (default 5, max 20).")
-    n_workers: int = Field(1, description="CPU workers for parallel grid search (default 1).")
-    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+    top_n: int = Field(
+        5,
+        description="Number of top parameter combinations to return (default 5, max 20).",
+    )
+    n_workers: int = Field(
+        1, description="CPU workers for parallel grid search (default 1)."
+    )
+    fill_price: str = Field(
+        "close",
+        description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
 
 
 class OptimizationRun(BaseModel):
@@ -802,38 +906,46 @@ class BacktestOptResult(BaseModel):
 # Advanced Indicators
 # ──────────────────────────────────────────────
 
+
 class AdvancedIndicatorsInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     mfi_period: int = Field(14, description="Money Flow Index period (default 14).")
     atr_period: int = Field(14, description="Wilder ATR period (default 14).")
-    sar_af_start: float = Field(0.02, description="Parabolic SAR initial acceleration factor (default 0.02).")
-    sar_af_max: float = Field(0.2, description="Parabolic SAR maximum acceleration factor (default 0.2).")
+    sar_af_start: float = Field(
+        0.02, description="Parabolic SAR initial acceleration factor (default 0.02)."
+    )
+    sar_af_max: float = Field(
+        0.2, description="Parabolic SAR maximum acceleration factor (default 0.2)."
+    )
 
 
 class AdvancedIndicatorsResult(BaseModel):
     symbol: str
     last_close: float
     sar_value: float
-    sar_trend: str       # "bullish" | "bearish"
-    sar_signal: str      # "buy" | "sell"
+    sar_trend: str  # "bullish" | "bearish"
+    sar_signal: str  # "buy" | "sell"
     wilder_atr: float
     wilder_atr_pct: float
     mfi: float
-    mfi_signal: str      # "overbought" | "oversold" | "neutral"
+    mfi_signal: str  # "overbought" | "oversold" | "neutral"
 
 
 # ──────────────────────────────────────────────
 # Rolling Beta
 # ──────────────────────────────────────────────
 
+
 class RollingBetaInput(BaseModel):
     symbol: str = Field(..., description="Asset ticker symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol (default SPY).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    window: int = Field(60, description="Rolling window in bars (default 60 ≈ 3 months daily).")
+    window: int = Field(
+        60, description="Rolling window in bars (default 60 ≈ 3 months daily)."
+    )
 
 
 class RollingBetaResult(BaseModel):
@@ -844,7 +956,7 @@ class RollingBetaResult(BaseModel):
     beta_1m_ago: Optional[float]
     beta_3m_ago: Optional[float]
     beta_6m_ago: Optional[float]
-    beta_trend: str      # "increasing" | "decreasing" | "stable"
+    beta_trend: str  # "increasing" | "decreasing" | "stable"
     beta_min: float
     beta_max: float
     beta_mean: float
@@ -854,6 +966,7 @@ class RollingBetaResult(BaseModel):
 # ──────────────────────────────────────────────
 # Extended Risk Metrics
 # ──────────────────────────────────────────────
+
 
 class ExtendedRiskInput(BaseModel):
     symbol: str = Field(..., description="Asset ticker symbol.")
@@ -879,6 +992,7 @@ class ExtendedRiskResult(BaseModel):
 # Custom Signal Backtest (bring-your-own signal)
 # ──────────────────────────────────────────────
 
+
 class SignalType(str, Enum):
     """
     What a custom signal's numeric values mean, and how strictly they're
@@ -889,14 +1003,21 @@ class SignalType(str, Enum):
     multiplies the (lagged) signal value by the bar's return, regardless
     of signal_type.
     """
-    SCORE = "score"                  # unrestricted float — caller owns the scale/leverage semantics
-    DIRECTION = "direction"          # must be exactly -1, 0, or 1 (within 1e-9)
+
+    SCORE = "score"  # unrestricted float — caller owns the scale/leverage semantics
+    DIRECTION = "direction"  # must be exactly -1, 0, or 1 (within 1e-9)
     TARGET_WEIGHT = "target_weight"  # must satisfy |value| <= max_abs_weight
 
 
-def _validate_signal_values(values: Dict[Any, float], signal_type: "SignalType", max_abs_weight: float) -> None:
+def _validate_signal_values(
+    values: Dict[Any, float], signal_type: "SignalType", max_abs_weight: float
+) -> None:
     if signal_type == SignalType.DIRECTION:
-        bad = {k: v for k, v in values.items() if min(abs(v - d) for d in (-1.0, 0.0, 1.0)) > 1e-9}
+        bad = {
+            k: v
+            for k, v in values.items()
+            if min(abs(v - d) for d in (-1.0, 0.0, 1.0)) > 1e-9
+        }
         if bad:
             sample = dict(list(bad.items())[:5])
             raise ValueError(
@@ -938,7 +1059,8 @@ class CustomSignalBacktestInput(BaseModel):
         ),
     )
     max_abs_weight: float = Field(
-        1.0, description="Bound used only when signal_type='target_weight' (ignored otherwise)."
+        1.0,
+        description="Bound used only when signal_type='target_weight' (ignored otherwise).",
     )
     signal_fill_policy: Literal["hold", "flat", "error"] = Field(
         "hold",
@@ -952,9 +1074,16 @@ class CustomSignalBacktestInput(BaseModel):
         ),
     )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
-    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+    commission_pct: float = Field(
+        0.001, description="Commission per trade (fraction, default 0.1%)."
+    )
+    slippage_pct: float = Field(
+        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+    )
+    fill_price: str = Field(
+        "close",
+        description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
 
     @model_validator(mode="after")
     def _check_signal_values(self) -> "CustomSignalBacktestInput":
@@ -966,8 +1095,11 @@ class CustomSignalBacktestInput(BaseModel):
 # Signal Panel Backtest (bring-your-own multi-ticker signal matrix)
 # ──────────────────────────────────────────────
 
+
 class SignalPanelBacktestInput(BaseModel):
-    tickers: List[str] = Field(..., description="Ticker universe. Must match signal_panel's outer keys.")
+    tickers: List[str] = Field(
+        ..., description="Ticker universe. Must match signal_panel's outer keys."
+    )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     signal_panel: Dict[str, Dict[str, float]] = Field(
@@ -993,14 +1125,22 @@ class SignalPanelBacktestInput(BaseModel):
             "'error' requires every price date to have an explicit signal entry."
         ),
     )
-    initial_capital: float = Field(10_000.0, description="Starting capital applied per ticker.")
+    initial_capital: float = Field(
+        10_000.0, description="Starting capital applied per ticker."
+    )
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
     benchmark: Optional[str] = Field(
-        None, description="Optional benchmark ticker — adds information_ratio to portfolio_metrics."
+        None,
+        description="Optional benchmark ticker — adds information_ratio to portfolio_metrics.",
     )
-    include_trade_log: bool = Field(False, description="If True, include a per-trade log for each ticker.")
-    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+    include_trade_log: bool = Field(
+        False, description="If True, include a per-trade log for each ticker."
+    )
+    fill_price: str = Field(
+        "close",
+        description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
     signal_type: SignalType = Field(
         SignalType.SCORE,
         description=(
@@ -1010,7 +1150,8 @@ class SignalPanelBacktestInput(BaseModel):
         ),
     )
     max_abs_weight: float = Field(
-        1.0, description="Bound used only when signal_type='target_weight' (ignored otherwise)."
+        1.0,
+        description="Bound used only when signal_type='target_weight' (ignored otherwise).",
     )
 
     @model_validator(mode="after")
@@ -1026,7 +1167,9 @@ class SignalPanelBacktestInput(BaseModel):
                 raise ValueError(f"weights must sum to 1.0, got {total:.6f}")
         for ticker in self.tickers:
             try:
-                _validate_signal_values(self.signal_panel[ticker], self.signal_type, self.max_abs_weight)
+                _validate_signal_values(
+                    self.signal_panel[ticker], self.signal_type, self.max_abs_weight
+                )
             except ValueError as exc:
                 raise ValueError(f"ticker '{ticker}': {exc}") from exc
         return self
@@ -1045,12 +1188,17 @@ class SignalPanelBacktestResult(BaseModel):
 # ──────────────────────────────────────────────
 
 _CONSTRUCTION_METHODS = (
-    "rank_weighted", "equal_weight_top_bottom", "zscore_normalized", "vol_scaled",
+    "rank_weighted",
+    "equal_weight_top_bottom",
+    "zscore_normalized",
+    "vol_scaled",
 )
 
 
 class PortfolioSimulationInput(BaseModel):
-    tickers: List[str] = Field(..., description="Ticker universe. Must match target_weights' outer keys.")
+    tickers: List[str] = Field(
+        ..., description="Ticker universe. Must match target_weights' outer keys."
+    )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     target_weights: Dict[str, Dict[str, float]] = Field(
@@ -1084,7 +1232,8 @@ class PortfolioSimulationInput(BaseModel):
         ),
     )
     gross_leverage: float = Field(
-        1.0, description="Target sum(|weight|) per date when signal_type='score' (ignored otherwise)."
+        1.0,
+        description="Target sum(|weight|) per date when signal_type='score' (ignored otherwise).",
     )
     n_long: Optional[int] = Field(
         None, description="Required when construction_method='equal_weight_top_bottom'."
@@ -1093,7 +1242,8 @@ class PortfolioSimulationInput(BaseModel):
         None, description="Required when construction_method='equal_weight_top_bottom'."
     )
     vol_lookback: int = Field(
-        20, description="Rolling window (bars) used when construction_method='vol_scaled'."
+        20,
+        description="Rolling window (bars) used when construction_method='vol_scaled'.",
     )
     make_dollar_neutral: bool = Field(
         False,
@@ -1102,11 +1252,18 @@ class PortfolioSimulationInput(BaseModel):
             "(backtest/sizing.py's dollar_neutral). Only applies when signal_type='score'."
         ),
     )
-    initial_capital: float = Field(10_000.0, description="Starting cash for the whole account.")
-    commission_pct: float = Field(0.001, description="Commission per trade notional (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade notional (fraction).")
+    initial_capital: float = Field(
+        10_000.0, description="Starting cash for the whole account."
+    )
+    commission_pct: float = Field(
+        0.001, description="Commission per trade notional (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, description="Slippage per trade notional (fraction)."
+    )
     max_gross_leverage: float = Field(
-        1.0, description="Reject any rebalance date whose sum(|weight|) exceeds this (default 1.0 = fully invested, no leverage)."
+        1.0,
+        description="Reject any rebalance date whose sum(|weight|) exceeds this (default 1.0 = fully invested, no leverage).",
     )
     max_position_pct: float = Field(
         1.0, description="Reject any single position whose |weight| exceeds this."
@@ -1116,21 +1273,44 @@ class PortfolioSimulationInput(BaseModel):
         description="'close' (default), 'next_open', or 'midpoint' — see run_strategy's fill_price / the True Portfolio Simulation docs.",
     )
     commission_model: str = Field(
-        "pct", description="'pct' (default — commission_pct * notional) or 'per_share' (per_share_rate per share, floored at min_commission).",
+        "pct",
+        description="'pct' (default — commission_pct * notional) or 'per_share' (per_share_rate per share, floored at min_commission).",
     )
-    per_share_rate: float = Field(0.0, description="Commission per share traded. Only used when commission_model='per_share'.")
-    min_commission: float = Field(0.0, description="Minimum commission per rebalance leg. Only used when commission_model='per_share'.")
+    per_share_rate: float = Field(
+        0.0,
+        description="Commission per share traded. Only used when commission_model='per_share'.",
+    )
+    min_commission: float = Field(
+        0.0,
+        description="Minimum commission per rebalance leg. Only used when commission_model='per_share'.",
+    )
     use_impact_model: bool = Field(
-        False, description="If True, add a square-root market-impact cost on top of commission + spread (backtest/costs.py).",
+        False,
+        description="If True, add a square-root market-impact cost on top of commission + spread (backtest/costs.py).",
     )
-    impact_coefficient: float = Field(1.0, description="Market-impact model coefficient. Only used when use_impact_model=True.")
-    impact_lookback: int = Field(20, description="Rolling window (bars) for average dollar volume / volatility used by the impact model.")
-    borrow_fee_bps: float = Field(0.0, description="Annualized basis-point borrow fee accrued daily on any short position's notional.")
-    margin_interest_rate: float = Field(0.0, description="Annualized rate accrued daily on negative cash (implied margin borrowing).")
+    impact_coefficient: float = Field(
+        1.0,
+        description="Market-impact model coefficient. Only used when use_impact_model=True.",
+    )
+    impact_lookback: int = Field(
+        20,
+        description="Rolling window (bars) for average dollar volume / volatility used by the impact model.",
+    )
+    borrow_fee_bps: float = Field(
+        0.0,
+        description="Annualized basis-point borrow fee accrued daily on any short position's notional.",
+    )
+    margin_interest_rate: float = Field(
+        0.0,
+        description="Annualized rate accrued daily on negative cash (implied margin borrowing).",
+    )
     max_adv_participation: Optional[float] = Field(
-        None, description="Reject any rebalance trade whose notional exceeds this fraction of the ticker's own rolling average dollar volume. Requires a 'Volume' column.",
+        None,
+        description="Reject any rebalance trade whose notional exceeds this fraction of the ticker's own rolling average dollar volume. Requires a 'Volume' column.",
     )
-    benchmark: Optional[str] = Field(None, description="Optional benchmark ticker — adds information_ratio.")
+    benchmark: Optional[str] = Field(
+        None, description="Optional benchmark ticker — adds information_ratio."
+    )
 
     @model_validator(mode="after")
     def _check_weights_panel(self) -> "PortfolioSimulationInput":
@@ -1163,7 +1343,9 @@ class PortfolioSimulationInput(BaseModel):
         # signal_type == TARGET_WEIGHT (default): today's exact validation.
         for date in next(iter(calendars), frozenset()):
             row = {t: self.target_weights[t][date] for t in self.tickers}
-            _validate_signal_values(row, SignalType.TARGET_WEIGHT, self.max_position_pct)
+            _validate_signal_values(
+                row, SignalType.TARGET_WEIGHT, self.max_position_pct
+            )
             gross = sum(abs(v) for v in row.values())
             if gross > self.max_gross_leverage + 1e-9:
                 raise ValueError(
@@ -1208,15 +1390,19 @@ class PortfolioSimulationResult(BaseModel):
 # event, unlike scan_pairs which only screens for candidates)
 # ──────────────────────────────────────────────
 
+
 class PairTradeBacktestInput(BaseModel):
     symbol_a: str = Field(..., description="First leg ticker.")
     symbol_b: str = Field(..., description="Second leg ticker.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     hedge_ratio: float = Field(
-        ..., description="spread = Close_a - hedge_ratio * Close_b — typically the hedge_ratio from run_cointegration_test.",
+        ...,
+        description="spread = Close_a - hedge_ratio * Close_b — typically the hedge_ratio from run_cointegration_test.",
     )
-    entry_z: float = Field(2.0, description="Enter the spread when |z-score| >= entry_z.")
+    entry_z: float = Field(
+        2.0, description="Enter the spread when |z-score| >= entry_z."
+    )
     exit_z: float = Field(0.5, description="Exit to flat once |z-score| <= exit_z.")
     zscore_window: Optional[int] = Field(
         30,
@@ -1228,11 +1414,18 @@ class PairTradeBacktestInput(BaseModel):
             "analysis, never to evaluate strategy performance."
         ),
     )
-    initial_capital: float = Field(10_000.0, description="Starting cash for the whole account.")
-    commission_pct: float = Field(0.001, description="Commission per trade notional (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade notional (fraction).")
+    initial_capital: float = Field(
+        10_000.0, description="Starting cash for the whole account."
+    )
+    commission_pct: float = Field(
+        0.001, description="Commission per trade notional (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, description="Slippage per trade notional (fraction)."
+    )
     gross_leverage: float = Field(
-        1.0, description="sum(|weight|) while in a position, split between the two legs to match hedge_ratio.",
+        1.0,
+        description="sum(|weight|) while in a position, split between the two legs to match hedge_ratio.",
     )
     fill_price: str = Field(
         "next_open",
@@ -1271,6 +1464,7 @@ class PairTradeBacktestResult(BaseModel):
 # Extended Backtest Diagnostics
 # ──────────────────────────────────────────────
 
+
 class BacktestDiagnosticsInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1278,36 +1472,46 @@ class BacktestDiagnosticsInput(BaseModel):
     strategy_type: str = Field(
         ...,
         description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
-                    "'macd_crossover', or 'bollinger_reversion'.",
+        "'macd_crossover', or 'bollinger_reversion'.",
     )
     parameters: Dict[str, Any] = Field(
-        {}, description="Strategy parameters — same shape as run_sma_backtest / run_rsi_backtest / etc.",
+        {},
+        description="Strategy parameters — same shape as run_sma_backtest / run_rsi_backtest / etc.",
     )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction, default 0.1%).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction, default 0.05%).")
-    top_n_drawdowns: int = Field(5, description="Number of worst drawdown episodes to return.")
-    fill_price: str = Field("close", description="'close' (default) or 'next_open' — see BacktestInput.fill_price.")
+    commission_pct: float = Field(
+        0.001, description="Commission per trade (fraction, default 0.1%)."
+    )
+    slippage_pct: float = Field(
+        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+    )
+    top_n_drawdowns: int = Field(
+        5, description="Number of worst drawdown episodes to return."
+    )
+    fill_price: str = Field(
+        "close",
+        description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
 
 
 class DrawdownEpisode(BaseModel):
     start: str
     trough: str
-    end: Optional[str] = None       # None if still underwater at the end of the series
-    depth: float                    # negative fraction, e.g. -0.15 = -15%
-    duration_bars: int              # peak -> recovery (or peak -> last bar if unrecovered)
-    recovery_bars: Optional[int] = None   # trough -> recovery; None if unrecovered
+    end: Optional[str] = None  # None if still underwater at the end of the series
+    depth: float  # negative fraction, e.g. -0.15 = -15%
+    duration_bars: int  # peak -> recovery (or peak -> last bar if unrecovered)
+    recovery_bars: Optional[int] = None  # trough -> recovery; None if unrecovered
 
 
 class TradeDiagnostics(BaseModel):
     expectancy_pct: float
     avg_winner_pct: float
     avg_loser_pct: float
-    payoff_ratio: float             # can be inf if there are no losing trades
+    payoff_ratio: float  # can be inf if there are no losing trades
     max_consecutive_wins: int
     max_consecutive_losses: int
-    avg_mae_pct: float              # average maximum adverse excursion across trades
-    avg_mfe_pct: float              # average maximum favorable excursion across trades
+    avg_mae_pct: float  # average maximum adverse excursion across trades
+    avg_mfe_pct: float  # average maximum favorable excursion across trades
 
 
 class ExposureDiagnostics(BaseModel):
@@ -1339,28 +1543,46 @@ class BacktestDiagnosticsResult(BaseModel):
 # run_walk_forward_backtest's out-of-sample validation)
 # ──────────────────────────────────────────────
 
+
 class RobustnessDiagnosticsInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     strategy: str = Field(
-        ..., description="Strategy name: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+        ...,
+        description="Strategy name: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
     )
     param_grid: Dict[str, List[Any]] = Field(
-        ..., description="Parameter grid to search — same shape as run_backtest_optimization.",
+        ...,
+        description="Parameter grid to search — same shape as run_backtest_optimization.",
     )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    sort_by: str = Field("sharpe_ratio", description="Metric used to pick the best trial from the grid.")
-    n_bootstrap_iterations: int = Field(1000, description="Block-bootstrap resamples for the best trial's Sharpe CI.")
-    bootstrap_block_size: int = Field(20, description="Block length (bars) for the bootstrap.")
-    bootstrap_confidence: float = Field(0.95, description="Two-sided confidence level for the bootstrap CI.")
-    random_seed: Optional[int] = Field(
-        None, description="Seed for the block-bootstrap RNG — set for reproducible results (recorded in the audit trail).",
+    sort_by: str = Field(
+        "sharpe_ratio", description="Metric used to pick the best trial from the grid."
     )
-    skew: float = Field(0.0, description="Return-distribution skew for the Deflated Sharpe Ratio's standard-error formula (0.0 = normal).")
-    kurtosis: float = Field(3.0, description="Return-distribution kurtosis for the Deflated Sharpe Ratio's standard-error formula (3.0 = normal).")
+    n_bootstrap_iterations: int = Field(
+        1000, description="Block-bootstrap resamples for the best trial's Sharpe CI."
+    )
+    bootstrap_block_size: int = Field(
+        20, description="Block length (bars) for the bootstrap."
+    )
+    bootstrap_confidence: float = Field(
+        0.95, description="Two-sided confidence level for the bootstrap CI."
+    )
+    random_seed: Optional[int] = Field(
+        None,
+        description="Seed for the block-bootstrap RNG — set for reproducible results (recorded in the audit trail).",
+    )
+    skew: float = Field(
+        0.0,
+        description="Return-distribution skew for the Deflated Sharpe Ratio's standard-error formula (0.0 = normal).",
+    )
+    kurtosis: float = Field(
+        3.0,
+        description="Return-distribution kurtosis for the Deflated Sharpe Ratio's standard-error formula (3.0 = normal).",
+    )
 
 
 class RobustnessDiagnosticsResult(BaseModel):
@@ -1383,19 +1605,31 @@ class RobustnessDiagnosticsResult(BaseModel):
 # relative to each ticker's own trading volume)
 # ──────────────────────────────────────────────
 
+
 class CapacityReportInput(BaseModel):
-    tickers: List[str] = Field(..., description="Ticker universe. Must match target_weights' keys.")
-    start_date: str = Field(..., description="Start date YYYY-MM-DD — used to compute each ticker's average dollar volume.")
+    tickers: List[str] = Field(
+        ..., description="Ticker universe. Must match target_weights' keys."
+    )
+    start_date: str = Field(
+        ...,
+        description="Start date YYYY-MM-DD — used to compute each ticker's average dollar volume.",
+    )
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     target_weights: Dict[str, float] = Field(
-        ..., description="{ticker: target fraction of account equity} — a single snapshot, not a rebalance panel.",
+        ...,
+        description="{ticker: target fraction of account equity} — a single snapshot, not a rebalance panel.",
     )
     max_participation: float = Field(
-        0.1, description="Max fraction of a ticker's own average dollar volume a position may represent.",
+        0.1,
+        description="Max fraction of a ticker's own average dollar volume a position may represent.",
     )
-    adv_lookback: int = Field(20, description="Rolling window (bars, trailing from the end of the requested range) for average dollar/share volume.")
+    adv_lookback: int = Field(
+        20,
+        description="Rolling window (bars, trailing from the end of the requested range) for average dollar/share volume.",
+    )
     include_sector_exposure: bool = Field(
-        True, description="If True, fetch each ticker's sector via the data provider's get_ticker_info and report exposure by sector (best-effort — 'Unknown' when unavailable).",
+        True,
+        description="If True, fetch each ticker's sector via the data provider's get_ticker_info and report exposure by sector (best-effort — 'Unknown' when unavailable).",
     )
 
     @model_validator(mode="after")
@@ -1408,9 +1642,11 @@ class CapacityReportInput(BaseModel):
 
 class CapacityReportResult(BaseModel):
     tickers: List[str]
-    per_ticker_max_account_size: Dict[str, Optional[float]]   # None = unbounded (zero target weight)
+    per_ticker_max_account_size: Dict[
+        str, Optional[float]
+    ]  # None = unbounded (zero target weight)
     binding_ticker: Optional[str] = None
-    max_account_size: Optional[float] = None                  # None = unbounded (every weight is zero)
+    max_account_size: Optional[float] = None  # None = unbounded (every weight is zero)
     days_to_liquidate_at_capacity: Dict[str, float]
     sector_exposure: Optional[Dict[str, float]] = None
     warnings: List[str] = []
@@ -1421,12 +1657,19 @@ class CapacityReportResult(BaseModel):
 # price-jump detection — data/metadata.py + data/quality.py)
 # ──────────────────────────────────────────────
 
+
 class DataQualityReportInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    stale_run_length: int = Field(3, description="Minimum consecutive-identical-Close run length to flag as stale.")
-    jump_threshold: float = Field(0.15, description="Fractional single-bar Close-to-Close move to flag as a jump (default 0.15 = 15%).")
+    stale_run_length: int = Field(
+        3,
+        description="Minimum consecutive-identical-Close run length to flag as stale.",
+    )
+    jump_threshold: float = Field(
+        0.15,
+        description="Fractional single-bar Close-to-Close move to flag as a jump (default 0.15 = 15%).",
+    )
 
 
 class MissingBar(BaseModel):
@@ -1468,6 +1711,7 @@ class DataQualityReportResult(BaseModel):
 # curve/trade log inline, unlike the plain BacktestResult)
 # ──────────────────────────────────────────────
 
+
 class PerformanceSummary(BaseModel):
     total_return: float
     annualized_return: float
@@ -1493,8 +1737,10 @@ class ExposureSummary(BaseModel):
 
 
 class CostSummary(BaseModel):
-    total_commission_pct: float   # sum of commission drag across all bars, as a fraction of capital
-    total_slippage_pct: float     # sum of slippage drag, same units
+    total_commission_pct: (
+        float  # sum of commission drag across all bars, as a fraction of capital
+    )
+    total_slippage_pct: float  # sum of slippage drag, same units
     total_cost_pct: float
     num_trades: int
 
@@ -1504,14 +1750,23 @@ class BacktestCompactInput(BaseModel):
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     strategy_type: str = Field(
-        ..., description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+        ...,
+        description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
     )
-    parameters: Dict[str, Any] = Field({}, description="Strategy parameters — same shape as BacktestInput.")
+    parameters: Dict[str, Any] = Field(
+        {}, description="Strategy parameters — same shape as BacktestInput."
+    )
     initial_capital: float = Field(10_000.0, description="Starting capital.")
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    fill_price: str = Field("close", description="'close' (default), 'next_open', or 'midpoint' — see BacktestInput.fill_price.")
-    run_id: Optional[str] = Field(None, description="Identifier for the saved artifacts. Auto-generated (a UUID) when not supplied.")
+    fill_price: str = Field(
+        "close",
+        description="'close' (default), 'next_open', or 'midpoint' — see BacktestInput.fill_price.",
+    )
+    run_id: Optional[str] = Field(
+        None,
+        description="Identifier for the saved artifacts. Auto-generated (a UUID) when not supplied.",
+    )
 
 
 class BacktestResultV2(BaseModel):
@@ -1522,6 +1777,6 @@ class BacktestResultV2(BaseModel):
     exposure: ExposureSummary
     costs: CostSummary
     equity_curve_uri: str
-    trades_uri: Optional[str] = None   # None when the strategy never traded
+    trades_uri: Optional[str] = None  # None when the strategy never traded
     warnings: List[str] = []
-    validation_status: str             # "ok" | "warning"
+    validation_status: str  # "ok" | "warning"

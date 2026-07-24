@@ -12,7 +12,10 @@ logger = logging.getLogger(__name__)
 _cpp_core: Any = None
 HAS_CPP = False
 try:
-    from standard_quant_tools import _sqt_core as _cpp_core  # type: ignore[attr-defined]
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
     HAS_CPP = True
 except ImportError:
     pass
@@ -69,8 +72,8 @@ def cointegration_test(
             "adf_statistic": float(raw["adf_statistic"]),
             "p_value": float(raw["p_value"]),
             "critical_values": {
-                "1%":  float(raw["cv_1pct"]),
-                "5%":  float(raw["cv_5pct"]),
+                "1%": float(raw["cv_1pct"]),
+                "5%": float(raw["cv_5pct"]),
                 "10%": float(raw["cv_10pct"]),
             },
             "half_life_days": float(raw["half_life"]),
@@ -85,8 +88,8 @@ def cointegration_test(
     adf_t, p_val, crit_arr = coint(a_vals, b_vals, trend="c", autolag=autolag)
 
     crit = {
-        "1%":  float(crit_arr[0]),
-        "5%":  float(crit_arr[1]),
+        "1%": float(crit_arr[0]),
+        "5%": float(crit_arr[1]),
         "10%": float(crit_arr[2]),
     }
 
@@ -102,8 +105,13 @@ def cointegration_test(
         "half_life_days": hl,
         "n_obs": n,
     }
-    logger.debug("[cointegration] cointegrated=%s  p=%.4f  hedge=%.4f  half_life=%.1f days",
-                 result["cointegrated"], float(p_val), hedge, hl)
+    logger.debug(
+        "[cointegration] cointegrated=%s  p=%.4f  hedge=%.4f  half_life=%.1f days",
+        result["cointegrated"],
+        float(p_val),
+        hedge,
+        hl,
+    )
     return result
 
 

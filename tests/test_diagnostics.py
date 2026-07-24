@@ -5,14 +5,14 @@ import pytest
 
 from standard_quant_tools.metrics.diagnostics import (
     drawdown_periods,
-    top_n_drawdowns,
-    trade_expectancy,
-    trade_excursions,
     exposure_stats,
+    top_n_drawdowns,
+    trade_excursions,
+    trade_expectancy,
 )
 
-
 # ── drawdown_periods / top_n_drawdowns ──────────────────────────────────────
+
 
 class TestDrawdownPeriods:
     def test_empty_series(self):
@@ -76,6 +76,7 @@ class TestDrawdownPeriods:
 
 # ── trade_expectancy ─────────────────────────────────────────────────────
 
+
 class TestTradeExpectancy:
     def test_empty_trade_log(self):
         result = trade_expectancy(pd.DataFrame(columns=["return_pct"]))
@@ -108,10 +109,13 @@ class TestTradeExpectancy:
 
 # ── trade_excursions (MAE/MFE) ───────────────────────────────────────────
 
+
 class TestTradeExcursions:
     def test_empty_trade_log(self):
         result = trade_excursions(
-            pd.DataFrame(columns=["entry_date", "exit_date", "direction", "entry_price"]),
+            pd.DataFrame(
+                columns=["entry_date", "exit_date", "direction", "entry_price"]
+            ),
             pd.DataFrame(columns=["High", "Low"]),
         )
         assert result.empty
@@ -120,16 +124,21 @@ class TestTradeExcursions:
 
     def test_long_trade_hand_verified(self):
         dates = pd.date_range("2022-01-01", periods=5, freq="B")
-        price_data = pd.DataFrame({
-            "High": [101, 108, 112, 95, 100],
-            "Low":  [99, 102, 90, 92, 98],
-        }, index=dates)
-        trade_log = pd.DataFrame({
-            "entry_date": [dates[0]],
-            "exit_date": [dates[2]],
-            "direction": ["long"],
-            "entry_price": [100.0],
-        })
+        price_data = pd.DataFrame(
+            {
+                "High": [101, 108, 112, 95, 100],
+                "Low": [99, 102, 90, 92, 98],
+            },
+            index=dates,
+        )
+        trade_log = pd.DataFrame(
+            {
+                "entry_date": [dates[0]],
+                "exit_date": [dates[2]],
+                "direction": ["long"],
+                "entry_price": [100.0],
+            }
+        )
         result = trade_excursions(trade_log, price_data)
         # Window is bars 0-2: High max=112, Low min=90.
         assert result.iloc[0]["mfe_pct"] == pytest.approx((112 - 100) / 100 * 100)
@@ -137,16 +146,21 @@ class TestTradeExcursions:
 
     def test_short_trade_hand_verified(self):
         dates = pd.date_range("2022-01-01", periods=5, freq="B")
-        price_data = pd.DataFrame({
-            "High": [101, 108, 112, 95, 100],
-            "Low":  [99, 102, 90, 92, 98],
-        }, index=dates)
-        trade_log = pd.DataFrame({
-            "entry_date": [dates[0]],
-            "exit_date": [dates[2]],
-            "direction": ["short"],
-            "entry_price": [100.0],
-        })
+        price_data = pd.DataFrame(
+            {
+                "High": [101, 108, 112, 95, 100],
+                "Low": [99, 102, 90, 92, 98],
+            },
+            index=dates,
+        )
+        trade_log = pd.DataFrame(
+            {
+                "entry_date": [dates[0]],
+                "exit_date": [dates[2]],
+                "direction": ["short"],
+                "entry_price": [100.0],
+            }
+        )
         result = trade_excursions(trade_log, price_data)
         # Short: favorable move is price falling (Low min=90), adverse is price rising (High max=112).
         assert result.iloc[0]["mfe_pct"] == pytest.approx((100 - 90) / 100 * 100)
@@ -154,6 +168,7 @@ class TestTradeExcursions:
 
 
 # ── exposure_stats ────────────────────────────────────────────────────────
+
 
 class TestExposureStats:
     def test_all_flat(self):
@@ -176,10 +191,12 @@ class TestExposureStats:
     def test_avg_holding_period_from_trade_log(self):
         dates = pd.date_range("2022-01-01", periods=6, freq="B")
         executed = pd.Series([1.0, 1.0, 1.0, 0.0, -1.0, -1.0], index=dates)
-        trade_log = pd.DataFrame({
-            "entry_date": [dates[0], dates[4]],
-            "exit_date": [dates[2], dates[5]],
-        })
+        trade_log = pd.DataFrame(
+            {
+                "entry_date": [dates[0], dates[4]],
+                "exit_date": [dates[2], dates[5]],
+            }
+        )
         result = exposure_stats(executed, trade_log)
         # Trade 1: bars 0->2 = 2 bars held. Trade 2: bars 4->5 = 1 bar held. avg = 1.5.
         assert result["avg_holding_period_bars"] == pytest.approx(1.5)

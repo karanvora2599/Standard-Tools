@@ -21,20 +21,21 @@ import pytest
 _cpp: Any = None
 try:
     from standard_quant_tools import _sqt_core as _cpp  # type: ignore[attr-defined]
+
     HAS_CPP = True
 except ImportError:
     HAS_CPP = False
 
 requires_cpp = pytest.mark.skipif(not HAS_CPP, reason="_sqt_core not built")
 
+from standard_quant_tools.analysis.cointegration import HAS_CPP as COINT_HAS_CPP
 from standard_quant_tools.analysis.cointegration import (
-    HAS_CPP as COINT_HAS_CPP,
     cointegration_test,
     compute_spread,
     half_life,
 )
+from standard_quant_tools.analysis.regression import HAS_CPP as REG_HAS_CPP
 from standard_quant_tools.analysis.regression import (
-    HAS_CPP as REG_HAS_CPP,
     calculate_beta,
 )
 
@@ -44,8 +45,9 @@ RNG = np.random.default_rng(42)
 DATE_IDX = pd.date_range("2020-01-01", periods=400, freq="B")
 
 
-def _make_cointegrated_pair(n: int = 400, hedge: float = 2.0,
-                             noise_scale: float = 0.05, seed: int = 7):
+def _make_cointegrated_pair(
+    n: int = 400, hedge: float = 2.0, noise_scale: float = 0.05, seed: int = 7
+):
     rng = np.random.default_rng(seed)
     rw = rng.standard_normal(n).cumsum()
     noise = rng.standard_normal(n) * noise_scale
@@ -63,12 +65,18 @@ def _make_independent_rws(n: int = 300, seed: int = 99):
 
 # ── Wrapper tests (always run) ────────────────────────────────────────────────
 
+
 class TestCointegrationTestReturnSchema:
     """The public API must return the expected keys regardless of backend."""
 
     REQUIRED_KEYS = {
-        "cointegrated", "hedge_ratio", "adf_statistic",
-        "p_value", "critical_values", "half_life_days", "n_obs",
+        "cointegrated",
+        "hedge_ratio",
+        "adf_statistic",
+        "p_value",
+        "critical_values",
+        "half_life_days",
+        "n_obs",
     }
     CV_KEYS = {"1%", "5%", "10%"}
 
@@ -190,6 +198,7 @@ class TestHalfLife:
 
 # ── C++ binding tests (skipped unless _sqt_core is built) ────────────────────
 
+
 class TestCppEngleGrangerDirect:
     """Direct calls to _sqt_core.engle_granger — bypasses the Python wrapper."""
 
@@ -206,9 +215,17 @@ class TestCppEngleGrangerDirect:
         y1 = 2.0 * y0 + np.random.default_rng(4).standard_normal(200) * 0.01
         result = _cpp.engle_granger(y0, y1)
         expected = {
-            "intercept", "hedge_ratio", "adf_statistic", "optimal_lag",
-            "p_value", "cv_1pct", "cv_5pct", "cv_10pct",
-            "half_life", "n_obs", "cointegrated",
+            "intercept",
+            "hedge_ratio",
+            "adf_statistic",
+            "optimal_lag",
+            "p_value",
+            "cv_1pct",
+            "cv_5pct",
+            "cv_10pct",
+            "half_life",
+            "n_obs",
+            "cointegrated",
         }
         assert set(result.keys()) == expected
 
@@ -299,6 +316,7 @@ class TestCppVsStatsmodels:
 
         # statsmodels reference
         from statsmodels.tsa.stattools import coint
+
         _, sm_pval, _ = coint(a_vals, b_vals, trend="c", autolag="aic")
 
         # Both should agree on cointegration at 5% for this strongly cointegrated pair
@@ -327,6 +345,7 @@ class TestCppVsStatsmodels:
 
 
 # ── C++ ols2 binding tests ────────────────────────────────────────────────────
+
 
 class TestCppOls2Direct:
     """Direct calls to _sqt_core.ols2 — bypasses the Python wrapper."""
@@ -389,8 +408,12 @@ class TestCppOls2Direct:
     @requires_cpp
     def test_calculate_beta_matches_lstsq(self):
         rng = np.random.default_rng(99)
-        bm = pd.Series(rng.standard_normal(300), index=pd.date_range("2020-01-01", periods=300))
-        asset = pd.Series(1.2 * bm.values + rng.standard_normal(300) * 0.1, index=bm.index)
+        bm = pd.Series(
+            rng.standard_normal(300), index=pd.date_range("2020-01-01", periods=300)
+        )
+        asset = pd.Series(
+            1.2 * bm.values + rng.standard_normal(300) * 0.1, index=bm.index
+        )
         r = calculate_beta(asset, bm)
         assert abs(r["beta"] - 1.2) < 0.05
         assert 0.0 <= r["r_squared"] <= 1.0
@@ -409,8 +432,10 @@ class TestCppOls2Direct:
     def test_compute_spread_cpp_path(self):
         rng = np.random.default_rng(23)
         rw = rng.standard_normal(300).cumsum()
-        y0 = pd.Series(2.0 * rw + rng.standard_normal(300) * 0.05,
-                       index=pd.date_range("2020-01-01", periods=300))
+        y0 = pd.Series(
+            2.0 * rw + rng.standard_normal(300) * 0.05,
+            index=pd.date_range("2020-01-01", periods=300),
+        )
         y1 = pd.Series(rw, index=pd.date_range("2020-01-01", periods=300))
         spread = compute_spread(y0, y1)
         assert len(spread) == 300
