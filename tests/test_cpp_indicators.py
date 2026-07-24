@@ -495,6 +495,31 @@ class TestCppPsar:
         # Different AF params produce different results
         assert not np.allclose(out1[:, 0], out2[:, 0])
 
+    @requires_cpp
+    @pytest.mark.parametrize(
+        "af_start,af_step,af_max",
+        [
+            (0.0, 0.02, 0.2),  # af_start <= 0
+            (-0.02, 0.02, 0.2),  # af_start negative
+            (0.02, -0.01, 0.2),  # af_step negative
+            (0.02, 0.02, 0.0),  # af_max <= 0
+            (0.2, 0.02, 0.02),  # af_max < af_start
+            (float("nan"), 0.02, 0.2),
+            (0.02, 0.02, float("inf")),
+        ],
+    )
+    def test_invalid_af_params_return_all_nan(
+        self, ohlc_200, af_start, af_step, af_max
+    ):
+        """Not a crash risk (no indexing on af_*), but a nonsensical
+        combination used to silently produce a numerically meaningless SAR
+        series rather than an obviously-invalid all-NaN result."""
+        high, low, _ = ohlc_200
+        h, l = high.astype(np.float64), low.astype(np.float64)
+        out = _cpp.parabolic_sar(h, l, af_start, af_step, af_max)
+        assert out.shape == (200, 2)
+        assert np.all(np.isnan(out))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Parabolic SAR — Python wrapper tests
@@ -529,6 +554,23 @@ class TestPsarWrapper:
         r1 = psar_wrapper(high, low)
         r2 = psar_wrapper(high, low, af_start=0.02, af_step=0.02, af_max=0.2)
         pd.testing.assert_frame_equal(r1, r2)
+
+    @pytest.mark.parametrize(
+        "kwargs,match",
+        [
+            ({"af_start": 0.0}, "af_start"),
+            ({"af_start": -0.02}, "af_start"),
+            ({"af_step": -0.01}, "af_step"),
+            ({"af_max": 0.0}, "af_max"),
+            ({"af_start": 0.2, "af_max": 0.02}, "af_max"),
+            ({"af_start": float("nan")}, "af_start"),
+            ({"af_max": float("inf")}, "af_max"),
+        ],
+    )
+    def test_invalid_af_params_raise(self, ohlc_series_200, kwargs, match):
+        high, low, _ = ohlc_series_200
+        with pytest.raises(ValidationError, match=match):
+            psar_wrapper(high, low, **kwargs)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

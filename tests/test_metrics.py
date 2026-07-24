@@ -4,12 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.return_metrics import (
     annualized_volatility,
     cagr,
     cumulative_return,
 )
-from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     cvar,

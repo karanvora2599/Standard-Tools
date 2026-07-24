@@ -32,9 +32,16 @@ struct BacktestResult {
  *   strat_ret[i]  = executed[i] * returns[i] - |pos_diff[i]| * (commission + slippage)
  *   equity[i]     = equity[i-1] * (1 + strat_ret[i])
  *
- * Trade log state machine mirrors _build_trade_log in engine.py:
- *   open a trade when pos_diff != 0 and executed != 0;
- *   close it at the next trade event.  Unclosed trades are excluded from stats.
+ * Trade log state machine mirrors _build_trade_log in engine.py exactly:
+ *   open a trade when pos_diff != 0 and executed != 0, recording entry_price
+ *   = prices[i-1] (Close one bar before the trade-open event, since
+ *   executed[i] = signals[i-1] earns its first return over that close) and
+ *   entry_size = exec_i (the raw signal value, not just its sign, so a
+ *   leveraged/SCORE signal's trade return scales the same way strat_ret
+ *   does); close it at the next trade event, deducting 2*cost_per_unit for
+ *   a completed round trip; a position still open at the final bar is
+ *   flushed at prices[n-1] with a single cost_per_unit deduction (entry
+ *   only — no real exit event occurred).
  *
  * @param prices         Close prices, length n.
  * @param signals        Position signals: 1=long, 0=flat, -1=short, length n.

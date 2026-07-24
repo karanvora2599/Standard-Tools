@@ -18,6 +18,7 @@ def _check_confidence(confidence: float) -> None:
             f"confidence must be strictly between 0 and 1, got {confidence!r}"
         )
 
+
 _scipy_stats = None
 try:
     from scipy import stats as _scipy_stats  # type: ignore[assignment]

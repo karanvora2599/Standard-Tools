@@ -123,6 +123,11 @@ def stochastic_oscillator(
     Uses C++ fused sliding min+max path when available (5-15× faster than two
     pandas rolling passes).  Falls back to pandas otherwise.
     """
+    if k_period <= 0:
+        raise ValidationError(f"k_period must be > 0, got {k_period}")
+    if d_period <= 0:
+        raise ValidationError(f"d_period must be > 0, got {d_period}")
+
     logger.debug(
         "[stochastic] k_period=%d  d_period=%d  bars=%d  path=%s",
         k_period,

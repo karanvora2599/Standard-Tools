@@ -241,7 +241,9 @@ class TestHl2ExploratoryFill:
         no_hl = {t: df.drop(columns=["High", "Low"]) for t, df in price_data.items()}
         target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
         with pytest.raises(ValidationError, match="High"):
-            run_portfolio_simulation(no_hl, target_weights, fill_price="hl2_exploratory")
+            run_portfolio_simulation(
+                no_hl, target_weights, fill_price="hl2_exploratory"
+            )
 
 
 class TestCostModels:
@@ -632,7 +634,9 @@ class TestValidation:
             "AAPL": _price_df([100.0, 101.0, 102.0], dates_a),
             "MSFT": _price_df([50.0, 51.0, 52.0], dates_b),
         }
-        target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates_a[0]])
+        target_weights = pd.DataFrame(
+            {"AAPL": [0.5], "MSFT": [0.3]}, index=[dates_a[0]]
+        )
         with pytest.raises(ValidationError, match="no common trading dates"):
             run_portfolio_simulation(price_data, target_weights)
 
@@ -652,8 +656,11 @@ class TestInsolvency:
         target_weights = pd.DataFrame({"AAPL": [1.0]}, index=[dates[0]])
         with pytest.raises(ValidationError, match="insolvent"):
             run_portfolio_simulation(
-                price_data, target_weights,
-                initial_capital=100.0, commission_pct=2.0, slippage_pct=0.0,
+                price_data,
+                target_weights,
+                initial_capital=100.0,
+                commission_pct=2.0,
+                slippage_pct=0.0,
             )
 
     def test_negative_equity_from_price_move_raises(self):
@@ -665,8 +672,11 @@ class TestInsolvency:
         target_weights = pd.DataFrame({"AAPL": [-1.0]}, index=[dates[0]])
         with pytest.raises(ValidationError, match="insolvent"):
             run_portfolio_simulation(
-                price_data, target_weights,
-                initial_capital=10_000.0, commission_pct=0.0, slippage_pct=0.0,
+                price_data,
+                target_weights,
+                initial_capital=10_000.0,
+                commission_pct=0.0,
+                slippage_pct=0.0,
             )
 
 
@@ -688,8 +698,11 @@ class TestFinancingCalendarGaps:
         price_data = {"AAPL": _price_df([100.0] * 4, dates)}
         target_weights = pd.DataFrame({"AAPL": [-1.0]}, index=[dates[0]])
         result = run_portfolio_simulation(
-            price_data, target_weights,
-            initial_capital=10_000.0, commission_pct=0.0, slippage_pct=0.0,
+            price_data,
+            target_weights,
+            initial_capital=10_000.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
             borrow_fee_bps=500.0,
         )
         cash = result["cash_curve"]

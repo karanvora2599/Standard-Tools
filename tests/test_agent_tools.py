@@ -60,9 +60,7 @@ class TestSanitizeForJson:
     def test_sanitizes_negative_inf_and_nan(self):
         from standard_quant_tools.agent.tools import _sanitize_for_json
 
-        result = _sanitize_for_json(
-            {"a": float("-inf"), "b": float("nan"), "c": 0.0}
-        )
+        result = _sanitize_for_json({"a": float("-inf"), "b": float("nan"), "c": 0.0})
         assert result["a"] is None
         assert result["b"] is None
         assert result["c"] == 0.0
@@ -88,6 +86,7 @@ class TestSanitizeForJson:
         must succeed on the sanitized output where it would have raised on
         the raw inf value."""
         import json
+
         from standard_quant_tools.agent.tools import _sanitize_for_json
 
         raw = {"calmar_ratio": float("inf")}
@@ -661,6 +660,19 @@ class TestRunHurstAnalysis:
         result = run_hurst_analysis(inp)
         assert result.method == "rs"
 
+    def test_invalid_method_rejected_by_pydantic(self, patched_factory):
+        """
+        HurstInput.method is a Literal["dfa", "rs"] specifically so a typo
+        (e.g. "DFA") is rejected at the API boundary rather than silently
+        running R/S analysis while echoing the typo'd string back in the
+        result — see analysis/hurst.py's own runtime guard for the same
+        regression, defended here at the Pydantic layer too.
+        """
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            HurstInput(symbol="AAPL", start_date=START, end_date=END, method="DFA")
+
     def test_n_obs_positive(self, patched_factory):
         inp = HurstInput(symbol="AAPL", start_date=START, end_date=END)
         result = run_hurst_analysis(inp)
@@ -938,5 +950,9 @@ class TestFillPriceIntegration:
                 slippage_pct=0.0,
             )
         )
-        assert zero_cost.best_sharpe != pytest.approx(default_cost.best_sharpe, abs=1e-9)
-        assert zero_cost.best_return != pytest.approx(default_cost.best_return, abs=1e-9)
+        assert zero_cost.best_sharpe != pytest.approx(
+            default_cost.best_sharpe, abs=1e-9
+        )
+        assert zero_cost.best_return != pytest.approx(
+            default_cost.best_return, abs=1e-9
+        )

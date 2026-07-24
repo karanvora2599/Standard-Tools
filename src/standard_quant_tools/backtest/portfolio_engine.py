@@ -225,9 +225,7 @@ def run_portfolio_simulation(
             f"{[str(d) for d in dupes[:5]]}"
         )
     if not target_weights.index.is_monotonic_increasing:
-        raise ValidationError(
-            "target_weights.index must be sorted in increasing order"
-        )
+        raise ValidationError("target_weights.index must be sorted in increasing order")
     if np.isinf(target_weights.to_numpy(dtype=float)).any():
         raise ValidationError(
             "target_weights contains an infinite value — every weight must be finite"

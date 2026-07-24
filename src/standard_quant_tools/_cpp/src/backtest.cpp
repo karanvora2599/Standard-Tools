@@ -46,16 +46,31 @@ BacktestResult run_strategy(
 
     std::vector<double> strat_ret(n, 0.0);
 
-    // ── Trade log state machine (mirrors _build_trade_log) ────────────────────
+    // ── Trade log state machine (mirrors _build_trade_log in engine.py) ──────
+    // entry_size (not just its sign) matches strat_ret[i] = exec_i * ret_i
+    // above — a leveraged SCORE signal (e.g. 2.5) must scale the trade's
+    // return the same way it scales the equity curve's, or reported
+    // win_rate/profit_factor/avg_trade_return_pct silently disagree with the
+    // actual P&L for any non-±1 signal. entry_price is prices[i-1] (Close
+    // one bar before the trade-open event), not prices[i]: executed[i] =
+    // signals[i-1] earns its first return over Close[i-1] -> Close[i], so
+    // Close[i-1] is this position's true economic entry point (same
+    // ref_prices = prices.shift(1) convention _build_trade_log uses for
+    // fill_price="close" — the only mode this native kernel implements).
+    // return_pct is reduced by 2*cost_per_unit for a completed round trip
+    // (entry + exit) or 1*cost_per_unit for a position still open at the
+    // final bar, matching the two separate pos_diff-triggered cost
+    // deductions strat_ret already applies to the equity curve.
     std::vector<double> trade_rets;  // per-trade return_pct (×100 scale)
     bool   has_open    = false;
     double entry_price = 0.0;
-    int    entry_dir   = 0;
+    double entry_size  = 0.0;
     double prev_exec   = 0.0;
 
     for (std::size_t i = 1; i < n; ++i) {
-        const double ret_i  = (prices[i - 1] != 0.0)
-            ? (prices[i] - prices[i - 1]) / prices[i - 1]
+        const double ref_price = prices[i - 1];
+        const double ret_i     = (ref_price != 0.0)
+            ? (prices[i] - ref_price) / ref_price
             : 0.0;
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
@@ -65,13 +80,15 @@ BacktestResult run_strategy(
 
         if (pdiff != 0.0) {
             if (has_open) {
-                const double pnl = (prices[i] - entry_price) / entry_price * entry_dir;
-                trade_rets.push_back(pnl * 100.0);
+                const double raw_pnl = (entry_price != 0.0)
+                    ? (ref_price - entry_price) / entry_price * entry_size
+                    : 0.0;
+                trade_rets.push_back((raw_pnl - 2.0 * cost_per_unit) * 100.0);
                 has_open = false;
             }
             if (exec_i != 0.0) {
-                entry_price = prices[i];
-                entry_dir   = (exec_i > 0.0) ? 1 : -1;
+                entry_price = ref_price;
+                entry_size  = exec_i;
                 has_open    = true;
             }
         }
@@ -79,10 +96,13 @@ BacktestResult run_strategy(
         prev_exec = exec_i;
     }
 
-    // Flush last open trade at final price (mirrors Python _build_trade_log).
-    if (has_open && n > 0) {
-        const double pnl = (prices[n - 1] - entry_price) / entry_price * entry_dir;
-        trade_rets.push_back(pnl * 100.0);
+    // Flush last open trade at final Close price (mirrors Python's
+    // synthesized final-bar exit — entry cost only, no real exit event).
+    if (has_open) {
+        const double raw_pnl = (entry_price != 0.0)
+            ? (prices[n - 1] - entry_price) / entry_price * entry_size
+            : 0.0;
+        trade_rets.push_back((raw_pnl - cost_per_unit) * 100.0);
     }
 
     // ── Equity curve: cumprod(1 + strat_ret) ──────────────────────────────────

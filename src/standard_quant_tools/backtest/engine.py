@@ -243,6 +243,20 @@ def run_strategy(
         raise ValidationError(
             f"fill_price must be one of {_VALID_FILL_PRICES}, got {fill_price!r}"
         )
+    if not np.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValidationError(
+            f"initial_capital must be positive and finite, got {initial_capital!r} "
+            "— a zero/negative/non-finite value silently produces inf/nan in "
+            "total_return and calmar_ratio instead of a meaningful result."
+        )
+    for name, value in (
+        ("commission_pct", commission_pct),
+        ("slippage_pct", slippage_pct),
+    ):
+        if not np.isfinite(value) or value < 0:
+            raise ValidationError(
+                f"{name} must be non-negative and finite, got {value!r}"
+            )
 
     idx = price_data.index.intersection(signal_series.index)
     prices = price_data.loc[idx, "Close"]
@@ -293,19 +307,24 @@ def run_strategy(
             prices_arr, signals_arr, initial_capital, commission_pct, slippage_pct
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
-        # win_rate/profit_factor/num_trades/avg_trade_return_pct: the native
-        # kernel's OWN internal trade-log logic still records entry at
-        # prices[i] (one bar later than the true economic reference) and
-        # excludes commission/slippage from each trade's return -- the exact
-        # bug _build_trade_log's Python-side fix addresses. Overwrite with
-        # the same fill-aware, cost-aware accounting so a caller gets
-        # identical trade statistics whether or not _sqt_core is built, and
-        # so these stats reconcile with trade_log below rather than
-        # disagreeing with it. Interim fix, not a native-code fix: the C++
-        # batch path in backtest_grid (batch_run_strategy) still returns the
-        # uncorrected native stats -- see the comment there.
+        # win_rate/profit_factor/num_trades/avg_trade_return_pct: overwrite
+        # the native kernel's own trade-log stats with the same fill-aware,
+        # cost-aware Python accounting used elsewhere, so these reconcile
+        # with trade_log below regardless of path. backtest.cpp's own
+        # trade-log logic was itself corrected to use this same convention
+        # (entry_price = prices[i-1], entry_size = signal magnitude, cost
+        # deducted per round trip) — see tests/test_cpp_indicators.py's
+        # TestCppTradeStatsParity for the gated (CI-only, no local C++
+        # toolchain to verify against here) equivalence check. This
+        # override is kept in place as belt-and-suspenders until that CI
+        # run has actually confirmed native and Python agree exactly; it's
+        # otherwise redundant computation, not a correctness requirement,
+        # once confirmed.
         trade_log_for_stats = _build_trade_log(
-            prices.shift(1), prices, executed, commission_pct + slippage_pct,
+            prices.shift(1),
+            prices,
+            executed,
+            commission_pct + slippage_pct,
         )
         trade_stats = _compute_trade_stats(trade_log_for_stats)
         result: Dict[str, Any] = {
@@ -548,6 +567,19 @@ def backtest_grid(
             param_grid={"threshold": [0.1, 0.2, 0.3]},
         )
     """
+    if not np.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValidationError(
+            f"initial_capital must be positive and finite, got {initial_capital!r}"
+        )
+    for name, value in (
+        ("commission_pct", commission_pct),
+        ("slippage_pct", slippage_pct),
+    ):
+        if not np.isfinite(value) or value < 0:
+            raise ValidationError(
+                f"{name} must be non-negative and finite, got {value!r}"
+            )
+
     is_custom = callable(strategy)
     if is_custom:
         signal_fn: Callable[..., pd.Series] = strategy  # type: ignore[assignment]
@@ -593,18 +625,20 @@ def backtest_grid(
                 sort_by,
             )
 
-            # NOTE (known gap, not fixed here): unlike run_strategy's single-
-            # call C++ path above, this batch path's win_rate/profit_factor/
-            # num_trades/avg_trade_return_pct still come straight from the
-            # native kernel's own uncorrected trade-log logic (entry at
-            # prices[i], no commission/slippage in trade returns) --
-            # overwriting per-combo here would mean rebuilding a Python-side
-            # trade log for every parameter combination in the grid, which
-            # defeats the point of the batch C++ path's speed. A grid search
-            # sorted by win_rate/profit_factor can therefore rank parameters
-            # differently with _sqt_core built vs. not. Real fix requires
-            # the native kernel itself to adopt the same fill-aware,
-            # cost-aware trade accounting (see _build_trade_log).
+            # win_rate/profit_factor/num_trades/avg_trade_return_pct here come
+            # straight from the native kernel's own trade-log logic, same as
+            # run_strategy's single-call C++ path above -- unlike that path,
+            # nothing overwrites them per-combo here (rebuilding a Python-side
+            # trade log for every parameter combination in the grid would
+            # defeat the point of the batch C++ path's speed). This used to
+            # be a real gap (native entry price one bar off, no commission/
+            # slippage in trade returns), but backtest.cpp's run_strategy
+            # (which batch_run_strategy calls per test) now uses the same
+            # fill-aware, cost-aware accounting as _build_trade_log directly,
+            # so these native stats should already agree with the Python
+            # recomputation without an override -- see
+            # tests/test_cpp_indicators.py's TestCppTradeStatsParity for the
+            # gated equivalence check.
             cpp_results = _cpp_core.batch_run_strategy(
                 prices_arr,
                 signals_mat,

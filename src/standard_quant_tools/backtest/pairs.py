@@ -54,11 +54,17 @@ def _execution_prices_for_weights(
     if fill_price == "hl2_exploratory":
         return (
             float(
-                (price_data[symbol_a]["High"].loc[d] + price_data[symbol_a]["Low"].loc[d])
+                (
+                    price_data[symbol_a]["High"].loc[d]
+                    + price_data[symbol_a]["Low"].loc[d]
+                )
                 / 2.0
             ),
             float(
-                (price_data[symbol_b]["High"].loc[d] + price_data[symbol_b]["Low"].loc[d])
+                (
+                    price_data[symbol_b]["High"].loc[d]
+                    + price_data[symbol_b]["Low"].loc[d]
+                )
                 / 2.0
             ),
         )
@@ -212,7 +218,14 @@ def run_pair_backtest(
     weight_b_vals = []
     for d in transition_dates:
         price_a, price_b = _execution_prices_for_weights(
-            d, common_idx, close_a, close_b, price_data, symbol_a, symbol_b, fill_price,
+            d,
+            common_idx,
+            close_a,
+            close_b,
+            price_data,
+            symbol_a,
+            symbol_b,
+            fill_price,
         )
         denom = price_a + abs_hedge * price_b
         weight_a_d = gross_leverage * price_a / denom

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
+from standard_quant_tools.error import ValidationError
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -174,6 +175,30 @@ class TestHurstEdgeCases:
         flat = pd.Series(np.ones(500))
         result = hurst_exponent(flat)
         assert np.isnan(result["hurst"])
+
+
+class TestHurstMethodValidation:
+    """
+    Regression: both the C++ kernel and the Python fallback treat *anything*
+    other than the exact string "dfa" as "rs" -- a typo like "DFA" or "rsi"
+    used to silently run R/S analysis while echoing the typo'd string back
+    in the "method" field of the result, hiding the mismatch. Must now
+    raise ValidationError before either code path runs.
+    """
+
+    @pytest.mark.parametrize("bad_method", ["DFA", "RS", "rsi", "r/s", "", "dfa "])
+    def test_hurst_exponent_rejects_invalid_method(self, iid_returns, bad_method):
+        with pytest.raises(ValidationError, match="method"):
+            hurst_exponent(iid_returns, method=bad_method)
+
+    @pytest.mark.parametrize("bad_method", ["DFA", "RS", "rsi", "r/s"])
+    def test_rolling_hurst_rejects_invalid_method(self, iid_returns, bad_method):
+        with pytest.raises(ValidationError, match="method"):
+            rolling_hurst(iid_returns, window=200, method=bad_method)
+
+    def test_valid_methods_still_accepted(self, iid_returns):
+        assert not np.isnan(hurst_exponent(iid_returns, method="dfa")["hurst"])
+        assert not np.isnan(hurst_exponent(iid_returns, method="rs")["hurst"])
 
 
 # ── rolling_hurst ──────────────────────────────────────────────────────────────

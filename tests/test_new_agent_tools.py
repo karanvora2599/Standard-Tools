@@ -1882,14 +1882,18 @@ class TestPortfolioSimulation:
         thereafter.
         """
         from unittest.mock import MagicMock
+
         from standard_quant_tools.data.factory import DataFactory
 
         dates = pd.date_range("2020-01-01", periods=10, freq="B")
         flat_close = pd.Series(100.0, index=dates)
         flat_df = pd.DataFrame(
             {
-                "Open": flat_close, "High": flat_close, "Low": flat_close,
-                "Close": flat_close, "Volume": pd.Series(1_000_000.0, index=dates),
+                "Open": flat_close,
+                "High": flat_close,
+                "Low": flat_close,
+                "Close": flat_close,
+                "Volume": pd.Series(1_000_000.0, index=dates),
             }
         )
         provider = MagicMock()
@@ -1897,13 +1901,20 @@ class TestPortfolioSimulation:
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
         weights = {"AAPL": {str(dates[0].date()): 1.0}}
-        result = run_portfolio_simulation(PortfolioSimulationInput(
-            tickers=["AAPL"], start_date=START, end_date=END, target_weights=weights,
-            commission_pct=0.05, slippage_pct=0.0,
-        ))
+        result = run_portfolio_simulation(
+            PortfolioSimulationInput(
+                tickers=["AAPL"],
+                start_date=START,
+                end_date=END,
+                target_weights=weights,
+                commission_pct=0.05,
+                slippage_pct=0.0,
+            )
+        )
         assert result.total_return == pytest.approx(-0.05, abs=1e-6)
         assert result.max_drawdown == pytest.approx(-0.05, abs=1e-6)
         import math as _math
+
         assert _math.isfinite(result.calmar_ratio)
 
 

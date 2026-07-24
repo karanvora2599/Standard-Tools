@@ -143,6 +143,13 @@ def hurst_exponent(
     -------
     dict with keys: hurst, regime, fit_r_squared, method, n_obs.
     """
+    if method not in ("dfa", "rs"):
+        raise ValidationError(
+            f"method must be 'dfa' or 'rs', got {method!r} — both the C++ "
+            "and Python fallback paths treat anything other than the exact "
+            "string 'dfa' as 'rs', so a typo would silently run the wrong "
+            "method while echoing the typo'd string back in the result."
+        )
     if min_window <= 0:
         raise ValidationError(f"min_window must be > 0, got {min_window}")
     if max_window is not None and max_window <= 0:
@@ -232,6 +239,13 @@ def rolling_hurst(
     -------
     pd.Series indexed like `series`; first (window-1) rows are NaN.
     """
+    if method not in ("dfa", "rs"):
+        raise ValidationError(
+            f"method must be 'dfa' or 'rs', got {method!r} — both the C++ "
+            "and Python fallback paths treat anything other than the exact "
+            "string 'dfa' as 'rs', so a typo would silently run the wrong "
+            "method."
+        )
     if window <= 0:
         raise ValidationError(f"window must be > 0, got {window}")
     if step <= 0:

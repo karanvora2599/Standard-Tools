@@ -349,6 +349,23 @@ class TestCppStochasticOscillator:
         # Shorter period → fewer NaN rows
         assert np.sum(np.isnan(out1[:, 0])) < np.sum(np.isnan(out2[:, 0]))
 
+    @requires_cpp
+    @pytest.mark.parametrize("bad_d_period", [0, -1, -3])
+    def test_zero_or_negative_d_period_returns_all_nan_not_oob(
+        self, ohlc_arrays, bad_d_period
+    ):
+        """
+        Regression: d_period <= 0 used to make `Sk -= K_vals[i - d_period + 1]`
+        read out of bounds (index >= i + 1) and `Sk / d_period` divide by
+        zero for d_period == 0. Must now return an all-NaN %D column
+        (matching the existing k_period < 1 guard's convention) instead of
+        touching memory outside K_vals.
+        """
+        h, l, c = (x.astype(np.float64) for x in ohlc_arrays)
+        out = _cpp.stochastic_oscillator(h, l, c, 14, bad_d_period)
+        assert out.shape == (N, 2)
+        assert np.all(np.isnan(out[:, 1]))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # stochastic_oscillator — Python wrapper routing tests
@@ -416,3 +433,24 @@ class TestStochasticOscillatorWrapper:
         np.testing.assert_allclose(
             result["Stoch_K"].dropna().to_numpy(), 100.0, atol=1e-10
         )
+
+    @pytest.mark.parametrize("bad_d_period", [0, -1, -5])
+    def test_zero_or_negative_d_period_raises(self, ohlc_series, bad_d_period):
+        """
+        Regression: d_period <= 0 used to reach the C++ kernel unguarded
+        (out-of-bounds read) or silently misbehave in the pandas fallback.
+        Both paths must now raise ValidationError before either runs.
+        """
+        from standard_quant_tools.error import ValidationError
+
+        h_s, l_s, c_s = ohlc_series
+        with pytest.raises(ValidationError, match="d_period"):
+            stoch_wrapper(h_s, l_s, c_s, d_period=bad_d_period)
+
+    @pytest.mark.parametrize("bad_k_period", [0, -1, -5])
+    def test_zero_or_negative_k_period_raises(self, ohlc_series, bad_k_period):
+        from standard_quant_tools.error import ValidationError
+
+        h_s, l_s, c_s = ohlc_series
+        with pytest.raises(ValidationError, match="k_period"):
+            stoch_wrapper(h_s, l_s, c_s, k_period=bad_k_period)

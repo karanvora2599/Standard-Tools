@@ -388,9 +388,7 @@ class TestHashChainIntegrity:
         assert len(jsonl_files) == 1
         assert audit.verify_audit_log_integrity(jsonl_files[0]) == []
 
-    def test_editing_a_record_breaks_the_chain(
-        self, patched_factory, audit_dir: Path
-    ):
+    def test_editing_a_record_breaks_the_chain(self, patched_factory, audit_dir: Path):
         dispatch(
             "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
         )
@@ -409,9 +407,7 @@ class TestHashChainIntegrity:
         assert problems, "editing a record's content must be detected"
         assert any("record_hash" in p for p in problems)
 
-    def test_removing_a_record_breaks_the_chain(
-        self, patched_factory, audit_dir: Path
-    ):
+    def test_removing_a_record_breaks_the_chain(self, patched_factory, audit_dir: Path):
         dispatch(
             "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
         )
@@ -419,7 +415,8 @@ class TestHashChainIntegrity:
             "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
         )
         dispatch(
-            "analyze_stock_risk", {"symbol": "GOOGL", "benchmark": "SPY", "period": "1y"}
+            "analyze_stock_risk",
+            {"symbol": "GOOGL", "benchmark": "SPY", "period": "1y"},
         )
         jsonl_path = next(iter(audit_dir.glob("*.jsonl")))
         lines = jsonl_path.read_text(encoding="utf-8").splitlines()

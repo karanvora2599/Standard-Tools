@@ -729,8 +729,11 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
 
     if result_df.empty:
         return ScreenerResult(
-            num_passed=0, tickers_passed=[], results=[],
-            failed_filters=failed_filters, failed_tickers=failed_tickers,
+            num_passed=0,
+            tickers_passed=[],
+            results=[],
+            failed_filters=failed_filters,
+            failed_tickers=failed_tickers,
             failed_batches=failed_batches,
         )
 
@@ -2539,9 +2542,11 @@ def run_portfolio_simulation(
     )
 
     equity_curve = raw["equity_curve"]
-    returns, total_return, annualized_return, equity_with_start = _metrics_with_day0_cost(
-        equity_curve,
-        input_data.initial_capital,
+    returns, total_return, annualized_return, equity_with_start = (
+        _metrics_with_day0_cost(
+            equity_curve,
+            input_data.initial_capital,
+        )
     )
     day0_max_dd = float(max_drawdown(equity_with_start))
     day0_calmar = (
@@ -2662,9 +2667,11 @@ def run_pair_trade_backtest(
     )
 
     equity_curve = raw["equity_curve"]
-    returns, total_return, annualized_return, equity_with_start = _metrics_with_day0_cost(
-        equity_curve,
-        input_data.initial_capital,
+    returns, total_return, annualized_return, equity_with_start = (
+        _metrics_with_day0_cost(
+            equity_curve,
+            input_data.initial_capital,
+        )
     )
     day0_max_dd = float(max_drawdown(equity_with_start))
     day0_calmar = (

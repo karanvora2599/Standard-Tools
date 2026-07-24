@@ -284,6 +284,22 @@ def parabolic_sar(
         'SAR'   : Stop-and-reverse price level.
         'Trend' : 1 = rising (long), -1 = falling (short).
     """
+    for name, value in (
+        ("af_start", af_start),
+        ("af_step", af_step),
+        ("af_max", af_max),
+    ):
+        if not np.isfinite(value):
+            raise ValidationError(f"{name} must be finite, got {value!r}")
+    if af_start <= 0.0:
+        raise ValidationError(f"af_start must be > 0, got {af_start!r}")
+    if af_step < 0.0:
+        raise ValidationError(f"af_step must be >= 0, got {af_step!r}")
+    if af_max <= 0.0:
+        raise ValidationError(f"af_max must be > 0, got {af_max!r}")
+    if af_max < af_start:
+        raise ValidationError(f"af_max ({af_max!r}) must be >= af_start ({af_start!r})")
+
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
 

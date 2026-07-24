@@ -50,6 +50,9 @@ std::vector<double> adx(
  * @param af_start  Initial acceleration factor (default 0.02).
  * @param af_step   Increment per new extreme point (default 0.02).
  * @param af_max    Maximum acceleration factor (default 0.2).
+ *
+ * Returns all-NaN if af_start/af_step/af_max are non-finite, af_start <= 0,
+ * af_step < 0, af_max <= 0, or af_max < af_start.
  */
 std::vector<double> parabolic_sar(
     const double* high,

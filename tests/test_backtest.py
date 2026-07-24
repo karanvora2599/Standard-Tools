@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.backtest.engine import backtest_grid, run_strategy
+from standard_quant_tools.error import ValidationError
 
 
 @pytest.fixture(scope="module")
@@ -60,6 +61,61 @@ class TestReturnKeys:
         assert float(result["equity_curve"].iloc[0]) == pytest.approx(
             10_000.0, rel=1e-6
         )
+
+
+class TestInputValidation:
+    """
+    Regression: unlike portfolio_engine.py (hardened separately), run_strategy/
+    backtest_grid never validated initial_capital/commission_pct/slippage_pct
+    before this — a zero/negative initial_capital silently produced inf/nan
+    in total_return/calmar_ratio instead of raising.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_capital", [0.0, -1.0, -10_000.0, float("nan"), float("inf")]
+    )
+    def test_run_strategy_rejects_bad_initial_capital(self, simple_ohlcv, bad_capital):
+        signals = pd.Series(1, index=simple_ohlcv.index)
+        with pytest.raises(ValidationError, match="initial_capital"):
+            run_strategy(simple_ohlcv, signals, initial_capital=bad_capital)
+
+    @pytest.mark.parametrize("bad_cost", [-0.001, float("nan"), float("inf")])
+    def test_run_strategy_rejects_bad_commission(self, simple_ohlcv, bad_cost):
+        signals = pd.Series(1, index=simple_ohlcv.index)
+        with pytest.raises(ValidationError, match="commission_pct"):
+            run_strategy(simple_ohlcv, signals, commission_pct=bad_cost)
+
+    @pytest.mark.parametrize("bad_cost", [-0.001, float("nan"), float("inf")])
+    def test_run_strategy_rejects_bad_slippage(self, simple_ohlcv, bad_cost):
+        signals = pd.Series(1, index=simple_ohlcv.index)
+        with pytest.raises(ValidationError, match="slippage_pct"):
+            run_strategy(simple_ohlcv, signals, slippage_pct=bad_cost)
+
+    def test_run_strategy_accepts_zero_costs(self, simple_ohlcv):
+        signals = pd.Series(1, index=simple_ohlcv.index)
+        result = run_strategy(
+            simple_ohlcv, signals, commission_pct=0.0, slippage_pct=0.0
+        )
+        assert np.isfinite(result["total_return"])
+
+    @pytest.mark.parametrize("bad_capital", [0.0, -1.0])
+    def test_backtest_grid_rejects_bad_initial_capital(self, simple_ohlcv, bad_capital):
+        with pytest.raises(ValidationError, match="initial_capital"):
+            backtest_grid(
+                simple_ohlcv,
+                strategy="sma_crossover",
+                param_grid={"fast_period": [5], "slow_period": [20]},
+                initial_capital=bad_capital,
+            )
+
+    def test_backtest_grid_rejects_bad_commission(self, simple_ohlcv):
+        with pytest.raises(ValidationError, match="commission_pct"):
+            backtest_grid(
+                simple_ohlcv,
+                strategy="sma_crossover",
+                param_grid={"fast_period": [5], "slow_period": [20]},
+                commission_pct=-0.001,
+            )
 
 
 class TestNoSignal:
@@ -243,14 +299,21 @@ class TestTradeLog:
         close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         df = pd.DataFrame(
             {
-                "Open": close, "High": close, "Low": close, "Close": close,
+                "Open": close,
+                "High": close,
+                "Low": close,
+                "Close": close,
                 "Volume": [1_000_000.0] * 6,
             },
             index=dates,
         )
         signals = pd.Series([2.5, 2.5, 2.5, 0, 0, 0], index=dates, dtype=float)
         result = run_strategy(
-            df, signals, commission_pct=0.001, slippage_pct=0.0005, include_trade_log=True,
+            df,
+            signals,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+            include_trade_log=True,
         )
         trade_log = result["trade_log"]
         assert len(trade_log) == 1
@@ -302,7 +365,9 @@ class TestTradeLog:
 
 
 class TestCppTradeStatsParity:
-    def test_native_trade_stats_overwritten_with_python_computed_ones(self, monkeypatch):
+    def test_native_trade_stats_overwritten_with_python_computed_ones(
+        self, monkeypatch
+    ):
         """
         Regression test (P0-2): the native C++ kernel's own trade-log logic
         records entry at prices[i] (not the economically correct prior
@@ -321,14 +386,18 @@ class TestCppTradeStatsParity:
         as test_trade_log_reconciles_with_equity_curve_close_mode (entry
         at Close[0]=100, exit at Close[3]=103, return_pct=2.7%).
         """
-        import standard_quant_tools.backtest.engine as engine_mod
         from unittest.mock import MagicMock
+
+        import standard_quant_tools.backtest.engine as engine_mod
 
         dates = pd.date_range("2023-01-02", periods=6, freq="B")
         close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         df = pd.DataFrame(
             {
-                "Open": close, "High": close, "Low": close, "Close": close,
+                "Open": close,
+                "High": close,
+                "Low": close,
+                "Close": close,
                 "Volume": [1_000_000.0] * 6,
             },
             index=dates,
@@ -356,7 +425,11 @@ class TestCppTradeStatsParity:
         monkeypatch.setattr(engine_mod, "_cpp_core", fake_cpp)
 
         result = run_strategy(
-            df, signals, commission_pct=0.001, slippage_pct=0.0005, include_trade_log=True,
+            df,
+            signals,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+            include_trade_log=True,
         )
 
         assert result["num_trades"] == 1
@@ -365,6 +438,98 @@ class TestCppTradeStatsParity:
         # Reconciles with the Python-side trade log built alongside it.
         row = result["trade_log"].iloc[0]
         assert result["avg_trade_return_pct"] == pytest.approx(row["return_pct"])
+
+
+from typing import Any as _Any
+
+_cpp: _Any = None
+try:
+    from standard_quant_tools import _sqt_core as _cpp  # type: ignore[attr-defined]
+
+    _HAS_CPP_EXT = True
+except ImportError:
+    _HAS_CPP_EXT = False
+
+requires_cpp_ext = pytest.mark.skipif(not _HAS_CPP_EXT, reason="_sqt_core not built")
+
+
+class TestNativeTradeStatsCorrectness:
+    """
+    Regression: backtest.cpp's own run_strategy trade-log logic used to use
+    entry_dir (sign only, ±1) and record entry_price at prices[i] instead of
+    prices[i-1] (one bar later than the true economic reference), and never
+    deducted commission/slippage from a trade's return -- so batch_run_strategy
+    (which has no Python-side override, unlike the single-call C++ path in
+    engine.py) silently reported wrong win_rate/profit_factor/
+    avg_trade_return_pct for any leveraged (non-±1) signal. Calls the real
+    compiled kernel directly (bypassing engine.py's Python override entirely)
+    with the same hand-verified 6-bar leveraged scenario as
+    test_trade_log_return_scales_with_leveraged_position_size: signal
+    magnitude 2.5, raw price return 100->103 = 3.0%, realized trade return
+    3.0% * 2.5 - 2*0.15% cost = 7.2%. Cannot run without a compiled
+    _sqt_core (no C++ toolchain available in the environment that wrote
+    this fix) -- verified by CI's build-cpp.yml instead.
+    """
+
+    @requires_cpp_ext
+    def test_run_strategy_native_avg_trade_return_matches_hand_computed(self):
+        close = np.array([100.0, 102.0, 104.0, 103.0, 105.0, 106.0])
+        signals = np.array([2.5, 2.5, 2.5, 0.0, 0.0, 0.0])
+        r = _cpp.run_strategy(close, signals, 10_000.0, 0.001, 0.0005)
+        assert r["num_trades"] == 1
+        assert r["win_rate"] == pytest.approx(1.0)
+        assert r["avg_trade_return_pct"] == pytest.approx(7.2, abs=1e-9)
+
+    @requires_cpp_ext
+    def test_batch_run_strategy_native_avg_trade_return_matches_hand_computed(self):
+        """batch_run_strategy has no Python-side override at all -- this is
+        the scenario that was silently wrong end-to-end before this fix."""
+        close = np.array([100.0, 102.0, 104.0, 103.0, 105.0, 106.0])
+        signals_mat = np.array([[2.5, 2.5, 2.5, 0.0, 0.0, 0.0]])
+        results = _cpp.batch_run_strategy(close, signals_mat, 10_000.0, 0.001, 0.0005)
+        assert len(results) == 1
+        r = results[0]
+        assert r["num_trades"] == 1
+        assert r["win_rate"] == pytest.approx(1.0)
+        assert r["avg_trade_return_pct"] == pytest.approx(7.2, abs=1e-9)
+
+    @requires_cpp_ext
+    def test_run_strategy_native_matches_python_recomputed_stats(self, simple_ohlcv):
+        """
+        Broader cross-check on a realistic random series (not just the
+        hand-verified 6-bar case): the native kernel's own trade stats must
+        now agree with engine.py's independent Python recomputation
+        (_build_trade_log + _compute_trade_stats), since both implement the
+        identical fill-aware, cost-aware accounting.
+        """
+        from standard_quant_tools.backtest.engine import (
+            _build_trade_log,
+            _compute_trade_stats,
+        )
+
+        np.random.seed(7)
+        signals = pd.Series(
+            np.random.choice([-1.0, 0.0, 1.0, 2.0], len(simple_ohlcv)),
+            index=simple_ohlcv.index,
+        )
+        prices = simple_ohlcv["Close"]
+        executed = signals.shift(1).fillna(0.0)
+
+        close_arr = prices.to_numpy(dtype=np.float64)
+        signals_arr = signals.to_numpy(dtype=np.float64)
+        native = _cpp.run_strategy(close_arr, signals_arr, 10_000.0, 0.001, 0.0005)
+
+        trade_log = _build_trade_log(prices.shift(1), prices, executed, 0.001 + 0.0005)
+        python_stats = _compute_trade_stats(trade_log)
+
+        assert native["num_trades"] == python_stats["num_trades"]
+        assert native["win_rate"] == pytest.approx(python_stats["win_rate"], abs=1e-9)
+        assert native["avg_trade_return_pct"] == pytest.approx(
+            python_stats["avg_trade_return_pct"], abs=1e-6
+        )
+        assert native["profit_factor"] == pytest.approx(
+            python_stats["profit_factor"], abs=1e-6
+        )
 
 
 class TestMetricBounds:

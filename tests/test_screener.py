@@ -144,6 +144,7 @@ class TestScreenerProcessPool:
         result = screen_stocks(tickers, filters={})
         assert len(result) == 5
 
+
 class TestScreenerErrorReporting:
     """
     Regression tests (operational item A): a ticker whose data fetch raises
@@ -187,9 +188,11 @@ class TestScreenerErrorReporting:
         assert "AAPL" in result.attrs["failed_tickers"]
         assert "API down" in result.attrs["failed_tickers"]["AAPL"]
 
-    def test_mixed_pass_fail_error_all_reported_correctly(self, mock_provider, monkeypatch):
-        from standard_quant_tools.data.factory import DataFactory
+    def test_mixed_pass_fail_error_all_reported_correctly(
+        self, mock_provider, monkeypatch
+    ):
         from standard_quant_tools.data.base import FinancialRatios
+        from standard_quant_tools.data.factory import DataFactory
 
         def get_ratios(ticker):
             if ticker == "AAPL":

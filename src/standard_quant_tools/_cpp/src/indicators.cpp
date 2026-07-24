@@ -169,6 +169,17 @@ std::vector<double> parabolic_sar(
     std::vector<double> result(2 * n, kNaN);
     if (n == 0) return result;
 
+    // Not a crash risk (af_* only feed floating-point arithmetic below, no
+    // indexing) but a nonsensical combination (e.g. af_max < af_start, a
+    // negative acceleration factor) silently produces a numerically
+    // meaningless SAR series rather than an obviously-wrong one — reject
+    // up front, same convention as the period<=0 guards elsewhere in this
+    // file.
+    if (!std::isfinite(af_start) || !std::isfinite(af_step) || !std::isfinite(af_max) ||
+        af_start <= 0.0 || af_step < 0.0 || af_max <= 0.0 || af_max < af_start) {
+        return result;
+    }
+
     // Bootstrap: assume rising trend from bar 0
     double sar       = low[0];
     double ep        = high[0];
@@ -346,6 +357,12 @@ std::vector<double> stochastic_oscillator(
 {
     std::vector<double> result(2 * n, kNaN);
     if (static_cast<int>(n) < k_period || k_period < 1) return result;
+
+    // d_period <= 0 would make `Sk -= K_vals[i - d_period + 1]` below read
+    // out of bounds (i - d_period + 1 >= i + 1 for d_period <= 0) and
+    // `Sk / d_period` divide by zero for d_period == 0 — reject up front,
+    // same convention as the k_period guard just above.
+    if (d_period <= 0) return result;
 
     // Compute %K for each bar from k_period-1 onward
     std::vector<double> K_vals(n, kNaN);

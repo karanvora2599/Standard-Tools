@@ -342,7 +342,7 @@ class HurstInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    method: str = Field(
+    method: Literal["dfa", "rs"] = Field(
         "dfa",
         description="Estimation method: 'dfa' (Detrended Fluctuation Analysis, default) or 'rs' (Rescaled Range).",
     )
@@ -378,7 +378,9 @@ class RegimeAdaptiveInput(BaseModel):
     initial_capital: float = Field(10_000.0, description="Starting capital.")
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    hurst_method: str = Field("dfa", description="Hurst method: 'dfa' or 'rs'.")
+    hurst_method: Literal["dfa", "rs"] = Field(
+        "dfa", description="Hurst method: 'dfa' or 'rs'."
+    )
     sma_param_grid: Optional[Dict[str, List[Any]]] = Field(
         None,
         description="Custom param grid for SMA crossover. Default: fast_period=[5,10,20], slow_period=[30,50,100].",
@@ -568,7 +570,7 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
     )
     commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
     slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    hurst_method: str = Field(
+    hurst_method: Literal["dfa", "rs"] = Field(
         "dfa",
         description="Hurst method: 'dfa' or 'rs' — reported as diagnostic context per window, not used to hard-select a strategy family.",
     )
@@ -1282,10 +1284,14 @@ class PortfolioSimulationInput(BaseModel):
         description="Target sum(|weight|) per date when signal_type='score' (ignored otherwise).",
     )
     n_long: Optional[int] = Field(
-        None, ge=0, description="Required when construction_method='equal_weight_top_bottom'."
+        None,
+        ge=0,
+        description="Required when construction_method='equal_weight_top_bottom'.",
     )
     n_short: Optional[int] = Field(
-        None, ge=0, description="Required when construction_method='equal_weight_top_bottom'."
+        None,
+        ge=0,
+        description="Required when construction_method='equal_weight_top_bottom'.",
     )
     vol_lookback: int = Field(
         20,

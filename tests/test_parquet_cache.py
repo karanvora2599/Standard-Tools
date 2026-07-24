@@ -12,13 +12,13 @@ import pandas as pd
 import pytest
 
 import standard_quant_tools.data.yfinance_provider as provider_module
-from standard_quant_tools.error import ValidationError
 from standard_quant_tools.data.yfinance_provider import (
     YFinanceProvider,
     _is_historical,
     _norm_date,
     _parquet_path,
 )
+from standard_quant_tools.error import ValidationError
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -114,10 +114,17 @@ class TestParquetPathContainment:
     the same slug-plus-resolved-containment approach as artifacts.py.
     """
 
-    @pytest.mark.parametrize("bad_symbol", [
-        "../../etc/passwd", "..\\..\\Windows\\System32", "AAPL/../../x",
-        "AAPL\x00.txt", "C:\\Windows", "",
-    ])
+    @pytest.mark.parametrize(
+        "bad_symbol",
+        [
+            "../../etc/passwd",
+            "..\\..\\Windows\\System32",
+            "AAPL/../../x",
+            "AAPL\x00.txt",
+            "C:\\Windows",
+            "",
+        ],
+    )
     def test_path_traversal_symbol_raises(self, bad_symbol):
         with pytest.raises(ValidationError, match="not a valid identifier|empty"):
             _parquet_path(bad_symbol, "2022-01-01", "2023-01-01", "1d")
@@ -150,9 +157,14 @@ class TestNormDateValidation:
     even match the YYYY-MM-DD shape after truncation to 10 characters.
     """
 
-    @pytest.mark.parametrize("bad_date", [
-        "../../etc/passwd", "not-a-date", "2022/01/01",
-    ])
+    @pytest.mark.parametrize(
+        "bad_date",
+        [
+            "../../etc/passwd",
+            "not-a-date",
+            "2022/01/01",
+        ],
+    )
     def test_malformed_date_string_raises(self, bad_date):
         with pytest.raises(ValidationError, match="YYYY-MM-DD"):
             _norm_date(bad_date)
@@ -252,9 +264,7 @@ class TestTimezoneNormalization:
     """
 
     def test_tz_aware_index_normalized_to_naive(self, tmp_path: Path):
-        dates = pd.date_range(
-            "2022-01-03", periods=5, freq="B", tz="America/New_York"
-        )
+        dates = pd.date_range("2022-01-03", periods=5, freq="B", tz="America/New_York")
         tz_aware_df = pd.DataFrame(
             {
                 "open": [100.0] * 5,
@@ -295,9 +305,7 @@ class TestTimezoneNormalization:
         assert result.index.tz is None
         assert pd.Timestamp("2022-01-03") in result.index
 
-    def test_preexisting_tz_aware_cache_file_normalized_on_read(
-        self, tmp_path: Path
-    ):
+    def test_preexisting_tz_aware_cache_file_normalized_on_read(self, tmp_path: Path):
         """
         A Parquet cache file written before this fix (or by an older
         yfinance version that returned tz-aware data) must still come back
@@ -365,12 +373,11 @@ class TestCacheHardening:
     filename.
     """
 
-    def test_session_cache_hit_still_records_audit(
-        self, minimal_ohlcv: pd.DataFrame
-    ):
-        with patch("yfinance.Ticker") as mock_ticker, patch.object(
-            provider_module.audit, "record_data_access"
-        ) as mock_record:
+    def test_session_cache_hit_still_records_audit(self, minimal_ohlcv: pd.DataFrame):
+        with (
+            patch("yfinance.Ticker") as mock_ticker,
+            patch.object(provider_module.audit, "record_data_access") as mock_record,
+        ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower
             )
@@ -397,9 +404,7 @@ class TestCacheHardening:
 
         assert second["Close"].iloc[0] != -999.0
 
-    def test_disk_cache_hit_returns_independent_copy(
-        self, minimal_ohlcv: pd.DataFrame
-    ):
+    def test_disk_cache_hit_returns_independent_copy(self, minimal_ohlcv: pd.DataFrame):
         with patch("yfinance.Ticker") as mock_ticker:
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower
@@ -416,9 +421,7 @@ class TestCacheHardening:
 
         assert third["Close"].iloc[0] != -999.0
 
-    def test_corrupt_parquet_evicted_and_refetched(
-        self, minimal_ohlcv: pd.DataFrame
-    ):
+    def test_corrupt_parquet_evicted_and_refetched(self, minimal_ohlcv: pd.DataFrame):
         with patch("yfinance.Ticker") as mock_ticker:
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower
@@ -463,8 +466,9 @@ class TestCacheHardening:
             tmp_names.append(self.name)
             return orig_replace(self, target)
 
-        with patch("yfinance.Ticker") as mock_ticker, patch.object(
-            Path, "replace", spy_replace
+        with (
+            patch("yfinance.Ticker") as mock_ticker,
+            patch.object(Path, "replace", spy_replace),
         ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower
@@ -492,9 +496,10 @@ class TestCacheHardening:
         replay, which constructs a fresh provider specifically to re-read
         data and detect tampering.
         """
-        with patch("yfinance.Ticker") as mock_ticker, patch.object(
-            provider_module.audit, "record_data_access"
-        ) as mock_record:
+        with (
+            patch("yfinance.Ticker") as mock_ticker,
+            patch.object(provider_module.audit, "record_data_access") as mock_record,
+        ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower
             )

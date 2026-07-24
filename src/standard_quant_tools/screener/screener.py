@@ -45,12 +45,23 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi as calc_rsi
 from standard_quant_tools.indicators.trend import sma as calc_sma
 
-_VALID_FILTER_KEYS = frozenset((
-    "pe_ratio_max", "pb_ratio_max", "debt_equity_max", "roe_min",
-    "profit_margin_min", "div_yield_min", "market_cap_min",
-    "rsi_max", "rsi_min", "price_above_sma", "price_below_sma",
-    "beta_max", "beta_min",
-))
+_VALID_FILTER_KEYS = frozenset(
+    (
+        "pe_ratio_max",
+        "pb_ratio_max",
+        "debt_equity_max",
+        "roe_min",
+        "profit_margin_min",
+        "div_yield_min",
+        "market_cap_min",
+        "rsi_max",
+        "rsi_min",
+        "price_above_sma",
+        "price_below_sma",
+        "beta_max",
+        "beta_min",
+    )
+)
 
 
 def _validate_filter_keys(filters: Dict[str, Any]) -> None:
@@ -60,6 +71,7 @@ def _validate_filter_keys(filters: Dict[str, Any]) -> None:
             f"Unknown filter key(s): {sorted(unknown)}. Valid keys: "
             f"{sorted(_VALID_FILTER_KEYS)}"
         )
+
 
 # ── Per-ticker async evaluation ───────────────────────────────────────────────
 
