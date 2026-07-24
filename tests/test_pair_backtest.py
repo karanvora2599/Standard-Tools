@@ -67,6 +67,41 @@ def _pair_price_data_unequal_prices():
     return {"A": _df(close_a), "B": _df(close_b)}, dates
 
 
+def _pair_price_data_unequal_overnight_gaps():
+    """
+    Same Close path as _pair_price_data_unequal_prices (A dips 200->40 at
+    bar 5, entry trigger), but Open != Close at the execution bar (bar 6,
+    the bar AFTER the trigger, where fill_price="next_open" actually
+    executes the trade) -- and, crucially, A and B gap by DIFFERENT
+    percentages overnight: A gaps up from 40 to 45 (+12.5%), B does not gap
+    at all (50 -> 50). This is exactly the scenario P0-1 identifies: sizing
+    weights from the trigger date's own Close (bar 5) and then executing at
+    a DIFFERENT bar's Open (bar 6) breaks the hedge share ratio unless the
+    two legs' overnight gaps happen to be identical -- which every other
+    fixture in this file (Open == Close everywhere) can never expose.
+    """
+    dates = pd.date_range("2023-01-02", periods=20, freq="B")
+    close_a = [200.0] * 5 + [40.0] * 5 + [200.0] * 5 + [360.0] * 5
+    close_b = [50.0] * 20
+    open_a = list(close_a)
+    open_b = list(close_b)
+    open_a[6] = 45.0  # +12.5% overnight gap from bar 5's Close (40) into bar 6
+
+    def _df(close, open_):
+        return pd.DataFrame(
+            {
+                "Open": open_,
+                "High": [max(c, o) for c, o in zip(close, open_)],
+                "Low": [min(c, o) for c, o in zip(close, open_)],
+                "Close": close,
+                "Volume": [1_000_000.0] * len(close),
+            },
+            index=dates,
+        )
+
+    return {"A": _df(close_a, open_a), "B": _df(close_b, open_b)}, dates
+
+
 class TestRunPairBacktest:
     def test_missing_symbol_raises(self):
         price_data, _ = _pair_price_data()
@@ -236,6 +271,64 @@ class TestRunPairBacktest:
         dollar_a = (gross + net) / 2.0
         dollar_b = (gross - net) / 2.0
         price_a, price_b = 40.0, 50.0  # Close at bar 5 (the entry bar)
+        shares_a = dollar_a / price_a
+        shares_b = dollar_b / price_b
+        assert shares_b / shares_a == pytest.approx(2.0, rel=1e-3)
+
+    def test_hedge_ratio_sizing_correct_under_default_next_open_with_unequal_gaps(self):
+        """
+        Regression test (P0-1): with the default fill_price="next_open",
+        the trade EXECUTES at the bar after the trigger date's Open, not
+        the trigger date's own Close. Sizing weights from the trigger
+        date's Close (bar 5) and then executing at a DIFFERENT bar's Open
+        (bar 6) breaks shares_b/shares_a == hedge_ratio unless A and B
+        happen to have identical overnight gaps -- which the "close"-mode
+        test above, and every fixture with Open == Close, can never expose.
+        This fixture's bar 6 has A gap +12.5% (40 -> 45) while B does not
+        gap at all (50 -> 50): the fix must size off bar 6's own Open
+        (45, 50), not bar 5's Close (40, 50).
+
+        gross_exposure_curve/net_exposure_curve (used by the sibling
+        "close"-mode test above) are marked at each bar's own Close, so
+        they can't be used here: bar 6's Close (40, unchanged from bar 5 --
+        this fixture only moves Open) differs from its Open (45, the
+        actual execution price), so Close-marked exposure would reflect an
+        intraday price move, not the trade's actual execution size.
+        cash_curve instead moves by exactly delta*execution_price at the
+        moment of execution, unaffected by later marking, so it's used to
+        back out each leg's dollar allocation at the true execution price:
+        cash_after = initial_capital - dollar_a + dollar_b (long A, short
+        B), and dollar_a + dollar_b = gross_leverage * initial_capital
+        always (weights sum to gross_leverage regardless of execution
+        price) -- solving those two equations gives dollar_b = cash_after / 2,
+        dollar_a = initial_capital - dollar_b.
+        """
+        price_data, dates = _pair_price_data_unequal_overnight_gaps()
+        initial_capital = 10_000.0
+        result = run_pair_backtest(
+            price_data,
+            symbol_a="A",
+            symbol_b="B",
+            hedge_ratio=2.0,
+            entry_z=1.0,
+            exit_z=0.3,
+            gross_leverage=1.0,
+            initial_capital=initial_capital,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            zscore_window=None,
+            # fill_price intentionally omitted -- exercises the new default.
+        )
+        entry_date = dates[5]
+        exec_date = dates[6]
+        assert result["state"].loc[entry_date] == 1.0  # long A, short B
+        # No trade has executed yet at the trigger bar itself.
+        assert result["cash_curve"].loc[entry_date] == pytest.approx(initial_capital)
+
+        cash_after = float(result["cash_curve"].loc[exec_date])
+        dollar_b = cash_after / 2.0
+        dollar_a = initial_capital - dollar_b
+        price_a, price_b = 45.0, 50.0  # Open at bar 6 (the actual execution bar)
         shares_a = dollar_a / price_a
         shares_b = dollar_b / price_b
         assert shares_b / shares_a == pytest.approx(2.0, rel=1e-3)

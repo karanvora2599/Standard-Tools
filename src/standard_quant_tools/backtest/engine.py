@@ -256,6 +256,21 @@ def run_strategy(
             prices_arr, signals_arr, initial_capital, commission_pct, slippage_pct
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
+        # win_rate/profit_factor/num_trades/avg_trade_return_pct: the native
+        # kernel's OWN internal trade-log logic still records entry at
+        # prices[i] (one bar later than the true economic reference) and
+        # excludes commission/slippage from each trade's return -- the exact
+        # bug _build_trade_log's Python-side fix addresses. Overwrite with
+        # the same fill-aware, cost-aware accounting so a caller gets
+        # identical trade statistics whether or not _sqt_core is built, and
+        # so these stats reconcile with trade_log below rather than
+        # disagreeing with it. Interim fix, not a native-code fix: the C++
+        # batch path in backtest_grid (batch_run_strategy) still returns the
+        # uncorrected native stats -- see the comment there.
+        trade_log_for_stats = _build_trade_log(
+            prices.shift(1), prices, executed, commission_pct + slippage_pct,
+        )
+        trade_stats = _compute_trade_stats(trade_log_for_stats)
         result: Dict[str, Any] = {
             "final_equity": round(float(r["final_equity"]), 2),
             "total_return": round(float(r["total_return"]), 6),
@@ -265,18 +280,10 @@ def run_strategy(
             "max_drawdown": round(float(r["max_drawdown"]), 6),
             "calmar_ratio": round(float(r["calmar_ratio"]), 4),
             "equity_curve": equity_curve,
-            "win_rate": round(float(r["win_rate"]), 4),
-            "profit_factor": round(float(r["profit_factor"]), 4),
-            "num_trades": int(r["num_trades"]),
-            "avg_trade_return_pct": round(float(r["avg_trade_return_pct"]), 4),
+            **trade_stats,
         }
         if include_trade_log:
-            result["trade_log"] = _build_trade_log(
-                prices.shift(1),
-                prices,
-                executed,
-                commission_pct + slippage_pct,
-            )
+            result["trade_log"] = trade_log_for_stats
         logger.debug(
             "[run_strategy] C++  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
             result["total_return"] * 100,
@@ -546,6 +553,18 @@ def backtest_grid(
                 sort_by,
             )
 
+            # NOTE (known gap, not fixed here): unlike run_strategy's single-
+            # call C++ path above, this batch path's win_rate/profit_factor/
+            # num_trades/avg_trade_return_pct still come straight from the
+            # native kernel's own uncorrected trade-log logic (entry at
+            # prices[i], no commission/slippage in trade returns) --
+            # overwriting per-combo here would mean rebuilding a Python-side
+            # trade log for every parameter combination in the grid, which
+            # defeats the point of the batch C++ path's speed. A grid search
+            # sorted by win_rate/profit_factor can therefore rank parameters
+            # differently with _sqt_core built vs. not. Real fix requires
+            # the native kernel itself to adopt the same fill-aware,
+            # cost-aware trade accounting (see _build_trade_log).
             cpp_results = _cpp_core.batch_run_strategy(
                 prices_arr,
                 signals_mat,

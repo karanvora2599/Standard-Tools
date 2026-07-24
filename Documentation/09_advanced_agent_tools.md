@@ -1970,10 +1970,11 @@ when the z-scored spread falls to or below `-entry_z`; short the spread on
 the mirror condition; exit to flat once the z-score reverts inside
 `exit_z`. `hedge_ratio` is a **share** ratio (`spread = Close_a -
 hedge_ratio * Close_b`), not a dollar-weight ratio; `gross_leverage`
-(default `1.0`) is split between the two legs using each transition
-date's own prices so `shares_b / shares_a == hedge_ratio` — only
-dollar-neutral when `|hedge_ratio| * Close_b ≈ Close_a`. See §15's
-"Pair Trade Backtest" section in `04_backtesting.md` for the exact formula.
+(default `1.0`) is split between the two legs using each transition's
+**execution price** (not necessarily that date's Close — see `fill_price`
+below) so `shares_b / shares_a == hedge_ratio` — only dollar-neutral when
+`|hedge_ratio| * exec_price_b ≈ exec_price_a`. See §15's "Pair Trade
+Backtest" section in `04_backtesting.md` for the exact formula.
 
 **`zscore_window`:** `Optional[int]`, default **`30`** — a rolling window
 (bars) so the spread z-score at each bar only uses data available up to

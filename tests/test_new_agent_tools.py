@@ -1863,6 +1863,49 @@ class TestPortfolioSimulation:
         assert costed.cvar_95 >= free.cvar_95
         assert costed.total_return < free.total_return
 
+    def test_day0_cost_reflected_in_max_drawdown_and_calmar(self, monkeypatch):
+        """
+        Regression test (P0-3): a portfolio that loses 5% entirely to a
+        day-0 rebalance cost and then stays perfectly flat must report
+        max_drawdown == -0.05, not 0.0. _metrics_with_day0_cost's
+        equity_with_start (initial_capital prepended before the day-0
+        rebalance) was already computed for total_return/Sharpe/VaR (item
+        8) but max_drawdown/calmar_ratio were still computed from the bare
+        equity_curve, whose iloc[0] is already net of the day-0 cost --
+        so the "dip" from initial_capital to the post-cost value was
+        invisible to a peak-to-trough calculation that never saw the peak.
+
+        Uses a dedicated flat-price, single-ticker fixture (not the
+        long_ohlcv random walk) so the expected max_drawdown is known
+        exactly: weight=1.0, commission_pct=0.05, slippage_pct=0.0 ->
+        exactly a 5% one-time cost on the full-notional day-0 entry, flat
+        thereafter.
+        """
+        from unittest.mock import MagicMock
+        from standard_quant_tools.data.factory import DataFactory
+
+        dates = pd.date_range("2020-01-01", periods=10, freq="B")
+        flat_close = pd.Series(100.0, index=dates)
+        flat_df = pd.DataFrame(
+            {
+                "Open": flat_close, "High": flat_close, "Low": flat_close,
+                "Close": flat_close, "Volume": pd.Series(1_000_000.0, index=dates),
+            }
+        )
+        provider = MagicMock()
+        provider.get_ohlcv.return_value = flat_df
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+
+        weights = {"AAPL": {str(dates[0].date()): 1.0}}
+        result = run_portfolio_simulation(PortfolioSimulationInput(
+            tickers=["AAPL"], start_date=START, end_date=END, target_weights=weights,
+            commission_pct=0.05, slippage_pct=0.0,
+        ))
+        assert result.total_return == pytest.approx(-0.05, abs=1e-6)
+        assert result.max_drawdown == pytest.approx(-0.05, abs=1e-6)
+        import math as _math
+        assert _math.isfinite(result.calmar_ratio)
+
 
 def _score_values(long_ohlcv, tickers, scores_by_ticker, rebalance_indices):
     dates = [str(long_ohlcv.index[i].date()) for i in rebalance_indices]

@@ -178,6 +178,93 @@ class TestParquetCacheWrite:
         # Parquet round-trip drops DatetimeIndex freq metadata — ignore it
         pd.testing.assert_frame_equal(result1, result2, check_freq=False)
 
+
+class TestTimezoneNormalization:
+    """
+    Regression tests: yfinance attaches the listing exchange's own timezone
+    to its returned index (even for daily bars) -- e.g. tz-aware
+    'America/New_York'. Every downstream consumer (agent/tools.py's
+    pd.Timestamp(iso_date) signal/target-weight keys, portfolio_engine.py's
+    per-ticker index intersection, signal_fill_policy's reindex) builds or
+    compares against tz-naive, midnight-normalized timestamps -- a tz-aware
+    provider index would make those either raise or (reindex doesn't raise)
+    silently produce an all-NaN/all-zero result.
+    """
+
+    def test_tz_aware_index_normalized_to_naive(self, tmp_path: Path):
+        dates = pd.date_range(
+            "2022-01-03", periods=5, freq="B", tz="America/New_York"
+        )
+        tz_aware_df = pd.DataFrame(
+            {
+                "open": [100.0] * 5,
+                "high": [101.0] * 5,
+                "low": [99.0] * 5,
+                "close": [100.5] * 5,
+                "volume": [1_000_000.0] * 5,
+            },
+            index=dates,
+        )
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = tz_aware_df
+            prov = YFinanceProvider()
+            result = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+        assert result.index.tz is None
+        # Matches a plain, tz-naive ISO-date timestamp exactly (midnight, no
+        # residual time-of-day component from the exchange's local open time).
+        assert pd.Timestamp("2022-01-03") in result.index
+
+    def test_tz_aware_utc_index_also_normalized(self, tmp_path: Path):
+        dates = pd.date_range("2022-01-03", periods=5, freq="B", tz="UTC")
+        tz_aware_df = pd.DataFrame(
+            {
+                "open": [100.0] * 5,
+                "high": [101.0] * 5,
+                "low": [99.0] * 5,
+                "close": [100.5] * 5,
+                "volume": [1_000_000.0] * 5,
+            },
+            index=dates,
+        )
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = tz_aware_df
+            prov = YFinanceProvider()
+            result = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+        assert result.index.tz is None
+        assert pd.Timestamp("2022-01-03") in result.index
+
+    def test_preexisting_tz_aware_cache_file_normalized_on_read(
+        self, tmp_path: Path
+    ):
+        """
+        A Parquet cache file written before this fix (or by an older
+        yfinance version that returned tz-aware data) must still come back
+        tz-naive on a cache-hit read -- the fix has to apply on both the
+        live-fetch path and the disk-cache-hit path, not just one.
+        """
+        dates = pd.date_range("2022-01-03", periods=5, freq="B", tz="UTC")
+        stale_cached_df = pd.DataFrame(
+            {
+                "Open": [100.0] * 5,
+                "High": [101.0] * 5,
+                "Low": [99.0] * 5,
+                "Close": [100.5] * 5,
+                "Volume": [1_000_000.0] * 5,
+            },
+            index=dates,
+        )
+        path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
+        provider_module._CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        stale_cached_df.to_parquet(path)
+
+        prov = YFinanceProvider()
+        result = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+
+        assert result.index.tz is None
+        assert pd.Timestamp("2022-01-03") in result.index
+
     def test_cache_returns_correct_columns(
         self, tmp_path: Path, minimal_ohlcv: pd.DataFrame
     ):

@@ -66,6 +66,31 @@ def _norm_date(d: Union[str, datetime, _date]) -> str:
     return str(d)[:10]
 
 
+def _normalize_ohlcv_index(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    yfinance attaches the listing exchange's own timezone to its returned
+    index (even for daily bars) — e.g. tz-aware 'America/New_York' for a
+    plain US ticker. Every downstream consumer (agent/tools.py's
+    pd.Timestamp(iso_date) signal/target-weight keys, portfolio_engine.py's
+    per-ticker index intersection, reindex-based signal_fill_policy, etc.)
+    builds or compares against tz-naive, midnight-normalized timestamps —
+    intersecting/reindexing a tz-naive index against a tz-aware one either
+    raises or (via .reindex(), which doesn't raise) silently produces an
+    all-NaN result, so a signal/target-weight dict keyed by plain ISO dates
+    can appear to have "no matching market data" for every date, or
+    silently zero out. Strip tz and drop any intraday time component here,
+    once, at the single choke point every OHLCV consumer goes through,
+    rather than requiring every call site to defend against it.
+    """
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    idx = idx.normalize()
+    df = df.copy()
+    df.index = idx
+    return df
+
+
 def _parquet_path(symbol: str, start: str, end: str, interval: str) -> Path:
     safe = symbol.replace("/", "-").upper()
     return _CACHE_ROOT / f"{safe}_{start}_{end}_{interval}.parquet"
@@ -141,7 +166,7 @@ class YFinanceProvider(DataProvider):
                 end_str,
                 pq_path.name,
             )
-            cached_df = pd.read_parquet(pq_path)
+            cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path))
             audit.record_data_access(
                 symbol,
                 start_str,
@@ -185,7 +210,7 @@ class YFinanceProvider(DataProvider):
             if df["Close"].isnull().any():
                 raise APIError(f"Data for {symbol} contains NaNs in Close column.")
 
-            result = df[required]
+            result = _normalize_ohlcv_index(df[required])
 
         except (DataNotFoundError, InvalidSymbolError, APIError):
             raise

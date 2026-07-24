@@ -2381,20 +2381,34 @@ def run_signal_panel_backtest(
 def _metrics_with_day0_cost(
     equity_curve: pd.Series,
     initial_capital: float,
-) -> Tuple[pd.Series, float, float]:
+) -> Tuple[pd.Series, float, float, pd.Series]:
     """
-    Returns (returns, total_return, annualized_return) accounting for a
-    same-bar-0 rebalance cost that would otherwise be invisible:
-    equity_curve.iloc[0] from run_portfolio_simulation/run_pair_backtest is
-    already net of that rebalance's costs, so naively using
-    cumulative_return/cagr (baseline = equity_curve.iloc[0]) and
+    Returns (returns, total_return, annualized_return, equity_with_start)
+    accounting for a same-bar-0 rebalance cost that would otherwise be
+    invisible: equity_curve.iloc[0] from run_portfolio_simulation/
+    run_pair_backtest is already net of that rebalance's costs, so naively
+    using cumulative_return/cagr (baseline = equity_curve.iloc[0]) and
     equity_curve.pct_change() (first return = NaN -> filled 0.0) silently
     drops the day-0 cost's entire effect on every downstream metric.
     Prepending a synthetic pre-trade observation at initial_capital makes
     the first real return capture it instead.
+
+    equity_with_start is also returned (not just consumed internally) so
+    callers can compute max_drawdown/calmar_ratio from the same complete
+    curve: max_drawdown(equity_curve) alone would treat the already-
+    post-cost equity_curve.iloc[0] as the peak, so a portfolio that lost
+    5% entirely to day-0 rebalance costs and then stayed flat would
+    otherwise report max_drawdown=0.0 (and calmar_ratio=inf) despite
+    total_return correctly reporting -5%. calmar_ratio should still be
+    computed as annualized_return (above, already using the correct
+    initial_capital baseline and undistorted bar count) divided by
+    max_drawdown(equity_with_start) -- not via the standalone calmar_ratio()
+    metrics function, which would redundantly recompute cagr from
+    equity_with_start's own iloc[0] baseline using len(equity_with_start)
+    (one bar too many, from the synthetic point) as its bar count.
     """
     if equity_curve.empty:
-        return equity_curve, 0.0, 0.0
+        return equity_curve, 0.0, 0.0, equity_curve
     synthetic_index = equity_curve.index[0] - pd.Timedelta(days=1)
     equity_with_start = pd.concat(
         [
@@ -2408,7 +2422,7 @@ def _metrics_with_day0_cost(
     annualized_return = (
         (1.0 + total_return) ** (1.0 / num_years) - 1.0 if num_years > 0 else 0.0
     )
-    return returns, total_return, annualized_return
+    return returns, total_return, annualized_return, equity_with_start
 
 
 def run_portfolio_simulation(
@@ -2511,9 +2525,13 @@ def run_portfolio_simulation(
     )
 
     equity_curve = raw["equity_curve"]
-    returns, total_return, annualized_return = _metrics_with_day0_cost(
+    returns, total_return, annualized_return, equity_with_start = _metrics_with_day0_cost(
         equity_curve,
         input_data.initial_capital,
+    )
+    day0_max_dd = float(max_drawdown(equity_with_start))
+    day0_calmar = (
+        annualized_return / abs(day0_max_dd) if day0_max_dd != 0.0 else float("inf")
     )
 
     ir: Optional[float] = None
@@ -2566,8 +2584,8 @@ def run_portfolio_simulation(
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
         sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
         sortino_ratio=round(float(sortino_ratio(returns)), 4),
-        max_drawdown=round(float(max_drawdown(equity_curve)), 6),
-        calmar_ratio=round(float(calmar_ratio(equity_curve)), 4),
+        max_drawdown=round(day0_max_dd, 6),
+        calmar_ratio=round(day0_calmar, 4),
         var_95=round(float(var_historical(returns, 0.95)), 6),
         cvar_95=round(float(cvar(returns, 0.95)), 6),
         information_ratio=ir,
@@ -2630,9 +2648,13 @@ def run_pair_trade_backtest(
     )
 
     equity_curve = raw["equity_curve"]
-    returns, total_return, annualized_return = _metrics_with_day0_cost(
+    returns, total_return, annualized_return, equity_with_start = _metrics_with_day0_cost(
         equity_curve,
         input_data.initial_capital,
+    )
+    day0_max_dd = float(max_drawdown(equity_with_start))
+    day0_calmar = (
+        annualized_return / abs(day0_max_dd) if day0_max_dd != 0.0 else float("inf")
     )
     rebalance_events = [
         RebalanceEvent(
@@ -2666,8 +2688,8 @@ def run_pair_trade_backtest(
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
         sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
         sortino_ratio=round(float(sortino_ratio(returns)), 4),
-        max_drawdown=round(float(max_drawdown(equity_curve)), 6),
-        calmar_ratio=round(float(calmar_ratio(equity_curve)), 4),
+        max_drawdown=round(day0_max_dd, 6),
+        calmar_ratio=round(day0_calmar, 4),
         final_equity=round(float(raw["final_equity"]), 2),
         final_cash=round(float(raw["final_cash"]), 2),
         equity_curve=equity_curve.tolist(),

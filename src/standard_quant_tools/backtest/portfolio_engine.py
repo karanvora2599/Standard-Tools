@@ -74,9 +74,12 @@ def run_portfolio_simulation(
             regardless of commission_model.
         max_gross_leverage: Reject (raise ValidationError) any rebalance date
             whose sum(|weight|) exceeds this (default 1.0 = fully invested,
-            no leverage).
+            no leverage). Bounds the TARGET weights / sizing basis — see
+            "Post-trade enforcement" below for what this does and does not
+            guarantee about realized, post-cost leverage.
         max_position_pct: Reject any single position whose |weight| exceeds
-            this (default 1.0).
+            this (default 1.0). Same target-weight/sizing-basis scope as
+            max_gross_leverage above.
         fill_price: "close" (default) — a rebalance dated D executes at D's
             own Close, the same bar the target weight is "known" on (this is
             the pre-existing behavior, unchanged). "next_open" — the
@@ -115,16 +118,38 @@ def run_portfolio_simulation(
             the trade is rejected), not open (silently treated as
             unconstrained).
 
-    Post-trade enforcement: after each rebalance's costs are deducted,
-    realized gross leverage and the largest single position (both computed
-    against post-cost equity, not the pre-cost equity target shares were
-    sized from) are re-checked against max_gross_leverage/max_position_pct;
-    a rebalance that only violates these limits once costs are included
-    raises ValidationError rather than silently exceeding the requested
-    limits. Zero-size trades (a ticker whose target share count is
-    unchanged from the prior rebalance) are skipped entirely — no cost,
-    no turnover, no ADV check — so a per_share_commission minimum floor
-    can't charge a ticker that didn't actually trade.
+    Post-trade enforcement, and what max_gross_leverage/max_position_pct
+    actually bound: target_shares for a rebalance are sized from equity_now
+    (the account's equity immediately BEFORE that rebalance's own costs are
+    deducted), so gross_after (the dollar value of the resulting shares) is
+    a fixed fraction — exactly sum(|weight|) — of equity_now by
+    construction. After costs are deducted, realized post-cost leverage
+    (gross_after / equity_after, the same ratio reported as
+    gross_leverage_after in rebalance_log and in leverage_curve) is
+    mechanically inflated above sum(|weight|) whenever this rebalance's own
+    costs are nonzero — equity_after < equity_now while gross_after is
+    unchanged. This is expected, unavoidable cost drag, not a limit
+    violation, and is NOT rejected: max_gross_leverage/max_position_pct
+    bound the TARGET weights (equivalently, gross_after relative to
+    equity_now, the actual sizing basis) — they are not a hard cap on the
+    post-cost ratio you'll see reported. What IS re-checked and CAN raise
+    ValidationError is gross_after/equity_now (and the largest single
+    position's weight/equity_now) exceeding the limit — a sizing
+    self-consistency invariant that should be structurally guaranteed by
+    the per-date weight validation above, so a violation here indicates an
+    actual sizing bug, not ordinary cost drag. If you need a hard ceiling
+    on realized, cost-inclusive leverage, monitor leverage_curve/
+    rebalance_log's gross_leverage_after yourself, or reserve headroom by
+    requesting a lower max_gross_leverage than your true risk limit (the
+    unavoidable inflation from cost drag is bounded by
+    max_gross_leverage / (1 - cost_fraction_of_equity), so it's small
+    whenever per-rebalance costs are a small fraction of equity — as they
+    are for typical bps-level commission/slippage).
+
+    Zero-size trades (a ticker whose target share count is unchanged from
+    the prior rebalance) are skipped entirely — no cost, no turnover, no
+    ADV check — so a per_share_commission minimum floor can't charge a
+    ticker that didn't actually trade.
 
     Returns:
         Dict with equity_curve, cash_curve, gross_exposure_curve,

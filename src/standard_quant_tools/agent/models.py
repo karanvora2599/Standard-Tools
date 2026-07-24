@@ -1263,10 +1263,21 @@ class PortfolioSimulationInput(BaseModel):
     )
     max_gross_leverage: float = Field(
         1.0,
-        description="Reject any rebalance date whose sum(|weight|) exceeds this (default 1.0 = fully invested, no leverage).",
+        description=(
+            "Reject any rebalance date whose sum(|weight|) exceeds this (default 1.0 = "
+            "fully invested, no leverage). Bounds the TARGET weights / sizing basis, not "
+            "realized post-cost leverage: transaction costs mechanically inflate the "
+            "reported gross_leverage_after (rebalance_log/leverage_curve) above this "
+            "limit whenever costs are nonzero, and that is expected, not rejected — see "
+            "run_portfolio_simulation's docstring ('Post-trade enforcement') for why."
+        ),
     )
     max_position_pct: float = Field(
-        1.0, description="Reject any single position whose |weight| exceeds this."
+        1.0,
+        description=(
+            "Reject any single position whose |weight| exceeds this. Same target-weight/"
+            "sizing-basis scope as max_gross_leverage — see its description."
+        ),
     )
     fill_price: str = Field(
         "close",

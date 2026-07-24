@@ -695,14 +695,18 @@ below `-entry_z`; short the spread on the mirror condition; exit to flat
 once the z-score reverts inside `exit_z`. `hedge_ratio` is a **share**
 ratio (`spread = Close_a - hedge_ratio * Close_b` — 1 share of `symbol_a`
 hedged by `hedge_ratio` shares of `symbol_b`), not a dollar-weight ratio,
-so converting it to dollar weights needs that transition date's own
-prices, recomputed at every transition (not once, statically) since
-`Close_a`/`Close_b` drift apart over time:
+so converting it to dollar weights needs the price the trade will
+**actually execute at** — Close on the trigger date itself under
+`fill_price="close"`, but the **following bar's Open** under the default
+`"next_open"` (sizing off the trigger date's Close and then executing a
+bar later silently breaks the share ratio unless both legs happen to gap
+overnight by the same percentage — recomputed at every transition since
+the two legs' prices drift apart over time either way):
 
 ```text
-denom     = Close_a + |hedge_ratio| * Close_b
-weight_a  = gross_leverage * Close_a / denom
-weight_b  = sign(hedge_ratio) * gross_leverage * |hedge_ratio| * Close_b / denom
+denom     = exec_price_a + |hedge_ratio| * exec_price_b
+weight_a  = gross_leverage * exec_price_a / denom
+weight_b  = sign(hedge_ratio) * gross_leverage * |hedge_ratio| * exec_price_b / denom
 ```
 
 — together `|weight_a| + |weight_b|` sum to `gross_leverage` at every

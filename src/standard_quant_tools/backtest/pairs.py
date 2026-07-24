@@ -18,6 +18,53 @@ from standard_quant_tools.error import ValidationError
 logger = logging.getLogger(__name__)
 
 
+def _execution_prices_for_weights(
+    d: Any,
+    common_idx: pd.Index,
+    close_a: pd.Series,
+    close_b: pd.Series,
+    price_data: Dict[str, pd.DataFrame],
+    symbol_a: str,
+    symbol_b: str,
+    fill_price: str,
+) -> tuple:
+    """
+    hedge_ratio -> dollar-weight conversion must use whatever price
+    run_portfolio_simulation will ACTUALLY execute this transition at, not
+    always that date's own Close: with fill_price="next_open" (the
+    default), the trade fills at the FOLLOWING bar's Open, so sizing off
+    today's Close and then executing at tomorrow's Open silently breaks the
+    hedge share ratio (shares_b/shares_a stops equaling hedge_ratio) unless
+    A and B happen to have identical overnight gaps -- exactly the case
+    the pre-existing hedge_ratio=1.0/near-equal-price test fixture could
+    never expose.
+    """
+    if fill_price == "next_open":
+        pos = int(common_idx.get_loc(d))
+        if pos + 1 < len(common_idx):
+            exec_date = common_idx[pos + 1]
+            return (
+                float(price_data[symbol_a]["Open"].loc[exec_date]),
+                float(price_data[symbol_b]["Open"].loc[exec_date]),
+            )
+        # Last bar with no following bar to execute at -- run_portfolio_simulation
+        # raises a clear ValidationError for this case; fall back to Close here
+        # so weight construction doesn't crash before that error surfaces.
+        return float(close_a.loc[d]), float(close_b.loc[d])
+    if fill_price == "midpoint":
+        return (
+            float(
+                (price_data[symbol_a]["High"].loc[d] + price_data[symbol_a]["Low"].loc[d])
+                / 2.0
+            ),
+            float(
+                (price_data[symbol_b]["High"].loc[d] + price_data[symbol_b]["Low"].loc[d])
+                / 2.0
+            ),
+        )
+    return float(close_a.loc[d]), float(close_b.loc[d])
+
+
 def _spread_state(z: pd.Series, entry_z: float, exit_z: float) -> pd.Series:
     """
     Stateful entry/exit machine on the z-scored spread: +1 = long the
@@ -92,14 +139,20 @@ def run_pair_backtest(
             two legs so the *share* ratio matches hedge_ratio (1 share of
             symbol_a per hedge_ratio shares of symbol_b — the same
             convention compute_spread uses), not a dollar ratio. Converting
-            a share ratio to dollar weights requires that transition date's
-            own prices: weight_a = gross_leverage * Close_a / (Close_a +
-            |hedge_ratio| * Close_b), weight_b = sign(hedge_ratio) *
-            gross_leverage * |hedge_ratio| * Close_b / (Close_a +
-            |hedge_ratio| * Close_b) (sign also flips with the position
-            direction). This is only dollar-neutral when |hedge_ratio| *
-            Close_b ~= Close_a; recomputed at every transition date since
-            Close_a/Close_b drift apart over time.
+            a share ratio to dollar weights requires the price the trade
+            will actually EXECUTE at (Close on the trigger date itself for
+            fill_price="close"; the FOLLOWING bar's Open for the default
+            "next_open" — sizing off the trigger date's Close and then
+            executing a bar later would silently break the share ratio
+            unless both legs happened to gap overnight by the same
+            percentage): weight_a = gross_leverage * exec_price_a /
+            (exec_price_a + |hedge_ratio| * exec_price_b), weight_b =
+            sign(hedge_ratio) * gross_leverage * |hedge_ratio| *
+            exec_price_b / (exec_price_a + |hedge_ratio| * exec_price_b)
+            (sign also flips with the position direction). This is only
+            dollar-neutral when |hedge_ratio| * exec_price_b ~= exec_price_a;
+            recomputed at every transition since the two legs' prices drift
+            apart over time.
         initial_capital, commission_pct, slippage_pct: passed through to
             run_portfolio_simulation.
         fill_price: passed through to run_portfolio_simulation; defaults to
@@ -148,17 +201,19 @@ def run_pair_backtest(
 
     # hedge_ratio is a SHARE ratio (1 share of A per hedge_ratio shares of
     # B), not a dollar-weight ratio — converting to dollar weights requires
-    # that date's own prices, recomputed at every transition since Close_a/
-    # Close_b drift apart over time (a static split, as if computed once
-    # from a single date's prices, would silently size the hedge leg wrong
-    # as soon as prices move).
+    # the price the trade will ACTUALLY execute at (see
+    # _execution_prices_for_weights), recomputed at every transition since
+    # Close_a/Close_b (and Open_a/Open_b) drift apart over time (a static
+    # split, as if computed once from a single date's prices, would
+    # silently size the hedge leg wrong as soon as prices move).
     sign_hedge = 1.0 if hedge_ratio >= 0 else -1.0
     abs_hedge = abs(hedge_ratio)
     weight_a_vals = []
     weight_b_vals = []
     for d in transition_dates:
-        price_a = float(close_a.loc[d])
-        price_b = float(close_b.loc[d])
+        price_a, price_b = _execution_prices_for_weights(
+            d, common_idx, close_a, close_b, price_data, symbol_a, symbol_b, fill_price,
+        )
         denom = price_a + abs_hedge * price_b
         weight_a_d = gross_leverage * price_a / denom
         weight_b_d = sign_hedge * gross_leverage * abs_hedge * price_b / denom

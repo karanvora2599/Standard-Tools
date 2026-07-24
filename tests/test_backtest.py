@@ -266,6 +266,72 @@ class TestTradeLog:
         )
 
 
+class TestCppTradeStatsParity:
+    def test_native_trade_stats_overwritten_with_python_computed_ones(self, monkeypatch):
+        """
+        Regression test (P0-2): the native C++ kernel's own trade-log logic
+        records entry at prices[i] (not the economically correct prior
+        close) and excludes commission/slippage from trade returns -- the
+        same bug _build_trade_log's Python-side fix addressed. Since the
+        C++ source can't be rebuilt in this environment, the interim fix is
+        to overwrite win_rate/profit_factor/num_trades/avg_trade_return_pct
+        with _compute_trade_stats(_build_trade_log(...)) regardless of
+        which path computed the equity curve, so results (and the optional
+        trade_log) are identical whether or not _sqt_core is built.
+
+        This fakes a native result with DELIBERATELY WRONG trade stats
+        (values that could never legitimately arise from this scenario) and
+        confirms they get replaced by the Python-computed correct values,
+        not passed through -- using the same 6-bar hand-verified scenario
+        as test_trade_log_reconciles_with_equity_curve_close_mode (entry
+        at Close[0]=100, exit at Close[3]=103, return_pct=2.7%).
+        """
+        import standard_quant_tools.backtest.engine as engine_mod
+        from unittest.mock import MagicMock
+
+        dates = pd.date_range("2023-01-02", periods=6, freq="B")
+        close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
+        df = pd.DataFrame(
+            {
+                "Open": close, "High": close, "Low": close, "Close": close,
+                "Volume": [1_000_000.0] * 6,
+            },
+            index=dates,
+        )
+        signals = pd.Series([1, 1, 1, 0, 0, 0], index=dates, dtype=float)
+
+        fake_cpp = MagicMock()
+        fake_cpp.run_strategy.return_value = {
+            "equity_curve": np.full(6, 10_000.0),
+            "final_equity": 10_000.0,
+            "total_return": 0.0,
+            "annualized_volatility": 0.0,
+            "sharpe_ratio": 0.0,
+            "sortino_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "calmar_ratio": 0.0,
+            # Deliberately wrong / implausible native trade stats -- these
+            # must NOT survive into the final result.
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "num_trades": 999,
+            "avg_trade_return_pct": -50.0,
+        }
+        monkeypatch.setattr(engine_mod, "HAS_CPP", True)
+        monkeypatch.setattr(engine_mod, "_cpp_core", fake_cpp)
+
+        result = run_strategy(
+            df, signals, commission_pct=0.001, slippage_pct=0.0005, include_trade_log=True,
+        )
+
+        assert result["num_trades"] == 1
+        assert result["win_rate"] == pytest.approx(1.0)
+        assert result["avg_trade_return_pct"] == pytest.approx(2.7, abs=1e-9)
+        # Reconciles with the Python-side trade log built alongside it.
+        row = result["trade_log"].iloc[0]
+        assert result["avg_trade_return_pct"] == pytest.approx(row["return_pct"])
+
+
 class TestMetricBounds:
     def test_win_rate_between_0_and_1(self, simple_ohlcv):
         np.random.seed(1)
