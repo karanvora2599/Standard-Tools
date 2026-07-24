@@ -34,6 +34,27 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- `data.bloomberg_provider.BloombergProvider`: a second `DataProvider`
+  implementation, backed by a local Bloomberg Terminal via Desktop API
+  (`blpapi`, a new optional dependency — `pip install
+  standard_quant_tools[bloomberg]`). No API key (DAPI authenticates via the
+  Terminal login); `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT` are the only
+  configurable, non-secret connection settings. Daily/weekly/monthly bars
+  only (intraday raises a clear `ValidationError`, not wrong data). Wired
+  into `DataFactory.get_provider("bloomberg")`, replacing the old
+  `NotImplementedError` stub. See
+  [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider).
+- `standard_quant_tools.config.load_env()`: a single choke point for
+  loading `.env` (via the new `python-dotenv` core dependency) into
+  `os.environ`, idempotent per process, never overriding a real environment
+  variable — the same mechanism whether config comes from a local `.env`
+  file or CI/CD secrets (GitHub Actions / GitLab CI) injected as real env
+  vars. `.env.example` documents every variable and both platforms' secrets
+  syntax.
+- `data/_retry.py`: extracted the retry-with-backoff decorator out of
+  `yfinance_provider.py` into a shared module so `BloombergProvider` doesn't
+  duplicate it; `yfinance_provider.py`'s behavior is unchanged (verified —
+  same tests, same results).
 - `audit.py`: a hash-chain (`prev_record_hash`/`record_hash` on every JSONL
   decision record) and `verify_audit_log_integrity()`, so the audit log
   itself is tamper-evident, not just each record's replay. JSONL writes are

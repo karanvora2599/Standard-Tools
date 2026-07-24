@@ -30,7 +30,8 @@ dependencies = [
     "numba>=0.57.0",
     "aiohttp>=3.8.0",
     "cachetools>=5.3.0",
-    "pyarrow>=12.0.0"
+    "pyarrow>=12.0.0",
+    "python-dotenv>=1.0.0"
 ]
 requires-python = ">=3.10"
 
@@ -63,6 +64,9 @@ dev = [
     "black>=23.0.0",
     "isort>=5.0.0",
     "mypy>=1.0.0"
+]
+bloomberg = [
+    "blpapi>=3.24.0"
 ]
 
 [tool.black]

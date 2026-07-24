@@ -1,6 +1,6 @@
 # Data Fetching
 
-The data layer wraps yfinance with caching, retry logic, and Pydantic-validated outputs. All providers implement the same `DataProvider` ABC so swapping sources requires zero changes to downstream code.
+The data layer wraps yfinance (and, optionally, a Bloomberg Terminal via Desktop API) with caching, retry logic, and Pydantic-validated outputs. All providers implement the same `DataProvider` ABC so swapping sources requires zero changes to downstream code.
 
 ---
 
@@ -165,6 +165,81 @@ returns_df = fetch_returns_sync(
 )
 print(returns_df.shape)  # (252, 3)
 ```
+
+---
+
+## Bloomberg Provider
+
+`standard_quant_tools.data.bloomberg_provider.BloombergProvider` implements
+the same `DataProvider` ABC against a locally running, **logged-in Bloomberg
+Terminal** via Desktop API (DAPI) — same `get_ohlcv`/`get_ticker_info`/
+`get_financial_ratios`/`get_metadata` interface as `YFinanceProvider`, so
+switching providers is a one-line change:
+
+```python
+from standard_quant_tools.data.factory import DataFactory
+
+provider = DataFactory.get_provider("bloomberg")
+df = provider.get_ohlcv("AAPL", "2023-01-01", "2024-01-01")
+```
+
+**No API key.** Desktop API authenticates via the Terminal login itself —
+there is no separate secret this library holds. What *is* configurable is
+purely connection-level (only relevant if you proxy DAPI to a non-default
+address), and is read from the environment rather than hardcoded, the same
+`SQT_*`-prefixed convention every other provider config in this package
+uses:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SQT_BLOOMBERG_HOST` | `localhost` | DAPI server host |
+| `SQT_BLOOMBERG_PORT` | `8194` | DAPI server port |
+
+**Where these live:** copy [`.env.example`](../.env.example) (repo root) to
+`.env` — already `.gitignore`d — for local development;
+`standard_quant_tools.config.load_env()` loads it into `os.environ` once per
+process automatically (and is a no-op, harmlessly, if `.env` doesn't
+exist — the normal state in CI). In GitHub Actions / GitLab CI, set the same
+variable names as encrypted repo/org secrets and inject them as job-level
+environment variables instead of using a `.env` file at all — see the
+comments at the bottom of `.env.example` for exact syntax on both platforms.
+Real environment variables set any other way always win over a stale
+`.env` value (`load_env()` never calls `override=True`).
+
+```python
+# Explicit args override SQT_BLOOMBERG_HOST/PORT for one instance:
+provider = DataFactory.get_provider("bloomberg", host="10.0.0.5", port=8194)
+```
+
+**Ticker convention:** a bare symbol (`"AAPL"`) is normalized to a
+fully-qualified Bloomberg ticker (`"AAPL US Equity"`) automatically. A
+symbol that already ends in a recognized market-sector keyword (`Equity`,
+`Govt`, `Corp`, `Curncy`, `Comdty`, `Index`, `Mtge`, `Muni`, `Pfd`) is passed
+through unchanged — pass the fully-qualified ticker yourself for anything
+non-US or non-equity (e.g. `"VOD LN Equity"`, `"EURUSD Curncy"`).
+
+**Scope, stated explicitly:**
+- Only daily/weekly/monthly bars are supported (`HistoricalDataRequest`).
+  Intraday intervals raise a clear `ValidationError` rather than silently
+  returning wrong data — proper intraday support needs a structurally
+  different request (`IntradayBarRequest`, with its own history-depth
+  limits) that isn't implemented.
+- `get_metadata()` honestly reports `survivorship_free=False` and
+  `point_in_time=False` — plain Desktop API makes neither guarantee; a real
+  point-in-time/survivorship-free feed needs Bloomberg's enterprise data
+  products (e.g. PORT), not DAPI.
+- No caching layer (session TTL cache or persistent Parquet disk cache) yet —
+  unlike `YFinanceProvider`, every call reaches the Terminal. Worth adding
+  if Bloomberg becomes a hot path; not built preemptively.
+- `blpapi` (Bloomberg's own SDK) is an **optional** dependency —
+  `pip install standard_quant_tools[bloomberg]` (or `pip install blpapi`
+  directly; if that doesn't resolve, use Bloomberg's own package index,
+  `pip install --index-url
+  https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi`).
+  Constructing `BloombergProvider()` (directly or via
+  `DataFactory.get_provider("bloomberg")`) without it installed raises a
+  clear `APIError` explaining how to install it, rather than an opaque
+  `ImportError` — the rest of the package works normally either way.
 
 ---
 

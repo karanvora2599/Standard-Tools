@@ -19,8 +19,14 @@ import yfinance as yf
 from cachetools import TTLCache
 
 from standard_quant_tools import audit
-from standard_quant_tools.error import APIError, DataNotFoundError, InvalidSymbolError, ValidationError
+from standard_quant_tools.error import (
+    APIError,
+    DataNotFoundError,
+    InvalidSymbolError,
+    ValidationError,
+)
 
+from ._retry import retry
 from .base import DataProvider, FinancialRatios, TickerInfo
 from .metadata import DataSetMetadata
 
@@ -34,10 +40,23 @@ from .metadata import DataSetMetadata
 # but still replaced with "-" before building the path, same as before.
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9./\-^=]+$")
 _DATE_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_VALID_INTERVALS = frozenset((
-    "1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h",
-    "1d", "5d", "1wk", "1mo", "3mo",
-))
+_VALID_INTERVALS = frozenset(
+    (
+        "1m",
+        "2m",
+        "5m",
+        "15m",
+        "30m",
+        "60m",
+        "90m",
+        "1h",
+        "1d",
+        "5d",
+        "1wk",
+        "1mo",
+        "3mo",
+    )
+)
 
 # ── In-process session cache (avoids repeated network calls in the same run) ──
 _session_cache = TTLCache(maxsize=100, ttl=3600)
@@ -181,7 +200,9 @@ def _parquet_path(symbol: str, start: str, end: str, interval: str) -> Path:
     root_cmp = Path(str(root).removeprefix("\\\\?\\"))
     resolved_cmp = Path(str(resolved).removeprefix("\\\\?\\"))
     if not resolved_cmp.is_relative_to(root_cmp):
-        raise ValidationError(f"resolved cache path {resolved} escapes SQT_CACHE_DIR ({root})")
+        raise ValidationError(
+            f"resolved cache path {resolved} escapes SQT_CACHE_DIR ({root})"
+        )
     return resolved
 
 
@@ -193,41 +214,6 @@ def _is_historical(end_date: Union[str, datetime, _date]) -> bool:
         return _norm_date(end_date) < _date.today().isoformat()
     except Exception:
         return False
-
-
-def retry(times: int = 3, delay: float = 1, backoff: float = 2):
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            t_delay = delay
-            last_exc = None
-            for i in range(times):
-                try:
-                    return func(*args, **kwargs)
-                except (InvalidSymbolError, DataNotFoundError):
-                    raise  # definitive errors — never retry or re-wrap
-                except (ValueError, APIError) as e:
-                    last_exc = e
-                    if i == times - 1:
-                        raise
-                    logger.warning(
-                        "[retry] %s attempt %d/%d failed: %s — retrying in %.1fs",
-                        func.__name__,
-                        i + 1,
-                        times,
-                        e,
-                        t_delay,
-                    )
-                    time.sleep(t_delay)
-                    t_delay *= backoff
-                except Exception as e:
-                    raise APIError(f"Unexpected error in {func.__name__}: {e}") from e
-            if last_exc:
-                raise last_exc
-
-        return wrapper
-
-    return decorator
 
 
 class YFinanceProvider(DataProvider):
@@ -274,7 +260,9 @@ class YFinanceProvider(DataProvider):
             )
             return cached_df.copy()
 
-        result = self._fetch_ohlcv_uncached(symbol, start_date, end_date, interval, start_str, end_str)
+        result = self._fetch_ohlcv_uncached(
+            symbol, start_date, end_date, interval, start_str, end_str
+        )
         _session_cache[cache_key] = result
         return result.copy()
 

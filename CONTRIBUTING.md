@@ -16,6 +16,15 @@ every code path falls back to Numba/pure-Python automatically when it isn't
 built. See [Development/build_guide.md](Development/build_guide.md) if you're
 working on the C++ side specifically.
 
+If you're working on the Bloomberg provider (`pip install -e
+".[test,dev,bloomberg]"`), copy [`.env.example`](.env.example) to `.env`
+(already `.gitignore`d) and fill in `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT`
+if you're proxying Desktop API to a non-default address — most setups need
+neither, since DAPI talks to a Terminal on `localhost:8194` by default with
+no separate credential. Never commit a `.env` file or hardcode a secret in
+code; see [SECURITY.md](SECURITY.md) if you're unsure whether something
+counts as one.
+
 ## Before You Start
 
 - **Open an issue first** for anything beyond a small fix (new agent tool,
