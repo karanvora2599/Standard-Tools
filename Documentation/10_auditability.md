@@ -3,18 +3,40 @@
 Every call routed through `dispatch()` can produce an immutable **decision
 record**: the tool name and inputs, the market data it pulled (with content
 hashes), whether the C++ accelerated path was available, a hash of the
-output, and how long it took. Records are also **hash-chained** — each one
-commits to the previous record's hash — so `verify_audit_log_integrity()`
-can detect a line that was edited, removed, reordered, or inserted after
-the fact (see [Tamper evidence](#tamper-evidence-hash-chain) below).
-`verify_replay()` re-runs a recorded call and reports whether the data and
-output still match — enough to tell a stale or tampered cache apart from a
-genuine code change. JSONL writes are guarded by a cross-process file lock,
-so two callers writing at once can't interleave and corrupt a day's file.
+output, and how long it took. Records are also **hash-chained across every
+day, not just within one day's file** — each one commits to the previous
+record's hash, and the *first* record of a new calendar day commits to the
+*previous day's* last hash via an independent chain index — so
+`verify_audit_log_integrity()`/`verify_audit_trail_integrity()` can detect a
+record that was edited, removed, reordered, or inserted, **or an entire
+day's file that was deleted outright** (see
+[Tamper evidence](#tamper-evidence-hash-chain) below). `verify_replay()`
+re-runs a recorded call and reports whether the data and output still
+match — enough to tell a stale or tampered cache apart from a genuine code
+change. JSONL writes are guarded by a cross-process file lock and `fsync`'d
+before the lock is released, so two callers writing at once can't interleave
+and corrupt a day's file, and a record isn't lost to a crash immediately
+after the write call returns.
 
 Nothing here runs automatically. The package attaches only a `NullHandler`
 by default, and decision records are the only side effect that requires
 explicit opt-out (they're on by default once you call `dispatch()`).
+
+**What this can and cannot certify.** Everything on this page is an
+*engineering control*: it makes tampering *detectable*, writes more
+*durable*, and evidence *exportable/verifiable*. That is exactly the
+technical layer SEC 17a-4 / SOC2 / FINRA-style audits check. **None of it is
+"SEC compliant" by itself** — actual regulatory certification requires a
+compliance/legal review of the *deployed system as a whole*: who has
+filesystem access to `SQT_AUDIT_DIR`, whether retention procedures are
+followed operationally, whether records are stored on genuinely
+non-rewriteable (WORM) media, whether any signing key custody is sound. No
+code change self-certifies any of that. In particular: local filesystem
+storage is not WORM regardless of anything on this page — nothing currently
+stops someone with OS-level write access to `SQT_AUDIT_DIR` from deleting
+files directly; the hash chain and chain index only make that
+*detectable after the fact*, at increasing cost to the attacker, not
+*impossible*.
 
 ---
 
@@ -117,8 +139,7 @@ produce a decision record.
 Each record commits to the record immediately before it in the same day's
 file: `record_hash` is a content hash of the record itself (every field
 except `record_hash`), and `prev_record_hash` is the *preceding* record's
-`record_hash` — `"0" * 16` (the genesis hash) for the first record of a
-day's file. Editing a record's content after the fact changes its
+`record_hash`. Editing a record's content after the fact changes its
 `record_hash`; removing, reordering, or inserting a record breaks the
 `prev_record_hash` link for every record that follows it.
 
@@ -135,23 +156,71 @@ else:
     print("chain intact")
 ```
 
-`verify_audit_log_integrity(path: str | Path) -> List[str]` walks the file
-top to bottom and returns one human-readable problem per broken link —
-empty if the file is clean or doesn't exist. Each problem names the
-offending `request_id` and line number, and distinguishes:
+`verify_audit_log_integrity(path: str | Path, expected_prev_hash: str = GENESIS) -> List[str]`
+walks one file top to bottom and returns one human-readable problem per
+broken link — empty if the file is clean or doesn't exist. Each problem
+names the offending `request_id` and line number, and distinguishes:
 
 - **content altered** — `record_hash` no longer matches that line's
   recomputed content hash.
 - **chain broken** — `prev_record_hash` doesn't match the preceding line's
   `record_hash` (a record was edited, removed, reordered, or inserted).
 
+`expected_prev_hash` defaults to the genesis hash (`"0" * 16`), correct for
+verifying a file in isolation. When checking a file as part of the larger
+cross-day trail (see below), pass the chain index's claimed starting hash
+for that day instead — `verify_audit_trail_integrity()` does this
+automatically.
+
 **What this does and doesn't guarantee:** an attacker who edits one line
 without also rewriting every later line's `prev_record_hash`/`record_hash`
-to match is caught. An attacker who consistently rewrites the *entire* file
-from the edited point forward is not — there's no external anchor (e.g.
-signing each day's final hash into a separate system) to detect a
-wholesale rewrite; this function doesn't attempt that. Not wired into the
-`sqt` CLI — call it directly from Python.
+to match is caught. An attacker who consistently rewrites an *entire file*
+end-to-end — including its chain-index entry (see below) — to remain
+internally self-consistent is not; there's no external anchor (a
+cryptographic signature verifiable independently of these files, or
+publishing hashes to a separate off-box system) to catch that class of
+attack. This is a real, currently-open limitation, not a hidden one.
+
+### Cross-day chain continuity
+
+Records are also chained **across calendar days**, not just within one
+day's file. An independent, self-hash-chained witness log,
+`_chain_index.jsonl`, lives at the root of `SQT_AUDIT_DIR` and records one
+entry per calendar day that had any audit activity:
+`{date, chain_head, prev_index_hash, index_hash}`, where `chain_head` is
+the *previous* active day's last `record_hash` (skipping forward correctly
+over days with no activity at all, e.g. weekends — a gap is not treated as
+a break). The first record written on a new calendar day commits to that
+`chain_head` as its own `prev_record_hash`, linking the new day's file to
+whatever came before it.
+
+Without this second, independent file, deleting an entire day's `.jsonl`
+was **completely undetectable** — the next day's chain would simply start
+fresh with no reference to whether a prior day ever existed. With it, an
+attacker has to consistently rewrite *both* the day file *and* the index to
+hide a deletion, not just one.
+
+```python
+from standard_quant_tools.audit import verify_audit_trail_integrity
+
+problems = verify_audit_trail_integrity()  # defaults to SQT_AUDIT_DIR
+```
+
+`verify_audit_trail_integrity(audit_dir=None) -> List[str]` checks the full
+trail: the chain index's own hash chain, that every day file the index
+attests to still exists on disk (and the reverse — a day file present with
+no matching index entry), and each day file's internal chain seeded with
+the chain head the index claims for that day — catching a
+wholesale-regenerated day file with a fabricated-but-internally-consistent
+chain, which `verify_audit_log_integrity(path)` alone (with its default
+genesis-hash assumption) cannot.
+
+**Pre-existing audit directories need no migration.** Day files written
+before this feature was deployed remain independently valid — verify them
+with `verify_audit_log_integrity(path)` directly. Cross-day linkage begins
+transparently at the next new-day write after upgrading; retroactively
+linking old files in would mean rewriting their stored hashes, which is
+itself indistinguishable from tampering, so it's deliberately not done.
 
 ### Concurrent writes
 
@@ -165,6 +234,21 @@ threads/async tasks) writing at the same instant can't interleave and
 corrupt a line or break the hash chain. If neither locking primitive is
 available, writes proceed unlocked rather than blocking a tool call on a
 missing OS feature — best-effort, not a hard guarantee.
+
+The chain index (`_chain_index.jsonl`) has its own sidecar lock
+(`_chain_index.jsonl.lock`), acquired only for the *first* write of a new
+calendar day (every subsequent write that day only touches the day file's
+own lock). Lock order is always the day file's lock first, then the index
+lock — a fixed order, so this can never deadlock against another writer
+doing the same thing.
+
+### Durability
+
+Every write — a decision record or a chain-index entry — is followed by
+`f.flush()` and `os.fsync(f.fileno())` before the write lock is released,
+so a record isn't lost to a crash or power loss immediately after the
+`dispatch()` call that produced it returns. This is unconditional, not a
+config flag.
 
 ---
 
@@ -275,6 +359,7 @@ dependency) around the same JSONL decision records, addressed by
 sqt report <request_id>              # pretty-print one record in full
 sqt replay <request_id>              # re-run the call, report data/output match
 sqt compare <request_id_a> <id_b>    # diff two records' status/output/inputs
+sqt verify [--file PATH]             # check hash-chain integrity (see below)
 ```
 
 ```bash
@@ -306,6 +391,49 @@ written against that behavior as stale. `sqt report` and `sqt compare` exit
 `input` that differs between the two records — useful for "why did this
 number change between these two runs" without hand-parsing two JSONL lines.
 
-Records are looked up across every `*.jsonl` file in `SQT_AUDIT_DIR`
-(default resolution — same env var as everywhere else), so `request_id`
-alone is enough regardless of which day's file it landed in.
+Records are looked up across every day file in `SQT_AUDIT_DIR` (default
+resolution — same env var as everywhere else; the chain index file is
+excluded from this lookup), so `request_id` alone is enough regardless of
+which day's file it landed in.
+
+### `sqt verify`
+
+```bash
+$ sqt verify
+OK — no integrity problems found.
+
+$ sqt verify
+3 problem(s) found:
+  - chain index attests to activity on 2026-07-18, but 2026-07-18.jsonl no longer exists on disk — likely deleted.
+  - 2026-07-19.jsonl line 4 (request_id=...): record_hash='...' does not match its own recomputed content hash '...' — this line's content was altered after it was written.
+  ...
+
+$ sqt verify --file ~/.cache/standard_quant_tools/audit/2026-07-19.jsonl
+OK — no integrity problems found.
+```
+
+With no arguments, checks the full cross-day trail rooted at `SQT_AUDIT_DIR`
+(`verify_audit_trail_integrity()`). With `--file PATH`, checks just that one
+day file in isolation (`verify_audit_log_integrity()`), the same as before
+`sqt verify` existed. Exit code `0` = clean, `1` = one or more problems
+(printed to stdout, one per line, prefixed with a count).
+
+### Standalone verification (no package install required)
+
+`scripts/verify_audit_log.py` in this repo is a **deliberate, stdlib-only
+reimplementation** of the same hashing and chain-walking logic — no
+`pydantic`/`pandas`/`numpy`, no `standard_quant_tools` import — so an
+external auditor can verify an exported log bundle without installing the
+project or its dependencies:
+
+```bash
+python verify_audit_log.py /path/to/audit_dir
+python verify_audit_log.py --file 2026-07-19.jsonl
+```
+
+This is a known duplication-by-design maintenance risk, called out in the
+script's own docstring: if `audit.hash_payload`'s canonicalization ever
+changes, this script must be updated to match or the two implementations
+will silently disagree about what counts as tampered.
+`tests/test_standalone_verifier.py` is the parity check that catches that
+drift — it fails if the two implementations' hash output ever diverges.

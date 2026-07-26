@@ -42,8 +42,13 @@ def redirect_ohlcv_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _audit_records(directory: Path):
+    """Decision records only -- excludes the chain-index witness log
+    (_chain_index.jsonl), which lives in the same directory and matches the
+    same *.jsonl glob but holds index entries, not DecisionRecords."""
     records = []
     for f in sorted(directory.glob("*.jsonl")):
+        if not audit._DAY_FILE_RE.match(f.name):
+            continue
         for line in f.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 records.append(json.loads(line))
@@ -384,9 +389,15 @@ class TestHashChainIntegrity:
         assert records[0]["record_hash"] is not None
         assert records[0]["record_hash"] != records[1]["record_hash"]
 
-        jsonl_files = list(audit_dir.glob("*.jsonl"))
+        jsonl_files = [
+            p for p in audit_dir.glob("*.jsonl") if audit._DAY_FILE_RE.match(p.name)
+        ]
         assert len(jsonl_files) == 1
         assert audit.verify_audit_log_integrity(jsonl_files[0]) == []
+        # And the chain index (a separate file, created for the first write
+        # of this new day) is itself clean when checked as part of the
+        # full cross-day trail.
+        assert audit.verify_audit_trail_integrity(audit_dir) == []
 
     def test_editing_a_record_breaks_the_chain(self, patched_factory, audit_dir: Path):
         dispatch(
@@ -433,13 +444,174 @@ class TestHashChainIntegrity:
     def test_write_creates_and_releases_a_sidecar_lock_file(
         self, patched_factory, audit_dir: Path
     ):
+        """
+        The FIRST write to a fresh audit_dir creates two sidecar lock files,
+        not one: the day file's own lock, plus _chain_index.jsonl.lock
+        (acquired once, only for the first write of a new calendar day, to
+        bootstrap the cross-day chain index — see AuditWriter._bootstrap_new_day).
+        This is an intentional new sidecar from the cross-day chain-continuity
+        feature, not a regression of the original single-lock-file behavior.
+        """
         dispatch(
             "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
         )
         lock_files = list(audit_dir.glob("*.jsonl.lock"))
-        assert len(lock_files) == 1
-        # A second write must succeed without the earlier lock being held.
+        day_locks = [p for p in lock_files if p.name != "_chain_index.jsonl.lock"]
+        index_locks = [p for p in lock_files if p.name == "_chain_index.jsonl.lock"]
+        assert len(day_locks) == 1
+        assert len(index_locks) == 1
+        # A second write must succeed without either earlier lock being held,
+        # and must NOT re-acquire the index lock (same day, not a new day file).
         dispatch(
             "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
         )
         assert len(_audit_records(audit_dir)) == 2
+        assert len(list(audit_dir.glob("*.jsonl.lock"))) == 2
+
+
+# ── Cross-day chain continuity (the chain index) ───────────────────────────────
+
+
+def _hand_written_record(tool_name: str, prev_hash: str) -> "audit.DecisionRecord":
+    """Build and hash a DecisionRecord the same way AuditWriter.write() does,
+    for tests that need to write directly to a specific day's file (bypassing
+    dispatch()'s real-clock-driven day selection) to control which calendar
+    day a record lands on."""
+    record = audit.DecisionRecord(
+        request_id="r-" + tool_name,
+        timestamp_utc="2024-01-01T00:00:00+00:00",
+        tool_name=tool_name,
+        input={},
+        cpp_available=False,
+        duration_ms=1.0,
+        status="ok",
+    )
+    record.prev_record_hash = prev_hash
+    record.record_hash = audit.hash_payload(
+        {**record.model_dump(exclude={"record_hash"}), "record_hash": None}
+    )
+    return record
+
+
+class TestChainIndexContinuity:
+    def test_second_day_chains_onto_previous_days_last_hash(self, tmp_path: Path):
+        w = audit.AuditWriter(audit_dir=tmp_path)
+
+        day1 = tmp_path / "2024-01-01.jsonl"
+        head1 = w._bootstrap_new_day(day1)
+        r1 = _hand_written_record("day1-call", head1)
+        day1.write_text(r1.model_dump_json() + "\n", encoding="utf-8")
+
+        day2 = tmp_path / "2024-01-02.jsonl"
+        head2 = w._bootstrap_new_day(day2)
+        assert head2 == r1.record_hash, (
+            "the second day's bootstrap chain head must equal the first "
+            "day's last record hash"
+        )
+        r2 = _hand_written_record("day2-call", head2)
+        day2.write_text(r2.model_dump_json() + "\n", encoding="utf-8")
+
+        assert audit.verify_audit_trail_integrity(tmp_path) == []
+
+    def test_gap_day_chains_onto_most_recent_existing_file(self, tmp_path: Path):
+        """A day with zero audit activity (e.g. a weekend) must not break the
+        chain for the next day that does have activity -- it should skip
+        straight back to the most recent day file that actually exists."""
+        w = audit.AuditWriter(audit_dir=tmp_path)
+
+        day1 = tmp_path / "2024-01-01.jsonl"
+        head1 = w._bootstrap_new_day(day1)
+        r1 = _hand_written_record("friday", head1)
+        day1.write_text(r1.model_dump_json() + "\n", encoding="utf-8")
+
+        # 2024-01-02 (Saturday) never happens -- no file is ever created for it.
+        day3 = tmp_path / "2024-01-03.jsonl"
+        head3 = w._bootstrap_new_day(day3)
+        assert head3 == r1.record_hash, (
+            "a gap day must not be treated as a break -- the next active day "
+            "should chain onto the most recent day that actually has a file"
+        )
+        r3 = _hand_written_record("monday", head3)
+        day3.write_text(r3.model_dump_json() + "\n", encoding="utf-8")
+
+        assert audit.verify_audit_trail_integrity(tmp_path) == []
+
+    def test_deleted_day_file_detected_by_trail_verification(self, tmp_path: Path):
+        w = audit.AuditWriter(audit_dir=tmp_path)
+
+        day1 = tmp_path / "2024-01-01.jsonl"
+        head1 = w._bootstrap_new_day(day1)
+        r1 = _hand_written_record("day1-call", head1)
+        day1.write_text(r1.model_dump_json() + "\n", encoding="utf-8")
+
+        day2 = tmp_path / "2024-01-02.jsonl"
+        head2 = w._bootstrap_new_day(day2)
+        r2 = _hand_written_record("day2-call", head2)
+        day2.write_text(r2.model_dump_json() + "\n", encoding="utf-8")
+
+        assert audit.verify_audit_trail_integrity(tmp_path) == []
+
+        day1.unlink()  # simulate an attacker deleting an entire day's records
+        problems = audit.verify_audit_trail_integrity(tmp_path)
+        assert problems, "a deleted day file must be detected"
+        assert any("2024-01-01" in p and "no longer exists" in p for p in problems)
+
+    def test_day_file_without_index_entry_detected(self, tmp_path: Path):
+        """The reverse tamper direction: the index entry is removed but the
+        day file itself is left in place."""
+        w = audit.AuditWriter(audit_dir=tmp_path)
+
+        day1 = tmp_path / "2024-01-01.jsonl"
+        head1 = w._bootstrap_new_day(day1)
+        r1 = _hand_written_record("day1-call", head1)
+        day1.write_text(r1.model_dump_json() + "\n", encoding="utf-8")
+
+        day2 = tmp_path / "2024-01-02.jsonl"
+        head2 = w._bootstrap_new_day(day2)
+        r2 = _hand_written_record("day2-call", head2)
+        day2.write_text(r2.model_dump_json() + "\n", encoding="utf-8")
+
+        # Remove day2's index entry only, leaving day2.jsonl untouched.
+        index_path = tmp_path / audit._INDEX_FILENAME
+        lines = [
+            line
+            for line in index_path.read_text(encoding="utf-8").splitlines()
+            if '"2024-01-02"' not in line
+        ]
+        index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        problems = audit.verify_audit_trail_integrity(tmp_path)
+        assert any("no corresponding chain index entry" in p for p in problems)
+
+    def test_index_own_chain_tamper_detected(self, tmp_path: Path):
+        w = audit.AuditWriter(audit_dir=tmp_path)
+        day1 = tmp_path / "2024-01-01.jsonl"
+        head1 = w._bootstrap_new_day(day1)
+        r1 = _hand_written_record("day1-call", head1)
+        day1.write_text(r1.model_dump_json() + "\n", encoding="utf-8")
+
+        day2 = tmp_path / "2024-01-02.jsonl"
+        w._bootstrap_new_day(day2)
+
+        index_path = tmp_path / audit._INDEX_FILENAME
+        entry = json.loads(index_path.read_text(encoding="utf-8").splitlines()[0])
+        entry["chain_head"] = "tampered00000000"  # alter without recomputing index_hash
+        index_path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+        problems = audit.verify_audit_trail_integrity(tmp_path)
+        assert any("index_hash" in p for p in problems)
+
+    def test_fsync_called_on_write(
+        self, patched_factory, audit_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import os as os_module
+
+        calls = []
+        real_fsync = os_module.fsync
+        monkeypatch.setattr(
+            os_module, "fsync", lambda fd: (calls.append(fd), real_fsync(fd))[1]
+        )
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        assert len(calls) >= 1, "os.fsync must be called when writing a decision record"

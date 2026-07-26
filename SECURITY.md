@@ -62,7 +62,20 @@ callables passed to `run_custom_signal_backtest` / `run_signal_panel_backtest`
   a legitimate report — please include the specific tool name and payload.
 - **Audit trail integrity**: `standard_quant_tools.audit`'s decision-record
   log is hash-chained (`prev_record_hash`/`record_hash` on every JSONL
-  record, checked by `verify_audit_log_integrity()`) so tampering with a
-  past record is detectable, not prevented — the log is append-only advisory
-  evidence, not a cryptographically-signed ledger. A gap in
-  `verify_audit_log_integrity()`'s tamper detection is a legitimate report.
+  record, checked by `verify_audit_log_integrity()`) **across every
+  calendar day**, not just within one day's file — an independent chain
+  index (`_chain_index.jsonl`, checked together with every day file by
+  `verify_audit_trail_integrity()`) links each new day's first record to the
+  previous active day's last hash, so deleting or wholesale-regenerating an
+  entire day's file is detectable too, not just editing one record within
+  it. This raises the cost of a convincing forgery — an attacker now has to
+  rewrite both the day file and the index, consistently, to hide tampering
+  — but does **not** eliminate it: an attacker who rewrites both end-to-end
+  and keeps them internally self-consistent is still undetected, because
+  there is no external anchor (e.g. a cryptographic signature verifiable
+  independently of these files) yet. That's tracked as a future
+  Ed25519-checkpoint-signing phase, not yet implemented. Until then, the log
+  is tamper-evident append-only advisory evidence, not a
+  cryptographically-signed ledger. A gap in `verify_audit_log_integrity()`'s
+  or `verify_audit_trail_integrity()`'s tamper detection is a legitimate
+  report.

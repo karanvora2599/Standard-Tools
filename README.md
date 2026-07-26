@@ -523,7 +523,9 @@ except InvalidSymbolError as e:
 
 ## Audit Trail & CLI (`standard_quant_tools.audit`, `sqt`)
 
-Every call routed through `agent.tools.dispatch()` can produce an immutable JSONL decision record capturing its inputs, the market data it pulled (with content hashes), which execution path ran, and a hash of its output — enough to tell a stale/tampered cache apart from a genuine code change. Records are hash-chained (`prev_record_hash` / `record_hash`, verified via `verify_audit_log_integrity()`) so a record edited or deleted after the fact breaks the chain instead of going unnoticed, and JSONL writes are guarded by a cross-process file lock. Nothing runs automatically; set `SQT_AUDIT_ENABLED=0` to disable record writes, and override the storage directory with `SQT_AUDIT_DIR`.
+Every call routed through `agent.tools.dispatch()` can produce an immutable JSONL decision record capturing its inputs, the market data it pulled (with content hashes), which execution path ran, and a hash of its output — enough to tell a stale/tampered cache apart from a genuine code change. Records are hash-chained (`prev_record_hash` / `record_hash`) **across every calendar day**, not just within one day's file — a first-of-day record commits to the previous active day's last hash via an independent chain index (`_chain_index.jsonl`), so deleting an entire day's file is detectable too, not just editing one record. `verify_audit_log_integrity()` checks one file; `verify_audit_trail_integrity()` checks the full cross-day trail. Every write (record or index entry) is `fsync`'d before its lock is released, and JSONL writes are guarded by a cross-process file lock. Nothing runs automatically; set `SQT_AUDIT_ENABLED=0` to disable record writes, and override the storage directory with `SQT_AUDIT_DIR`.
+
+This is an *engineering control* — tamper detection, not tamper prevention or regulatory certification. See [Documentation/10_auditability.md](Documentation/10_auditability.md#what-this-can-and-cannot-certify) for what it can and can't certify.
 
 The `sqt` command (installed with the package) inspects and verifies these records by `request_id`:
 
@@ -531,9 +533,10 @@ The `sqt` command (installed with the package) inspects and verifies these recor
 sqt replay <request_id>              # re-run the recorded call, report whether data/output still match
 sqt compare <request_id_a> <id_b>    # diff two records' status/output/timing/provenance/inputs
 sqt report <request_id>              # pretty-print one record in full
+sqt verify [--file PATH]             # check hash-chain integrity (full trail, or one file with --file)
 ```
 
-`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. See [Documentation/10_auditability.md](Documentation/10_auditability.md).
+`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. See [Documentation/10_auditability.md](Documentation/10_auditability.md).
 
 ---
 
