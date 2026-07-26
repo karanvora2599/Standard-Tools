@@ -1,6 +1,6 @@
 """
 Command-line interface for the audit trail's JSONL decision records
-(audit.py). Four subcommands:
+(audit.py). Subcommands:
 
     sqt replay <request_id>              — re-run the recorded call via
                                             audit.verify_replay(), report
@@ -24,6 +24,22 @@ Command-line interface for the audit trail's JSONL decision records
                                             Exit code: 0 = clean, 1 = one or
                                             more problems found (printed to
                                             stdout, one per line).
+    sqt hold <date> [--reason TEXT]      — place a legal/retention hold on
+                                            a calendar day (YYYY-MM-DD),
+                                            protecting it from `sqt gc`.
+    sqt release-hold <date>              — remove a hold from a day.
+    sqt gc [--confirm]                   — delete day files past
+                                            SQT_AUDIT_RETENTION_DAYS,
+                                            excluding held days. Dry-run
+                                            (lists candidates only) unless
+                                            --confirm is passed.
+    sqt seal <date>                      — chmod a day file read-only
+                                            (not WORM — see audit.py's
+                                            seal_day docstring).
+    sqt export --start D --end D --out F — package day files in [start,
+                                            end] plus the chain index, a
+                                            manifest, and the standalone
+                                            verifier into one zip bundle.
 
 stdlib argparse only — no new dependency, matching this repo's minimal-
 dependency stance. Each subcommand's logic lives in its own `cmd_*` function
@@ -173,6 +189,39 @@ def _format_verify(problems: List[str]) -> str:
     return "\n".join(lines)
 
 
+def cmd_hold(
+    date: str, reason: Optional[str] = None, audit_dir: Optional[Path] = None
+) -> Path:
+    return audit.hold_day(date, audit_dir=audit_dir, reason=reason)
+
+
+def cmd_release_hold(date: str, audit_dir: Optional[Path] = None) -> bool:
+    return audit.release_hold(date, audit_dir=audit_dir)
+
+
+def cmd_gc(
+    confirm: bool = False,
+    retention_days: Optional[int] = None,
+    audit_dir: Optional[Path] = None,
+) -> List[str]:
+    """Dry-run (confirm=False, the default): returns candidate dates without
+    deleting anything. confirm=True: actually deletes and returns the dates
+    that were deleted."""
+    return audit.gc(
+        audit_dir=audit_dir, retention_days=retention_days, dry_run=not confirm
+    )
+
+
+def cmd_seal(date: str, audit_dir: Optional[Path] = None) -> Path:
+    return audit.seal_day(date, audit_dir=audit_dir)
+
+
+def cmd_export(
+    start: str, end: str, out: Path, audit_dir: Optional[Path] = None
+) -> Path:
+    return audit.export_bundle(start, end, out, audit_dir=audit_dir)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="sqt", description="standard_quant_tools audit-trail CLI"
@@ -200,6 +249,48 @@ def main(argv: Optional[List[str]] = None) -> int:
         "cross-day trail.",
     )
 
+    p_hold = sub.add_parser(
+        "hold", help="Place a legal/retention hold on a calendar day."
+    )
+    p_hold.add_argument("date", help="YYYY-MM-DD")
+    p_hold.add_argument("--reason", default=None)
+
+    p_release_hold = sub.add_parser(
+        "release-hold", help="Remove a hold from a calendar day."
+    )
+    p_release_hold.add_argument("date", help="YYYY-MM-DD")
+
+    p_gc = sub.add_parser(
+        "gc",
+        help="Delete day files past SQT_AUDIT_RETENTION_DAYS, excluding held "
+        "days. Dry-run by default.",
+    )
+    p_gc.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Actually delete candidates. Without this flag, only lists them.",
+    )
+    p_gc.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help="Override SQT_AUDIT_RETENTION_DAYS for this invocation.",
+    )
+
+    p_seal = sub.add_parser(
+        "seal", help="Chmod a day file read-only (not WORM — see docs)."
+    )
+    p_seal.add_argument("date", help="YYYY-MM-DD")
+
+    p_export = sub.add_parser(
+        "export",
+        help="Package day files in a date range plus the chain index and a "
+        "manifest into a zip bundle for an external auditor.",
+    )
+    p_export.add_argument("--start", required=True, help="YYYY-MM-DD, inclusive")
+    p_export.add_argument("--end", required=True, help="YYYY-MM-DD, inclusive")
+    p_export.add_argument("--out", type=Path, required=True, help="Output .zip path")
+
     args = parser.parse_args(argv)
 
     try:
@@ -216,7 +307,32 @@ def main(argv: Optional[List[str]] = None) -> int:
             problems = cmd_verify(file=args.file)
             print(_format_verify(problems))
             return 1 if problems else 0
-    except ValueError as exc:
+        elif args.command == "hold":
+            path = cmd_hold(args.date, reason=args.reason)
+            print(f"Hold placed on {args.date} ({path})")
+        elif args.command == "release-hold":
+            released = cmd_release_hold(args.date)
+            if released:
+                print(f"Hold released on {args.date}")
+            else:
+                print(f"No hold existed on {args.date}")
+        elif args.command == "gc":
+            dates = cmd_gc(confirm=args.confirm, retention_days=args.retention_days)
+            if not dates:
+                verb = "deleted" if args.confirm else "eligible for deletion"
+                print(f"No day files {verb}.")
+            else:
+                verb = "Deleted" if args.confirm else "Eligible for deletion (dry-run)"
+                print(f"{verb}:")
+                for d in dates:
+                    print(f"  - {d}")
+        elif args.command == "seal":
+            path = cmd_seal(args.date)
+            print(f"Sealed {path} read-only.")
+        elif args.command == "export":
+            out_path = cmd_export(args.start, args.end, args.out)
+            print(f"Exported bundle: {out_path}")
+    except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

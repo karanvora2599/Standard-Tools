@@ -534,9 +534,14 @@ sqt replay <request_id>              # re-run the recorded call, report whether 
 sqt compare <request_id_a> <id_b>    # diff two records' status/output/timing/provenance/inputs
 sqt report <request_id>              # pretty-print one record in full
 sqt verify [--file PATH]             # check hash-chain integrity (full trail, or one file with --file)
+sqt hold <date> [--reason TEXT]      # legal/retention hold on a calendar day, protects it from gc
+sqt release-hold <date>              # remove a hold
+sqt gc [--confirm]                   # delete day files past SQT_AUDIT_RETENTION_DAYS (dry-run by default)
+sqt seal <date>                      # chmod a day file read-only (operational safeguard, not WORM)
+sqt export --start D --end D --out F # zip a date range + manifest + standalone verifier for an auditor
 ```
 
-`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. See [Documentation/10_auditability.md](Documentation/10_auditability.md).
+`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. `SQT_AUDIT_REDACT_FIELDS` (comma-separated dotted field paths) replaces matching `input` fields with a non-reversible content-hash placeholder before a record is written. See [Documentation/10_auditability.md](Documentation/10_auditability.md).
 
 ---
 

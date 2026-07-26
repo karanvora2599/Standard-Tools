@@ -34,6 +34,30 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Audit trail hardening, phase 2 (retention, legal hold, sealing,
+  redaction, export bundle):** `audit.hold_day()`/`release_hold()`/
+  `is_held()` place/remove a legal/retention hold sidecar
+  (`<date>.jsonl.hold`) on a calendar day. `gc_candidates()`/`gc()` delete
+  day files past `SQT_AUDIT_RETENTION_DAYS` (or an explicit
+  `retention_days` param) — held days are always excluded, deletion never
+  happens automatically (`dry_run=True` by default, only ever triggered
+  explicitly via `sqt gc --confirm`), and an unset retention window means
+  never delete. Deleting a day file this way is real and permanent, and —
+  by design, not by bug — `verify_audit_trail_integrity()` will correctly
+  report it as "likely deleted" afterward, same as it would for tampering;
+  the chain has no way to tell the two apart, so treat your own
+  gc-invocation log as the record of *why*. `seal_day()` chmod's a day file
+  read-only as an operational safeguard against accidental writes —
+  explicitly not WORM. `SQT_AUDIT_REDACT_FIELDS` (comma-separated dotted
+  field paths) replaces matching `input` fields with a non-reversible
+  content-hash placeholder before a record is written, so redacted values
+  stay comparable across records without the raw value ever touching disk.
+  `export_bundle()` zips a date range of day files, the chain index, a
+  manifest (per-file SHA-256, record counts, provenance), a copy of
+  `scripts/verify_audit_log.py`, and verification instructions into one
+  auditor-ready archive. New `sqt hold`/`sqt release-hold`/`sqt gc`/
+  `sqt seal`/`sqt export` CLI subcommands. See
+  [Documentation/10_auditability.md](Documentation/10_auditability.md#retention-legal-hold-sealing-and-export).
 - **Audit trail hardening, phase 1 (cross-day chain continuity, durability,
   `sqt verify`):** decision records were previously hash-chained only
   *within* one day's JSONL file — deleting an entire day's file outright was

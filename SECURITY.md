@@ -79,3 +79,23 @@ callables passed to `run_custom_signal_backtest` / `run_signal_panel_backtest`
   cryptographically-signed ledger. A gap in `verify_audit_log_integrity()`'s
   or `verify_audit_trail_integrity()`'s tamper detection is a legitimate
   report.
+- **Retention (`gc`), sealing, and legal hold**: `audit.gc()` only ever
+  deletes a day file when called with `dry_run=False` (`sqt gc --confirm`)
+  — never automatically, and never a day currently under a hold
+  (`hold_day()`/`sqt hold`). Deletion under a configured retention window
+  is, by design, indistinguishable from tampering to the hash chain itself
+  (both leave the same evidence: a missing file the chain index still
+  attests to) — `verify_audit_trail_integrity()` will correctly flag a
+  `gc`'d day as "likely deleted." That's expected, not a bug; treat your
+  own record of when `sqt gc --confirm` ran as the source of truth for
+  *why* a given day is gone. `seal_day()`'s `os.chmod` is an operational
+  safeguard against accidental writes, explicitly not a WORM guarantee —
+  reversible by anyone with sufficient OS-level privilege, same caveat as
+  the rest of local filesystem storage.
+- **Redaction (`SQT_AUDIT_REDACT_FIELDS`)**: redacted fields are replaced
+  with a short SHA-256 content-hash placeholder before a decision record is
+  written — the raw value never touches disk. This is a one-way hash, not
+  encryption; do not rely on it if the redacted value space is small enough
+  to brute-force by hashing candidate values and comparing (e.g. a 4-digit
+  PIN). It's intended for values you want comparable-but-hidden (account
+  IDs, SSNs), not secret material where guessability matters.

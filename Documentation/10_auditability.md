@@ -123,6 +123,8 @@ for what they cover and how to verify them.
 |---|---|---|
 | `SQT_AUDIT_ENABLED` | `1` | Set to `0` to disable decision-record writes entirely |
 | `SQT_AUDIT_DIR` | `~/.cache/standard_quant_tools/audit/` | Where JSONL files are written |
+| `SQT_AUDIT_RETENTION_DAYS` | unset (never delete) | Default retention window for `gc()`/`sqt gc` — see [Retention / garbage collection](#retention--garbage-collection) |
+| `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` to redact — see [Field redaction](#field-redaction) |
 
 ### Scope
 
@@ -360,6 +362,11 @@ sqt report <request_id>              # pretty-print one record in full
 sqt replay <request_id>              # re-run the call, report data/output match
 sqt compare <request_id_a> <id_b>    # diff two records' status/output/inputs
 sqt verify [--file PATH]             # check hash-chain integrity (see below)
+sqt hold <date> [--reason TEXT]      # legal/retention hold on a calendar day
+sqt release-hold <date>              # remove a hold
+sqt gc [--confirm]                   # delete day files past retention (dry-run by default)
+sqt seal <date>                      # chmod a day file read-only (not WORM)
+sqt export --start D --end D --out F # package a date range into an auditor-ready zip
 ```
 
 ```bash
@@ -437,3 +444,133 @@ changes, this script must be updated to match or the two implementations
 will silently disagree about what counts as tampered.
 `tests/test_standalone_verifier.py` is the parity check that catches that
 drift — it fails if the two implementations' hash output ever diverges.
+
+---
+
+## Retention, legal hold, sealing, and export
+
+Four operations for the operational side of running an audit trail long
+enough that "keep everything forever, growing without bound" stops being
+practical — none of them run automatically. Every one is either read-only
+(`gc` in its default dry-run mode) or requires an explicit CLI invocation.
+
+### Legal hold
+
+```python
+from standard_quant_tools.audit import hold_day, release_hold, is_held
+
+hold_day("2026-07-19", reason="litigation hold — case #1234")
+is_held("2026-07-19")   # True
+release_hold("2026-07-19")
+```
+
+`hold_day(date, audit_dir=None, reason=None)` writes a small sidecar
+(`<date>.jsonl.hold`) that `gc()` checks before ever deleting a day —
+a held date is never a deletion candidate, regardless of how old it is.
+Holding is idempotent (holding twice just updates the reason/timestamp) and
+works even for a date with no audit activity yet, since a hold is a
+statement about a date, not a file. `release_hold` returns whether a hold
+actually existed to remove.
+
+### Retention / garbage collection
+
+```python
+from standard_quant_tools.audit import gc_candidates, gc
+
+gc_candidates(retention_days=90)          # preview: which dates would go
+gc(retention_days=90, dry_run=True)       # same thing, the gc() entrypoint
+gc(retention_days=90, dry_run=False)      # actually deletes (held dates excluded)
+```
+
+`SQT_AUDIT_RETENTION_DAYS` sets the default retention window when
+`retention_days` isn't passed explicitly; **unset means never delete** —
+there is no default retention period that silently starts pruning data.
+`dry_run=True` is also the default, so `gc()` called with no arguments at
+all just returns `[]` (nothing configured) rather than deleting anything.
+
+**Deletion here is real and permanent, and it has a real, unavoidable
+interaction with tamper detection:** after `gc()` removes a day file,
+`verify_audit_trail_integrity()` / `sqt verify` will (correctly) report
+that date as "likely deleted" — the hash chain has no way to distinguish a
+legitimate, policy-driven deletion from tampering, because both leave
+identical evidence (a missing file the chain index still attests to).
+This isn't a bug to fix; it's the same fundamental limitation described in
+[Tamper evidence](#tamper-evidence-hash-chain) applied to a case where the
+deletion actually was authorized. Two practical mitigations: keep your own
+operational record of *when and why* `sqt gc --confirm` was run (e.g. your
+infra's own command/audit log for who ran it), and run `sqt export` to
+archive anything you might need to produce later *before* it ages out.
+
+### Sealing
+
+```python
+from standard_quant_tools.audit import seal_day
+
+seal_day("2026-07-19")   # chmod's the day file read-only
+```
+
+`seal_day(date, audit_dir=None)` marks one calendar day's file read-only via
+`os.chmod`, as a safeguard against *accidental* modification. This is
+**explicitly not WORM**: anyone with sufficient OS-level privilege can chmod
+the file writable again — see the top-of-page caveat about local filesystem
+storage never being WORM regardless of anything on this page. On Windows,
+`os.chmod` can only toggle the read-only attribute (there's no separate
+owner/group/other bit to set). Sealing is a deployer-scheduled operation
+(e.g. a nightly cron running `sqt seal $(yesterday)`), not something this
+library does automatically at day rollover — rollover timing isn't
+guaranteed to coincide with a running process. Only the day file itself is
+sealed; the chain index stays writable, since it's one file shared across
+every day including future ones.
+
+### Field redaction
+
+```bash
+export SQT_AUDIT_REDACT_FIELDS="account_id,client.ssn"
+```
+
+Comma-separated, dotted field paths into a tool call's `input`. Each
+matched field is replaced with `<redacted:xxxxxxxx>` — a short content hash
+of the original value, not the value itself — before the decision record is
+written, so two records that redacted the same underlying value still
+compare equal on that field without the raw value ever touching disk. A
+configured path that doesn't match anything in a particular tool's input is
+silently skipped, since not every tool has every field. Unset (the default)
+redacts nothing.
+
+**Data classification note:** as of this writing, the built-in agent tools'
+input models (`standard_quant_tools/agent/models.py`) only ever carry
+tickers, date ranges, strategy names/parameters, and numeric config — there
+are no free-text or PII-shaped fields in the box today, so
+`SQT_AUDIT_REDACT_FIELDS` exists as a mechanism, not because a shipped tool
+currently needs it. A deployment that adds its own tools with genuinely
+sensitive fields (account identifiers, customer PII) owns configuring this
+env var for those fields; the library can't know in advance what a
+downstream tool considers sensitive.
+
+### Export bundle
+
+```python
+from standard_quant_tools.audit import export_bundle
+
+export_bundle("2026-07-01", "2026-07-19", "audit_bundle.zip")
+```
+
+`export_bundle(start_date, end_date, out_path, audit_dir=None)` zips every
+day file in the inclusive date range, the chain index, a `manifest.json`
+(per-file SHA-256, record counts, package version, git commit, generation
+timestamp), a copy of `scripts/verify_audit_log.py`, and a short
+`README.txt` with verification instructions — the complete artifact meant
+to be handed to an external auditor, who can verify it offline with only
+the Python standard library:
+
+```bash
+unzip audit_bundle.zip -d bundle/
+cd bundle/
+python verify_audit_log.py .
+```
+
+A clean result confirms the exported records are internally self-consistent
+and match their hash chain. It does **not** prove the source system's
+filesystem was never tampered with before export, and the bundle carries no
+cryptographic signature yet — see
+[What this can and cannot certify](#auditability) at the top of this page.

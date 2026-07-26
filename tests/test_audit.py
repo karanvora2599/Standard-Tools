@@ -10,6 +10,8 @@ and the async context-propagation fix).
 
 import json
 import logging
+import stat
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -615,3 +617,289 @@ class TestChainIndexContinuity:
             "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
         )
         assert len(calls) >= 1, "os.fsync must be called when writing a decision record"
+
+
+# ── Legal hold ──────────────────────────────────────────────────────────────
+
+
+class TestLegalHold:
+    def test_hold_creates_sidecar_and_is_held_reports_true(self, tmp_path: Path):
+        assert not audit.is_held("2024-01-01", audit_dir=tmp_path)
+        path = audit.hold_day("2024-01-01", audit_dir=tmp_path, reason="litigation")
+        assert path.exists()
+        assert audit.is_held("2024-01-01", audit_dir=tmp_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["reason"] == "litigation"
+        assert payload["date"] == "2024-01-01"
+
+    def test_hold_works_ahead_of_any_activity(self, tmp_path: Path):
+        """A hold is a statement about a date, not a file -- placing one on a
+        date with no audit file yet must not raise."""
+        path = audit.hold_day("2099-01-01", audit_dir=tmp_path)
+        assert path.exists()
+
+    def test_release_hold_removes_sidecar_and_reports_true(self, tmp_path: Path):
+        audit.hold_day("2024-01-01", audit_dir=tmp_path)
+        assert audit.release_hold("2024-01-01", audit_dir=tmp_path) is True
+        assert not audit.is_held("2024-01-01", audit_dir=tmp_path)
+
+    def test_release_hold_on_unheld_date_reports_false(self, tmp_path: Path):
+        assert audit.release_hold("2024-01-01", audit_dir=tmp_path) is False
+
+    def test_holding_twice_overwrites_reason(self, tmp_path: Path):
+        path = audit.hold_day("2024-01-01", audit_dir=tmp_path, reason="first")
+        audit.hold_day("2024-01-01", audit_dir=tmp_path, reason="second")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["reason"] == "second"
+
+
+# ── Retention / gc ──────────────────────────────────────────────────────────
+
+
+class TestRetentionGC:
+    def _write_day(self, tmp_path: Path, date: str) -> Path:
+        w = audit.AuditWriter(audit_dir=tmp_path)
+        day_path = tmp_path / f"{date}.jsonl"
+        head = w._bootstrap_new_day(day_path)
+        record = _hand_written_record(f"call-{date}", head)
+        day_path.write_text(record.model_dump_json() + "\n", encoding="utf-8")
+        return day_path
+
+    def test_no_retention_configured_yields_no_candidates(self, tmp_path: Path):
+        self._write_day(tmp_path, "2020-01-01")
+        assert audit.gc_candidates(audit_dir=tmp_path) == []
+
+    def test_retention_days_param_finds_old_days(self, tmp_path: Path):
+        self._write_day(tmp_path, "2020-01-01")
+        assert audit.gc_candidates(audit_dir=tmp_path, retention_days=0) == [
+            "2020-01-01"
+        ]
+
+    def test_retention_days_env_var_used_when_param_omitted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._write_day(tmp_path, "2020-01-01")
+        monkeypatch.setenv("SQT_AUDIT_RETENTION_DAYS", "0")
+        assert audit.gc_candidates(audit_dir=tmp_path) == ["2020-01-01"]
+
+    def test_held_day_excluded_from_candidates(self, tmp_path: Path):
+        self._write_day(tmp_path, "2020-01-01")
+        audit.hold_day("2020-01-01", audit_dir=tmp_path)
+        assert audit.gc_candidates(audit_dir=tmp_path, retention_days=0) == []
+
+    def test_gc_dry_run_does_not_delete(self, tmp_path: Path):
+        day_path = self._write_day(tmp_path, "2020-01-01")
+        result = audit.gc(audit_dir=tmp_path, retention_days=0, dry_run=True)
+        assert result == ["2020-01-01"]
+        assert day_path.exists()
+
+    def test_gc_confirm_deletes_candidates_only(self, tmp_path: Path):
+        old_path = self._write_day(tmp_path, "2020-01-01")
+        held_path = self._write_day(tmp_path, "2020-01-02")
+        audit.hold_day("2020-01-02", audit_dir=tmp_path)
+
+        deleted = audit.gc(audit_dir=tmp_path, retention_days=0, dry_run=False)
+
+        assert deleted == ["2020-01-01"]
+        assert not old_path.exists()
+        assert held_path.exists()
+
+    def test_gc_never_runs_automatically_from_dispatch(
+        self, patched_factory, audit_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A retention window being configured must not cause dispatch() to
+        delete anything on its own -- gc() is only ever invoked explicitly."""
+        monkeypatch.setenv("SQT_AUDIT_RETENTION_DAYS", "0")
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        assert len(_audit_records(audit_dir)) == 1
+
+
+# ── Sealing ─────────────────────────────────────────────────────────────────
+
+
+class TestSealing:
+    def test_seal_makes_day_file_read_only(self, tmp_path: Path):
+        w = audit.AuditWriter(audit_dir=tmp_path)
+        day_path = tmp_path / "2024-01-01.jsonl"
+        head = w._bootstrap_new_day(day_path)
+        record = _hand_written_record("call", head)
+        day_path.write_text(record.model_dump_json() + "\n", encoding="utf-8")
+
+        sealed_path = audit.seal_day("2024-01-01", audit_dir=tmp_path)
+        assert sealed_path == day_path
+        with pytest.raises(PermissionError):
+            with open(day_path, "a", encoding="utf-8"):
+                pass
+
+        # Cleanup: restore write permission so pytest's tmp_path teardown
+        # can remove the file on platforms that enforce this at delete time.
+        import os as os_module
+
+        os_module.chmod(day_path, stat.S_IWRITE | stat.S_IREAD)
+
+    def test_seal_missing_day_raises(self, tmp_path: Path):
+        with pytest.raises(FileNotFoundError):
+            audit.seal_day("2099-01-01", audit_dir=tmp_path)
+
+    def test_seal_does_not_touch_the_chain_index(self, tmp_path: Path):
+        w = audit.AuditWriter(audit_dir=tmp_path)
+        day_path = tmp_path / "2024-01-01.jsonl"
+        head = w._bootstrap_new_day(day_path)
+        record = _hand_written_record("call", head)
+        day_path.write_text(record.model_dump_json() + "\n", encoding="utf-8")
+
+        audit.seal_day("2024-01-01", audit_dir=tmp_path)
+
+        # The index must remain writable -- a later day's bootstrap still
+        # needs to append to it.
+        day2_path = tmp_path / "2024-01-02.jsonl"
+        w._bootstrap_new_day(day2_path)  # must not raise
+
+        import os as os_module
+
+        os_module.chmod(day_path, stat.S_IWRITE | stat.S_IREAD)
+
+
+# ── Redaction ───────────────────────────────────────────────────────────────
+
+
+class TestRedaction:
+    def test_no_fields_configured_returns_input_unchanged(self):
+        payload = {"symbol": "AAPL", "account_id": "12345"}
+        assert audit._redact(payload, []) is payload
+
+    def test_top_level_field_redacted(self):
+        redacted = audit._redact(
+            {"symbol": "AAPL", "account_id": "12345"}, ["account_id"]
+        )
+        assert redacted["symbol"] == "AAPL"
+        assert redacted["account_id"] != "12345"
+        assert redacted["account_id"].startswith("<redacted:")
+
+    def test_nested_dotted_field_redacted(self):
+        redacted = audit._redact(
+            {"client": {"ssn": "123-45-6789", "name": "A"}}, ["client.ssn"]
+        )
+        assert redacted["client"]["ssn"].startswith("<redacted:")
+        assert redacted["client"]["name"] == "A"
+
+    def test_missing_field_silently_skipped(self):
+        redacted = audit._redact({"symbol": "AAPL"}, ["account_id", "client.ssn"])
+        assert redacted == {"symbol": "AAPL"}
+
+    def test_redaction_placeholder_is_deterministic(self):
+        a = audit._redact({"account_id": "12345"}, ["account_id"])
+        b = audit._redact({"account_id": "12345"}, ["account_id"])
+        assert a["account_id"] == b["account_id"]
+
+    def test_redaction_does_not_mutate_original_dict(self):
+        original = {"account_id": "12345"}
+        audit._redact(original, ["account_id"])
+        assert original["account_id"] == "12345"
+
+    def test_redact_fields_reads_comma_separated_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SQT_AUDIT_REDACT_FIELDS", "account_id, client.ssn")
+        assert audit._redact_fields() == ["account_id", "client.ssn"]
+
+    def test_redact_fields_empty_when_unset(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("SQT_AUDIT_REDACT_FIELDS", raising=False)
+        assert audit._redact_fields() == []
+
+    def test_dispatch_redacts_configured_field_in_written_record(
+        self, patched_factory, audit_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SQT_AUDIT_REDACT_FIELDS", "symbol")
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        records = _audit_records(audit_dir)
+        assert records[0]["input"]["symbol"] != "AAPL"
+        assert records[0]["input"]["symbol"].startswith("<redacted:")
+        assert records[0]["input"]["benchmark"] == "SPY"  # unconfigured field untouched
+
+
+# ── Export bundle ───────────────────────────────────────────────────────────
+
+
+class TestExportBundle:
+    def _write_day(self, tmp_path: Path, date: str, tool_name: str = "call") -> Path:
+        w = audit.AuditWriter(audit_dir=tmp_path)
+        day_path = tmp_path / f"{date}.jsonl"
+        head = w._bootstrap_new_day(day_path)
+        record = _hand_written_record(tool_name, head)
+        day_path.write_text(record.model_dump_json() + "\n", encoding="utf-8")
+        return day_path
+
+    def test_bundle_contains_day_files_index_manifest_and_verifier(
+        self, tmp_path: Path
+    ):
+        self._write_day(tmp_path, "2024-01-01")
+        out_path = tmp_path.parent / "bundle.zip"
+
+        result = audit.export_bundle("2024-01-01", "2024-01-01", out_path, tmp_path)
+
+        assert result == out_path
+        with zipfile.ZipFile(out_path) as zf:
+            names = set(zf.namelist())
+        assert "2024-01-01.jsonl" in names
+        assert "_chain_index.jsonl" in names
+        assert "manifest.json" in names
+        assert "verify_audit_log.py" in names
+        assert "README.txt" in names
+
+    def test_date_range_excludes_out_of_range_days(self, tmp_path: Path):
+        self._write_day(tmp_path, "2024-01-01")
+        self._write_day(tmp_path, "2024-01-02")
+        self._write_day(tmp_path, "2024-01-03")
+        out_path = tmp_path.parent / "bundle.zip"
+
+        audit.export_bundle("2024-01-02", "2024-01-02", out_path, tmp_path)
+
+        with zipfile.ZipFile(out_path) as zf:
+            names = set(zf.namelist())
+        assert "2024-01-02.jsonl" in names
+        assert "2024-01-01.jsonl" not in names
+        assert "2024-01-03.jsonl" not in names
+
+    def test_manifest_sha256_matches_bundled_file_content(self, tmp_path: Path):
+        self._write_day(tmp_path, "2024-01-01")
+        out_path = tmp_path.parent / "bundle.zip"
+        audit.export_bundle("2024-01-01", "2024-01-01", out_path, tmp_path)
+
+        with zipfile.ZipFile(out_path) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+            by_name = {f["name"]: f for f in manifest["files"]}
+            content = zf.read("2024-01-01.jsonl")
+            import hashlib
+
+            assert (
+                by_name["2024-01-01.jsonl"]["sha256"]
+                == hashlib.sha256(content).hexdigest()
+            )
+            assert by_name["2024-01-01.jsonl"]["record_count"] == 1
+
+    def test_bundled_verifier_confirms_clean_trail(self, tmp_path: Path):
+        """End-to-end: a bundle built from a real clean trail must itself
+        verify clean using the exact verifier script it ships."""
+        import importlib.util
+
+        self._write_day(tmp_path, "2024-01-01")
+        out_dir = tmp_path.parent / "extracted"
+        out_path = tmp_path.parent / "bundle.zip"
+        audit.export_bundle("2024-01-01", "2024-01-01", out_path, tmp_path)
+
+        with zipfile.ZipFile(out_path) as zf:
+            zf.extractall(out_dir)
+
+        spec = importlib.util.spec_from_file_location(
+            "bundled_verifier", out_dir / "verify_audit_log.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert module.verify_trail(out_dir) == []
