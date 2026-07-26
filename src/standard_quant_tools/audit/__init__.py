@@ -21,11 +21,13 @@ pluggable storage backends, ...):
     provenance  — git/package-version/strategy-source best-effort provenance
     paths       — audit-dir resolution, day-file discovery, advisory locking
     models      — DecisionRecord, ReplayResult
+    storage     — AuditStorageBackend, LocalFilesystemBackend (pluggable I/O)
     writer      — AuditWriter (hash-chained, fsync'd JSONL + chain index)
     verify      — verify_audit_log_integrity, verify_audit_trail_integrity
     redaction   — SQT_AUDIT_REDACT_FIELDS field redaction
     retention   — legal hold, retention/gc, read-only sealing
     export      — export_bundle (auditor-ready zip)
+    signing     — Ed25519 checkpoint signing (optional `cryptography` extra)
     dispatch    — _run_and_record, the core agent.tools.dispatch() uses
     replay      — verify_replay
 
@@ -62,18 +64,30 @@ from .provenance import (
 from .redaction import _redact, _redact_fields
 from .replay import verify_replay
 from .retention import gc, gc_candidates, hold_day, is_held, release_hold, seal_day
+from .signing import (
+    HAS_CRYPTOGRAPHY,
+    checkpoint_and_sign,
+    generate_keypair,
+    verify_checkpoint_signature,
+)
+from .storage import AuditStorageBackend, LocalFilesystemBackend
 from .verify import verify_audit_log_integrity, verify_audit_trail_integrity
 from .writer import AuditWriter
 
 __all__ = [
+    "AuditStorageBackend",
     "AuditWriter",
     "DecisionRecord",
+    "HAS_CRYPTOGRAPHY",
+    "LocalFilesystemBackend",
     "ReplayResult",
     "RequestIdFilter",
+    "checkpoint_and_sign",
     "configure_logging",
     "export_bundle",
     "gc",
     "gc_candidates",
+    "generate_keypair",
     "hash_dataframe",
     "hash_payload",
     "hold_day",
@@ -84,5 +98,6 @@ __all__ = [
     "seal_day",
     "verify_audit_log_integrity",
     "verify_audit_trail_integrity",
+    "verify_checkpoint_signature",
     "verify_replay",
 ]

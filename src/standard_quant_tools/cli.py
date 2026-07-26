@@ -1,6 +1,6 @@
 """
 Command-line interface for the audit trail's JSONL decision records
-(audit.py). Subcommands:
+(the `standard_quant_tools.audit` package). Subcommands:
 
     sqt replay <request_id>              — re-run the recorded call via
                                             audit.verify_replay(), report
@@ -34,16 +34,30 @@ Command-line interface for the audit trail's JSONL decision records
                                             (lists candidates only) unless
                                             --confirm is passed.
     sqt seal <date>                      — chmod a day file read-only
-                                            (not WORM — see audit.py's
-                                            seal_day docstring).
+                                            (not WORM — see
+                                            audit.seal_day's docstring).
     sqt export --start D --end D --out F — package day files in [start,
                                             end] plus the chain index, a
                                             manifest, and the standalone
                                             verifier into one zip bundle.
+    sqt keygen [--out DIR]                — generate an Ed25519 signing
+                                            keypair. Local development only
+                                            — not production key custody.
+    sqt anchor <date> [--key PATH]       — sign a checkpoint for a calendar
+                                            day (see audit.checkpoint_and_sign).
+                                            Key from --key or
+                                            SQT_AUDIT_SIGNING_KEY_PATH.
+    sqt verify --checkpoint <date>
+               --pubkey PATH             — verify a checkpoint's Ed25519
+                                            signature using only the public
+                                            key. Exit 0 if valid, 1 otherwise.
 
-stdlib argparse only — no new dependency, matching this repo's minimal-
-dependency stance. Each subcommand's logic lives in its own `cmd_*` function
-so it can be tested directly without spawning a subprocess.
+`keygen`/`anchor`/`--checkpoint` verification require the optional
+`cryptography` dependency (`pip install standard_quant_tools[signing]`) —
+every other subcommand works without it. stdlib argparse only otherwise, no
+new dependency, matching this repo's minimal-dependency stance. Each
+subcommand's logic lives in its own `cmd_*` function so it can be tested
+directly without spawning a subprocess.
 """
 
 import argparse
@@ -57,7 +71,8 @@ from standard_quant_tools import audit
 
 def _iter_records(audit_dir: Optional[Path] = None) -> Iterator[Dict[str, Any]]:
     """Decision records only -- excludes the chain-index witness log
-    (_chain_index.jsonl, see audit.py), which lives in the same directory
+    (_chain_index.jsonl, see the audit package's paths module), which lives
+    in the same directory
     and matches the same *.jsonl glob but holds index entries, not
     decision records."""
     directory = audit_dir if audit_dir is not None else audit._audit_dir()
@@ -222,6 +237,31 @@ def cmd_export(
     return audit.export_bundle(start, end, out, audit_dir=audit_dir)
 
 
+def cmd_keygen(out_dir: Path) -> "tuple[Path, Path]":
+    """Generate an Ed25519 keypair and write it as two files
+    (audit_signing_key.private / .public) under out_dir. Local development
+    only -- see audit.generate_keypair's docstring."""
+    private_bytes, public_bytes = audit.generate_keypair()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    priv_path = out_dir / "audit_signing_key.private"
+    pub_path = out_dir / "audit_signing_key.public"
+    priv_path.write_bytes(private_bytes)
+    pub_path.write_bytes(public_bytes)
+    return priv_path, pub_path
+
+
+def cmd_anchor(
+    date: str, key_path: Optional[Path] = None, audit_dir: Optional[Path] = None
+) -> Path:
+    return audit.checkpoint_and_sign(date, audit_dir=audit_dir, key_path=key_path)
+
+
+def cmd_verify_checkpoint(
+    date: str, pubkey: Path, audit_dir: Optional[Path] = None
+) -> bool:
+    return audit.verify_checkpoint_signature(date, pubkey, audit_dir=audit_dir)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="sqt", description="standard_quant_tools audit-trail CLI"
@@ -247,6 +287,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Verify a single day's .jsonl in isolation instead of the full "
         "cross-day trail.",
+    )
+    p_verify.add_argument(
+        "--checkpoint",
+        metavar="DATE",
+        default=None,
+        help="Verify an Ed25519-signed checkpoint for this date instead of "
+        "the hash chain. Requires --pubkey.",
+    )
+    p_verify.add_argument(
+        "--pubkey",
+        type=Path,
+        default=None,
+        help="Public key file for --checkpoint verification.",
     )
 
     p_hold = sub.add_parser(
@@ -291,6 +344,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_export.add_argument("--end", required=True, help="YYYY-MM-DD, inclusive")
     p_export.add_argument("--out", type=Path, required=True, help="Output .zip path")
 
+    p_keygen = sub.add_parser(
+        "keygen",
+        help="Generate an Ed25519 signing keypair (local development only "
+        "— not production key custody).",
+    )
+    p_keygen.add_argument(
+        "--out",
+        type=Path,
+        default=Path("."),
+        help="Directory to write the keypair into.",
+    )
+
+    p_anchor = sub.add_parser(
+        "anchor", help="Sign a checkpoint for a calendar day (Ed25519)."
+    )
+    p_anchor.add_argument("date", help="YYYY-MM-DD")
+    p_anchor.add_argument(
+        "--key",
+        type=Path,
+        default=None,
+        help="Private key file (else SQT_AUDIT_SIGNING_KEY_PATH).",
+    )
+
     args = parser.parse_args(argv)
 
     try:
@@ -304,6 +380,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "report":
             print(cmd_report(args.request_id))
         elif args.command == "verify":
+            if args.checkpoint is not None:
+                if args.pubkey is None:
+                    print("error: --checkpoint requires --pubkey", file=sys.stderr)
+                    return 1
+                ok = cmd_verify_checkpoint(args.checkpoint, args.pubkey)
+                print(
+                    "Signature valid."
+                    if ok
+                    else "Signature invalid, or checkpoint/signature file not found."
+                )
+                return 0 if ok else 1
             problems = cmd_verify(file=args.file)
             print(_format_verify(problems))
             return 1 if problems else 0
@@ -332,7 +419,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "export":
             out_path = cmd_export(args.start, args.end, args.out)
             print(f"Exported bundle: {out_path}")
-    except (ValueError, FileNotFoundError) as exc:
+        elif args.command == "keygen":
+            priv_path, pub_path = cmd_keygen(args.out)
+            print(f"Private key: {priv_path}")
+            print(f"Public key:  {pub_path}")
+            print(
+                "WARNING: local development only — not a production "
+                "key-custody solution. See Documentation/10_auditability.md."
+            )
+        elif args.command == "anchor":
+            checkpoint_path = cmd_anchor(args.date, key_path=args.key)
+            print(f"Checkpoint signed: {checkpoint_path}")
+    except (ValueError, FileNotFoundError, ImportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

@@ -357,3 +357,90 @@ class TestCmdExport:
         with zipfile.ZipFile(out_path) as zf:
             assert f"{date}.jsonl" in zf.namelist()
             assert "manifest.json" in zf.namelist()
+
+
+class TestCmdKeygenAnchorAndCheckpointVerify:
+    pytestmark = pytest.mark.skipif(
+        not cli.audit.HAS_CRYPTOGRAPHY, reason="cryptography is not installed"
+    )
+
+    def test_keygen_via_main_writes_keypair(self, tmp_path: Path, capsys):
+        out_dir = tmp_path / "keys"
+        exit_code = cli.main(["keygen", "--out", str(out_dir)])
+        assert exit_code == 0
+        output = capsys.readouterr().out
+        assert "Private key" in output
+        assert "Public key" in output
+        assert "local development only" in output
+        assert (out_dir / "audit_signing_key.private").exists()
+        assert (out_dir / "audit_signing_key.public").exists()
+
+    def test_anchor_and_verify_checkpoint_round_trip_via_main(
+        self, patched_factory, audit_dir: Path, tmp_path: Path, capsys
+    ):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        day_files = [
+            p for p in audit_dir.glob("*.jsonl") if cli.audit._DAY_FILE_RE.match(p.name)
+        ]
+        date = day_files[0].stem
+
+        keys_dir = tmp_path / "keys"
+        cli.main(["keygen", "--out", str(keys_dir)])
+        priv_path = keys_dir / "audit_signing_key.private"
+        pub_path = keys_dir / "audit_signing_key.public"
+
+        exit_code = cli.main(["anchor", date, "--key", str(priv_path)])
+        assert exit_code == 0
+        assert "Checkpoint signed" in capsys.readouterr().out
+        assert (audit_dir / f"{date}.checkpoint.json").exists()
+
+        exit_code = cli.main(
+            ["verify", "--checkpoint", date, "--pubkey", str(pub_path)]
+        )
+        assert exit_code == 0
+        assert "Signature valid." in capsys.readouterr().out
+
+    def test_verify_checkpoint_without_pubkey_errors(
+        self, patched_factory, audit_dir: Path, capsys
+    ):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        exit_code = cli.main(["verify", "--checkpoint", "2024-01-01"])
+        assert exit_code == 1
+        assert "--pubkey" in capsys.readouterr().err
+
+    def test_verify_checkpoint_missing_date_fails(
+        self, patched_factory, audit_dir: Path, tmp_path: Path, capsys
+    ):
+        keys_dir = tmp_path / "keys"
+        cli.main(["keygen", "--out", str(keys_dir)])
+        pub_path = keys_dir / "audit_signing_key.public"
+
+        exit_code = cli.main(
+            ["verify", "--checkpoint", "2099-01-01", "--pubkey", str(pub_path)]
+        )
+        assert exit_code == 1
+        assert "invalid" in capsys.readouterr().out.lower()
+
+    def test_anchor_without_key_or_env_var_errors(
+        self,
+        patched_factory,
+        audit_dir: Path,
+        capsys,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("SQT_AUDIT_SIGNING_KEY_PATH", raising=False)
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        day_files = [
+            p for p in audit_dir.glob("*.jsonl") if cli.audit._DAY_FILE_RE.match(p.name)
+        ]
+        date = day_files[0].stem
+
+        exit_code = cli.main(["anchor", date])
+        assert exit_code == 1
+        assert "error" in capsys.readouterr().err

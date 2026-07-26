@@ -26,7 +26,7 @@ poetry install
 
 **Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `scikit-learn`, `plotly`, `pyarrow`, `python-dotenv`
 
-**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider).
+**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below.
 
 > **Note on the C++ extension:** the package uses a Flit build backend, so `pip install .` / `poetry install` above installs the **pure-Python package only** — every indicator, backtest, and analysis function works via its Numba/pure-Python fallback, but the compiled `_sqt_core` speedups in the table below are not built by this step. Building `_sqt_core` is a separate, manual CMake step; see [Development/build_guide.md](Development/build_guide.md).
 
@@ -539,9 +539,14 @@ sqt release-hold <date>              # remove a hold
 sqt gc [--confirm]                   # delete day files past SQT_AUDIT_RETENTION_DAYS (dry-run by default)
 sqt seal <date>                      # chmod a day file read-only (operational safeguard, not WORM)
 sqt export --start D --end D --out F # zip a date range + manifest + standalone verifier for an auditor
+sqt keygen [--out DIR]                # generate an Ed25519 keypair (local development only)
+sqt anchor <date> [--key PATH]        # sign a checkpoint anchoring a day's chain endpoint
+sqt verify --checkpoint <date> --pubkey PATH   # verify a checkpoint's signature (public key only)
 ```
 
-`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. `SQT_AUDIT_REDACT_FIELDS` (comma-separated dotted field paths) replaces matching `input` fields with a non-reversible content-hash placeholder before a record is written. See [Documentation/10_auditability.md](Documentation/10_auditability.md).
+`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. `SQT_AUDIT_REDACT_FIELDS` (comma-separated dotted field paths) replaces matching `input` fields with a non-reversible content-hash placeholder before a record is written.
+
+**Checkpoint signing** (Ed25519, optional `pip install standard_quant_tools[signing]`) closes the one gap the hash chain can't on its own: a wholesale, internally-consistent rewrite of an entire day file. `checkpoint_and_sign()`/`sqt anchor` signs `{date, final_record_hash, index_hash}`; `verify_checkpoint_signature()`/`sqt verify --checkpoint` verifies it with only the public key. `generate_keypair()`/`sqt keygen` are for local development only — a real deployment should route signing through an HSM/KMS via a `signer` callback instead of a bare key file. Storage itself is behind a pluggable `AuditStorageBackend` (`LocalFilesystemBackend` is the only implementation shipped — a seam for a future WORM backend, not a WORM backend itself). See [Documentation/10_auditability.md](Documentation/10_auditability.md) for the full picture, including what none of this certifies by itself.
 
 ---
 

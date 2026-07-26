@@ -24,19 +24,24 @@ explicit opt-out (they're on by default once you call `dispatch()`).
 
 **What this can and cannot certify.** Everything on this page is an
 *engineering control*: it makes tampering *detectable*, writes more
-*durable*, and evidence *exportable/verifiable*. That is exactly the
+*durable*, and evidence *exportable/verifiable/anchorable* (via optional
+[checkpoint signing](#checkpoint-signing-ed25519)). That is exactly the
 technical layer SEC 17a-4 / SOC2 / FINRA-style audits check. **None of it is
 "SEC compliant" by itself** — actual regulatory certification requires a
 compliance/legal review of the *deployed system as a whole*: who has
 filesystem access to `SQT_AUDIT_DIR`, whether retention procedures are
 followed operationally, whether records are stored on genuinely
-non-rewriteable (WORM) media, whether any signing key custody is sound. No
-code change self-certifies any of that. In particular: local filesystem
-storage is not WORM regardless of anything on this page — nothing currently
-stops someone with OS-level write access to `SQT_AUDIT_DIR` from deleting
-files directly; the hash chain and chain index only make that
+non-rewriteable (WORM) media, and — if checkpoint signing is enabled —
+whether the private signing key's custody (an HSM/KMS, not a bare file on
+the same disk as the audit trail) is actually sound. No code change
+self-certifies any of that. In particular: local filesystem storage is not
+WORM regardless of anything on this page, including chmod-based sealing —
+nothing stops someone with OS-level write access to `SQT_AUDIT_DIR` from
+deleting files directly; the hash chain and chain index only make that
 *detectable after the fact*, at increasing cost to the attacker, not
-*impossible*.
+*impossible* — closing that specific gap requires the external anchor a
+signed checkpoint provides, and only for the days it was actually run
+against.
 
 ---
 
@@ -125,6 +130,7 @@ for what they cover and how to verify them.
 | `SQT_AUDIT_DIR` | `~/.cache/standard_quant_tools/audit/` | Where JSONL files are written |
 | `SQT_AUDIT_RETENTION_DAYS` | unset (never delete) | Default retention window for `gc()`/`sqt gc` — see [Retention / garbage collection](#retention--garbage-collection) |
 | `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` to redact — see [Field redaction](#field-redaction) |
+| `SQT_AUDIT_SIGNING_KEY_PATH` | unset | Private key file for `checkpoint_and_sign` when no `key_path`/`signer` is given — see [Checkpoint signing](#checkpoint-signing-ed25519) |
 
 ### Scope
 
@@ -178,10 +184,12 @@ automatically.
 without also rewriting every later line's `prev_record_hash`/`record_hash`
 to match is caught. An attacker who consistently rewrites an *entire file*
 end-to-end — including its chain-index entry (see below) — to remain
-internally self-consistent is not; there's no external anchor (a
-cryptographic signature verifiable independently of these files, or
-publishing hashes to a separate off-box system) to catch that class of
-attack. This is a real, currently-open limitation, not a hidden one.
+internally self-consistent is **not** caught by the hash chain alone;
+there's no external anchor within these files themselves to catch that
+class of attack. [Checkpoint signing](#checkpoint-signing-ed25519) is that
+external anchor — but only for days it was actually run against, and only
+as strong as the signing key's custody. Without it, this remains a real,
+open limitation, not a hidden one.
 
 ### Cross-day chain continuity
 
@@ -367,6 +375,9 @@ sqt release-hold <date>              # remove a hold
 sqt gc [--confirm]                   # delete day files past retention (dry-run by default)
 sqt seal <date>                      # chmod a day file read-only (not WORM)
 sqt export --start D --end D --out F # package a date range into an auditor-ready zip
+sqt keygen [--out DIR]                # generate an Ed25519 keypair (local dev only)
+sqt anchor <date> [--key PATH]        # sign a checkpoint for a calendar day
+sqt verify --checkpoint <date> --pubkey PATH   # verify a checkpoint's signature
 ```
 
 ```bash
@@ -571,6 +582,154 @@ python verify_audit_log.py .
 
 A clean result confirms the exported records are internally self-consistent
 and match their hash chain. It does **not** prove the source system's
-filesystem was never tampered with before export, and the bundle carries no
-cryptographic signature yet — see
+filesystem was never tampered with before export. `export_bundle()` doesn't
+currently bundle a signed checkpoint automatically — if you're anchoring
+the exported range with [checkpoint signing](#checkpoint-signing-ed25519),
+run `sqt anchor`/copy the `.checkpoint.json`/`.checkpoint.sig` sidecars into
+the bundle yourself before handing it off. See
 [What this can and cannot certify](#auditability) at the top of this page.
+
+---
+
+## Checkpoint signing (Ed25519)
+
+An optional external anchor closing the one gap the hash chain itself
+cannot: an attacker who consistently rewrites an entire day file *and* its
+chain-index entry stays undetected by `verify_audit_log_integrity()` /
+`verify_audit_trail_integrity()` alone (see
+[Tamper evidence](#tamper-evidence-hash-chain) above). A signed checkpoint
+anchors a day's chain endpoint outside those files entirely — verifying it
+needs only the public key, no trust in the JSONL files' own internal
+consistency.
+
+Requires the optional `cryptography` dependency
+(`pip install standard_quant_tools[signing]`); every other feature on this
+page works without it. `standard_quant_tools.audit.HAS_CRYPTOGRAPHY` reports
+whether it's installed; calling any signing function without it raises a
+clear `ImportError` with install instructions instead of a confusing
+`ModuleNotFoundError` deep in a traceback.
+
+```python
+from standard_quant_tools.audit import (
+    generate_keypair, checkpoint_and_sign, verify_checkpoint_signature,
+)
+
+# One-time (or per-deployment) key generation -- see the key custody
+# warning below before using this in anything but local development.
+private_bytes, public_bytes = generate_keypair()
+
+# Sign a checkpoint for a day that already has activity:
+checkpoint_and_sign("2026-07-19", key_path="signing_key.private")
+
+# Verify with ONLY the public key -- no trust in the JSONL files required:
+verify_checkpoint_signature("2026-07-19", "signing_key.public")  # -> True/False
+```
+
+A checkpoint is `{date, final_record_hash, index_hash, signed_at_utc}` —
+signed once per day (or whenever you choose to call `checkpoint_and_sign`
+again), not per record; the hash chain already covers per-record integrity,
+the checkpoint only needs to anchor the chain's current endpoint. Signing
+writes two sidecars next to the day file: `<date>.checkpoint.json` (the
+payload) and `<date>.checkpoint.sig` (the raw Ed25519 signature, hex).
+
+**Verification does two things, not one:** it checks the signature over the
+*stored* checkpoint using only the public key, **and** it re-derives
+`final_record_hash`/`index_hash` from the *current* on-disk state and
+confirms they still match. A checkpoint signed against a day, then followed
+by any change to that day's file (a legitimate new record, or a wholesale
+forged rewrite) fails verification either way — re-anchor with
+`checkpoint_and_sign` again once you know a change is legitimate.
+`verify_checkpoint_signature` never raises for a bad input; it returns
+`False` for a missing checkpoint/signature file, a non-matching public key,
+a corrupted signature, or stale/mismatched content.
+
+**Checkpoint signing does not replace hash-chain verification, the two
+catch different things:** an edited record whose `record_hash` field wasn't
+recomputed to match is a *chain break*, caught by
+`verify_audit_log_integrity()` — a signed checkpoint alone does not
+re-validate the chain's internals, only its endpoint. Run both.
+
+### Key custody — read this before using signing beyond local development
+
+`generate_keypair()` / `sqt keygen` make a raw Ed25519 keypair on the local
+filesystem. **This is explicitly for local development only, not a
+production key-custody solution** — a private key sitting next to (or even
+near) the audit trail it signs defeats the point of an external anchor: an
+attacker with filesystem access to sign new checkpoints over their own
+forged data has broken the anchor as thoroughly as if it never existed.
+
+Two ways to supply a signing key, in order of preference for anything
+beyond local development:
+
+1. **`signer` callback** (recommended for real deployments) — pass
+   `checkpoint_and_sign(..., signer=your_callable)`, a
+   `Callable[[bytes], bytes]` you write yourself, routed through an
+   HSM/KMS (AWS KMS, GCP Cloud KMS, Azure Key Vault, a hardware token,
+   etc.). This library never sees or touches the private key at all.
+2. **`key_path` / `SQT_AUDIT_SIGNING_KEY_PATH`** — a raw private key file
+   on disk, resolved by `checkpoint_and_sign` if no `signer` is given.
+   Suitable for local development and testing only.
+
+This library deliberately does not implement key rotation, key storage, or
+any HSM/KMS integration itself — that's a deployment decision with no
+one-size-fits-all answer, consistent with this package's stance elsewhere
+(e.g. the [storage backend](#pluggable-storage-backend) interface exists as
+a seam, not a built-in cloud integration).
+
+### CLI
+
+```bash
+sqt keygen --out ./keys                                  # local dev only
+sqt anchor 2026-07-19 --key ./keys/audit_signing_key.private
+sqt verify --checkpoint 2026-07-19 --pubkey ./keys/audit_signing_key.public
+```
+
+`sqt keygen` prints an explicit "local development only" warning alongside
+the two key file paths it writes. `sqt anchor` reads the key from `--key`
+or `SQT_AUDIT_SIGNING_KEY_PATH` (there's no `--signer` CLI flag — a custom
+signer callback is a Python-API-only feature, since a callback can't be
+expressed on a command line). `sqt verify --checkpoint DATE --pubkey PATH`
+exits `0` if the signature is valid, `1` otherwise (including "no
+checkpoint found for that date").
+
+---
+
+## Pluggable storage backend
+
+`AuditWriter` (used internally by `dispatch()` and directly by
+`checkpoint_and_sign`) delegates all of its actual reads/writes/locking to
+an `AuditStorageBackend`:
+
+```python
+from standard_quant_tools.audit import AuditWriter, LocalFilesystemBackend
+
+writer = AuditWriter(audit_dir="...", backend=LocalFilesystemBackend())  # the default
+```
+
+`LocalFilesystemBackend` — the only backend implemented — is exactly what
+`AuditWriter` did directly before this interface existed: local disk,
+cross-process advisory locking via a sidecar `.lock` file, unconditional
+`fsync` after every append. Moving it behind an interface didn't change its
+behavior; it created a **seam** so a future backend backed by genuinely
+non-rewriteable storage (S3 Object Lock, Azure Immutable Blob) could be
+substituted without touching `AuditWriter`'s chain-hashing/locking
+orchestration logic. **That backend does not exist yet** — building one is
+explicitly out of scope for this round; this interface only makes it
+*possible* later without a rewrite.
+
+**Scope of what's backend-routed today:** `AuditWriter`'s own read, append,
+lock, and day-listing operations (used for writing records and for
+`checkpoint_and_sign`'s content derivation) go through whatever backend was
+passed in. `verify_audit_log_integrity()`, `verify_audit_trail_integrity()`,
+the retention functions (`hold_day`/`gc`/`seal_day`), and `export_bundle()`
+still read the local filesystem directly — extending those to the backend
+interface too is future work if a non-local backend is ever built, not
+something this round's scope covers.
+
+A custom backend implements five methods (`acquire_lock`, `release_lock`,
+`read_lines`, `append_line`, `exists`, `list_day_stems` — see
+`AuditStorageBackend`'s docstring in `audit/storage.py` for exact
+semantics). `tests/test_audit_storage.py`'s fake in-memory backend is a
+worked example: it proves the interface is a real seam `AuditWriter`
+delegates through — including cross-day chain bootstrapping — not just a
+passthrough wrapper that still assumes local disk somewhere.

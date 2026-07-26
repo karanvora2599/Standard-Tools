@@ -31,8 +31,52 @@ bump, consistent with SemVer's pre-1.0 clause.
   threads `commission_pct`/`slippage_pct` into every grid combination
   instead of silently ignoring them — `backtest_grid` itself already did
   this correctly; the gap was specific to the agent-tool wrapper.
+- **Internal:** `src/standard_quant_tools/audit.py` (~1060 lines after
+  audit-trail hardening phases 1–2) was split into a package,
+  `standard_quant_tools/audit/` (hashing, context, provenance, paths,
+  models, storage, writer, verify, redaction, retention, export, signing,
+  dispatch, replay), ahead of phase 3 adding more surface area.
+  `__init__.py` re-exports the full previous public + semi-private surface,
+  so this is a pure internal reorganization — no call site anywhere in the
+  codebase or its tests needed to change, and no behavior changed.
 
 ### Added
+
+- **Audit trail hardening, phase 3 (Ed25519 checkpoint signing + pluggable
+  storage backend):** `audit.generate_keypair()`/`checkpoint_and_sign()`/
+  `verify_checkpoint_signature()` add an optional external anchor closing
+  the one gap the hash chain can't close on its own — an attacker who
+  consistently rewrites an entire day file *and* its chain-index entry to
+  stay internally self-consistent. A signed checkpoint
+  (`{date, final_record_hash, index_hash, signed_at_utc}`) is verifiable
+  with only the public key, no trust in the JSONL files' own consistency
+  required. Requires the new optional `cryptography` dependency
+  (`pip install standard_quant_tools[signing]`, a new `signing` extra in
+  `pyproject.toml`); every other audit-trail feature keeps working without
+  it, and calling a signing function without it installed raises a clear
+  `ImportError` instead of a confusing traceback (same pattern as the
+  `bloomberg` extra). Signing key: pass a `signer` callback (routed through
+  an HSM/KMS) for anything beyond local development, or `key_path`/
+  `SQT_AUDIT_SIGNING_KEY_PATH` pointing at a raw key file —
+  `generate_keypair()`/`sqt keygen` are explicitly labeled local-development
+  only, not a production key-custody solution. New `sqt keygen`/
+  `sqt anchor <date>`/`sqt verify --checkpoint <date> --pubkey PATH` CLI
+  subcommands.
+
+  Also introduces a pluggable `AuditStorageBackend` interface behind
+  `AuditWriter`; `LocalFilesystemBackend` (the only implementation shipped)
+  is a like-for-like move of the previous direct-filesystem behavior behind
+  that interface, not a new capability — it's a seam so a future WORM
+  backend (S3 Object Lock, Azure Immutable Blob) could be substituted later
+  without touching `AuditWriter`'s chain-hashing/locking logic. Building
+  that backend is explicitly out of scope for this round.
+
+  28 new tests across `tests/test_audit_signing.py` (18) and
+  `tests/test_audit_storage.py` (5, including a fake in-memory backend that
+  proves the interface is a real seam, not a passthrough wrapper) plus 5 new
+  `sqt keygen`/`sqt anchor`/`sqt verify --checkpoint` CLI tests in
+  `tests/test_cli.py`. See
+  [Documentation/10_auditability.md](Documentation/10_auditability.md#checkpoint-signing-ed25519).
 
 - **Audit trail hardening, phase 2 (retention, legal hold, sealing,
   redaction, export bundle):** `audit.hold_day()`/`release_hold()`/

@@ -68,6 +68,9 @@ dev = [
 bloomberg = [
     "blpapi>=3.24.0"
 ]
+signing = [
+    "cryptography>=42.0.0"
+]
 
 [tool.black]
 line-length = 88
