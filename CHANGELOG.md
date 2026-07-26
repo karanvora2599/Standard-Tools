@@ -42,6 +42,49 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **4 new backtest strategies** (`backtest/strategies.py`, `STRATEGY_REGISTRY`
+  now has 8 entries, up from 4): `donchian_breakout` (Turtle-style channel
+  breakout, entry/exit channels use `.shift(1)` so it's a genuine breakout
+  past the already-established channel, not a same-bar tautology),
+  `momentum_timeseries` (trailing-return threshold, fully vectorized —
+  `pandas.Series.pct_change`, no per-bar state at all), `vwap_reversion`
+  (mean reversion to a rolling VWAP rather than a plain price mean, aimed
+  at intraday/tick data), and `adx_trend` (ADX-strength-filtered
+  directional trend, a single vectorized boolean condition on the existing
+  `adx()` indicator's output). Every hysteresis-based strategy
+  (`donchian_breakout`, `vwap_reversion`, matching the existing
+  `rsi_mean_reversion`/`bollinger_reversion` pattern) runs its entry/exit
+  tracking through a numba-JIT state machine — verified to complete in
+  well under a second on 500k-bar synthetic series in
+  `tests/test_strategies.py::TestScalesToLargeSeries`, with no interpreted
+  Python loop over the series regardless of length. The other two need no
+  state machine at all. All four are immediately usable through every
+  entry point that already accepted a `STRATEGY_REGISTRY` name generically
+  (`backtest_grid`, `get_backtest_diagnostics`, `run_backtest_compact`,
+  `run_backtest_optimization`, `run_walk_forward_backtest`,
+  `get_robustness_diagnostics`) — updated their Pydantic field
+  descriptions accordingly. They do **not** get dedicated `run_*_backtest`
+  tools (only the original 4 do) and are **not** added to
+  `compare_strategies`' fixed four-strategy comparison or
+  `run_regime_adaptive_backtest`'s curated 3-way regime→strategy map —
+  both deliberate scope boundaries, not oversights. See
+  [Documentation/04_backtesting.md](Documentation/04_backtesting.md).
+
+  Registering the 4 new strategies surfaced a real, unrelated gap:
+  `run_regime_adaptive_walkforward_backtest` (unlike the single-shot
+  `run_regime_adaptive_backtest` above) iterates the *entire*
+  `STRATEGY_REGISTRY` every window trying all of them, so it immediately
+  `KeyError`'d on the first new strategy name via
+  `_DEFAULT_PARAM_GRIDS[strat_name]` — that dict only had the original 4
+  entries. Fixed by adding default grids for all 4 new strategies and
+  changing `grid_overrides[strat_name]` to `grid_overrides.get(strat_name)`
+  (the per-strategy override fields on `RegimeAdaptiveWalkForwardInput`
+  only exist for the original 4; newer registry entries fall through to
+  their default grid, same as any future addition would without a
+  matching Pydantic field) — caught by
+  `tests/test_new_agent_tools.py::TestRegimeAdaptiveWalkForwardBacktest`,
+  not discovered after the fact.
+
 - **Portfolio optimization** (`portfolio/optimize.py`): `mean_variance_optimize`
   (Markowitz mean-variance — `max_sharpe`/`min_volatility`/`target_return`/
   `target_volatility`), `risk_parity_weights`, and `black_litterman` (plus

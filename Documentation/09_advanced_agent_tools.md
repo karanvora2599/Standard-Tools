@@ -1234,7 +1234,7 @@ for run in result.top_results:
 | `symbol` | str | — | Ticker symbol |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
-| `strategy` | str | — | `"sma_crossover"`, `"rsi_mean_reversion"`, `"macd_crossover"`, `"bollinger_reversion"` |
+| `strategy` | str | — | `"sma_crossover"`, `"rsi_mean_reversion"`, `"macd_crossover"`, `"bollinger_reversion"`, `"donchian_breakout"`, `"momentum_timeseries"`, `"vwap_reversion"`, `"adx_trend"` |
 | `param_grid` | dict | — | Mapping of parameter name → list of values to test |
 | `initial_capital` | float | 10000 | Starting capital |
 | `sort_by` | str | `"sharpe_ratio"` | Ranking metric: `"sharpe_ratio"`, `"total_return"`, `"calmar_ratio"`, `"sortino_ratio"`, `"max_drawdown"` |

@@ -26,6 +26,10 @@ class TestStrategyRegistry:
             "rsi_mean_reversion",
             "macd_crossover",
             "bollinger_reversion",
+            "donchian_breakout",
+            "momentum_timeseries",
+            "vwap_reversion",
+            "adx_trend",
         }
 
     def test_all_strategies_callable(self):

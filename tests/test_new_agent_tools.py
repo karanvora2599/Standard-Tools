@@ -261,12 +261,14 @@ class TestRegimeAdaptiveWalkForwardBacktest:
             bollinger_param_grid=_RAWF_GRID["bollinger_reversion"],
         )
         result = run_regime_adaptive_walkforward_backtest(inp)
-        valid_strategies = {
-            "sma_crossover",
-            "rsi_mean_reversion",
-            "macd_crossover",
-            "bollinger_reversion",
-        }
+        from standard_quant_tools.backtest import strategies as strategies_mod
+
+        # Every registered strategy is eligible here (the walk-forward
+        # selector tries all of STRATEGY_REGISTRY per window, not just the
+        # 3 the single-shot run_regime_adaptive_backtest maps by regime) --
+        # derived dynamically so this assertion doesn't go stale as new
+        # strategies are registered.
+        valid_strategies = set(strategies_mod.STRATEGY_REGISTRY)
         for win in result.windows:
             assert win.selected_strategy in valid_strategies
             assert win.regime in (

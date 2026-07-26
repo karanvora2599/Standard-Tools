@@ -661,7 +661,14 @@ class WalkForwardInput(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     strategy: str = Field(
         ...,
-        description="Strategy name: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+        description=(
+            "Strategy name: 'sma_crossover', 'rsi_mean_reversion', "
+            "'macd_crossover', 'bollinger_reversion', 'donchian_breakout' "
+            "(Turtle-style channel breakout), 'momentum_timeseries' "
+            "(trailing-return threshold), 'vwap_reversion' (mean reversion "
+            "to rolling VWAP — intended for intraday/tick data), or "
+            "'adx_trend' (ADX-strength-filtered directional trend)."
+        ),
     )
     param_grid: Dict[str, List[Any]] = Field(
         ...,
@@ -1121,7 +1128,8 @@ class BacktestOptInput(BaseModel):
         ...,
         description=(
             "Strategy to optimise: 'sma_crossover', 'rsi_mean_reversion', "
-            "'macd_crossover', or 'bollinger_reversion'."
+            "'macd_crossover', 'bollinger_reversion', 'donchian_breakout', "
+            "'momentum_timeseries', 'vwap_reversion', or 'adx_trend'."
         ),
     )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1790,8 +1798,11 @@ class BacktestDiagnosticsInput(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     strategy_type: str = Field(
         ...,
-        description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
-        "'macd_crossover', or 'bollinger_reversion'.",
+        description=(
+            "Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
+            "'macd_crossover', 'bollinger_reversion', 'donchian_breakout', "
+            "'momentum_timeseries', 'vwap_reversion', or 'adx_trend'."
+        ),
     )
     parameters: Dict[str, Any] = Field(
         {},
@@ -1869,7 +1880,11 @@ class RobustnessDiagnosticsInput(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     strategy: str = Field(
         ...,
-        description="Strategy name: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+        description=(
+            "Strategy name: 'sma_crossover', 'rsi_mean_reversion', "
+            "'macd_crossover', 'bollinger_reversion', 'donchian_breakout', "
+            "'momentum_timeseries', 'vwap_reversion', or 'adx_trend'."
+        ),
     )
     param_grid: Dict[str, List[Any]] = Field(
         ...,
@@ -2148,7 +2163,11 @@ class BacktestCompactInput(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     strategy_type: str = Field(
         ...,
-        description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', 'macd_crossover', or 'bollinger_reversion'.",
+        description=(
+            "Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
+            "'macd_crossover', 'bollinger_reversion', 'donchian_breakout', "
+            "'momentum_timeseries', 'vwap_reversion', or 'adx_trend'."
+        ),
     )
     parameters: Dict[str, Any] = Field(
         {}, description="Strategy parameters — same shape as BacktestInput."

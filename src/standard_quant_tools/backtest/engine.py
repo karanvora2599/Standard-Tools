@@ -515,8 +515,11 @@ def backtest_grid(
         price_data:     OHLCV DataFrame (from provider.get_ohlcv).
         strategy:       Either one of the built-in registry names
                         ('sma_crossover', 'rsi_mean_reversion', 'macd_crossover',
-                        'bollinger_reversion'), or your own signal-generating
-                        callable with signature `(price_data: pd.DataFrame, **params)
+                        'bollinger_reversion', 'donchian_breakout',
+                        'momentum_timeseries', 'vwap_reversion', 'adx_trend'
+                        — see backtest.strategies.STRATEGY_REGISTRY), or your
+                        own signal-generating callable with signature
+                        `(price_data: pd.DataFrame, **params)
                         -> pd.Series` (values in {-1, 0, 1}). A custom callable
                         still gets the full C++ batch-kernel speedup when
                         `_sqt_core` is built — only the metric computation runs

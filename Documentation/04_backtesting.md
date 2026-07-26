@@ -2,7 +2,7 @@
 
 The backtesting engine is **fully vectorized** — it computes the entire equity curve in one NumPy operation instead of looping bar-by-bar. This makes it orders of magnitude faster than event-driven backtesting for signal-based strategies.
 
-**Signal generators** (`rsi_mean_reversion`, `bollinger_reversion`) use a Numba JIT-compiled state machine for their entry/exit tracking loops, providing ~50–100× speedup over a plain Python loop on long series. This is especially impactful inside `backtest_grid` where the same loop runs thousands of times across parameter combinations. The JIT path requires `numba` installed with NumPy ≤ 2.0; pure Python is used otherwise.
+**Signal generators** (`rsi_mean_reversion`, `bollinger_reversion`, `donchian_breakout`, `vwap_reversion`) use a Numba JIT-compiled state machine for their entry/exit tracking loops, providing ~50–100× speedup over a plain Python loop on long series. This is especially impactful inside `backtest_grid` where the same loop runs thousands of times across parameter combinations. The JIT path requires `numba` installed with NumPy ≤ 2.0; pure Python is used otherwise. (`momentum_timeseries` and `adx_trend` need no state machine at all — every bar's signal depends only on that bar's own already-vectorized values — so they're plain pandas/numpy regardless of numba availability.)
 
 ---
 
@@ -269,6 +269,25 @@ result = run_bollinger_backtest(BacktestInput(
 ))
 ```
 
+### Donchian Breakout, Momentum, VWAP Reversion, ADX Trend
+
+Four more built-in strategies, registered in `backtest.strategies.STRATEGY_REGISTRY` alongside the original four. They don't have dedicated `run_*_backtest` tools (only `run_sma_backtest`/`run_rsi_backtest`/`run_macd_backtest`/`run_bollinger_backtest` do) — use them via `backtest_grid`, `get_backtest_diagnostics`, or `run_backtest_compact`, which all accept any registered strategy name as a plain string:
+
+```python
+from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+
+signals = STRATEGY_REGISTRY["donchian_breakout"](df, entry_period=20, exit_period=10)
+result = run_strategy(df, signals, initial_capital=10_000)
+```
+
+- **`donchian_breakout`** (`entry_period=20`, `exit_period=10`) — Turtle-style channel breakout. Long on a new `entry_period`-bar high (measured against the *prior* bars via `.shift(1)`, not today's own high — a genuine breakout past the already-established channel, not a tautology); flat again on a new `exit_period`-bar low. `entry_period > exit_period` is the classic asymmetric design (slower entry, faster exit).
+- **`momentum_timeseries`** (`lookback=90`, `threshold=0.0`) — time-series (absolute) momentum: long when the trailing `lookback`-bar return exceeds `threshold`. No per-bar state at all — a single vectorized `pct_change(periods=lookback)` call, the cheapest strategy in the registry on very large series.
+- **`vwap_reversion`** (`period=20`, `entry_threshold=0.02`) — mean reversion to a rolling VWAP rather than a plain price mean (contrast with `bollinger_reversion`). Aimed at intraday/tick data, where VWAP is the standard fair-value benchmark: enter long when Close drops `entry_threshold` below its own trailing VWAP, exit once it recovers to VWAP.
+- **`adx_trend`** (`adx_period=14`, `adx_threshold=25.0`) — trend-strength-filtered directional strategy: long only when ADX confirms a genuinely trending market *and* `+DI > -DI`. No state machine — a single vectorized boolean condition on the `adx()` indicator's own output.
+
+**Performance, stated explicitly (all four were written with per-tick/million-row series in mind):** `donchian_breakout` and `vwap_reversion` use the same numba-JIT entry/exit state-machine pattern as `rsi_mean_reversion`/`bollinger_reversion` — no interpreted Python loop over the series regardless of length. `momentum_timeseries` and `adx_trend` need no state machine at all (a bar's signal depends only on that bar's own already-vectorized indicator/rolling values), so they're pure pandas/numpy — O(n), not O(n·window). All four were benchmarked in `tests/test_strategies.py`'s `TestScalesToLargeSeries` on 500k-bar synthetic series and complete in well under a second.
+
 ---
 
 ## Parameter Grid Search
@@ -284,7 +303,7 @@ df = provider.get_ohlcv("AAPL", "2020-01-01", "2024-01-01")
 
 results = backtest_grid(
     price_data=df,
-    strategy="sma_crossover",          # or rsi_mean_reversion / macd_crossover / bollinger_reversion
+    strategy="sma_crossover",          # or any other STRATEGY_REGISTRY name
     param_grid={
         "fast_period": [5, 10, 20],
         "slow_period": [30, 50, 100, 200],
@@ -299,7 +318,7 @@ results = backtest_grid(
 print(results[["fast_period", "slow_period", "sharpe_ratio", "total_return", "max_drawdown"]].head())
 ```
 
-All four strategies are supported:
+All eight registered strategies are supported:
 
 ```python
 results = backtest_grid(df, strategy="rsi_mean_reversion",
@@ -310,6 +329,18 @@ results = backtest_grid(df, strategy="macd_crossover",
 
 results = backtest_grid(df, strategy="bollinger_reversion",
     param_grid={"period": [15, 20, 25], "num_std": [1.5, 2.0, 2.5]})
+
+results = backtest_grid(df, strategy="donchian_breakout",
+    param_grid={"entry_period": [10, 20, 40], "exit_period": [5, 10, 20]})
+
+results = backtest_grid(df, strategy="momentum_timeseries",
+    param_grid={"lookback": [30, 60, 90], "threshold": [0.0, 0.05]})
+
+results = backtest_grid(df, strategy="vwap_reversion",
+    param_grid={"period": [10, 20, 40], "entry_threshold": [0.01, 0.02, 0.03]})
+
+results = backtest_grid(df, strategy="adx_trend",
+    param_grid={"adx_period": [10, 14, 21], "adx_threshold": [20.0, 25.0, 30.0]})
 ```
 
 Pass `n_workers=1` to run sequentially (no subprocess overhead — useful in notebooks).

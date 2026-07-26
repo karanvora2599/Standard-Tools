@@ -11,7 +11,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 
 - **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 42 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
-- **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 4 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
+- **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
 
 ---
@@ -300,13 +300,15 @@ from standard_quant_tools.backtest import backtest_grid
 
 results = backtest_grid(
     price_data=df,
-    strategy="sma_crossover",          # or rsi_mean_reversion / macd_crossover / bollinger_reversion
+    strategy="sma_crossover",          # or any of the 8 STRATEGY_REGISTRY names
     param_grid={"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]},
     sort_by="sharpe_ratio",
     n_workers=4,                        # parallel ProcessPoolExecutor
 )
 print(results.head())   # 9 combinations ranked by Sharpe
 ```
+
+**8 built-in strategies** (`backtest.strategies.STRATEGY_REGISTRY`): `sma_crossover`, `rsi_mean_reversion`, `macd_crossover`, `bollinger_reversion`, `donchian_breakout` (Turtle-style channel breakout), `momentum_timeseries` (trailing-return threshold, no state machine — the cheapest to evaluate), `vwap_reversion` (mean reversion to rolling VWAP — aimed at intraday/tick data), `adx_trend` (ADX-strength-filtered directional trend). The 4 newer ones don't have dedicated `run_*_backtest` tools — use them via `backtest_grid`, `get_backtest_diagnostics`, or `run_backtest_compact`, or call `STRATEGY_REGISTRY[name](df, **params)` directly. Every hysteresis-based strategy (`rsi_mean_reversion`, `bollinger_reversion`, `donchian_breakout`, `vwap_reversion`) runs its entry/exit tracking through a numba-JIT state machine — no interpreted Python loop regardless of series length; the other four need no per-bar state at all and are pure vectorized pandas/numpy. See [Documentation/04_backtesting.md](Documentation/04_backtesting.md) for the full reference.
 
 `strategy` also accepts your own signal-generating callable — grid search, C++ speed, and `sort_by` ranking all work identically on your own alpha logic, not just the built-ins. For a pre-computed signal matrix across a ticker universe, see `run_signal_panel_backtest` in [Documentation/04_backtesting.md](Documentation/04_backtesting.md#grid-searching-your-own-signal).
 
@@ -624,7 +626,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1599 Python tests total** (1422 passing, 171 skipped pending C++ build across 6 `test_cpp_*.py` files, 6 integration-only) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**1631 Python tests total** (1454 passing, 171 skipped pending C++ build across 6 `test_cpp_*.py` files, 6 integration-only) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 

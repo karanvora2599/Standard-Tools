@@ -1296,6 +1296,22 @@ _DEFAULT_PARAM_GRIDS: Dict[str, Dict[str, List[Any]]] = {
         "period": [15, 20, 25],
         "num_std": [1.5, 2.0],
     },
+    "donchian_breakout": {
+        "entry_period": [10, 20, 40],
+        "exit_period": [5, 10],
+    },
+    "momentum_timeseries": {
+        "lookback": [30, 60, 90],
+        "threshold": [0.0, 0.05],
+    },
+    "vwap_reversion": {
+        "period": [10, 20, 40],
+        "entry_threshold": [0.01, 0.02, 0.03],
+    },
+    "adx_trend": {
+        "adx_period": [10, 14, 21],
+        "adx_threshold": [20.0, 25.0, 30.0],
+    },
 }
 
 _REGIME_STRATEGY_MAP: Dict[str, str] = {
@@ -1475,6 +1491,11 @@ def run_regime_adaptive_walkforward_backtest(
             f"{train_bars + test_bars} bars, got {n}."
         )
 
+    # Only the original 4 strategies have dedicated override fields on
+    # RegimeAdaptiveWalkForwardInput; the 4 newer STRATEGY_REGISTRY entries
+    # always use _DEFAULT_PARAM_GRIDS below (.get(...) -> None -> falls
+    # through to the default), same as any future registry addition would
+    # without a matching Pydantic field added here.
     grid_overrides: Dict[str, Optional[Dict[str, List[Any]]]] = {
         "sma_crossover": input_data.sma_param_grid,
         "rsi_mean_reversion": input_data.rsi_param_grid,
@@ -1500,7 +1521,9 @@ def run_regime_adaptive_walkforward_backtest(
 
         best_overall: Optional[Dict[str, Any]] = None
         for strat_name in STRATEGY_REGISTRY:
-            param_grid = grid_overrides[strat_name] or _DEFAULT_PARAM_GRIDS[strat_name]
+            param_grid = (
+                grid_overrides.get(strat_name) or _DEFAULT_PARAM_GRIDS[strat_name]
+            )
             grid_df = backtest_grid(
                 train_df,
                 strategy=strat_name,
