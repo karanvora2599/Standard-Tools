@@ -1,6 +1,6 @@
 """
 Command-line interface for the audit trail's JSONL decision records
-(audit.py). Three subcommands, each operating on records by request_id:
+(audit.py). Four subcommands:
 
     sqt replay <request_id>              — re-run the recorded call via
                                             audit.verify_replay(), report
@@ -13,6 +13,17 @@ Command-line interface for the audit trail's JSONL decision records
     sqt compare <request_id_a> <id_b>    — diff two records' status/output/
                                             timing/provenance and inputs.
     sqt report <request_id>              — pretty-print one record in full.
+    sqt verify [--file PATH]             — check hash-chain integrity. With
+                                            no args, verifies the full
+                                            cross-day trail (every day file
+                                            plus the chain index) via
+                                            audit.verify_audit_trail_integrity().
+                                            With --file, verifies just that
+                                            one day file in isolation via
+                                            audit.verify_audit_log_integrity().
+                                            Exit code: 0 = clean, 1 = one or
+                                            more problems found (printed to
+                                            stdout, one per line).
 
 stdlib argparse only — no new dependency, matching this repo's minimal-
 dependency stance. Each subcommand's logic lives in its own `cmd_*` function
@@ -29,10 +40,16 @@ from standard_quant_tools import audit
 
 
 def _iter_records(audit_dir: Optional[Path] = None) -> Iterator[Dict[str, Any]]:
+    """Decision records only -- excludes the chain-index witness log
+    (_chain_index.jsonl, see audit.py), which lives in the same directory
+    and matches the same *.jsonl glob but holds index entries, not
+    decision records."""
     directory = audit_dir if audit_dir is not None else audit._audit_dir()
     if not directory.exists():
         return
     for path in sorted(directory.glob("*.jsonl")):
+        if not audit._DAY_FILE_RE.match(path.name):
+            continue
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line:
@@ -133,6 +150,29 @@ def cmd_compare(
     return "\n".join(lines)
 
 
+def cmd_verify(
+    file: Optional[Path] = None, audit_dir: Optional[Path] = None
+) -> List[str]:
+    """
+    Check hash-chain integrity. `file` (a single day's .jsonl) checks just
+    that file in isolation; no `file` checks the full cross-day trail
+    (every day file plus the chain index) rooted at `audit_dir`.
+
+    Returns a list of human-readable problems (empty if clean).
+    """
+    if file is not None:
+        return audit.verify_audit_log_integrity(file)
+    return audit.verify_audit_trail_integrity(audit_dir)
+
+
+def _format_verify(problems: List[str]) -> str:
+    if not problems:
+        return "OK — no integrity problems found."
+    lines = [f"{len(problems)} problem(s) found:"]
+    lines.extend(f"  - {p}" for p in problems)
+    return "\n".join(lines)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="sqt", description="standard_quant_tools audit-trail CLI"
@@ -151,6 +191,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_report = sub.add_parser("report", help="Pretty-print one recorded tool call.")
     p_report.add_argument("request_id")
 
+    p_verify = sub.add_parser("verify", help="Check audit-log hash-chain integrity.")
+    p_verify.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Verify a single day's .jsonl in isolation instead of the full "
+        "cross-day trail.",
+    )
+
     args = parser.parse_args(argv)
 
     try:
@@ -163,6 +212,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(cmd_compare(args.request_id_a, args.request_id_b))
         elif args.command == "report":
             print(cmd_report(args.request_id))
+        elif args.command == "verify":
+            problems = cmd_verify(file=args.file)
+            print(_format_verify(problems))
+            return 1 if problems else 0
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

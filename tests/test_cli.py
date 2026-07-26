@@ -131,11 +131,84 @@ class TestCmdReplay:
         dispatch(
             "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
         )
-        record_path = next(audit_dir.glob("*.jsonl"))
+        # audit_dir now also contains _chain_index.jsonl (see audit.py's
+        # cross-day chain continuity) which also matches *.jsonl but isn't a
+        # decision-record file -- filter it out rather than grabbing
+        # whichever file glob() happens to yield first.
+        day_files = [
+            p for p in audit_dir.glob("*.jsonl") if cli.audit._DAY_FILE_RE.match(p.name)
+        ]
+        record_path = day_files[0]
         record = json.loads(record_path.read_text(encoding="utf-8").splitlines()[0])
 
         output = cli.cmd_replay(record["request_id"], audit_dir)
         assert "output_match : True" in output
+
+
+class TestCmdVerify:
+    def test_clean_trail_reports_no_problems(self, patched_factory, audit_dir: Path):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        dispatch(
+            "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
+        )
+        assert cli.cmd_verify(audit_dir=audit_dir) == []
+
+    def test_tampered_record_reported(self, patched_factory, audit_dir: Path):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        day_files = [
+            p for p in audit_dir.glob("*.jsonl") if cli.audit._DAY_FILE_RE.match(p.name)
+        ]
+        path = day_files[0]
+        record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        record["status"] = "tampered"
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        problems = cli.cmd_verify(audit_dir=audit_dir)
+        assert problems
+
+    def test_single_file_mode_checks_only_that_file(
+        self, patched_factory, audit_dir: Path
+    ):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        day_files = [
+            p for p in audit_dir.glob("*.jsonl") if cli.audit._DAY_FILE_RE.match(p.name)
+        ]
+        assert cli.cmd_verify(file=day_files[0]) == []
+
+    def test_missing_audit_dir_reports_no_problems(self, tmp_path: Path):
+        assert cli.cmd_verify(audit_dir=tmp_path / "nonexistent") == []
+
+    def test_verify_via_main_clean(self, patched_factory, audit_dir: Path, capsys):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        exit_code = cli.main(["verify"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "OK" in captured.out
+
+    def test_verify_via_main_tampered(self, patched_factory, audit_dir: Path, capsys):
+        dispatch(
+            "analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"}
+        )
+        day_files = [
+            p for p in audit_dir.glob("*.jsonl") if cli.audit._DAY_FILE_RE.match(p.name)
+        ]
+        path = day_files[0]
+        record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        record["status"] = "tampered"
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        exit_code = cli.main(["verify"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "problem" in captured.out
 
 
 class TestMainEntrypoint:

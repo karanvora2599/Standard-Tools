@@ -34,6 +34,36 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Audit trail hardening, phase 1 (cross-day chain continuity, durability,
+  `sqt verify`):** decision records were previously hash-chained only
+  *within* one day's JSONL file — deleting an entire day's file outright was
+  undetectable. `audit.py` now maintains an independent, self-hash-chained
+  witness log (`_chain_index.jsonl`) at the audit-dir root, one entry per
+  calendar day with any activity; the first record of a new day commits to
+  the previous active day's last hash via this index (correctly bridging
+  gaps like weekends without a false positive), so an attacker now has to
+  rewrite both the day file and the index, consistently, to hide a deletion.
+  New `verify_audit_trail_integrity()` checks the full trail (the index's
+  own chain, index-vs-on-disk day files in both directions, and each day
+  file reseeded with the index's claimed starting hash); the existing
+  `verify_audit_log_integrity()` gained an optional `expected_prev_hash`
+  param (default unchanged) so it can be seeded that way. Every write — a
+  decision record or a chain-index entry — is now followed by `f.flush()` +
+  `os.fsync(f.fileno())` before its lock is released, unconditionally, so a
+  record isn't lost to a crash immediately after `dispatch()` returns.
+  New `sqt verify [--file PATH]` CLI subcommand (full trail by default,
+  single file with `--file`; exit 0 clean / 1 problems found). New
+  `scripts/verify_audit_log.py`: a deliberate, stdlib-only reimplementation
+  of the same hashing/chain-walking logic (no `pydantic`/`pandas`/`numpy`,
+  no package install) so an external auditor can verify an exported log
+  bundle independently; `tests/test_standalone_verifier.py` is a parity
+  test that fails if the two implementations' hash output ever diverges.
+  Pre-existing audit directories need no migration — old day files stay
+  independently valid, and cross-day linkage begins transparently at the
+  next new-day write. See
+  [Documentation/10_auditability.md](Documentation/10_auditability.md#what-this-can-and-cannot-certify)
+  for what this does and does not certify — it is a tamper-*detection*
+  control, not tamper prevention or regulatory certification by itself.
 - `data.bloomberg_provider.BloombergProvider`: a second `DataProvider`
   implementation, backed by a local Bloomberg Terminal via Desktop API
   (`blpapi`, a new optional dependency — `pip install

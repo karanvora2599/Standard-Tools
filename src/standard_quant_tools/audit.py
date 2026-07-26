@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -245,6 +246,24 @@ def _audit_dir() -> Path:
 
 _GENESIS_HASH = "0" * 16
 
+# Independent witness log at the audit-dir root: records which calendar days
+# had activity and what each day's file *should* chain onto, separately from
+# the day files themselves. Without this, deleting an entire day's .jsonl is
+# undetectable — the next day's chain would start fresh from genesis with no
+# reference to whether a prior day ever existed. An attacker now has to
+# consistently rewrite both the day file AND this index to hide a deletion.
+_INDEX_FILENAME = "_chain_index.jsonl"
+_DAY_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
+
+
+def _iter_day_files(directory: Path) -> List[Path]:
+    """Every daily decision-record file in `directory`, sorted chronologically
+    (lexicographic sort on YYYY-MM-DD filenames is chronological). Excludes
+    the chain index and any lock/hold sidecar files."""
+    if not directory.exists():
+        return []
+    return sorted(p for p in directory.glob("*.jsonl") if _DAY_FILE_RE.match(p.name))
+
 
 def _acquire_lock(lock_path: Path) -> Optional[Any]:
     """
@@ -303,32 +322,105 @@ class AuditWriter:
         self._dir.mkdir(parents=True, exist_ok=True)
         return self._dir / f"{when.strftime('%Y-%m-%d')}.jsonl"
 
-    def _last_record_hash(self, path: Path) -> str:
-        """Hash of the last line in `path`, or the genesis hash if the file
-        doesn't exist/is empty. Must be called while the write lock is held,
-        since it establishes the chain link the new record commits to."""
+    def _last_record_hash_in_file(self, path: Path) -> Optional[str]:
+        """Hash of the last line in `path`, or None if the file doesn't
+        exist or has no valid lines. Must be called while the relevant write
+        lock is held, since it establishes a chain link a new record commits
+        to."""
         if not path.exists():
-            return _GENESIS_HASH
+            return None
         last_line: Optional[str] = None
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     last_line = line
         if last_line is None:
+            return None
+        try:
+            return json.loads(last_line).get("record_hash")
+        except Exception:
+            return None
+
+    def _last_index_hash(self, index_path: Path) -> str:
+        """Hash of the last line in the chain index, or the genesis hash if
+        it doesn't exist/is empty. Must be called while the index lock is
+        held."""
+        if not index_path.exists():
+            return _GENESIS_HASH
+        last_line: Optional[str] = None
+        with open(index_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line
+        if last_line is None:
             return _GENESIS_HASH
         try:
-            return json.loads(last_line).get("record_hash") or _GENESIS_HASH
+            return json.loads(last_line).get("index_hash") or _GENESIS_HASH
         except Exception:
             return _GENESIS_HASH
+
+    def _chain_head_before(self, day_path: Path) -> str:
+        """The record_hash a NEW day file's first record should chain onto:
+        the last record_hash of the most recent existing day file strictly
+        before `day_path`, or the genesis hash if there is no earlier day
+        file (this is the very first day the audit trail has ever seen
+        activity)."""
+        candidates = [p for p in _iter_day_files(self._dir) if p.name < day_path.name]
+        if not candidates:
+            return _GENESIS_HASH
+        return self._last_record_hash_in_file(candidates[-1]) or _GENESIS_HASH
+
+    def _bootstrap_new_day(self, day_path: Path) -> str:
+        """
+        Called once, immediately before the first record of a new calendar
+        day's file is written. Computes the chain head this new day should
+        link onto and records that linkage in the independent chain-index
+        witness log (itself hash-chained) BEFORE the day file gains its
+        first record, so the index and the day file can be cross-checked
+        against each other later (verify_audit_trail_integrity) — an
+        attacker who deletes/regenerates a day file now also has to rewrite
+        a second, independent artifact to hide it.
+
+        Returns the chain head so the caller can commit to it as the new
+        day's first record's prev_record_hash.
+        """
+        index_path = self._dir / _INDEX_FILENAME
+        index_lock_path = index_path.with_name(index_path.name + ".lock")
+        ilf = _acquire_lock(index_lock_path)
+        try:
+            chain_head = self._chain_head_before(day_path)
+            entry: Dict[str, Any] = {
+                "date": day_path.stem,
+                "chain_head": chain_head,
+                "prev_index_hash": self._last_index_hash(index_path),
+                "index_hash": None,
+            }
+            entry["index_hash"] = hash_payload(entry)
+            with open(index_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, sort_keys=True) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            _release_lock(ilf)
+        return chain_head
 
     def write(self, record: DecisionRecord) -> Path:
         when = datetime.now(timezone.utc)
         path = self._path_for(when)
         lock_path = path.with_name(path.name + ".lock")
 
+        # Day-lock is always acquired before the index-lock taken (only)
+        # inside _bootstrap_new_day — a fixed lock order, so this can never
+        # deadlock against a concurrent writer doing the same thing.
         lf = _acquire_lock(lock_path)
         try:
-            record.prev_record_hash = self._last_record_hash(path)
+            is_new_day_file = not path.exists()
+            if is_new_day_file:
+                record.prev_record_hash = self._bootstrap_new_day(path)
+            else:
+                record.prev_record_hash = (
+                    self._last_record_hash_in_file(path) or _GENESIS_HASH
+                )
             # Hash over the record with record_hash itself left unset, so
             # the chain link (prev_record_hash) and the record's own content
             # are both covered without the field hashing itself.
@@ -337,12 +429,16 @@ class AuditWriter:
             )
             with open(path, "a", encoding="utf-8") as f:
                 f.write(record.model_dump_json() + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         finally:
             _release_lock(lf)
         return path
 
 
-def verify_audit_log_integrity(path: Union[str, Path]) -> List[str]:
+def verify_audit_log_integrity(
+    path: Union[str, Path], expected_prev_hash: str = _GENESIS_HASH
+) -> List[str]:
     """
     Walk a single day's JSONL audit file and confirm its hash chain is
     intact. Returns a list of human-readable problems (empty if the file is
@@ -352,12 +448,23 @@ def verify_audit_log_integrity(path: Union[str, Path]) -> List[str]:
     fundamentally unreachable guarantee without an external, independently
     stored anchor (e.g. signing the last hash of each day into a separate
     system) — this function does not attempt that.
+
+    Args:
+        expected_prev_hash: the chain head this file's FIRST record should
+            claim as its prev_record_hash. Defaults to the genesis hash,
+            correct when verifying a file in isolation (or the very first
+            day file the audit trail ever wrote). When verifying a file as
+            part of the larger cross-day trail, pass the chain index's
+            claimed chain_head for this day instead — see
+            verify_audit_trail_integrity, which does this automatically —
+            so a wholesale-regenerated day file with an internally
+            consistent but fabricated starting point is still caught.
     """
     path = Path(path)
     if not path.exists():
         return []
     problems: List[str] = []
-    prev_hash = _GENESIS_HASH
+    prev_hash = expected_prev_hash
     with open(path, "r", encoding="utf-8") as f:
         for lineno, line in enumerate(f, start=1):
             if not line.strip():
@@ -381,6 +488,98 @@ def verify_audit_log_integrity(path: Union[str, Path]) -> List[str]:
                     "content was altered after it was written."
                 )
             prev_hash = claimed_hash or prev_hash
+    return problems
+
+
+def verify_audit_trail_integrity(
+    audit_dir: Optional[Union[str, Path]] = None,
+) -> List[str]:
+    """
+    Verify the FULL cross-day audit trail, not just one file: the
+    independent chain-index witness log's own hash chain, that every day
+    file the index attests to still exists on disk (and the reverse — a day
+    file present with no matching index entry, for any date at or after the
+    index's earliest entry), and each day file's own internal record chain
+    seeded with the chain head the index claims for that day — so a
+    wholesale-regenerated day file with a fabricated-but-internally-
+    consistent chain is still caught, which verify_audit_log_integrity(path)
+    alone (with its default genesis-hash assumption) cannot detect.
+
+    Days before the chain index's earliest entry (audit activity that
+    predates this feature, or an audit directory with no index at all) are
+    NOT cross-day-linked, by design — retroactively rewriting old records to
+    link them in would itself be indistinguishable from tampering. Verify
+    those individually with verify_audit_log_integrity(path) instead.
+
+    Returns a list of human-readable problems (empty if everything's clean,
+    including the case where the audit directory doesn't exist yet).
+    """
+    directory = Path(audit_dir) if audit_dir else _audit_dir()
+    problems: List[str] = []
+    index_path = directory / _INDEX_FILENAME
+
+    index_entries: List[Dict[str, Any]] = []
+    if index_path.exists():
+        prev_index_hash = _GENESIS_HASH
+        with open(index_path, "r", encoding="utf-8") as f:
+            for lineno, line in enumerate(f, start=1):
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                claimed_prev = entry.get("prev_index_hash")
+                if claimed_prev != prev_index_hash:
+                    problems.append(
+                        f"chain index line {lineno} (date={entry.get('date')}): "
+                        f"prev_index_hash={claimed_prev!r} does not match the "
+                        f"preceding entry's hash {prev_index_hash!r} — index "
+                        "chain broken (an entry was edited, removed, "
+                        "reordered, or inserted)."
+                    )
+                recomputed = hash_payload({**entry, "index_hash": None})
+                claimed_hash = entry.get("index_hash")
+                if recomputed != claimed_hash:
+                    problems.append(
+                        f"chain index line {lineno} (date={entry.get('date')}): "
+                        f"index_hash={claimed_hash!r} does not match its own "
+                        f"recomputed content hash {recomputed!r} — this entry "
+                        "was altered after it was written."
+                    )
+                prev_index_hash = claimed_hash or prev_index_hash
+                index_entries.append(entry)
+
+    indexed_dates = {e["date"] for e in index_entries if e.get("date")}
+    on_disk_dates = {p.stem for p in _iter_day_files(directory)}
+
+    for date in sorted(indexed_dates - on_disk_dates):
+        problems.append(
+            f"chain index attests to activity on {date}, but {date}.jsonl "
+            "no longer exists on disk — likely deleted."
+        )
+
+    if indexed_dates:
+        earliest_indexed_date = min(indexed_dates)
+        unindexed_days = {
+            d
+            for d in on_disk_dates
+            if d >= earliest_indexed_date and d not in indexed_dates
+        }
+        for date in sorted(unindexed_days):
+            problems.append(
+                f"{date}.jsonl exists on disk with no corresponding chain "
+                "index entry (the index entry may have been removed, or "
+                "this file was created outside the normal write path)."
+            )
+
+    for entry in index_entries:
+        date = entry.get("date")
+        if date not in on_disk_dates:
+            continue  # already reported above
+        day_path = directory / f"{date}.jsonl"
+        expected_head = entry.get("chain_head", _GENESIS_HASH)
+        problems.extend(
+            verify_audit_log_integrity(day_path, expected_prev_hash=expected_head)
+        )
+
     return problems
 
 
