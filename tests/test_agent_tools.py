@@ -10,12 +10,12 @@ from standard_quant_tools.agent.models import (
     BuyAndHoldInput,
     CointegrationInput,
     CompareStrategiesInput,
+    CorrelationAnalysisInput,
     FactorRegressionInput,
     HurstInput,
-    PCAInput,
-    CorrelationAnalysisInput,
     LiquidityAnalysisInput,
     MonteCarloSimulationInput,
+    PCAInput,
     PortfolioInput,
     ScreenerInput,
     StressTestInput,
@@ -107,9 +107,9 @@ class TestSanitizeForJson:
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_thirty_nine_tools(self):
+    def test_returns_list_of_forty_two_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 39
+        assert len(tools) == 42
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -810,9 +810,7 @@ class TestGetCorrelationAnalysis:
         from pydantic import ValidationError as PydanticValidationError
 
         with pytest.raises(PydanticValidationError):
-            CorrelationAnalysisInput(
-                tickers=["AAPL"], start_date=START, end_date=END
-            )
+            CorrelationAnalysisInput(tickers=["AAPL"], start_date=START, end_date=END)
 
     def test_custom_weights_accepted(self, patched_factory):
         inp = CorrelationAnalysisInput(
@@ -990,9 +988,7 @@ class TestGetLiquidityMetrics:
         assert set(result.per_ticker.keys()) == {"AAPL", "MSFT"}
 
     def test_per_ticker_fields_present(self, patched_factory):
-        inp = LiquidityAnalysisInput(
-            tickers=["AAPL"], start_date=START, end_date=END
-        )
+        inp = LiquidityAnalysisInput(tickers=["AAPL"], start_date=START, end_date=END)
         result = get_liquidity_metrics(inp)
         fields = result.per_ticker["AAPL"]
         assert set(fields.keys()) == {
@@ -1002,16 +998,12 @@ class TestGetLiquidityMetrics:
         }
 
     def test_amihud_illiquidity_nonnegative(self, patched_factory):
-        inp = LiquidityAnalysisInput(
-            tickers=["AAPL"], start_date=START, end_date=END
-        )
+        inp = LiquidityAnalysisInput(tickers=["AAPL"], start_date=START, end_date=END)
         result = get_liquidity_metrics(inp)
         assert result.per_ticker["AAPL"]["amihud_illiquidity"] >= 0.0
 
     def test_corwin_schultz_spread_nonnegative(self, patched_factory):
-        inp = LiquidityAnalysisInput(
-            tickers=["AAPL"], start_date=START, end_date=END
-        )
+        inp = LiquidityAnalysisInput(tickers=["AAPL"], start_date=START, end_date=END)
         result = get_liquidity_metrics(inp)
         assert result.per_ticker["AAPL"]["corwin_schultz_spread_bps"] >= 0.0
 

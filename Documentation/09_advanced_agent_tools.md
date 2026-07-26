@@ -1,8 +1,8 @@
 # Advanced Agent Tools
 
-Twenty-five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Twenty-eight high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 39), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 42), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -17,6 +17,7 @@ Twenty-five high-level agentic tools that compose the library's existing primiti
 | `scan_pairs` | Find cointegrated pairs in a universe, ranked by half-life | `pairs[].half_life_days`, `pairs[].signal`, `failed_pairs`, `failed_tickers` |
 | `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `stitched_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
 | `get_portfolio_risk_attribution` | Deep risk decomposition: MCR, PCA, optional factor model | `asset_risk_contributions`, `pca_variance_explained` |
+| `run_portfolio_optimization` | Produce weights — Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike `get_portfolio_risk_attribution`, which only decomposes weights already chosen | `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `risk_contributions` (risk_parity only) |
 | `get_position_size` | ATR stop-loss sizing with optional Kelly criterion | `shares_fixed_risk`, `kelly_fraction`, `recommended_shares` |
 | `run_portfolio_simulation` | True shared-cash portfolio: rebalancing, position sizing vs. current equity, weight drift between rebalances | `rebalance_log`, `avg_gross_leverage`, `final_equity`, `final_cash` |
 
@@ -57,6 +58,13 @@ Twenty-five high-level agentic tools that compose the library's existing primiti
 | `run_monte_carlo_simulation` | Block-bootstrap projection of a portfolio's possible future equity paths | `terminal_median`, `prob_loss`, `equity_band_p5/p50/p95` |
 | `run_stress_test` | Replay a portfolio's weights against a named historical crash window using real historical returns | `portfolio_return_pct`, `max_drawdown_pct`, `tickers_missing_data` |
 | `get_liquidity_metrics` | Amihud illiquidity ratio and Corwin-Schultz spread estimator per ticker | `per_ticker[ticker].amihud_illiquidity`, `per_ticker[ticker].corwin_schultz_spread_bps` |
+
+**Options pricing tools (2)** — see [12_options.md](12_options.md) for the full reference
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `get_option_pricing` | Black-Scholes-Merton price and Greeks (delta, gamma, vega, theta, rho) for a European option | `price`, `greeks.delta`, `greeks.gamma`, `greeks.vega`, `greeks.theta`, `greeks.rho` |
+| `get_implied_volatility` | Solve for the volatility that reproduces an observed European option price (Newton-Raphson + bisection fallback) | `implied_volatility`, `converged`, `method` |
 
 ---
 

@@ -125,6 +125,90 @@ print(json.dumps(result.model_dump(), indent=2))
 
 ---
 
+## Portfolio Optimization
+
+`standard_quant_tools.portfolio.optimize` — unlike everything above, which
+*scores* weights you already chose, this module *produces* weights. Three
+families:
+
+### Markowitz Mean-Variance
+
+```python
+from standard_quant_tools.portfolio import mean_variance_optimize
+
+result = mean_variance_optimize(
+    returns_df,
+    objective="max_sharpe",   # or "min_volatility" / "target_return" / "target_volatility"
+    risk_free_rate=0.0,
+    allow_short=False,        # long-only by default
+    max_weight=0.4,           # optional per-asset cap
+)
+print(result["weights"])              # {"AAPL": 0.4, "MSFT": 0.35, ...}
+print(result["expected_volatility"])  # annualized
+print(result["converged"])
+```
+
+`allow_short=True` with `max_weight=None` (the fully unconstrained case) is solved in **closed form** via the standard two-fund efficient-frontier parametrization (Merton 1972) — numpy only, no solver dependency, and `converged` is always `True`. Any other combination (`allow_short=False` and/or a `max_weight` cap) requires **scipy** (SLSQP) and reports the solver's own success flag as `converged` — a request that's actually infeasible (e.g. a `target_return` no long-only portfolio can reach) comes back with `converged=False` rather than a silently wrong answer.
+
+`objective="target_return"`/`"target_volatility"` need the matching `target_return`/`target_volatility` argument (annualized). A `target_volatility` below the global minimum-variance portfolio's own volatility is infeasible and raises `ValidationError` immediately.
+
+### Risk Parity
+
+```python
+from standard_quant_tools.portfolio import risk_parity_weights
+
+cov = (returns_df.cov() * 252).to_numpy()
+result = risk_parity_weights(cov)              # equal risk contribution
+# or: risk_parity_weights(cov, risk_budget=np.array([0.5, 0.3, 0.2]))
+
+print(result["weights"])              # np.ndarray
+print(result["risk_contributions"])   # fractional, sums to 1
+print(result["converged"])
+```
+
+Solved via a damped multiplicative fixed-point iteration — a **documented heuristic**, not a globally-convergence-proven algorithm like the mean-variance closed form. It converges reliably in practice for well-conditioned covariance matrices (verified in `tests/test_portfolio_optimize.py`: a diagonal covariance converges exactly to the closed-form inverse-volatility weights), but `converged` reflects whether the iteration actually reached its tolerance within `max_iterations`, not an assumption — check it.
+
+### Black-Litterman
+
+```python
+from standard_quant_tools.portfolio import black_litterman, build_bl_views
+
+cov = (returns_df.cov() * 252).to_numpy()
+market_weights = np.array([0.4, 0.35, 0.25])
+
+# Absolute view: "AAPL will return 15%/yr"; relative views (long/short
+# coefficients in "assets") work the same way.
+P, Q, omega = build_bl_views(
+    tickers=["AAPL", "MSFT", "GOOGL"],
+    views=[{"assets": {"AAPL": 1.0}, "view_return": 0.15, "confidence": 0.7}],
+    cov_matrix=cov,
+)
+result = black_litterman(cov, market_weights, P, Q, risk_aversion=2.5, tau=0.05, omega=omega)
+
+print(result["posterior_returns"])   # blended prior + views
+print(result["implied_weights"])     # sums to 1
+```
+
+The market-equilibrium prior (`pi = risk_aversion * cov @ market_weights`) is blended with your views via the standard He & Litterman (1999) formula. `confidence` in `build_bl_views` (default `1.0`, the standard He-Litterman uncertainty) is a **documented simplification** of Idzorek's (2005) full confidence-scaling method, not a reimplementation of it — lower values widen that view's uncertainty proportionally, letting it move the posterior less.
+
+### Via Agent Tool
+
+```python
+from standard_quant_tools.agent.tools import run_portfolio_optimization
+from standard_quant_tools.agent.models import PortfolioOptimizationInput
+
+result = run_portfolio_optimization(PortfolioOptimizationInput(
+    tickers=["AAPL", "MSFT", "GOOGL"],
+    start_date="2022-01-01", end_date="2024-01-01",
+    method="risk_parity",
+))
+print(result.weights, result.risk_contributions)
+```
+
+`method` selects among all six: `"max_sharpe"`, `"min_volatility"`, `"target_return"`, `"target_volatility"`, `"risk_parity"`, `"black_litterman"` — see [09_advanced_agent_tools.md](09_advanced_agent_tools.md) and [07_agent_tools.md](07_agent_tools.md) for the full input/output model reference, including `black_litterman`'s `views`/`market_weights` fields.
+
+---
+
 ## Async Fetching (Advanced)
 
 For time-sensitive applications, call the async version directly:

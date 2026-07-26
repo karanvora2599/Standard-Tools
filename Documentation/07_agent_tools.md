@@ -56,13 +56,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **39 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **42 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 39
+print(len(tools))  # 42
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -102,6 +102,11 @@ for t in tools:
 # get_capacity_report — How much account size a target-weight portfolio can support before positions outgrow each ticker's own trading volume.
 # get_data_quality_report — Dataset provenance plus missing-bar/stale-price/price-jump detection on a symbol's OHLCV.
 # run_backtest_compact — Compact backtest result: summary/risk/exposure/cost sub-reports plus equity-curve/trade-log artifact URIs.
+# run_portfolio_optimization — Produce portfolio weights via Markowitz mean-variance, risk parity, or Black-Litterman.
+# get_option_pricing    — Black-Scholes-Merton price and Greeks for a European option.
+# get_implied_volatility — Solve for Black-Scholes-Merton implied volatility from an observed option price.
+# (get_agent_tools() also includes get_volatility_estimators, get_correlation_analysis,
+#  run_monte_carlo_simulation, run_stress_test, and get_liquidity_metrics — see 09_advanced_agent_tools.md)
 
 # Inspect the parameter schema for any tool:
 import json
@@ -121,7 +126,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 39 valid names.
+- **`ValueError`** — unknown tool name; message lists all 42 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -204,7 +209,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to a 39-tool financial
+You are a quantitative analyst assistant with access to a 42-tool financial
 toolkit. The 26 most commonly used are described below (see
 09_advanced_agent_tools.md for the remaining execution/diagnostic tools —
 run_regime_adaptive_walkforward_backtest, get_backtest_diagnostics,
@@ -1243,7 +1248,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have access to a 39-tool
+You are a quantitative investment analyst. You have access to a 42-tool
 financial toolkit; the 27 covered here are the most commonly used (see
 09_advanced_agent_tools.md for the remaining execution/diagnostic tools):
 
@@ -2073,10 +2078,11 @@ print(f"Example params: {playbook['example_params']}")
 | `PCAInput` | `tickers`, `start_date`, `end_date` | `n_components=3` (must be ≥ 1) |
 | `HurstInput` | `symbol`, `start_date`, `end_date` | `method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `rolling_window=None` |
 
-**Advanced tools (7)**
+**Advanced tools (8)**
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
+| `PortfolioOptimizationInput` | `tickers`, `start_date`, `end_date` | `method="max_sharpe"` (`"max_sharpe"`/`"min_volatility"`/`"target_return"`/`"target_volatility"`/`"risk_parity"`/`"black_litterman"`), `risk_free_rate=0.0`, `target_return=None`, `target_volatility=None`, `allow_short=False`, `max_weight=None`, `risk_budget=None`, `market_weights=None`, `views=None` (`List[BLViewInput]`), `risk_aversion=2.5`, `tau=0.05`, `periods_per_year=252` — see 09_advanced_agent_tools.md and 05_portfolio.md for the per-method requirements |
 | `RegimeAdaptiveInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `sma/rsi/macd/bollinger_param_grid=None`, `n_workers=1` |
 | `RegimeAdaptiveWalkForwardInput` | `symbol`, `start_date`, `end_date` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `sma/rsi/macd/bollinger_param_grid=None`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"hl2_exploratory"`, applied to each window's OOS leg) |
 | `PairScannerInput` | `tickers`, `start_date`, `end_date` | `max_pairs=10`, `min_half_life=5.0`, `max_half_life=126.0`, `p_value_threshold=0.05`, `zscore_window=30` |
@@ -2102,6 +2108,13 @@ print(f"Example params: {playbook['example_params']}")
 |---|---|---|
 | `CustomSignalBacktestInput` | `symbol`, `start_date`, `end_date`, `signals` (`{date: value}`) | `signal_type="direction"`, `max_abs_weight=1.0`, `signal_fill_policy="hold"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
 | `SignalPanelBacktestInput` | `tickers`, `start_date`, `end_date`, `signal_panel` (`{ticker: {date: value}}`) | `weights=None` (equal weight), `signal_fill_policy="hold"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `benchmark=None`, `include_trade_log=False`, `fill_price="close"`, `signal_type="score"`, `max_abs_weight=1.0` |
+
+**Options tools (2)** — see [12_options.md](12_options.md)
+
+| Model | Required | Optional (with defaults) |
+|---|---|---|
+| `OptionPricingInput` | `spot`, `strike`, `time_to_expiry`, `risk_free_rate`, `volatility` | `option_type="call"` (`"call"`/`"put"`), `dividend_yield=0.0` |
+| `ImpliedVolatilityInput` | `option_price`, `spot`, `strike`, `time_to_expiry`, `risk_free_rate` | `option_type="call"`, `dividend_yield=0.0` |
 
 **`signal_type` — what a custom signal's values mean, opt-in validation:**
 
@@ -2158,6 +2171,7 @@ print(f"Example params: {playbook['example_params']}")
 | `WalkForwardResult` | `symbol`, `strategy`, `n_windows`, `windows` (List[`WalkForwardWindow`]), `avg_oos_sharpe`, `avg_oos_return`, `avg_oos_max_drawdown`, `pct_windows_profitable`, `param_stability`, `stitched_oos_return`, `stitched_oos_sharpe`, `stitched_oos_sortino`, `stitched_oos_max_drawdown`, `stitched_oos_calmar`, `is_to_oos_sharpe_decay`, `is_to_oos_return_decay`, `worst_oos_window`, `longest_losing_window_streak`, `parameter_turnover` |
 | `WalkForwardWindow` | `window_index`, `train_start`, `train_end`, `test_start`, `test_end`, `best_params`, `in_sample_sharpe`, `in_sample_return`, `out_of_sample_sharpe`, `out_of_sample_return`, `out_of_sample_max_drawdown` |
 | `RiskAttributionResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio`, `asset_risk_contributions`, `pca_variance_explained`, `portfolio_pc_exposures`, `factor_loadings`, `factor_r_squared`, `factor_alpha` |
+| `PortfolioOptimizationResult` | `tickers`, `method`, `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `risk_contributions` (risk_parity only), `warnings` |
 | `PositionSizerResult` | `symbol`, `last_close`, `atr`, `atr_pct`, `stop_distance`, `shares_fixed_risk`, `position_value_fixed_risk`, `portfolio_pct_fixed_risk`, `max_loss_fixed_risk`, `kelly_fraction`, `shares_half_kelly`, `position_value_half_kelly`, `portfolio_pct_half_kelly`, `recommended_sizing`, `recommended_shares`, `recommended_position_value` |
 | `PortfolioSimulationResult` | `tickers`, `n_rebalances`, `rebalance_log` (List[`RebalanceEvent`]), `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `information_ratio`, `final_equity`, `final_cash`, `avg_gross_leverage`, `max_gross_leverage_used`, `equity_curve`, `warnings` |
 | `RebalanceEvent` | `date`, `turnover_pct`, `gross_leverage_after`, `n_positions` |
@@ -2184,8 +2198,16 @@ print(f"Example params: {playbook['example_params']}")
 | `run_custom_signal_backtest` output | Reuses `BacktestResult` — identical shape to the built-in strategy backtests |
 | `SignalPanelBacktestResult` | `tickers`, `per_ticker` (`Dict[str, BacktestResult]`), `portfolio_metrics` (same shape as `portfolio.portfolio_metrics()` output: `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `total_return`, `tickers`, `weights`, plus `information_ratio` when `benchmark` was set) |
 
+**Options tools**
+
+| Model | Key fields |
+|---|---|
+| `OptionPricingResult` | `option_type`, `price`, `greeks` (`OptionGreeks`), `d1`, `d2` |
+| `OptionGreeks` | `delta`, `gamma`, `vega` (per 1.0 of volatility, not per vol point), `theta` (per year, not per day), `rho` |
+| `ImpliedVolatilityResult` | `implied_volatility`, `converged`, `iterations`, `method` (`"newton"`/`"bisection"`) |
+
 ---
 
 ## Advanced Tools
 
-The remaining 20 advanced, supplementary, custom-signal, and diagnostic tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).
+The remaining 28 advanced, supplementary, custom-signal, options, and diagnostic tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).

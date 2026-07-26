@@ -31,11 +31,10 @@ from standard_quant_tools.agent.models import (
     BacktestOptResult,
     BacktestResult,
     BacktestResultV2,
+    BLViewInput,
     BuyAndHoldInput,
     CapacityReportInput,
     CapacityReportResult,
-    LiquidityAnalysisInput,
-    LiquidityAnalysisResult,
     CointegrationInput,
     CointegrationResult,
     CompareStrategiesInput,
@@ -57,10 +56,17 @@ from standard_quant_tools.agent.models import (
     FundamentalsResult,
     HurstInput,
     HurstResult,
+    ImpliedVolatilityInput,
+    ImpliedVolatilityResult,
+    LiquidityAnalysisInput,
+    LiquidityAnalysisResult,
     MissingBar,
     MonteCarloSimulationInput,
     MonteCarloSimulationResult,
     OptimizationRun,
+    OptionGreeks,
+    OptionPricingInput,
+    OptionPricingResult,
     PairFailure,
     PairResult,
     PairScannerInput,
@@ -71,6 +77,8 @@ from standard_quant_tools.agent.models import (
     PCAResult,
     PerformanceSummary,
     PortfolioInput,
+    PortfolioOptimizationInput,
+    PortfolioOptimizationResult,
     PortfolioResult,
     PortfolioSimulationInput,
     PortfolioSimulationResult,
@@ -94,11 +102,11 @@ from standard_quant_tools.agent.models import (
     ScreenerResult,
     SignalPanelBacktestInput,
     SignalPanelBacktestResult,
-    StressTestInput,
-    StressTestResult,
     SignalType,
     StalePriceRun,
     StrategyComparison,
+    StressTestInput,
+    StressTestResult,
     TechnicalInput,
     TechnicalResult,
     Trade,
@@ -123,6 +131,13 @@ from standard_quant_tools.analysis.multi_factor import (
     multi_factor_regression,
     rolling_factor_loadings,
 )
+from standard_quant_tools.analysis.options import (
+    black_scholes_greeks,
+    black_scholes_price,
+)
+from standard_quant_tools.analysis.options import (
+    implied_volatility as _implied_volatility,
+)
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.backtest.artifacts import save_artifact
@@ -140,17 +155,13 @@ from standard_quant_tools.backtest.liquidity import (
     amihud_illiquidity,
     corwin_schultz_spread,
 )
+from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths
 from standard_quant_tools.backtest.pairs import run_pair_backtest as _pair_backtest_run
 from standard_quant_tools.backtest.panel import (
     run_signal_panel_backtest as _signal_panel_backtest,
 )
 from standard_quant_tools.backtest.portfolio_engine import (
     run_portfolio_simulation as _portfolio_engine_run,
-)
-from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths
-from standard_quant_tools.backtest.stress_test import (
-    replay_stress_scenario,
-    scenario_dates,
 )
 from standard_quant_tools.backtest.robustness import (
     block_bootstrap_ci as _block_bootstrap_ci,
@@ -169,6 +180,10 @@ from standard_quant_tools.backtest.sizing import (
     zscore_normalized,
 )
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+from standard_quant_tools.backtest.stress_test import (
+    replay_stress_scenario,
+    scenario_dates,
+)
 from standard_quant_tools.backtest.walk_forward import (
     longest_losing_streak,
     parameter_turnover,
@@ -213,6 +228,12 @@ from standard_quant_tools.metrics.volatility_estimators import (
     garman_klass_volatility,
     parkinson_volatility,
     yang_zhang_volatility,
+)
+from standard_quant_tools.portfolio.optimize import (
+    black_litterman,
+    build_bl_views,
+    mean_variance_optimize,
+    risk_parity_weights,
 )
 from standard_quant_tools.portfolio.portfolio import (
     build_portfolio,
@@ -724,6 +745,147 @@ def get_portfolio_analysis(input_data: PortfolioInput) -> PortfolioResult:
     )
 
 
+# ──────────────────────────────────────────────────────────────────
+# Portfolio Optimization (produces weights, unlike get_portfolio_analysis
+# above which only scores weights already chosen)
+# ──────────────────────────────────────────────────────────────────
+
+
+def run_portfolio_optimization(
+    input_data: PortfolioOptimizationInput,
+) -> PortfolioOptimizationResult:
+    """
+    Produce portfolio weights via Markowitz mean-variance (max_sharpe,
+    min_volatility, target_return, target_volatility), risk parity, or
+    Black-Litterman — unlike get_portfolio_analysis, which only scores
+    weights the caller already picked.
+    """
+    logger.debug(
+        "[portfolio_optimization] tickers=%s  method=%s  %s → %s",
+        input_data.tickers,
+        input_data.method,
+        input_data.start_date,
+        input_data.end_date,
+    )
+    returns_df = fetch_returns_sync(
+        input_data.tickers, input_data.start_date, input_data.end_date
+    )
+    warnings: List[str] = []
+
+    if input_data.method == "risk_parity":
+        mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
+        budget = (
+            np.array([input_data.risk_budget[t] for t in input_data.tickers])
+            if input_data.risk_budget is not None
+            else None
+        )
+        rp = risk_parity_weights(cov, risk_budget=budget)
+        if not rp["converged"]:
+            warnings.append(
+                "risk parity iteration did not converge within max_iterations "
+                "— weights are the best achieved, not exact equal risk contribution"
+            )
+        w = rp["weights"]
+        exp_ret = float(w @ mu)
+        exp_vol = float(np.sqrt(w @ cov @ w))
+        sharpe = (
+            (exp_ret - input_data.risk_free_rate) / exp_vol if exp_vol > 1e-12 else 0.0
+        )
+        return PortfolioOptimizationResult(
+            tickers=input_data.tickers,
+            method=input_data.method,
+            weights={t: round(float(wi), 6) for t, wi in zip(input_data.tickers, w)},
+            expected_return=round(exp_ret, 6),
+            expected_volatility=round(exp_vol, 6),
+            sharpe_ratio=round(sharpe, 4),
+            converged=rp["converged"],
+            risk_contributions={
+                t: round(float(c), 6)
+                for t, c in zip(input_data.tickers, rp["risk_contributions"])
+            },
+            warnings=warnings,
+        )
+
+    if input_data.method == "black_litterman":
+        mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
+        n = len(input_data.tickers)
+        mkt_w = (
+            np.array([input_data.market_weights[t] for t in input_data.tickers])
+            if input_data.market_weights is not None
+            else np.full(n, 1.0 / n)
+        )
+        assert input_data.views  # validated non-empty by the Pydantic model
+        P, Q, omega = build_bl_views(
+            input_data.tickers,
+            [v.model_dump() for v in input_data.views],
+            cov,
+            tau=input_data.tau,
+        )
+        bl = black_litterman(
+            cov,
+            mkt_w,
+            P,
+            Q,
+            risk_aversion=input_data.risk_aversion,
+            tau=input_data.tau,
+            omega=omega,
+        )
+        w = bl["implied_weights"]
+        exp_ret = float(w @ bl["posterior_returns"])
+        exp_vol = float(np.sqrt(w @ bl["posterior_cov"] @ w))
+        sharpe = (
+            (exp_ret - input_data.risk_free_rate) / exp_vol if exp_vol > 1e-12 else 0.0
+        )
+        return PortfolioOptimizationResult(
+            tickers=input_data.tickers,
+            method=input_data.method,
+            weights={t: round(float(wi), 6) for t, wi in zip(input_data.tickers, w)},
+            expected_return=round(exp_ret, 6),
+            expected_volatility=round(exp_vol, 6),
+            sharpe_ratio=round(sharpe, 4),
+            converged=True,
+            warnings=warnings,
+        )
+
+    result = mean_variance_optimize(
+        returns_df,
+        objective=input_data.method,
+        risk_free_rate=input_data.risk_free_rate,
+        target_return=input_data.target_return,
+        target_volatility=input_data.target_volatility,
+        allow_short=input_data.allow_short,
+        max_weight=input_data.max_weight,
+        periods_per_year=input_data.periods_per_year,
+    )
+    if not result["converged"]:
+        warnings.append(
+            "optimizer did not converge — constraints may be infeasible; "
+            "treat weights as approximate"
+        )
+    return PortfolioOptimizationResult(
+        tickers=result["tickers"],
+        method=input_data.method,
+        weights={t: round(float(wi), 6) for t, wi in result["weights"].items()},
+        expected_return=round(result["expected_return"], 6),
+        expected_volatility=round(result["expected_volatility"], 6),
+        sharpe_ratio=round(result["sharpe_ratio"], 4),
+        converged=result["converged"],
+        warnings=warnings,
+    )
+
+
+def _mean_cov_for_tools(
+    returns_df: pd.DataFrame, periods_per_year: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Same annualized (mean, cov) computation portfolio.optimize's private
+    _mean_cov does — reimplemented here rather than imported since it's a
+    two-line pandas call and importing a leading-underscore helper across
+    module boundaries would couple this file to that module's internals."""
+    mu = returns_df.mean().to_numpy(dtype=float) * periods_per_year
+    cov = returns_df.cov().to_numpy(dtype=float) * periods_per_year
+    return mu, cov
+
+
 def correlation_matrix_to_dict(returns_df: pd.DataFrame) -> Dict[str, Any]:
     from standard_quant_tools.portfolio.portfolio import correlation_matrix
 
@@ -984,8 +1146,7 @@ def get_correlation_analysis(
 
     corr_dict = {
         row_ticker: {
-            col_ticker: round(float(value), 4)
-            for col_ticker, value in row.items()
+            col_ticker: round(float(value), 4) for col_ticker, value in row.items()
         }
         for row_ticker, row in summary["correlation_matrix"].iterrows()
     }
@@ -3220,7 +3381,9 @@ def get_capacity_report(input_data: CapacityReportInput) -> CapacityReportResult
     )
 
 
-def get_liquidity_metrics(input_data: LiquidityAnalysisInput) -> LiquidityAnalysisResult:
+def get_liquidity_metrics(
+    input_data: LiquidityAnalysisInput,
+) -> LiquidityAnalysisResult:
     """
     Amihud illiquidity ratio and Corwin-Schultz spread estimator per
     ticker — academic proxies for market depth and bid/ask spread derived
@@ -3253,10 +3416,14 @@ def get_liquidity_metrics(input_data: LiquidityAnalysisInput) -> LiquidityAnalys
         per_ticker[t] = {
             "avg_dollar_volume": round(float(avg_dollar_volume.iloc[-1]), 2),
             "amihud_illiquidity": (
-                round(float(amihud_valid.iloc[-1]), 6) if not amihud_valid.empty else 0.0
+                round(float(amihud_valid.iloc[-1]), 6)
+                if not amihud_valid.empty
+                else 0.0
             ),
             "corwin_schultz_spread_bps": (
-                round(float(cs_valid.iloc[-1]) * 10_000.0, 4) if not cs_valid.empty else 0.0
+                round(float(cs_valid.iloc[-1]) * 10_000.0, 4)
+                if not cs_valid.empty
+                else 0.0
             ),
         }
 
@@ -3435,6 +3602,86 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
 
 
 # ──────────────────────────────────────────────────────────────────
+# Options Pricing, Greeks & Implied Volatility
+# ──────────────────────────────────────────────────────────────────
+
+
+def get_option_pricing(input_data: OptionPricingInput) -> OptionPricingResult:
+    """Black-Scholes-Merton price and Greeks for a European option (European exercise only)."""
+    logger.debug(
+        "[option_pricing] %s  S=%.4f K=%.4f T=%.4f r=%.4f sigma=%.4f q=%.4f",
+        input_data.option_type,
+        input_data.spot,
+        input_data.strike,
+        input_data.time_to_expiry,
+        input_data.risk_free_rate,
+        input_data.volatility,
+        input_data.dividend_yield,
+    )
+    price = black_scholes_price(
+        input_data.spot,
+        input_data.strike,
+        input_data.time_to_expiry,
+        input_data.risk_free_rate,
+        input_data.volatility,
+        option_type=input_data.option_type,
+        dividend_yield=input_data.dividend_yield,
+    )
+    greeks = black_scholes_greeks(
+        input_data.spot,
+        input_data.strike,
+        input_data.time_to_expiry,
+        input_data.risk_free_rate,
+        input_data.volatility,
+        option_type=input_data.option_type,
+        dividend_yield=input_data.dividend_yield,
+    )
+    return OptionPricingResult(
+        option_type=input_data.option_type,
+        price=round(price, 6),
+        greeks=OptionGreeks(
+            delta=round(greeks["delta"], 6),
+            gamma=round(greeks["gamma"], 6),
+            vega=round(greeks["vega"], 6),
+            theta=round(greeks["theta"], 6),
+            rho=round(greeks["rho"], 6),
+        ),
+        d1=round(greeks["d1"], 6),
+        d2=round(greeks["d2"], 6),
+    )
+
+
+def get_implied_volatility(
+    input_data: ImpliedVolatilityInput,
+) -> ImpliedVolatilityResult:
+    """Solve for Black-Scholes-Merton implied volatility from an observed European option price."""
+    logger.debug(
+        "[implied_volatility] %s  price=%.4f  S=%.4f K=%.4f T=%.4f r=%.4f",
+        input_data.option_type,
+        input_data.option_price,
+        input_data.spot,
+        input_data.strike,
+        input_data.time_to_expiry,
+        input_data.risk_free_rate,
+    )
+    result = _implied_volatility(
+        input_data.option_price,
+        input_data.spot,
+        input_data.strike,
+        input_data.time_to_expiry,
+        input_data.risk_free_rate,
+        option_type=input_data.option_type,
+        dividend_yield=input_data.dividend_yield,
+    )
+    return ImpliedVolatilityResult(
+        implied_volatility=round(result["implied_volatility"], 6),
+        converged=result["converged"],
+        iterations=result["iterations"],
+        method=result["method"],
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Extended Backtest Diagnostics
 # ──────────────────────────────────────────────────────────────────
 
@@ -3577,6 +3824,11 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             TechnicalInput,
         ),
         ("get_portfolio_analysis", "Multi-asset portfolio metrics.", PortfolioInput),
+        (
+            "run_portfolio_optimization",
+            "Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike get_portfolio_analysis, which only scores weights already chosen.",
+            PortfolioOptimizationInput,
+        ),
         (
             "run_screener",
             "Filter a stock universe by fundamental and technical criteria.",
@@ -3727,6 +3979,16 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             "Compact backtest result: summary/risk/exposure/cost sub-reports plus equity-curve/trade-log artifact URIs, instead of embedding the full data inline like run_sma_backtest etc.",
             BacktestCompactInput,
         ),
+        (
+            "get_option_pricing",
+            "Black-Scholes-Merton price and Greeks (delta, gamma, vega, theta, rho) for a European option.",
+            OptionPricingInput,
+        ),
+        (
+            "get_implied_volatility",
+            "Solve for Black-Scholes-Merton implied volatility from an observed European option price.",
+            ImpliedVolatilityInput,
+        ),
     ]
 
     return [
@@ -3756,6 +4018,10 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "analyze_stock_risk": (analyze_stock_risk, AnalysisInput),
     "get_technical_analysis": (get_technical_analysis, TechnicalInput),
     "get_portfolio_analysis": (get_portfolio_analysis, PortfolioInput),
+    "run_portfolio_optimization": (
+        run_portfolio_optimization,
+        PortfolioOptimizationInput,
+    ),
     "run_screener": (run_screener, ScreenerInput),
     "run_factor_regression": (run_factor_regression, FactorRegressionInput),
     "run_cointegration_test": (run_cointegration_test, CointegrationInput),
@@ -3801,6 +4067,8 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "get_liquidity_metrics": (get_liquidity_metrics, LiquidityAnalysisInput),
     "get_data_quality_report": (get_data_quality_report, DataQualityReportInput),
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
+    "get_option_pricing": (get_option_pricing, OptionPricingInput),
+    "get_implied_volatility": (get_implied_volatility, ImpliedVolatilityInput),
 }
 
 

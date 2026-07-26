@@ -173,6 +173,133 @@ class PortfolioResult(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# Portfolio Optimization (portfolio/optimize.py — Markowitz mean-variance,
+# risk parity, and Black-Litterman; produces weights, unlike PortfolioInput/
+# Result above which only scores weights already chosen)
+# ──────────────────────────────────────────────
+
+
+class BLViewInput(BaseModel):
+    assets: Dict[str, float] = Field(
+        ...,
+        description=(
+            "Ticker -> pick coefficient. {'AAPL': 1.0} is an absolute view "
+            "on AAPL; {'AAPL': 1.0, 'MSFT': -1.0} is a relative view "
+            "('AAPL will outperform MSFT by view_return')."
+        ),
+    )
+    view_return: float = Field(
+        ..., description="Annualized expected return implied by this view."
+    )
+    confidence: float = Field(
+        1.0,
+        gt=0,
+        le=1,
+        description=(
+            "1.0 (default) uses the standard He-Litterman view uncertainty. "
+            "Lower values widen this view's uncertainty proportionally, "
+            "letting it move the posterior less — a documented "
+            "simplification of Idzorek's (2005) confidence-scaling method."
+        ),
+    )
+
+
+class PortfolioOptimizationInput(BaseModel):
+    tickers: List[str] = Field(..., description="Universe of tickers to optimize over.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    method: Literal[
+        "max_sharpe",
+        "min_volatility",
+        "target_return",
+        "target_volatility",
+        "risk_parity",
+        "black_litterman",
+    ] = Field("max_sharpe", description="Optimization method.")
+    risk_free_rate: float = Field(
+        0.0,
+        description="Annualized rate — used by max_sharpe and the Sharpe ratio reported for every method.",
+    )
+    target_return: Optional[float] = Field(
+        None, description="Required (annualized) for method='target_return'."
+    )
+    target_volatility: Optional[float] = Field(
+        None, description="Required (annualized) for method='target_volatility'."
+    )
+    allow_short: bool = Field(
+        False, description="Mean-variance methods only: allow negative weights."
+    )
+    max_weight: Optional[float] = Field(
+        None,
+        description="Mean-variance methods only: per-asset weight cap. Setting this requires scipy.",
+    )
+    risk_budget: Optional[Dict[str, float]] = Field(
+        None,
+        description="risk_parity only: ticker -> target fractional risk contribution, must sum to 1.0. None = equal risk contribution.",
+    )
+    market_weights: Optional[Dict[str, float]] = Field(
+        None,
+        description="black_litterman only: ticker -> prior/market-cap weight. None = equal weight.",
+    )
+    views: Optional[List[BLViewInput]] = Field(
+        None,
+        description="black_litterman only: at least one view is required for this method.",
+    )
+    risk_aversion: float = Field(
+        2.5,
+        gt=0,
+        description="black_litterman only: market risk-aversion coefficient (delta).",
+    )
+    tau: float = Field(
+        0.05,
+        gt=0,
+        description="black_litterman only: confidence in the equilibrium prior (smaller = more confident).",
+    )
+    periods_per_year: int = Field(
+        252, description="Annualization factor for the fetched return series."
+    )
+
+    @model_validator(mode="after")
+    def _check_method_requirements(self) -> "PortfolioOptimizationInput":
+        if self.method == "target_return" and self.target_return is None:
+            raise ValueError("method='target_return' requires target_return")
+        if self.method == "target_volatility" and self.target_volatility is None:
+            raise ValueError("method='target_volatility' requires target_volatility")
+        if self.method == "black_litterman" and not self.views:
+            raise ValueError("method='black_litterman' requires at least one view")
+        if self.risk_budget is not None:
+            missing = [t for t in self.tickers if t not in self.risk_budget]
+            if missing:
+                raise ValueError(f"risk_budget is missing entries for: {missing}")
+        if self.market_weights is not None:
+            missing = [t for t in self.tickers if t not in self.market_weights]
+            if missing:
+                raise ValueError(f"market_weights is missing entries for: {missing}")
+        if self.views is not None:
+            unknown = sorted(
+                {a for v in self.views for a in v.assets if a not in self.tickers}
+            )
+            if unknown:
+                raise ValueError(f"views reference tickers not in tickers: {unknown}")
+        return self
+
+
+class PortfolioOptimizationResult(BaseModel):
+    tickers: List[str]
+    method: str
+    weights: Dict[str, float]
+    expected_return: float
+    expected_volatility: float
+    sharpe_ratio: float
+    converged: bool
+    risk_contributions: Optional[Dict[str, float]] = Field(
+        None,
+        description="risk_parity only: fractional contribution to total variance per asset, sums to 1.",
+    )
+    warnings: List[str] = []
+
+
+# ──────────────────────────────────────────────
 # Screener
 # ──────────────────────────────────────────────
 
@@ -1806,17 +1933,23 @@ class MonteCarloSimulationInput(BaseModel):
         description="Portfolio weights, same order as tickers, must sum to 1.0. None (default) uses equal weighting.",
     )
     start_date: str = Field(
-        ..., description="Start date YYYY-MM-DD for the historical return window used to estimate the distribution."
+        ...,
+        description="Start date YYYY-MM-DD for the historical return window used to estimate the distribution.",
     )
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     horizon_days: int = Field(
-        252, gt=0, le=2520, description="Number of forward bars to simulate (default 252 = ~1 year)."
+        252,
+        gt=0,
+        le=2520,
+        description="Number of forward bars to simulate (default 252 = ~1 year).",
     )
     n_simulations: int = Field(
         1000, ge=100, le=20000, description="Number of independent simulated paths."
     )
     block_size: int = Field(
-        20, gt=0, description="Block length (bars) for the moving-block bootstrap resample."
+        20,
+        gt=0,
+        description="Block length (bars) for the moving-block bootstrap resample.",
     )
     initial_capital: float = Field(10_000.0, gt=0, description="Starting capital.")
     random_seed: Optional[int] = Field(
@@ -2044,3 +2177,73 @@ class BacktestResultV2(BaseModel):
     trades_uri: Optional[str] = None  # None when the strategy never traded
     warnings: List[str] = []
     validation_status: str  # "ok" | "warning"
+
+
+# ──────────────────────────────────────────────
+# Options Pricing, Greeks & Implied Volatility (analysis/options.py —
+# Black-Scholes-Merton, European options only)
+# ──────────────────────────────────────────────
+
+
+class OptionPricingInput(BaseModel):
+    spot: float = Field(..., gt=0, description="Current underlying price.")
+    strike: float = Field(..., gt=0, description="Option strike price.")
+    time_to_expiry: float = Field(
+        ..., gt=0, description="Time to expiry in years (e.g. 0.25 = 3 months)."
+    )
+    risk_free_rate: float = Field(
+        ...,
+        description="Annualized continuously-compounded risk-free rate (e.g. 0.05 = 5%).",
+    )
+    volatility: float = Field(
+        ..., gt=0, description="Annualized volatility (e.g. 0.20 = 20%)."
+    )
+    option_type: Literal["call", "put"] = Field("call", description="Option type.")
+    dividend_yield: float = Field(
+        0.0,
+        ge=0,
+        description="Continuous dividend yield (Merton extension); 0.0 = plain Black-Scholes.",
+    )
+
+
+class OptionGreeks(BaseModel):
+    delta: float
+    gamma: float
+    vega: float = Field(
+        ...,
+        description="Price change per 1.0 (100 percentage points) of volatility — divide by 100 for the conventional 'per vol point' quote.",
+    )
+    theta: float = Field(
+        ...,
+        description="Price change per YEAR (raw) — divide by 365 for the conventional 'per calendar day' quote.",
+    )
+    rho: float
+
+
+class OptionPricingResult(BaseModel):
+    option_type: str
+    price: float
+    greeks: OptionGreeks
+    d1: float
+    d2: float
+
+
+class ImpliedVolatilityInput(BaseModel):
+    option_price: float = Field(
+        ..., gt=0, description="Observed market price of the option."
+    )
+    spot: float = Field(..., gt=0, description="Current underlying price.")
+    strike: float = Field(..., gt=0, description="Option strike price.")
+    time_to_expiry: float = Field(..., gt=0, description="Time to expiry in years.")
+    risk_free_rate: float = Field(
+        ..., description="Annualized continuously-compounded risk-free rate."
+    )
+    option_type: Literal["call", "put"] = Field("call", description="Option type.")
+    dividend_yield: float = Field(0.0, ge=0, description="Continuous dividend yield.")
+
+
+class ImpliedVolatilityResult(BaseModel):
+    implied_volatility: float
+    converged: bool
+    iterations: int
+    method: str  # "newton" | "bisection"

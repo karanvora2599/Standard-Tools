@@ -42,6 +42,51 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Portfolio optimization** (`portfolio/optimize.py`): `mean_variance_optimize`
+  (Markowitz mean-variance — `max_sharpe`/`min_volatility`/`target_return`/
+  `target_volatility`), `risk_parity_weights`, and `black_litterman` (plus
+  `build_bl_views`, a convenience for turning a plain-dict view list into the
+  `(P, Q, Omega)` matrices `black_litterman` expects). The unconstrained
+  mean-variance case (`allow_short=True`, `max_weight=None`) is solved in
+  closed form via the standard Merton (1972) two-fund efficient-frontier
+  parametrization — numpy only, no solver dependency, `converged` is always
+  `True`. Any long-only and/or weight-capped request uses scipy (SLSQP),
+  following the same "scipy optional, clear error if needed and missing"
+  convention `metrics.risk_metrics.var_parametric` already established; a
+  genuinely infeasible constrained request (e.g. an unreachable
+  `target_return` under a `max_weight` cap) reports `converged=False` rather
+  than a silently wrong answer. `risk_parity_weights` is a documented
+  heuristic (damped multiplicative fixed-point iteration) — not a
+  globally-convergence-proven algorithm like the mean-variance closed form —
+  and reports its own `converged` flag honestly; verified against a
+  diagonal-covariance closed-form case (inverse-volatility weighting) in
+  tests. New agent tool `run_portfolio_optimization`
+  (`PortfolioOptimizationInput`/`Result`, `BLViewInput`), registered in
+  `get_agent_tools()`/`dispatch()` and assigned to the multi-agent
+  orchestrator's Portfolio Risk & Sizing worker. This closes the gap
+  `backtest/sizing.py`'s own docstring flagged: every other portfolio-facing
+  tool only *scored* weights already chosen; nothing *produced* them. See
+  [Documentation/05_portfolio.md](Documentation/05_portfolio.md#portfolio-optimization).
+
+- **Options pricing, Greeks & implied volatility** (`analysis/options.py`):
+  `black_scholes_price`/`black_scholes_greeks` (Black-Scholes-Merton,
+  European options only, `dividend_yield` covers the Merton 1973 continuous-
+  dividend extension) and `implied_volatility` (Newton-Raphson with a
+  bisection fallback over a practical `[1e-6, 5.0]` bracket, plus a
+  no-arbitrage bound check before solving). Dependency-free: the standard
+  normal CDF/PDF are computed via `math.erf` (stdlib), not scipy. Every
+  Greek is cross-validated in tests against a finite-difference derivative of
+  `black_scholes_price` itself (not just checked against the textbook
+  formula), and pricing matches Hull's published reference example exactly.
+  Two new agent tools, `get_option_pricing` (price + all five Greeks in one
+  call) and `get_implied_volatility`
+  (`OptionPricingInput`/`Result`/`OptionGreeks`,
+  `ImpliedVolatilityInput`/`Result`), registered in
+  `get_agent_tools()`/`dispatch()` and assigned to the multi-agent
+  orchestrator's Technical & Risk Analysis worker (Greeks are risk
+  sensitivities). `get_agent_tools()` now returns 42 tools, up from 39. See
+  [Documentation/12_options.md](Documentation/12_options.md) (new file).
+
 - `data.polygon_provider.PolygonProvider`: a third `DataProvider`
   implementation, backed by Polygon.io's plain REST API — no vendor SDK to
   install, just an API key (`SQT_POLYGON_API_KEY`, no default; get a free

@@ -16,7 +16,7 @@ between, because only one of the two is ever in front of the model.
 
 from typing import Any, Dict
 
-from _agent_utils import run_agent, _header, _section, _log
+from _agent_utils import _header, _log, _section, run_agent
 
 WORKER_AGENTS: Dict[str, Dict[str, Any]] = {
     "screener": {
@@ -37,9 +37,16 @@ requesting agent can hand them to a different specialist.""",
         "label": "Technical & Risk Analysis Agent",
         "description": "Single-asset risk profiling, technical indicator snapshots, and multi-asset portfolio metrics.",
         "tools": [
-            "analyze_stock_risk", "get_technical_analysis", "get_advanced_indicators",
-            "get_rolling_beta", "get_extended_risk_metrics", "get_portfolio_analysis",
-            "get_data_quality_report", "get_volatility_estimators",
+            "analyze_stock_risk",
+            "get_technical_analysis",
+            "get_advanced_indicators",
+            "get_rolling_beta",
+            "get_extended_risk_metrics",
+            "get_portfolio_analysis",
+            "get_data_quality_report",
+            "get_volatility_estimators",
+            "get_option_pricing",
+            "get_implied_volatility",
         ],
         "system_prompt": """You are a risk and technical analysis specialist. Your tools cover
 single-asset risk profiling (analyze_stock_risk, get_extended_risk_metrics),
@@ -47,25 +54,33 @@ technical indicator snapshots (get_technical_analysis, get_advanced_indicators,
 get_rolling_beta), multi-asset portfolio metrics (get_portfolio_analysis),
 dataset provenance / data-quality checks (get_data_quality_report — dataset
 guarantees like adjusted/survivorship-free/point-in-time, plus missing-bar,
-stale-price, and price-jump detection on a symbol's own OHLCV), and realized
+stale-price, and price-jump detection on a symbol's own OHLCV), realized
 volatility via Parkinson/Garman-Klass/Yang-Zhang estimators alongside plain
 close-to-close (get_volatility_estimators — use this when the user needs a
 more accurate or overnight-gap-aware volatility read than close-to-close
 alone; a high yang_zhang_vs_close_to_close_ratio flags a symbol whose true
 volatility is being understated by close-only volatility because of large
-overnight gaps).
+overnight gaps), and European option risk (get_option_pricing — Black-Scholes-
+Merton price plus delta/gamma/vega/theta/rho, given a volatility;
+get_implied_volatility — the reverse, solving for the volatility that
+reproduces an observed option price. European exercise only; no early
+exercise, no American-option adjustment).
 
-Your only job is to characterize risk, technical posture, and data quality —
-never run a backtest and never size a position; those belong to other
-specialists. State the exact numbers from every tool call, do not round or
-approximate them.""",
+Your only job is to characterize risk, technical posture, data quality, and
+option sensitivities — never run a backtest and never size a position;
+those belong to other specialists. State the exact numbers from every tool
+call, do not round or approximate them.""",
     },
     "quant_research": {
         "label": "Quant Research Agent",
         "description": "Factor regression, cointegration/pairs testing, PCA, and Hurst regime detection.",
         "tools": [
-            "run_factor_regression", "run_cointegration_test", "run_pca_analysis",
-            "run_hurst_analysis", "scan_pairs", "get_correlation_analysis",
+            "run_factor_regression",
+            "run_cointegration_test",
+            "run_pca_analysis",
+            "run_hurst_analysis",
+            "scan_pairs",
+            "get_correlation_analysis",
         ],
         "system_prompt": """You are a quantitative research specialist covering factor models
 (run_factor_regression), cointegration and pairs screening (run_cointegration_test,
@@ -85,13 +100,21 @@ your tool calls.""",
         "label": "Backtest Agent",
         "description": "Run, optimise, and validate the library's built-in named strategies (SMA/RSI/MACD/Bollinger, regime-adaptive, walk-forward).",
         "tools": [
-            "run_sma_backtest", "run_rsi_backtest", "run_macd_backtest",
-            "run_bollinger_backtest", "run_buy_and_hold", "compare_strategies",
-            "run_backtest_optimization", "run_regime_adaptive_backtest",
+            "run_sma_backtest",
+            "run_rsi_backtest",
+            "run_macd_backtest",
+            "run_bollinger_backtest",
+            "run_buy_and_hold",
+            "compare_strategies",
+            "run_backtest_optimization",
+            "run_regime_adaptive_backtest",
             "run_regime_adaptive_walkforward_backtest",
-            "run_walk_forward_backtest", "get_backtest_diagnostics",
-            "run_portfolio_simulation", "run_pair_trade_backtest",
-            "get_robustness_diagnostics", "run_backtest_compact",
+            "run_walk_forward_backtest",
+            "get_backtest_diagnostics",
+            "run_portfolio_simulation",
+            "run_pair_trade_backtest",
+            "get_robustness_diagnostics",
+            "run_backtest_compact",
             "run_monte_carlo_simulation",
         ],
         "system_prompt": """You are a backtesting specialist for the library's BUILT-IN indicator
@@ -153,12 +176,23 @@ Report the exact statistics from the tool call. Never size a position.""",
         "label": "Portfolio Risk & Sizing Agent",
         "description": "Portfolio risk decomposition (MCR/PCA/factor) and ATR/Kelly position sizing.",
         "tools": [
-            "get_portfolio_risk_attribution", "get_position_size", "get_capacity_report",
-            "run_stress_test", "get_liquidity_metrics",
+            "get_portfolio_risk_attribution",
+            "get_position_size",
+            "get_capacity_report",
+            "run_stress_test",
+            "get_liquidity_metrics",
+            "run_portfolio_optimization",
         ],
         "system_prompt": """You are a portfolio risk decomposition and position sizing specialist.
 get_portfolio_risk_attribution: marginal risk contribution, PCA variance
 decomposition, optional factor model for a weighted multi-asset portfolio.
+run_portfolio_optimization: PRODUCES weights (unlike get_portfolio_risk_attribution,
+which only decomposes weights the caller already chose) via Markowitz
+mean-variance (max_sharpe, min_volatility, target_return, target_volatility),
+risk parity (equal or custom-budgeted risk contribution), or Black-Litterman
+(market-equilibrium prior blended with explicit views). Use this when asked
+to "build", "construct", or "find the optimal" portfolio weights, not just
+to evaluate weights already given.
 get_position_size: ATR-based stop-loss sizing with optional Kelly criterion,
 given account equity and (optionally) a strategy's win rate / avg win / avg loss.
 get_capacity_report: how much account size a target-weight portfolio can
@@ -193,7 +227,9 @@ def run_worker_agent(
 ) -> str:
     """Run one worker agent, scoped to its own tool subset and system prompt."""
     if worker_key not in WORKER_AGENTS:
-        raise ValueError(f"Unknown worker '{worker_key}'. Available: {list(WORKER_AGENTS)}")
+        raise ValueError(
+            f"Unknown worker '{worker_key}'. Available: {list(WORKER_AGENTS)}"
+        )
 
     worker = WORKER_AGENTS[worker_key]
     _header(f"→ DELEGATING TO: {worker['label']}")

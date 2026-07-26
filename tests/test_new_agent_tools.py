@@ -11,10 +11,13 @@ from standard_quant_tools.agent.models import (
     CapacityReportInput,
     CompareStrategiesInput,
     DataQualityReportInput,
+    ImpliedVolatilityInput,
+    OptionPricingInput,
     PairScannerInput,
     PairTradeBacktestInput,
     PCAInput,
     PortfolioInput,
+    PortfolioOptimizationInput,
     PortfolioSimulationInput,
     PositionSizerInput,
     RegimeAdaptiveInput,
@@ -30,11 +33,14 @@ from standard_quant_tools.agent.tools import (
     get_backtest_diagnostics,
     get_capacity_report,
     get_data_quality_report,
+    get_implied_volatility,
+    get_option_pricing,
     get_portfolio_risk_attribution,
     get_position_size,
     get_robustness_diagnostics,
     run_buy_and_hold,
     run_pair_trade_backtest,
+    run_portfolio_optimization,
     run_portfolio_simulation,
     run_regime_adaptive_backtest,
     run_regime_adaptive_walkforward_backtest,
@@ -88,8 +94,8 @@ def patched_long(long_ohlcv, monkeypatch):
 
 
 class TestToolRegistry:
-    def test_now_has_thirty_nine_tools(self):
-        assert len(get_agent_tools()) == 39
+    def test_now_has_forty_two_tools(self):
+        assert len(get_agent_tools()) == 42
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}
@@ -2437,3 +2443,214 @@ class TestDataQualityReport:
         jump = result.price_jumps[0]
         assert jump.date == str(gapped_dates[-1].date())
         assert jump.pct_change == pytest.approx(0.4, abs=1e-6)
+
+
+# ── Portfolio Optimization (Markowitz / risk parity / Black-Litterman) ──────
+
+
+def _three_asset_ohlcv():
+    """3 tickers with distinct (non-degenerate) return series -- a
+    singular/perfectly-collinear covariance would break the unconstrained
+    closed-form path, so each needs genuinely different price action."""
+    np.random.seed(11)
+    n = 300
+    dates = pd.date_range(START, periods=n, freq="B")
+
+    def _series(mu, sigma, seed):
+        rng = np.random.default_rng(seed)
+        rets = rng.normal(mu, sigma, n)
+        close = 100.0 * np.cumprod(1 + rets)
+        return pd.DataFrame(
+            {
+                "Open": close,
+                "High": close * 1.01,
+                "Low": close * 0.99,
+                "Close": close,
+                "Volume": [1_000_000.0] * n,
+            },
+            index=dates,
+        )
+
+    return {
+        "AAA": _series(0.0006, 0.012, 1),
+        "BBB": _series(0.0004, 0.020, 2),
+        "CCC": _series(0.0003, 0.008, 3),
+    }
+
+
+@pytest.fixture
+def patched_three_asset(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from standard_quant_tools.data.factory import DataFactory
+
+    price_data = _three_asset_ohlcv()
+    provider = MagicMock()
+    provider.get_ohlcv.side_effect = lambda symbol, *a, **kw: price_data[symbol]
+    provider.get_ohlcv_async = AsyncMock(
+        side_effect=lambda symbol, *a, **kw: price_data[symbol]
+    )
+    monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+    return provider
+
+
+class TestPortfolioOptimization:
+    def _input(self, **overrides):
+        base = dict(
+            tickers=["AAA", "BBB", "CCC"],
+            start_date=START,
+            end_date=END,
+            method="max_sharpe",
+        )
+        base.update(overrides)
+        return PortfolioOptimizationInput(**base)
+
+    def test_max_sharpe_weights_sum_to_one(self, patched_three_asset):
+        result = run_portfolio_optimization(
+            self._input(method="max_sharpe", allow_short=True)
+        )
+        assert sum(result.weights.values()) == pytest.approx(1.0, abs=1e-4)
+        assert result.converged is True
+        assert set(result.weights) == {"AAA", "BBB", "CCC"}
+
+    def test_min_volatility_long_only(self, patched_three_asset):
+        result = run_portfolio_optimization(
+            self._input(method="min_volatility", allow_short=False)
+        )
+        assert result.converged is True
+        for w in result.weights.values():
+            assert w >= -1e-6
+        assert sum(result.weights.values()) == pytest.approx(1.0, abs=1e-4)
+
+    def test_target_return_achieves_target(self, patched_three_asset):
+        result = run_portfolio_optimization(
+            self._input(method="target_return", target_return=0.05, allow_short=True)
+        )
+        assert result.expected_return == pytest.approx(0.05, abs=1e-3)
+
+    def test_risk_parity_reports_risk_contributions(self, patched_three_asset):
+        result = run_portfolio_optimization(self._input(method="risk_parity"))
+        assert result.converged is True
+        assert result.risk_contributions is not None
+        assert sum(result.risk_contributions.values()) == pytest.approx(1.0, abs=1e-3)
+        for c in result.risk_contributions.values():
+            assert c == pytest.approx(1 / 3, abs=0.05)
+
+    def test_black_litterman_with_bullish_view(self, patched_three_asset):
+        result = run_portfolio_optimization(
+            self._input(
+                method="black_litterman",
+                views=[
+                    {"assets": {"AAA": 1.0}, "view_return": 0.30, "confidence": 1.0}
+                ],
+            )
+        )
+        assert result.converged is True
+        assert sum(result.weights.values()) == pytest.approx(1.0, abs=1e-4)
+
+    def test_dispatch_routes_correctly(self, patched_three_asset):
+        result = dispatch(
+            "run_portfolio_optimization",
+            {
+                "tickers": ["AAA", "BBB", "CCC"],
+                "start_date": START,
+                "end_date": END,
+                "method": "min_volatility",
+            },
+        )
+        assert "weights" in result
+        assert result["method"] == "min_volatility"
+
+    def test_black_litterman_requires_views(self):
+        with pytest.raises(pydantic.ValidationError, match="at least one view"):
+            self._input(method="black_litterman")
+
+
+# ── Options Pricing, Greeks & Implied Volatility ────────────────────────────
+
+
+class TestOptionPricingTool:
+    def test_call_pricing_and_greeks(self):
+        result = get_option_pricing(
+            OptionPricingInput(
+                spot=42,
+                strike=40,
+                time_to_expiry=0.5,
+                risk_free_rate=0.10,
+                volatility=0.20,
+                option_type="call",
+            )
+        )
+        assert result.price == pytest.approx(4.76, abs=0.01)
+        assert 0.0 < result.greeks.delta < 1.0
+        assert result.greeks.gamma > 0
+        assert result.greeks.vega > 0
+
+    def test_put_pricing(self):
+        result = get_option_pricing(
+            OptionPricingInput(
+                spot=42,
+                strike=40,
+                time_to_expiry=0.5,
+                risk_free_rate=0.10,
+                volatility=0.20,
+                option_type="put",
+            )
+        )
+        assert result.price == pytest.approx(0.81, abs=0.01)
+        assert -1.0 < result.greeks.delta < 0.0
+
+    def test_dispatch_routes_correctly(self):
+        result = dispatch(
+            "get_option_pricing",
+            {
+                "spot": 42,
+                "strike": 40,
+                "time_to_expiry": 0.5,
+                "risk_free_rate": 0.10,
+                "volatility": 0.20,
+                "option_type": "call",
+            },
+        )
+        assert result["price"] == pytest.approx(4.76, abs=0.01)
+
+    def test_invalid_option_type_rejected_by_pydantic(self):
+        with pytest.raises(pydantic.ValidationError):
+            OptionPricingInput(
+                spot=42,
+                strike=40,
+                time_to_expiry=0.5,
+                risk_free_rate=0.10,
+                volatility=0.20,
+                option_type="straddle",
+            )
+
+
+class TestImpliedVolatilityTool:
+    def test_recovers_known_volatility(self):
+        result = get_implied_volatility(
+            ImpliedVolatilityInput(
+                option_price=4.759422392871528,
+                spot=42,
+                strike=40,
+                time_to_expiry=0.5,
+                risk_free_rate=0.10,
+                option_type="call",
+            )
+        )
+        assert result.implied_volatility == pytest.approx(0.20, abs=1e-3)
+        assert result.converged is True
+
+    def test_dispatch_routes_correctly(self):
+        result = dispatch(
+            "get_implied_volatility",
+            {
+                "option_price": 4.759422392871528,
+                "spot": 42,
+                "strike": 40,
+                "time_to_expiry": 0.5,
+                "risk_free_rate": 0.10,
+                "option_type": "call",
+            },
+        )
+        assert result["implied_volatility"] == pytest.approx(0.20, abs=1e-3)
