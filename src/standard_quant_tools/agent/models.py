@@ -334,6 +334,40 @@ class PCAResult(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# Correlation & Diversification Analytics
+# ──────────────────────────────────────────────
+
+
+class CorrelationAnalysisInput(BaseModel):
+    tickers: List[str] = Field(..., description="Universe of tickers (>= 2).")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    weights: Optional[List[float]] = Field(
+        None,
+        description=(
+            "Portfolio weights for the diversification ratio, same order as "
+            "tickers, must sum to 1.0. None (default) uses equal weighting."
+        ),
+    )
+
+    @field_validator("tickers")
+    @classmethod
+    def _check_min_tickers(cls, v: List[str]) -> List[str]:
+        if len(v) < 2:
+            raise ValueError(f"tickers must contain at least 2 symbols, got {len(v)}")
+        return v
+
+
+class CorrelationAnalysisResult(BaseModel):
+    tickers: List[str]
+    correlation_matrix: Dict[str, Dict[str, float]]
+    avg_pairwise_correlation: float
+    highest_correlated_pair: Dict[str, Any]
+    lowest_correlated_pair: Dict[str, Any]
+    diversification_ratio: float
+
+
+# ──────────────────────────────────────────────
 # Hurst Exponent
 # ──────────────────────────────────────────────
 
@@ -364,6 +398,30 @@ class HurstResult(BaseModel):
     n_obs: int
     rolling_current: Optional[float] = None
     rolling_regime_fractions: Optional[Dict[str, float]] = None
+
+
+# ──────────────────────────────────────────────
+# Realized Volatility Estimators (Parkinson, Garman-Klass, Yang-Zhang)
+# ──────────────────────────────────────────────
+
+
+class VolatilityEstimatorsInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    period: int = Field(
+        20, gt=1, description="Rolling window in bars for every estimator."
+    )
+
+
+class VolatilityEstimatorsResult(BaseModel):
+    symbol: str
+    period: int
+    close_to_close_annualized: float
+    parkinson_annualized: float
+    garman_klass_annualized: float
+    yang_zhang_annualized: float
+    yang_zhang_vs_close_to_close_ratio: float
 
 
 # ──────────────────────────────────────────────
@@ -693,6 +751,66 @@ class RiskAttributionResult(BaseModel):
     factor_loadings: Optional[Dict[str, float]] = None
     factor_r_squared: Optional[float] = None
     factor_alpha: Optional[float] = None
+
+
+# ──────────────────────────────────────────────
+# Historical Stress-Test Replay
+# ──────────────────────────────────────────────
+
+
+class StressTestInput(BaseModel):
+    tickers: List[str] = Field(..., description="Portfolio asset symbols.")
+    weights: Optional[List[float]] = Field(
+        None,
+        description="Portfolio weights, same order as tickers, must sum to 1.0. None (default) uses equal weighting.",
+    )
+    scenario: Literal[
+        "black_monday_1987",
+        "dotcom_2000",
+        "gfc_2008",
+        "volmageddon_2018",
+        "covid_2020",
+        "rate_shock_2022",
+        "custom",
+    ] = Field(
+        "gfc_2008",
+        description="Named historical crash window, or 'custom' to supply your own custom_start_date/custom_end_date.",
+    )
+    custom_start_date: Optional[str] = Field(
+        None, description="Required (YYYY-MM-DD) when scenario='custom'."
+    )
+    custom_end_date: Optional[str] = Field(
+        None, description="Required (YYYY-MM-DD) when scenario='custom'."
+    )
+
+    @model_validator(mode="after")
+    def _check_custom_dates(self) -> "StressTestInput":
+        if self.scenario == "custom" and (
+            self.custom_start_date is None or self.custom_end_date is None
+        ):
+            raise ValueError(
+                "custom_start_date and custom_end_date are both required when scenario='custom'"
+            )
+        if self.weights is not None and len(self.weights) != len(self.tickers):
+            raise ValueError(
+                f"len(weights)={len(self.weights)} must equal len(tickers)={len(self.tickers)}"
+            )
+        return self
+
+
+class StressTestResult(BaseModel):
+    scenario: str
+    scenario_start_date: str
+    scenario_end_date: str
+    tickers_used: List[str]
+    tickers_missing_data: List[str]
+    portfolio_return_pct: float
+    max_drawdown_pct: float
+    worst_day_return_pct: float
+    worst_day_date: str
+    best_day_return_pct: float
+    best_day_date: str
+    n_trading_days: int
 
 
 # ──────────────────────────────────────────────
@@ -1674,6 +1792,55 @@ class RobustnessDiagnosticsResult(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# Monte Carlo Forward Simulation (block-bootstrap projection of possible
+# future equity paths from a historical return distribution — forward-
+# looking, NOT a substitute for run_walk_forward_backtest's out-of-sample
+# validation, which tests a strategy's actual historical decisions)
+# ──────────────────────────────────────────────
+
+
+class MonteCarloSimulationInput(BaseModel):
+    tickers: List[str] = Field(..., description="Portfolio tickers.")
+    weights: Optional[List[float]] = Field(
+        None,
+        description="Portfolio weights, same order as tickers, must sum to 1.0. None (default) uses equal weighting.",
+    )
+    start_date: str = Field(
+        ..., description="Start date YYYY-MM-DD for the historical return window used to estimate the distribution."
+    )
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    horizon_days: int = Field(
+        252, gt=0, le=2520, description="Number of forward bars to simulate (default 252 = ~1 year)."
+    )
+    n_simulations: int = Field(
+        1000, ge=100, le=20000, description="Number of independent simulated paths."
+    )
+    block_size: int = Field(
+        20, gt=0, description="Block length (bars) for the moving-block bootstrap resample."
+    )
+    initial_capital: float = Field(10_000.0, gt=0, description="Starting capital.")
+    random_seed: Optional[int] = Field(
+        None,
+        description="Seed for the resampling RNG — set for reproducible results (recorded in the audit trail).",
+    )
+
+
+class MonteCarloSimulationResult(BaseModel):
+    tickers: List[str]
+    horizon_days: int
+    n_simulations: int
+    terminal_median: float
+    terminal_p5: float
+    terminal_p95: float
+    prob_loss: float
+    terminal_var_95: float
+    terminal_cvar_95: float
+    equity_band_p5: List[float]
+    equity_band_p50: List[float]
+    equity_band_p95: List[float]
+
+
+# ──────────────────────────────────────────────
 # Capacity Report (liquidity/ADV-based capacity — how much account size a
 # target-weight portfolio can support before positions become too large
 # relative to each ticker's own trading volume)
@@ -1724,6 +1891,29 @@ class CapacityReportResult(BaseModel):
     days_to_liquidate_at_capacity: Dict[str, float]
     sector_exposure: Optional[Dict[str, float]] = None
     warnings: List[str] = []
+
+
+# ──────────────────────────────────────────────
+# Liquidity / Microstructure Proxies (Amihud illiquidity, Corwin-Schultz
+# spread estimator — academic proxies for bid/ask spread and market depth
+# from OHLCV alone, since no real bid/ask data exists in this library)
+# ──────────────────────────────────────────────
+
+
+class LiquidityAnalysisInput(BaseModel):
+    tickers: List[str] = Field(..., description="Tickers to analyze.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    window: int = Field(
+        20, gt=0, description="Rolling window (bars) for both liquidity proxies."
+    )
+
+
+class LiquidityAnalysisResult(BaseModel):
+    tickers: List[str]
+    per_ticker: Dict[str, Dict[str, float]]
+    least_liquid_ticker: str
+    most_liquid_ticker: str
 
 
 # ──────────────────────────────────────────────

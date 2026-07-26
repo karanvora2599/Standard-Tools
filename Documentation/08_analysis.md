@@ -886,3 +886,90 @@ The `run_regime_adaptive_backtest` agent tool automates this entire flow — it 
 **C++ path** — when `_sqt_core` is importable, `hurst_exponent` calls `_cpp.hurst_dfa` or `_cpp.hurst_rs` directly with the raw `float64` array. `rolling_hurst` calls `_cpp.rolling_hurst`, which executes the entire sliding-window pass in one C++ function — no Python re-entry per bar. The result is copied back to a `pd.Series` with the original index.
 
 **Numerical stability** — both implementations clip the final H estimate to `[0.0, 1.5]` and return `hurst=nan` when fewer than `min_window × 4` observations are available, when fewer than 3 valid window sizes survive, or when any fluctuation value is non-positive.
+
+---
+
+## Realized Volatility Estimators
+
+`standard_quant_tools.metrics.volatility_estimators` — Parkinson, Garman-Klass, and Yang-Zhang OHLC-based realized volatility, complementing `metrics.return_metrics.annualized_volatility`'s plain close-to-close measure. See [09_advanced_agent_tools.md, Tool 21](09_advanced_agent_tools.md) for the agent-tool wrapper (`get_volatility_estimators`) with worked examples and interpretation guidance.
+
+```python
+from standard_quant_tools.metrics.volatility_estimators import (
+    parkinson_volatility, garman_klass_volatility, yang_zhang_volatility,
+)
+
+parkinson_volatility(high, low, period=20, periods_per_year=252)
+garman_klass_volatility(open_, high, low, close, period=20, periods_per_year=252)
+yang_zhang_volatility(open_, high, low, close, period=20, periods_per_year=252)
+```
+
+All three return a rolling `pd.Series` aligned to the input index (`period - 1` leading `NaN`s for Parkinson/Garman-Klass; Yang-Zhang has one additional leading `NaN` since its overnight term needs the prior bar's close). `period` must be `> 1`; raises `ValidationError` otherwise.
+
+---
+
+## Correlation & Diversification Analytics
+
+`standard_quant_tools.analysis.correlation` — pairwise correlation summary and the Choueifaty-Coignard (2008) diversification ratio, built on top of `portfolio.portfolio.correlation_matrix`. See [09_advanced_agent_tools.md, Tool 22](09_advanced_agent_tools.md) for the agent-tool wrapper (`get_correlation_analysis`).
+
+```python
+from standard_quant_tools.analysis.correlation import (
+    diversification_ratio, pairwise_correlation_summary,
+)
+
+diversification_ratio(returns_df, weights=None)       # None = equal-weight; returns a float >= 1.0
+pairwise_correlation_summary(returns_df)               # dict: correlation_matrix, avg_pairwise_correlation, highest/lowest_correlated_pair
+```
+
+Both require at least 2 asset columns in `returns_df`; raise `ValidationError` otherwise. Hierarchical clustering of the universe was considered but deliberately left out of this pass (would need an optional `scipy.cluster` dependency guard for marginal benefit).
+
+---
+
+## Monte Carlo Forward Simulation
+
+`standard_quant_tools.backtest.monte_carlo` — moving-block bootstrap projection of possible future equity paths from a historical return series, mirroring `backtest.robustness.block_bootstrap_ci`'s resampling approach (reimplemented independently rather than shared, to avoid coupling the two features' evolution). See [09_advanced_agent_tools.md, Tool 23](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_monte_carlo_simulation`).
+
+```python
+from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths
+
+simulate_forward_paths(
+    returns, horizon_days=252, n_simulations=1000, block_size=20,
+    initial_capital=10_000.0, seed=None,
+)
+```
+
+Returns a dict with terminal-distribution stats (`terminal_median`, `terminal_p5`/`terminal_p95`, `prob_loss`, `terminal_var_95`, `terminal_cvar_95`) and three per-day percentile equity-curve bands (`equity_band_p5`/`p50`/`p95`, each length `horizon_days`) for plotting a "fan chart." This is a projection from historical statistics, not a prediction — see the agent-tool doc for the full caveat.
+
+---
+
+## Historical Stress-Test Replay
+
+`standard_quant_tools.backtest.stress_test` — replay a portfolio's weights against a named historical crash window (or custom date range) using each ticker's own real historical returns. See [09_advanced_agent_tools.md, Tool 24](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_stress_test`) and the full list of six built-in named scenarios.
+
+```python
+from standard_quant_tools.backtest.stress_test import (
+    list_stress_scenarios, scenario_dates, replay_stress_scenario,
+)
+
+list_stress_scenarios()                              # {"gfc_2008": {"start": ..., "end": ...}, ...}
+scenario_dates("covid_2020")                          # ("2020-02-19", "2020-03-23")
+replay_stress_scenario(returns_df, weights)           # dict: portfolio_return_pct, max_drawdown_pct, worst/best_day_*, n_trading_days
+```
+
+`replay_stress_scenario` expects `returns_df` already sliced to the scenario window — per-ticker data availability (a ticker not yet listed during an old scenario) is the caller's responsibility to handle, which is exactly what the agent tool does (isolating missing tickers rather than failing the whole call).
+
+---
+
+## Liquidity / Microstructure Proxies
+
+`standard_quant_tools.backtest.liquidity` — Amihud (2002) illiquidity ratio and the Corwin-Schultz (2012) high-low spread estimator, both derived purely from OHLCV since this library has no real bid/ask data. Sits alongside `backtest.costs.pct_of_range_spread` (a simpler single-bar range proxy already used for market-impact cost modeling) without replacing it. See [09_advanced_agent_tools.md, Tool 25](09_advanced_agent_tools.md) for the agent-tool wrapper (`get_liquidity_metrics`).
+
+```python
+from standard_quant_tools.backtest.liquidity import (
+    amihud_illiquidity, corwin_schultz_spread,
+)
+
+amihud_illiquidity(returns, dollar_volume, window=20)   # rolling |return|/dollar_volume, x1e6
+corwin_schultz_spread(high, low, window=1)               # fractional spread; clipped at 0
+```
+
+`corwin_schultz_spread` is indexed at the second bar of each consecutive-day pair (the first bar of the series is always `NaN` — no prior bar to pair with); `window > 1` additionally smooths the per-pair estimate with a rolling mean.

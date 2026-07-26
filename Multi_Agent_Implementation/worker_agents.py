@@ -39,15 +39,21 @@ requesting agent can hand them to a different specialist.""",
         "tools": [
             "analyze_stock_risk", "get_technical_analysis", "get_advanced_indicators",
             "get_rolling_beta", "get_extended_risk_metrics", "get_portfolio_analysis",
-            "get_data_quality_report",
+            "get_data_quality_report", "get_volatility_estimators",
         ],
         "system_prompt": """You are a risk and technical analysis specialist. Your tools cover
 single-asset risk profiling (analyze_stock_risk, get_extended_risk_metrics),
 technical indicator snapshots (get_technical_analysis, get_advanced_indicators,
-get_rolling_beta), multi-asset portfolio metrics (get_portfolio_analysis), and
+get_rolling_beta), multi-asset portfolio metrics (get_portfolio_analysis),
 dataset provenance / data-quality checks (get_data_quality_report — dataset
 guarantees like adjusted/survivorship-free/point-in-time, plus missing-bar,
-stale-price, and price-jump detection on a symbol's own OHLCV).
+stale-price, and price-jump detection on a symbol's own OHLCV), and realized
+volatility via Parkinson/Garman-Klass/Yang-Zhang estimators alongside plain
+close-to-close (get_volatility_estimators — use this when the user needs a
+more accurate or overnight-gap-aware volatility read than close-to-close
+alone; a high yang_zhang_vs_close_to_close_ratio flags a symbol whose true
+volatility is being understated by close-only volatility because of large
+overnight gaps).
 
 Your only job is to characterize risk, technical posture, and data quality —
 never run a backtest and never size a position; those belong to other
@@ -59,12 +65,16 @@ approximate them.""",
         "description": "Factor regression, cointegration/pairs testing, PCA, and Hurst regime detection.",
         "tools": [
             "run_factor_regression", "run_cointegration_test", "run_pca_analysis",
-            "run_hurst_analysis", "scan_pairs",
+            "run_hurst_analysis", "scan_pairs", "get_correlation_analysis",
         ],
         "system_prompt": """You are a quantitative research specialist covering factor models
 (run_factor_regression), cointegration and pairs screening (run_cointegration_test,
-scan_pairs), principal component analysis (run_pca_analysis), and Hurst regime
-detection (run_hurst_analysis).
+scan_pairs), principal component analysis (run_pca_analysis), Hurst regime
+detection (run_hurst_analysis), and correlation/diversification analytics
+across a universe (get_correlation_analysis — correlation matrix, avg
+pairwise correlation, most/least correlated pair, and the Choueifaty-Coignard
+diversification ratio; a ratio near 1.0 means little diversification benefit
+even with many holdings).
 
 Your only job is statistical structure analysis — never run a price/strategy
 backtest (that belongs to the Backtest Agent) and never size a position.
@@ -82,6 +92,7 @@ your tool calls.""",
             "run_walk_forward_backtest", "get_backtest_diagnostics",
             "run_portfolio_simulation", "run_pair_trade_backtest",
             "get_robustness_diagnostics", "run_backtest_compact",
+            "run_monte_carlo_simulation",
         ],
         "system_prompt": """You are a backtesting specialist for the library's BUILT-IN indicator
 strategies: SMA crossover, RSI mean-reversion, MACD crossover, Bollinger
@@ -106,7 +117,13 @@ substitute for run_walk_forward_backtest's out-of-sample validation), and a
 compact result shape (run_backtest_compact — same built-in strategies as
 run_sma_backtest etc., but returns summary/risk/exposure/cost sub-reports
 plus equity-curve/trade-log artifact URIs instead of the full data inline;
-prefer this when the caller doesn't need the raw equity curve/trade log).
+prefer this when the caller doesn't need the raw equity curve/trade log),
+and Monte Carlo forward simulation (run_monte_carlo_simulation — projects
+possible future equity paths via moving-block bootstrap of a portfolio's
+historical returns; unlike get_robustness_diagnostics (same-sample
+confidence check) or run_walk_forward_backtest (tests actual historical
+decisions), this is a forward-looking projection from historical
+statistics, not a prediction or a validation of any strategy).
 
 IMPORTANT: if a request comes with a signal someone else already computed (an
 explicit list or map of values, not "find me a good strategy"), that is NOT
@@ -135,7 +152,10 @@ Report the exact statistics from the tool call. Never size a position.""",
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing Agent",
         "description": "Portfolio risk decomposition (MCR/PCA/factor) and ATR/Kelly position sizing.",
-        "tools": ["get_portfolio_risk_attribution", "get_position_size", "get_capacity_report"],
+        "tools": [
+            "get_portfolio_risk_attribution", "get_position_size", "get_capacity_report",
+            "run_stress_test", "get_liquidity_metrics",
+        ],
         "system_prompt": """You are a portfolio risk decomposition and position sizing specialist.
 get_portfolio_risk_attribution: marginal risk contribution, PCA variance
 decomposition, optional factor model for a weighted multi-asset portfolio.
@@ -144,10 +164,22 @@ given account equity and (optionally) a strategy's win rate / avg win / avg loss
 get_capacity_report: how much account size a target-weight portfolio can
 support before positions become too large relative to each ticker's own
 trading volume (ADV-based), plus days-to-liquidate and sector exposure.
+run_stress_test: replay a portfolio's weights against a named historical
+crash window (black_monday_1987, dotcom_2000, gfc_2008, volmageddon_2018,
+covid_2020, rate_shock_2022, or a custom date range) using each ticker's
+own real historical returns — "how would my current allocation have fared
+during X." A ticker without data that far back is reported in
+tickers_missing_data, not treated as a failure.
+get_liquidity_metrics: Amihud illiquidity ratio and Corwin-Schultz spread
+estimator per ticker — OHLCV-derived proxies for how much a given trade
+size would move the price and how wide the effective bid/ask spread likely
+is, since no real bid/ask data exists in this library. Higher Amihud value
+= less liquid.
 
-Your only job is risk decomposition, position sizing, and capacity
-analysis. If asked for a backtest or fundamental screen, say plainly that
-it's out of scope for this agent.""",
+Your only job is risk decomposition, position sizing, capacity analysis,
+historical stress-test replay, and liquidity analysis. If asked for a
+backtest or fundamental screen, say plainly that it's out of scope for
+this agent.""",
     },
 }
 

@@ -1,8 +1,8 @@
 # Advanced Agent Tools
 
-Twenty high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Twenty-five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 34), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 39), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -47,6 +47,16 @@ Twenty high-level agentic tools that compose the library's existing primitives i
 | `get_capacity_report` | Max account size a target-weight portfolio can support before positions move their own market | `max_account_size`, `binding_ticker`, `days_to_liquidate_at_capacity` |
 | `get_data_quality_report` | Dataset provenance plus missing-bar/stale-price/price-jump detection on fetched OHLCV | `metadata`, `missing_bars`, `stale_price_runs`, `price_jumps` |
 | `run_backtest_compact` | Same four built-in strategies as `run_sma_backtest` etc., but returns a compact summary/risk/exposure/cost result with artifact URIs instead of the inline equity curve/trade log | `summary`, `risk`, `exposure`, `costs`, `equity_curve_uri` |
+
+**Analytics tools (5)**
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `get_volatility_estimators` | Parkinson, Garman-Klass, and Yang-Zhang realized volatility vs. plain close-to-close | `parkinson_annualized`, `garman_klass_annualized`, `yang_zhang_annualized`, `yang_zhang_vs_close_to_close_ratio` |
+| `get_correlation_analysis` | Correlation matrix, avg pairwise correlation, most/least correlated pair, diversification ratio | `correlation_matrix`, `avg_pairwise_correlation`, `diversification_ratio` |
+| `run_monte_carlo_simulation` | Block-bootstrap projection of a portfolio's possible future equity paths | `terminal_median`, `prob_loss`, `equity_band_p5/p50/p95` |
+| `run_stress_test` | Replay a portfolio's weights against a named historical crash window using real historical returns | `portfolio_return_pct`, `max_drawdown_pct`, `tickers_missing_data` |
+| `get_liquidity_metrics` | Amihud illiquidity ratio and Corwin-Schultz spread estimator per ticker | `per_ticker[ticker].amihud_illiquidity`, `per_ticker[ticker].corwin_schultz_spread_bps` |
 
 ---
 
@@ -2267,3 +2277,290 @@ exposing those would need an event-driven execution engine, which
 loop exists to consume it). `costs` reports cost **drag as a fraction of
 capital**, not a dollarized total, since `run_strategy` operates on
 returns, not share counts/notional.
+
+---
+
+## 21. Realized Volatility Estimators
+
+`get_volatility_estimators` reports three OHLC-based realized-volatility estimators — Parkinson, Garman-Klass, and Yang-Zhang — alongside plain close-to-close volatility (`metrics.annualized_volatility`) for comparison. All three use only the High/Low/Open/Close already fetched for every symbol; no new data source is required.
+
+Each estimator makes a different tradeoff:
+- **Parkinson** — uses only High/Low. More efficient than close-to-close (lower estimator variance for the same window), but assumes no drift and is blind to overnight gaps entirely (it never looks at Close).
+- **Garman-Klass** — adds the open-to-close term to Parkinson. Slightly more efficient still, but like Parkinson it's contaminated by (not aware of) large overnight gaps.
+- **Yang-Zhang** — decomposes variance into an overnight (close-to-open) component, an open-to-close component, and a drift-independent Rogers-Satchell component. The only one of the three that explicitly isolates overnight gap risk rather than ignoring or being distorted by it — generally the most reliable for real equities, which routinely gap overnight on earnings/news.
+
+```python
+from standard_quant_tools.agent.tools import get_volatility_estimators
+from standard_quant_tools.agent.models import VolatilityEstimatorsInput
+
+result = get_volatility_estimators(VolatilityEstimatorsInput(
+    symbol="AAPL",
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    period=20,
+))
+
+print(f"Symbol                   : {result.symbol}")
+print(f"Close-to-close vol       : {result.close_to_close_annualized:.2%}")
+print(f"Parkinson vol            : {result.parkinson_annualized:.2%}")
+print(f"Garman-Klass vol         : {result.garman_klass_annualized:.2%}")
+print(f"Yang-Zhang vol           : {result.yang_zhang_annualized:.2%}")
+print(f"Yang-Zhang / close ratio : {result.yang_zhang_vs_close_to_close_ratio:.2f}")
+```
+
+**VolatilityEstimatorsInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `period` | int | `20` | Rolling window (bars) for every estimator; must be > 1 |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | `str` | Ticker |
+| `period` | `int` | Rolling window used |
+| `close_to_close_annualized` | `float` | Plain close-to-close annualized volatility, for comparison |
+| `parkinson_annualized` | `float` | Parkinson (1980) high-low estimator, annualized |
+| `garman_klass_annualized` | `float` | Garman-Klass (1980) OHLC estimator, annualized |
+| `yang_zhang_annualized` | `float` | Yang-Zhang (2000) estimator, annualized |
+| `yang_zhang_vs_close_to_close_ratio` | `float` | `yang_zhang_annualized / close_to_close_annualized` — a ratio well above 1.0 flags a symbol whose true volatility (including overnight gap risk) is understated by close-to-close alone |
+
+**Interpreting the ratio:**
+
+A `yang_zhang_vs_close_to_close_ratio` near 1.0 means overnight gaps aren't contributing much beyond what close-to-close already captures — the symbol trades in a fairly continuous way session-to-session. A ratio well above 1.0 (e.g. a stock with frequent earnings gaps or thin after-hours liquidity) means close-to-close volatility is understating real risk; size positions and set stops using the Yang-Zhang figure, not the close-to-close one, for such names.
+
+---
+
+## 22. Correlation & Diversification Analytics
+
+`get_correlation_analysis` reports the full pairwise correlation matrix for a universe, the average pairwise correlation, the most and least correlated pair, and the Choueifaty-Coignard (2008) diversification ratio — how much of each holding's individual risk is actually being diversified away by the others.
+
+The diversification ratio is `(weighted-average individual volatility) / (portfolio volatility)`. By construction it's always >= 1.0: a ratio of exactly 1.0 means the assets are perfectly correlated (holding more names buys zero risk reduction); a higher ratio means real diversification benefit. It uses equal weighting by default, or the `weights` you supply.
+
+```python
+from standard_quant_tools.agent.tools import get_correlation_analysis
+from standard_quant_tools.agent.models import CorrelationAnalysisInput
+
+result = get_correlation_analysis(CorrelationAnalysisInput(
+    tickers=["AAPL", "MSFT", "GOOGL", "AMZN"],
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+))
+
+print(f"Avg pairwise correlation : {result.avg_pairwise_correlation:.3f}")
+print(f"Most correlated pair     : {result.highest_correlated_pair}")
+print(f"Least correlated pair    : {result.lowest_correlated_pair}")
+print(f"Diversification ratio    : {result.diversification_ratio:.2f}")
+```
+
+**CorrelationAnalysisInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tickers` | List[str] | — | Universe of tickers, at least 2 |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `weights` | Optional[List[float]] | `None` | Weights for the diversification ratio (same order as `tickers`, must sum to 1.0); `None` uses equal weighting |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `tickers` | `List[str]` | Universe, in input order |
+| `correlation_matrix` | `Dict[str, Dict[str, float]]` | Full Pearson correlation matrix, ticker → ticker → correlation |
+| `avg_pairwise_correlation` | `float` | Mean of every off-diagonal pair (each pair counted once) |
+| `highest_correlated_pair` | `Dict[str, Any]` | `{"a": ..., "b": ..., "correlation": ...}` for the most correlated off-diagonal pair |
+| `lowest_correlated_pair` | `Dict[str, Any]` | Same shape, for the least correlated (or most negatively correlated) pair |
+| `diversification_ratio` | `float` | Choueifaty-Coignard ratio; >= 1.0, higher is more diversified |
+
+**Interpreting the results:**
+
+A high `avg_pairwise_correlation` (say, > 0.7) alongside a `diversification_ratio` near 1.0 is a concentration warning even if the position count looks diversified — e.g. five large-cap tech names that all move together in a risk-off selloff. Use `highest_correlated_pair` to find redundant pairs worth consolidating, and `lowest_correlated_pair` (especially if negative) to find genuine hedges. Pair this with `run_pca_analysis` for a complementary view: PCA's `explained_variance_ratio["PC1"]` dominating the decomposition is the same "hidden concentration" signal from a different angle.
+
+---
+
+## 23. Monte Carlo Forward Simulation
+
+`run_monte_carlo_simulation` projects a portfolio's possible future equity paths using a moving-block bootstrap of its own historical daily returns — overlapping blocks of consecutive returns are resampled with replacement and concatenated to the requested horizon, preserving the real distribution's shape, fat tails, and short-range autocorrelation (unlike a parametric normal-distribution assumption). This is a **forward-looking projection from historical statistics, not a prediction** — it answers "given how this portfolio has actually behaved, what's the plausible range of outcomes going forward," not "what will happen."
+
+This is a different question from `get_robustness_diagnostics` (a same-sample confidence check on a backtest's Sharpe ratio) and `run_walk_forward_backtest` (which validates a strategy's actual historical decisions out-of-sample) — Monte Carlo here doesn't test any strategy or decision at all, it simulates the portfolio's own historical return-generating process forward in time.
+
+```python
+from standard_quant_tools.agent.tools import run_monte_carlo_simulation
+from standard_quant_tools.agent.models import MonteCarloSimulationInput
+
+result = run_monte_carlo_simulation(MonteCarloSimulationInput(
+    tickers=["AAPL", "MSFT", "GOOGL"],
+    start_date="2021-01-01",
+    end_date="2024-01-01",
+    horizon_days=252,       # ~1 year forward
+    n_simulations=2000,
+    initial_capital=100_000.0,
+    random_seed=42,          # reproducible, recorded in the audit trail
+))
+
+print(f"Median terminal value : ${result.terminal_median:,.0f}")
+print(f"5th percentile         : ${result.terminal_p5:,.0f}")
+print(f"95th percentile        : ${result.terminal_p95:,.0f}")
+print(f"Probability of loss    : {result.prob_loss:.1%}")
+print(f"Simulated VaR 95%      : {result.terminal_var_95:.2%}")
+print(f"Simulated CVaR 95%     : {result.terminal_cvar_95:.2%}")
+```
+
+**MonteCarloSimulationInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tickers` | List[str] | — | Portfolio tickers |
+| `weights` | Optional[List[float]] | `None` | Portfolio weights, same order as tickers, must sum to 1.0; `None` uses equal weighting |
+| `start_date` | str | — | Historical window start used to estimate the return distribution |
+| `end_date` | str | — | Historical window end |
+| `horizon_days` | int | `252` | Forward bars to simulate per path (1–2520) |
+| `n_simulations` | int | `1000` | Independent simulated paths (100–20,000) |
+| `block_size` | int | `20` | Block length (bars) for the bootstrap resample |
+| `initial_capital` | float | `10000.0` | Starting capital for every simulated path |
+| `random_seed` | Optional[int] | `None` | RNG seed for reproducibility |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `terminal_median` | `float` | Median simulated ending equity across all paths |
+| `terminal_p5` / `terminal_p95` | `float` | 5th/95th percentile ending equity |
+| `prob_loss` | `float` | Fraction of simulated paths ending below `initial_capital` |
+| `terminal_var_95` | `float` | VaR 95% of the simulated terminal-return distribution (positive = loss magnitude) |
+| `terminal_cvar_95` | `float` | CVaR 95% — expected loss in the worst 5% of simulated outcomes |
+| `equity_band_p5` / `equity_band_p50` / `equity_band_p95` | `List[float]` | Per-day percentile equity curves across all simulations, length `horizon_days` — plot these three together for a classic "fan chart" |
+
+**Interpreting the results:**
+
+A wide gap between `equity_band_p5` and `equity_band_p95` at the horizon means high uncertainty in the outcome — expected for volatile, concentrated portfolios. `prob_loss` well above 50% combined with a `terminal_median` below `initial_capital` means the portfolio's own historical return distribution, if it continues, more often loses money than not over this horizon — a signal to revisit the allocation, not just the horizon length. Because resampling draws from the SAME historical window every time, a short or unusually calm/volatile `start_date`–`end_date` range will bias every simulated path accordingly — use a window long enough to capture at least one full market cycle when the conclusion matters.
+
+---
+
+## 24. Historical Stress-Test Replay
+
+`run_stress_test` replays a portfolio's weights against a named historical crash window using each ticker's own **real historical returns** for that window — not a synthetic shock applied uniformly to every position. "How would my current allocation have fared during the 2008 financial crisis" using the actual day-by-day returns those specific tickers experienced.
+
+Six built-in named scenarios are available (`list_stress_scenarios()` in `backtest/stress_test.py` for the full registry), or supply `scenario="custom"` with your own `custom_start_date`/`custom_end_date`:
+
+| Scenario | Window |
+|---|---|
+| `black_monday_1987` | 1987-10-14 → 1987-10-19 |
+| `dotcom_2000` | 2000-03-24 → 2002-10-09 |
+| `gfc_2008` (default) | 2008-09-01 → 2009-03-09 |
+| `volmageddon_2018` | 2018-01-26 → 2018-02-09 |
+| `covid_2020` | 2020-02-19 → 2020-03-23 |
+| `rate_shock_2022` | 2022-01-03 → 2022-10-12 |
+
+These are well-known, widely-cited approximate peak/trough windows, not academically precise event-study boundaries.
+
+A ticker with no data that far back (it hadn't listed yet, or the provider has no history for it) is reported in `tickers_missing_data` rather than failing the whole call — the replay proceeds on the remaining tickers, with their weights re-normalized to preserve relative proportions (a missing ticker is excluded, not silently treated as if it had earned a 0% return).
+
+```python
+from standard_quant_tools.agent.tools import run_stress_test
+from standard_quant_tools.agent.models import StressTestInput
+
+result = run_stress_test(StressTestInput(
+    tickers=["AAPL", "MSFT", "GOOGL"],
+    scenario="covid_2020",
+))
+
+print(f"Scenario           : {result.scenario} ({result.scenario_start_date} → {result.scenario_end_date})")
+print(f"Portfolio return    : {result.portfolio_return_pct:.1%}")
+print(f"Max drawdown        : {result.max_drawdown_pct:.1%}")
+print(f"Worst day           : {result.worst_day_return_pct:.1%} on {result.worst_day_date}")
+if result.tickers_missing_data:
+    print(f"No data for         : {result.tickers_missing_data}")
+
+# Custom date range instead of a named scenario:
+custom = run_stress_test(StressTestInput(
+    tickers=["AAPL", "MSFT"],
+    scenario="custom",
+    custom_start_date="2022-01-01",
+    custom_end_date="2022-06-30",
+))
+```
+
+**StressTestInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tickers` | List[str] | — | Portfolio asset symbols |
+| `weights` | Optional[List[float]] | `None` | Portfolio weights, same order as tickers, must sum to 1.0; `None` uses equal weighting |
+| `scenario` | Literal[...] | `"gfc_2008"` | One of the six named scenarios above, or `"custom"` |
+| `custom_start_date` | Optional[str] | `None` | Required (YYYY-MM-DD) when `scenario="custom"` |
+| `custom_end_date` | Optional[str] | `None` | Required (YYYY-MM-DD) when `scenario="custom"` |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `scenario` | `str` | Scenario name used |
+| `scenario_start_date` / `scenario_end_date` | `str` | Resolved window dates |
+| `tickers_used` | `List[str]` | Tickers that had data for this window and were included in the replay |
+| `tickers_missing_data` | `List[str]` | Tickers with no data for this window — not an error, just excluded |
+| `portfolio_return_pct` | `float` | Total portfolio return over the scenario window |
+| `max_drawdown_pct` | `float` | Worst peak-to-trough decline within the window |
+| `worst_day_return_pct` / `worst_day_date` | `float` / `str` | Single worst trading day and its return |
+| `best_day_return_pct` / `best_day_date` | `float` / `str` | Single best trading day and its return |
+| `n_trading_days` | `int` | Number of overlapping trading days actually used |
+
+**Interpreting the results:**
+
+Compare `max_drawdown_pct` here against a portfolio's own backtest max drawdown (e.g. from `run_portfolio_simulation`) to see whether the current allocation would have been more or less painful than its typical historical drawdown during an actual crisis. A non-empty `tickers_missing_data` for an older scenario (e.g. a stock that IPO'd after 2010 tested against `gfc_2008`) is expected, not a bug — the reported metrics reflect only `tickers_used`, so interpret them as "what the survivors of this portfolio would have experienced," not the full current allocation.
+
+---
+
+## 25. Liquidity / Microstructure Proxies
+
+`get_liquidity_metrics` reports two academic liquidity proxies per ticker, derived purely from OHLCV since this library has no real bid/ask quote data:
+
+- **Amihud (2002) illiquidity ratio** — rolling mean of `|daily return| / dollar volume`. Higher means a given dollar volume moves the price more (less liquid). This is different from `backtest.costs.pct_of_range_spread` (a simpler High-Low-range proxy already used for market-impact cost modeling elsewhere in this library) — Amihud specifically measures price impact per unit of trading volume, not the bar's own range.
+- **Corwin-Schultz (2012) spread estimator** — the actual named academic high-low spread estimator (not the range proxy above), using consecutive-day pairs of High/Low ranges to back out an implied bid/ask spread. Reported in basis points.
+
+```python
+from standard_quant_tools.agent.tools import get_liquidity_metrics
+from standard_quant_tools.agent.models import LiquidityAnalysisInput
+
+result = get_liquidity_metrics(LiquidityAnalysisInput(
+    tickers=["AAPL", "GME", "SPY"],
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    window=20,
+))
+
+for ticker, metrics in result.per_ticker.items():
+    print(f"{ticker}: ADV=${metrics['avg_dollar_volume']:,.0f}  "
+          f"Amihud={metrics['amihud_illiquidity']:.4f}  "
+          f"CS spread={metrics['corwin_schultz_spread_bps']:.1f}bps")
+
+print(f"Least liquid : {result.least_liquid_ticker}")
+print(f"Most liquid  : {result.most_liquid_ticker}")
+```
+
+**LiquidityAnalysisInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tickers` | List[str] | — | Tickers to analyze |
+| `start_date` | str | — | ISO date |
+| `end_date` | str | — | ISO date |
+| `window` | int | `20` | Rolling window (bars) for both proxies |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `tickers` | `List[str]` | Universe, in input order |
+| `per_ticker` | `Dict[str, Dict[str, float]]` | Per ticker: `avg_dollar_volume`, `amihud_illiquidity`, `corwin_schultz_spread_bps` |
+| `least_liquid_ticker` | `str` | Highest Amihud illiquidity in the universe |
+| `most_liquid_ticker` | `str` | Lowest Amihud illiquidity in the universe |
+
+**Interpreting the results:**
+
+Use `least_liquid_ticker`/`most_liquid_ticker` alongside `get_capacity_report` when sizing positions — a name flagged here as illiquid is exactly the kind of ticker `get_capacity_report`'s ADV-participation constraint should be tightened for. A wide `corwin_schultz_spread_bps` combined with a small `avg_dollar_volume` is a double warning: the position will both cost more to enter/exit (spread) and move the market more per dollar traded (Amihud) than a comparable liquid name.

@@ -218,6 +218,17 @@ def _is_historical(end_date: Union[str, datetime, _date]) -> bool:
 
 class YFinanceProvider(DataProvider):
 
+    def __init__(self) -> None:
+        # A stable per-instance token for scoping the session cache (see
+        # get_ohlcv below) — deliberately NOT id(self): CPython reuses an
+        # object's id() once it's garbage collected, so two unrelated,
+        # sequentially-created provider instances can end up with the exact
+        # same id() if the first is freed before the second is allocated
+        # (observed intermittently under full-test-suite memory churn,
+        # never in isolation) — a UUID has no such collision risk regardless
+        # of allocator behavior.
+        self._instance_token = uuid.uuid4()
+
     def get_ohlcv(
         self,
         symbol: str,
@@ -239,14 +250,15 @@ class YFinanceProvider(DataProvider):
 
         start_str = _norm_date(start_date)
         end_str = _norm_date(end_date)
-        # Keyed by id(self) (not just the call args) to match the previous
-        # @cached(_session_cache) decorator's default hashkey, which included
-        # self — a fresh provider instance must NOT transparently reuse
-        # another instance's cached result (e.g. audit replay constructs a
-        # fresh provider specifically to re-read from disk/network and
-        # detect tampering; sharing the cache across instances would mask
-        # that a cached Parquet file was altered after the original fetch).
-        cache_key = (id(self), symbol, start_str, end_str, interval)
+        # Keyed by self._instance_token (not just the call args) to match
+        # the previous @cached(_session_cache) decorator's default hashkey,
+        # which included self — a fresh provider instance must NOT
+        # transparently reuse another instance's cached result (e.g. audit
+        # replay constructs a fresh provider specifically to re-read from
+        # disk/network and detect tampering; sharing the cache across
+        # instances would mask that a cached Parquet file was altered after
+        # the original fetch).
+        cache_key = (self._instance_token, symbol, start_str, end_str, interval)
 
         cached_df = _session_cache.get(cache_key)
         if cached_df is not None:

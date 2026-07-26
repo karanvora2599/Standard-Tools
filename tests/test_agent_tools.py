@@ -13,16 +13,24 @@ from standard_quant_tools.agent.models import (
     FactorRegressionInput,
     HurstInput,
     PCAInput,
+    CorrelationAnalysisInput,
+    LiquidityAnalysisInput,
+    MonteCarloSimulationInput,
     PortfolioInput,
     ScreenerInput,
+    StressTestInput,
     TechnicalInput,
+    VolatilityEstimatorsInput,
 )
 from standard_quant_tools.agent.tools import (
     analyze_stock_risk,
     compare_strategies,
     get_agent_tools,
+    get_correlation_analysis,
+    get_liquidity_metrics,
     get_portfolio_analysis,
     get_technical_analysis,
+    get_volatility_estimators,
     run_backtest_optimization,
     run_bollinger_backtest,
     run_buy_and_hold,
@@ -30,10 +38,12 @@ from standard_quant_tools.agent.tools import (
     run_factor_regression,
     run_hurst_analysis,
     run_macd_backtest,
+    run_monte_carlo_simulation,
     run_pca_analysis,
     run_rsi_backtest,
     run_screener,
     run_sma_backtest,
+    run_stress_test,
 )
 from standard_quant_tools.data.factory import DataFactory
 
@@ -97,9 +107,9 @@ class TestSanitizeForJson:
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_thirty_four_tools(self):
+    def test_returns_list_of_thirty_nine_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 34
+        assert len(tools) == 39
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -697,6 +707,336 @@ class TestRunHurstAnalysis:
         fracs = result.rolling_regime_fractions
         assert set(fracs.keys()) == {"trending", "random_walk", "mean_reverting"}
         assert abs(sum(fracs.values()) - 1.0) < 0.01
+
+
+class TestGetVolatilityEstimators:
+    def test_returns_result_for_symbol(self, patched_factory):
+        inp = VolatilityEstimatorsInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_volatility_estimators(inp)
+        assert result.symbol == "AAPL"
+        assert result.period == 20
+
+    def test_all_volatility_fields_nonnegative(self, patched_factory):
+        inp = VolatilityEstimatorsInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_volatility_estimators(inp)
+        assert result.close_to_close_annualized >= 0.0
+        assert result.parkinson_annualized >= 0.0
+        assert result.garman_klass_annualized >= 0.0
+        assert result.yang_zhang_annualized >= 0.0
+
+    def test_ratio_is_yang_zhang_over_close_to_close(self, patched_factory):
+        """
+        The ratio is computed from the raw (unrounded) values inside the
+        tool, not by dividing the two already-rounded (6dp) output fields --
+        so recomputing it from those rounded fields only agrees to within
+        rounding-composition error, not exactly.
+        """
+        inp = VolatilityEstimatorsInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_volatility_estimators(inp)
+        expected = result.yang_zhang_annualized / result.close_to_close_annualized
+        assert result.yang_zhang_vs_close_to_close_ratio == pytest.approx(
+            expected, abs=1e-3
+        )
+
+    def test_custom_period_respected(self, patched_factory):
+        inp = VolatilityEstimatorsInput(
+            symbol="AAPL", start_date=START, end_date=END, period=10
+        )
+        result = get_volatility_estimators(inp)
+        assert result.period == 10
+
+    def test_invalid_period_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            VolatilityEstimatorsInput(
+                symbol="AAPL", start_date=START, end_date=END, period=1
+            )
+
+
+class TestGetCorrelationAnalysis:
+    """
+    patched_factory's mock provider returns the identical sample_ohlcv for
+    every ticker regardless of symbol -- so every pair is perfectly
+    correlated here (avg/highest/lowest all == 1.0, diversification_ratio
+    == 1.0). That's expected given the shared fixture, not a bug; these
+    tests assert on that known structure rather than assuming variation.
+    """
+
+    def test_returns_result_for_tickers(self, patched_factory):
+        inp = CorrelationAnalysisInput(
+            tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END
+        )
+        result = get_correlation_analysis(inp)
+        assert result.tickers == ["AAPL", "MSFT", "GOOGL"]
+
+    def test_correlation_matrix_has_all_tickers_as_keys(self, patched_factory):
+        inp = CorrelationAnalysisInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END
+        )
+        result = get_correlation_analysis(inp)
+        assert set(result.correlation_matrix.keys()) == {"AAPL", "MSFT"}
+        assert set(result.correlation_matrix["AAPL"].keys()) == {"AAPL", "MSFT"}
+
+    def test_diagonal_is_one(self, patched_factory):
+        inp = CorrelationAnalysisInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END
+        )
+        result = get_correlation_analysis(inp)
+        assert result.correlation_matrix["AAPL"]["AAPL"] == pytest.approx(1.0)
+        assert result.correlation_matrix["MSFT"]["MSFT"] == pytest.approx(1.0)
+
+    def test_identical_mock_data_yields_full_correlation(self, patched_factory):
+        inp = CorrelationAnalysisInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END
+        )
+        result = get_correlation_analysis(inp)
+        assert result.avg_pairwise_correlation == pytest.approx(1.0)
+        assert result.highest_correlated_pair["correlation"] == pytest.approx(1.0)
+        assert result.lowest_correlated_pair["correlation"] == pytest.approx(1.0)
+        assert result.diversification_ratio == pytest.approx(1.0)
+
+    def test_highest_and_lowest_pair_ticker_membership(self, patched_factory):
+        inp = CorrelationAnalysisInput(
+            tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END
+        )
+        result = get_correlation_analysis(inp)
+        assert {
+            result.highest_correlated_pair["a"],
+            result.highest_correlated_pair["b"],
+        } <= {"AAPL", "MSFT", "GOOGL"}
+
+    def test_too_few_tickers_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            CorrelationAnalysisInput(
+                tickers=["AAPL"], start_date=START, end_date=END
+            )
+
+    def test_custom_weights_accepted(self, patched_factory):
+        inp = CorrelationAnalysisInput(
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
+            weights=[0.3, 0.7],
+        )
+        result = get_correlation_analysis(inp)
+        assert result.diversification_ratio == pytest.approx(1.0)
+
+
+class TestRunMonteCarloSimulation:
+    def test_returns_result_for_tickers(self, patched_factory):
+        inp = MonteCarloSimulationInput(
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
+            horizon_days=30,
+            n_simulations=200,
+            random_seed=1,
+        )
+        result = run_monte_carlo_simulation(inp)
+        assert result.tickers == ["AAPL", "MSFT"]
+        assert result.horizon_days == 30
+        assert result.n_simulations == 200
+
+    def test_equity_bands_have_horizon_length(self, patched_factory):
+        inp = MonteCarloSimulationInput(
+            tickers=["AAPL"],
+            start_date=START,
+            end_date=END,
+            horizon_days=45,
+            n_simulations=200,
+            random_seed=2,
+        )
+        result = run_monte_carlo_simulation(inp)
+        assert len(result.equity_band_p5) == 45
+        assert len(result.equity_band_p50) == 45
+        assert len(result.equity_band_p95) == 45
+
+    def test_bands_ordered(self, patched_factory):
+        inp = MonteCarloSimulationInput(
+            tickers=["AAPL"],
+            start_date=START,
+            end_date=END,
+            horizon_days=30,
+            n_simulations=500,
+            random_seed=3,
+        )
+        result = run_monte_carlo_simulation(inp)
+        for p5, p50, p95 in zip(
+            result.equity_band_p5, result.equity_band_p50, result.equity_band_p95
+        ):
+            assert p5 <= p50 <= p95
+
+    def test_prob_loss_bounded(self, patched_factory):
+        inp = MonteCarloSimulationInput(
+            tickers=["AAPL"],
+            start_date=START,
+            end_date=END,
+            horizon_days=30,
+            n_simulations=200,
+            random_seed=4,
+        )
+        result = run_monte_carlo_simulation(inp)
+        assert 0.0 <= result.prob_loss <= 1.0
+
+    def test_reproducible_with_same_seed(self, patched_factory):
+        kwargs = dict(
+            tickers=["AAPL"],
+            start_date=START,
+            end_date=END,
+            horizon_days=30,
+            n_simulations=200,
+            random_seed=42,
+        )
+        r1 = run_monte_carlo_simulation(MonteCarloSimulationInput(**kwargs))
+        r2 = run_monte_carlo_simulation(MonteCarloSimulationInput(**kwargs))
+        assert r1.terminal_median == r2.terminal_median
+        assert r1.equity_band_p50 == r2.equity_band_p50
+
+    def test_invalid_horizon_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            MonteCarloSimulationInput(
+                tickers=["AAPL"], start_date=START, end_date=END, horizon_days=0
+            )
+
+    def test_too_few_simulations_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            MonteCarloSimulationInput(
+                tickers=["AAPL"], start_date=START, end_date=END, n_simulations=10
+            )
+
+
+class TestRunStressTest:
+    """
+    patched_factory's mock provider returns sample_ohlcv for every ticker
+    regardless of symbol/date range, so every requested ticker "has data"
+    for every scenario here -- tickers_missing_data is expected to be empty
+    under this fixture; a real provider would populate it for tickers that
+    didn't exist yet during an old scenario window.
+    """
+
+    def test_default_scenario_is_gfc_2008(self, patched_factory):
+        inp = StressTestInput(tickers=["AAPL", "MSFT"])
+        result = run_stress_test(inp)
+        assert result.scenario == "gfc_2008"
+        assert result.scenario_start_date == "2008-09-01"
+        assert result.scenario_end_date == "2009-03-09"
+
+    def test_named_scenario_dates_reported(self, patched_factory):
+        inp = StressTestInput(tickers=["AAPL"], scenario="covid_2020")
+        result = run_stress_test(inp)
+        assert result.scenario_start_date == "2020-02-19"
+        assert result.scenario_end_date == "2020-03-23"
+
+    def test_all_tickers_used_under_mock_data(self, patched_factory):
+        inp = StressTestInput(tickers=["AAPL", "MSFT", "GOOGL"])
+        result = run_stress_test(inp)
+        assert set(result.tickers_used) == {"AAPL", "MSFT", "GOOGL"}
+        assert result.tickers_missing_data == []
+
+    def test_max_drawdown_nonpositive(self, patched_factory):
+        inp = StressTestInput(tickers=["AAPL"], scenario="dotcom_2000")
+        result = run_stress_test(inp)
+        assert result.max_drawdown_pct <= 0.0
+
+    def test_worst_day_return_le_best_day_return(self, patched_factory):
+        inp = StressTestInput(tickers=["AAPL"], scenario="volmageddon_2018")
+        result = run_stress_test(inp)
+        assert result.worst_day_return_pct <= result.best_day_return_pct
+
+    def test_custom_scenario_requires_custom_dates(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            StressTestInput(tickers=["AAPL"], scenario="custom")
+
+    def test_custom_scenario_with_dates_accepted(self, patched_factory):
+        inp = StressTestInput(
+            tickers=["AAPL"],
+            scenario="custom",
+            custom_start_date="2015-01-01",
+            custom_end_date="2015-03-01",
+        )
+        result = run_stress_test(inp)
+        assert result.scenario_start_date == "2015-01-01"
+        assert result.scenario_end_date == "2015-03-01"
+
+    def test_unknown_named_scenario_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            StressTestInput(tickers=["AAPL"], scenario="not_a_real_crash")
+
+    def test_mismatched_weights_length_rejected(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            StressTestInput(tickers=["AAPL", "MSFT"], weights=[1.0])
+
+
+class TestGetLiquidityMetrics:
+    def test_returns_result_for_tickers(self, patched_factory):
+        inp = LiquidityAnalysisInput(
+            tickers=["AAPL", "MSFT"], start_date=START, end_date=END
+        )
+        result = get_liquidity_metrics(inp)
+        assert result.tickers == ["AAPL", "MSFT"]
+        assert set(result.per_ticker.keys()) == {"AAPL", "MSFT"}
+
+    def test_per_ticker_fields_present(self, patched_factory):
+        inp = LiquidityAnalysisInput(
+            tickers=["AAPL"], start_date=START, end_date=END
+        )
+        result = get_liquidity_metrics(inp)
+        fields = result.per_ticker["AAPL"]
+        assert set(fields.keys()) == {
+            "avg_dollar_volume",
+            "amihud_illiquidity",
+            "corwin_schultz_spread_bps",
+        }
+
+    def test_amihud_illiquidity_nonnegative(self, patched_factory):
+        inp = LiquidityAnalysisInput(
+            tickers=["AAPL"], start_date=START, end_date=END
+        )
+        result = get_liquidity_metrics(inp)
+        assert result.per_ticker["AAPL"]["amihud_illiquidity"] >= 0.0
+
+    def test_corwin_schultz_spread_nonnegative(self, patched_factory):
+        inp = LiquidityAnalysisInput(
+            tickers=["AAPL"], start_date=START, end_date=END
+        )
+        result = get_liquidity_metrics(inp)
+        assert result.per_ticker["AAPL"]["corwin_schultz_spread_bps"] >= 0.0
+
+    def test_least_and_most_liquid_are_valid_tickers(self, patched_factory):
+        inp = LiquidityAnalysisInput(
+            tickers=["AAPL", "MSFT", "GOOGL"], start_date=START, end_date=END
+        )
+        result = get_liquidity_metrics(inp)
+        assert result.least_liquid_ticker in {"AAPL", "MSFT", "GOOGL"}
+        assert result.most_liquid_ticker in {"AAPL", "MSFT", "GOOGL"}
+
+    def test_custom_window_respected(self, patched_factory):
+        inp = LiquidityAnalysisInput(
+            tickers=["AAPL"], start_date=START, end_date=END, window=10
+        )
+        result = get_liquidity_metrics(inp)
+        assert result.tickers == ["AAPL"]
+
+    def test_invalid_window_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            LiquidityAnalysisInput(
+                tickers=["AAPL"], start_date=START, end_date=END, window=0
+            )
 
 
 class TestGetTechnicalAnalysisExtended:

@@ -34,10 +34,14 @@ from standard_quant_tools.agent.models import (
     BuyAndHoldInput,
     CapacityReportInput,
     CapacityReportResult,
+    LiquidityAnalysisInput,
+    LiquidityAnalysisResult,
     CointegrationInput,
     CointegrationResult,
     CompareStrategiesInput,
     CompareStrategiesResult,
+    CorrelationAnalysisInput,
+    CorrelationAnalysisResult,
     CostSummary,
     CustomSignalBacktestInput,
     DataQualityReportInput,
@@ -54,6 +58,8 @@ from standard_quant_tools.agent.models import (
     HurstInput,
     HurstResult,
     MissingBar,
+    MonteCarloSimulationInput,
+    MonteCarloSimulationResult,
     OptimizationRun,
     PairFailure,
     PairResult,
@@ -88,6 +94,8 @@ from standard_quant_tools.agent.models import (
     ScreenerResult,
     SignalPanelBacktestInput,
     SignalPanelBacktestResult,
+    StressTestInput,
+    StressTestResult,
     SignalType,
     StalePriceRun,
     StrategyComparison,
@@ -95,6 +103,8 @@ from standard_quant_tools.agent.models import (
     TechnicalResult,
     Trade,
     TradeDiagnostics,
+    VolatilityEstimatorsInput,
+    VolatilityEstimatorsResult,
     WalkForwardInput,
     WalkForwardResult,
     WalkForwardWindow,
@@ -103,6 +113,10 @@ from standard_quant_tools.analysis.cointegration import (
     cointegration_test,
     compute_spread,
     spread_zscore,
+)
+from standard_quant_tools.analysis.correlation import (
+    diversification_ratio,
+    pairwise_correlation_summary,
 )
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
 from standard_quant_tools.analysis.multi_factor import (
@@ -122,12 +136,21 @@ from standard_quant_tools.backtest.constraints import (
     sector_exposure as _sector_exposure,
 )
 from standard_quant_tools.backtest.engine import backtest_grid, run_strategy
+from standard_quant_tools.backtest.liquidity import (
+    amihud_illiquidity,
+    corwin_schultz_spread,
+)
 from standard_quant_tools.backtest.pairs import run_pair_backtest as _pair_backtest_run
 from standard_quant_tools.backtest.panel import (
     run_signal_panel_backtest as _signal_panel_backtest,
 )
 from standard_quant_tools.backtest.portfolio_engine import (
     run_portfolio_simulation as _portfolio_engine_run,
+)
+from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths
+from standard_quant_tools.backtest.stress_test import (
+    replay_stress_scenario,
+    scenario_dates,
 )
 from standard_quant_tools.backtest.robustness import (
     block_bootstrap_ci as _block_bootstrap_ci,
@@ -186,7 +209,13 @@ from standard_quant_tools.metrics.risk_metrics import (
     var_historical,
     var_parametric,
 )
+from standard_quant_tools.metrics.volatility_estimators import (
+    garman_klass_volatility,
+    parkinson_volatility,
+    yang_zhang_volatility,
+)
 from standard_quant_tools.portfolio.portfolio import (
+    build_portfolio,
     fetch_returns_sync,
     portfolio_metrics,
 )
@@ -932,6 +961,51 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
     )
 
 
+def get_correlation_analysis(
+    input_data: CorrelationAnalysisInput,
+) -> CorrelationAnalysisResult:
+    """
+    Correlation matrix, avg pairwise correlation, most/least correlated
+    pair, and the Choueifaty-Coignard diversification ratio for a universe.
+    """
+    logger.debug(
+        "[correlation_analysis] tickers=%s  %s → %s  weighted=%s",
+        input_data.tickers,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.weights is not None,
+    )
+    returns_df = fetch_returns_sync(
+        input_data.tickers, input_data.start_date, input_data.end_date
+    )
+
+    summary = pairwise_correlation_summary(returns_df)
+    dr = diversification_ratio(returns_df, weights=input_data.weights)
+
+    corr_dict = {
+        row_ticker: {
+            col_ticker: round(float(value), 4)
+            for col_ticker, value in row.items()
+        }
+        for row_ticker, row in summary["correlation_matrix"].iterrows()
+    }
+
+    return CorrelationAnalysisResult(
+        tickers=input_data.tickers,
+        correlation_matrix=corr_dict,
+        avg_pairwise_correlation=round(summary["avg_pairwise_correlation"], 4),
+        highest_correlated_pair={
+            **summary["highest_correlated_pair"],
+            "correlation": round(summary["highest_correlated_pair"]["correlation"], 4),
+        },
+        lowest_correlated_pair={
+            **summary["lowest_correlated_pair"],
+            "correlation": round(summary["lowest_correlated_pair"]["correlation"], 4),
+        },
+        diversification_ratio=round(dr, 4) if dr == dr else 0.0,
+    )
+
+
 # ──────────────────────────────────────────────────────────────────
 # Hurst Tool
 # ──────────────────────────────────────────────────────────────────
@@ -985,6 +1059,56 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
         n_obs=result["n_obs"],
         rolling_current=rolling_current,
         rolling_regime_fractions=rolling_regime_fractions,
+    )
+
+
+def get_volatility_estimators(
+    input_data: VolatilityEstimatorsInput,
+) -> VolatilityEstimatorsResult:
+    """
+    Realized volatility via Parkinson, Garman-Klass, and Yang-Zhang
+    estimators, alongside plain close-to-close volatility for comparison.
+    """
+    logger.debug(
+        "[volatility_estimators] %s  %s → %s  period=%d",
+        input_data.symbol,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.period,
+    )
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(
+        input_data.symbol, input_data.start_date, input_data.end_date
+    )
+    period = input_data.period
+
+    close_returns = df["Close"].pct_change().dropna()
+    close_to_close = annualized_volatility(close_returns)
+
+    parkinson = parkinson_volatility(df["High"], df["Low"], period=period)
+    garman_klass = garman_klass_volatility(
+        df["Open"], df["High"], df["Low"], df["Close"], period=period
+    )
+    yang_zhang = yang_zhang_volatility(
+        df["Open"], df["High"], df["Low"], df["Close"], period=period
+    )
+
+    def _latest(series: pd.Series) -> float:
+        valid = series.dropna()
+        return float(valid.iloc[-1]) if not valid.empty else float("nan")
+
+    yz_val = _latest(yang_zhang)
+    ctc_val = float(close_to_close)
+    ratio = (yz_val / ctc_val) if ctc_val > 0 else float("nan")
+
+    return VolatilityEstimatorsResult(
+        symbol=input_data.symbol,
+        period=period,
+        close_to_close_annualized=round(ctc_val, 6),
+        parkinson_annualized=round(_latest(parkinson), 6),
+        garman_klass_annualized=round(_latest(garman_klass), 6),
+        yang_zhang_annualized=round(yz_val, 6),
+        yang_zhang_vs_close_to_close_ratio=round(ratio, 4),
     )
 
 
@@ -1774,6 +1898,98 @@ def get_portfolio_risk_attribution(
         factor_loadings=factor_loadings,
         factor_r_squared=factor_r2,
         factor_alpha=factor_alpha,
+    )
+
+
+def run_stress_test(input_data: StressTestInput) -> StressTestResult:
+    """
+    Replay a portfolio's current weights against a named historical crash
+    window (or a custom date range) using each ticker's own real historical
+    returns for that window. A ticker with no data that far back (e.g. it
+    hadn't listed yet) is isolated into tickers_missing_data rather than
+    failing the whole call — the replay proceeds on whatever subset of
+    tickers actually has data.
+    """
+    if input_data.scenario == "custom":
+        # StressTestInput._check_custom_dates already guarantees both are
+        # set when scenario == "custom" (raises otherwise) — asserted here
+        # too so this stays a str, not Optional[str], for every caller below.
+        assert input_data.custom_start_date is not None
+        assert input_data.custom_end_date is not None
+        scenario_start = input_data.custom_start_date
+        scenario_end = input_data.custom_end_date
+    else:
+        scenario_start, scenario_end = scenario_dates(input_data.scenario)
+
+    logger.debug(
+        "[stress_test] tickers=%s  scenario=%s  %s → %s",
+        input_data.tickers,
+        input_data.scenario,
+        scenario_start,
+        scenario_end,
+    )
+
+    provider = DataFactory.get_provider()
+    returns_by_ticker: Dict[str, pd.Series] = {}
+    tickers_missing_data: List[str] = []
+    for t in input_data.tickers:
+        try:
+            close = provider.get_ohlcv(t, scenario_start, scenario_end)["Close"]
+            returns = close.pct_change().dropna()
+            if returns.empty:
+                raise ValueError("no trading days with data in this window")
+            returns_by_ticker[t] = returns
+        except Exception as exc:
+            logger.debug(
+                "[stress_test] %s has no data for %s → %s (%s)",
+                t,
+                scenario_start,
+                scenario_end,
+                exc,
+            )
+            tickers_missing_data.append(t)
+
+    if not returns_by_ticker:
+        raise ValidationError(
+            f"None of {input_data.tickers} have any data for {scenario_start} → "
+            f"{scenario_end} — cannot replay this scenario."
+        )
+
+    tickers_used = list(returns_by_ticker.keys())
+    returns_df = pd.DataFrame(returns_by_ticker).dropna()
+
+    if input_data.weights is None:
+        weights = np.full(len(input_data.tickers), 1.0 / len(input_data.tickers))
+    else:
+        weights = np.array(input_data.weights, dtype=float)
+    # Re-normalize weights over just the tickers that actually have data,
+    # preserving their relative proportions, rather than silently treating
+    # a missing ticker's weight as if it had earned a 0% return.
+    weight_by_ticker = dict(zip(input_data.tickers, weights))
+    used_weights = np.array([weight_by_ticker[t] for t in tickers_used])
+    used_weights_sum = used_weights.sum()
+    if used_weights_sum <= 0:
+        raise ValidationError(
+            "the tickers with available data for this scenario carry zero "
+            "total weight — cannot replay."
+        )
+    used_weights = used_weights / used_weights_sum
+
+    result = replay_stress_scenario(returns_df, used_weights)
+
+    return StressTestResult(
+        scenario=input_data.scenario,
+        scenario_start_date=scenario_start,
+        scenario_end_date=scenario_end,
+        tickers_used=tickers_used,
+        tickers_missing_data=tickers_missing_data,
+        portfolio_return_pct=round(result["portfolio_return_pct"], 6),
+        max_drawdown_pct=round(result["max_drawdown_pct"], 6),
+        worst_day_return_pct=round(result["worst_day_return_pct"], 6),
+        worst_day_date=result["worst_day_date"],
+        best_day_return_pct=round(result["best_day_return_pct"], 6),
+        best_day_date=result["best_day_date"],
+        n_trading_days=result["n_trading_days"],
     )
 
 
@@ -2848,6 +3064,62 @@ def get_robustness_diagnostics(
     )
 
 
+def run_monte_carlo_simulation(
+    input_data: MonteCarloSimulationInput,
+) -> MonteCarloSimulationResult:
+    """
+    Monte Carlo forward simulation: projects possible future equity paths
+    from a portfolio's historical return distribution via moving-block
+    bootstrap resampling. Forward-looking, unlike get_robustness_diagnostics
+    (a same-sample confidence check) or run_walk_forward_backtest (which
+    tests actual historical decisions) — this is a projection from
+    historical statistics, not a prediction or a validation of any
+    strategy's decisions.
+    """
+    logger.debug(
+        "[monte_carlo] tickers=%s  %s → %s  horizon=%d  n_sim=%d",
+        input_data.tickers,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.horizon_days,
+        input_data.n_simulations,
+    )
+    returns_df = fetch_returns_sync(
+        input_data.tickers, input_data.start_date, input_data.end_date
+    )
+    n_assets = returns_df.shape[1]
+    weights = (
+        np.full(n_assets, 1.0 / n_assets)
+        if input_data.weights is None
+        else input_data.weights
+    )
+    portfolio_returns = build_portfolio(returns_df, weights)
+
+    result = simulate_forward_paths(
+        portfolio_returns,
+        horizon_days=input_data.horizon_days,
+        n_simulations=input_data.n_simulations,
+        block_size=input_data.block_size,
+        initial_capital=input_data.initial_capital,
+        seed=input_data.random_seed,
+    )
+
+    return MonteCarloSimulationResult(
+        tickers=input_data.tickers,
+        horizon_days=input_data.horizon_days,
+        n_simulations=input_data.n_simulations,
+        terminal_median=round(result["terminal_median"], 2),
+        terminal_p5=round(result["terminal_p5"], 2),
+        terminal_p95=round(result["terminal_p95"], 2),
+        prob_loss=round(result["prob_loss"], 4),
+        terminal_var_95=round(result["terminal_var_95"], 6),
+        terminal_cvar_95=round(result["terminal_cvar_95"], 6),
+        equity_band_p5=[round(v, 2) for v in result["equity_band_p5"]],
+        equity_band_p50=[round(v, 2) for v in result["equity_band_p50"]],
+        equity_band_p95=[round(v, 2) for v in result["equity_band_p95"]],
+    )
+
+
 # ──────────────────────────────────────────────────────────────────
 # Capacity Report (liquidity/ADV-based capacity)
 # ──────────────────────────────────────────────────────────────────
@@ -2945,6 +3217,57 @@ def get_capacity_report(input_data: CapacityReportInput) -> CapacityReportResult
         days_to_liquidate_at_capacity=days_to_liquidate_out,
         sector_exposure=sector_exp,
         warnings=warnings,
+    )
+
+
+def get_liquidity_metrics(input_data: LiquidityAnalysisInput) -> LiquidityAnalysisResult:
+    """
+    Amihud illiquidity ratio and Corwin-Schultz spread estimator per
+    ticker — academic proxies for market depth and bid/ask spread derived
+    purely from OHLCV, since no real bid/ask data exists in this library.
+    """
+    logger.debug(
+        "[liquidity_metrics] tickers=%s  window=%d",
+        input_data.tickers,
+        input_data.window,
+    )
+    provider = DataFactory.get_provider()
+    window = input_data.window
+
+    per_ticker: Dict[str, Dict[str, float]] = {}
+    for t in input_data.tickers:
+        df = provider.get_ohlcv(t, input_data.start_date, input_data.end_date)
+        if "Volume" not in df.columns:
+            raise ValueError(f"OHLCV for {t!r} is missing a 'Volume' column")
+
+        returns = df["Close"].pct_change()
+        dollar_volume = df["Close"] * df["Volume"]
+        avg_dollar_volume = dollar_volume.rolling(window, min_periods=1).mean()
+
+        amihud = amihud_illiquidity(returns, dollar_volume, window=window)
+        cs_spread = corwin_schultz_spread(df["High"], df["Low"], window=window)
+
+        amihud_valid = amihud.dropna()
+        cs_valid = cs_spread.dropna()
+
+        per_ticker[t] = {
+            "avg_dollar_volume": round(float(avg_dollar_volume.iloc[-1]), 2),
+            "amihud_illiquidity": (
+                round(float(amihud_valid.iloc[-1]), 6) if not amihud_valid.empty else 0.0
+            ),
+            "corwin_schultz_spread_bps": (
+                round(float(cs_valid.iloc[-1]) * 10_000.0, 4) if not cs_valid.empty else 0.0
+            ),
+        }
+
+    least_liquid = max(per_ticker, key=lambda t: per_ticker[t]["amihud_illiquidity"])
+    most_liquid = min(per_ticker, key=lambda t: per_ticker[t]["amihud_illiquidity"])
+
+    return LiquidityAnalysisResult(
+        tickers=input_data.tickers,
+        per_ticker=per_ticker,
+        least_liquid_ticker=least_liquid,
+        most_liquid_ticker=most_liquid,
     )
 
 
@@ -3275,9 +3598,19 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             PCAInput,
         ),
         (
+            "get_correlation_analysis",
+            "Correlation matrix, avg pairwise correlation, most/least correlated pair, and diversification ratio for a universe.",
+            CorrelationAnalysisInput,
+        ),
+        (
             "run_hurst_analysis",
             "Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.",
             HurstInput,
+        ),
+        (
+            "get_volatility_estimators",
+            "Realized volatility via Parkinson, Garman-Klass, and Yang-Zhang estimators vs. plain close-to-close.",
+            VolatilityEstimatorsInput,
         ),
         (
             "run_regime_adaptive_backtest",
@@ -3303,6 +3636,11 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             "get_portfolio_risk_attribution",
             "Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.",
             RiskAttributionInput,
+        ),
+        (
+            "run_stress_test",
+            "Replay a portfolio's weights against a named historical crash window (or custom date range) using real historical returns.",
+            StressTestInput,
         ),
         (
             "get_position_size",
@@ -3365,9 +3703,19 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             RobustnessDiagnosticsInput,
         ),
         (
+            "run_monte_carlo_simulation",
+            "Monte Carlo forward simulation of a portfolio's future equity paths via moving-block bootstrap of its historical returns.",
+            MonteCarloSimulationInput,
+        ),
+        (
             "get_capacity_report",
             "How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume, plus days-to-liquidate and sector exposure.",
             CapacityReportInput,
+        ),
+        (
+            "get_liquidity_metrics",
+            "Amihud illiquidity ratio and Corwin-Schultz spread estimator per ticker — OHLCV-derived proxies for market depth and bid/ask spread.",
+            LiquidityAnalysisInput,
         ),
         (
             "get_data_quality_report",
@@ -3412,7 +3760,9 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_factor_regression": (run_factor_regression, FactorRegressionInput),
     "run_cointegration_test": (run_cointegration_test, CointegrationInput),
     "run_pca_analysis": (run_pca_analysis, PCAInput),
+    "get_correlation_analysis": (get_correlation_analysis, CorrelationAnalysisInput),
     "run_hurst_analysis": (run_hurst_analysis, HurstInput),
+    "get_volatility_estimators": (get_volatility_estimators, VolatilityEstimatorsInput),
     "run_regime_adaptive_backtest": (run_regime_adaptive_backtest, RegimeAdaptiveInput),
     "run_regime_adaptive_walkforward_backtest": (
         run_regime_adaptive_walkforward_backtest,
@@ -3424,6 +3774,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
         get_portfolio_risk_attribution,
         RiskAttributionInput,
     ),
+    "run_stress_test": (run_stress_test, StressTestInput),
     "get_position_size": (get_position_size, PositionSizerInput),
     "get_stock_fundamentals": (get_stock_fundamentals, FundamentalsInput),
     "run_backtest_optimization": (run_backtest_optimization, BacktestOptInput),
@@ -3442,7 +3793,12 @@ _TOOL_DISPATCH: Dict[str, Any] = {
         get_robustness_diagnostics,
         RobustnessDiagnosticsInput,
     ),
+    "run_monte_carlo_simulation": (
+        run_monte_carlo_simulation,
+        MonteCarloSimulationInput,
+    ),
     "get_capacity_report": (get_capacity_report, CapacityReportInput),
+    "get_liquidity_metrics": (get_liquidity_metrics, LiquidityAnalysisInput),
     "get_data_quality_report": (get_data_quality_report, DataQualityReportInput),
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
 }
