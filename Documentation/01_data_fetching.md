@@ -1,6 +1,6 @@
 # Data Fetching
 
-The data layer wraps yfinance (and, optionally, a Bloomberg Terminal via Desktop API) with caching, retry logic, and Pydantic-validated outputs. All providers implement the same `DataProvider` ABC so swapping sources requires zero changes to downstream code.
+The data layer wraps yfinance (and, optionally, a Bloomberg Terminal via Desktop API, or Polygon.io's REST API) with caching, retry logic, and Pydantic-validated outputs. All providers implement the same `DataProvider` ABC so swapping sources requires zero changes to downstream code.
 
 ---
 
@@ -240,6 +240,63 @@ non-US or non-equity (e.g. `"VOD LN Equity"`, `"EURUSD Curncy"`).
   `DataFactory.get_provider("bloomberg")`) without it installed raises a
   clear `APIError` explaining how to install it, rather than an opaque
   `ImportError` — the rest of the package works normally either way.
+
+---
+
+## Polygon.io Provider
+
+`standard_quant_tools.data.polygon_provider.PolygonProvider` implements the
+same `DataProvider` ABC against Polygon.io's plain REST API — no vendor SDK
+to install, just an API key:
+
+```python
+from standard_quant_tools.data.factory import DataFactory
+
+provider = DataFactory.get_provider("polygon")  # or api_key="..." explicitly
+df = provider.get_ohlcv("AAPL", "2023-01-01", "2024-01-01")
+```
+
+**API key required, no default.** Read from `SQT_POLYGON_API_KEY` (via a
+local `.env` — copy [`.env.example`](../.env.example) — or a real
+environment variable / CI secret), or pass `api_key=` explicitly to
+`DataFactory.get_provider("polygon", api_key=...)`. Get a free key at
+[polygon.io/dashboard/api-keys](https://polygon.io/dashboard/api-keys).
+Constructing `PolygonProvider()` (directly or via the factory) with no key
+resolvable anywhere raises a clear `APIError` rather than an opaque
+failure deep inside the first network call.
+
+**Supported intervals:** `"1m"`, `"5m"`, `"15m"`, `"30m"`, `"60m"`/`"1h"`,
+`"1d"`, `"1wk"`, `"1mo"`, `"3mo"` — the subset Polygon's Aggregates (Bars)
+endpoint supports natively. Anything else raises `ValidationError` rather
+than silently guessing a mapping.
+
+**Scope, stated explicitly:**
+- Only plain equity tickers are exercised end-to-end; crypto (`X:BTCUSD`)
+  and forex (`C:EURUSD`) prefixes may work against the same aggs endpoint
+  but are untested here.
+- `get_ohlcv` fetches a single page (`limit=50000`). A request whose true
+  result set exceeds one page — mostly a risk for long intraday ranges — is
+  **not** paginated; a logged warning fires when Polygon's response
+  indicates more pages exist (`next_url` present), so truncation is visible
+  rather than silent, but the remaining pages aren't fetched.
+- `get_financial_ratios` has no direct analogue to yfinance's `.info`
+  ratios in Polygon's reference data. `market_cap` comes straight from
+  Ticker Details v3. `trailing_pe`, `price_to_book`, `debt_to_equity`,
+  `return_on_equity`, and `profit_margins` are derived from the most recent
+  filing on the Financials vX endpoint combined with `market_cap` (e.g.
+  `trailing_pe ~= market_cap / net_income`). `forward_pe` (no forward
+  estimates in this data) and `dividend_yield` (would need a separate
+  dividends-history aggregation) are always `None` — missing, not wrong.
+- `get_ticker_info`'s `sector`/`industry` both fall back to Polygon's single
+  `sic_description` classification field — a coarser taxonomy than
+  yfinance's separate sector/industry fields.
+- `get_metadata()` honestly reports `survivorship_free=False` and
+  `point_in_time=False` — this provider makes neither guarantee.
+- No caching layer (session TTL or persistent Parquet) yet, unlike
+  `YFinanceProvider` — every call reaches Polygon. The free tier is
+  rate-limited (5 requests/minute at the time of writing); a 429 is
+  retried like any other transient `APIError` via the shared `retry`
+  decorator, with no Polygon-specific backoff tuning.
 
 ---
 

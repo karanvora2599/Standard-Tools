@@ -26,11 +26,11 @@ poetry install
 
 **Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `scikit-learn`, `plotly`, `pyarrow`, `python-dotenv`
 
-**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below.
+**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider).
 
 > **Note on the C++ extension:** the package uses a Flit build backend, so `pip install .` / `poetry install` above installs the **pure-Python package only** — every indicator, backtest, and analysis function works via its Numba/pure-Python fallback, but the compiled `_sqt_core` speedups in the table below are not built by this step. Building `_sqt_core` is a separate, manual CMake step; see [Development/build_guide.md](Development/build_guide.md).
 
-> **Config & secrets:** copy [`.env.example`](.env.example) to `.env` (already `.gitignore`d) for any local provider configuration — currently just `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT`. `standard_quant_tools.config.load_env()` loads it automatically and is a harmless no-op when `.env` doesn't exist (the normal state in CI). In GitHub Actions / GitLab CI, set the same variable names as encrypted secrets and inject them as job-level environment variables instead — no `.env` file involved, no code changes needed either way.
+> **Config & secrets:** copy [`.env.example`](.env.example) to `.env` (already `.gitignore`d) for any local provider configuration — currently `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT` and `SQT_POLYGON_API_KEY`. `standard_quant_tools.config.load_env()` loads it automatically and is a harmless no-op when `.env` doesn't exist (the normal state in CI). In GitHub Actions / GitLab CI, set the same variable names as encrypted secrets and inject them as job-level environment variables instead — no `.env` file involved, no code changes needed either way.
 
 ---
 
@@ -65,7 +65,7 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 
 ### Data (`standard_quant_tools.data`)
 
-Two providers implement the same `DataProvider` ABC — `DataFactory.get_provider("yfinance" | "bloomberg")` — so switching is a one-line change with zero changes downstream.
+Three providers implement the same `DataProvider` ABC — `DataFactory.get_provider("yfinance" | "bloomberg" | "polygon")` — so switching is a one-line change with zero changes downstream.
 
 | Function | Description | Returns |
 |---|---|---|
@@ -78,6 +78,8 @@ Two providers implement the same `DataProvider` ABC — `DataFactory.get_provide
 **`YFinanceProvider`** (default) — **Caching:** Historical OHLCV calls are saved as Parquet files under `~/.cache/standard_quant_tools/ohlcv/`. Subsequent calls — even from a new Python process — load from disk rather than the network. Override the cache directory with `SQT_CACHE_DIR`.
 
 **`BloombergProvider`** — talks to a local, logged-in Bloomberg Terminal via Desktop API (`blpapi`, optional dependency). No API key: DAPI authenticates via the Terminal login itself; only `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT` are configurable (via `.env` locally or CI secrets — see Config & secrets above), and neither is a secret. Daily/weekly/monthly bars only. See [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider) for the full reference.
+
+**`PolygonProvider`** — talks to Polygon.io's plain REST API, no vendor SDK required. Needs an API key (`SQT_POLYGON_API_KEY`, no default — free tier available at [polygon.io/dashboard/api-keys](https://polygon.io/dashboard/api-keys)). Supports `1m`/`5m`/`15m`/`30m`/`60m`/`1d`/`1wk`/`1mo`/`3mo` bars via the Aggregates endpoint; `get_financial_ratios` derives P/E, P/B, D/E, ROE, and margins from the most recent financials filing plus market cap (no forward estimates or dividend yield). See [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider) for the full reference.
 
 **Data quality (`standard_quant_tools.data.quality`):** `detect_missing_bars`, `detect_stale_prices`, `detect_price_jumps` — heuristic checks on an already-fetched OHLCV frame (weekday gaps, frozen prices, large single-bar jumps). `detect_missing_bars` has no market-holiday calendar, so U.S. holidays show up as false-positive gaps — treat findings as leads to investigate, not confirmed defects. Exposed together with `get_metadata` via the `get_data_quality_report` agent tool.
 
@@ -576,7 +578,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1263 Python tests total** (1092 passing; 171 skipped pending C++ build, across 6 `test_cpp_*.py` files) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**1498 Python tests total** (1321 passing, 171 skipped pending C++ build across 6 `test_cpp_*.py` files, 6 integration-only) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 

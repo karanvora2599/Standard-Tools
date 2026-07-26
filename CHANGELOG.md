@@ -42,6 +42,19 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- `data.polygon_provider.PolygonProvider`: a third `DataProvider`
+  implementation, backed by Polygon.io's plain REST API — no vendor SDK to
+  install, just an API key (`SQT_POLYGON_API_KEY`, no default; get a free
+  one at https://polygon.io/dashboard/api-keys). Supports `1m`/`5m`/`15m`/
+  `30m`/`60m`/`1d`/`1wk`/`1mo`/`3mo` bars via the Aggregates (Bars) endpoint
+  (other intervals raise `ValidationError`); `get_financial_ratios` derives
+  `trailing_pe`/`price_to_book`/`debt_to_equity`/`return_on_equity`/
+  `profit_margins` from the most recent Financials vX filing combined with
+  `market_cap` from Ticker Details v3 — `forward_pe` and `dividend_yield`
+  are always `None` (no forward estimates or dividend-history aggregation
+  in scope). Wired into `DataFactory.get_provider("polygon", api_key=...)`,
+  replacing the old `NotImplementedError` stub. See
+  [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider).
 - **Audit trail hardening, phase 3 (Ed25519 checkpoint signing + pluggable
   storage backend):** `audit.generate_keypair()`/`checkpoint_and_sign()`/
   `verify_checkpoint_signature()` add an optional external anchor closing
