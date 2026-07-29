@@ -5,22 +5,40 @@ Claude filters a universe, profiles every passer, and produces a ranked watchlis
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 UNIVERSE = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX",
-    "ADBE", "CRM",  "NOW",   "SNOW", "SHOP", "UBER", "ABNB",
-    "PYPL", "AMD",  "INTC",  "QCOM", "TXN",
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "NVDA",
+    "TSLA",
+    "NFLX",
+    "ADBE",
+    "CRM",
+    "NOW",
+    "SNOW",
+    "SHOP",
+    "UBER",
+    "ABNB",
+    "PYPL",
+    "AMD",
+    "INTC",
+    "QCOM",
+    "TXN",
 ]
-START_DATE   = "2023-01-01"
-END_DATE     = "2024-12-31"
-ACCOUNT      = 500_000.0
+START_DATE = "2023-01-01"
+END_DATE = "2024-12-31"
+ACCOUNT = 500_000.0
 MAX_POSITION = 0.10
 
 SYSTEM_PROMPT = """You are a quantitative equity analyst responsible for building a momentum watchlist.
@@ -77,8 +95,12 @@ if __name__ == "__main__":
     _header("Agentic Stock Screener — Claude Haiku")
     _log("Log file", str(log_file))
     _log("Universe", f"{len(UNIVERSE)} stocks")
-    _log("Period",   f"{START_DATE} → {END_DATE}")
-    _log("Account",  f"${ACCOUNT:,.0f}")
+    _log("Period", f"{START_DATE} → {END_DATE}")
+    _log("Account", f"${ACCOUNT:,.0f}")
+
+    routed_categories = route_request(
+        USER_REQUEST, api_key=ANTHROPIC_API_KEY, model=MODEL
+    )
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -86,6 +108,7 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=25,
+        categories=routed_categories,
     )
 
     _header("FINAL WATCHLIST")

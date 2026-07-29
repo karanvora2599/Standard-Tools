@@ -5,13 +5,14 @@ The agent autonomously selects strategies, runs backtests, and summarizes findin
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 SYSTEM_PROMPT = """You are a quantitative analyst with access to a suite of backtesting and analysis tools.
 
@@ -36,7 +37,17 @@ if __name__ == "__main__":
 
     _header("Agentic Backtest — Claude Haiku")
     _log("Log file", str(log_file))
-    _log("Symbol",   "AAPL  |  2023")
+    _log("Symbol", "AAPL  |  2023")
+
+    # Reference integration for the tool-category router (see
+    # standard_quant_tools/agent/router.py): one cheap classification call
+    # narrows the ~45-tool registry down to the categories this request
+    # actually needs before the real agent loop starts, instead of handing
+    # every tool to the model on every call. Fails open (routes to every
+    # category) if the classification call errors or is unparseable.
+    routed_categories = route_request(
+        USER_REQUEST, api_key=ANTHROPIC_API_KEY, model=MODEL
+    )
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -44,6 +55,7 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=15,
+        categories=routed_categories,
     )
 
     _header("FINAL REPORT")

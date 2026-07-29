@@ -5,24 +5,25 @@ Claude runs a multi-factor study and synthesises a factor research note.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
-ASSETS     = ["NVDA", "AMD", "INTC", "QCOM", "AMAT", "LRCX", "KLAC"]
+ASSETS = ["NVDA", "AMD", "INTC", "QCOM", "AMAT", "LRCX", "KLAC"]
 START_DATE = "2020-01-01"
-END_DATE   = "2024-12-31"
+END_DATE = "2024-12-31"
 
 FACTORS = {
-    "market":   "SPY",
-    "size":     "IWM",
-    "value":    "IWD",
+    "market": "SPY",
+    "size": "IWM",
+    "value": "IWD",
     "momentum": "MTUM",
-    "quality":  "QUAL",
+    "quality": "QUAL",
 }
 
 SYSTEM_PROMPT = """You are a quantitative factor researcher studying return attribution across a sector.
@@ -64,7 +65,7 @@ Step 5 — Write the factor research note
 
 Be rigorous. Cite exact p-values, factor loadings, R², and Hurst values."""
 
-factor_names_str   = ", ".join(FACTORS.keys())
+factor_names_str = ", ".join(FACTORS.keys())
 factor_tickers_str = ", ".join(FACTORS.values())
 
 USER_REQUEST = f"""
@@ -94,9 +95,13 @@ if __name__ == "__main__":
 
     _header("Agentic Factor Researcher — Claude Haiku")
     _log("Log file", str(log_file))
-    _log("Assets",   ", ".join(ASSETS))
-    _log("Factors",  factor_names_str)
-    _log("Period",   f"{START_DATE} → {END_DATE}")
+    _log("Assets", ", ".join(ASSETS))
+    _log("Factors", factor_names_str)
+    _log("Period", f"{START_DATE} → {END_DATE}")
+
+    routed_categories = route_request(
+        USER_REQUEST, api_key=ANTHROPIC_API_KEY, model=MODEL
+    )
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -104,6 +109,7 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=30,
+        categories=routed_categories,
     )
 
     _header("FACTOR RESEARCH NOTE")

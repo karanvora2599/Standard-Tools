@@ -7,23 +7,24 @@ portfolio simulation, and capacity check.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 STRATEGY_SYMBOL = "AAPL"
-STRATEGY_TYPE   = "sma_crossover"
-PARAM_GRID      = {"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]}
-START_DATE      = "2021-01-01"
-END_DATE        = "2024-12-31"
+STRATEGY_TYPE = "sma_crossover"
+PARAM_GRID = {"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]}
+START_DATE = "2021-01-01"
+END_DATE = "2024-12-31"
 
 PORTFOLIO_TICKERS = ["AAPL", "MSFT"]
 PORTFOLIO_WEIGHTS = [0.5, 0.5]
-ACCOUNT_SIZE      = 250_000.0
+ACCOUNT_SIZE = 250_000.0
 
 SYSTEM_PROMPT = """You are a quantitative strategy validator. Your job is to decide whether a
 candidate strategy is actually ready for real capital — never trust a single
@@ -117,10 +118,14 @@ if __name__ == "__main__":
     log_file = setup_logging("agent_strategy_validator_anthropic")
 
     _header("Agentic Strategy Validator — Claude Haiku")
-    _log("Log file",  str(log_file))
+    _log("Log file", str(log_file))
     _log("Candidate", f"{STRATEGY_TYPE} on {STRATEGY_SYMBOL}")
     _log("Portfolio", tickers_str)
-    _log("Account",   f"${ACCOUNT_SIZE:,.0f}")
+    _log("Account", f"${ACCOUNT_SIZE:,.0f}")
+
+    routed_categories = route_request(
+        USER_REQUEST, api_key=ANTHROPIC_API_KEY, model=MODEL
+    )
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -128,6 +133,7 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=20,
+        categories=routed_categories,
     )
 
     _header("VALIDATION VERDICT")

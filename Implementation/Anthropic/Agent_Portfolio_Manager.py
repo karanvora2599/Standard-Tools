@@ -5,19 +5,22 @@ Claude autonomously reviews the portfolio and produces a rebalancing recommendat
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
-PORTFOLIO  = {"tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"],
-              "weights": [0.20,   0.20,   0.20,   0.20,   0.20]}
+PORTFOLIO = {
+    "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"],
+    "weights": [0.20, 0.20, 0.20, 0.20, 0.20],
+}
 START_DATE = "2022-01-01"
-END_DATE   = "2024-12-31"
-BENCHMARK  = "SPY"
+END_DATE = "2024-12-31"
+BENCHMARK = "SPY"
 
 SYSTEM_PROMPT = """You are a senior portfolio manager with expertise in quantitative risk management.
 
@@ -62,9 +65,13 @@ if __name__ == "__main__":
     log_file = setup_logging("agent_portfolio_anthropic")
 
     _header("Agentic Portfolio Manager — Claude Haiku")
-    _log("Log file",  str(log_file))
+    _log("Log file", str(log_file))
     _log("Portfolio", tickers_str)
-    _log("Period",    f"{START_DATE} → {END_DATE}")
+    _log("Period", f"{START_DATE} → {END_DATE}")
+
+    routed_categories = route_request(
+        USER_REQUEST, api_key=ANTHROPIC_API_KEY, model=MODEL
+    )
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -72,6 +79,7 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=20,
+        categories=routed_categories,
     )
 
     _header("FINAL REPORT")
