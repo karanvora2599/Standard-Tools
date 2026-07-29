@@ -11,9 +11,12 @@ from standard_quant_tools.metrics.return_metrics import (
     cumulative_return,
 )
 from standard_quant_tools.metrics.risk_metrics import (
+    HAS_SCIPY,
+    _fit_gpd_pwm,
     calmar_ratio,
     cvar,
     drawdown_series,
+    evt_tail_risk,
     information_ratio,
     max_drawdown,
     sharpe_ratio,
@@ -314,3 +317,123 @@ class TestDrawdownSeries:
     def test_min_equals_max_drawdown(self, sample_equity):
         dd = drawdown_series(sample_equity)
         assert dd.min() == pytest.approx(max_drawdown(sample_equity), rel=1e-10)
+
+
+# ── EVT tail risk ─────────────────────────────────────────────────────────────
+
+
+def _gpd_inverse_cdf_exceedances(xi, beta, n, seed):
+    """Sample n exceedances from a known GPD(xi, beta) via inverse-CDF —
+    used to check that the fitted parameters recover the true generating
+    values, independent of evt_tail_risk's own threshold-selection logic."""
+    rng = np.random.default_rng(seed)
+    u = rng.uniform(0, 1, n)
+    return (beta / xi) * ((1 - u) ** (-xi) - 1)
+
+
+@pytest.fixture(scope="module")
+def fat_tailed_returns():
+    """Student-t(df=3) returns — genuinely fat-tailed, enough observations
+    for a reliable POT fit at the default 5% tail_fraction (n=5000 -> ~250
+    exceedances, comfortably above the 20-exceedance floor)."""
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2015-01-01", periods=5000, freq="B")
+    return pd.Series(rng.standard_t(df=3, size=5000) * 0.01, index=dates)
+
+
+class TestFitGpdPwm:
+    def test_recovers_known_generating_parameters(self):
+        true_xi, true_beta = 0.25, 0.02
+        exceedances = _gpd_inverse_cdf_exceedances(true_xi, true_beta, 20_000, seed=3)
+        xi_hat, beta_hat = _fit_gpd_pwm(exceedances)
+        assert xi_hat == pytest.approx(true_xi, abs=0.05)
+        assert beta_hat == pytest.approx(true_beta, abs=0.01)
+
+
+class TestEvtTailRisk:
+    def test_returns_required_keys(self, fat_tailed_returns):
+        result = evt_tail_risk(fat_tailed_returns)
+        assert set(result.keys()) == {
+            "confidence",
+            "tail_fraction",
+            "threshold",
+            "n_exceedances",
+            "n_obs",
+            "shape_xi",
+            "scale_beta",
+            "var_evt",
+            "cvar_evt",
+            "method",
+            "tail_classification",
+        }
+
+    def test_default_method_is_pwm_and_needs_no_scipy(self, fat_tailed_returns):
+        result = evt_tail_risk(fat_tailed_returns)
+        assert result["method"] == "pwm"
+
+    def test_n_exceedances_matches_tail_fraction(self, fat_tailed_returns):
+        result = evt_tail_risk(fat_tailed_returns, tail_fraction=0.05)
+        expected = int(round(0.05 * len(fat_tailed_returns)))
+        assert abs(result["n_exceedances"] - expected) <= 1
+
+    def test_var_evt_is_positive_for_fat_tailed_losses(self, fat_tailed_returns):
+        result = evt_tail_risk(fat_tailed_returns, confidence=0.99)
+        assert result["var_evt"] > 0
+        assert result["cvar_evt"] >= result["var_evt"]
+
+    def test_tail_classification_matches_shape_xi(self, fat_tailed_returns):
+        result = evt_tail_risk(fat_tailed_returns)
+        xi = result["shape_xi"]
+        if xi > 0.1:
+            assert result["tail_classification"] == "heavy_tailed"
+        elif xi < -0.1:
+            assert result["tail_classification"] == "light_tailed"
+        else:
+            assert result["tail_classification"] == "near_exponential"
+
+    @pytest.mark.skipif(not HAS_SCIPY, reason="method='mle' requires scipy")
+    def test_mle_method_gives_similar_result_to_pwm(self, fat_tailed_returns):
+        pwm = evt_tail_risk(fat_tailed_returns, method="pwm")
+        mle = evt_tail_risk(fat_tailed_returns, method="mle")
+        assert mle["shape_xi"] == pytest.approx(pwm["shape_xi"], abs=0.1)
+
+    def test_mle_without_scipy_raises_if_unavailable(self, fat_tailed_returns, monkeypatch):
+        monkeypatch.setattr(
+            "standard_quant_tools.metrics.risk_metrics.HAS_SCIPY", False
+        )
+        with pytest.raises(ValidationError, match="scipy"):
+            evt_tail_risk(fat_tailed_returns, method="mle")
+
+
+class TestEvtTailRiskValidation:
+    def test_confidence_out_of_bounds_raises(self, fat_tailed_returns):
+        with pytest.raises(ValidationError, match="confidence"):
+            evt_tail_risk(fat_tailed_returns, confidence=1.5)
+
+    def test_tail_fraction_out_of_bounds_raises(self, fat_tailed_returns):
+        with pytest.raises(ValidationError, match="tail_fraction"):
+            evt_tail_risk(fat_tailed_returns, tail_fraction=0.6)
+
+    def test_invalid_method_raises(self, fat_tailed_returns):
+        with pytest.raises(ValidationError, match="method"):
+            evt_tail_risk(fat_tailed_returns, method="bogus")
+
+    def test_too_few_exceedances_raises(self):
+        dates = pd.date_range("2020-01-01", periods=50, freq="B")
+        returns = pd.Series(np.random.default_rng(1).normal(0, 0.01, 50), index=dates)
+        with pytest.raises(ValidationError, match="exceedances"):
+            evt_tail_risk(returns, tail_fraction=0.05)
+
+
+@pytest.mark.benchmark
+class TestEvtTailRiskScale:
+    def test_two_million_points_fits_quickly(self):
+        import time
+
+        rng = np.random.default_rng(9)
+        returns = pd.Series(rng.standard_t(df=3, size=2_000_000) * 0.01)
+        t0 = time.time()
+        result = evt_tail_risk(returns)
+        elapsed = time.time() - t0
+        assert elapsed < 5.0, f"2M-point EVT fit took {elapsed:.2f}s"
+        assert result["n_obs"] == 2_000_000

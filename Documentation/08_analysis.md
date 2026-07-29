@@ -973,3 +973,47 @@ corwin_schultz_spread(high, low, window=1)               # fractional spread; cl
 ```
 
 `corwin_schultz_spread` is indexed at the second bar of each consecutive-day pair (the first bar of the series is always `NaN` — no prior bar to pair with); `window > 1` additionally smooths the per-pair estimate with a rolling mean.
+
+---
+
+## GARCH(1,1) Conditional Volatility
+
+`standard_quant_tools.analysis.garch` — fits a GARCH(1,1) model (today's variance depends on yesterday's shock and yesterday's variance) and forecasts it forward, unlike the realized-volatility estimators above which only describe past variance. The variance recursion is inherently sequential and numba-`@njit`'d (same tool `backtest.strategies`' state machines use — no native build step required); fitting is MLE via `scipy.optimize` (required — there's no meaningful scipy-free fallback for a maximum-likelihood fit). See [09_advanced_agent_tools.md, Tool 26](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_garch_volatility_forecast`).
+
+```python
+from standard_quant_tools.analysis.garch import garch_volatility_forecast
+
+garch_volatility_forecast(returns, forecast_horizon=10, periods_per_year=252)
+```
+
+Returns a dict with fitted parameters (`omega`, `alpha`, `beta`, `persistence`), fit diagnostics (`converged`, `log_likelihood`, `aic`, `bic`), and volatility figures (`current_annualized_vol`, `long_run_annualized_vol`, `forecast_annualized_vol` — a closed-form geometric decay toward the long-run level, no loop needed for the forecast itself). Raises `ValidationError` below 100 observations (GARCH fits are unstable on small samples) or without scipy installed. Scope is GARCH(1,1) with normal innovations and a constant mean only — EGARCH/GJR-GARCH and Student-t innovations are real extensions, not built here.
+
+---
+
+## Kalman-Filter Dynamic Hedge Ratio
+
+`standard_quant_tools.analysis.cointegration.kalman_hedge_ratio` — a time-varying alternative to `cointegration_test`'s single static OLS hedge ratio, re-estimating it every bar via a Kalman filter (predict/update recursion on a `[intercept, beta]` state following a random walk). Numba-`@njit`'d hand-unrolled 2x2 linear algebra (matching the C++ `rolling_regression.cpp` kernel's own preference for explicit small-matrix math over a generic solver — no scipy/C++ needed here). See [09_advanced_agent_tools.md, Tool 27](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_kalman_hedge_ratio`).
+
+```python
+from standard_quant_tools.analysis.cointegration import kalman_hedge_ratio
+
+kalman_hedge_ratio(
+    series_a, series_b, delta=1e-4, observation_noise=1e-3, include_intercept=True,
+)
+```
+
+Returns a `pd.DataFrame` (`Hedge_Ratio`, `Intercept`, `Spread`, `Kalman_Gain` columns) indexed on the common index of the two series — matching `rolling_beta`'s DataFrame-return convention. `delta` is the one exposed tuning knob (smaller = slower-adapting, closer to a static ratio); as `delta → 0` the terminal `Hedge_Ratio` converges to `cointegration_test`'s static OLS `hedge_ratio` on the same pair. Deliberately **not** wired into `backtest.pairs.run_pair_backtest`, which still takes a single static `float` hedge ratio for the whole window.
+
+---
+
+## EVT Tail Risk (Peaks-Over-Threshold)
+
+`standard_quant_tools.metrics.risk_metrics.evt_tail_risk` — fits a Generalized Pareto Distribution to the worst `tail_fraction` of daily losses (Peaks-Over-Threshold, McNeil & Frey 2000) and extrapolates VaR/CVaR from that fitted tail, rather than reading a raw quantile off however many extreme observations happen to be in-sample the way `var_historical`/`cvar` do. See [09_advanced_agent_tools.md, Tool 28](09_advanced_agent_tools.md) for the agent-tool wrapper (`get_tail_risk_metrics`).
+
+```python
+from standard_quant_tools.metrics.risk_metrics import evt_tail_risk
+
+evt_tail_risk(returns, confidence=0.99, tail_fraction=0.05, method="pwm")
+```
+
+Default `method="pwm"` (probability-weighted moments, Hosking & Wallis 1987) is closed-form pure numpy (one sort + cumulative arithmetic) — zero optional-dependency surface out of the box, and the reason it's the default rather than `"mle"`. `method="mle"` refines the fit via `scipy.optimize`, seeded from the PWM estimate. Returns a dict with the fitted shape/scale (`shape_xi`, `scale_beta`), `var_evt`/`cvar_evt`, and `tail_classification` (`"heavy_tailed"` when `shape_xi > 0.1`). Raises `ValidationError` below 20 exceedances — the tail fit is unreliable below that threshold.

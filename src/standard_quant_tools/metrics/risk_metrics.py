@@ -1,4 +1,5 @@
 import logging
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -20,8 +21,10 @@ def _check_confidence(confidence: float) -> None:
 
 
 _scipy_stats = None
+_scipy_minimize = None
 try:
     from scipy import stats as _scipy_stats  # type: ignore[assignment]
+    from scipy.optimize import minimize as _scipy_minimize  # type: ignore[assignment]
 
     HAS_SCIPY = True
 except ImportError:
@@ -188,3 +191,193 @@ def drawdown_series(series: pd.Series) -> pd.Series:
     """Returns the full drawdown series (fraction from peak), useful for plotting."""
     cum_max = series.cummax()
     return (series - cum_max) / cum_max
+
+
+# ── Extreme Value Theory (EVT) tail risk ─────────────────────────────────────
+#
+# var_historical/cvar above use the empirical distribution directly — fine
+# in-sample, but the further out in the tail you go (99.5%, 99.9%) the fewer
+# actual observations back it, and it can't say anything about losses beyond
+# the worst one seen. The Peaks-Over-Threshold (POT) approach here instead
+# fits a Generalized Pareto Distribution to just the exceedances beyond a
+# high threshold (McNeil & Frey 2000) and extrapolates VaR/CVaR from that
+# fitted tail model — the standard EVT approach to tail risk.
+
+
+def _fit_gpd_pwm(exceedances: np.ndarray) -> Tuple[float, float]:
+    """
+    Fit a Generalized Pareto Distribution via probability-weighted moments
+    (Hosking & Wallis 1987) — closed-form, no optimizer, pure vectorized
+    numpy (one sort + cumulative arithmetic). This is the default fitting
+    method specifically so evt_tail_risk has zero optional-dependency
+    surface out of the box.
+
+    Returns (xi, beta) — shape and scale.
+    """
+    n = len(exceedances)
+    x_sorted = np.sort(exceedances)
+    b0 = float(x_sorted.mean())
+    # weight (n-1-j)/(n-1) for 0-indexed ascending order statistic j: the
+    # smallest value gets weight 1, the largest gets weight 0 — this
+    # estimates E[X*(1-F(X))], NOT E[X*F(X)] (weighting the other way is a
+    # PWM sign bug that silently fits the wrong tail shape).
+    weights = (n - 1 - np.arange(n, dtype=float)) / (n - 1)
+    b1 = float(np.mean(weights * x_sorted))
+    denom = b0 - 2.0 * b1
+    xi = 2.0 - b0 / denom
+    beta = 2.0 * b0 * b1 / denom
+    return xi, beta
+
+
+def _gpd_neg_loglik(params: np.ndarray, exceedances: np.ndarray) -> float:
+    xi, beta = params
+    if beta <= 0:
+        return 1.0e10
+    n = len(exceedances)
+    if abs(xi) < 1.0e-6:
+        # Exponential limiting case (xi -> 0) — avoids dividing by ~0.
+        return n * np.log(beta) + float(np.sum(exceedances)) / beta
+    z = xi * exceedances / beta
+    if np.any(1.0 + z <= 0.0):
+        return 1.0e10
+    return n * np.log(beta) + (1.0 + 1.0 / xi) * float(np.sum(np.log(1.0 + z)))
+
+
+def _fit_gpd_mle(exceedances: np.ndarray) -> Tuple[float, float]:
+    """
+    Refine a GPD fit via maximum likelihood, seeded from the PWM estimate.
+    Requires scipy — call sites must guard with _require_scipy first.
+    """
+    xi0, beta0 = _fit_gpd_pwm(exceedances)
+    beta0 = max(beta0, 1.0e-8)
+    opt = _scipy_minimize(  # type: ignore[misc]
+        _gpd_neg_loglik,
+        x0=np.array([xi0, beta0]),
+        args=(exceedances,),
+        method="Nelder-Mead",
+    )
+    xi, beta = float(opt.x[0]), float(opt.x[1])
+    return xi, beta
+
+
+def _require_scipy_evt(context: str) -> None:
+    if not HAS_SCIPY:
+        raise ValidationError(
+            f"{context} requires scipy, which is not installed. Install "
+            "scipy, or use method='pwm' (the default), which has a "
+            "closed-form solution needing only numpy."
+        )
+
+
+@validate_series()
+def evt_tail_risk(
+    returns: pd.Series,
+    confidence: float = 0.99,
+    tail_fraction: float = 0.05,
+    method: str = "pwm",
+) -> Dict[str, Any]:
+    """
+    Extreme Value Theory tail risk via the Peaks-Over-Threshold method:
+    fits a Generalized Pareto Distribution to the worst `tail_fraction` of
+    daily losses, then extrapolates VaR/CVaR at `confidence` from that
+    fitted tail rather than the raw empirical quantile.
+
+    Parameters
+    ----------
+    returns       : pd.Series  Return series (NOT price levels).
+    confidence    : VaR/CVaR confidence level, strictly between 0.5 and 1.0.
+    tail_fraction : Fraction of observations (by loss) treated as the tail
+        for threshold selection — default 0.05 (top 5%), the standard POT
+        choice. Must be strictly between 0 and 0.5.
+    method        : "pwm" (default, closed-form, no dependencies) or "mle"
+        (maximum likelihood, requires scipy, more statistically efficient
+        but iterative).
+
+    Returns
+    -------
+    dict with keys: confidence, tail_fraction, threshold, n_exceedances,
+    n_obs, shape_xi, scale_beta, var_evt, cvar_evt, method,
+    tail_classification ("heavy_tailed" if xi > 0.1, "light_tailed" if
+    xi < -0.1, else "near_exponential").
+
+    Raises
+    ------
+    ValidationError: confidence or tail_fraction out of range, method is
+        neither "pwm" nor "mle", method="mle" requested without scipy
+        installed, or fewer than 20 exceedances result (the tail fit is
+        unreliable below that — a documented threshold, not a silent bad
+        fit).
+    """
+    _check_confidence(confidence)
+    if not (0.0 < tail_fraction < 0.5):
+        raise ValidationError(
+            f"tail_fraction must be strictly between 0 and 0.5, got {tail_fraction!r}"
+        )
+    if method not in ("pwm", "mle"):
+        raise ValidationError(f"method must be 'pwm' or 'mle', got {method!r}")
+    if method == "mle":
+        _require_scipy_evt("EVT MLE fitting (method='mle')")
+
+    arr = returns.dropna().to_numpy(dtype=np.float64)
+    n_obs = len(arr)
+    losses = -arr
+    threshold = float(np.percentile(losses, (1.0 - tail_fraction) * 100.0))
+    exceedances = losses[losses > threshold] - threshold
+    n_exceedances = len(exceedances)
+
+    if n_exceedances < 20:
+        raise ValidationError(
+            f"evt_tail_risk needs at least 20 exceedances above the "
+            f"tail_fraction={tail_fraction} threshold for a reliable GPD "
+            f"fit, got {n_exceedances} (n_obs={n_obs}). Use a larger "
+            "tail_fraction or a longer history."
+        )
+
+    if method == "mle":
+        xi, beta = _fit_gpd_mle(exceedances)
+    else:
+        xi, beta = _fit_gpd_pwm(exceedances)
+
+    n_over_nu = n_obs / n_exceedances
+    tail_prob = n_over_nu * (1.0 - confidence)
+    if abs(xi) < 1.0e-6:
+        var_evt = threshold + beta * float(np.log(1.0 / tail_prob))
+    else:
+        var_evt = threshold + (beta / xi) * (tail_prob ** (-xi) - 1.0)
+
+    if xi >= 1.0:
+        cvar_evt = float("inf")
+    else:
+        cvar_evt = var_evt / (1.0 - xi) + (beta - xi * threshold) / (1.0 - xi)
+
+    if xi > 0.1:
+        tail_classification = "heavy_tailed"
+    elif xi < -0.1:
+        tail_classification = "light_tailed"
+    else:
+        tail_classification = "near_exponential"
+
+    logger.debug(
+        "[evt_tail_risk] method=%s  n_exceedances=%d  xi=%.4f  beta=%.6f  "
+        "var_evt=%.6f  cvar_evt=%.6f",
+        method,
+        n_exceedances,
+        xi,
+        beta,
+        var_evt,
+        cvar_evt,
+    )
+
+    return {
+        "confidence": confidence,
+        "tail_fraction": tail_fraction,
+        "threshold": threshold,
+        "n_exceedances": n_exceedances,
+        "n_obs": n_obs,
+        "shape_xi": float(xi),
+        "scale_beta": float(beta),
+        "var_evt": float(var_evt),
+        "cvar_evt": float(cvar_evt),
+        "method": method,
+        "tail_classification": tail_classification,
+    }

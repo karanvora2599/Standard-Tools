@@ -94,8 +94,8 @@ def patched_long(long_ohlcv, monkeypatch):
 
 
 class TestToolRegistry:
-    def test_now_has_forty_two_tools(self):
-        assert len(get_agent_tools()) == 42
+    def test_now_has_forty_five_tools(self):
+        assert len(get_agent_tools()) == 45
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}

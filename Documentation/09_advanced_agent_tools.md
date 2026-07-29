@@ -1,8 +1,8 @@
 # Advanced Agent Tools
 
-Twenty-eight high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Thirty-one high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 42), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 45), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -58,6 +58,14 @@ Twenty-eight high-level agentic tools that compose the library's existing primit
 | `run_monte_carlo_simulation` | Block-bootstrap projection of a portfolio's possible future equity paths | `terminal_median`, `prob_loss`, `equity_band_p5/p50/p95` |
 | `run_stress_test` | Replay a portfolio's weights against a named historical crash window using real historical returns | `portfolio_return_pct`, `max_drawdown_pct`, `tickers_missing_data` |
 | `get_liquidity_metrics` | Amihud illiquidity ratio and Corwin-Schultz spread estimator per ticker | `per_ticker[ticker].amihud_illiquidity`, `per_ticker[ticker].corwin_schultz_spread_bps` |
+
+**Time-varying dynamics & tail risk tools (3)**
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `run_garch_volatility_forecast` | Fit GARCH(1,1) conditional volatility and forecast it forward, unlike `get_volatility_estimators`' backward-looking realized estimates | `persistence`, `current_annualized_vol`, `long_run_annualized_vol`, `forecast_annualized_vol` |
+| `run_kalman_hedge_ratio` | Time-varying hedge ratio via a Kalman filter — a staleness diagnostic companion to `run_cointegration_test`'s static OLS hedge ratio | `current_hedge_ratio`, `hedge_ratio_std`, `current_zscore`, `signal` |
+| `get_tail_risk_metrics` | Extreme Value Theory tail risk (Peaks-Over-Threshold GPD fit): VaR/CVaR extrapolated from the fitted tail, vs. the naive historical quantile | `var_evt`, `cvar_evt`, `var_historical_comparison`, `tail_classification` |
 
 **Options pricing tools (2)** — see [12_options.md](12_options.md) for the full reference
 
@@ -2572,3 +2580,152 @@ print(f"Most liquid  : {result.most_liquid_ticker}")
 **Interpreting the results:**
 
 Use `least_liquid_ticker`/`most_liquid_ticker` alongside `get_capacity_report` when sizing positions — a name flagged here as illiquid is exactly the kind of ticker `get_capacity_report`'s ADV-participation constraint should be tightened for. A wide `corwin_schultz_spread_bps` combined with a small `avg_dollar_volume` is a double warning: the position will both cost more to enter/exit (spread) and move the market more per dollar traded (Amihud) than a comparable liquid name.
+
+---
+
+## 26. GARCH(1,1) Conditional Volatility Forecast
+
+`run_garch_volatility_forecast` fits a GARCH(1,1) model — today's variance depends on yesterday's shock and yesterday's variance — and forecasts it forward. Unlike `get_volatility_estimators` (Parkinson/Garman-Klass/Yang-Zhang), which only describe *past* realized variance from OHLC bars, this produces a genuine forward-looking forecast.
+
+Scope: GARCH(1,1) with normal innovations and a constant mean only — the standard, most commonly requested specification. EGARCH/GJR-GARCH (asymmetric leverage effects) and Student-t innovations are real extensions but not built here. Requires `scipy` (maximum-likelihood fitting) — there is no meaningful scipy-free fallback for this tool, unlike EVT's closed-form default below.
+
+```python
+from standard_quant_tools.agent.tools import run_garch_volatility_forecast
+from standard_quant_tools.agent.models import GarchVolatilityForecastInput
+
+result = run_garch_volatility_forecast(GarchVolatilityForecastInput(
+    symbol="TSLA",
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    forecast_horizon=10,
+))
+
+print(f"alpha={result.alpha}  beta={result.beta}  persistence={result.persistence}")
+print(f"Current annualized vol   : {result.current_annualized_vol:.1%}")
+print(f"Long-run annualized vol  : {result.long_run_annualized_vol:.1%}")
+print(f"10-day forecast          : {[f'{v:.1%}' for v in result.forecast_annualized_vol]}")
+```
+
+**GarchVolatilityForecastInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` / `end_date` | str | — | ISO dates |
+| `forecast_horizon` | int | `10` | Periods ahead to forecast (1–252) |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `omega`, `alpha`, `beta` | `float` | Fitted GARCH(1,1) parameters |
+| `persistence` | `float` | `alpha + beta` — how slowly a volatility shock decays; close to 1.0 means shocks persist for a long time |
+| `converged` | `bool` | Whether the MLE optimizer converged to a stationary fit (`persistence < 1.0`) |
+| `current_annualized_vol` | `float` | Latest in-sample conditional volatility, annualized |
+| `long_run_annualized_vol` | `float` | The model's unconditional (long-run) volatility level |
+| `forecast_annualized_vol` | `List[float]` | Forecast conditional volatility for each of the next `forecast_horizon` periods, decaying geometrically toward `long_run_annualized_vol` |
+| `log_likelihood`, `aic`, `bic` | `float` | Fit quality / model comparison statistics |
+| `n_obs` | `int` | Observations used (minimum 100 required — GARCH fits are unstable on small samples) |
+
+**Interpreting the results:**
+
+A `persistence` near 1.0 (e.g. > 0.97) means today's volatility shock will take a long time to fade — current elevated (or depressed) volatility is a reliable near-term forecast. Compare `current_annualized_vol` against `get_volatility_estimators`' realized measures on the same symbol: GARCH's conditional vol reacts faster to recent shocks than a trailing realized-vol window does, since it's model-based rather than a rolling average.
+
+---
+
+## 27. Kalman-Filter Dynamic Hedge Ratio
+
+`run_kalman_hedge_ratio` re-estimates a pair's hedge ratio every bar via a Kalman filter, treating it as a hidden state that follows a random walk — a diagnostic companion to `run_cointegration_test`'s single static OLS `hedge_ratio`, useful for checking whether that static ratio has gone stale.
+
+This tool is **not** wired into `run_pair_trade_backtest`, which still takes a single static hedge ratio for the whole backtest window; feeding a time-varying ratio into that execution engine is a real, separate follow-up, not something this tool does implicitly.
+
+```python
+from standard_quant_tools.agent.tools import run_kalman_hedge_ratio
+from standard_quant_tools.agent.models import KalmanHedgeRatioInput
+
+result = run_kalman_hedge_ratio(KalmanHedgeRatioInput(
+    symbol_a="KO",
+    symbol_b="PEP",
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    delta=1e-4,
+))
+
+print(f"Current hedge ratio : {result.current_hedge_ratio}  (drift std: {result.hedge_ratio_std})")
+print(f"Current z-score     : {result.current_zscore}  →  {result.signal}")
+```
+
+**KalmanHedgeRatioInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol_a` / `symbol_b` | str | — | Pair legs, same convention as `run_cointegration_test` |
+| `start_date` / `end_date` | str | — | ISO dates |
+| `delta` | float | `1e-4` | The one tuning knob: controls how fast the hedge ratio is allowed to drift. Smaller = slower-adapting/more stable (closer to a static OLS ratio); larger = faster-adapting/noisier |
+| `zscore_window` | int | `20` | Rolling window (bars) for the spread z-score used to generate a signal |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `current_hedge_ratio` / `current_intercept` | `float` | Latest filtered state |
+| `hedge_ratio_std` | `float` | Std. dev. of the hedge ratio path over the window — a stability diagnostic; a large value means the "static" assumption behind a fixed hedge ratio would have been a poor one over this period |
+| `spread_mean` / `spread_std` | `float` | Full-window spread statistics |
+| `current_zscore` | `float` | Latest rolling z-score of the Kalman spread |
+| `signal` | `str` | `"long_a_short_b"` / `"short_a_long_b"` / `"neutral"`, same thresholds as `run_cointegration_test` |
+| `n_obs` | `int` | Observations used |
+
+**Interpreting the results:**
+
+Run this alongside `run_cointegration_test` on the same pair: if `current_hedge_ratio` here is far from `run_cointegration_test`'s static `hedge_ratio`, or `hedge_ratio_std` is large relative to the hedge ratio itself, the static ratio has likely gone stale and any position sized off it may no longer be dollar/beta-neutral.
+
+---
+
+## 28. EVT Tail Risk (Peaks-Over-Threshold)
+
+`get_tail_risk_metrics` fits a Generalized Pareto Distribution to just the worst `tail_fraction` of daily losses (the Peaks-Over-Threshold method, McNeil & Frey 2000) and extrapolates VaR/CVaR from that fitted tail — rather than reading a raw empirical quantile off however many extreme observations happen to be in the sample, the way `get_extended_risk_metrics`' `var_historical_99` does.
+
+Default fitting method is `"pwm"` (probability-weighted moments, Hosking & Wallis 1987) — closed-form, pure numpy, no optional dependency. `method="mle"` refines the fit via maximum likelihood and requires `scipy`.
+
+```python
+from standard_quant_tools.agent.tools import get_tail_risk_metrics
+from standard_quant_tools.agent.models import TailRiskInput
+
+result = get_tail_risk_metrics(TailRiskInput(
+    symbol="GME",
+    start_date="2020-01-01",
+    end_date="2024-01-01",
+    confidence=0.99,
+))
+
+print(f"EVT VaR(99%)          : {result.var_evt:.2%}")
+print(f"EVT CVaR(99%)         : {result.cvar_evt:.2%}")
+print(f"Naive historical VaR  : {result.var_historical_comparison:.2%}")
+print(f"Tail shape            : xi={result.shape_xi}  ({result.tail_classification})")
+```
+
+**TailRiskInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` / `end_date` | str | — | ISO dates |
+| `confidence` | float | `0.99` | VaR/CVaR confidence level (0.5, 1.0) |
+| `tail_fraction` | float | `0.05` | Fraction of observations (by loss) treated as the tail for threshold selection |
+| `method` | `"pwm"` \| `"mle"` | `"pwm"` | Fitting method — `"pwm"` needs no optional dependency, `"mle"` requires scipy |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `threshold_daily_loss_pct` | `float` | The loss level above which observations are treated as tail exceedances |
+| `n_exceedances` | `int` | Observations above the threshold the GPD was fit to (minimum 20 required) |
+| `shape_xi` | `float` | GPD shape parameter — the tail-heaviness diagnostic |
+| `scale_beta` | `float` | GPD scale parameter |
+| `var_evt` / `cvar_evt` | `float` | Tail-model-extrapolated VaR/CVaR at `confidence` |
+| `var_historical_comparison` | `float` | The naive empirical-quantile VaR at the same confidence, for direct contrast |
+| `tail_classification` | `str` | `"heavy_tailed"` (xi > 0.1), `"light_tailed"` (xi < -0.1), or `"near_exponential"` |
+
+**Interpreting the results:**
+
+`tail_classification == "heavy_tailed"` combined with `var_evt` meaningfully exceeding `var_historical_comparison` means the historical-quantile VaR is understating true tail risk — the empirical sample simply hasn't contained a large enough loss yet for the naive quantile to reflect it, while the fitted GPD tail extrapolates beyond what's actually been observed. Prefer `var_evt`/`cvar_evt` over `get_extended_risk_metrics`' historical/parametric VaR for genuinely fat-tailed names or short historical windows.

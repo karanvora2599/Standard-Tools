@@ -10,7 +10,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 ## Key Features
 
 - **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
-- **Agent-First Design** — All tools return Pydantic models; 42 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
+- **Agent-First Design** — All tools return Pydantic models; 45 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
 
@@ -448,7 +448,7 @@ from standard_quant_tools.agent.models import (
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools()  # 42 tools ready for function calling
+tools = get_agent_tools()  # 45 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -640,7 +640,7 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/04_backtesting.md` | Vectorized engine, trade log, custom signals, grid search |
 | `Documentation/05_portfolio.md` | Multi-asset metrics, correlation, optimization |
 | `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
-| `Documentation/07_agent_tools.md` | Core 14 LLM tools, full 42-tool registry, Pydantic models, end-to-end agent loop |
+| `Documentation/07_agent_tools.md` | Core 14 LLM tools, full 45-tool registry, Pydantic models, end-to-end agent loop |
 | `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
 | `Documentation/09_advanced_agent_tools.md` | 28 advanced/supplementary/custom-signal/analytics/options/diagnostic tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, portfolio optimization, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation, pair trade backtest, robustness diagnostics, capacity report, data quality report, compact backtest result, volatility estimators, correlation analysis, Monte Carlo simulation, stress test, liquidity metrics, option pricing/Greeks, implied volatility |
 | `Documentation/10_auditability.md` | Decision-record audit trail, replay verification, correlated logging, `sqt` CLI |

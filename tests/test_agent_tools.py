@@ -12,13 +12,16 @@ from standard_quant_tools.agent.models import (
     CompareStrategiesInput,
     CorrelationAnalysisInput,
     FactorRegressionInput,
+    GarchVolatilityForecastInput,
     HurstInput,
+    KalmanHedgeRatioInput,
     LiquidityAnalysisInput,
     MonteCarloSimulationInput,
     PCAInput,
     PortfolioInput,
     ScreenerInput,
     StressTestInput,
+    TailRiskInput,
     TechnicalInput,
     VolatilityEstimatorsInput,
 )
@@ -29,6 +32,7 @@ from standard_quant_tools.agent.tools import (
     get_correlation_analysis,
     get_liquidity_metrics,
     get_portfolio_analysis,
+    get_tail_risk_metrics,
     get_technical_analysis,
     get_volatility_estimators,
     run_backtest_optimization,
@@ -36,7 +40,9 @@ from standard_quant_tools.agent.tools import (
     run_buy_and_hold,
     run_cointegration_test,
     run_factor_regression,
+    run_garch_volatility_forecast,
     run_hurst_analysis,
+    run_kalman_hedge_ratio,
     run_macd_backtest,
     run_monte_carlo_simulation,
     run_pca_analysis,
@@ -107,9 +113,9 @@ class TestSanitizeForJson:
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_forty_two_tools(self):
+    def test_returns_list_of_forty_five_tools(self):
         tools = get_agent_tools()
-        assert len(tools) == 42
+        assert len(tools) == 45
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -558,6 +564,53 @@ class TestRunCointegrationTest:
         assert isinstance(result.hedge_ratio, float)
 
 
+class TestRunKalmanHedgeRatio:
+    def test_returns_result_for_symbols(self, patched_factory):
+        inp = KalmanHedgeRatioInput(
+            symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END
+        )
+        result = run_kalman_hedge_ratio(inp)
+        assert result.symbol_a == "KO"
+        assert result.symbol_b == "PEP"
+
+    def test_signal_is_valid_string(self, patched_factory):
+        inp = KalmanHedgeRatioInput(
+            symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END
+        )
+        result = run_kalman_hedge_ratio(inp)
+        assert result.signal in {"long_a_short_b", "short_a_long_b", "neutral"}
+
+    def test_hedge_ratio_and_intercept_are_float(self, patched_factory):
+        inp = KalmanHedgeRatioInput(
+            symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END
+        )
+        result = run_kalman_hedge_ratio(inp)
+        assert isinstance(result.current_hedge_ratio, float)
+        assert isinstance(result.current_intercept, float)
+
+    def test_hedge_ratio_std_nonnegative(self, patched_factory):
+        inp = KalmanHedgeRatioInput(
+            symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END
+        )
+        result = run_kalman_hedge_ratio(inp)
+        assert result.hedge_ratio_std >= 0.0
+
+    def test_n_obs_positive(self, patched_factory):
+        inp = KalmanHedgeRatioInput(
+            symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END
+        )
+        result = run_kalman_hedge_ratio(inp)
+        assert result.n_obs > 0
+
+    def test_delta_out_of_bounds_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            KalmanHedgeRatioInput(
+                symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END, delta=1.5
+            )
+
+
 class TestRunPCAAnalysis:
     def test_returns_pca_result(self, patched_factory):
         inp = PCAInput(
@@ -751,6 +804,48 @@ class TestGetVolatilityEstimators:
         with pytest.raises(PydanticValidationError):
             VolatilityEstimatorsInput(
                 symbol="AAPL", start_date=START, end_date=END, period=1
+            )
+
+
+class TestRunGarchVolatilityForecast:
+    def test_returns_result_for_symbol(self, patched_factory):
+        inp = GarchVolatilityForecastInput(
+            symbol="AAPL", start_date=START, end_date=END
+        )
+        result = run_garch_volatility_forecast(inp)
+        assert result.symbol == "AAPL"
+
+    def test_persistence_equals_alpha_plus_beta(self, patched_factory):
+        inp = GarchVolatilityForecastInput(
+            symbol="AAPL", start_date=START, end_date=END
+        )
+        result = run_garch_volatility_forecast(inp)
+        assert result.persistence == pytest.approx(
+            round(result.alpha + result.beta, 6), abs=1e-4
+        )
+
+    def test_forecast_length_matches_horizon(self, patched_factory):
+        inp = GarchVolatilityForecastInput(
+            symbol="AAPL", start_date=START, end_date=END, forecast_horizon=5
+        )
+        result = run_garch_volatility_forecast(inp)
+        assert len(result.forecast_annualized_vol) == 5
+
+    def test_vols_are_nonnegative(self, patched_factory):
+        inp = GarchVolatilityForecastInput(
+            symbol="AAPL", start_date=START, end_date=END
+        )
+        result = run_garch_volatility_forecast(inp)
+        assert result.current_annualized_vol >= 0.0
+        assert result.long_run_annualized_vol >= 0.0
+        assert all(v >= 0.0 for v in result.forecast_annualized_vol)
+
+    def test_invalid_horizon_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            GarchVolatilityForecastInput(
+                symbol="AAPL", start_date=START, end_date=END, forecast_horizon=0
             )
 
 
@@ -1029,6 +1124,52 @@ class TestGetLiquidityMetrics:
             LiquidityAnalysisInput(
                 tickers=["AAPL"], start_date=START, end_date=END, window=0
             )
+
+
+class TestGetTailRiskMetrics:
+    def test_returns_result_for_symbol(self, patched_factory):
+        inp = TailRiskInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_tail_risk_metrics(inp)
+        assert result.symbol == "AAPL"
+
+    def test_default_method_is_pwm(self, patched_factory):
+        inp = TailRiskInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_tail_risk_metrics(inp)
+        assert result.method == "pwm"
+
+    def test_var_evt_positive_and_cvar_not_below_var(self, patched_factory):
+        inp = TailRiskInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_tail_risk_metrics(inp)
+        assert result.var_evt > 0.0
+        assert result.cvar_evt >= result.var_evt
+
+    def test_tail_classification_is_valid(self, patched_factory):
+        inp = TailRiskInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_tail_risk_metrics(inp)
+        assert result.tail_classification in {
+            "heavy_tailed",
+            "light_tailed",
+            "near_exponential",
+        }
+
+    def test_var_historical_comparison_is_float(self, patched_factory):
+        inp = TailRiskInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_tail_risk_metrics(inp)
+        assert isinstance(result.var_historical_comparison, float)
+
+    def test_invalid_tail_fraction_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            TailRiskInput(
+                symbol="AAPL", start_date=START, end_date=END, tail_fraction=0.6
+            )
+
+    def test_invalid_method_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            TailRiskInput(symbol="AAPL", start_date=START, end_date=END, method="bogus")
 
 
 class TestGetTechnicalAnalysisExtended:

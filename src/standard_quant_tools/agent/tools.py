@@ -54,10 +54,14 @@ from standard_quant_tools.agent.models import (
     FactorRegressionResult,
     FundamentalsInput,
     FundamentalsResult,
+    GarchVolatilityForecastInput,
+    GarchVolatilityForecastResult,
     HurstInput,
     HurstResult,
     ImpliedVolatilityInput,
     ImpliedVolatilityResult,
+    KalmanHedgeRatioInput,
+    KalmanHedgeRatioResult,
     LiquidityAnalysisInput,
     LiquidityAnalysisResult,
     MissingBar,
@@ -107,6 +111,8 @@ from standard_quant_tools.agent.models import (
     StrategyComparison,
     StressTestInput,
     StressTestResult,
+    TailRiskInput,
+    TailRiskResult,
     TechnicalInput,
     TechnicalResult,
     Trade,
@@ -120,12 +126,14 @@ from standard_quant_tools.agent.models import (
 from standard_quant_tools.analysis.cointegration import (
     cointegration_test,
     compute_spread,
+    kalman_hedge_ratio,
     spread_zscore,
 )
 from standard_quant_tools.analysis.correlation import (
     diversification_ratio,
     pairwise_correlation_summary,
 )
+from standard_quant_tools.analysis.garch import garch_volatility_forecast
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
 from standard_quant_tools.analysis.multi_factor import (
     multi_factor_regression,
@@ -216,6 +224,7 @@ from standard_quant_tools.metrics.return_metrics import annualized_volatility, c
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     cvar,
+    evt_tail_risk,
     information_ratio,
     max_drawdown,
     sharpe_ratio,
@@ -1068,6 +1077,62 @@ def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResul
 
 
 # ──────────────────────────────────────────────────────────────────
+# Kalman-Filter Dynamic Hedge Ratio Tool
+# ──────────────────────────────────────────────────────────────────
+
+
+def run_kalman_hedge_ratio(input_data: KalmanHedgeRatioInput) -> KalmanHedgeRatioResult:
+    """
+    Time-varying hedge ratio via a Kalman filter — a diagnostic companion
+    to run_cointegration_test's static OLS hedge_ratio, useful for checking
+    whether a static ratio has gone stale. NOT wired into run_pair_backtest,
+    which still takes a single static hedge ratio for the whole window.
+    """
+    logger.debug(
+        "[kalman_hedge_ratio] %s vs %s  %s → %s  delta=%.2e",
+        input_data.symbol_a,
+        input_data.symbol_b,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.delta,
+    )
+    provider = DataFactory.get_provider()
+    prices_a = provider.get_ohlcv(
+        input_data.symbol_a, input_data.start_date, input_data.end_date
+    )["Close"]
+    prices_b = provider.get_ohlcv(
+        input_data.symbol_b, input_data.start_date, input_data.end_date
+    )["Close"]
+
+    kf = kalman_hedge_ratio(prices_a, prices_b, delta=input_data.delta)
+    z = spread_zscore(kf["Spread"], window=input_data.zscore_window)
+    valid_z = z.dropna()
+    current_z = round(float(valid_z.iloc[-1]), 4) if not valid_z.empty else 0.0
+
+    if current_z < -2.0:
+        signal = "long_a_short_b"
+    elif current_z > 2.0:
+        signal = "short_a_long_b"
+    else:
+        signal = "neutral"
+
+    beta_series = kf["Hedge_Ratio"]
+
+    return KalmanHedgeRatioResult(
+        symbol_a=input_data.symbol_a,
+        symbol_b=input_data.symbol_b,
+        current_hedge_ratio=round(float(beta_series.iloc[-1]), 4),
+        current_intercept=round(float(kf["Intercept"].iloc[-1]), 4),
+        hedge_ratio_std=round(float(beta_series.std()), 4),
+        spread_mean=round(float(kf["Spread"].mean()), 6),
+        spread_std=round(float(kf["Spread"].std()), 6),
+        current_zscore=current_z,
+        signal=signal,
+        n_obs=len(kf),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # PCA Tool
 # ──────────────────────────────────────────────────────────────────
 
@@ -1270,6 +1335,51 @@ def get_volatility_estimators(
         garman_klass_annualized=round(_latest(garman_klass), 6),
         yang_zhang_annualized=round(yz_val, 6),
         yang_zhang_vs_close_to_close_ratio=round(ratio, 4),
+    )
+
+
+def run_garch_volatility_forecast(
+    input_data: GarchVolatilityForecastInput,
+) -> GarchVolatilityForecastResult:
+    """
+    GARCH(1,1) conditional volatility: fits how variance itself evolves
+    (today's variance depends on yesterday's shock and yesterday's
+    variance) and forecasts it forward — unlike get_volatility_estimators,
+    which only describes past realized variance.
+    """
+    logger.debug(
+        "[garch_volatility_forecast] %s  %s → %s  horizon=%d",
+        input_data.symbol,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.forecast_horizon,
+    )
+    provider = DataFactory.get_provider()
+    close = provider.get_ohlcv(
+        input_data.symbol, input_data.start_date, input_data.end_date
+    )["Close"]
+    returns = close.pct_change().dropna()
+
+    result = garch_volatility_forecast(
+        returns, forecast_horizon=input_data.forecast_horizon
+    )
+
+    return GarchVolatilityForecastResult(
+        symbol=input_data.symbol,
+        omega=result["omega"],
+        alpha=round(result["alpha"], 6),
+        beta=round(result["beta"], 6),
+        persistence=round(result["persistence"], 6),
+        converged=result["converged"],
+        current_annualized_vol=round(result["current_annualized_vol"], 6),
+        long_run_annualized_vol=round(result["long_run_annualized_vol"], 6),
+        forecast_annualized_vol=[
+            round(v, 6) for v in result["forecast_annualized_vol"]
+        ],
+        log_likelihood=round(result["log_likelihood"], 4),
+        aic=round(result["aic"], 4),
+        bic=round(result["bic"], 4),
+        n_obs=result["n_obs"],
     )
 
 
@@ -2637,6 +2747,60 @@ def get_extended_risk_metrics(input_data: ExtendedRiskInput) -> ExtendedRiskResu
 
 
 # ──────────────────────────────────────────────────────────────────
+# EVT Tail Risk Tool
+# ──────────────────────────────────────────────────────────────────
+
+
+def get_tail_risk_metrics(input_data: TailRiskInput) -> TailRiskResult:
+    """
+    Extreme Value Theory tail risk via Peaks-Over-Threshold: fits a
+    Generalized Pareto Distribution to the worst tail of daily losses and
+    extrapolates VaR/CVaR from that fitted tail, rather than the raw
+    empirical quantile get_extended_risk_metrics' var_historical_99 uses —
+    var_historical_comparison reports that side by side for contrast.
+    """
+    logger.debug(
+        "[tail_risk] %s  %s → %s  confidence=%.3f  tail_fraction=%.3f  method=%s",
+        input_data.symbol,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.confidence,
+        input_data.tail_fraction,
+        input_data.method,
+    )
+    provider = DataFactory.get_provider()
+    close = provider.get_ohlcv(
+        input_data.symbol, input_data.start_date, input_data.end_date
+    )["Close"]
+    returns = close.pct_change().dropna()
+
+    result = evt_tail_risk(
+        returns,
+        confidence=input_data.confidence,
+        tail_fraction=input_data.tail_fraction,
+        method=input_data.method,
+    )
+    hist_comparison = var_historical(returns, confidence=input_data.confidence)
+
+    return TailRiskResult(
+        symbol=input_data.symbol,
+        confidence=result["confidence"],
+        threshold_daily_loss_pct=round(result["threshold"], 6),
+        n_exceedances=result["n_exceedances"],
+        n_obs=result["n_obs"],
+        shape_xi=round(result["shape_xi"], 4),
+        scale_beta=round(result["scale_beta"], 6),
+        var_evt=round(result["var_evt"], 6),
+        cvar_evt=round(result["cvar_evt"], 6)
+        if result["cvar_evt"] != float("inf")
+        else float("inf"),
+        var_historical_comparison=round(hist_comparison, 6),
+        method=result["method"],
+        tail_classification=result["tail_classification"],
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Custom Signal Backtest (bring-your-own signal)
 # ──────────────────────────────────────────────────────────────────
 
@@ -3868,6 +4032,11 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             CointegrationInput,
         ),
         (
+            "run_kalman_hedge_ratio",
+            "Time-varying hedge ratio via a Kalman filter — a staleness diagnostic companion to run_cointegration_test's static OLS hedge ratio.",
+            KalmanHedgeRatioInput,
+        ),
+        (
             "run_pca_analysis",
             "PCA on multi-asset returns: explained variance, loadings, factor contributions.",
             PCAInput,
@@ -3886,6 +4055,11 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             "get_volatility_estimators",
             "Realized volatility via Parkinson, Garman-Klass, and Yang-Zhang estimators vs. plain close-to-close.",
             VolatilityEstimatorsInput,
+        ),
+        (
+            "run_garch_volatility_forecast",
+            "GARCH(1,1) conditional volatility: fits how variance evolves over time and forecasts it forward, unlike get_volatility_estimators' backward-looking realized estimates.",
+            GarchVolatilityForecastInput,
         ),
         (
             "run_regime_adaptive_backtest",
@@ -3946,6 +4120,11 @@ def get_agent_tools() -> List[Dict[str, Any]]:
             "get_extended_risk_metrics",
             "Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.",
             ExtendedRiskInput,
+        ),
+        (
+            "get_tail_risk_metrics",
+            "Extreme Value Theory tail risk (Peaks-Over-Threshold GPD fit): VaR/CVaR extrapolated from the fitted tail, compared against the naive historical quantile.",
+            TailRiskInput,
         ),
         (
             "run_custom_signal_backtest",
@@ -4048,10 +4227,15 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_screener": (run_screener, ScreenerInput),
     "run_factor_regression": (run_factor_regression, FactorRegressionInput),
     "run_cointegration_test": (run_cointegration_test, CointegrationInput),
+    "run_kalman_hedge_ratio": (run_kalman_hedge_ratio, KalmanHedgeRatioInput),
     "run_pca_analysis": (run_pca_analysis, PCAInput),
     "get_correlation_analysis": (get_correlation_analysis, CorrelationAnalysisInput),
     "run_hurst_analysis": (run_hurst_analysis, HurstInput),
     "get_volatility_estimators": (get_volatility_estimators, VolatilityEstimatorsInput),
+    "run_garch_volatility_forecast": (
+        run_garch_volatility_forecast,
+        GarchVolatilityForecastInput,
+    ),
     "run_regime_adaptive_backtest": (run_regime_adaptive_backtest, RegimeAdaptiveInput),
     "run_regime_adaptive_walkforward_backtest": (
         run_regime_adaptive_walkforward_backtest,
@@ -4070,6 +4254,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "get_advanced_indicators": (get_advanced_indicators, AdvancedIndicatorsInput),
     "get_rolling_beta": (get_rolling_beta, RollingBetaInput),
     "get_extended_risk_metrics": (get_extended_risk_metrics, ExtendedRiskInput),
+    "get_tail_risk_metrics": (get_tail_risk_metrics, TailRiskInput),
     "run_custom_signal_backtest": (
         run_custom_signal_backtest,
         CustomSignalBacktestInput,

@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import coint
 
+from standard_quant_tools.error import ValidationError
+
 logger = logging.getLogger(__name__)
 
 # ── C++ extension (optional fast path) ───────────────────────────────────────
@@ -19,6 +21,18 @@ try:
     HAS_CPP = True
 except ImportError:
     pass
+
+# ── numba (Kalman filter recursion is inherently sequential) ─────────────────
+
+try:
+    from numba import njit
+
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+    def njit(func):  # type: ignore[misc]
+        return func
 
 
 def cointegration_test(
@@ -221,3 +235,200 @@ def spread_zscore(
     rolling_mean = spread.rolling(window).mean()
     rolling_std = spread.rolling(window).std()
     return ((spread - rolling_mean) / rolling_std).rename("zscore")
+
+
+# ── Kalman-filter dynamic hedge ratio ────────────────────────────────────────
+#
+# cointegration_test's hedge_ratio is a single static OLS coefficient fit
+# once over the whole window — the standard starting point, but it can go
+# stale as the true relationship drifts. The Kalman filter below treats the
+# hedge ratio as a hidden state that follows a random walk and re-estimates
+# it every bar via the standard predict/update recursion (see e.g. Chan,
+# "Algorithmic Trading", ch. 3, for this exact parametrization). It's a
+# diagnostic companion to cointegration_test, not a replacement — and it is
+# NOT wired into backtest/pairs.py's run_pair_backtest, which takes a single
+# static float hedge ratio for the whole backtest window; feeding it a
+# time-varying ratio would be a real follow-up to that engine, not this
+# module.
+#
+# The recursion is inherently sequential (state at t depends on state at
+# t-1), so it's numba-@njit'd rather than vectorized — same tool this
+# codebase already uses for backtest/strategies.py's state-machine loops.
+# Two separate kernels (1-state / 2-state) rather than one branching kernel,
+# matching strategies.py's precedent of one njit function per state machine
+# instead of a single parametrized one.
+
+_KALMAN_PRIOR_VARIANCE = 1.0e4
+
+
+@njit
+def _kalman_filter_1state(
+    y: np.ndarray, x: np.ndarray, delta: float, observation_noise: float
+) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    n = len(y)
+    beta_path = np.empty(n)
+    gain_path = np.empty(n)
+    innovation_path = np.empty(n)
+
+    vw = delta / (1.0 - delta)
+    beta_prev = 0.0
+    p_prev = _KALMAN_PRIOR_VARIANCE
+
+    for t in range(n):
+        r = p_prev + vw
+        y_hat = beta_prev * x[t]
+        q = r * x[t] * x[t] + observation_noise
+        e = y[t] - y_hat
+        k = r * x[t] / q
+
+        beta_t = beta_prev + k * e
+        p_t = r - k * x[t] * r
+
+        beta_path[t] = beta_t
+        gain_path[t] = k
+        innovation_path[t] = e
+
+        beta_prev = beta_t
+        p_prev = p_t
+
+    return beta_path, gain_path, innovation_path
+
+
+@njit
+def _kalman_filter_2state(
+    y: np.ndarray, x: np.ndarray, delta: float, observation_noise: float
+) -> "tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]":
+    n = len(y)
+    alpha_path = np.empty(n)
+    beta_path = np.empty(n)
+    gain_path = np.empty(n)
+    innovation_path = np.empty(n)
+
+    vw = delta / (1.0 - delta)
+    alpha_prev = 0.0
+    beta_prev = 0.0
+    p00, p01, p11 = _KALMAN_PRIOR_VARIANCE, 0.0, _KALMAN_PRIOR_VARIANCE
+
+    for t in range(n):
+        r00 = p00 + vw
+        r01 = p01
+        r11 = p11 + vw
+
+        xt = x[t]
+        q = r00 + 2.0 * r01 * xt + r11 * xt * xt + observation_noise
+        e = y[t] - (alpha_prev + beta_prev * xt)
+
+        rx0 = r00 + r01 * xt
+        rx1 = r01 + r11 * xt
+        k0 = rx0 / q
+        k1 = rx1 / q
+
+        alpha_t = alpha_prev + k0 * e
+        beta_t = beta_prev + k1 * e
+
+        p00_t = r00 - k0 * rx0
+        p01_t = r01 - k0 * rx1
+        p11_t = r11 - k1 * rx1
+
+        alpha_path[t] = alpha_t
+        beta_path[t] = beta_t
+        gain_path[t] = k1
+        innovation_path[t] = e
+
+        alpha_prev, beta_prev = alpha_t, beta_t
+        p00, p01, p11 = p00_t, p01_t, p11_t
+
+    return alpha_path, beta_path, gain_path, innovation_path
+
+
+def kalman_hedge_ratio(
+    series_a: pd.Series,
+    series_b: pd.Series,
+    delta: float = 1e-4,
+    observation_noise: float = 1e-3,
+    include_intercept: bool = True,
+) -> pd.DataFrame:
+    """
+    Time-varying hedge ratio between two price series via a Kalman filter.
+
+    Models series_a[t] = intercept[t] + beta[t] * series_b[t] + noise, with
+    beta[t] (and intercept[t], if include_intercept) following a random
+    walk. Unlike cointegration_test's single static OLS hedge_ratio, this
+    re-estimates the ratio every bar — useful as a staleness diagnostic on
+    an existing pairs relationship, or to see how much a static ratio would
+    have drifted over the window.
+
+    Parameters
+    ----------
+    series_a, series_b : pd.Series
+        Price (or log-price) series, same convention as cointegration_test.
+        Index alignment is handled automatically.
+    delta : float
+        The one tuning knob (standard in the Kalman pairs-trading
+        literature): controls how fast the hedge ratio is allowed to drift.
+        Smaller = slower-adapting / more stable (closer to a static OLS
+        ratio); larger = faster-adapting / noisier. Must be in (0, 1).
+    observation_noise : float
+        Assumed variance of the observation noise (spread noise). Larger
+        values make the filter trust new observations less.
+    include_intercept : bool
+        If True (default), fits both an intercept and a slope (2-state
+        filter). If False, fits slope only (1-state filter, intercept
+        forced to 0).
+
+    Returns
+    -------
+    pd.DataFrame indexed on the common index of series_a/series_b, columns:
+        Hedge_Ratio : beta[t]
+        Intercept   : intercept[t] (all zero if include_intercept=False)
+        Spread      : series_a - Hedge_Ratio*series_b - Intercept
+        Kalman_Gain : the slope's Kalman gain at each step (diagnostic —
+                      near-zero means the filter has stopped reacting to
+                      new observations)
+    """
+    if not (0.0 < delta < 1.0):
+        raise ValidationError(f"delta must be in (0, 1), got {delta}")
+    if observation_noise <= 0:
+        raise ValidationError(
+            f"observation_noise must be > 0, got {observation_noise}"
+        )
+
+    common_idx = series_a.index.intersection(series_b.index)
+    a = series_a.loc[common_idx].to_numpy(dtype=float)
+    b = series_b.loc[common_idx].to_numpy(dtype=float)
+    n = len(a)
+    if n < 3:
+        raise ValidationError(
+            f"kalman_hedge_ratio needs at least 3 aligned observations, got {n}"
+        )
+
+    path = "2-state" if include_intercept else "1-state"
+    logger.debug(
+        "[kalman_hedge_ratio] n_obs=%d  delta=%.2e  observation_noise=%.2e  path=%s",
+        n,
+        delta,
+        observation_noise,
+        path,
+    )
+
+    if include_intercept:
+        alpha_path, beta_path, gain_path, _ = _kalman_filter_2state(
+            a, b, delta, observation_noise
+        )
+    else:
+        beta_path, gain_path, _ = _kalman_filter_1state(
+            a, b, delta, observation_noise
+        )
+        alpha_path = np.zeros(n)
+
+    spread = a - beta_path * b - alpha_path
+
+    return pd.DataFrame(
+        {
+            "Hedge_Ratio": beta_path,
+            "Intercept": alpha_path,
+            "Spread": spread,
+            "Kalman_Gain": gain_path,
+        },
+        index=common_idx,
+    )

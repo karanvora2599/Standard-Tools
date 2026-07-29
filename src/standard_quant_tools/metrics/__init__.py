@@ -10,6 +10,7 @@ from .risk_metrics import (
     calmar_ratio,
     cvar,
     drawdown_series,
+    evt_tail_risk,
     information_ratio,
     max_drawdown,
     sharpe_ratio,

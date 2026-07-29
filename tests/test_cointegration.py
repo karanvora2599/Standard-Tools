@@ -5,11 +5,14 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.analysis.cointegration import (
+    _kalman_filter_1state,
     cointegration_test,
     compute_spread,
     half_life,
+    kalman_hedge_ratio,
     spread_zscore,
 )
+from standard_quant_tools.error import ValidationError
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -287,3 +290,131 @@ class TestSpreadZscore:
         spread = compute_spread(a, b)
         z = spread_zscore(spread)
         assert z.name == "zscore"
+
+
+# ── kalman_hedge_ratio ───────────────────────────────────────────────────────
+
+
+class TestKalmanHedgeRatioOutputStructure:
+    def test_returns_expected_columns(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        result = kalman_hedge_ratio(a, b)
+        assert set(result.columns) == {
+            "Hedge_Ratio",
+            "Intercept",
+            "Spread",
+            "Kalman_Gain",
+        }
+
+    def test_index_matches_common_index(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        result = kalman_hedge_ratio(a, b)
+        assert result.index.equals(a.index.intersection(b.index))
+
+    def test_include_intercept_false_zeroes_intercept(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        result = kalman_hedge_ratio(a, b, include_intercept=False)
+        assert (result["Intercept"] == 0.0).all()
+
+    def test_no_nans(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        result = kalman_hedge_ratio(a, b)
+        assert not result.isna().any().any()
+
+
+class TestKalmanHedgeRatioConvergence:
+    def test_tiny_delta_converges_to_static_ols_hedge_ratio(self, cointegrated_pair):
+        """As delta -> 0 the filter should barely adapt, landing close to
+        cointegration_test's static OLS hedge_ratio on the same pair — a
+        cross-check against already-verified existing code."""
+        a, b = cointegrated_pair
+        static = cointegration_test(a, b)
+        kf = kalman_hedge_ratio(a, b, delta=1e-6, observation_noise=1.0)
+        terminal_beta = kf["Hedge_Ratio"].iloc[-1]
+        assert terminal_beta == pytest.approx(static["hedge_ratio"], abs=0.15)
+
+    def test_spread_matches_hedge_ratio_and_intercept(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        common = a.index.intersection(b.index)
+        result = kalman_hedge_ratio(a, b)
+        expected_spread = (
+            a.loc[common] - result["Hedge_Ratio"] * b.loc[common] - result["Intercept"]
+        )
+        pd.testing.assert_series_equal(
+            result["Spread"], expected_spread, check_names=False
+        )
+
+
+class TestKalmanFilter1StateHandComputed:
+    def test_matches_hand_computed_two_step_recursion(self):
+        y = np.array([2.0, 4.4])
+        x = np.array([1.0, 2.0])
+        delta, obs_noise = 0.5, 1.0
+        beta_path, gain_path, innov_path = _kalman_filter_1state(
+            y, x, delta, obs_noise
+        )
+
+        vw = delta / (1.0 - delta)
+        p0 = 1.0e4
+        beta_prev, p_prev = 0.0, p0
+
+        r = p_prev + vw
+        q = r * x[0] ** 2 + obs_noise
+        e0 = y[0] - beta_prev * x[0]
+        k0 = r * x[0] / q
+        beta0 = beta_prev + k0 * e0
+        p0_next = r - k0 * x[0] * r
+
+        assert beta_path[0] == pytest.approx(beta0)
+        assert gain_path[0] == pytest.approx(k0)
+        assert innov_path[0] == pytest.approx(e0)
+
+        r1 = p0_next + vw
+        q1 = r1 * x[1] ** 2 + obs_noise
+        e1 = y[1] - beta0 * x[1]
+        k1 = r1 * x[1] / q1
+        beta1 = beta0 + k1 * e1
+
+        assert beta_path[1] == pytest.approx(beta1)
+        assert innov_path[1] == pytest.approx(e1)
+
+
+class TestKalmanHedgeRatioValidation:
+    def test_delta_out_of_bounds_raises(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        with pytest.raises(ValidationError, match="delta"):
+            kalman_hedge_ratio(a, b, delta=1.5)
+        with pytest.raises(ValidationError, match="delta"):
+            kalman_hedge_ratio(a, b, delta=0.0)
+
+    def test_non_positive_observation_noise_raises(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        with pytest.raises(ValidationError, match="observation_noise"):
+            kalman_hedge_ratio(a, b, observation_noise=0.0)
+
+    def test_too_few_observations_raises(self):
+        dates = pd.date_range("2020-01-01", periods=2, freq="B")
+        a = pd.Series([1.0, 2.0], index=dates)
+        b = pd.Series([1.0, 2.0], index=dates)
+        with pytest.raises(ValidationError, match="at least 3"):
+            kalman_hedge_ratio(a, b)
+
+
+@pytest.mark.benchmark
+class TestKalmanHedgeRatioScale:
+    def test_two_million_points_runs_quickly(self):
+        import time
+
+        rng = np.random.default_rng(7)
+        n = 2_000_000
+        x = np.cumsum(rng.standard_normal(n)) + 100
+        y = 1.5 * x + rng.standard_normal(n)
+        dates = pd.date_range("2000-01-01", periods=n, freq="min")
+        a = pd.Series(y, index=dates)
+        b = pd.Series(x, index=dates)
+
+        t0 = time.time()
+        result = kalman_hedge_ratio(a, b)
+        elapsed = time.time() - t0
+        assert elapsed < 10.0, f"2M-point Kalman filter took {elapsed:.2f}s"
+        assert len(result) == n

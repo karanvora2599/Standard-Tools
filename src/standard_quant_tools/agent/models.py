@@ -428,6 +428,46 @@ class CointegrationResult(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# Kalman-Filter Dynamic Hedge Ratio
+# ──────────────────────────────────────────────
+
+
+class KalmanHedgeRatioInput(BaseModel):
+    symbol_a: str = Field(..., description="First asset symbol (the 'long' leg).")
+    symbol_b: str = Field(..., description="Second asset symbol (the 'short' leg).")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    delta: float = Field(
+        1e-4,
+        gt=0,
+        lt=1,
+        description=(
+            "Controls how fast the hedge ratio is allowed to drift. Smaller "
+            "= slower-adapting/more stable (closer to a static OLS ratio); "
+            "larger = faster-adapting/noisier."
+        ),
+    )
+    zscore_window: int = Field(
+        20,
+        gt=1,
+        description="Rolling window (bars) for the spread z-score used to generate a signal.",
+    )
+
+
+class KalmanHedgeRatioResult(BaseModel):
+    symbol_a: str
+    symbol_b: str
+    current_hedge_ratio: float
+    current_intercept: float
+    hedge_ratio_std: float
+    spread_mean: float
+    spread_std: float
+    current_zscore: float
+    signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
+    n_obs: int
+
+
+# ──────────────────────────────────────────────
 # PCA
 # ──────────────────────────────────────────────
 
@@ -549,6 +589,36 @@ class VolatilityEstimatorsResult(BaseModel):
     garman_klass_annualized: float
     yang_zhang_annualized: float
     yang_zhang_vs_close_to_close_ratio: float
+
+
+# ──────────────────────────────────────────────
+# GARCH(1,1) Conditional Volatility Forecast
+# ──────────────────────────────────────────────
+
+
+class GarchVolatilityForecastInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    forecast_horizon: int = Field(
+        10, gt=0, le=252, description="Periods ahead to forecast."
+    )
+
+
+class GarchVolatilityForecastResult(BaseModel):
+    symbol: str
+    omega: float
+    alpha: float
+    beta: float
+    persistence: float
+    converged: bool
+    current_annualized_vol: float
+    long_run_annualized_vol: float
+    forecast_annualized_vol: List[float]
+    log_likelihood: float
+    aic: float
+    bic: float
+    n_obs: int
 
 
 # ──────────────────────────────────────────────
@@ -1277,6 +1347,47 @@ class ExtendedRiskResult(BaseModel):
     var_historical_99: float
     cvar_99: float
     beta: float
+
+
+# ──────────────────────────────────────────────
+# EVT Tail Risk (Peaks-Over-Threshold)
+# ──────────────────────────────────────────────
+
+
+class TailRiskInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    confidence: float = Field(0.99, gt=0.5, lt=1.0, description="VaR/CVaR confidence level.")
+    tail_fraction: float = Field(
+        0.05,
+        gt=0.0,
+        lt=0.5,
+        description="Fraction of observations (by loss) treated as the tail for threshold selection.",
+    )
+    method: Literal["pwm", "mle"] = Field(
+        "pwm",
+        description=(
+            "'pwm' (default, closed-form, no dependencies) or 'mle' "
+            "(maximum likelihood, requires scipy, more statistically "
+            "efficient but iterative)."
+        ),
+    )
+
+
+class TailRiskResult(BaseModel):
+    symbol: str
+    confidence: float
+    threshold_daily_loss_pct: float
+    n_exceedances: int
+    n_obs: int
+    shape_xi: float
+    scale_beta: float
+    var_evt: float
+    cvar_evt: float
+    var_historical_comparison: float
+    method: str
+    tail_classification: str
 
 
 # ──────────────────────────────────────────────

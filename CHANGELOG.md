@@ -42,6 +42,53 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **3 new agent tools: GARCH volatility forecasting, Kalman dynamic hedge
+  ratio, EVT tail risk** (42 → 45 tools). All three model time-varying
+  dynamics or fat tails — a gap the analytics layer's existing static/
+  point-in-time tools (cointegration, correlation, realized-vol estimators,
+  historical VaR/CVaR) didn't cover:
+  - `run_garch_volatility_forecast` (`analysis/garch.py`) — fits GARCH(1,1)
+    conditional volatility and forecasts it forward, unlike
+    `get_volatility_estimators`' backward-looking realized measures. The
+    variance recursion is numba-`@njit`'d (inherently sequential, same tool
+    `backtest/strategies.py`'s state machines already use); MLE fitting via
+    `scipy.optimize` handles millions of bars in well under a second thanks
+    to the JIT'd recursion. Requires scipy — no meaningful scipy-free
+    fallback for a maximum-likelihood fit.
+  - `run_kalman_hedge_ratio` (`analysis/cointegration.py`) — re-estimates a
+    pair's hedge ratio every bar via a Kalman filter, a time-varying
+    diagnostic companion to `run_cointegration_test`'s static OLS
+    `hedge_ratio`. Hand-unrolled 2×2 numba recursion, verified to converge
+    to `cointegration_test`'s static hedge ratio as the `delta` tuning
+    parameter shrinks toward 0. Deliberately **not** wired into
+    `run_pair_trade_backtest`, which still trades a single static hedge
+    ratio for the whole window — a real, separate follow-up.
+  - `get_tail_risk_metrics` (`metrics/risk_metrics.py`) — Extreme Value
+    Theory tail risk via Peaks-Over-Threshold: fits a Generalized Pareto
+    Distribution to the worst tail of daily losses and extrapolates
+    VaR/CVaR from that fitted tail, reported alongside the naive
+    `var_historical` figure for direct contrast. Default fitting method is
+    probability-weighted moments (closed-form, pure numpy, zero
+    optional-dependency surface); `method="mle"` requires scipy.
+
+  All three follow the established pattern exactly: new Pydantic
+  Input/Result models, registration in both `get_agent_tools()` and
+  `_TOOL_DISPATCH`, worker assignment + updated system prompt in
+  `Multi_Agent_Implementation/worker_agents.py` (verified against
+  `test_multi_agent_tool_coverage.py`), and hand-verified pure-function
+  tests (GARCH against a simulated known-parameter process; Kalman against
+  a hand-computed toy recursion and convergence to static OLS; EVT against
+  a known-generating GPD via inverse-CDF sampling) plus structural
+  agent-tool tests. See
+  [Documentation/09_advanced_agent_tools.md](Documentation/09_advanced_agent_tools.md),
+  Tools 26–28.
+
+  Found and fixed a real bug while implementing this: the initial EVT
+  probability-weighted-moments estimator had its order-statistic weights
+  backwards (weighting by `F(x)` instead of `1-F(x)`), which silently fit
+  the wrong tail shape — caught by the known-generating-GPD hand
+  verification before it shipped, not by the unit tests alone.
+
 - **4 new backtest strategies** (`backtest/strategies.py`, `STRATEGY_REGISTRY`
   now has 8 entries, up from 4): `donchian_breakout` (Turtle-style channel
   breakout, entry/exit channels use `.shift(1)` so it's a genuine breakout
