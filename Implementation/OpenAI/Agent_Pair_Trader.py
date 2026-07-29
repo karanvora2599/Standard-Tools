@@ -5,18 +5,19 @@ GPT scans for cointegrated pairs and produces a trade plan with position sizing.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-OPENAI_API_KEY = ""   # Replace with your key
-MODEL          = "gpt-4o-mini"
+OPENAI_API_KEY = ""  # Replace with your key
+MODEL = "gpt-4o-mini"
 
-UNIVERSE   = ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX", "VLO", "OXY", "HAL"]
+UNIVERSE = ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX", "VLO", "OXY", "HAL"]
 START_DATE = "2021-01-01"
-END_DATE   = "2024-12-31"
-ACCOUNT    = 500_000.0
+END_DATE = "2024-12-31"
+ACCOUNT = 500_000.0
 
 SYSTEM_PROMPT = """You are a quantitative pairs trader specialising in statistical arbitrage.
 
@@ -60,8 +61,10 @@ if __name__ == "__main__":
     _header("Agentic Pair Trader — GPT-4o mini")
     _log("Log file", str(log_file))
     _log("Universe", ", ".join(UNIVERSE))
-    _log("Period",   f"{START_DATE} → {END_DATE}")
-    _log("Account",  f"${ACCOUNT:,.0f}")
+    _log("Period", f"{START_DATE} → {END_DATE}")
+    _log("Account", f"${ACCOUNT:,.0f}")
+
+    routed_categories = route_request(USER_REQUEST, api_key=OPENAI_API_KEY, model=MODEL)
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -69,6 +72,7 @@ if __name__ == "__main__":
         api_key=OPENAI_API_KEY,
         model=MODEL,
         max_iterations=20,
+        categories=routed_categories,
     )
 
     _header("FINAL TRADE PLAN")

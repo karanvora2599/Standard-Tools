@@ -5,13 +5,14 @@ The agent autonomously selects strategies, runs backtests, and summarizes findin
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-GEMINI_API_KEY = ""   # Replace with your key
-MODEL          = "gemini-2.0-flash"
+GEMINI_API_KEY = ""  # Replace with your key
+MODEL = "gemini-2.0-flash"
 
 SYSTEM_PROMPT = """You are a quantitative analyst with access to a suite of backtesting and analysis tools.
 
@@ -36,7 +37,9 @@ if __name__ == "__main__":
 
     _header("Agentic Backtest — Gemini 2.0 Flash")
     _log("Log file", str(log_file))
-    _log("Symbol",   "AAPL  |  2023")
+    _log("Symbol", "AAPL  |  2023")
+
+    routed_categories = route_request(USER_REQUEST, api_key=GEMINI_API_KEY, model=MODEL)
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -44,6 +47,7 @@ if __name__ == "__main__":
         api_key=GEMINI_API_KEY,
         model=MODEL,
         max_iterations=15,
+        categories=routed_categories,
     )
 
     _header("FINAL REPORT")

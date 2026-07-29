@@ -11,24 +11,27 @@ second-guesses the signal itself, it only backtests and combines it.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
+
 import pandas as pd
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
+
 from standard_quant_tools.data.factory import DataFactory
-from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-OPENAI_API_KEY = ""   # Replace with your key
-MODEL          = "gpt-4o-mini"
+OPENAI_API_KEY = ""  # Replace with your key
+MODEL = "gpt-4o-mini"
 
-SYMBOL     = "AAPL"
+SYMBOL = "AAPL"
 START_DATE = "2022-06-01"
-END_DATE   = "2023-06-01"
+END_DATE = "2023-06-01"
 
 PANEL_TICKERS = ["AAPL", "MSFT", "GOOGL"]
-PANEL_START   = "2023-01-01"
-PANEL_END     = "2023-06-01"
+PANEL_START = "2023-01-01"
+PANEL_END = "2023-06-01"
 
 
 def _acceleration_signal(close: pd.Series) -> pd.Series:
@@ -79,8 +82,8 @@ if __name__ == "__main__":
     single_signal = _signal_dict(SYMBOL, START_DATE, END_DATE)
     panel_signal = {t: _signal_dict(t, PANEL_START, PANEL_END) for t in PANEL_TICKERS}
 
-    _log("Symbol",               f"{SYMBOL}  |  {START_DATE} to {END_DATE}")
-    _log("Panel tickers",        ", ".join(PANEL_TICKERS))
+    _log("Symbol", f"{SYMBOL}  |  {START_DATE} to {END_DATE}")
+    _log("Panel tickers", ", ".join(PANEL_TICKERS))
     _log("Signal points (single)", str(len(single_signal)))
 
     user_request = f"""
@@ -105,12 +108,15 @@ Separately, here is the same model's output across a small universe
 Report all three results clearly, with the exact numbers from each tool call.
 """.strip()
 
+    routed_categories = route_request(user_request, api_key=OPENAI_API_KEY, model=MODEL)
+
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
         user_request=user_request,
         api_key=OPENAI_API_KEY,
         model=MODEL,
         max_iterations=10,
+        categories=routed_categories,
     )
 
     _header("FINAL REPORT")

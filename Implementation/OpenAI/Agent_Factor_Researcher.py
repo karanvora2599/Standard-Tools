@@ -5,24 +5,25 @@ GPT runs a multi-factor study and synthesises a factor research note.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-OPENAI_API_KEY = ""   # Replace with your key
-MODEL          = "gpt-4o-mini"
+OPENAI_API_KEY = ""  # Replace with your key
+MODEL = "gpt-4o-mini"
 
-ASSETS     = ["NVDA", "AMD", "INTC", "QCOM", "AMAT", "LRCX", "KLAC"]
+ASSETS = ["NVDA", "AMD", "INTC", "QCOM", "AMAT", "LRCX", "KLAC"]
 START_DATE = "2020-01-01"
-END_DATE   = "2024-12-31"
+END_DATE = "2024-12-31"
 
 FACTORS = {
-    "market":   "SPY",
-    "size":     "IWM",
-    "value":    "IWD",
+    "market": "SPY",
+    "size": "IWM",
+    "value": "IWD",
     "momentum": "MTUM",
-    "quality":  "QUAL",
+    "quality": "QUAL",
 }
 
 SYSTEM_PROMPT = """You are a quantitative factor researcher studying return attribution across a sector.
@@ -78,9 +79,11 @@ if __name__ == "__main__":
 
     _header("Agentic Factor Researcher — GPT-4o mini")
     _log("Log file", str(log_file))
-    _log("Assets",   ", ".join(ASSETS))
-    _log("Factors",  factor_names_str)
-    _log("Period",   f"{START_DATE} → {END_DATE}")
+    _log("Assets", ", ".join(ASSETS))
+    _log("Factors", factor_names_str)
+    _log("Period", f"{START_DATE} → {END_DATE}")
+
+    routed_categories = route_request(USER_REQUEST, api_key=OPENAI_API_KEY, model=MODEL)
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -88,6 +91,7 @@ if __name__ == "__main__":
         api_key=OPENAI_API_KEY,
         model=MODEL,
         max_iterations=30,
+        categories=routed_categories,
     )
 
     _header("FACTOR RESEARCH NOTE")

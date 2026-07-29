@@ -6,18 +6,19 @@ rolling beta, and extended risk metrics into a complete stock deep-dive.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _agent_utils import setup_logging, run_agent, _header, _log
+from _agent_utils import _header, _log, route_request, run_agent, setup_logging
 
 # ── Configuration ──────────────────────────────────────────────────
-OPENAI_API_KEY = ""   # Replace with your key
-MODEL          = "gpt-4o-mini"
+OPENAI_API_KEY = ""  # Replace with your key
+MODEL = "gpt-4o-mini"
 
-SYMBOLS    = ["AAPL", "MSFT", "NVDA"]
-BENCHMARK  = "SPY"
+SYMBOLS = ["AAPL", "MSFT", "NVDA"]
+BENCHMARK = "SPY"
 START_DATE = "2022-01-01"
-END_DATE   = "2024-12-31"
+END_DATE = "2024-12-31"
 
 SYSTEM_PROMPT = """You are a senior equity analyst conducting a deep-dive on a set of stocks.
 
@@ -77,10 +78,12 @@ if __name__ == "__main__":
     log_file = setup_logging("agent_fundamental_analyst_openai")
 
     _header("Agentic Fundamental Analyst — GPT-4o-mini")
-    _log("Log file",  str(log_file))
-    _log("Stocks",    symbols_str)
+    _log("Log file", str(log_file))
+    _log("Stocks", symbols_str)
     _log("Benchmark", BENCHMARK)
-    _log("Period",    f"{START_DATE} → {END_DATE}")
+    _log("Period", f"{START_DATE} → {END_DATE}")
+
+    routed_categories = route_request(USER_REQUEST, api_key=OPENAI_API_KEY, model=MODEL)
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -88,6 +91,7 @@ if __name__ == "__main__":
         api_key=OPENAI_API_KEY,
         model=MODEL,
         max_iterations=25,
+        categories=routed_categories,
     )
 
     _header("RESEARCH NOTE")

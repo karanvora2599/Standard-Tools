@@ -19,24 +19,29 @@ import concurrent.futures
 import datetime
 import json
 import logging
-import time
 import textwrap
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Optional
 
 from google import genai
 from google.genai import types
 from google.genai.types import Type as GeminiType
 
-from standard_quant_tools.agent.tools import get_agent_tools, dispatch
+from standard_quant_tools.agent.router import (
+    TOOL_CATEGORIES,
+    build_router_prompt,
+    parse_router_response,
+)
+from standard_quant_tools.agent.tools import dispatch, get_agent_tools
 
 # ── Constants ──────────────────────────────────────────────────────
-_LOGS_DIR     = Path(__file__).resolve().parent.parent.parent / "logs"
-_DIVIDER      = "═" * 70
+_LOGS_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+_DIVIDER = "═" * 70
 _THIN_DIVIDER = "─" * 70
 
 _fmt_console = logging.Formatter("  %(levelname)-7s  %(name)s  %(message)s")
-_fmt_file    = logging.Formatter(
+_fmt_file = logging.Formatter(
     "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -50,7 +55,7 @@ _HANDLER_MARKER = "_sqt_example_handler"
 def setup_logging(name: str) -> Path:
     """Attach a per-run FileHandler + StreamHandler to the standard_quant_tools logger."""
     _LOGS_DIR.mkdir(exist_ok=True)
-    ts       = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     log_file = _LOGS_DIR / f"{name}_{ts}.log"
 
     lib = logging.getLogger("standard_quant_tools")
@@ -77,19 +82,23 @@ def setup_logging(name: str) -> Path:
 
 # ── Console helpers ─────────────────────────────────────────────────
 
+
 def _header(title: str) -> None:
     print(f"\n{_DIVIDER}")
     print(f"  {title}")
     print(_DIVIDER)
+
 
 def _section(title: str) -> None:
     print(f"\n{_THIN_DIVIDER}")
     print(f"  {title}")
     print(_THIN_DIVIDER)
 
+
 def _log(label: str, value: str = "", indent: int = 2) -> None:
     prefix = " " * indent
     print(f"{prefix}{label}: {value}" if value else f"{prefix}{label}")
+
 
 def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
     raw = json.dumps(data, indent=2, default=str)
@@ -100,6 +109,7 @@ def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
 
 
 # ── Tool format conversion ──────────────────────────────────────────
+
 
 def _schema_to_gemini(schema: dict[str, Any]) -> types.Schema:
     """
@@ -112,12 +122,12 @@ def _schema_to_gemini(schema: dict[str, Any]) -> types.Schema:
         return _schema_to_gemini(non_null[0]) if non_null else types.Schema(type=GeminiType.STRING)  # type: ignore[arg-type]
 
     _type_map: dict[str, GeminiType] = {
-        "string":  GeminiType.STRING,
+        "string": GeminiType.STRING,
         "integer": GeminiType.INTEGER,
-        "number":  GeminiType.NUMBER,
+        "number": GeminiType.NUMBER,
         "boolean": GeminiType.BOOLEAN,
-        "array":   GeminiType.ARRAY,
-        "object":  GeminiType.OBJECT,
+        "array": GeminiType.ARRAY,
+        "object": GeminiType.OBJECT,
     }
 
     kwargs: dict[str, Any] = {
@@ -153,7 +163,43 @@ def _to_gemini_tools(openai_tools: list[dict[str, Any]]) -> list[types.Tool]:
     return [types.Tool(function_declarations=declarations)]
 
 
+# ── Router glue (provider-specific: which client, which cheap model) ────
+
+
+def route_request(
+    request: str,
+    api_key: str,
+    model: str = "gemini-2.0-flash",
+) -> List[str]:
+    """
+    One cheap classification call: ask `model` which 1-2 tool categories
+    (see agent/router.py) are relevant to `request`, and return that list
+    of category keys. Fails open (returns every category, i.e. no
+    narrowing) on any API error or unparseable response — see
+    agent/router.py's module docstring for why that's the right default.
+    """
+    raw_text = ""
+    try:
+        client = genai.Client(
+            api_key=api_key, http_options=types.HttpOptions(timeout=15_000)
+        )
+        response = client.models.generate_content(
+            model=model,
+            contents=build_router_prompt(request, TOOL_CATEGORIES),
+        )
+        raw_text = response.text or ""
+    except Exception as exc:
+        _log(
+            f"route_request: classification call failed ({exc}) — routing to all categories"
+        )
+
+    categories = parse_router_response(raw_text, TOOL_CATEGORIES)
+    _log("Routed categories", ", ".join(categories))
+    return categories
+
+
 # ── Core agent loop ─────────────────────────────────────────────────
+
 
 def run_agent(
     system_prompt: str,
@@ -165,6 +211,7 @@ def run_agent(
     request_timeout_s: float = 60.0,
     tool_timeout_s: float = 120.0,
     verbose: bool = True,
+    categories: Optional[List[str]] = None,
 ) -> str:
     """
     Run the agentic loop: send user_request to Gemini, execute any function
@@ -180,39 +227,49 @@ def run_agent(
     user/tool payloads (see the module docstring) while keeping status-line
     output.
 
+    categories: optional list of TOOL_CATEGORY values (see agent/router.py)
+    to narrow the tool list to — pass the output of route_request() here.
+    None (the default) loads every tool, identical to this function's
+    behavior before this parameter existed.
+
     Returns the final text response from the model.
     """
     client = genai.Client(
         api_key=api_key,
         http_options=types.HttpOptions(timeout=int(request_timeout_s * 1000)),
     )
-    tools  = _to_gemini_tools(get_agent_tools())
+    tools = _to_gemini_tools(get_agent_tools(categories=categories))
 
     _header("AGENT SESSION STARTED  (Gemini)")
-    _log("Model",          model)
-    _log("Max tokens",     str(max_tokens))
+    _log("Model", model)
+    _log("Max tokens", str(max_tokens))
     _log("Max iterations", str(max_iterations))
-    _log("Tools loaded",   str(sum(len(t.function_declarations or []) for t in tools)))
-    _log("Tool names",     ", ".join(
-        fd.name for t in tools for fd in (t.function_declarations or [])
-    ))
+    _log("Tools loaded", str(sum(len(t.function_declarations or []) for t in tools)))
+    _log(
+        "Tool names",
+        ", ".join(fd.name for t in tools for fd in (t.function_declarations or [])),
+    )
     if verbose:
         _section("USER REQUEST")
-        print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+        print(
+            textwrap.fill(
+                user_request, width=68, initial_indent="  ", subsequent_indent="  "
+            )
+        )
 
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
-        tools=tools,           # type: ignore[arg-type]
+        tools=tools,  # type: ignore[arg-type]
         max_output_tokens=max_tokens,
     )
 
     contents: list[types.Content] = [
         types.Content(role="user", parts=[types.Part(text=user_request)])
     ]
-    session_start        = time.perf_counter()
-    total_input_tokens   = 0
-    total_output_tokens  = 0
-    iteration            = 0
+    session_start = time.perf_counter()
+    total_input_tokens = 0
+    total_output_tokens = 0
+    iteration = 0
     accumulated_text: list[str] = []
 
     for iteration in range(1, max_iterations + 1):
@@ -228,7 +285,7 @@ def run_agent(
 
         elapsed = time.perf_counter() - iter_start
         if response.usage_metadata:
-            total_input_tokens  += response.usage_metadata.prompt_token_count or 0
+            total_input_tokens += response.usage_metadata.prompt_token_count or 0
             total_output_tokens += response.usage_metadata.candidates_token_count or 0
 
         # Guard: Gemini response fields can be None on safety blocks
@@ -240,24 +297,48 @@ def run_agent(
             _log("Empty candidate — breaking loop")
             break
 
-        finish_reason = (candidate.finish_reason.name  # "STOP", "MAX_TOKENS", etc.
-                         if candidate.finish_reason else "UNKNOWN")
+        finish_reason = (
+            candidate.finish_reason.name  # "STOP", "MAX_TOKENS", etc.
+            if candidate.finish_reason
+            else "UNKNOWN"
+        )
         parts: list[types.Part] = list(candidate.content.parts or [])
 
         _section("API RESPONSE METADATA")
-        _log("Finish reason",  finish_reason)
-        _log("Input tokens",   str(response.usage_metadata.prompt_token_count if response.usage_metadata else "—"))
-        _log("Output tokens",  str(response.usage_metadata.candidates_token_count if response.usage_metadata else "—"))
-        _log("Latency",        f"{elapsed:.2f}s")
+        _log("Finish reason", finish_reason)
+        _log(
+            "Input tokens",
+            str(
+                response.usage_metadata.prompt_token_count
+                if response.usage_metadata
+                else "—"
+            ),
+        )
+        _log(
+            "Output tokens",
+            str(
+                response.usage_metadata.candidates_token_count
+                if response.usage_metadata
+                else "—"
+            ),
+        )
+        _log("Latency", f"{elapsed:.2f}s")
 
         _section(f"MODEL OUTPUT  ({len(parts)} part(s))")
         for i, part in enumerate(parts):
             text = getattr(part, "text", None)
-            fn   = getattr(part, "function_call", None)
+            fn = getattr(part, "function_call", None)
             if text:
                 print(f"\n  [Part {i+1}]  type=text")
                 if verbose:
-                    print(textwrap.fill(text, width=68, initial_indent="    ", subsequent_indent="    "))
+                    print(
+                        textwrap.fill(
+                            text,
+                            width=68,
+                            initial_indent="    ",
+                            subsequent_indent="    ",
+                        )
+                    )
                 accumulated_text.append(text)
             elif fn:
                 print(f"\n  [Part {i+1}]  type=function_call  name={fn.name}")
@@ -268,7 +349,7 @@ def run_agent(
         contents.append(candidate.content)  # type: ignore[arg-type]
 
         has_text = any(getattr(p, "text", None) for p in parts)
-        has_fn   = any(getattr(p, "function_call", None) for p in parts)
+        has_fn = any(getattr(p, "function_call", None) for p in parts)
 
         # ── Finished normally ────────────────────────────────────────
         if finish_reason == "STOP":
@@ -279,13 +360,19 @@ def run_agent(
         if finish_reason == "MAX_TOKENS":
             if has_text and not has_fn:
                 _log("MAX_TOKENS hit mid-text — sending continuation prompt ...")
-                contents.append(types.Content(
-                    role="user",
-                    parts=[types.Part(text=(
-                        "Please continue your response from exactly where you left off. "
-                        "Do not repeat anything already written."
-                    ))],
-                ))
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part(
+                                text=(
+                                    "Please continue your response from exactly where you left off. "
+                                    "Do not repeat anything already written."
+                                )
+                            )
+                        ],
+                    )
+                )
                 continue
             _log("MAX_TOKENS with function_calls — stopping")
             break
@@ -325,28 +412,36 @@ def run_agent(
                 if verbose:
                     print(_pretty_json(result, indent=5))
                 fn_response_parts.append(
-                    types.Part(function_response=types.FunctionResponse(
-                        name=name,
-                        response=result,
-                    ))
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=name,
+                            response=result,
+                        )
+                    )
                 )
             except concurrent.futures.TimeoutError:
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✗  TIMED OUT after {ms:.0f}ms (limit {tool_timeout_s}s)")
                 fn_response_parts.append(
-                    types.Part(function_response=types.FunctionResponse(
-                        name=name,
-                        response={"error": f"tool call timed out after {tool_timeout_s}s"},
-                    ))
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=name,
+                            response={
+                                "error": f"tool call timed out after {tool_timeout_s}s"
+                            },
+                        )
+                    )
                 )
             except Exception as exc:
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✗  FAILED in {ms:.0f}ms — {exc}")
                 fn_response_parts.append(
-                    types.Part(function_response=types.FunctionResponse(
-                        name=name,
-                        response={"error": str(exc)},
-                    ))
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=name,
+                            response={"error": str(exc)},
+                        )
+                    )
                 )
             finally:
                 ex.shutdown(wait=False)
@@ -357,10 +452,10 @@ def run_agent(
     # ── Session summary ──────────────────────────────────────────────
     total_elapsed = time.perf_counter() - session_start
     _header("SESSION SUMMARY")
-    _log("Iterations used",     f"{iteration} / {max_iterations}")
-    _log("Total input tokens",  str(total_input_tokens))
+    _log("Iterations used", f"{iteration} / {max_iterations}")
+    _log("Total input tokens", str(total_input_tokens))
     _log("Total output tokens", str(total_output_tokens))
-    _log("Total tokens",        str(total_input_tokens + total_output_tokens))
-    _log("Total wall time",     f"{total_elapsed:.2f}s")
+    _log("Total tokens", str(total_input_tokens + total_output_tokens))
+    _log("Total wall time", f"{total_elapsed:.2f}s")
 
     return "".join(accumulated_text) or "Max iterations reached."
