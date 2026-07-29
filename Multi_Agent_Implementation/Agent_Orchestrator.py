@@ -2,43 +2,50 @@
 Multi-Agent Orchestrator — Anthropic / Claude Haiku.
 
 Demonstrates an orchestrator-workers architecture on top of Standard Quant
-Tools' 34 agent tools: instead of one agent choosing among all 34 tools
-every turn, a top-level orchestrator delegates each sub-task to a specialist
-worker agent (see worker_agents.py) that only ever sees the small subset of
-tools relevant to its own workflow.
+Tools' full agent-tool registry (see standard_quant_tools.agent.tools
+._TOOL_DISPATCH / TOOL_CATEGORY for the current count and taxonomy):
+instead of one agent choosing among every registered tool every turn, a
+top-level orchestrator delegates each sub-task to a specialist worker agent
+(see worker_agents.py) that only ever sees the small subset of tools
+relevant to its own workflow.
 
-The orchestrator's own "tools" are not the library's 34 — they are six
-hand-authored delegate_to_<worker>_agent(request) tools, one per worker.
-Calling one spins up a fresh, independently-scoped run_agent() session for
-that worker and returns its final answer as the tool result.
+The orchestrator's own "tools" are not the library's full registry — they
+are hand-authored delegate_to_<worker>_agent(request) tools, one per
+worker (auto-generated below from WORKER_AGENTS.keys(), so this list always
+matches however many workers worker_agents.py currently defines — no
+hardcoded count to go stale here). Calling one spins up a fresh,
+independently-scoped run_agent() session for that worker and returns its
+final answer as the tool result.
 
-Why this helps over a single flat 29-tool agent: a worker that was never
-given run_sma_backtest cannot mistakenly call it instead of
+Why this helps over a single flat agent with every tool loaded: a worker
+that was never given run_sma_backtest cannot mistakenly call it instead of
 run_custom_signal_backtest — the confusable tool simply isn't in front of
 the model. Smaller tool lists also mean shorter, more focused system
 prompts per turn, which measurably improves function-calling accuracy on
-cheaper models like Haiku.
+cheaper models like Haiku. See also standard_quant_tools.agent.router for
+a lighter-weight version of this same idea that doesn't require spinning up
+separate agent sessions (Implementation/*/Agent_*.py use that instead).
 """
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
-import time
 import textwrap
+import time
 from typing import Any, cast
 
+from _agent_utils import _header, _log, _pretty_json, _section, setup_logging
 from anthropic import Anthropic
 from anthropic.types import Message, MessageParam, ToolParam
-
 from worker_agents import WORKER_AGENTS, run_worker_agent
-from _agent_utils import setup_logging, _header, _section, _log, _pretty_json
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY  = ""   # Replace with your key
+ANTHROPIC_API_KEY = ""  # Replace with your key
 ORCHESTRATOR_MODEL = "claude-haiku-4-5"
-WORKER_MODEL       = "claude-haiku-4-5"
+WORKER_MODEL = "claude-haiku-4-5"
 
 # ── Orchestrator's own tools: one delegate call per worker ──────────
 
@@ -73,7 +80,7 @@ _DELEGATE_TOOLS: list[ToolParam] = [
 
 _WORKER_KEY_BY_TOOL = {f"delegate_to_{key}_agent": key for key in WORKER_AGENTS}
 
-ORCHESTRATOR_SYSTEM_PROMPT = f"""You are the lead quantitative analyst coordinating a team of six
+ORCHESTRATOR_SYSTEM_PROMPT = f"""You are the lead quantitative analyst coordinating a team of {len(WORKER_AGENTS)}
 specialist agents. You do NOT have direct access to any backtesting, screening,
 or analysis tools yourself — you can only delegate to your specialists and
 synthesise their answers into one coherent final response for the user.
@@ -103,10 +110,14 @@ def run_orchestrator(user_request: str, max_iterations: int = 8) -> str:
 
     _header("ORCHESTRATOR SESSION STARTED")
     _log("Orchestrator model", ORCHESTRATOR_MODEL)
-    _log("Worker model",       WORKER_MODEL)
-    _log("Workers available",  ", ".join(WORKER_AGENTS))
+    _log("Worker model", WORKER_MODEL)
+    _log("Workers available", ", ".join(WORKER_AGENTS))
     _section("USER REQUEST")
-    print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+    print(
+        textwrap.fill(
+            user_request, width=68, initial_indent="  ", subsequent_indent="  "
+        )
+    )
 
     messages: list[MessageParam] = [
         cast(MessageParam, {"role": "user", "content": user_request})
@@ -132,10 +143,14 @@ def run_orchestrator(user_request: str, max_iterations: int = 8) -> str:
         _section(f"ORCHESTRATOR OUTPUT  ({len(response.content)} block(s))")
         for block in response.content:
             if block.type == "text":
-                print(textwrap.fill(
-                    block.text, width=68,
-                    initial_indent="    ", subsequent_indent="    ",
-                ))
+                print(
+                    textwrap.fill(
+                        block.text,
+                        width=68,
+                        initial_indent="    ",
+                        subsequent_indent="    ",
+                    )
+                )
             elif block.type == "tool_use":
                 _log(f"  Delegating → {block.name}", indent=4)
                 print(_pretty_json(block.input, indent=6))
@@ -144,7 +159,9 @@ def run_orchestrator(user_request: str, max_iterations: int = 8) -> str:
             if block.type == "text" and block.text:
                 accumulated_text.append(block.text)  # type: ignore[attr-defined]
 
-        messages.append(cast(MessageParam, {"role": "assistant", "content": response.content}))
+        messages.append(
+            cast(MessageParam, {"role": "assistant", "content": response.content})
+        )
 
         if response.stop_reason == "end_turn":
             _section("ORCHESTRATOR FINISHED  (end_turn)")
@@ -165,10 +182,15 @@ def run_orchestrator(user_request: str, max_iterations: int = 8) -> str:
             else:
                 sub_request = block.input.get("request", "")
                 try:
-                    content, is_error = run_worker_agent(
-                        worker_key, sub_request,
-                        api_key=ANTHROPIC_API_KEY, model=WORKER_MODEL,
-                    ), False
+                    content, is_error = (
+                        run_worker_agent(
+                            worker_key,
+                            sub_request,
+                            api_key=ANTHROPIC_API_KEY,
+                            model=WORKER_MODEL,
+                        ),
+                        False,
+                    )
                 except Exception as exc:
                     content, is_error = f"Worker '{worker_key}' failed: {exc}", True
 

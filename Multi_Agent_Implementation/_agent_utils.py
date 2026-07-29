@@ -4,10 +4,12 @@ Shared utilities for the multi-agent example (Anthropic).
 This is a scoped variant of Implementation/Anthropic/_agent_utils.py: the
 core run_agent() loop is identical, but it accepts an optional tool_names
 filter so a worker agent can be given only a small, non-overlapping subset
-of the library's 34 tools instead of all of them. Shrinking the tool list
-per agent is the actual fix for tool-selection confusion between similar
-tools (e.g. run_sma_backtest vs run_custom_signal_backtest) — a worker
-that was never given the other tool cannot call it.
+of the library's registered agent tools (see
+standard_quant_tools.agent.tools._TOOL_DISPATCH for the current count)
+instead of all of them. Shrinking the tool list per agent is the actual
+fix for tool-selection confusion between similar tools (e.g.
+run_sma_backtest vs run_custom_signal_backtest) — a worker that was never
+given the other tool cannot call it.
 
 Provides:
   - setup_logging(name)                    -> configure lib logger + per-run file handler
@@ -20,26 +22,35 @@ Provides:
 import datetime
 import json
 import logging
-import time
 import textwrap
+import time
 from pathlib import Path
 from typing import Any, List, Optional, cast
 
 from anthropic import Anthropic
 from anthropic.types import Message, MessageParam, ToolParam
 
-from standard_quant_tools.agent.tools import get_agent_tools, dispatch
+from standard_quant_tools.agent.tools import dispatch, get_agent_tools
 
 # ── Constants ──────────────────────────────────────────────────────
-_LOGS_DIR     = Path(__file__).resolve().parent.parent / "logs"
-_DIVIDER      = "═" * 70
+_LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
+_DIVIDER = "═" * 70
 _THIN_DIVIDER = "─" * 70
 
 _fmt_console = logging.Formatter("  %(levelname)-7s  %(name)s  %(message)s")
-_fmt_file    = logging.Formatter(
+_fmt_file = logging.Formatter(
     "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
     datefmt="%H:%M:%S",
 )
+
+
+# Marker attribute so repeated setup_logging() calls in the same process
+# replace the previous run's handlers instead of piling up duplicates that
+# would print every log line once per prior call -- important here
+# specifically since one orchestrator run can call run_worker_agent()
+# (and therefore setup_logging()-adjacent code paths) multiple times as
+# delegation fans out across workers.
+_HANDLER_MARKER = "_sqt_example_handler"
 
 
 def setup_logging(name: str) -> Path:
@@ -48,18 +59,24 @@ def setup_logging(name: str) -> Path:
     logger hierarchy. Returns the path of the log file created.
     """
     _LOGS_DIR.mkdir(exist_ok=True)
-    ts       = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     log_file = _LOGS_DIR / f"{name}_{ts}.log"
+
+    lib = logging.getLogger("standard_quant_tools")
+    for h in list(lib.handlers):
+        if getattr(h, _HANDLER_MARKER, False):
+            lib.removeHandler(h)
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(_fmt_file)
     fh.setLevel(logging.DEBUG)
+    setattr(fh, _HANDLER_MARKER, True)
 
     sh = logging.StreamHandler()
     sh.setFormatter(_fmt_console)
     sh.setLevel(logging.DEBUG)
+    setattr(sh, _HANDLER_MARKER, True)
 
-    lib = logging.getLogger("standard_quant_tools")
     lib.setLevel(logging.DEBUG)
     lib.addHandler(fh)
     lib.addHandler(sh)
@@ -69,19 +86,23 @@ def setup_logging(name: str) -> Path:
 
 # ── Console helpers ─────────────────────────────────────────────────
 
+
 def _header(title: str) -> None:
     print(f"\n{_DIVIDER}")
     print(f"  {title}")
     print(_DIVIDER)
+
 
 def _section(title: str) -> None:
     print(f"\n{_THIN_DIVIDER}")
     print(f"  {title}")
     print(_THIN_DIVIDER)
 
+
 def _log(label: str, value: str = "", indent: int = 2) -> None:
     prefix = " " * indent
     print(f"{prefix}{label}: {value}" if value else f"{prefix}{label}")
+
 
 def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
     raw = json.dumps(data, indent=2, default=str)
@@ -92,6 +113,7 @@ def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
 
 
 # ── Tool format conversion / filtering ───────────────────────────────
+
 
 def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
     """Convert get_agent_tools() OpenAI format → Anthropic native format."""
@@ -107,8 +129,8 @@ def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
 
 def _scoped_tools(tool_names: Optional[List[str]]) -> list[ToolParam]:
     """
-    Full 29-tool registry by default; filtered to tool_names when given.
-    A worker agent should always pass its own fixed subset here.
+    The full registered-tool set by default; filtered to tool_names when
+    given. A worker agent should always pass its own fixed subset here.
     """
     all_tools = get_agent_tools()
     if tool_names is not None:
@@ -116,11 +138,14 @@ def _scoped_tools(tool_names: Optional[List[str]]) -> list[ToolParam]:
         all_tools = [t for t in all_tools if t["function"]["name"] in wanted]
         missing = wanted - {t["function"]["name"] for t in all_tools}
         if missing:
-            raise ValueError(f"tool_names references unknown tool(s): {sorted(missing)}")
+            raise ValueError(
+                f"tool_names references unknown tool(s): {sorted(missing)}"
+            )
     return _to_anthropic_tools(all_tools)
 
 
 # ── Core agent loop ─────────────────────────────────────────────────
+
 
 def run_agent(
     system_prompt: str,
@@ -135,31 +160,35 @@ def run_agent(
     Run the agentic loop: send user_request to Claude, execute any tool calls
     via dispatch(), feed results back, and repeat until end_turn or exhausted.
 
-    tool_names: if given, the model only ever sees this subset of the 29
+    tool_names: if given, the model only ever sees this subset of the
     registered tools (all of them if omitted). This is how a worker agent
     stays scoped to its own workflow.
 
     Returns the final text response from the model.
     """
     client = Anthropic(api_key=api_key)
-    tools  = _scoped_tools(tool_names)
+    tools = _scoped_tools(tool_names)
 
     _header("AGENT SESSION STARTED")
-    _log("Model",          model)
-    _log("Max tokens",     str(max_tokens))
+    _log("Model", model)
+    _log("Max tokens", str(max_tokens))
     _log("Max iterations", str(max_iterations))
-    _log("Tools loaded",   str(len(tools)))
-    _log("Tool names",     ", ".join(t["name"] for t in tools))
+    _log("Tools loaded", str(len(tools)))
+    _log("Tool names", ", ".join(t["name"] for t in tools))
     _section("USER REQUEST")
-    print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+    print(
+        textwrap.fill(
+            user_request, width=68, initial_indent="  ", subsequent_indent="  "
+        )
+    )
 
     messages: list[MessageParam] = [
         cast(MessageParam, {"role": "user", "content": user_request})
     ]
-    session_start        = time.perf_counter()
-    total_input_tokens   = 0
-    total_output_tokens  = 0
-    iteration            = 0
+    session_start = time.perf_counter()
+    total_input_tokens = 0
+    total_output_tokens = 0
+    iteration = 0
     accumulated_text: list[str] = []
 
     for iteration in range(1, max_iterations + 1):
@@ -178,34 +207,40 @@ def run_agent(
             ),
         )
 
-        elapsed              = time.perf_counter() - iter_start
-        total_input_tokens  += response.usage.input_tokens
+        elapsed = time.perf_counter() - iter_start
+        total_input_tokens += response.usage.input_tokens
         total_output_tokens += response.usage.output_tokens
 
         _section("API RESPONSE METADATA")
-        _log("Stop reason",   response.stop_reason or "—")
-        _log("Input tokens",  str(response.usage.input_tokens))
+        _log("Stop reason", response.stop_reason or "—")
+        _log("Input tokens", str(response.usage.input_tokens))
         _log("Output tokens", str(response.usage.output_tokens))
-        _log("Latency",       f"{elapsed:.2f}s")
+        _log("Latency", f"{elapsed:.2f}s")
 
         _section(f"MODEL OUTPUT  ({len(response.content)} block(s))")
         for i, block in enumerate(response.content):
             print(f"\n  [Block {i+1}]  type={block.type}")
             if block.type == "text":
-                print(textwrap.fill(
-                    block.text, width=68,
-                    initial_indent="    ", subsequent_indent="    ",
-                ))
+                print(
+                    textwrap.fill(
+                        block.text,
+                        width=68,
+                        initial_indent="    ",
+                        subsequent_indent="    ",
+                    )
+                )
             elif block.type == "tool_use":
                 _log(f"  Tool call → {block.name}", indent=4)
-                _log(f"  Call ID   → {block.id}",   indent=4)
+                _log(f"  Call ID   → {block.id}", indent=4)
                 print(_pretty_json(block.input, indent=6))
 
         for block in response.content:
             if block.type == "text" and block.text:
                 accumulated_text.append(block.text)  # type: ignore[attr-defined]
 
-        messages.append(cast(MessageParam, {"role": "assistant", "content": response.content}))
+        messages.append(
+            cast(MessageParam, {"role": "assistant", "content": response.content})
+        )
 
         if response.stop_reason == "end_turn":
             _section("AGENT FINISHED  (end_turn)")
@@ -217,10 +252,15 @@ def run_agent(
 
             if has_text and not has_tool:
                 _log("max_tokens hit mid-text — sending continuation prompt ...")
-                messages.append(cast(MessageParam, {
-                    "role": "user",
-                    "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
-                }))
+                messages.append(
+                    cast(
+                        MessageParam,
+                        {
+                            "role": "user",
+                            "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
+                        },
+                    )
+                )
                 continue
 
             _log("max_tokens with tool_use content — cannot continue cleanly, stopping")
@@ -246,20 +286,24 @@ def run_agent(
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✓  completed in {ms:.0f}ms")
                 print(_pretty_json(result, indent=5))
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result, default=str),
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, default=str),
+                    }
+                )
             except Exception as exc:
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✗  FAILED in {ms:.0f}ms — {exc}")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: {exc}",
-                    "is_error": True,
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Error: {exc}",
+                        "is_error": True,
+                    }
+                )
             print("  └" + "─" * 50)
 
         accumulated_text.clear()
@@ -267,10 +311,10 @@ def run_agent(
 
     total_elapsed = time.perf_counter() - session_start
     _header("SESSION SUMMARY")
-    _log("Iterations used",     f"{iteration} / {max_iterations}")
-    _log("Total input tokens",  str(total_input_tokens))
+    _log("Iterations used", f"{iteration} / {max_iterations}")
+    _log("Total input tokens", str(total_input_tokens))
     _log("Total output tokens", str(total_output_tokens))
-    _log("Total tokens",        str(total_input_tokens + total_output_tokens))
-    _log("Total wall time",     f"{total_elapsed:.2f}s")
+    _log("Total tokens", str(total_input_tokens + total_output_tokens))
+    _log("Total wall time", f"{total_elapsed:.2f}s")
 
     return "".join(accumulated_text) or "Max iterations reached."

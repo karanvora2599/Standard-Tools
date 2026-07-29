@@ -60,8 +60,40 @@ class TestWorkerToolCoverage:
         # bring-your-own-signal tools must never be loaded into the same
         # worker, or the disambiguation problem they were split to fix
         # would simply reappear.
-        backtest_tools = set(worker_agents["backtest"]["tools"])
+        backtest_tools = set(worker_agents["backtest_execution"]["tools"]) | set(
+            worker_agents["backtest_validation"]["tools"]
+        )
         custom_signal_tools = set(worker_agents["custom_signal"]["tools"])
         assert "run_sma_backtest" in backtest_tools
         assert "run_custom_signal_backtest" in custom_signal_tools
         assert backtest_tools.isdisjoint(custom_signal_tools)
+
+    def test_backtest_execution_and_validation_tools_are_split_across_workers(
+        self, worker_agents
+    ):
+        # The same confusion-pair guarantee, one level narrower: "run this
+        # exact strategy" (backtest_execution) and "find/validate the best
+        # parameters" (backtest_validation) must never share a worker either,
+        # or a worker could pick run_sma_backtest when the request actually
+        # needed run_backtest_optimization (or vice versa).
+        execution_tools = set(worker_agents["backtest_execution"]["tools"])
+        validation_tools = set(worker_agents["backtest_validation"]["tools"])
+        assert "run_sma_backtest" in execution_tools
+        assert "run_backtest_optimization" in validation_tools
+        assert execution_tools.isdisjoint(validation_tools)
+
+    def test_there_are_seven_workers(self, worker_agents):
+        """Regression guard for the backtest_execution/backtest_validation
+        split -- catches an accidental re-merge or an accidental further
+        split just as easily as a magic number would, but derived from the
+        actual registry rather than repeating a number that could itself
+        drift."""
+        assert set(worker_agents) == {
+            "screener",
+            "analysis",
+            "quant_research",
+            "backtest_execution",
+            "backtest_validation",
+            "custom_signal",
+            "portfolio_risk",
+        }

@@ -2,27 +2,49 @@
 Worker-agent registry for the multi-agent Standard Quant Tools example.
 
 Each worker owns a small, non-overlapping subset of the library's agent
-tools and a system prompt scoped to exactly that workflow. Together the six
-workers cover every registered tool exactly once — see
+tools and a system prompt scoped to exactly that workflow. Together the
+seven workers cover every registered tool exactly once — see
 test_multi_agent_tool_coverage in tests/ for the coverage check.
 
 This is the direct, structural answer to "how do I stop the model confusing
 similar tools like the backtest ones": give each agent so few, so tightly
 related tools that the confusable ones are never loaded together. The
-Backtest Agent never sees run_custom_signal_backtest, and the Custom Signal
-Agent never sees run_sma_backtest — there is nothing to pick incorrectly
-between, because only one of the two is ever in front of the model.
+Backtest Execution Agent never sees run_custom_signal_backtest, and the
+Custom Signal Agent never sees run_sma_backtest — there is nothing to pick
+incorrectly between, because only one of the two is ever in front of the
+model. The same split applies within backtesting itself: the Backtest
+Execution Agent (run a strategy once) and Backtest Validation Agent
+(optimize/validate/diagnose one) are separate workers so "run SMA on AAPL"
+and "find the best SMA parameters" never compete for the same model's
+attention.
+
+Each worker's "tools" list is *derived* from
+standard_quant_tools.agent.tools.TOOL_CATEGORY — the same single source of
+truth agent/router.py's classification prompt uses — rather than
+hand-duplicated here. A tool's category assignment only ever needs to be
+correct in one place (TOOL_CATEGORY) to show up correctly in both the
+router and this worker registry.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from _agent_utils import _header, _log, _section, run_agent
+
+from standard_quant_tools.agent.tools import TOOL_CATEGORY
+
+
+def _tools_for(category: str) -> List[str]:
+    """Every tool name assigned to `category` in TOOL_CATEGORY, sorted for
+    deterministic ordering (dict iteration order is otherwise insertion
+    order, which isn't meaningful here)."""
+    return sorted(name for name, cat in TOOL_CATEGORY.items() if cat == category)
+
 
 WORKER_AGENTS: Dict[str, Dict[str, Any]] = {
     "screener": {
         "label": "Screener Agent",
         "description": "Filter a ticker universe by fundamental/technical criteria and fetch company fundamentals.",
-        "tools": ["run_screener", "get_stock_fundamentals"],
+        "tools": _tools_for("screener"),
         "system_prompt": """You are a stock screening specialist. You have exactly two tools:
 run_screener (filter a ticker universe by fundamental/technical criteria) and
 get_stock_fundamentals (company metadata and financial ratios for one ticker).
@@ -36,20 +58,7 @@ requesting agent can hand them to a different specialist.""",
     "analysis": {
         "label": "Technical & Risk Analysis Agent",
         "description": "Single-asset risk profiling, technical indicator snapshots, and multi-asset portfolio metrics.",
-        "tools": [
-            "analyze_stock_risk",
-            "get_technical_analysis",
-            "get_advanced_indicators",
-            "get_rolling_beta",
-            "get_extended_risk_metrics",
-            "get_tail_risk_metrics",
-            "get_portfolio_analysis",
-            "get_data_quality_report",
-            "get_volatility_estimators",
-            "run_garch_volatility_forecast",
-            "get_option_pricing",
-            "get_implied_volatility",
-        ],
+        "tools": _tools_for("analysis"),
         "system_prompt": """You are a risk and technical analysis specialist. Your tools cover
 single-asset risk profiling (analyze_stock_risk, get_extended_risk_metrics),
 technical indicator snapshots (get_technical_analysis, get_advanced_indicators,
@@ -86,15 +95,7 @@ call, do not round or approximate them.""",
     "quant_research": {
         "label": "Quant Research Agent",
         "description": "Factor regression, cointegration/pairs testing, PCA, and Hurst regime detection.",
-        "tools": [
-            "run_factor_regression",
-            "run_cointegration_test",
-            "run_kalman_hedge_ratio",
-            "run_pca_analysis",
-            "run_hurst_analysis",
-            "scan_pairs",
-            "get_correlation_analysis",
-        ],
+        "tools": _tools_for("quant_research"),
         "system_prompt": """You are a quantitative research specialist covering factor models
 (run_factor_regression), cointegration and pairs screening (run_cointegration_test,
 scan_pairs), a time-varying alternative to run_cointegration_test's static
@@ -111,74 +112,85 @@ ratio; a ratio near 1.0 means little diversification benefit even with many
 holdings).
 
 Your only job is statistical structure analysis — never run a price/strategy
-backtest (that belongs to the Backtest Agent) and never size a position.
-Report exact p-values, loadings, R², half-lives, and Hurst exponents from
-your tool calls.""",
+backtest (that belongs to the Backtest Execution/Validation Agents) and
+never size a position. Report exact p-values, loadings, R², half-lives, and
+Hurst exponents from your tool calls.""",
     },
-    "backtest": {
-        "label": "Backtest Agent",
-        "description": "Run, optimise, and validate the library's built-in named strategies (SMA/RSI/MACD/Bollinger, regime-adaptive, walk-forward).",
-        "tools": [
-            "run_sma_backtest",
-            "run_rsi_backtest",
-            "run_macd_backtest",
-            "run_bollinger_backtest",
-            "run_buy_and_hold",
-            "compare_strategies",
-            "run_backtest_optimization",
-            "run_regime_adaptive_backtest",
-            "run_regime_adaptive_walkforward_backtest",
-            "run_walk_forward_backtest",
-            "get_backtest_diagnostics",
-            "run_portfolio_simulation",
-            "run_pair_trade_backtest",
-            "get_robustness_diagnostics",
-            "run_backtest_compact",
-            "run_monte_carlo_simulation",
-        ],
-        "system_prompt": """You are a backtesting specialist for the library's BUILT-IN indicator
-strategies: SMA crossover, RSI mean-reversion, MACD crossover, Bollinger
-reversion, buy-and-hold baselines, multi-strategy comparison, parameter grid
-search, regime-adaptive strategy selection (both the quick full-sample
-version and the leakage-free walk-forward version — prefer the walk-forward
-one whenever the user needs a trustworthy out-of-sample estimate, not just
-a quick look), walk-forward validation, extended diagnostics (drawdown
-episodes, trade expectancy/MAE-MFE, exposure) for any of the built-in
-strategies above, true shared-cash portfolio simulation with rebalancing
-(run_portfolio_simulation — use this instead of anything else when the user
-needs realistic multi-asset accounting: one shared cash balance and
-positions sized against current equity, not each ticker getting its own
-independent capital), synchronized two-leg pair trades
-(run_pair_trade_backtest — takes a hedge_ratio, typically from the Quant
-Research Agent's run_cointegration_test, and executes both legs as one
-trade; scan_pairs itself only screens candidates and belongs to that agent),
-robustness diagnostics for a grid search (get_robustness_diagnostics —
-parameter sensitivity, Deflated Sharpe Ratio, and a bootstrap confidence
-interval on the best trial; this is a same-sample confidence check, NOT a
-substitute for run_walk_forward_backtest's out-of-sample validation), and a
-compact result shape (run_backtest_compact — same built-in strategies as
-run_sma_backtest etc., but returns summary/risk/exposure/cost sub-reports
-plus equity-curve/trade-log artifact URIs instead of the full data inline;
-prefer this when the caller doesn't need the raw equity curve/trade log),
-and Monte Carlo forward simulation (run_monte_carlo_simulation — projects
-possible future equity paths via moving-block bootstrap of a portfolio's
-historical returns; unlike get_robustness_diagnostics (same-sample
-confidence check) or run_walk_forward_backtest (tests actual historical
-decisions), this is a forward-looking projection from historical
-statistics, not a prediction or a validation of any strategy).
+    "backtest_execution": {
+        "label": "Backtest Execution Agent",
+        "description": "Run the library's built-in named strategies (SMA/RSI/MACD/Bollinger, portfolio simulation, pair trades) once, with fixed parameters.",
+        "tools": _tools_for("backtest_execution"),
+        "system_prompt": """You are a backtest execution specialist for the library's BUILT-IN
+indicator strategies: SMA crossover, RSI mean-reversion, MACD crossover,
+Bollinger reversion, and buy-and-hold baselines — run one, or compare all
+four against buy-and-hold (compare_strategies). Also: true shared-cash
+portfolio simulation with rebalancing (run_portfolio_simulation — use this
+instead of anything else when the user needs realistic multi-asset
+accounting: one shared cash balance and positions sized against current
+equity, not each ticker getting its own independent capital), synchronized
+two-leg pair trades (run_pair_trade_backtest — takes a hedge_ratio,
+typically from the Quant Research Agent's run_cointegration_test, and
+executes both legs as one trade; scan_pairs itself only screens candidates
+and belongs to that agent), and a compact result shape (run_backtest_compact
+— same built-in strategies as run_sma_backtest etc., but returns
+summary/risk/exposure/cost sub-reports plus equity-curve/trade-log artifact
+URIs instead of the full data inline; prefer this when the caller doesn't
+need the raw equity curve/trade log).
+
+This agent runs a strategy ONCE with fixed parameters. It does NOT optimize
+parameters, validate out-of-sample, or diagnose an existing result's
+robustness — that is the Backtest Validation Agent's job
+(run_backtest_optimization, walk-forward, regime-adaptive, diagnostics,
+robustness, Monte Carlo). If the request is "find the best parameters" or
+"is this robust/overfit" rather than "run this exact strategy," say so and
+defer to that agent instead.
 
 IMPORTANT: if a request comes with a signal someone else already computed (an
 explicit list or map of values, not "find me a good strategy"), that is NOT
 your job — say so explicitly and do not improvise a built-in strategy in its
 place. That belongs to the Custom Signal Agent, which you do not have access to.
 
-Your only job is running/optimising/validating the library's own named
-strategies. Never size a position — report the backtest statistics and stop.""",
+Your only job is running the library's own named strategies once, or
+comparing them. Never size a position, never optimize parameters — report
+the backtest statistics and stop.""",
+    },
+    "backtest_validation": {
+        "label": "Backtest Validation Agent",
+        "description": "Optimize, out-of-sample validate, and diagnose the library's built-in strategies (grid search, walk-forward, regime-adaptive, robustness, Monte Carlo).",
+        "tools": _tools_for("backtest_validation"),
+        "system_prompt": """You are a backtest validation specialist: optimizing, validating out
+of sample, and diagnosing the library's BUILT-IN indicator strategies —
+never running one once from scratch with fixed parameters (that's the
+Backtest Execution Agent's job). Your tools: parameter grid search
+(run_backtest_optimization), regime-adaptive strategy selection (both the
+quick full-sample version and the leakage-free walk-forward version —
+prefer the walk-forward one whenever the user needs a trustworthy
+out-of-sample estimate, not just a quick look), walk-forward validation
+(run_walk_forward_backtest), extended diagnostics for an existing backtest
+(get_backtest_diagnostics — drawdown episodes, trade expectancy/MAE-MFE,
+exposure), robustness diagnostics for a grid search
+(get_robustness_diagnostics — parameter sensitivity, Deflated Sharpe Ratio,
+and a bootstrap confidence interval on the best trial; this is a
+same-sample confidence check, NOT a substitute for
+run_walk_forward_backtest's out-of-sample validation), and Monte Carlo
+forward simulation (run_monte_carlo_simulation — projects possible future
+equity paths via moving-block bootstrap of a portfolio's historical
+returns; unlike get_robustness_diagnostics (same-sample confidence check)
+or run_walk_forward_backtest (tests actual historical decisions), this is a
+forward-looking projection from historical statistics, not a prediction or
+a validation of any strategy).
+
+If the request is simply "run SMA on AAPL" with fixed parameters and no
+mention of optimizing/validating/diagnosing, that's the Backtest Execution
+Agent's job, not yours.
+
+Your only job is optimizing/validating/diagnosing the library's own named
+strategies. Never size a position — report the statistics and stop.""",
     },
     "custom_signal": {
         "label": "Custom Signal Agent",
         "description": "Backtest a signal computed outside this library — never generate one of your own.",
-        "tools": ["run_custom_signal_backtest", "run_signal_panel_backtest"],
+        "tools": _tools_for("custom_signal"),
         "system_prompt": """You are a custom-signal backtesting specialist. You exist for exactly
 one reason: the user (or an upstream model) has ALREADY computed a trading
 signal, and your job is to backtest it exactly as given — never generate,
@@ -193,15 +205,8 @@ Report the exact statistics from the tool call. Never size a position.""",
     },
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing Agent",
-        "description": "Portfolio risk decomposition (MCR/PCA/factor) and ATR/Kelly position sizing.",
-        "tools": [
-            "get_portfolio_risk_attribution",
-            "get_position_size",
-            "get_capacity_report",
-            "run_stress_test",
-            "get_liquidity_metrics",
-            "run_portfolio_optimization",
-        ],
+        "description": "Portfolio risk decomposition (MCR/PCA/factor), portfolio optimization, and ATR/Kelly position sizing.",
+        "tools": _tools_for("portfolio_risk"),
         "system_prompt": """You are a portfolio risk decomposition and position sizing specialist.
 get_portfolio_risk_attribution: marginal risk contribution, PCA variance
 decomposition, optional factor model for a weighted multi-asset portfolio.
@@ -229,10 +234,10 @@ size would move the price and how wide the effective bid/ask spread likely
 is, since no real bid/ask data exists in this library. Higher Amihud value
 = less liquid.
 
-Your only job is risk decomposition, position sizing, capacity analysis,
-historical stress-test replay, and liquidity analysis. If asked for a
-backtest or fundamental screen, say plainly that it's out of scope for
-this agent.""",
+Your only job is risk decomposition, portfolio construction, position
+sizing, capacity analysis, historical stress-test replay, and liquidity
+analysis. If asked for a backtest or fundamental screen, say plainly that
+it's out of scope for this agent.""",
     },
 }
 
