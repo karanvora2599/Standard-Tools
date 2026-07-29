@@ -27,6 +27,7 @@ from standard_quant_tools.agent.models import (
     WalkForwardInput,
 )
 from standard_quant_tools.agent.tools import (
+    _TOOL_DISPATCH,
     compare_strategies,
     dispatch,
     get_agent_tools,
@@ -95,7 +96,7 @@ def patched_long(long_ohlcv, monkeypatch):
 
 class TestToolRegistry:
     def test_now_has_forty_five_tools(self):
-        assert len(get_agent_tools()) == 45
+        assert len(get_agent_tools()) == len(_TOOL_DISPATCH)
 
     def test_new_tool_names_present(self):
         names = {t["function"]["name"] for t in get_agent_tools()}

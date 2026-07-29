@@ -26,6 +26,8 @@ from standard_quant_tools.agent.models import (
     VolatilityEstimatorsInput,
 )
 from standard_quant_tools.agent.tools import (
+    _TOOL_DISPATCH,
+    TOOL_CATEGORY,
     analyze_stock_risk,
     compare_strategies,
     get_agent_tools,
@@ -113,9 +115,12 @@ class TestSanitizeForJson:
 
 
 class TestGetAgentTools:
-    def test_returns_list_of_forty_five_tools(self):
+    def test_returns_one_tool_per_registered_dispatch_entry(self):
+        """Derived from _TOOL_DISPATCH rather than a hardcoded count -- a
+        magic number here is exactly the kind of drift this repo has
+        accumulated before (README/comments variously said 34/42/45)."""
         tools = get_agent_tools()
-        assert len(tools) == 45
+        assert len(tools) == len(_TOOL_DISPATCH)
 
     def test_all_tools_have_correct_schema_keys(self):
         for tool in get_agent_tools():
@@ -149,6 +154,81 @@ class TestGetAgentTools:
             schema = tool["function"]["parameters"]
             assert schema.get("type") == "object"
             assert "properties" in schema
+
+    def test_no_categories_arg_matches_default_output_exactly(self):
+        """Backward-compat guard: get_agent_tools(categories=None) must be
+        byte-for-byte identical to get_agent_tools() -- every existing
+        caller (dispatch(), pre-router single-agent scripts) relies on
+        this."""
+        assert get_agent_tools() == get_agent_tools(categories=None)
+
+    def test_single_category_filter_returns_only_that_categorys_tools(self):
+        names = {
+            t["function"]["name"] for t in get_agent_tools(categories=["screener"])
+        }
+        assert names == {
+            name for name, cat in TOOL_CATEGORY.items() if cat == "screener"
+        }
+
+    def test_multi_category_filter_unions_categories(self):
+        names = {
+            t["function"]["name"]
+            for t in get_agent_tools(categories=["screener", "custom_signal"])
+        }
+        expected = {
+            name
+            for name, cat in TOOL_CATEGORY.items()
+            if cat in ("screener", "custom_signal")
+        }
+        assert names == expected
+        assert len(names) < len(_TOOL_DISPATCH)  # confirms it actually narrowed
+
+    def test_unknown_category_returns_empty_not_an_error(self):
+        """An unknown category name is silently ignored (see
+        get_agent_tools's docstring) -- a router isn't a strict validator,
+        it narrows when confident and shouldn't raise on a typo'd key."""
+        assert get_agent_tools(categories=["not_a_real_category"]) == []
+
+
+class TestToolCategoryCoverage:
+    """The drift-proofing test: TOOL_CATEGORY is the single source of truth
+    every other categorization (get_agent_tools(categories=...), the router,
+    Multi_Agent_Implementation's WORKER_AGENTS) derives from. If a new tool
+    is added to _TOOL_DISPATCH without a TOOL_CATEGORY entry, this fails
+    immediately instead of silently drifting like the __all__/README/
+    worker-list counts did before."""
+
+    def test_every_dispatched_tool_has_exactly_one_category(self):
+        assert set(TOOL_CATEGORY) == set(_TOOL_DISPATCH)
+
+    def test_every_category_value_is_a_known_key(self):
+        known_categories = {
+            "screener",
+            "analysis",
+            "quant_research",
+            "backtest_execution",
+            "backtest_validation",
+            "custom_signal",
+            "portfolio_risk",
+        }
+        assert set(TOOL_CATEGORY.values()) <= known_categories
+
+    def test_backtest_execution_and_validation_are_disjoint_and_cover_backtest(self):
+        """Regression guard for the specific split this repo made: every
+        tool that used to be in one 16-tool 'backtest' bucket is now in
+        exactly one of the two narrower categories, not both and not
+        neither."""
+        execution = {n for n, c in TOOL_CATEGORY.items() if c == "backtest_execution"}
+        validation = {n for n, c in TOOL_CATEGORY.items() if c == "backtest_validation"}
+        assert execution.isdisjoint(validation)
+        assert len(execution) == 9
+        assert len(validation) == 7
+
+    def test_run_backtest_optimization_and_run_sma_backtest_are_separated(self):
+        """The exact kind of confusable-tool pair this category split exists
+        to keep apart: 'run a strategy' vs 'optimize a strategy's params'."""
+        assert TOOL_CATEGORY["run_sma_backtest"] == "backtest_execution"
+        assert TOOL_CATEGORY["run_backtest_optimization"] == "backtest_validation"
 
 
 class TestSMABacktest:

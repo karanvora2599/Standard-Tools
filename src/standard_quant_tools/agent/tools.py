@@ -2791,9 +2791,11 @@ def get_tail_risk_metrics(input_data: TailRiskInput) -> TailRiskResult:
         shape_xi=round(result["shape_xi"], 4),
         scale_beta=round(result["scale_beta"], 6),
         var_evt=round(result["var_evt"], 6),
-        cvar_evt=round(result["cvar_evt"], 6)
-        if result["cvar_evt"] != float("inf")
-        else float("inf"),
+        cvar_evt=(
+            round(result["cvar_evt"], 6)
+            if result["cvar_evt"] != float("inf")
+            else float("inf")
+        ),
         var_historical_comparison=round(hist_comparison, 6),
         method=result["method"],
         tail_classification=result["tail_classification"],
@@ -3976,10 +3978,23 @@ def get_backtest_diagnostics(
 # ──────────────────────────────────────────────────────────────────
 
 
-def get_agent_tools() -> List[Dict[str, Any]]:
+def get_agent_tools(
+    categories: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """
     Returns tool definitions formatted for OpenAI / Anthropic function calling.
     All tools have Pydantic-derived schemas — no manual JSON authoring required.
+
+    Args:
+        categories: Optional list of `TOOL_CATEGORY` values (see below) to
+            filter to — e.g. `["screener"]` returns only the 2 screener
+            tools. `None` (the default) returns every tool, identical to
+            this function's behavior before this parameter existed; every
+            existing caller (`dispatch()`, single-agent scripts that haven't
+            adopted a router yet) keeps working unchanged. An unknown
+            category name is silently ignored rather than raising, since a
+            router's job is to narrow *when confident*, not to be a strict
+            validator — see `agent/router.py`.
     """
     tool_defs = [
         ("run_sma_backtest", "SMA crossover backtest.", BacktestInput),
@@ -4193,6 +4208,10 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         ),
     ]
 
+    if categories is not None:
+        allowed = set(categories)
+        tool_defs = [t for t in tool_defs if TOOL_CATEGORY.get(t[0]) in allowed]
+
     return [
         {
             "type": "function",
@@ -4277,6 +4296,73 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
     "get_option_pricing": (get_option_pricing, OptionPricingInput),
     "get_implied_volatility": (get_implied_volatility, ImpliedVolatilityInput),
+}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Tool categories — single source of truth for anything that needs to
+# group/filter/narrow the tool set: get_agent_tools(categories=...),
+# agent/router.py's classification prompt, and
+# Multi_Agent_Implementation/worker_agents.py's WORKER_AGENTS (each worker's
+# "tools" list is *derived* from this dict, not hand-duplicated). Every key
+# in _TOOL_DISPATCH must appear here exactly once — enforced by
+# tests/test_agent_tools.py::TestToolCategoryCoverage.
+# ──────────────────────────────────────────────────────────────────
+
+TOOL_CATEGORY: Dict[str, str] = {
+    # screener — filter a universe, fetch fundamentals
+    "run_screener": "screener",
+    "get_stock_fundamentals": "screener",
+    # analysis — single-asset risk/technical/volatility/option profiling,
+    # multi-asset portfolio metrics, data quality
+    "analyze_stock_risk": "analysis",
+    "get_technical_analysis": "analysis",
+    "get_advanced_indicators": "analysis",
+    "get_rolling_beta": "analysis",
+    "get_extended_risk_metrics": "analysis",
+    "get_tail_risk_metrics": "analysis",
+    "get_portfolio_analysis": "analysis",
+    "get_data_quality_report": "analysis",
+    "get_volatility_estimators": "analysis",
+    "run_garch_volatility_forecast": "analysis",
+    "get_option_pricing": "analysis",
+    "get_implied_volatility": "analysis",
+    # quant_research — factor/cointegration/PCA/Hurst/correlation structure
+    "run_factor_regression": "quant_research",
+    "run_cointegration_test": "quant_research",
+    "run_kalman_hedge_ratio": "quant_research",
+    "run_pca_analysis": "quant_research",
+    "run_hurst_analysis": "quant_research",
+    "scan_pairs": "quant_research",
+    "get_correlation_analysis": "quant_research",
+    # backtest_execution — run a built-in strategy / portfolio / pair once
+    "run_sma_backtest": "backtest_execution",
+    "run_rsi_backtest": "backtest_execution",
+    "run_macd_backtest": "backtest_execution",
+    "run_bollinger_backtest": "backtest_execution",
+    "run_buy_and_hold": "backtest_execution",
+    "compare_strategies": "backtest_execution",
+    "run_backtest_compact": "backtest_execution",
+    "run_portfolio_simulation": "backtest_execution",
+    "run_pair_trade_backtest": "backtest_execution",
+    # backtest_validation — optimize/validate/diagnose a built-in strategy
+    "run_backtest_optimization": "backtest_validation",
+    "run_regime_adaptive_backtest": "backtest_validation",
+    "run_regime_adaptive_walkforward_backtest": "backtest_validation",
+    "run_walk_forward_backtest": "backtest_validation",
+    "get_backtest_diagnostics": "backtest_validation",
+    "get_robustness_diagnostics": "backtest_validation",
+    "run_monte_carlo_simulation": "backtest_validation",
+    # custom_signal — backtest a signal computed outside this library
+    "run_custom_signal_backtest": "custom_signal",
+    "run_signal_panel_backtest": "custom_signal",
+    # portfolio_risk — risk decomposition, sizing, capacity, stress, liquidity
+    "get_portfolio_risk_attribution": "portfolio_risk",
+    "get_position_size": "portfolio_risk",
+    "get_capacity_report": "portfolio_risk",
+    "run_stress_test": "portfolio_risk",
+    "get_liquidity_metrics": "portfolio_risk",
+    "run_portfolio_optimization": "portfolio_risk",
 }
 
 
