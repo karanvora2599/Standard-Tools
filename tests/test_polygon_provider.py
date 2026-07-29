@@ -275,6 +275,54 @@ class TestPolygonGet:
                 _polygon_get("/v3/reference/tickers/AAPL", {}, "key")
 
 
+class TestTickerUrlPathEncoding:
+    """A symbol is LLM/user-reachable and gets interpolated straight into a
+    URL path segment (not just a query-string param) for both the aggs
+    endpoint and the ticker-details endpoint. Guards against it being used
+    to inject extra path segments / query params — e.g. a symbol like
+    'AAPL?extra=1&apiKey=x' must not be able to smuggle its own apiKey or
+    alter the request path _polygon_get ends up hitting."""
+
+    def _provider(self) -> PolygonProvider:
+        return PolygonProvider(api_key="test-key")
+
+    def test_ohlcv_symbol_with_injection_characters_is_escaped_in_path(self):
+        malicious = "AAPL?extra=1&apiKey=stolen"
+        with patch(
+            "standard_quant_tools.data.polygon_provider._polygon_get",
+            return_value={"status": "OK", "results": []},
+        ) as mock_get:
+            with pytest.raises(DataNotFoundError):
+                self._provider().get_ohlcv(malicious, "2023-01-01", "2023-06-01")
+        path = mock_get.call_args[0][0]
+        assert "?" not in path
+        assert "&" not in path
+        assert path == (
+            "/v2/aggs/ticker/AAPL%3FEXTRA%3D1%26APIKEY%3DSTOLEN/range/"
+            "1/day/2023-01-01/2023-06-01"
+        )
+
+    def test_ticker_details_symbol_with_injection_characters_is_escaped_in_path(self):
+        with patch(
+            "standard_quant_tools.data.polygon_provider._polygon_get",
+            return_value={"status": "OK", "results": None},
+        ) as mock_get:
+            with pytest.raises(DataNotFoundError):
+                self._provider().get_ticker_info("AAPL/../../secrets")
+        path = mock_get.call_args[0][0]
+        assert path == "/v3/reference/tickers/AAPL%2F..%2F..%2FSECRETS"
+
+    def test_crypto_style_colon_prefix_is_preserved(self):
+        with patch(
+            "standard_quant_tools.data.polygon_provider._polygon_get",
+            return_value={"status": "OK", "results": []},
+        ) as mock_get:
+            with pytest.raises(DataNotFoundError):
+                self._provider().get_ohlcv("X:BTCUSD", "2023-01-01", "2023-06-01")
+        path = mock_get.call_args[0][0]
+        assert "/v2/aggs/ticker/X:BTCUSD/range/" in path
+
+
 class TestPolygonProviderConstruction:
     def test_no_key_anywhere_raises_api_error(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("SQT_POLYGON_API_KEY", raising=False)

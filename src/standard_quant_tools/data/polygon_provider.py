@@ -56,6 +56,7 @@ import urllib.request
 from datetime import date as _date
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import quote as _urlquote
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -347,7 +348,7 @@ class PolygonProvider(DataProvider):
         self, symbol: str, start_str: str, end_str: str, interval: str
     ) -> pd.DataFrame:
         multiplier, timespan = _TIMESPAN_MAP[interval]
-        ticker = symbol.strip().upper()
+        ticker = _urlquote(symbol.strip().upper(), safe=":")
         path = f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
         payload = _polygon_get(
             path,
@@ -420,7 +421,7 @@ class PolygonProvider(DataProvider):
         return _parse_financial_ratios(details, financials)
 
     def _fetch_ticker_details(self, symbol: str) -> Dict[str, Any]:
-        ticker = symbol.strip().upper()
+        ticker = _urlquote(symbol.strip().upper(), safe=":")
         payload = _polygon_get(f"/v3/reference/tickers/{ticker}", {}, self._api_key)
         details = payload.get("results")
         if not details:
