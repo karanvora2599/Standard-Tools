@@ -42,6 +42,50 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Agent tool orchestration: category taxonomy, a lightweight router, and a
+  hardened multi-agent orchestrator.** Tool metadata used to be
+  hand-duplicated across `get_agent_tools()`'s `tool_defs`, `_TOOL_DISPATCH`,
+  and a hardcoded `WORKER_AGENTS` tool-list in
+  `Multi_Agent_Implementation/worker_agents.py`, drifting apart silently
+  (README/comments variously claimed 34, 42, or 45 tools against a real
+  registry of 45). `standard_quant_tools.agent.tools.TOOL_CATEGORY` is now
+  the single source of truth — every tool mapped to one of 7 categories
+  (`screener`, `analysis`, `quant_research`, `backtest_execution`,
+  `backtest_validation`, `custom_signal`, `portfolio_risk`; the former
+  16-tool `backtest` bucket split into execution vs. validation, since
+  "run this strategy" and "optimize this strategy's parameters" are
+  different jobs). `get_agent_tools()` gained an optional `categories`
+  filter param, backward compatible (`None` = every tool). Fixed
+  `agent/__init__.py`'s stale `__all__`, which predated ~16 real tools.
+
+  New `standard_quant_tools.agent.router`: a provider-agnostic tool-category
+  classifier — one cheap completion call narrows the tool list to 1-2
+  categories before the real agent loop starts, without spinning up a
+  separate agent session. Fails open by design (returns every category on
+  any malformed/empty/unparseable response or API error) — a router that
+  wrongly excludes a needed tool is worse than today's unfiltered list.
+  `route_request()` + an optional `categories` param on `run_agent()` wired
+  into every `Implementation/{Anthropic,OpenAI,Gemini}/Agent_*.py` script
+  (27 scripts across 3 providers), replacing "hand every tool to the model
+  on every call" with "narrow first, then call."
+
+  `Multi_Agent_Implementation/worker_agents.py`'s `WORKER_AGENTS` now
+  *derives* each worker's tool list from `TOOL_CATEGORY` instead of a
+  hand-duplicated literal list (7 workers now, up from 6, matching the
+  execution/validation split); `Agent_Orchestrator.py`'s delegate-tool set
+  and system prompt are generated from `WORKER_AGENTS.keys()`/`len()`
+  rather than hardcoded counts. Fixed a missing duplicate-log-handler guard
+  in `Multi_Agent_Implementation/_agent_utils.py` (present in
+  `Implementation/Anthropic/_agent_utils.py`, absent here) that would have
+  gotten worse as delegation fans out across more workers.
+
+  New `tests/test_router.py` (unit tests + an `@pytest.mark.integration`
+  routing-accuracy eval — the first actual measurement of routing
+  correctness in this codebase, vs. the pre-existing multi-agent test's
+  coverage/disjointness-only checks) and expanded
+  `tests/test_multi_agent_tool_coverage.py` for the 7-worker split. New
+  [Documentation/13_agent_orchestration.md](Documentation/13_agent_orchestration.md).
+
 - **3 new agent tools: GARCH volatility forecasting, Kalman dynamic hedge
   ratio, EVT tail risk** (42 → 45 tools). All three model time-varying
   dynamics or fat tails — a gap the analytics layer's existing static/

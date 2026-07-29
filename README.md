@@ -423,9 +423,9 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ### AI Agent Tools (`standard_quant_tools.agent`)
 
-42 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
+45 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
-For a single agent choosing among all 42, see `Implementation/`. For an **orchestrator-workers** architecture — a lead agent that delegates to six specialist sub-agents, each scoped to a small, non-overlapping tool subset — see `Multi_Agent_Implementation/` (Anthropic only for now). Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest): a worker that was never given the other tool cannot call it by mistake.
+`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 45 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 7 specialist sub-agents, each with its own independent session scoped to a small, non-overlapping tool subset. Both build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](Documentation/13_agent_orchestration.md).
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -646,6 +646,7 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/10_auditability.md` | Decision-record audit trail, replay verification, correlated logging, `sqt` CLI |
 | `Documentation/11_data_quality.md` | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
 | `Documentation/12_options.md` | Black-Scholes-Merton option pricing, Greeks, implied volatility (European options only) |
+| `Documentation/13_agent_orchestration.md` | Tool-category taxonomy, the lightweight router, and the multi-agent orchestrator-workers architecture |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
 
