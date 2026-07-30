@@ -105,9 +105,7 @@ class TestOutputStructure:
         assert len(result["forecast_annualized_vol"]) == 10
 
     def test_persistence_equals_alpha_plus_beta(self, result):
-        assert result["persistence"] == pytest.approx(
-            result["alpha"] + result["beta"]
-        )
+        assert result["persistence"] == pytest.approx(result["alpha"] + result["beta"])
 
     def test_vols_are_non_negative(self, result):
         assert result["current_annualized_vol"] >= 0

@@ -123,7 +123,9 @@ class TestSimulateForwardPaths:
             initial_capital=20_000.0,
             seed=11,
         )
-        assert r2["terminal_median"] == pytest.approx(r1["terminal_median"] * 2, rel=1e-9)
+        assert r2["terminal_median"] == pytest.approx(
+            r1["terminal_median"] * 2, rel=1e-9
+        )
 
     @pytest.mark.parametrize("bad_horizon", [0, -5])
     def test_invalid_horizon_days_raises(self, sample_returns, bad_horizon):
@@ -137,9 +139,7 @@ class TestSimulateForwardPaths:
 
     def test_invalid_initial_capital_raises(self, sample_returns):
         with pytest.raises(ValidationError, match="initial_capital"):
-            simulate_forward_paths(
-                sample_returns, horizon_days=30, initial_capital=0.0
-            )
+            simulate_forward_paths(sample_returns, horizon_days=30, initial_capital=0.0)
 
     def test_block_size_larger_than_series_raises(self, sample_returns):
         with pytest.raises(ValidationError, match="block_size"):

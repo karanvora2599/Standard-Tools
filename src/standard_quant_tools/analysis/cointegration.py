@@ -389,9 +389,7 @@ def kalman_hedge_ratio(
     if not (0.0 < delta < 1.0):
         raise ValidationError(f"delta must be in (0, 1), got {delta}")
     if observation_noise <= 0:
-        raise ValidationError(
-            f"observation_noise must be > 0, got {observation_noise}"
-        )
+        raise ValidationError(f"observation_noise must be > 0, got {observation_noise}")
 
     common_idx = series_a.index.intersection(series_b.index)
     a = series_a.loc[common_idx].to_numpy(dtype=float)
@@ -416,9 +414,7 @@ def kalman_hedge_ratio(
             a, b, delta, observation_noise
         )
     else:
-        beta_path, gain_path, _ = _kalman_filter_1state(
-            a, b, delta, observation_noise
-        )
+        beta_path, gain_path, _ = _kalman_filter_1state(a, b, delta, observation_noise)
         alpha_path = np.zeros(n)
 
     spread = a - beta_path * b - alpha_path

@@ -350,9 +350,7 @@ class TestKalmanFilter1StateHandComputed:
         y = np.array([2.0, 4.4])
         x = np.array([1.0, 2.0])
         delta, obs_noise = 0.5, 1.0
-        beta_path, gain_path, innov_path = _kalman_filter_1state(
-            y, x, delta, obs_noise
-        )
+        beta_path, gain_path, innov_path = _kalman_filter_1state(y, x, delta, obs_noise)
 
         vw = delta / (1.0 - delta)
         p0 = 1.0e4

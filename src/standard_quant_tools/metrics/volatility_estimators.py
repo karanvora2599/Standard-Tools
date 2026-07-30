@@ -103,10 +103,9 @@ def yang_zhang_volatility(
     prev_close = close.shift(1)
     overnight = np.log(open_ / prev_close)
     open_close = np.log(close / open_)
-    rogers_satchell = (
-        np.log(high / close) * np.log(high / open_)
-        + np.log(low / close) * np.log(low / open_)
-    )
+    rogers_satchell = np.log(high / close) * np.log(high / open_) + np.log(
+        low / close
+    ) * np.log(low / open_)
 
     k = 0.34 / (1.34 + (period + 1) / (period - 1))
 

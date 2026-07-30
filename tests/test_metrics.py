@@ -397,7 +397,9 @@ class TestEvtTailRisk:
         mle = evt_tail_risk(fat_tailed_returns, method="mle")
         assert mle["shape_xi"] == pytest.approx(pwm["shape_xi"], abs=0.1)
 
-    def test_mle_without_scipy_raises_if_unavailable(self, fat_tailed_returns, monkeypatch):
+    def test_mle_without_scipy_raises_if_unavailable(
+        self, fat_tailed_returns, monkeypatch
+    ):
         monkeypatch.setattr(
             "standard_quant_tools.metrics.risk_metrics.HAS_SCIPY", False
         )

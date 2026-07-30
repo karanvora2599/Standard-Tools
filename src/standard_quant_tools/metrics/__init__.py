@@ -24,4 +24,3 @@ from .volatility_estimators import (
     parkinson_volatility,
     yang_zhang_volatility,
 )
-    

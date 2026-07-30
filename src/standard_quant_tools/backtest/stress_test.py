@@ -83,8 +83,12 @@ def replay_stress_scenario(
         "portfolio_return_pct": total_return,
         "max_drawdown_pct": mdd,
         "worst_day_return_pct": float(portfolio_returns.loc[worst_idx]),
-        "worst_day_date": str(worst_idx.date()) if hasattr(worst_idx, "date") else str(worst_idx),
+        "worst_day_date": (
+            str(worst_idx.date()) if hasattr(worst_idx, "date") else str(worst_idx)
+        ),
         "best_day_return_pct": float(portfolio_returns.loc[best_idx]),
-        "best_day_date": str(best_idx.date()) if hasattr(best_idx, "date") else str(best_idx),
+        "best_day_date": (
+            str(best_idx.date()) if hasattr(best_idx, "date") else str(best_idx)
+        ),
         "n_trading_days": len(portfolio_returns),
     }

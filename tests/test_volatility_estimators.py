@@ -107,7 +107,11 @@ class TestYangZhangVolatility:
         low = open_ * 0.9999
 
         parkinson = parkinson_volatility(high, low, period=20).dropna().iloc[-1]
-        yz = yang_zhang_volatility(open_, high, low, close_s, period=20).dropna().iloc[-1]
+        yz = (
+            yang_zhang_volatility(open_, high, low, close_s, period=20)
+            .dropna()
+            .iloc[-1]
+        )
         assert yz > parkinson * 5
 
     def test_nan_prefix_length(self):

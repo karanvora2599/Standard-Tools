@@ -123,9 +123,7 @@ def garch_volatility_forecast(
     is not installed.
     """
     if forecast_horizon <= 0:
-        raise ValidationError(
-            f"forecast_horizon must be > 0, got {forecast_horizon}"
-        )
+        raise ValidationError(f"forecast_horizon must be > 0, got {forecast_horizon}")
     _require_scipy("GARCH(1,1) maximum-likelihood fitting")
 
     arr = returns.dropna().to_numpy(dtype=float)
@@ -193,8 +191,7 @@ def garch_volatility_forecast(
         ],
     }
     logger.debug(
-        "[garch] omega=%.8f  alpha=%.4f  beta=%.4f  persistence=%.4f  "
-        "converged=%s",
+        "[garch] omega=%.8f  alpha=%.4f  beta=%.4f  persistence=%.4f  " "converged=%s",
         omega,
         alpha,
         beta,

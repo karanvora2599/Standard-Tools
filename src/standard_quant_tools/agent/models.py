@@ -1358,7 +1358,9 @@ class TailRiskInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    confidence: float = Field(0.99, gt=0.5, lt=1.0, description="VaR/CVaR confidence level.")
+    confidence: float = Field(
+        0.99, gt=0.5, lt=1.0, description="VaR/CVaR confidence level."
+    )
     tail_fraction: float = Field(
         0.05,
         gt=0.0,

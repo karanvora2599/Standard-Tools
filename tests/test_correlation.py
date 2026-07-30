@@ -31,9 +31,7 @@ class TestDiversificationRatio:
         n_assets = 4
         n_obs = 5000  # large sample so realized correlation/vol ~ population values
         dates = pd.date_range("2015-01-01", periods=n_obs, freq="B")
-        data = {
-            f"T{i}": rng.normal(0, 0.02, n_obs) for i in range(n_assets)
-        }
+        data = {f"T{i}": rng.normal(0, 0.02, n_obs) for i in range(n_assets)}
         returns_df = pd.DataFrame(data, index=dates)
         dr = diversification_ratio(returns_df)
         assert dr == pytest.approx(np.sqrt(n_assets), rel=0.05)
@@ -81,9 +79,7 @@ class TestPairwiseCorrelationSummary:
         base = np.random.normal(0, 0.01, n)
         independent = np.random.normal(0, 0.01, n)
         dates = pd.date_range("2022-01-01", periods=n, freq="B")
-        returns_df = pd.DataFrame(
-            {"A": base, "B": base, "C": independent}, index=dates
-        )
+        returns_df = pd.DataFrame({"A": base, "B": base, "C": independent}, index=dates)
         summary = pairwise_correlation_summary(returns_df)
         assert summary["highest_correlated_pair"]["correlation"] == pytest.approx(
             1.0, abs=1e-8
@@ -126,11 +122,7 @@ class TestPairwiseCorrelationSummary:
         corr = summary["correlation_matrix"]
         n_assets = 3
         manual = np.mean(
-            [
-                corr.iloc[i, j]
-                for i in range(n_assets)
-                for j in range(i + 1, n_assets)
-            ]
+            [corr.iloc[i, j] for i in range(n_assets) for j in range(i + 1, n_assets)]
         )
         assert summary["avg_pairwise_correlation"] == pytest.approx(manual)
 
@@ -139,9 +131,7 @@ class TestPairwiseCorrelationSummary:
         n = 200
         base = np.random.normal(0, 0.01, n)
         dates = pd.date_range("2022-01-01", periods=n, freq="B")
-        returns_df = pd.DataFrame(
-            {"A": base, "B": base, "C": -base}, index=dates
-        )
+        returns_df = pd.DataFrame({"A": base, "B": base, "C": -base}, index=dates)
         summary = pairwise_correlation_summary(returns_df)
         assert summary["highest_correlated_pair"]["correlation"] == pytest.approx(
             1.0, abs=1e-8
