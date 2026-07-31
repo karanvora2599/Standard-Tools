@@ -5,9 +5,12 @@ Unit tests: mock the yfinance calls (no network).
 Integration tests: require live network; marked with @pytest.mark.integration.
 """
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
+import standard_quant_tools.data._cache as cache_module
 from standard_quant_tools.data.base import FinancialRatios, TickerInfo
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import (
@@ -15,6 +18,18 @@ from standard_quant_tools.error import (
     DataNotFoundError,
     InvalidSymbolError,
 )
+
+
+@pytest.fixture(autouse=True)
+def redirect_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Redirect all Parquet writes/reads to a temp directory for every test
+    so the real persistent disk cache never leaks between tests -- see
+    tests/test_parquet_cache.py for the original pattern this mirrors.
+    Most tests here use a fully-mocked DataFactory and never touch the
+    cache, but TestLiveYFinance's integration tests do."""
+    monkeypatch.setattr(cache_module, "_CACHE_ROOT", tmp_path)
+    cache_module._session_cache.clear()
+
 
 # ── Mocked unit tests ─────────────────────────────────────────────────────────
 

@@ -231,6 +231,44 @@ class TestToolCategoryCoverage:
         assert TOOL_CATEGORY["run_backtest_optimization"] == "backtest_validation"
 
 
+class TestAgentModelExports:
+    """Drift-proofing for agent/__init__.py: every Pydantic model defined in
+    models.py must be re-exported from the agent package, or callers doing
+    `from standard_quant_tools.agent import SomeInput` silently break even
+    though the model itself works fine. This is the same class of bug
+    TestToolCategoryCoverage guards against, one layer up."""
+
+    def test_every_model_defined_in_models_py_is_exported(self):
+        import inspect
+
+        from pydantic import BaseModel
+
+        import standard_quant_tools.agent as agent_pkg
+        from standard_quant_tools.agent import models as models_module
+
+        defined_models = {
+            name
+            for name, obj in vars(models_module).items()
+            if inspect.isclass(obj)
+            and issubclass(obj, BaseModel)
+            and obj.__module__ == models_module.__name__
+        }
+        missing = defined_models - set(agent_pkg.__all__)
+        assert (
+            not missing
+        ), f"models.py classes missing from agent.__all__: {sorted(missing)}"
+
+    def test_every_exported_model_name_is_importable_from_the_package(self):
+        import standard_quant_tools.agent as agent_pkg
+        from standard_quant_tools.agent import models as models_module
+
+        model_names_in_all = {
+            name for name in agent_pkg.__all__ if hasattr(models_module, name)
+        }
+        for name in model_names_in_all:
+            assert hasattr(agent_pkg, name), f"{name} is in __all__ but not importable"
+
+
 class TestSMABacktest:
     def test_returns_backtest_result(self, patched_factory):
         inp = BacktestInput(
@@ -997,6 +1035,28 @@ class TestGetCorrelationAnalysis:
         result = get_correlation_analysis(inp)
         assert result.diversification_ratio == pytest.approx(1.0)
 
+    def test_weights_not_summing_to_one_rejected_by_pydantic(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            CorrelationAnalysisInput(
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
+                weights=[0.3, 0.3],
+            )
+
+    def test_weights_length_mismatch_rejected_by_pydantic(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            CorrelationAnalysisInput(
+                tickers=["AAPL", "MSFT", "GOOGL"],
+                start_date=START,
+                end_date=END,
+                weights=[0.5, 0.5],
+            )
+
 
 class TestRunMonteCarloSimulation:
     def test_returns_result_for_tickers(self, patched_factory):
@@ -1082,6 +1142,41 @@ class TestRunMonteCarloSimulation:
         with pytest.raises(PydanticValidationError):
             MonteCarloSimulationInput(
                 tickers=["AAPL"], start_date=START, end_date=END, n_simulations=10
+            )
+
+    def test_custom_weights_accepted(self, patched_factory):
+        inp = MonteCarloSimulationInput(
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
+            weights=[0.3, 0.7],
+            horizon_days=30,
+            n_simulations=200,
+            random_seed=5,
+        )
+        result = run_monte_carlo_simulation(inp)
+        assert result.tickers == ["AAPL", "MSFT"]
+
+    def test_weights_not_summing_to_one_rejected_by_pydantic(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            MonteCarloSimulationInput(
+                tickers=["AAPL", "MSFT"],
+                start_date=START,
+                end_date=END,
+                weights=[0.3, 0.3],
+            )
+
+    def test_weights_length_mismatch_rejected_by_pydantic(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            MonteCarloSimulationInput(
+                tickers=["AAPL", "MSFT", "GOOGL"],
+                start_date=START,
+                end_date=END,
+                weights=[0.5, 0.5],
             )
 
 

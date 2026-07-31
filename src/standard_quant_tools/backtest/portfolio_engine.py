@@ -353,7 +353,7 @@ def run_portfolio_simulation(
     net_records: List[float] = []
     rebalance_log: List[Dict[str, Any]] = []
 
-    def _valid_dollar_volume(t: str, exec_date: Any) -> float:
+    def _valid_dollar_volume(t: str, trigger_date: Any, exec_date: Any) -> float:
         # Fail closed: a caller who explicitly enabled max_adv_participation
         # or use_impact_model asked for a liquidity-aware check — a missing
         # or invalid volume baseline means that check can't be performed,
@@ -361,7 +361,16 @@ def run_portfolio_simulation(
         # unconstrained. costs.py's adv_participation/impact_cost stay
         # permissive (return 0.0) for callers who use them directly without
         # opting into this engine's safety feature.
-        dv = float(dollar_volume[t].loc[exec_date])
+        #
+        # Look up at trigger_date, not exec_date: for fill_price="close"/
+        # "hl2_exploratory" the two are always equal (a no-op here), but for
+        # "next_open" they differ -- exec_date is the bar actually being
+        # filled, whose own full-day Volume/Close isn't knowable yet at that
+        # bar's Open. trigger_date is the last bar that was fully complete
+        # when the rebalance decision was made, so it's the correct,
+        # actually-known-in-advance baseline for a mode whose entire
+        # documented purpose is being lookahead-free.
+        dv = float(dollar_volume[t].loc[trigger_date])
         if not math.isfinite(dv) or dv <= 0:
             raise ValidationError(
                 f"rebalance {exec_date} ticker {t!r}: average dollar volume is "
@@ -371,7 +380,11 @@ def run_portfolio_simulation(
         return dv
 
     def _trade_cost(
-        t: str, delta_shares: float, trade_notional: float, exec_date: Any
+        t: str,
+        delta_shares: float,
+        trade_notional: float,
+        trigger_date: Any,
+        exec_date: Any,
     ) -> float:
         if commission_model == "per_share":
             commission = per_share_commission(
@@ -382,11 +395,13 @@ def run_portfolio_simulation(
         spread = trade_notional * slippage_pct
         impact = 0.0
         if use_impact_model:
-            adv = _valid_dollar_volume(t, exec_date)
+            adv = _valid_dollar_volume(t, trigger_date, exec_date)
+            # Same trigger_date-not-exec_date lookup as _valid_dollar_volume,
+            # and for the same reason.
             impact = impact_cost(
                 trade_notional,
                 adv,
-                float(volatility[t].loc[exec_date]),
+                float(volatility[t].loc[trigger_date]),
                 impact_coefficient,
             )
         return commission + spread + impact
@@ -435,7 +450,7 @@ def run_portfolio_simulation(
             turnover_notional += trade_notional
 
             if max_adv_participation is not None:
-                adv = _valid_dollar_volume(t, exec_date)
+                adv = _valid_dollar_volume(t, trigger_date, exec_date)
                 participation = adv_participation(trade_notional, adv)
                 if participation > max_adv_participation + 1e-9:
                     raise ValidationError(
@@ -444,7 +459,7 @@ def run_portfolio_simulation(
                     )
 
             cash -= delta * price
-            cash -= _trade_cost(t, delta, trade_notional, exec_date)
+            cash -= _trade_cost(t, delta, trade_notional, trigger_date, exec_date)
             shares[t] = target_shares
 
         equity_after = cash + sum(shares[t] * exec_prices[t] for t in tickers)

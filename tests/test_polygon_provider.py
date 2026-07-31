@@ -20,11 +20,13 @@ No real network call is made anywhere in this file.
 import json
 import urllib.error
 from email.message import Message
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+import standard_quant_tools.data._cache as cache_module
 from standard_quant_tools.data.base import FinancialRatios, TickerInfo
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.data.polygon_provider import (
@@ -40,8 +42,19 @@ from standard_quant_tools.error import (
     APIError,
     DataNotFoundError,
     InvalidSymbolError,
+    NonRetryableAPIError,
     ValidationError,
 )
+
+
+@pytest.fixture(autouse=True)
+def redirect_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Redirect all Parquet writes/reads to a temp directory for every test
+    so the real persistent disk cache never leaks between tests (or across
+    runs) -- see tests/test_parquet_cache.py for the original pattern this
+    mirrors."""
+    monkeypatch.setattr(cache_module, "_CACHE_ROOT", tmp_path)
+    cache_module._session_cache.clear()
 
 
 class TestResolvePolygonApiKey:
@@ -249,6 +262,22 @@ class TestPolygonGet:
             with pytest.raises(APIError, match="SQT_POLYGON_API_KEY"):
                 _polygon_get("/v3/reference/tickers/AAPL", {}, "key")
 
+    def test_401_raises_the_non_retryable_subclass_specifically(self):
+        # Regression: 401/403 used to raise plain APIError, identical (from
+        # the retry decorator's point of view) to a genuinely transient
+        # 429/5xx -- an invalid API key would get retried 3x with backoff
+        # instead of failing fast.
+        err = self._http_error(401, "Unauthorized", b"unauthorized")
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(NonRetryableAPIError):
+                _polygon_get("/v3/reference/tickers/AAPL", {}, "key")
+
+    def test_403_raises_the_non_retryable_subclass_specifically(self):
+        err = self._http_error(403, "Forbidden", b"forbidden")
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(NonRetryableAPIError):
+                _polygon_get("/v3/reference/tickers/AAPL", {}, "key")
+
     def test_404_raises_data_not_found(self):
         err = self._http_error(404, "Not Found", b"not found")
         with patch("urllib.request.urlopen", side_effect=err):
@@ -424,6 +453,34 @@ class TestGetOhlcvMockedFetch:
                 df = self._provider().get_ohlcv("AAPL", "2023-01-01", "2023-06-01")
         assert not df.empty
         assert any("truncating" in record.message for record in caplog.records)
+
+    def test_cache_invalid_symbol_does_not_crash_on_write(self, tmp_path):
+        """A symbol _safe_parquet_path can't encode into a cache filename
+        (e.g. one with a space) used to crash on the write-side call to
+        _write_parquet_atomic(pq_path, result), which wasn't None-guarded
+        even though the read-side call already was."""
+        payload = {
+            "status": "OK",
+            "results": [
+                {
+                    "o": 100.0,
+                    "h": 105.0,
+                    "l": 99.0,
+                    "c": 103.0,
+                    "v": 1000,
+                    "t": 1672704000000,
+                },
+            ],
+        }
+        with patch(
+            "standard_quant_tools.data.polygon_provider._polygon_get",
+            return_value=payload,
+        ):
+            df = self._provider().get_ohlcv(
+                "AAPL US Equity", "2023-01-01", "2023-06-01"
+            )
+        assert not df.empty
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestAsyncFetch:

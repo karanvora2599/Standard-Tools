@@ -439,6 +439,73 @@ bump, consistent with SemVer's pre-1.0 clause.
   `distutils`, which Python 3.12 removed, and nothing in the suite actually
   used it) and added `anthropic` to the `test` extras, since
   `test_multi_agent_tool_coverage.py` transitively imports it.
+- `garch_volatility_forecast`: the one-step-ahead forecast seed never
+  incorporated the most recent observed return (`current_var` stopped one
+  recursion step short), so `forecast_annualized_vol[0]` silently diverged
+  from `current_annualized_vol` and every later forecast step compounded a
+  spurious extra decay. Fixed by computing the true T+1 variance explicitly
+  and re-indexing the forecast horizon from `h=0`.
+- `audit/paths.py`: the Windows advisory file lock (`msvcrt.locking`) raised
+  `OSError` after its own ~10s internal retry and was silently swallowed by
+  a blanket `except Exception`, letting `AuditWriter.write()` proceed
+  completely unlocked under contention (and leaking the file handle). Now
+  retries indefinitely, matching POSIX `fcntl.flock`'s existing blocking
+  behavior, and closes the handle on failure.
+- `PositionSizerInput`: `win_rate`/`avg_win_pct`/`avg_loss_pct` had no range
+  validation (unlike the sibling `risk_per_trade_pct`), so an impossible
+  input (e.g. `avg_loss_pct=0`, a Kelly-formula divisor) could reach the
+  sizing math instead of being rejected up front.
+- `data/_cache.py`: the shared in-process session cache (`cachetools.TTLCache`)
+  had no locking despite being read/written from multiple threads via each
+  provider's async path; added a module-level lock around get/set.
+- Audit redaction: exception messages echoing a redacted field's raw value
+  were never redacted (only `input` was), and the redaction placeholder
+  itself was an unsalted 8-hex-char hash, brute-forceable offline for small
+  value spaces (SSNs, PINs). Added `redact_text()` for error messages
+  (sharing one `_placeholder_for()` helper with `input` redaction so both
+  produce the same placeholder) and an optional `SQT_AUDIT_REDACT_SALT`
+  env var, with a one-time warning when it's unset.
+- `portfolio_engine.py`: `fill_price="next_open"` still looked up that
+  day's own ADV/volatility for cost/impact modeling — not yet knowable at
+  that bar's Open. `_valid_dollar_volume`/`_trade_cost` now index at
+  `trigger_date` instead of `exec_date` (a no-op for `close`/
+  `hl2_exploratory`, where the two are already equal).
+- The retry decorator treated HTTP 401/403 (permanent, e.g. an invalid API
+  key) identically to 429/5xx (transient), burning through a rate-limited
+  API's request budget on every call until the key was fixed. Added
+  `NonRetryableAPIError` (a subclass of `APIError`, so existing `except
+  APIError` sites are unaffected); `PolygonProvider` now raises it for
+  401/403 specifically, and the retry decorator never retries it.
+- `agent/__init__.py` was missing re-exports for ~46 Pydantic models defined
+  in `models.py` (e.g. `Trade`, `PortfolioOptimizationInput`,
+  `OptionPricingResult`), so `from standard_quant_tools.agent import
+  SomeInput` silently `ImportError`'d for those classes even though the
+  models themselves worked fine. Added a regression-guard test
+  (`TestAgentModelExports`) so this can't drift silently again.
+- `YFinanceProvider` hard-failed with `ValidationError` on a symbol whose
+  characters couldn't be safely encoded into a cache filename, where
+  `PolygonProvider` already degraded gracefully by skipping the disk cache
+  for that call. Both providers now use `_safe_parquet_path` consistently
+  on the read *and* write side (the write-side call in `PolygonProvider`
+  itself was missing the same `None` guard the read side already had).
+- `CorrelationAnalysisInput.weights`/`MonteCarloSimulationInput.weights`
+  (both optional — `None` means equal weighting) had no validation when
+  provided, unlike the required `weights` on sibling models
+  (`PortfolioInput`, `RiskAttributionInput`). Added the same length/sum-to-1
+  check, guarded on `weights is not None`.
+- `spread_zscore`'s rolling branch and `rolling_beta`'s pandas fallback both
+  divided by a rolling std/variance with no zero-guard — a flat spread or
+  constant benchmark window produced `inf`/`-inf` instead of raising or
+  producing an explicit missing value. Both now NaN out that window instead
+  (not a literal `0.0`, which would be indistinguishable from a legitimate
+  zero mid-series).
+- Test isolation: `tests/test_polygon_provider.py` and `tests/test_data.py`
+  didn't redirect the real persistent Parquet disk cache to a temp
+  directory (unlike `test_parquet_cache.py`/`test_audit.py`, which already
+  did), so a cache entry written by an earlier test/run could leak into a
+  later test in the same run — the root cause of an intermittent CI "Run
+  tests" failure. Added the same `autouse=True` `redirect_cache` fixture to
+  both files.
 
 ### Known Issues
 

@@ -61,7 +61,7 @@ from .provenance import (
     _package_version,
     _strategy_source_hash,
 )
-from .redaction import _redact, _redact_fields
+from .redaction import _redact, _redact_fields, redact_text
 from .replay import verify_replay
 from .retention import gc, gc_candidates, hold_day, is_held, release_hold, seal_day
 from .signing import (

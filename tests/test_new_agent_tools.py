@@ -1280,6 +1280,79 @@ class TestPositionSizer:
         assert result.recommended_shares >= 0
 
 
+class TestPositionSizerKellyInputValidation:
+    """Regression coverage: win_rate/avg_win_pct/avg_loss_pct used to have no
+    validation at all (unlike the sibling risk_per_trade_pct field), so an
+    impossible win_rate like 2.0 could reach the Kelly formula and produce a
+    silently over-100%-of-equity sizing recommendation."""
+
+    def test_win_rate_above_one_rejected(self):
+        with pytest.raises(pydantic.ValidationError, match="win_rate"):
+            PositionSizerInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                account_equity=100_000.0,
+                win_rate=2.0,
+                avg_win_pct=0.05,
+                avg_loss_pct=0.03,
+            )
+
+    def test_win_rate_below_zero_rejected(self):
+        with pytest.raises(pydantic.ValidationError, match="win_rate"):
+            PositionSizerInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                account_equity=100_000.0,
+                win_rate=-0.1,
+            )
+
+    def test_win_rate_zero_and_one_are_valid_boundaries(self):
+        PositionSizerInput(
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            account_equity=100_000.0,
+            win_rate=0.0,
+        )
+        PositionSizerInput(
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            account_equity=100_000.0,
+            win_rate=1.0,
+        )
+
+    def test_negative_avg_win_pct_rejected(self):
+        with pytest.raises(pydantic.ValidationError, match="avg_win_pct"):
+            PositionSizerInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                account_equity=100_000.0,
+                avg_win_pct=-0.05,
+            )
+
+    def test_non_positive_avg_loss_pct_rejected(self):
+        with pytest.raises(pydantic.ValidationError, match="avg_loss_pct"):
+            PositionSizerInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                account_equity=100_000.0,
+                avg_loss_pct=0.0,
+            )
+        with pytest.raises(pydantic.ValidationError, match="avg_loss_pct"):
+            PositionSizerInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                account_equity=100_000.0,
+                avg_loss_pct=-0.02,
+            )
+
+
 # ── Feature: "unknown" regime fallback ────────────────────────────────────────
 
 

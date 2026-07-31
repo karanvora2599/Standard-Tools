@@ -291,6 +291,19 @@ class TestSpreadZscore:
         z = spread_zscore(spread)
         assert z.name == "zscore"
 
+    def test_rolling_constant_spread_window_yields_nan_not_inf(self):
+        """A rolling window with zero variance (e.g. a flat stretch of the
+        spread) used to divide by zero -- must produce NaN for that window,
+        not inf/-inf that could silently poison downstream math. Unlike the
+        static (window=None) branch, NaN is used instead of a literal 0.0
+        since a rolling 0.0 would be indistinguishable from a legitimate
+        zero z-score mid-series."""
+        spread = pd.Series([1.5] * 100)
+        window = 20
+        z = spread_zscore(spread, window=window)
+        assert z.iloc[window - 1 :].isna().all()
+        assert not np.isinf(z).any()
+
 
 # ── kalman_hedge_ratio ───────────────────────────────────────────────────────
 

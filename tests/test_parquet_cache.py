@@ -11,12 +11,13 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+import standard_quant_tools.data._cache as cache_module
 import standard_quant_tools.data.yfinance_provider as provider_module
+from standard_quant_tools.data._cache import _parquet_path
 from standard_quant_tools.data.yfinance_provider import (
     YFinanceProvider,
     _is_historical,
     _norm_date,
-    _parquet_path,
 )
 from standard_quant_tools.error import ValidationError
 
@@ -25,10 +26,17 @@ from standard_quant_tools.error import ValidationError
 
 @pytest.fixture(autouse=True)
 def redirect_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Redirect all Parquet writes/reads to a temp directory for every test."""
-    monkeypatch.setattr(provider_module, "_CACHE_ROOT", tmp_path)
+    """Redirect all Parquet writes/reads to a temp directory for every test.
+
+    _CACHE_ROOT/_session_cache are read by functions defined in
+    standard_quant_tools.data._cache (extracted there so Bloomberg/Polygon
+    can share them) -- patching yfinance_provider's re-exported name would
+    not affect what those functions actually see, so the patch target is
+    the defining module, not the re-exporting one.
+    """
+    monkeypatch.setattr(cache_module, "_CACHE_ROOT", tmp_path)
     # Also clear the session TTL cache between tests so reads always hit the disk path
-    provider_module._session_cache.clear()
+    cache_module._session_cache.clear()
 
 
 @pytest.fixture
@@ -198,7 +206,7 @@ class TestParquetCacheWrite:
 
         expected = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
         # Redirect to tmp_path (done by autouse fixture)
-        from standard_quant_tools.data.yfinance_provider import _CACHE_ROOT
+        from standard_quant_tools.data._cache import _CACHE_ROOT
 
         pq = _CACHE_ROOT / expected.name
         assert pq.exists(), f"Expected Parquet file at {pq}"
@@ -218,7 +226,7 @@ class TestParquetCacheWrite:
             prov = YFinanceProvider()
             prov.get_ohlcv("AAPL", "2022-01-01", today)
 
-        from standard_quant_tools.data.yfinance_provider import _CACHE_ROOT
+        from standard_quant_tools.data._cache import _CACHE_ROOT
 
         parquets = list(_CACHE_ROOT.glob("*.parquet"))
         assert (
@@ -239,7 +247,7 @@ class TestParquetCacheWrite:
             first_call_count = mock_ticker.call_count
 
             # Clear session TTL cache so the function body runs again
-            provider_module._session_cache.clear()
+            cache_module._session_cache.clear()
 
             # Second call — should read Parquet, not call yfinance again
             result2 = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
@@ -324,7 +332,7 @@ class TestTimezoneNormalization:
             index=dates,
         )
         path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
-        provider_module._CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        cache_module._CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         stale_cached_df.to_parquet(path)
 
         prov = YFinanceProvider()
@@ -343,7 +351,7 @@ class TestTimezoneNormalization:
             )
             prov = YFinanceProvider()
             prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
-            provider_module._session_cache.clear()
+            cache_module._session_cache.clear()
             result = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
 
         assert list(result.columns) == ["Open", "High", "Low", "Close", "Volume"]
@@ -352,15 +360,26 @@ class TestTimezoneNormalization:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """SQT_CACHE_DIR env variable should control the cache directory."""
-        custom_dir = tmp_path / "custom_cache"
-        monkeypatch.setenv("SQT_CACHE_DIR", str(custom_dir))
-        # Re-import to pick up the env var (simulate fresh import)
         import importlib
 
+        custom_dir = tmp_path / "custom_cache"
+        monkeypatch.setenv("SQT_CACHE_DIR", str(custom_dir))
+        # _CACHE_ROOT is computed at import time in _cache.py; provider_module
+        # binds its own reference to it via `from ._cache import ...`, so
+        # both modules need reloading (cache first) for this to propagate,
+        # and both need reloading back afterward in a finally -- otherwise
+        # this test leaves provider_module's bound references (e.g.
+        # _session_cache) pointing at objects reload just replaced in
+        # cache_module, silently breaking cache isolation for every test
+        # that runs after this one in the same process.
+        importlib.reload(cache_module)
         importlib.reload(provider_module)
-        assert str(custom_dir) in str(provider_module._CACHE_ROOT)
-        # Restore
-        importlib.reload(provider_module)
+        try:
+            assert str(custom_dir) in str(cache_module._CACHE_ROOT)
+        finally:
+            monkeypatch.delenv("SQT_CACHE_DIR", raising=False)
+            importlib.reload(cache_module)
+            importlib.reload(provider_module)
 
 
 class TestCacheHardening:
@@ -412,11 +431,11 @@ class TestCacheHardening:
             prov = YFinanceProvider()
             prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
 
-            provider_module._session_cache.clear()
+            cache_module._session_cache.clear()
             second = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")  # disk hit
             second.iloc[0, second.columns.get_loc("Close")] = -999.0
 
-            provider_module._session_cache.clear()
+            cache_module._session_cache.clear()
             third = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")  # disk hit
 
         assert third["Close"].iloc[0] != -999.0
@@ -432,7 +451,7 @@ class TestCacheHardening:
 
             pq_path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
             pq_path.write_bytes(b"this is not a valid parquet file")
-            provider_module._session_cache.clear()
+            cache_module._session_cache.clear()
 
             result = prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
 
@@ -478,7 +497,7 @@ class TestCacheHardening:
 
             pq_path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
             pq_path.unlink()
-            provider_module._session_cache.clear()
+            cache_module._session_cache.clear()
 
             prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
 
@@ -511,3 +530,48 @@ class TestCacheHardening:
             "a second, distinct provider instance must not transparently "
             "hit the first instance's session-cache entry"
         )
+
+
+class TestCacheInvalidSymbol:
+    """A symbol yfinance itself can fetch fine but that _parquet_path can't
+    safely encode into a cache filename (e.g. one containing a space) used
+    to hard-fail get_ohlcv with a ValidationError, unlike PolygonProvider,
+    which already degrades gracefully by skipping the disk cache for that
+    call. YFinanceProvider now mirrors that via _safe_parquet_path."""
+
+    def test_cache_invalid_symbol_still_returns_data(self, minimal_ohlcv: pd.DataFrame):
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            prov = YFinanceProvider()
+            result = prov.get_ohlcv("AAPL US Equity", "2022-01-01", "2022-06-01")
+
+        pd.testing.assert_frame_equal(
+            result.reset_index(drop=True), minimal_ohlcv.reset_index(drop=True)
+        )
+
+    def test_cache_invalid_symbol_does_not_write_to_disk(
+        self, minimal_ohlcv: pd.DataFrame, tmp_path: Path
+    ):
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            YFinanceProvider().get_ohlcv("AAPL US Equity", "2022-01-01", "2022-06-01")
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_cache_invalid_symbol_refetches_every_call(
+        self, minimal_ohlcv: pd.DataFrame
+    ):
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
+                columns=str.lower
+            )
+            prov = YFinanceProvider()
+            prov.get_ohlcv("AAPL US Equity", "2022-01-01", "2022-06-01")
+            cache_module._session_cache.clear()
+            prov.get_ohlcv("AAPL US Equity", "2022-01-01", "2022-06-01")
+
+        assert mock_ticker.call_count == 2

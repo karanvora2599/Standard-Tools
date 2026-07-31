@@ -524,6 +524,18 @@ class CorrelationAnalysisInput(BaseModel):
             raise ValueError(f"tickers must contain at least 2 symbols, got {len(v)}")
         return v
 
+    @model_validator(mode="after")
+    def _check_weights(self) -> "CorrelationAnalysisInput":
+        if self.weights is not None:
+            if len(self.weights) != len(self.tickers):
+                raise ValueError(
+                    f"len(weights)={len(self.weights)} must equal len(tickers)={len(self.tickers)}"
+                )
+            total = sum(self.weights)
+            if abs(total - 1.0) > 1e-6:
+                raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
+        return self
+
 
 class CorrelationAnalysisResult(BaseModel):
     tickers: List[str]
@@ -1052,6 +1064,29 @@ class PositionSizerInput(BaseModel):
     def _check_risk_pct(cls, v: float) -> float:
         if not 0.0 < v <= 1.0:
             raise ValueError(f"risk_per_trade_pct must be in (0, 1], got {v}")
+        return v
+
+    @field_validator("win_rate")
+    @classmethod
+    def _check_win_rate(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not 0.0 <= v <= 1.0:
+            raise ValueError(f"win_rate must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("avg_win_pct")
+    @classmethod
+    def _check_avg_win_pct(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v < 0.0:
+            raise ValueError(f"avg_win_pct must be >= 0, got {v}")
+        return v
+
+    @field_validator("avg_loss_pct")
+    @classmethod
+    def _check_avg_loss_pct(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0.0:
+            raise ValueError(
+                f"avg_loss_pct must be > 0 (it's a magnitude, used as a Kelly-formula divisor), got {v}"
+            )
         return v
 
 
@@ -2084,6 +2119,18 @@ class MonteCarloSimulationInput(BaseModel):
         None,
         description="Seed for the resampling RNG — set for reproducible results (recorded in the audit trail).",
     )
+
+    @model_validator(mode="after")
+    def _check_weights(self) -> "MonteCarloSimulationInput":
+        if self.weights is not None:
+            if len(self.weights) != len(self.tickers):
+                raise ValueError(
+                    f"len(weights)={len(self.weights)} must equal len(tickers)={len(self.tickers)}"
+                )
+            total = sum(self.weights)
+            if abs(total - 1.0) > 1e-6:
+                raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
+        return self
 
 
 class MonteCarloSimulationResult(BaseModel):

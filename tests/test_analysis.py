@@ -104,3 +104,13 @@ class TestRollingBeta:
         manual = calculate_beta(slice_asset, slice_bench)
         rolling_val = float(result.loc[idx_t, "Rolling_Beta"])
         assert rolling_val == pytest.approx(manual["beta"], rel=0.05)
+
+    def test_constant_benchmark_window_yields_nan_not_inf(self, sample_returns):
+        """A window with zero benchmark variance (e.g. a constant
+        benchmark) used to divide by zero -- must produce NaN for that
+        window, not inf/-inf that could silently poison downstream math."""
+        constant_benchmark = pd.Series(1.0, index=sample_returns.index)
+        result = rolling_beta(sample_returns, constant_benchmark, window=30)
+        valid = result["Rolling_Beta"].dropna()
+        assert valid.empty
+        assert not np.isinf(result["Rolling_Beta"]).any()

@@ -206,6 +206,60 @@ class TestNextOpenFill:
         with pytest.raises(ValidationError, match="Open"):
             run_portfolio_simulation(no_open, target_weights, fill_price="next_open")
 
+    def test_adv_and_impact_ignore_the_execution_bars_own_volume(self):
+        """Regression: ADV-participation/impact-cost used to look up
+        dollar_volume/volatility at exec_date (the bar being filled), whose
+        own full-day Volume/Close isn't actually knowable at that bar's Open
+        under fill_price="next_open" -- exactly the look-ahead bias this
+        mode's docstring claims not to have. Two scenarios differing ONLY in
+        the execution bar's (bar 1's) own Volume, with an identical trigger
+        bar (bar 0): with the fix, impact_lookback=1 makes each bar's own
+        rolling volume/volatility trivially itself, so if the lookup
+        correctly uses trigger_date (bar 0, identical in both scenarios)
+        instead of exec_date (bar 1, deliberately different), the resulting
+        cost must be identical between the two scenarios."""
+        dates = pd.date_range("2023-01-02", periods=3, freq="B")
+
+        def _prices(bar1_volume: float) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Open": [100.0, 103.0, 106.0],
+                    "High": [101.0, 104.0, 107.0],
+                    "Low": [99.0, 102.0, 105.0],
+                    "Close": [100.0, 103.0, 106.0],
+                    "Volume": [2_000_000.0, bar1_volume, 2_000_000.0],
+                },
+                index=dates,
+            )
+
+        target_weights = pd.DataFrame({"AAPL": [1.0]}, index=[dates[0]])
+
+        low_bar1_volume = run_portfolio_simulation(
+            {"AAPL": _prices(1_000.0)},
+            target_weights,
+            initial_capital=10_000.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            fill_price="next_open",
+            use_impact_model=True,
+            impact_coefficient=5.0,
+            impact_lookback=1,
+        )
+        high_bar1_volume = run_portfolio_simulation(
+            {"AAPL": _prices(50_000_000.0)},
+            target_weights,
+            initial_capital=10_000.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            fill_price="next_open",
+            use_impact_model=True,
+            impact_coefficient=5.0,
+            impact_lookback=1,
+        )
+        assert low_bar1_volume["final_equity"] == pytest.approx(
+            high_bar1_volume["final_equity"]
+        )
+
 
 class TestHl2ExploratoryFill:
     def test_rebalance_executes_at_same_bar_hl2(self):

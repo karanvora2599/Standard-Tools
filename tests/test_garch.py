@@ -75,6 +75,74 @@ class TestParameterRecovery:
         assert abs(forecast[-1] - long_run) < abs(forecast[0] - long_run) + 1e-9
 
 
+# ── garch_volatility_forecast — forecast seed uses the last observed return ──
+
+
+class TestForecastSeed:
+    """Regression coverage for a real bug: the forecast used to seed itself
+    from sigma2[-1] (the model's own fitted variance for the last observed
+    bar, computed only through resid_sq[-2]) without ever taking one more
+    step to incorporate resid_sq[-1], the actual last observed squared
+    return -- silently understating the forecast right after a shock."""
+
+    def test_forecast_first_step_equals_current_vol_exactly(self):
+        # current_annualized_vol and forecast_annualized_vol[0] both claim to
+        # describe the same thing (the next bar's conditional vol) -- they
+        # must be numerically identical, not just close.
+        returns = _simulate_garch11(2000, 1e-6, 0.08, 0.90)
+        result = garch_volatility_forecast(returns, forecast_horizon=10)
+        assert result["forecast_annualized_vol"][0] == pytest.approx(
+            result["current_annualized_vol"], rel=1e-9
+        )
+
+    def test_current_vol_reacts_to_an_outsized_last_bar_shock(self):
+        # Two otherwise-identical series differing only in the sign/scale of
+        # the very last return: current_annualized_vol must be able to move
+        # in response to that last bar. Under the bug, current_var was
+        # computed from information only through the SECOND-to-last bar, so
+        # this last-bar shock had zero effect on the reported "current" vol.
+        rng = np.random.default_rng(7)
+        base = rng.normal(0, 0.01, 500)
+        calm = pd.Series(np.append(base[:-1], 0.005))
+        shocked = pd.Series(np.append(base[:-1], 0.5))
+
+        calm_result = garch_volatility_forecast(calm, forecast_horizon=1)
+        shocked_result = garch_volatility_forecast(shocked, forecast_horizon=1)
+
+        assert (
+            shocked_result["current_annualized_vol"]
+            > calm_result["current_annualized_vol"] * 2
+        )
+
+    def test_current_var_matches_one_more_hand_computed_recursion_step(self):
+        # Direct hand-computation, same style as
+        # TestVarianceRecursion.test_matches_hand_computed_values: current_var
+        # must equal omega + alpha*resid_sq[-1] + beta*sigma2[-1], where
+        # sigma2 is the recursion's own output array (i.e. one explicit step
+        # beyond sigma2[-1] itself).
+        omega, alpha, beta = 1e-6, 0.08, 0.90
+        returns = _simulate_garch11(300, omega, alpha, beta)
+        resid = (returns - returns.mean()).to_numpy()
+        resid_sq = resid**2
+
+        result = garch_volatility_forecast(returns, forecast_horizon=1)
+        fitted_omega, fitted_alpha, fitted_beta = (
+            result["omega"],
+            result["alpha"],
+            result["beta"],
+        )
+        fitted_sigma2 = _garch11_variance_recursion(
+            resid_sq, fitted_omega, fitted_alpha, fitted_beta
+        )
+        expected_current_var = (
+            fitted_omega + fitted_alpha * resid_sq[-1] + fitted_beta * fitted_sigma2[-1]
+        )
+        expected_annualized = float(np.sqrt(expected_current_var * 252))
+        assert result["current_annualized_vol"] == pytest.approx(
+            expected_annualized, rel=1e-6
+        )
+
+
 # ── garch_volatility_forecast — output structure ──────────────────────────────
 
 

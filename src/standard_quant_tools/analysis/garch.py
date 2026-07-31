@@ -165,12 +165,23 @@ def garch_volatility_forecast(
     bic = k_params * np.log(n) - 2 * log_likelihood
 
     sigma2 = _garch11_variance_recursion(resid_sq, omega, alpha, beta)
-    current_var = float(sigma2[-1])
+    # sigma2[-1] is the model's own conditional-variance estimate for the
+    # LAST OBSERVED bar, computed from information only through resid_sq[-2]
+    # -- it never incorporates the most recent actual squared return,
+    # resid_sq[-1]. Take one more explicit recursion step to get the true
+    # one-step-ahead forecast (the value GARCH would predict for the next,
+    # not-yet-observed bar), which is what "current volatility" and the
+    # forecast's own h=1 base are supposed to mean.
+    current_var = float(omega + alpha * resid_sq[-1] + beta * sigma2[-1])
 
     persistence_safe = min(persistence, 0.9999)
     long_run_var = omega / (1.0 - persistence_safe)
 
-    h = np.arange(1, forecast_horizon + 1, dtype=float)
+    # current_var above is already the (deterministic, not decayed) T+1
+    # value, so forecast step h=1,2,...,horizon needs exponent h-1 -- h=0 at
+    # the first output -- or forecast_annualized_vol[0] would silently apply
+    # one spurious extra decay step and stop matching current_annualized_vol.
+    h = np.arange(0, forecast_horizon, dtype=float)
     forecast_var = long_run_var + (persistence_safe**h) * (current_var - long_run_var)
     forecast_var = np.clip(forecast_var, _MIN_SIGMA2, None)
 

@@ -16,7 +16,7 @@ from .provenance import (
     _package_version,
     _strategy_source_hash,
 )
-from .redaction import _redact, _redact_fields
+from .redaction import _redact, _redact_fields, redact_text
 from .writer import AuditWriter
 
 logger = logging.getLogger(__name__)
@@ -54,11 +54,22 @@ def _run_and_record(
         duration_ms = (time.perf_counter() - t0) * 1000
         if _audit_enabled():
             try:
+                fields = _redact_fields()
+                raw_input = model_instance.model_dump()
+                # Redacting `input` alone isn't enough -- a tool exception's
+                # own message can echo a redacted value back (e.g.
+                # ValueError(f"Unknown account: {account_id}")), leaking it
+                # unredacted in the same record where `input` is masked.
+                safe_error_message = (
+                    redact_text(error_message, raw_input, fields)
+                    if error_message is not None
+                    else None
+                )
                 record = DecisionRecord(
                     request_id=request_id,
                     timestamp_utc=datetime.now(timezone.utc).isoformat(),
                     tool_name=tool_name,
-                    input=_redact(model_instance.model_dump(), _redact_fields()),
+                    input=_redact(raw_input, fields),
                     data_sources=list(_data_sources_var.get() or []),
                     cpp_available=_cpp_available(),
                     n_workers=getattr(model_instance, "n_workers", None),
@@ -66,7 +77,7 @@ def _run_and_record(
                     output_hash=hash_payload(output) if output is not None else None,
                     status=status,
                     error_type=error_type,
-                    error_message=error_message,
+                    error_message=safe_error_message,
                     git_commit_sha=_git_sha(),
                     package_version=_package_version(),
                     random_seed=getattr(model_instance, "random_seed", None),

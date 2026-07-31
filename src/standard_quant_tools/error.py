@@ -30,6 +30,18 @@ class APIError(DataProviderError):
     pass
 
 
+class NonRetryableAPIError(APIError):
+    """An APIError that will never succeed no matter how many times it's
+    retried — e.g. an invalid/expired API key (HTTP 401/403). Distinct from
+    plain APIError (used for genuinely transient failures like 429/5xx) so
+    the shared retry decorator (data/_retry.py) can tell them apart without
+    guessing from the HTTP status embedded in the message text. Still an
+    APIError subclass, so every existing `except APIError` call site keeps
+    working unchanged."""
+
+    pass
+
+
 class CalculationError(QuantError):
     """Raised when a calculation fails (e.g., division by zero, NaN inputs)."""
 

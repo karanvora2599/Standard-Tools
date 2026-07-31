@@ -59,11 +59,30 @@ def _acquire_lock(lock_path: Path) -> Optional[Any]:
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lf = open(lock_path, "a+b")
+    except Exception:
+        logger.debug("[audit] advisory file lock unavailable", exc_info=True)
+        return None
+    try:
         if sys.platform == "win32":
             import msvcrt
 
             lf.seek(0)
-            msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
+            # msvcrt.locking(LK_LOCK) retries internally for ~10s, then
+            # raises OSError -- unlike POSIX fcntl.flock(LOCK_EX) below,
+            # which blocks indefinitely. Left as a single attempt, a lock
+            # held >10s by another process/thread would raise here, and the
+            # blanket except below would silently return None -- letting
+            # the caller proceed with NO lock at all, unlike POSIX. Retry
+            # in a loop instead so both platforms block indefinitely under
+            # contention, matching the OS-level lock's other property on
+            # both platforms: it's released automatically if the holder
+            # crashes, so this isn't a new hang risk versus POSIX today.
+            while True:
+                try:
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    continue
         else:
             import fcntl
 
@@ -71,6 +90,7 @@ def _acquire_lock(lock_path: Path) -> Optional[Any]:
         return lf
     except Exception:
         logger.debug("[audit] advisory file lock unavailable", exc_info=True)
+        lf.close()
         return None
 
 

@@ -18,10 +18,10 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-import standard_quant_tools.data.yfinance_provider as provider_module
+import standard_quant_tools.data._cache as cache_module
 from standard_quant_tools import audit
 from standard_quant_tools.agent import dispatch
-from standard_quant_tools.data.yfinance_provider import _parquet_path
+from standard_quant_tools.data._cache import _parquet_path
 from standard_quant_tools.error import DataNotFoundError
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -38,9 +38,13 @@ def audit_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture(autouse=True)
 def redirect_ohlcv_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Redirect the parquet OHLCV cache so tests never touch the real user cache."""
-    monkeypatch.setattr(provider_module, "_CACHE_ROOT", tmp_path / "ohlcv")
-    provider_module._session_cache.clear()
+    """Redirect the parquet OHLCV cache so tests never touch the real user
+    cache. _CACHE_ROOT/_session_cache are read by functions defined in
+    standard_quant_tools.data._cache (shared by every provider) -- patching
+    yfinance_provider's re-exported name would not affect what those
+    functions actually see."""
+    monkeypatch.setattr(cache_module, "_CACHE_ROOT", tmp_path / "ohlcv")
+    cache_module._session_cache.clear()
 
 
 def _audit_records(directory: Path):
@@ -288,9 +292,9 @@ class TestVerifyReplay:
         # provider silently revising historical data between the original
         # call and the replay.
         pq_path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
-        cached = pd.read_parquet(provider_module._CACHE_ROOT / pq_path.name)
+        cached = pd.read_parquet(cache_module._CACHE_ROOT / pq_path.name)
         cached["Close"] = cached["Close"] * 1.5
-        cached.to_parquet(provider_module._CACHE_ROOT / pq_path.name)
+        cached.to_parquet(cache_module._CACHE_ROOT / pq_path.name)
 
         result = audit.verify_replay(record)
         assert any(not m["match"] for m in result.data_source_matches)
@@ -820,6 +824,84 @@ class TestRedaction:
         assert records[0]["input"]["symbol"] != "AAPL"
         assert records[0]["input"]["symbol"].startswith("<redacted:")
         assert records[0]["input"]["benchmark"] == "SPY"  # unconfigured field untouched
+
+    def test_redact_text_replaces_raw_value_with_same_placeholder_as_input(self):
+        raw_input = {"account_id": "12345", "symbol": "AAPL"}
+        redacted_input = audit._redact(raw_input, ["account_id"])
+        message = "lookup failed for account 12345"
+        redacted_message = audit.redact_text(message, raw_input, ["account_id"])
+        assert "12345" not in redacted_message
+        assert redacted_input["account_id"] in redacted_message
+
+    def test_redact_text_no_fields_returns_text_unchanged(self):
+        assert audit.redact_text("some message", {"account_id": "12345"}, []) == (
+            "some message"
+        )
+
+    def test_redact_text_field_not_present_in_message_unaffected(self):
+        raw_input = {"account_id": "12345"}
+        assert (
+            audit.redact_text("unrelated error", raw_input, ["account_id"])
+            == "unrelated error"
+        )
+
+    def test_dispatch_redacts_configured_field_in_error_message(
+        self,
+        patched_factory,
+        mock_provider,
+        audit_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("SQT_AUDIT_REDACT_FIELDS", "symbol")
+        mock_provider.get_ohlcv.side_effect = ValueError("no data for symbol AAPL")
+        with pytest.raises(ValueError):
+            dispatch(
+                "analyze_stock_risk",
+                {"symbol": "AAPL", "benchmark": "SPY", "period": "1y"},
+            )
+        records = _audit_records(audit_dir)
+        assert records[0]["status"] == "error"
+        assert "AAPL" not in records[0]["error_message"]
+        assert records[0]["error_message"].startswith("no data for symbol <redacted:")
+
+
+class TestRedactionSalt:
+    def test_unsalted_placeholder_differs_from_salted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("SQT_AUDIT_REDACT_SALT", raising=False)
+        unsalted = audit._redact({"account_id": "12345"}, ["account_id"])
+        monkeypatch.setenv("SQT_AUDIT_REDACT_SALT", "a-secret-salt")
+        salted = audit._redact({"account_id": "12345"}, ["account_id"])
+        assert unsalted["account_id"] != salted["account_id"]
+
+    def test_same_salt_produces_deterministic_placeholder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SQT_AUDIT_REDACT_SALT", "a-secret-salt")
+        a = audit._redact({"account_id": "12345"}, ["account_id"])
+        b = audit._redact({"account_id": "12345"}, ["account_id"])
+        assert a["account_id"] == b["account_id"]
+
+    def test_different_salts_produce_different_placeholders(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SQT_AUDIT_REDACT_SALT", "salt-one")
+        first = audit._redact({"account_id": "12345"}, ["account_id"])
+        monkeypatch.setenv("SQT_AUDIT_REDACT_SALT", "salt-two")
+        second = audit._redact({"account_id": "12345"}, ["account_id"])
+        assert first["account_id"] != second["account_id"]
+
+    def test_input_and_error_message_use_the_same_placeholder_when_salted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SQT_AUDIT_REDACT_SALT", "a-secret-salt")
+        raw_input = {"account_id": "12345"}
+        redacted_input = audit._redact(raw_input, ["account_id"])
+        redacted_message = audit.redact_text(
+            "error for 12345", raw_input, ["account_id"]
+        )
+        assert redacted_input["account_id"] in redacted_message
 
 
 # ── Export bundle ───────────────────────────────────────────────────────────

@@ -4,7 +4,12 @@ import functools
 import logging
 import time
 
-from standard_quant_tools.error import APIError, DataNotFoundError, InvalidSymbolError
+from standard_quant_tools.error import (
+    APIError,
+    DataNotFoundError,
+    InvalidSymbolError,
+    NonRetryableAPIError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +23,14 @@ def retry(times: int = 3, delay: float = 1, backoff: float = 2):
             for i in range(times):
                 try:
                     return func(*args, **kwargs)
-                except (InvalidSymbolError, DataNotFoundError):
-                    raise  # definitive errors — never retry or re-wrap
+                except (InvalidSymbolError, DataNotFoundError, NonRetryableAPIError):
+                    # Definitive errors — never retry or re-wrap. Must be
+                    # caught before the broader `except (..., APIError)`
+                    # below, since NonRetryableAPIError IS an APIError and
+                    # Python matches except clauses in order — a permanent
+                    # failure (e.g. an invalid API key) would otherwise be
+                    # retried identically to a transient one (429/5xx).
+                    raise
                 except (ValueError, APIError) as e:
                     last_exc = e
                     if i == times - 1:

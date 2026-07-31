@@ -234,7 +234,11 @@ def spread_zscore(
 
     rolling_mean = spread.rolling(window).mean()
     rolling_std = spread.rolling(window).std()
-    return ((spread - rolling_mean) / rolling_std).rename("zscore")
+    # A window with zero variance (e.g. a constant spread) would otherwise
+    # divide by zero -- NaN out that bar rather than a mid-series inf/nan
+    # spike being mistaken for a real z-score.
+    safe_std = rolling_std.where(rolling_std > 0)
+    return ((spread - rolling_mean) / safe_std).rename("zscore")
 
 
 # ── Kalman-filter dynamic hedge ratio ────────────────────────────────────────

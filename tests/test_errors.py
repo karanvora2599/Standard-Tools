@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from standard_quant_tools.data._retry import retry
 from standard_quant_tools.error import (
     APIError,
     BacktestError,
@@ -10,6 +11,7 @@ from standard_quant_tools.error import (
     DataNotFoundError,
     DataProviderError,
     InvalidSymbolError,
+    NonRetryableAPIError,
     QuantError,
     ValidationError,
 )
@@ -28,6 +30,11 @@ class TestExceptionHierarchy:
         assert issubclass(DataNotFoundError, DataProviderError)
         assert issubclass(InvalidSymbolError, DataProviderError)
         assert issubclass(APIError, DataProviderError)
+
+    def test_non_retryable_api_error_is_an_api_error(self):
+        # Deliberately a subclass, not a sibling -- every existing
+        # `except APIError` call site must keep working unchanged.
+        assert issubclass(NonRetryableAPIError, APIError)
 
     def test_all_errors_are_exceptions(self):
         for exc in (
@@ -100,3 +107,45 @@ class TestDataProviderErrors:
         provider = DataFactory.get_provider()
         with pytest.raises(DataNotFoundError):
             provider.get_ohlcv("FAKE", "2023-01-01", "2024-01-01")
+
+
+class TestRetryDecorator:
+    """Regression coverage: the retry decorator used to retry HTTP 401/403
+    (permanent, e.g. an invalid API key) identically to 429/5xx (genuinely
+    transient), burning through a rate-limited API's request budget on
+    every single call until the key was fixed."""
+
+    def test_non_retryable_api_error_is_not_retried(self):
+        calls = []
+
+        @retry(times=3, delay=0)
+        def always_fails_permanently():
+            calls.append(1)
+            raise NonRetryableAPIError("invalid key")
+
+        with pytest.raises(NonRetryableAPIError):
+            always_fails_permanently()
+        assert len(calls) == 1
+
+    def test_plain_api_error_is_retried_up_to_the_configured_times(self):
+        calls = []
+
+        @retry(times=3, delay=0)
+        def always_fails_transiently():
+            calls.append(1)
+            raise APIError("rate limited")
+
+        with pytest.raises(APIError):
+            always_fails_transiently()
+        assert len(calls) == 3
+
+    def test_non_retryable_api_error_succeeds_immediately_if_no_error(self):
+        calls = []
+
+        @retry(times=3, delay=0)
+        def succeeds():
+            calls.append(1)
+            return "ok"
+
+        assert succeeds() == "ok"
+        assert len(calls) == 1

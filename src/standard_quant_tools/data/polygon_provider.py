@@ -39,9 +39,10 @@ BloombergProvider):
   with share count). `forward_pe` (no forward estimates in this data) and
   `dividend_yield` (would need a separate dividends-history aggregation)
   are always `None` — missing, not wrong.
-- No caching layer (session TTL or persistent Parquet) yet, unlike
-  YFinanceProvider — every call reaches Polygon. Worth adding if this
-  becomes a hot path; not built preemptively.
+- Same two-tier cache as YFinanceProvider (in-memory session TTL cache +
+  persistent Parquet disk cache), sharing the hardened implementation in
+  `data/_cache.py` rather than reaching Polygon on every call — a real
+  concern given the free tier's 5-requests/minute limit.
 """
 
 import asyncio
@@ -50,10 +51,9 @@ import functools
 import json
 import logging
 import os
-import re
 import urllib.error
 import urllib.request
-from datetime import date as _date
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import quote as _urlquote
@@ -67,9 +67,19 @@ from standard_quant_tools.error import (
     APIError,
     DataNotFoundError,
     InvalidSymbolError,
+    NonRetryableAPIError,
     ValidationError,
 )
 
+from ._cache import (
+    _is_historical,
+    _norm_date,
+    _normalize_ohlcv_index,
+    _safe_parquet_path,
+    _session_cache_get,
+    _session_cache_set,
+    _write_parquet_atomic,
+)
 from ._retry import retry
 from .base import DataProvider, FinancialRatios, TickerInfo
 from .metadata import DataSetMetadata
@@ -77,7 +87,6 @@ from .metadata import DataSetMetadata
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.polygon.io"
-_DATE_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # interval (this package's convention, matching YFinanceProvider) -> Polygon
 # Aggregates (multiplier, timespan). Only the subset Polygon's aggs endpoint
@@ -103,18 +112,6 @@ _TIMESPAN_MAP = {
 # convention YFinanceProvider's _normalize_ohlcv_index establishes for every
 # other provider in this package.
 _DAY_OR_COARSER = frozenset({"day", "week", "month"})
-
-
-def _norm_date(d: Union[str, datetime, _date]) -> str:
-    """Normalize a date-like value to YYYY-MM-DD, rejecting anything that
-    doesn't actually look like a date (start_date/end_date are LLM-reachable
-    via get_ohlcv's own parameters)."""
-    norm = str(d)[:10]
-    if not _DATE_STR_RE.match(norm):
-        raise ValidationError(
-            f"date must be in YYYY-MM-DD format, got {d!r} (normalized: {norm!r})"
-        )
-    return norm
 
 
 def _resolve_polygon_api_key(api_key: Optional[str] = None) -> str:
@@ -166,7 +163,9 @@ def _polygon_get(path: str, params: Dict[str, Any], api_key: str) -> Dict[str, A
                 f"Polygon.io returned 404 for {path}: {detail}"
             ) from e
         if e.code in (401, 403):
-            raise APIError(
+            # Permanent -- an invalid/expired API key will never succeed no
+            # matter how many times it's retried, unlike 429/5xx below.
+            raise NonRetryableAPIError(
                 f"Polygon.io rejected the request (HTTP {e.code}) — check "
                 f"SQT_POLYGON_API_KEY is valid: {detail}"
             ) from e
@@ -322,6 +321,12 @@ class PolygonProvider(DataProvider):
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self._api_key = _resolve_polygon_api_key(api_key)
+        # Stable per-instance token for the session cache -- deliberately
+        # NOT id(self): CPython reuses an object's id() once it's garbage
+        # collected, so two unrelated, sequentially-created instances could
+        # collide on it (see YFinanceProvider.__init__ for the original
+        # fix this mirrors).
+        self._instance_token = uuid.uuid4()
 
     # ── Historical data ─────────────────────────────────────────────────────
 
@@ -341,12 +346,73 @@ class PolygonProvider(DataProvider):
             )
         start_str = _norm_date(start_date)
         end_str = _norm_date(end_date)
-        return self._get_ohlcv_uncached(symbol, start_str, end_str, interval)
+
+        # "polygon" is included explicitly in the cache key so this can
+        # never collide with another provider's entry for the "same"
+        # symbol/date/interval -- different providers can have different
+        # adjustment conventions or data revisions.
+        cache_key = (
+            "polygon",
+            self._instance_token,
+            symbol,
+            start_str,
+            end_str,
+            interval,
+        )
+        cached_df = _session_cache_get(cache_key)
+        if cached_df is not None:
+            audit.record_data_access(
+                symbol,
+                start_str,
+                end_str,
+                interval,
+                source="session_cache",
+                content_hash=audit.hash_dataframe(cached_df),
+            )
+            return cached_df.copy()
+
+        result = self._get_ohlcv_uncached(symbol, start_str, end_str, interval)
+        _session_cache_set(cache_key, result)
+        return result.copy()
 
     @retry(times=3, delay=1)
     def _get_ohlcv_uncached(
         self, symbol: str, start_str: str, end_str: str, interval: str
     ) -> pd.DataFrame:
+        # ── Parquet disk cache (historical ranges only) ────────────────────
+        pq_path = _safe_parquet_path(
+            symbol, start_str, end_str, interval, provider="polygon"
+        )
+        if pq_path is not None and _is_historical(end_str) and pq_path.exists():
+            try:
+                cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path))
+            except Exception as exc:
+                logger.warning(
+                    "[cache] disk read failed for %s (%s) — evicting and "
+                    "refetching: %s",
+                    symbol,
+                    pq_path.name,
+                    exc,
+                )
+                pq_path.unlink(missing_ok=True)
+            else:
+                logger.debug(
+                    "[cache] disk hit  %s  %s → %s  (%s)",
+                    symbol,
+                    start_str,
+                    end_str,
+                    pq_path.name,
+                )
+                audit.record_data_access(
+                    symbol,
+                    start_str,
+                    end_str,
+                    interval,
+                    source="disk_cache",
+                    content_hash=audit.hash_dataframe(cached_df),
+                )
+                return cached_df
+
         multiplier, timespan = _TIMESPAN_MAP[interval]
         ticker = _urlquote(symbol.strip().upper(), safe=":")
         path = f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
@@ -376,6 +442,10 @@ class PolygonProvider(DataProvider):
             source="live_fetch",
             content_hash=audit.hash_dataframe(result),
         )
+
+        if pq_path is not None and _is_historical(end_str):
+            _write_parquet_atomic(pq_path, result)
+
         return result
 
     async def get_ohlcv_async(

@@ -2,21 +2,16 @@ import asyncio
 import contextvars
 import functools
 import logging
-import os
-import re
-import threading
 import time
 import uuid
 from datetime import date as _date
 from datetime import datetime
-from pathlib import Path
 from typing import Union
 
 logger = logging.getLogger(__name__)
 
 import pandas as pd
 import yfinance as yf
-from cachetools import TTLCache
 
 from standard_quant_tools import audit
 from standard_quant_tools.error import (
@@ -26,20 +21,19 @@ from standard_quant_tools.error import (
     ValidationError,
 )
 
+from ._cache import (
+    _is_historical,
+    _norm_date,
+    _normalize_ohlcv_index,
+    _safe_parquet_path,
+    _session_cache_get,
+    _session_cache_set,
+    _write_parquet_atomic,
+)
 from ._retry import retry
 from .base import DataProvider, FinancialRatios, TickerInfo
 from .metadata import DataSetMetadata
 
-# Permissive enough for realistic ticker formats (BRK.B, BRK/B, 0700.HK,
-# ^GSPC, EURUSD=X) while rejecting ".." (parent-directory traversal),
-# backslashes, drive-letter colons, and null bytes — the same slug-plus-
-# resolved-containment approach artifacts.py uses for run_id/name, applied
-# here since start_date/end_date/interval are just as LLM-reachable
-# (get_ohlcv's own parameters) and were previously used unsanitized in the
-# cache filename. A lone "/" is allowed (some tickers, e.g. BRK/B, use it)
-# but still replaced with "-" before building the path, same as before.
-_SYMBOL_RE = re.compile(r"^[A-Za-z0-9./\-^=]+$")
-_DATE_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _VALID_INTERVALS = frozenset(
     (
         "1m",
@@ -57,9 +51,6 @@ _VALID_INTERVALS = frozenset(
         "3mo",
     )
 )
-
-# ── In-process session cache (avoids repeated network calls in the same run) ──
-_session_cache = TTLCache(maxsize=100, ttl=3600)
 
 # ── Yahoo Finance exchange-suffix -> IANA timezone (best-effort, no network
 # call) — used by get_metadata() so a non-US listing isn't silently
@@ -86,134 +77,6 @@ _EXCHANGE_SUFFIX_TIMEZONES = {
     ".V": "America/Toronto",
     ".SA": "America/Sao_Paulo",
 }
-
-# ── Persistent Parquet disk cache ─────────────────────────────────────────────
-# Historical OHLCV bars are stored permanently on disk once a date range is in
-# the past. Note "historical" here means "not still forming today" — it does
-# NOT mean the values are guaranteed never to change again: we fetch with
-# auto_adjust=True, so a later corporate action (split, special dividend) can
-# retroactively change the adjusted Close/Open/High/Low for dates that were
-# already cached. This cache trades that small staleness risk for avoiding
-# repeated network calls; callers who need post-corporate-action-accurate
-# history for a symbol that's had a recent action should clear/bypass the
-# cache (SQT_CACHE_DIR) rather than assume it self-heals.
-# The cache directory can be overridden with the SQT_CACHE_DIR env variable.
-_CACHE_ROOT = Path(
-    os.environ.get(
-        "SQT_CACHE_DIR",
-        str(Path.home() / ".cache" / "standard_quant_tools" / "ohlcv"),
-    )
-)
-
-
-def _norm_date(d: Union[str, datetime, _date]) -> str:
-    """
-    Normalise any date-like value to a YYYY-MM-DD string.
-
-    Validates the result actually looks like a date rather than blindly
-    truncating: a real datetime/date object always stringifies to a valid
-    YYYY-MM-DD prefix, but an arbitrary caller-supplied string (start_date/
-    end_date are LLM-reachable via get_ohlcv) does not, and this value
-    feeds directly into the Parquet cache filename (_parquet_path) — a
-    truncated-but-unvalidated string could still contain '..' or path
-    separators after slicing to 10 characters.
-    """
-    norm = str(d)[:10]
-    if not _DATE_STR_RE.match(norm):
-        raise ValidationError(
-            f"date must be in YYYY-MM-DD format, got {d!r} (normalized: {norm!r})"
-        )
-    return norm
-
-
-def _normalize_ohlcv_index(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    yfinance attaches the listing exchange's own timezone to its returned
-    index (even for daily bars) — e.g. tz-aware 'America/New_York' for a
-    plain US ticker. Every downstream consumer (agent/tools.py's
-    pd.Timestamp(iso_date) signal/target-weight keys, portfolio_engine.py's
-    per-ticker index intersection, reindex-based signal_fill_policy, etc.)
-    builds or compares against tz-naive, midnight-normalized timestamps —
-    intersecting/reindexing a tz-naive index against a tz-aware one either
-    raises or (via .reindex(), which doesn't raise) silently produces an
-    all-NaN result, so a signal/target-weight dict keyed by plain ISO dates
-    can appear to have "no matching market data" for every date, or
-    silently zero out. Strip tz and drop any intraday time component here,
-    once, at the single choke point every OHLCV consumer goes through,
-    rather than requiring every call site to defend against it.
-    """
-    idx = pd.DatetimeIndex(df.index)
-    if idx.tz is not None:
-        idx = idx.tz_localize(None)
-    idx = idx.normalize()
-    df = df.copy()
-    df.index = idx
-    return df
-
-
-def _parquet_path(symbol: str, start: str, end: str, interval: str) -> Path:
-    """
-    Build the Parquet cache path for (symbol, start, end, interval).
-
-    All four components are LLM-reachable via get_ohlcv's own parameters,
-    and used to go straight into the filename unsanitized except for a
-    single "/" -> "-" replacement on symbol — start/end/interval were not
-    checked at all. Validates each against an allow-list/pattern (the same
-    slug-plus-resolved-containment approach artifacts.py uses for run_id/
-    name) and confirms the resulting path actually resolves inside
-    _CACHE_ROOT before returning it, as defense in depth.
-
-    Raises:
-        ValidationError: symbol/interval don't match their allowed pattern/
-            set, or the resolved path would escape _CACHE_ROOT.
-    """
-    if not symbol or ".." in symbol or not _SYMBOL_RE.match(symbol):
-        raise ValidationError(
-            f"symbol={symbol!r} is not a valid identifier for caching — only "
-            "letters, digits, '.', '/', '-', '^', '=' are allowed, and '..' "
-            "is never allowed."
-        )
-    for value, name in ((start, "start"), (end, "end")):
-        if not _DATE_STR_RE.match(value):
-            raise ValidationError(
-                f"{name}={value!r} must already be normalized to YYYY-MM-DD "
-                "before building a cache path (call _norm_date first)."
-            )
-    if interval not in _VALID_INTERVALS:
-        raise ValidationError(
-            f"interval={interval!r} is not supported. Valid intervals: "
-            f"{sorted(_VALID_INTERVALS)}"
-        )
-    safe = symbol.replace("/", "-").upper()
-    path = _CACHE_ROOT / f"{safe}_{start}_{end}_{interval}.parquet"
-    root = _CACHE_ROOT.resolve()
-    resolved = path.resolve()
-    # On Windows, Path.resolve() calls into GetFinalPathNameByHandle for a
-    # path that actually exists on disk, which returns the "\\?\"-prefixed
-    # extended-length form — but for a path that doesn't exist yet (or is
-    # short enough), it's returned without that prefix. _CACHE_ROOT and the
-    # full file path can therefore disagree on the prefix even though they
-    # denote the same location, causing a false-positive "escapes cache
-    # dir" rejection. Compare with the prefix stripped from both sides;
-    # still return the real `resolved` path (the prefix is harmless to the
-    # filesystem APIs that consume it).
-    root_cmp = Path(str(root).removeprefix("\\\\?\\"))
-    resolved_cmp = Path(str(resolved).removeprefix("\\\\?\\"))
-    if not resolved_cmp.is_relative_to(root_cmp):
-        raise ValidationError(
-            f"resolved cache path {resolved} escapes SQT_CACHE_DIR ({root})"
-        )
-    return resolved
-
-
-def _is_historical(end_date: Union[str, datetime, _date]) -> bool:
-    """Return True when end_date is strictly before today (bar is fully formed,
-    so it's eligible for the disk cache — see the cache-root comment above for
-    why "historical" doesn't mean the adjusted values can never change)."""
-    try:
-        return _norm_date(end_date) < _date.today().isoformat()
-    except Exception:
-        return False
 
 
 class YFinanceProvider(DataProvider):
@@ -247,6 +110,11 @@ class YFinanceProvider(DataProvider):
         """
         if not symbol or not isinstance(symbol, str):
             raise InvalidSymbolError(f"Invalid symbol: {symbol}")
+        if interval not in _VALID_INTERVALS:
+            raise ValidationError(
+                f"interval={interval!r} is not supported. Valid intervals: "
+                f"{sorted(_VALID_INTERVALS)}"
+            )
 
         start_str = _norm_date(start_date)
         end_str = _norm_date(end_date)
@@ -257,10 +125,20 @@ class YFinanceProvider(DataProvider):
         # replay constructs a fresh provider specifically to re-read from
         # disk/network and detect tampering; sharing the cache across
         # instances would mask that a cached Parquet file was altered after
-        # the original fetch).
-        cache_key = (self._instance_token, symbol, start_str, end_str, interval)
+        # the original fetch). "yfinance" is included explicitly (rather
+        # than relying on it being the only provider using this cache) so
+        # the invariant that no two providers can collide on the same entry
+        # is visible at every call site, not just in _cache.py's docstring.
+        cache_key = (
+            "yfinance",
+            self._instance_token,
+            symbol,
+            start_str,
+            end_str,
+            interval,
+        )
 
-        cached_df = _session_cache.get(cache_key)
+        cached_df = _session_cache_get(cache_key)
         if cached_df is not None:
             audit.record_data_access(
                 symbol,
@@ -275,7 +153,7 @@ class YFinanceProvider(DataProvider):
         result = self._fetch_ohlcv_uncached(
             symbol, start_date, end_date, interval, start_str, end_str
         )
-        _session_cache[cache_key] = result
+        _session_cache_set(cache_key, result)
         return result.copy()
 
     @retry(times=3, delay=1)
@@ -289,8 +167,10 @@ class YFinanceProvider(DataProvider):
         end_str: str,
     ) -> pd.DataFrame:
         # ── Parquet disk cache (historical ranges only) ────────────────────
-        pq_path = _parquet_path(symbol, start_str, end_str, interval)
-        if _is_historical(end_date) and pq_path.exists():
+        pq_path = _safe_parquet_path(
+            symbol, start_str, end_str, interval, provider="yfinance"
+        )
+        if pq_path is not None and _is_historical(end_date) and pq_path.exists():
             try:
                 cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path))
             except Exception as exc:
@@ -374,24 +254,8 @@ class YFinanceProvider(DataProvider):
         )
 
         # ── Persist to Parquet for future sessions ─────────────────────────
-        if _is_historical(end_date):
-            try:
-                _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-                # Write to a per-PID-and-thread temp file then atomically
-                # replace the target so concurrent processes AND concurrent
-                # threads within the same process don't collide on the same
-                # temp filename (os.getpid() alone isn't unique across threads).
-                tmp = pq_path.with_name(
-                    f"{pq_path.stem}.{os.getpid()}.{threading.get_ident()}."
-                    f"{uuid.uuid4().hex[:8]}.tmp.parquet"
-                )
-                result.to_parquet(tmp)
-                tmp.replace(pq_path)  # atomic on all platforms
-                logger.debug("[cache] disk write %s  → %s", symbol, pq_path.name)
-            except Exception as cache_exc:
-                logger.warning(
-                    "[cache] disk write failed for %s: %s", symbol, cache_exc
-                )
+        if pq_path is not None and _is_historical(end_date):
+            _write_parquet_atomic(pq_path, result)
 
         return result
 

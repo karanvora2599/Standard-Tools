@@ -29,11 +29,15 @@ def audit_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture(autouse=True)
 def redirect_ohlcv_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Redirect the parquet OHLCV cache so tests never touch the real user cache."""
-    import standard_quant_tools.data.yfinance_provider as provider_module
+    """Redirect the parquet OHLCV cache so tests never touch the real user
+    cache. _CACHE_ROOT/_session_cache are read by functions defined in
+    standard_quant_tools.data._cache (shared by every provider) -- patching
+    yfinance_provider's re-exported name would not affect what those
+    functions actually see."""
+    import standard_quant_tools.data._cache as cache_module
 
-    monkeypatch.setattr(provider_module, "_CACHE_ROOT", tmp_path / "ohlcv")
-    provider_module._session_cache.clear()
+    monkeypatch.setattr(cache_module, "_CACHE_ROOT", tmp_path / "ohlcv")
+    cache_module._session_cache.clear()
 
 
 def _write_record(

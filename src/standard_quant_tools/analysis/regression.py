@@ -88,4 +88,8 @@ def rolling_beta(
     # ── Pandas fallback ───────────────────────────────────────────────────────
     cov = y.rolling(window=window).cov(x)
     var = x.rolling(window=window).var()
-    return pd.DataFrame({"Rolling_Beta": cov / var})
+    # A window with zero benchmark variance (e.g. a constant benchmark)
+    # would otherwise divide by zero -- NaN out that bar rather than a
+    # mid-series inf/nan spike being mistaken for a real beta.
+    safe_var = var.where(var > 0)
+    return pd.DataFrame({"Rolling_Beta": cov / safe_var})
