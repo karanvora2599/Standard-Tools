@@ -44,6 +44,18 @@ static py::dict hurst_result_to_dict(const sqt::HurstResult& r) {
 }
 
 // ── Module definition ─────────────────────────────────────────────────────────
+//
+// Every binding below follows the same GIL-release shape: extract raw
+// pointers/sizes/plain-C++-value arguments from the py:: types FIRST (while
+// still holding the GIL -- pybind11's array buffer access and argument
+// casting are Python-API calls), then release the GIL for the duration of
+// the actual sqt:: kernel call (the only part of each binding doing
+// nontrivial CPU work with no Python API calls of its own), then let
+// py::gil_scoped_release's destructor reacquire the GIL before touching any
+// py:: type again to build the return value. This lets multiple Python
+// threads run these kernels concurrently instead of serializing on the GIL
+// even though NumPy released it for nothing -- the C++ call itself never
+// touched a Python object once past argument extraction.
 
 PYBIND11_MODULE(_sqt_core, m) {
     m.doc() =
@@ -57,8 +69,14 @@ PYBIND11_MODULE(_sqt_core, m) {
         "hurst_dfa",
         [](Array1D arr, int min_window, int max_window) -> py::dict {
             require_1d(arr, "arr");
-            return hurst_result_to_dict(
-                sqt::hurst_exponent(arr.data(), arr.size(), "dfa", min_window, max_window));
+            const double* arr_ptr = arr.data();
+            const auto    n       = arr.size();
+            sqt::HurstResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::hurst_exponent(arr_ptr, n, "dfa", min_window, max_window);
+            }
+            return hurst_result_to_dict(r);
         },
         py::arg("arr"),
         py::arg("min_window") = 10,
@@ -70,8 +88,14 @@ PYBIND11_MODULE(_sqt_core, m) {
         "hurst_rs",
         [](Array1D arr, int min_window, int max_window) -> py::dict {
             require_1d(arr, "arr");
-            return hurst_result_to_dict(
-                sqt::hurst_exponent(arr.data(), arr.size(), "rs", min_window, max_window));
+            const double* arr_ptr = arr.data();
+            const auto    n       = arr.size();
+            sqt::HurstResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::hurst_exponent(arr_ptr, n, "rs", min_window, max_window);
+            }
+            return hurst_result_to_dict(r);
         },
         py::arg("arr"),
         py::arg("min_window") = 10,
@@ -85,8 +109,13 @@ PYBIND11_MODULE(_sqt_core, m) {
            const std::string& method, int min_window) -> py::array_t<double>
         {
             require_1d(arr, "arr");
-            auto result = sqt::rolling_hurst(
-                arr.data(), arr.size(), window, step, method, min_window);
+            const double* arr_ptr = arr.data();
+            const auto    n       = arr.size();
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::rolling_hurst(arr_ptr, n, window, step, method, min_window);
+            }
             // Return a new 1-D numpy array (copy of result vector)
             py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
             std::copy(result.begin(), result.end(), out.mutable_data());
@@ -106,7 +135,13 @@ PYBIND11_MODULE(_sqt_core, m) {
         "rsi",
         [](Array1D arr, int period) -> py::array_t<double> {
             require_1d(arr, "arr");
-            auto result = sqt::rsi(arr.data(), arr.size(), period);
+            const double* arr_ptr = arr.data();
+            const auto    n       = arr.size();
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::rsi(arr_ptr, n, period);
+            }
             py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
             std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
@@ -126,8 +161,15 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(close, "close");
             if (high.size() != low.size() || high.size() != close.size())
                 throw std::invalid_argument("high, low, close must have equal length");
-            const auto n = high.size();
-            auto result  = sqt::adx(high.data(), low.data(), close.data(), n, period);
+            const double* high_ptr  = high.data();
+            const double* low_ptr   = low.data();
+            const double* close_ptr = close.data();
+            const auto    n         = high.size();
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::adx(high_ptr, low_ptr, close_ptr, n, period);
+            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(3)});
             std::copy(result.begin(), result.end(), out.mutable_data());
@@ -153,9 +195,14 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(low, "low");
             if (high.size() != low.size())
                 throw std::invalid_argument("high and low must have equal length");
-            const auto n = high.size();
-            auto result  = sqt::parabolic_sar(
-                high.data(), low.data(), n, af_start, af_step, af_max);
+            const double* high_ptr = high.data();
+            const double* low_ptr  = low.data();
+            const auto    n        = high.size();
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::parabolic_sar(high_ptr, low_ptr, n, af_start, af_step, af_max);
+            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(2)});
             std::copy(result.begin(), result.end(), out.mutable_data());
@@ -180,8 +227,15 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(close, "close");
             if (high.size() != low.size() || high.size() != close.size())
                 throw std::invalid_argument("high, low, close must have equal length");
-            const auto n = high.size();
-            auto result  = sqt::wilder_atr(high.data(), low.data(), close.data(), n, period);
+            const double* high_ptr  = high.data();
+            const double* low_ptr   = low.data();
+            const double* close_ptr = close.data();
+            const auto    n         = high.size();
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::wilder_atr(high_ptr, low_ptr, close_ptr, n, period);
+            }
             py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
             std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
@@ -207,10 +261,16 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(signals, "signals");
             if (prices.size() != signals.size())
                 throw std::invalid_argument("prices and signals must have equal length");
-            const auto n = prices.size();
-            const auto r = sqt::run_strategy(
-                prices.data(), signals.data(), n,
-                initial_capital, commission_pct, slippage_pct);
+            const double* prices_ptr  = prices.data();
+            const double* signals_ptr = signals.data();
+            const auto    n           = prices.size();
+            sqt::BacktestResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::run_strategy(
+                    prices_ptr, signals_ptr, n,
+                    initial_capital, commission_pct, slippage_pct);
+            }
 
             py::array_t<double> eq(static_cast<py::ssize_t>(r.equity_curve.size()));
             std::copy(r.equity_curve.begin(), r.equity_curve.end(), eq.mutable_data());
@@ -266,9 +326,13 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* p_ptr = static_cast<const double*>(prices_buf.ptr);
             const double* s_ptr = static_cast<const double*>(signals_buf.ptr);
 
-            const auto results = sqt::batch_run_strategy(
-                p_ptr, s_ptr, n, num_tests,
-                initial_capital, commission_pct, slippage_pct);
+            std::vector<sqt::BacktestResult> results;
+            {
+                py::gil_scoped_release release;
+                results = sqt::batch_run_strategy(
+                    p_ptr, s_ptr, n, num_tests,
+                    initial_capital, commission_pct, slippage_pct);
+            }
 
             py::list out;
             for (const auto& r : results) {
@@ -307,7 +371,14 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(x, "x");
             if (y.size() != x.size())
                 throw std::invalid_argument("y and x must have equal length");
-            const auto r = sqt::ols2(y.data(), x.data(), y.size());
+            const double* y_ptr = y.data();
+            const double* x_ptr = x.data();
+            const auto    n     = y.size();
+            sqt::Ols2Result r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::ols2(y_ptr, x_ptr, n);
+            }
             py::dict d;
             d["intercept"] = r.intercept;
             d["slope"]     = r.slope;
@@ -344,7 +415,11 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* y_ptr = static_cast<const double*>(y_buf.ptr);
             const double* f_ptr = static_cast<const double*>(f_buf.ptr);
 
-            const auto flat = sqt::rolling_factor_loadings(y_ptr, f_ptr, n, k, window);
+            std::vector<double> flat;
+            {
+                py::gil_scoped_release release;
+                flat = sqt::rolling_factor_loadings(y_ptr, f_ptr, n, k, window);
+            }
 
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), static_cast<py::ssize_t>(p)});
@@ -372,9 +447,14 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(x_arr, "x");
             if (y_arr.size() != x_arr.size())
                 throw std::invalid_argument("y and x must have equal length");
-            const auto n  = static_cast<std::size_t>(y_arr.size());
-            const auto result = sqt::rolling_beta(
-                y_arr.data(), x_arr.data(), n, window);
+            const double* y_ptr = y_arr.data();
+            const double* x_ptr = x_arr.data();
+            const auto    n     = static_cast<std::size_t>(y_arr.size());
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::rolling_beta(y_ptr, x_ptr, n, window);
+            }
             py::array_t<double> out(static_cast<py::ssize_t>(n));
             std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
@@ -393,9 +473,13 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](Array1D prices, int period, double num_std) -> py::array_t<double>
         {
             require_1d(prices, "prices");
-            const auto n      = static_cast<std::size_t>(prices.size());
-            const auto result = sqt::bollinger_bands(
-                prices.data(), n, period, num_std);
+            const double* prices_ptr = prices.data();
+            const auto    n          = static_cast<std::size_t>(prices.size());
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::bollinger_bands(prices_ptr, n, period, num_std);
+            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(3)});
             std::copy(result.begin(), result.end(), out.mutable_data());
@@ -421,9 +505,16 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(close, "close");
             if (high.size() != low.size() || high.size() != close.size())
                 throw std::invalid_argument("high, low, close must have equal length");
-            const auto n      = static_cast<std::size_t>(high.size());
-            const auto result = sqt::stochastic_oscillator(
-                high.data(), low.data(), close.data(), n, k_period, d_period);
+            const double* high_ptr  = high.data();
+            const double* low_ptr   = low.data();
+            const double* close_ptr = close.data();
+            const auto    n         = static_cast<std::size_t>(high.size());
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::stochastic_oscillator(
+                    high_ptr, low_ptr, close_ptr, n, k_period, d_period);
+            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(2)});
             std::copy(result.begin(), result.end(), out.mutable_data());
@@ -449,8 +540,14 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(y1, "y1");
             if (y0.size() != y1.size())
                 throw std::invalid_argument("y0 and y1 must have equal length");
-            const auto r = sqt::engle_granger(
-                y0.data(), y1.data(), y0.size(), max_lag, use_aic);
+            const double* y0_ptr = y0.data();
+            const double* y1_ptr = y1.data();
+            const auto    n      = y0.size();
+            sqt::CointResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::engle_granger(y0_ptr, y1_ptr, n, max_lag, use_aic);
+            }
             py::dict d;
             d["intercept"]     = r.intercept;
             d["hedge_ratio"]   = r.hedge_ratio;
@@ -498,10 +595,15 @@ PYBIND11_MODULE(_sqt_core, m) {
                 throw std::invalid_argument(
                     "simulate_forward_paths: horizon_days and n_simulations must both be > 0");
 
-            const auto n = static_cast<std::size_t>(values.size());
-            auto result  = sqt::simulate_forward_paths(
-                values.data(), n, horizon_days, n_simulations, block_size,
-                initial_capital, seed_val, has_seed);
+            const double* values_ptr = values.data();
+            const auto    n          = static_cast<std::size_t>(values.size());
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::simulate_forward_paths(
+                    values_ptr, n, horizon_days, n_simulations, block_size,
+                    initial_capital, seed_val, has_seed);
+            }
 
             const auto expected =
                 static_cast<std::size_t>(n_simulations) * static_cast<std::size_t>(horizon_days);
@@ -538,9 +640,13 @@ PYBIND11_MODULE(_sqt_core, m) {
         "garch11_variance_recursion",
         [](Array1D resid_sq, double omega, double alpha, double beta) -> py::array_t<double> {
             require_1d(resid_sq, "resid_sq");
-            const auto n = static_cast<std::size_t>(resid_sq.size());
-            auto result  = sqt::garch11_variance_recursion(
-                resid_sq.data(), n, omega, alpha, beta);
+            const double* resid_sq_ptr = resid_sq.data();
+            const auto    n            = static_cast<std::size_t>(resid_sq.size());
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::garch11_variance_recursion(resid_sq_ptr, n, omega, alpha, beta);
+            }
             py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
             std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
@@ -563,9 +669,14 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(x, "x");
             if (y.size() != x.size())
                 throw std::invalid_argument("y and x must have equal length");
-            const auto n = static_cast<std::size_t>(y.size());
-            auto r = sqt::kalman_filter_1state(
-                y.data(), x.data(), n, delta, observation_noise);
+            const double* y_ptr = y.data();
+            const double* x_ptr = x.data();
+            const auto    n     = static_cast<std::size_t>(y.size());
+            sqt::Kalman1StateResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::kalman_filter_1state(y_ptr, x_ptr, n, delta, observation_noise);
+            }
 
             py::array_t<double> beta(static_cast<py::ssize_t>(r.beta.size()));
             std::copy(r.beta.begin(), r.beta.end(), beta.mutable_data());
@@ -595,9 +706,14 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(x, "x");
             if (y.size() != x.size())
                 throw std::invalid_argument("y and x must have equal length");
-            const auto n = static_cast<std::size_t>(y.size());
-            auto r = sqt::kalman_filter_2state(
-                y.data(), x.data(), n, delta, observation_noise);
+            const double* y_ptr = y.data();
+            const double* x_ptr = x.data();
+            const auto    n     = static_cast<std::size_t>(y.size());
+            sqt::Kalman2StateResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::kalman_filter_2state(y_ptr, x_ptr, n, delta, observation_noise);
+            }
 
             py::array_t<double> alpha(static_cast<py::ssize_t>(r.alpha.size()));
             std::copy(r.alpha.begin(), r.alpha.end(), alpha.mutable_data());
@@ -633,9 +749,16 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(exit_min, "exit_min");
             if (close.size() != entry_max.size() || close.size() != exit_min.size())
                 throw std::invalid_argument("close, entry_max, exit_min must have equal length");
-            const auto n = static_cast<std::size_t>(close.size());
-            auto result  = sqt::donchian_state_machine(
-                close.data(), entry_max.data(), exit_min.data(), n);
+            const double* close_ptr     = close.data();
+            const double* entry_max_ptr = entry_max.data();
+            const double* exit_min_ptr  = exit_min.data();
+            const auto    n             = static_cast<std::size_t>(close.size());
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::donchian_state_machine(
+                    close_ptr, entry_max_ptr, exit_min_ptr, n);
+            }
             py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
             std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
@@ -654,9 +777,15 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(vwap, "vwap");
             if (close.size() != vwap.size())
                 throw std::invalid_argument("close and vwap must have equal length");
-            const auto n = static_cast<std::size_t>(close.size());
-            auto result  = sqt::vwap_reversion_state_machine(
-                close.data(), vwap.data(), entry_threshold, n);
+            const double* close_ptr = close.data();
+            const double* vwap_ptr  = vwap.data();
+            const auto    n         = static_cast<std::size_t>(close.size());
+            std::vector<double> result;
+            {
+                py::gil_scoped_release release;
+                result = sqt::vwap_reversion_state_machine(
+                    close_ptr, vwap_ptr, entry_threshold, n);
+            }
             py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
             std::copy(result.begin(), result.end(), out.mutable_data());
             return out;

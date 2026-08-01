@@ -390,6 +390,21 @@ bump, consistent with SemVer's pre-1.0 clause.
   one backend). See `Development/performance_insights.md` and
   `Development/build_guide.md` for the full detail.
 
+- **C++ hardening, Tier 3 item 9 of an independent code review:** every
+  `_sqt_core` binding (all ~21 `m.def(...)` entries in `bindings.cpp`) now
+  releases the GIL (`py::gil_scoped_release`) around just the `sqt::` kernel
+  call itself — extracting raw pointers/sizes/plain-C++ arguments from the
+  `py::` types first (while still holding the GIL, since buffer access and
+  argument casting are Python-API calls), then letting multiple Python
+  threads run the actual C++ computation concurrently instead of
+  serializing on the GIL for work that never touched a Python object once
+  argument extraction was done. Added `tests/test_cpp_gil_release.py`: a
+  concurrency smoke-test suite (multiple threads hammering `rsi`,
+  `run_strategy`, `hurst_dfa`, `bollinger_bands`, and a mixed-kernel
+  scenario at once), each thread's result checked against its own
+  single-threaded reference rather than attempting to prove GIL-release
+  timing from Python.
+
 ### Fixed
 
 - **C++ hardening, Tier 1-2 (items 1-5 of an independent code review of the
