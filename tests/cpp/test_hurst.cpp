@@ -20,6 +20,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -191,6 +192,30 @@ static void test_hurst_rs_too_short() {
     CHECK_NAN(r.hurst);
 }
 
+static void test_hurst_invalid_method_throws() {
+    // Regression test: any method string other than exactly "dfa"/"rs" used
+    // to silently fall through to R/S instead of honoring the documented
+    // "dfa" or "rs" contract -- a typo (e.g. "DFA", "r_s", "") would run a
+    // different estimator than intended while echoing the typo'd string
+    // back in the result, not raise.
+    auto data = white_noise(600);
+    bool threw = false;
+    try {
+        sqt::hurst_exponent(data.data(), data.size(), "DFA", 10, -1);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK_TRUE(threw);
+
+    threw = false;
+    try {
+        sqt::hurst_exponent(data.data(), data.size(), "", 10, -1);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK_TRUE(threw);
+}
+
 
 // ── Tests: rolling_hurst ──────────────────────────────────────────────────────
 
@@ -258,6 +283,20 @@ static void test_rolling_hurst_values_in_range() {
     }
 }
 
+static void test_rolling_hurst_invalid_method_throws() {
+    // Same contract as hurst_exponent -- validated eagerly (before the
+    // sliding-window loop) so even an input too short to run any iteration
+    // still raises rather than silently returning an all-NaN series.
+    std::vector<double> data = {0.1, 0.2, 0.3};  // shorter than any window
+    bool threw = false;
+    try {
+        sqt::rolling_hurst(data.data(), data.size(), 100, 1, "rsx", 10);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK_TRUE(threw);
+}
+
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -281,6 +320,7 @@ int main() {
     // hurst_exponent — R/S
     test_hurst_rs_reasonable_series();
     test_hurst_rs_too_short();
+    test_hurst_invalid_method_throws();
 
     // rolling_hurst
     test_rolling_hurst_length();
@@ -288,6 +328,7 @@ int main() {
     test_rolling_hurst_non_nan_count();
     test_rolling_hurst_step2();
     test_rolling_hurst_values_in_range();
+    test_rolling_hurst_invalid_method_throws();
 
     std::printf("\n%d / %d tests passed.\n", g_tests_run - g_tests_failed, g_tests_run);
     return (g_tests_failed == 0) ? 0 : 1;

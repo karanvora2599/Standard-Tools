@@ -392,7 +392,7 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
-- **C++ hardening, Tier 1 (items 1-4 of an independent code review of the
+- **C++ hardening, Tier 1-2 (items 1-5 of an independent code review of the
   entire `_cpp` surface at commit `d52e9f2`), each verified against the real
   compiled `_sqt_core` before and after:**
   1. `cointegration.cpp`'s `mackinnon_pvalue` used a 13-point lookup table
@@ -435,6 +435,20 @@ bump, consistent with SemVer's pre-1.0 clause.
      reconciliation would require tracking continuous positions with a
      weighted-average cost basis, a bigger redesign that changes reported
      `num_trades` for resize-using strategies and was left out of scope here.
+  5. `hurst.cpp`'s `hurst_exponent` accepted any `method` string, silently
+     treating anything other than exactly `"dfa"` as `"rs"` — the Python
+     wrapper (`analysis/hurst.py`) already validated this at its own layer,
+     but `_sqt_core` is directly importable, so a caller bypassing the
+     wrapper got a silently wrong estimator instead of an error. Both
+     `hurst_exponent` and `rolling_hurst` now reject any method other than
+     `"dfa"`/`"rs"` with `std::invalid_argument` (validated eagerly in
+     `rolling_hurst`, before its sliding-window loop, so a too-short input
+     that would otherwise run zero iterations still raises). Also added an
+     explicit `std::isnan(h)` guard before `std::clamp`/regime
+     classification — `std::clamp`'s behavior on a NaN input is unspecified
+     by the standard, and relying on classify()'s threshold comparisons
+     (all false for NaN) to coincidentally fall through to a safe-looking
+     label was fragile.
 - `portfolio_engine.py`: `max_gross_leverage`/`max_position_pct` are now
   enforced against realized post-cost state, not just pre-trade intent;
   added insolvency checks (a rebalance that leaves the account with

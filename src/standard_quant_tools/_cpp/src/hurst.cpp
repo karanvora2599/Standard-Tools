@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace sqt {
@@ -204,6 +205,16 @@ HurstResult hurst_exponent(
 {
     const HurstResult nan_result{kNaN, "unknown", kNaN, method, n};
 
+    // Anything other than exactly "dfa"/"rs" used to fall through the
+    // if/else below straight to R/S -- silently substituting a different
+    // (and, per the header's own doc comment, upward-biased-for-short-series)
+    // estimator for a caller's typo'd or invalid method string, rather than
+    // honoring the documented "dfa" or "rs" contract. Reject explicitly.
+    if (method != "dfa" && method != "rs")
+        throw std::invalid_argument(
+            "hurst_exponent: method must be exactly \"dfa\" or \"rs\", got \"" +
+            method + "\"");
+
     // min_window <= 0 would otherwise reach log10() in log_sizes() with a
     // non-positive argument (NaN, not a crash, but relying on that NaN to
     // propagate cleanly through every downstream branch is fragile) —
@@ -247,6 +258,14 @@ HurstResult hurst_exponent(
     }
 
     auto [h, r2] = ols_slope_r2(log_s, log_v);
+
+    // std::clamp's behavior is unspecified if the value being clamped is
+    // NaN (the standard requires v/lo/hi to be well-ordered by <, which NaN
+    // never is) -- guard explicitly rather than relying on clamp+classify's
+    // string-threshold comparisons (all false for NaN) to silently fall
+    // through to a plausible-looking but wrong regime label.
+    if (std::isnan(h)) return nan_result;
+
     h = std::clamp(h, 0.0, 1.5);
 
     return {h, classify(h), r2, method, n};
@@ -264,6 +283,15 @@ std::vector<double> rolling_hurst(
     int                min_window)
 {
     std::vector<double> out(n, kNaN);
+
+    // Validate eagerly rather than relying on the first hurst_exponent()
+    // call inside the loop below to catch it -- for a short input (n <
+    // window) that loop runs zero times, so a bad method string would
+    // otherwise silently produce an all-NaN result instead of raising.
+    if (method != "dfa" && method != "rs")
+        throw std::invalid_argument(
+            "rolling_hurst: method must be exactly \"dfa\" or \"rs\", got \"" +
+            method + "\"");
 
     // step <= 0 makes the loop below non-progressing (i += step never
     // advances, or moves backward) — an infinite native loop that hangs

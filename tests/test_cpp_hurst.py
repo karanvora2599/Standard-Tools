@@ -401,6 +401,22 @@ class TestCppArgSafety:
         out = _cpp.rolling_hurst(white_noise_500, -1, 1, "dfa", 10)
         assert np.all(np.isnan(out))
 
+    @requires_cpp
+    def test_rolling_hurst_invalid_method_direct_call_raises(self, white_noise_500):
+        """
+        Regression test: rolling_hurst() (the only native binding exposing a
+        free-form method string -- hurst_dfa/hurst_rs hardcode "dfa"/"rs")
+        used to silently treat any method other than exactly "dfa" as "rs"
+        instead of rejecting it. The Python wrapper (analysis/hurst.py)
+        already validates method before ever reaching the extension, so this
+        only matters for a caller importing _sqt_core directly (bypassing
+        the wrapper entirely), which is exactly what this test does.
+        """
+        with pytest.raises(Exception):
+            _cpp.rolling_hurst(white_noise_500, 100, 1, "DFA", 10)
+        with pytest.raises(Exception):
+            _cpp.rolling_hurst(white_noise_500, 100, 1, "not_a_method", 10)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.  Routing test: verify wrapper uses C++ when available
