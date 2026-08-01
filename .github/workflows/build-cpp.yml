@@ -119,7 +119,18 @@ jobs:
         run: ctest --test-dir build --output-on-failure -C Debug
 
       - name: Verify extension loaded
-        run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
+        # Same LD_PRELOAD requirement as the pytest step below -- this step
+        # imports the ASan-instrumented _sqt_core directly, and without
+        # libasan preloaded into the (non-sanitized) Python interpreter
+        # first, ASan aborts immediately with "ASan runtime does not come
+        # first in initial library list" before Python even finishes the
+        # import. Confirmed by an actual failed CI run: this step was
+        # missing the preload the whole time, so it never validated
+        # anything -- always failing at the same "runtime not first" error
+        # regardless of whether the build itself was actually healthy.
+        run: |
+          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+          python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
 
       - name: Run tests under ASan/UBSan
         # Python itself isn't built with ASan, so libasan must be preloaded

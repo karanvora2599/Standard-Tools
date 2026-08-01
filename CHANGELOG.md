@@ -419,6 +419,19 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- `build-cpp.yml`'s ASan/UBSan job's "Verify extension loaded" step never
+  actually verified anything — it imported the ASan-instrumented `_sqt_core`
+  without the `LD_PRELOAD=$(gcc -print-file-name=libasan.so)` the very next
+  step already correctly sets for the same import, so it always failed
+  immediately with "ASan runtime does not come first in initial library
+  list" regardless of whether the build itself was healthy. Confirmed via
+  an actual failed CI run's logs (fetched with the repo's own stored git
+  credential, since the anonymous GitHub API blocks job-log downloads even
+  on public repos). Added the same `LD_PRELOAD` export this step was
+  missing. This is what let item 8's `-DSQT_BUILD_TESTS=ON` + `ctest` fix
+  be verified for real: the native `ctest` suite under ASan/UBSan now
+  genuinely passes (confirmed on a live CI run, not just locally on
+  Windows/MSVC where sanitizers aren't available at all).
 - **C++ hardening, Tier 1-2 (items 1-5 of an independent code review of the
   entire `_cpp` surface at commit `d52e9f2`), each verified against the real
   compiled `_sqt_core` before and after:**
