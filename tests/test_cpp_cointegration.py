@@ -347,6 +347,73 @@ class TestCppVsStatsmodels:
         assert COINT_HAS_CPP is True
 
 
+class TestMackinnonPValueAccuracy:
+    """Regression coverage for the MacKinnon (2010) p-value fix: the
+    previous 13-point lookup table was off by up to 0.08 mid-distribution
+    despite claiming ±0.01-0.02 accuracy. The replacement is the exact
+    regression-surface algorithm statsmodels itself uses (same
+    coefficients, same quadratic/cubic branch split, same normal-CDF
+    mapping), so it should match statsmodels.tsa.stattools.mackinnonp to
+    near machine precision -- not just "broadly consistent" -- for
+    engle_granger's own computed adf_statistic, across a real spread of
+    statistics (weak to strong mean reversion), not just one lucky point.
+    """
+
+    @requires_cpp
+    def test_matches_statsmodels_across_a_range_of_statistics(self):
+        from statsmodels.tsa.stattools import mackinnonp
+
+        # y1 is (near-)constant so the step-1 OLS just centers y0 -- lets
+        # y0's own AR(1) structure directly control the resulting ADF
+        # statistic's magnitude via phi, sweeping from barely-distinguishable-
+        # from-a-unit-root (phi close to 1) to strongly mean-reverting (phi
+        # small), which lands adf_statistic across a wide, realistic range
+        # rather than only the extreme-negative region a naive cointegrated
+        # random-walk pair tends to produce.
+        rng = np.random.default_rng(21)
+        n = 400
+        y1 = pd.Series(np.full(n, 100.0) + rng.standard_normal(n) * 1e-6)
+
+        seen_mid_range = False
+        for phi in (0.995, 0.98, 0.95, 0.9, 0.8, 0.6, 0.3):
+            eps = rng.standard_normal(n) * 0.5
+            y0 = np.zeros(n)
+            y0[0] = eps[0]
+            for t in range(1, n):
+                y0[t] = phi * y0[t - 1] + eps[t]
+            y0 = pd.Series(y0 + 100.0)
+
+            cpp_r = _cpp.engle_granger(
+                y0.to_numpy(dtype=float), y1.to_numpy(dtype=float)
+            )
+            stat = cpp_r["adf_statistic"]
+            if np.isnan(stat):
+                continue
+            expected = mackinnonp(stat, regression="c", N=2)
+            if -18.86 < stat < 0.92:
+                seen_mid_range = True
+            assert cpp_r["p_value"] == pytest.approx(expected, abs=1e-9), (
+                f"phi={phi}  adf_statistic={stat}  "
+                f"cpp={cpp_r['p_value']}  statsmodels={expected}"
+            )
+
+        # Sanity check the sweep actually exercised the interesting part of
+        # the distribution (not every phi degenerating to the -18.86/0.92
+        # clamp boundaries), otherwise this test would pass trivially.
+        assert seen_mid_range
+
+    @requires_cpp
+    def test_p05_anchor_point_exact(self):
+        # tau_star=-2.62 is the branch boundary; -3.3377 is the classic 5%
+        # critical value anchor both the old table and the new algorithm
+        # agree on -- confirms the new algorithm didn't regress the one
+        # point that was already exact.
+        from statsmodels.tsa.stattools import mackinnonp
+
+        expected = mackinnonp(-3.3377, regression="c", N=2)
+        assert expected == pytest.approx(0.05, abs=0.001)
+
+
 # ── C++ ols2 binding tests ────────────────────────────────────────────────────
 
 

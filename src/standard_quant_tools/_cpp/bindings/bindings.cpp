@@ -15,8 +15,20 @@ namespace py = pybind11;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-// Force the input to be a 1-D, C-contiguous float64 array.
+// Forces the input to be a C-contiguous float64 array -- but c_style and
+// forcecast alone say nothing about ndim, so a caller passing a 2-D array
+// (or any other shape) previously flowed through silently, flattened, and
+// misinterpreted as if it were the 1-D series every kernel below assumes.
+// require_1d() (called at the top of every lambda taking an Array1D
+// parameter) is what actually enforces the "1-D" half of this type's name.
 using Array1D = py::array_t<double, py::array::c_style | py::array::forcecast>;
+
+static void require_1d(const Array1D& arr, const char* name) {
+    if (arr.ndim() != 1)
+        throw std::invalid_argument(
+            std::string(name) + " must be a 1-D array, got ndim=" +
+            std::to_string(arr.ndim()));
+}
 
 static py::dict hurst_result_to_dict(const sqt::HurstResult& r) {
     py::dict d;
@@ -41,6 +53,7 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "hurst_dfa",
         [](Array1D arr, int min_window, int max_window) -> py::dict {
+            require_1d(arr, "arr");
             return hurst_result_to_dict(
                 sqt::hurst_exponent(arr.data(), arr.size(), "dfa", min_window, max_window));
         },
@@ -53,6 +66,7 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "hurst_rs",
         [](Array1D arr, int min_window, int max_window) -> py::dict {
+            require_1d(arr, "arr");
             return hurst_result_to_dict(
                 sqt::hurst_exponent(arr.data(), arr.size(), "rs", min_window, max_window));
         },
@@ -67,6 +81,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](Array1D arr, int window, int step,
            const std::string& method, int min_window) -> py::array_t<double>
         {
+            require_1d(arr, "arr");
             auto result = sqt::rolling_hurst(
                 arr.data(), arr.size(), window, step, method, min_window);
             // Return a new 1-D numpy array (copy of result vector)
@@ -87,6 +102,7 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "rsi",
         [](Array1D arr, int period) -> py::array_t<double> {
+            require_1d(arr, "arr");
             auto result = sqt::rsi(arr.data(), arr.size(), period);
             py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
             std::copy(result.begin(), result.end(), out.mutable_data());
@@ -102,6 +118,9 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "adx",
         [](Array1D high, Array1D low, Array1D close, int period) -> py::array_t<double> {
+            require_1d(high, "high");
+            require_1d(low, "low");
+            require_1d(close, "close");
             if (high.size() != low.size() || high.size() != close.size())
                 throw std::invalid_argument("high, low, close must have equal length");
             const auto n = high.size();
@@ -127,6 +146,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](Array1D high, Array1D low,
            double af_start, double af_step, double af_max) -> py::array_t<double>
         {
+            require_1d(high, "high");
+            require_1d(low, "low");
             if (high.size() != low.size())
                 throw std::invalid_argument("high and low must have equal length");
             const auto n = high.size();
@@ -151,6 +172,9 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "wilder_atr",
         [](Array1D high, Array1D low, Array1D close, int period) -> py::array_t<double> {
+            require_1d(high, "high");
+            require_1d(low, "low");
+            require_1d(close, "close");
             if (high.size() != low.size() || high.size() != close.size())
                 throw std::invalid_argument("high, low, close must have equal length");
             const auto n = high.size();
@@ -176,6 +200,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](Array1D prices, Array1D signals,
            double initial_capital, double commission_pct, double slippage_pct)
         -> py::dict {
+            require_1d(prices, "prices");
+            require_1d(signals, "signals");
             if (prices.size() != signals.size())
                 throw std::invalid_argument("prices and signals must have equal length");
             const auto n = prices.size();
@@ -221,6 +247,7 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, double commission_pct, double slippage_pct)
         -> py::list
         {
+            require_1d(prices, "prices");
             auto prices_buf  = prices.request();
             auto signals_buf = signals_2d.request();
 
@@ -273,6 +300,8 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "ols2",
         [](Array1D y, Array1D x) -> py::dict {
+            require_1d(y, "y");
+            require_1d(x, "x");
             if (y.size() != x.size())
                 throw std::invalid_argument("y and x must have equal length");
             const auto r = sqt::ols2(y.data(), x.data(), y.size());
@@ -296,6 +325,7 @@ PYBIND11_MODULE(_sqt_core, m) {
            py::array_t<double, py::array::c_style | py::array::forcecast> factors_arr,
            int window) -> py::array_t<double>
         {
+            require_1d(y_arr, "y");
             auto y_buf  = y_arr.request();
             auto f_buf  = factors_arr.request();
 
@@ -335,6 +365,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         "rolling_beta",
         [](Array1D y_arr, Array1D x_arr, int window) -> py::array_t<double>
         {
+            require_1d(y_arr, "y");
+            require_1d(x_arr, "x");
             if (y_arr.size() != x_arr.size())
                 throw std::invalid_argument("y and x must have equal length");
             const auto n  = static_cast<std::size_t>(y_arr.size());
@@ -357,6 +389,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         "bollinger_bands",
         [](Array1D prices, int period, double num_std) -> py::array_t<double>
         {
+            require_1d(prices, "prices");
             const auto n      = static_cast<std::size_t>(prices.size());
             const auto result = sqt::bollinger_bands(
                 prices.data(), n, period, num_std);
@@ -380,6 +413,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](Array1D high, Array1D low, Array1D close,
            int k_period, int d_period) -> py::array_t<double>
         {
+            require_1d(high, "high");
+            require_1d(low, "low");
+            require_1d(close, "close");
             if (high.size() != low.size() || high.size() != close.size())
                 throw std::invalid_argument("high, low, close must have equal length");
             const auto n      = static_cast<std::size_t>(high.size());
@@ -406,6 +442,8 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "engle_granger",
         [](Array1D y0, Array1D y1, int max_lag, bool use_aic) -> py::dict {
+            require_1d(y0, "y0");
+            require_1d(y1, "y1");
             if (y0.size() != y1.size())
                 throw std::invalid_argument("y0 and y1 must have equal length");
             const auto r = sqt::engle_granger(
@@ -443,6 +481,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](Array1D values, int horizon_days, int n_simulations, int block_size,
            double initial_capital, py::object seed) -> py::array_t<double>
         {
+            require_1d(values, "values");
             const bool has_seed = !seed.is_none();
             const unsigned long long seed_val =
                 has_seed ? seed.cast<unsigned long long>() : 0ULL;
@@ -495,6 +534,7 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "garch11_variance_recursion",
         [](Array1D resid_sq, double omega, double alpha, double beta) -> py::array_t<double> {
+            require_1d(resid_sq, "resid_sq");
             const auto n = static_cast<std::size_t>(resid_sq.size());
             auto result  = sqt::garch11_variance_recursion(
                 resid_sq.data(), n, omega, alpha, beta);
@@ -516,6 +556,8 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "kalman_filter_1state",
         [](Array1D y, Array1D x, double delta, double observation_noise) -> py::dict {
+            require_1d(y, "y");
+            require_1d(x, "x");
             if (y.size() != x.size())
                 throw std::invalid_argument("y and x must have equal length");
             const auto n = static_cast<std::size_t>(y.size());
@@ -546,6 +588,8 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "kalman_filter_2state",
         [](Array1D y, Array1D x, double delta, double observation_noise) -> py::dict {
+            require_1d(y, "y");
+            require_1d(x, "x");
             if (y.size() != x.size())
                 throw std::invalid_argument("y and x must have equal length");
             const auto n = static_cast<std::size_t>(y.size());
@@ -581,6 +625,9 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "donchian_state_machine",
         [](Array1D close, Array1D entry_max, Array1D exit_min) -> py::array_t<double> {
+            require_1d(close, "close");
+            require_1d(entry_max, "entry_max");
+            require_1d(exit_min, "exit_min");
             if (close.size() != entry_max.size() || close.size() != exit_min.size())
                 throw std::invalid_argument("close, entry_max, exit_min must have equal length");
             const auto n = static_cast<std::size_t>(close.size());
@@ -600,6 +647,8 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "vwap_reversion_state_machine",
         [](Array1D close, Array1D vwap, double entry_threshold) -> py::array_t<double> {
+            require_1d(close, "close");
+            require_1d(vwap, "vwap");
             if (close.size() != vwap.size())
                 throw std::invalid_argument("close and vwap must have equal length");
             const auto n = static_cast<std::size_t>(close.size());

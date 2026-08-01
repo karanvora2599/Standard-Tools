@@ -112,59 +112,45 @@ static double mackinnon_cv(double level_pct, int n) {
 
 
 // ── MacKinnon (2010) p-value ──────────────────────────────────────────────────
-// Uses a lookup table of asymptotic quantiles for the 2-variable cointegration
-// distribution (N=2, constant).
+// Exact regression-surface algorithm for the 2-variable cointegration
+// distribution (N=2, constant, "c"), not an interpolated lookup table.
 //
-// The 3 anchor points (p=0.01, 0.05, 0.10) are exact from MacKinnon (2010).
-// The remaining points use the observed ~0.476-unit left-shift relative to
-// the standard ADF distribution with constant (MacKinnon 1994, Hamilton 1994).
-// Accuracy: within ±0.01-0.02 across the full [0.01, 0.99] range.
+// This is the real MacKinnon (1994/2010) response-surface method: fit a
+// cubic (or, below a "star" breakpoint, quadratic) polynomial in the test
+// statistic, then map through the standard normal CDF. The coefficients
+// below are the exact regression-c/N=2 values statsmodels ships in
+// tsa/adfvalues.py (_tau_maxs/_tau_mins/_tau_stars/_tau_smallps/_tau_largeps)
+// -- reproducing statsmodels.tsa.stattools.mackinnonp(t, regression="c", N=2)
+// to machine precision (verified numerically across [-20, 2] before this
+// was written; see tests/test_cpp_cointegration.py). The previous
+// hand-built 13-point lookup table this replaces was off by up to 0.08 in
+// the middle of the distribution -- nowhere near the ±0.01-0.02 its own
+// comment claimed.
+//
+// Reference: MacKinnon, J.G. 2010, "Critical Values for Cointegration
+// Tests", Queen's Economics Department Working Paper No. 1227.
 
 static double mackinnon_pvalue(double adf_stat) {
-    // {p-level, asymptotic τ_∞}
-    static const double kTable[][2] = {
-        {0.001, -4.514}, {0.005, -4.040},
-        {0.010, -3.9001},  // MacKinnon (2010) exact
-        {0.025, -3.606},
-        {0.050, -3.3377},  // MacKinnon (2010) exact
-        {0.100, -3.0462},  // MacKinnon (2010) exact
-        {0.200, -2.689},   {0.500, -1.996},
-        {0.800, -1.241},   {0.900, -0.781},
-        {0.950, -0.426},   {0.975, -0.086},
-        {0.990,  0.313},
-    };
-    constexpr int N = sizeof(kTable) / sizeof(kTable[0]);
+    constexpr double kTauMax  = 0.92;
+    constexpr double kTauMin  = -18.86;
+    constexpr double kTauStar = -2.62;
 
-    // Off left end → p near 0
-    if (adf_stat <= kTable[0][1]) {
-        // Linear extrapolation in log(p) space
-        const double slope =
-            (std::log(kTable[1][0]) - std::log(kTable[0][0])) /
-            (kTable[1][1] - kTable[0][1]);
-        const double log_p = std::log(kTable[0][0]) + slope * (adf_stat - kTable[0][1]);
-        return std::max(1e-6, std::exp(log_p));
+    if (adf_stat > kTauMax) return 1.0;
+    if (adf_stat < kTauMin) return 0.0;
+
+    double poly;
+    if (adf_stat <= kTauStar) {
+        // Quadratic branch, coefficients in ascending order [c0, c1, c2]
+        constexpr double c0 = 2.92, c1 = 1.5012, c2 = 0.039796;
+        poly = c2 * adf_stat * adf_stat + c1 * adf_stat + c0;
+    } else {
+        // Cubic branch, coefficients in ascending order [c0, c1, c2, c3]
+        constexpr double c0 = 2.1945, c1 = 0.64695, c2 = -0.29198, c3 = -0.042377;
+        poly = ((c3 * adf_stat + c2) * adf_stat + c1) * adf_stat + c0;
     }
 
-    // Off right end → p near 1
-    if (adf_stat >= kTable[N - 1][1]) {
-        return std::min(0.999, 0.99 + 0.009 * (adf_stat - kTable[N - 1][1]));
-    }
-
-    // Binary search + linear interpolation
-    int lo = 0, hi = N - 2;
-    while (lo < hi) {
-        const int mid = (lo + hi) / 2;
-        if (kTable[mid + 1][1] <= adf_stat) lo = mid + 1;
-        else hi = mid;
-    }
-
-    const double tau0 = kTable[lo][1],     p0 = kTable[lo][0];
-    const double tau1 = kTable[lo + 1][1], p1 = kTable[lo + 1][0];
-
-    // Linear interpolation in log(p)
-    const double frac = (adf_stat - tau0) / (tau1 - tau0);
-    const double log_p = std::log(p0) + frac * (std::log(p1) - std::log(p0));
-    return std::exp(log_p);
+    // Standard normal CDF via erf (no scipy/statsmodels dependency needed).
+    return 0.5 * (1.0 + std::erf(poly / std::sqrt(2.0)));
 }
 
 

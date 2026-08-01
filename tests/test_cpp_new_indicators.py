@@ -178,6 +178,48 @@ class TestCppBollingerBands:
         # NaN prefix is shorter with period=10
         assert np.sum(np.isnan(o10[:, 0])) < np.sum(np.isnan(o20[:, 0]))
 
+    @requires_cpp
+    def test_large_baseline_no_catastrophic_cancellation(self):
+        """Regression test for the raw-moment cancellation bug: a
+        ~1e9-level price with genuine small variance used to produce a
+        *negative* raw-moment variance (verified by hand: -215.58 for a
+        true variance of ~0.35), silently clamped to std=0 -- Bollinger
+        bands collapsing to a flat moving average instead of reflecting
+        the real, small volatility. The fix shifts by a per-window
+        reference before accumulating, so this must now report the actual
+        small variance, not zero."""
+        rng = np.random.default_rng(5)
+        baseline = 1e9
+        prices = baseline + rng.standard_normal(20) * 0.3
+        true_std = float(np.std(prices, ddof=1))
+
+        out = _cpp.bollinger_bands(prices, 20, 2.0)
+        reported_std = (out[-1, 0] - out[-1, 1]) / 2.0
+
+        assert reported_std > 0.0
+        assert reported_std == pytest.approx(true_std, rel=1e-4)
+
+    @requires_cpp
+    def test_large_baseline_matches_pandas_across_full_series(self):
+        rng = np.random.default_rng(9)
+        baseline = 1e9
+        n, period = 500, 20
+        prices = baseline + rng.standard_normal(n) * 0.3
+
+        out = _cpp.bollinger_bands(prices, period, 2.0)
+        s = pd.Series(prices)
+        expected_mean = s.rolling(period).mean().to_numpy()
+        expected_std = s.rolling(period).std(ddof=1).to_numpy()
+
+        reported_mean = out[:, 1]
+        reported_std = (out[:, 0] - out[:, 1]) / 2.0
+        valid = ~np.isnan(expected_mean)
+
+        np.testing.assert_allclose(
+            reported_mean[valid], expected_mean[valid], atol=1e-5
+        )
+        np.testing.assert_allclose(reported_std[valid], expected_std[valid], atol=1e-5)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # bollinger_bands — Python wrapper routing tests

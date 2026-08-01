@@ -303,37 +303,61 @@ std::vector<double> bollinger_bands(
     const double W   = static_cast<double>(period);
     const double dof = W - 1.0;  // ddof=1, matching pandas .std()
 
-    // Seed first window
-    double Sx = 0.0, Sxx = 0.0;
-    for (int i = 0; i < period; ++i) {
-        Sx  += prices[i];
-        Sxx += prices[i] * prices[i];
-    }
-    {
-        const double mean = Sx / W;
-        const double var  = (Sxx - Sx * Sx / W) / dof;
-        const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
-        const double bw   = num_std * std;
-        const int    out  = (period - 1) * 3;
-        result[out]     = mean + bw;  // upper
-        result[out + 1] = mean;       // middle
-        result[out + 2] = mean - bw;  // lower
-    }
+    // Raw-moment sums (Sx, Sxx of the *unshifted* prices) suffer
+    // catastrophic cancellation for a large-baseline series: e.g. a
+    // ~1e9-level price with genuine variance ~0.35 previously produced
+    // var = -215.58 here (verified by hand), clamped to std=0 -- Bollinger
+    // bands collapsing to a flat moving average, silently. Shifting by a
+    // per-window reference `c` close to the window's own values before
+    // accumulating keeps Sx'/Sxx' near the *variation* magnitude, not the
+    // baseline-squared magnitude, which is what actually causes the
+    // cancellation -- same fix class as the shifted-data / two-pass
+    // algorithm, kept compatible with this function's O(1)-per-bar sliding
+    // update by periodically re-deriving both the shift and the sums from
+    // scratch (same "periodic full recompute" idiom rolling_regression.cpp's
+    // rolling_factor_loadings already uses to bound floating-point drift).
+    double c = 0.0, Sx = 0.0, Sxx = 0.0;
+    std::size_t since_refresh = 0;
 
-    // Slide
-    for (int i = period; i < static_cast<int>(n); ++i) {
-        const int old = i - period;
-        Sx  += prices[i] - prices[old];
-        Sxx += prices[i] * prices[i] - prices[old] * prices[old];
+    auto recompute_window = [&](std::size_t start) {
+        c = prices[start];
+        Sx = 0.0;
+        Sxx = 0.0;
+        for (std::size_t j = start; j < start + static_cast<std::size_t>(period); ++j) {
+            const double d = prices[j] - c;
+            Sx += d;
+            Sxx += d * d;
+        }
+        since_refresh = 0;
+    };
 
-        const double mean = Sx / W;
+    auto write_bands = [&](int i) {
+        const double mean = c + Sx / W;
         const double var  = (Sxx - Sx * Sx / W) / dof;
         const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
         const double bw   = num_std * std;
         const int    out  = i * 3;
-        result[out]     = mean + bw;
-        result[out + 1] = mean;
-        result[out + 2] = mean - bw;
+        result[out]     = mean + bw;  // upper
+        result[out + 1] = mean;       // middle
+        result[out + 2] = mean - bw;  // lower
+    };
+
+    // Seed first window
+    recompute_window(0);
+    write_bands(period - 1);
+
+    // Slide
+    for (int i = period; i < static_cast<int>(n); ++i) {
+        const int old = i - period;
+        Sx  += (prices[i] - c) - (prices[old] - c);
+        Sxx += (prices[i] - c) * (prices[i] - c) - (prices[old] - c) * (prices[old] - c);
+        ++since_refresh;
+
+        if (since_refresh >= static_cast<std::size_t>(period)) {
+            recompute_window(static_cast<std::size_t>(old) + 1);
+        }
+
+        write_bands(i);
     }
 
     return result;

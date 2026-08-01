@@ -150,33 +150,64 @@ std::vector<double> rolling_beta(
     // beta = cov(x,y) / var(x)
     //      = [W*Sxy - Sx*Sy] / [W*Sxx - Sx^2]
     // where W = window (constant), maintained with O(1) sliding updates.
+    //
+    // Raw-moment sums on the *unshifted* x/y suffer catastrophic
+    // cancellation for a large-baseline series -- e.g. a ~1e9-level x with
+    // a genuine beta near 1.5 previously came out as -0.003, and the
+    // denominator collapsed to exactly zero at a ~1e12 offset (verified by
+    // hand). Shifting both x and y by per-window reference points (their
+    // own first values, so x/y - c stays close to the window's actual
+    // *variation*, not its absolute level) before accumulating fixes this
+    // the same way as bollinger_bands' fix in indicators.cpp -- periodic
+    // full recompute every `window` bars both re-centers the shift and
+    // bounds floating-point drift, matching rolling_factor_loadings'
+    // existing periodic-refresh idiom elsewhere in this file.
     const double W = static_cast<double>(window);
+    double cx = 0.0, cy = 0.0;
     double Sx = 0.0, Sy = 0.0, Sxy = 0.0, Sxx = 0.0;
+    std::size_t since_refresh = 0;
 
-    // Seed first window
-    for (int i = 0; i < window; ++i) {
-        Sx  += x[i];
-        Sy  += y[i];
-        Sxy += x[i] * y[i];
-        Sxx += x[i] * x[i];
-    }
-    {
+    auto recompute_window = [&](std::size_t start) {
+        cx = x[start];
+        cy = y[start];
+        Sx = Sy = Sxy = Sxx = 0.0;
+        for (std::size_t j = start; j < start + static_cast<std::size_t>(window); ++j) {
+            const double xd = x[j] - cx;
+            const double yd = y[j] - cy;
+            Sx  += xd;
+            Sy  += yd;
+            Sxy += xd * yd;
+            Sxx += xd * xd;
+        }
+        since_refresh = 0;
+    };
+
+    auto write_beta = [&](int i) {
         const double denom = W * Sxx - Sx * Sx;
         if (std::abs(denom) > 1e-14)
-            result[window - 1] = (W * Sxy - Sx * Sy) / denom;
-    }
+            result[i] = (W * Sxy - Sx * Sy) / denom;
+    };
+
+    // Seed first window
+    recompute_window(0);
+    write_beta(window - 1);
 
     // Slide
     for (int i = window; i < static_cast<int>(n); ++i) {
         const int old = i - window;
-        Sx  += x[i]        - x[old];
-        Sy  += y[i]        - y[old];
-        Sxy += x[i] * y[i] - x[old] * y[old];
-        Sxx += x[i] * x[i] - x[old] * x[old];
+        const double xdi = x[i] - cx, ydi = y[i] - cy;
+        const double xdo = x[old] - cx, ydo = y[old] - cy;
+        Sx  += xdi - xdo;
+        Sy  += ydi - ydo;
+        Sxy += xdi * ydi - xdo * ydo;
+        Sxx += xdi * xdi - xdo * xdo;
+        ++since_refresh;
 
-        const double denom = W * Sxx - Sx * Sx;
-        if (std::abs(denom) > 1e-14)
-            result[i] = (W * Sxy - Sx * Sy) / denom;
+        if (since_refresh >= static_cast<std::size_t>(window)) {
+            recompute_window(static_cast<std::size_t>(old) + 1);
+        }
+
+        write_beta(i);
     }
 
     return result;

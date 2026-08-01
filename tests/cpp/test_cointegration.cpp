@@ -241,6 +241,57 @@ static void test_eg_p_value_in_unit_interval() {
     CHECK(r.p_value >= 0.0 && r.p_value <= 1.0);
 }
 
+// Independent replica of the MacKinnon (2010) regression-surface algorithm
+// (same coefficients cointegration.cpp's internal mackinnon_pvalue uses --
+// duplicated here, not called directly, since it has internal linkage and
+// this is a separate translation unit) -- catches a regression in the real
+// implementation by re-deriving the expected p-value from engle_granger's
+// own adf_statistic, independently of how that statistic was computed.
+static double mackinnon_pvalue_reference(double t) {
+    if (t > 0.92) return 1.0;
+    if (t < -18.86) return 0.0;
+    double poly;
+    if (t <= -2.62) {
+        poly = 0.039796 * t * t + 1.5012 * t + 2.92;
+    } else {
+        poly = ((-0.042377 * t + -0.29198) * t + 0.64695) * t + 2.1945;
+    }
+    return 0.5 * (1.0 + std::erf(poly / std::sqrt(2.0)));
+}
+
+static void test_eg_p_value_matches_mackinnon_regression_surface() {
+    // Sweep several AR(1) phi values (via a near-constant y1 so the
+    // step-1 OLS just centers y0) to land adf_statistic across a real
+    // range, not just one point -- same idea as the Python-side sweep in
+    // tests/test_cpp_cointegration.py::TestMackinnonPValueAccuracy.
+    const int n = 300;
+    // Tiny noise, not an exactly-flat constant -- a truly zero-variance y1
+    // makes ols2's X'X singular (residuals become NaN, not just a
+    // degenerate-but-defined regression), which would just make every
+    // iteration below hit the std::isnan `continue` instead of exercising
+    // mackinnon_pvalue at all.
+    auto y1_noise = lcg_noise(n, 17, 1e-6);
+    std::vector<double> y1(n);
+    for (int t = 0; t < n; ++t) y1[t] = 100.0 + y1_noise[t];
+    const double phis[] = {0.995, 0.95, 0.9, 0.8, 0.6, 0.3};
+    bool saw_mid_range = false;
+
+    for (double phi : phis) {
+        auto eps = lcg_noise(n, static_cast<unsigned>(phi * 1000), 0.5);
+        std::vector<double> y0(n);
+        y0[0] = eps[0];
+        for (int t = 1; t < n; ++t) y0[t] = phi * y0[t - 1] + eps[t];
+        for (int t = 0; t < n; ++t) y0[t] += 100.0;
+
+        auto r = sqt::engle_granger(y0.data(), y1.data(), n);
+        if (std::isnan(r.adf_statistic)) continue;
+        if (r.adf_statistic > -18.86 && r.adf_statistic < 0.92) saw_mid_range = true;
+        const double expected = mackinnon_pvalue_reference(r.adf_statistic);
+        CHECK_NEAR(r.p_value, expected, 1e-9);
+    }
+    CHECK(saw_mid_range);
+}
+
 static void test_eg_intercept_finite() {
     int n = 200;
     auto rw = random_walk(n, 43);
@@ -385,6 +436,7 @@ int main() {
     test_eg_hedge_ratio_sign();
     test_eg_critical_values_ordered();
     test_eg_p_value_in_unit_interval();
+    test_eg_p_value_matches_mackinnon_regression_surface();
     test_eg_intercept_finite();
     test_eg_n_obs_matches_input();
     test_eg_half_life_positive();

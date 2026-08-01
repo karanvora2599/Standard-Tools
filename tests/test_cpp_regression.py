@@ -178,6 +178,33 @@ class TestCppRollingBeta:
         valid = out[~np.isnan(out)]
         assert valid.mean() == pytest.approx(1.5, abs=0.15)
 
+    @requires_cpp
+    def test_large_baseline_no_catastrophic_cancellation(self):
+        """Regression test for the raw-moment cancellation bug: an x series
+        with a ~1e9 baseline used to produce beta=-0.003 for a true beta of
+        1.5 (verified by hand), and the denominator collapsed to exactly
+        zero at a ~1e12 offset. The fix shifts by a per-window reference
+        before accumulating, so this must now recover beta correctly."""
+        rng = np.random.default_rng(3)
+        n, window = 500, 60
+        baseline = 1e9
+        noise_x = rng.standard_normal(n) * 10
+        x = baseline + noise_x
+        # y depends on the variation, not the absolute baseline -- true
+        # beta is exactly 1.5 by construction.
+        y = 1.5 * noise_x + rng.standard_normal(n) * 0.5
+
+        out = _cpp.rolling_beta(y, x, window)
+        valid = out[~np.isnan(out)]
+        assert valid.mean() == pytest.approx(1.5, abs=0.05)
+
+        expected = (
+            pd.Series(x).rolling(window).cov(pd.Series(y))
+            / pd.Series(x).rolling(window).var(ddof=1)
+        ).to_numpy()
+        mask = ~np.isnan(expected)
+        np.testing.assert_allclose(out[mask], expected[mask], atol=1e-4)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # rolling_beta — Python wrapper tests
