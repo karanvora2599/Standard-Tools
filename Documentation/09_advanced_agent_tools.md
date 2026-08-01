@@ -1659,10 +1659,12 @@ print(f"Sharpe: {bt.sharpe_ratio:.2f}  →  Recommended: {pos.recommended_shares
 `run_signal_panel_backtest` extends the same idea to a **ticker universe**:
 pass a pre-computed signal matrix (e.g. a cross-sectional alpha model's
 output) and get back per-ticker backtest results plus portfolio-level
-metrics. It fetches OHLCV internally, runs `run_strategy` per ticker, and
-combines the realized returns via the existing portfolio module
-(`build_portfolio` / `portfolio_metrics`) — no new backtest math, and no
-assumption about how the signal was generated.
+metrics. It fetches OHLCV for the whole universe concurrently (one network
+round-trip per ticker via `asyncio.gather`, not a blocking loop — see
+[01_data_fetching.md](01_data_fetching.md#portfolio-level-async-fetch)),
+runs `run_strategy` per ticker, and combines the realized returns via the
+existing portfolio module (`build_portfolio` / `portfolio_metrics`) — no
+new backtest math, and no assumption about how the signal was generated.
 
 ```python
 from standard_quant_tools.agent.tools import run_signal_panel_backtest
@@ -1844,6 +1846,14 @@ account**: a shared cash balance, positions sized against **current
 equity**, and rebalancing only at the dates you specify — share counts stay
 fixed between rebalances while weights drift with the market, exactly like
 a real account.
+
+Like `run_signal_panel_backtest`, the full ticker panel is fetched
+concurrently, not sequentially — a large universe (e.g. the full S&P 500,
+equal-weighted) is a realistic call, not just a 5-50-ticker research
+sample. First call on an uncached date range is still network-bound (the
+default executor's ~32-worker thread pool means throughput scales with
+ticker count, not zero-cost), but repeat calls over the same range hit the
+persistent Parquet disk cache and are fast.
 
 ```python
 from standard_quant_tools.agent.tools import run_portfolio_simulation

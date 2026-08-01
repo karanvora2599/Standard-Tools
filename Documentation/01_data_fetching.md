@@ -161,7 +161,11 @@ Errors are designed to be descriptive enough for LLM self-correction — the mes
 
 ## Portfolio-Level Async Fetch
 
-For multi-asset workflows, use the portfolio module's built-in async fetch:
+For multi-asset workflows, use the portfolio module's built-in async fetch —
+one `asyncio.gather` round-trip per ticker instead of a blocking loop, which
+matters once you're past a handful of tickers (a few seconds for dozens of
+tickers rather than one network round-trip's latency multiplied by the
+ticker count):
 
 ```python
 from standard_quant_tools.portfolio import fetch_returns_sync
@@ -174,6 +178,29 @@ returns_df = fetch_returns_sync(
 )
 print(returns_df.shape)  # (252, 3)
 ```
+
+If you need the full OHLCV panel (Volume/High/Low, not just Close-derived
+returns — e.g. to feed your own ADV or volatility calculation) use
+`fetch_ohlcv_panel_sync` instead, same concurrency, different return shape:
+
+```python
+from standard_quant_tools.portfolio import fetch_ohlcv_panel_sync
+
+# Dict[ticker, DataFrame] — each DataFrame has the usual Open/High/Low/Close/Volume columns
+panel = fetch_ohlcv_panel_sync(
+    ["AAPL", "MSFT", "GOOGL"],
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+)
+print(panel["AAPL"].columns.tolist())  # ['Open', 'High', 'Low', 'Close', 'Volume']
+```
+
+Both of the agent tools that operate over a full ticker universe with
+rebalancing (`run_portfolio_simulation`, `run_signal_panel_backtest`) use
+`fetch_ohlcv_panel_sync` internally — every multi-ticker tool in the
+package fetches concurrently this way, so a large universe (e.g. the full
+S&P 500) is bounded by the default executor's thread pool (~32 requests in
+flight), not by ticker count times per-request latency.
 
 ---
 

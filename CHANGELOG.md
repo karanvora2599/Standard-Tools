@@ -364,6 +364,27 @@ bump, consistent with SemVer's pre-1.0 clause.
 - `black`/`isort` now actually pass in CI — added shared `[tool.black]`/
   `[tool.isort]` config (`profile = "black"`) and reformatted the full
   `src/`/`tests/` tree, which had never matched the CI check before.
+- `_sqt_core` (the optional C++ extension) gained four more kernels, found
+  by auditing everything added to the library since its last porting pass:
+  `simulate_forward_paths` (Monte Carlo moving-block bootstrap — the only
+  genuinely unaccelerated loop found, not even numba-decorated, and
+  embarrassingly parallel, so it also gets an optional OpenMP path on top
+  of the usual compiled-vs-interpreted speedup),
+  `garch11_variance_recursion`, `kalman_filter_1state`/`kalman_filter_2state`
+  (added to the existing `cointegration.cpp` rather than a new file), and
+  `donchian_state_machine`/`vwap_reversion_state_machine`. The latter three
+  were already numba-JIT'd and confirmed fast once warm — ported for the
+  same permanent reason already documented for RSI/ADX/PSAR: no ~300–500ms
+  JIT cold-start latency on a fresh process, and immunity to future numpy
+  ABI breakage. Every port keeps the existing pure-Python/numba fallback as
+  the default when `_sqt_core` isn't built, and follows the same
+  `HAS_CPP`/`_cpp_core` guard pattern as the rest of the extension.
+  **Behavior note:** the Monte Carlo C++ path's RNG does not reproduce
+  NumPy's PCG64 bit stream, so `random_seed` is only reproducible *within*
+  one backend — the same seed gives different concrete numbers depending on
+  whether `_sqt_core` is built (still bit-identical on repeat calls within
+  one backend). See `Development/performance_insights.md` and
+  `Development/build_guide.md` for the full detail.
 
 ### Fixed
 
@@ -506,6 +527,18 @@ bump, consistent with SemVer's pre-1.0 clause.
   later test in the same run — the root cause of an intermittent CI "Run
   tests" failure. Added the same `autouse=True` `redirect_cache` fixture to
   both files.
+- `run_portfolio_simulation`/`run_signal_panel_backtest` fetched every
+  ticker with a blocking `provider.get_ohlcv()` call inside a plain `for`
+  loop — for a large universe (e.g. the full S&P 500) this meant minutes of
+  pure sequential network wait before the simulation itself even started,
+  unlike every other multi-ticker tool in the module, which already fetches
+  concurrently. Added `fetch_ohlcv_panel_async`/`fetch_ohlcv_panel_sync`
+  (same `asyncio.gather` concurrency as the existing `fetch_returns_*`
+  helpers, but preserving the full OHLCV panel — Volume/High/Low, not just
+  Close-derived returns — since the transaction-cost model needs it) and
+  wired both tools to use it. Verified against live yfinance: 20 uncached
+  tickers fetched concurrently in ~2.1s vs. ~2.4s for 10 tickers
+  sequentially beforehand.
 
 ### Known Issues
 

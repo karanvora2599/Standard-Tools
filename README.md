@@ -9,7 +9,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 
 ## Key Features
 
-- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching; persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×), Monte Carlo forward simulation (moving-block bootstrap, optionally OpenMP-parallel — 10–20×+), GARCH(1,1)/Kalman-filter/Donchian/VWAP-reversion (eliminates numba JIT cold-start + numpy-ABI fragility); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching (including full-universe portfolio simulation, not just correlation/optimization); persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 45 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
@@ -529,8 +529,12 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 | `rolling_beta` (n = 2 000, window = 60) | ~1–3 ms (2× rolling) | ~0.05–0.2 ms | **10–40×** |
 | `bollinger_bands` (n = 2 000, period = 20) | ~0.5–1.5 ms (2× rolling) | ~0.1–0.4 ms | **3–8×** |
 | `stochastic_oscillator` (n = 2 000, k = 14) | ~0.6–1.8 ms (2× rolling) | ~0.1–0.3 ms | **5–15×** |
+| `simulate_forward_paths` (n_simulations = 20 000) | ~1–3 s (uncompiled Python loop) | ~0.1–0.3 s serial; lower still with OpenMP | **10–20× serial, more with multiple cores** |
+| `garch11_variance_recursion` (per fresh process) | ~300–500 ms (numba JIT cold-start) | negligible (no JIT step) | eliminates cold-start, not a steady-state speedup |
+| `kalman_filter_1state`/`kalman_filter_2state` (per fresh process) | ~300–500 ms (numba JIT cold-start) | negligible (no JIT step) | eliminates cold-start, not a steady-state speedup |
+| `donchian_state_machine`/`vwap_reversion_state_machine` (per fresh process) | ~300–500 ms (numba JIT cold-start) | negligible (no JIT step) | eliminates cold-start, not a steady-state speedup |
 
-The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop. `rolling_factor_loadings` achieves its dramatic speedup through incremental rank-1 XtX updates — each new bar costs O(k²) instead of a full O(n·k²) `lstsq` solve.
+The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop. `rolling_factor_loadings` achieves its dramatic speedup through incremental rank-1 XtX updates — each new bar costs O(k²) instead of a full O(n·k²) `lstsq` solve. The GARCH/Kalman/signal-state-machine rows are a different kind of win than the rest of this table: numba is fast once warm on a compatible NumPy version, so the C++ path isn't a steady-state speedup there — it eliminates the JIT compile tax paid on the first call in any fresh process, and removes the numpy-ABI fragility that already broke numba once for RSI/ADX/PSAR (see the Numba note below). `simulate_forward_paths` is the one exception in this group: it had no acceleration at all before, and — being embarrassingly parallel across simulated paths — it's also the only one of the four with an additional OpenMP-parallel path on top of the usual compiled-vs-interpreted gain.
 
 > These are projected figures based on algorithmic analysis of loop iterations vs. compiled throughput. The benchmark suite (`tests/cpp/bench_hurst.cpp` and `pytest -m benchmark`) confirms actual numbers once the extension is built. See [Development/build_guide.md](Development/build_guide.md) for build instructions.
 
@@ -550,7 +554,7 @@ Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):
 | Portfolio covariance | — | BLAS `pandas.cov` | BLAS-backed | O(n·k²) via LAPACK |
 | Screener (50+ tickers) | — | ProcessPoolExecutor | multi-core | Auto async→multiprocess threshold |
 
-> **Numba note:** RSI, ADX, Parabolic SAR, and the RSI/Bollinger strategy state machines are decorated with `@njit` for ~50–100× speedup on their inner loops. This requires Numba with a compatible NumPy version (≤ 2.0). On NumPy 2.x (current default), Numba decorators are a no-op — but the C++ extension (`_sqt_core`) provides equivalent performance for RSI, ADX, and PSAR without any Numba dependency. All three fall back to pure Python automatically when neither C++ nor Numba is available.
+> **Numba note:** RSI, ADX, Parabolic SAR, GARCH's variance recursion, the Kalman filter, and every backtest-strategy state machine (RSI/Bollinger/Donchian/VWAP-reversion) are decorated with `@njit` for ~50–100× speedup on their inner loops. This requires Numba with a compatible NumPy version (≤ 2.0, or wherever Numba's own ABI support currently ends). On an incompatible NumPy version, Numba decorators are a no-op — but the C++ extension (`_sqt_core`) provides equivalent (or, for GARCH/Kalman/Donchian/VWAP-reversion, strictly better — no per-process JIT warmup) performance for all of these without any Numba dependency. Every one of them falls back to pure Python automatically when neither C++ nor Numba is available.
 
 ---
 
@@ -626,7 +630,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1748 Python tests total** (1562 passing, 163 skipped pending C++ build across 6 `test_cpp_*.py` files, 23 integration/slow/benchmark) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**1782 Python tests total** (1562 passing, 197 skipped pending C++ build across 9 `test_cpp_*.py` files, 23 integration/slow/benchmark) · **110 C++ unit tests** (17 Hurst + 24 indicators + 25 cointegration + 17 backtest + 10 Monte Carlo + 6 GARCH + 11 signal state machines, run via `ctest`)
 
 ---
 
