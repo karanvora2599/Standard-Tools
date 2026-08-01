@@ -114,14 +114,51 @@ def _garch11_variance_recursion(
 def _garch11_neg_loglik(
     params: np.ndarray, resid_sq: np.ndarray, penalize: bool = True
 ) -> float:
+    """
+    GARCH(1,1) negative log-likelihood -- dispatches to the compiled C++
+    kernel when `_sqt_core` is built, otherwise falls back to the numba
+    variance recursion plus a NumPy reduction. The C++ path computes the
+    recursion and the NLL sum in one fused native call: unlike
+    _garch11_variance_recursion (which still round-trips a full sigma2
+    array so callers that actually need it, e.g. the final forecast step,
+    still get one), scipy.optimize calls this function every single
+    L-BFGS-B iteration purely for its scalar result, so fusing away that
+    per-iteration array round-trip is the actual performance-relevant part
+    of this port.
+    """
     omega, alpha, beta = params
-    sigma2 = _garch11_variance_recursion(resid_sq, omega, alpha, beta)
+    if HAS_CPP and _cpp_core is not None:
+        return float(
+            _cpp_core.garch11_neg_loglik(resid_sq, omega, alpha, beta, penalize)
+        )
+    sigma2 = _garch11_variance_recursion_numba(resid_sq, omega, alpha, beta)
     nll = 0.5 * np.sum(np.log(2.0 * np.pi) + np.log(sigma2) + resid_sq / sigma2)
     if penalize:
         persistence = alpha + beta
         if persistence >= 1.0:
             nll += 1.0e6 * (persistence - 1.0) ** 2
     return float(nll)
+
+
+def _garch11_neg_loglik_and_grad(
+    params: np.ndarray, resid_sq: np.ndarray, penalize: bool = True
+):
+    """
+    GARCH(1,1) NLL and its analytic gradient in one fused call, for
+    scipy.optimize's `jac=True` convention (`fun` returns `(value, grad)`).
+    C++-only: there is no numba/NumPy analytic-gradient fallback here --
+    when `_sqt_core` isn't built, garch_volatility_forecast doesn't call
+    this at all, and scipy falls back to its own finite-difference
+    gradient with `_garch11_neg_loglik` instead. The analytic gradient was
+    verified against a central-difference numerical check across a grid of
+    random (resid_sq, omega, alpha, beta) inputs before being wired in
+    here (see tests/cpp/test_garch.cpp).
+    """
+    omega, alpha, beta = params
+    nll, grad = _cpp_core.garch11_neg_loglik_grad(
+        resid_sq, omega, alpha, beta, penalize
+    )
+    return float(nll), np.asarray(grad, dtype=float)
 
 
 def garch_volatility_forecast(
@@ -172,13 +209,28 @@ def garch_volatility_forecast(
     bounds = [(1e-12, None), (1e-8, 1.0 - 1e-8), (1e-8, 1.0 - 1e-8)]
 
     logger.debug("[garch] n_obs=%d  x0=%s", n, x0)
-    opt = _scipy_minimize(  # type: ignore[misc]
-        _garch11_neg_loglik,
-        x0,
-        args=(resid_sq, True),
-        method="L-BFGS-B",
-        bounds=bounds,
-    )
+    if HAS_CPP and _cpp_core is not None:
+        # jac=True: fun returns (value, grad) together, computed in one
+        # fused C++ pass -- an optimizer using the gradient pays for one
+        # recursion per iteration instead of scipy's default finite-
+        # difference approach (2*3=6 extra NLL evaluations per iteration
+        # to numerically estimate a 3-parameter gradient).
+        opt = _scipy_minimize(  # type: ignore[misc]
+            _garch11_neg_loglik_and_grad,
+            x0,
+            args=(resid_sq, True),
+            method="L-BFGS-B",
+            jac=True,
+            bounds=bounds,
+        )
+    else:
+        opt = _scipy_minimize(  # type: ignore[misc]
+            _garch11_neg_loglik,
+            x0,
+            args=(resid_sq, True),
+            method="L-BFGS-B",
+            bounds=bounds,
+        )
     omega, alpha, beta = (float(v) for v in opt.x)
     persistence = alpha + beta
     converged = bool(opt.success) and persistence < 1.0

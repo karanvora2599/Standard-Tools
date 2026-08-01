@@ -442,6 +442,35 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Performance architecture, item 3:** `garch_volatility_forecast`'s
+  scipy L-BFGS-B fit called `_garch11_neg_loglik` every iteration, which
+  dispatched to the C++ recursion for a full `sigma2` array, copied it out
+  of C++, then reduced it to one scalar in NumPy — a full array round-trip
+  every iteration purely to throw the array away. New
+  `garch11_neg_loglik` (C++) fuses the recursion and the NLL reduction
+  into one native call returning a single `double`; new
+  `garch11_neg_loglik_grad` additionally computes the analytic gradient
+  w.r.t. `(omega, alpha, beta)` in the same fused pass, wired via scipy's
+  `jac=True` convention so L-BFGS-B stops needing 6 extra
+  finite-difference NLL evaluations per iteration. The analytic gradient
+  was verified against central differences across 5 random input grids
+  before being trusted (`tests/cpp/test_garch.cpp`) — per the plan's own
+  gate, this was only wired into the optimizer after that check passed
+  cleanly (the first attempt used a single absolute step size across all
+  three parameters and failed on `omega`, not because the gradient was
+  wrong, but because `omega`'s tiny ~1e-6 scale needs a much smaller step
+  than `alpha`/`beta`'s ~0.05–0.95 range; per-parameter-scaled steps fixed
+  the numerical reference itself). `garch11_variance_recursion` alone
+  (just the recursion, no fusion) still measures 0.8× vs warm numba — the
+  fusion is what actually pays off. Measured end-to-end
+  `garch_volatility_forecast()`: **~7.8×** (7.928ms → 1.016ms, n=1000,
+  same-machine git stash/pop before/after). `jac=True` can converge to a
+  very slightly different point than finite-difference gradients near a
+  flat likelihood surface (real for GARCH), so
+  `TestGarchForecastEndToEndParity` was loosened from bit-identical
+  (`abs=1e-10`) to `rel=1e-2` on fitted parameters plus a tight `rel=1e-3`
+  check on the two fits' own log-likelihoods — the actual invariant that
+  matters.
 - **Performance architecture, item 2:** `simulate_forward_paths`
   (`monte_carlo.cpp`) constructed a fresh `std::mt19937_64` and allocated a
   `resampled` heap buffer on *every single simulated path* inside the

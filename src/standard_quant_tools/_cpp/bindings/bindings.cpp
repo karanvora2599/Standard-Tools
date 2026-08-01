@@ -660,6 +660,66 @@ PYBIND11_MODULE(_sqt_core, m) {
         "max(omega + alpha*resid_sq[t-1] + beta*sigma2[t-1], 1e-12) for t >= 1.\n"
         "Returns a 1-D float64 array of the same length as resid_sq.");
 
+    m.def(
+        "garch11_neg_loglik",
+        [](Array1D resid_sq, double omega, double alpha, double beta,
+           bool penalize) -> double
+        {
+            require_1d(resid_sq, "resid_sq");
+            const double* resid_sq_ptr = resid_sq.data();
+            const auto    n            = static_cast<std::size_t>(resid_sq.size());
+            double nll;
+            {
+                py::gil_scoped_release release;
+                nll = sqt::garch11_neg_loglik(resid_sq_ptr, n, omega, alpha, beta, penalize);
+            }
+            return nll;
+        },
+        py::arg("resid_sq"),
+        py::arg("omega"),
+        py::arg("alpha"),
+        py::arg("beta"),
+        py::arg("penalize") = true,
+        "GARCH(1,1) negative log-likelihood -- fuses the variance recursion\n"
+        "and the NLL reduction into one native call, so a scipy.optimize\n"
+        "objective evaluation never round-trips a full sigma2 array across\n"
+        "the Python/C++ boundary just to reduce it to a scalar.\n\n"
+        "nll = 0.5 * sum(log(2*pi) + log(sigma2) + resid_sq/sigma2);\n"
+        "if penalize and (alpha+beta) >= 1.0: nll += 1e6*((alpha+beta)-1)**2.\n"
+        "Returns a single float (0.0 if resid_sq is empty).");
+
+    m.def(
+        "garch11_neg_loglik_grad",
+        [](Array1D resid_sq, double omega, double alpha, double beta,
+           bool penalize) -> py::tuple
+        {
+            require_1d(resid_sq, "resid_sq");
+            const double* resid_sq_ptr = resid_sq.data();
+            const auto    n            = static_cast<std::size_t>(resid_sq.size());
+            double nll;
+            double grad[3];
+            {
+                py::gil_scoped_release release;
+                nll = sqt::garch11_neg_loglik_grad(
+                    resid_sq_ptr, n, omega, alpha, beta, penalize, grad);
+            }
+            py::array_t<double> grad_out(3);
+            std::copy(grad, grad + 3, grad_out.mutable_data());
+            return py::make_tuple(nll, grad_out);
+        },
+        py::arg("resid_sq"),
+        py::arg("omega"),
+        py::arg("alpha"),
+        py::arg("beta"),
+        py::arg("penalize") = true,
+        "GARCH(1,1) negative log-likelihood AND its analytic gradient\n"
+        "w.r.t. (omega, alpha, beta), computed in one fused pass -- for\n"
+        "scipy.optimize's jac=True convention (fun returns (value, grad)),\n"
+        "so an optimizer using the gradient pays for one recursion per\n"
+        "iteration, not two.\n\n"
+        "Returns a tuple (nll: float, grad: 1-D float64 array of length 3\n"
+        "[d/domega, d/dalpha, d/dbeta]).");
+
     // ── Kalman filters (time-varying hedge ratio) ─────────────────────────────
 
     m.def(
