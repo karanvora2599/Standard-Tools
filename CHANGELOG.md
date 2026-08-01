@@ -442,6 +442,28 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Performance architecture, item 4:** `adx()` (`indicators.cpp`)
+  allocated 4 full n-sized temporary arrays (`dm_plus`, `dm_minus`, `tr`,
+  `dx_vals`) beyond its own output array. Traced Wilder's recursion by
+  hand: it only ever needs the immediately-previous smoothed sum plus the
+  *current* bar's raw TR/DM value (computable inline, no lookback array
+  needed), and the DX/ADX seed windows only need a running sum of the
+  values seen so far, not the individual values — so the whole function
+  genuinely reduces to O(1) auxiliary memory, not just "smaller."
+  Rewrote as a single fused pass preserving the exact same order of
+  floating-point operations as the original 4-pass version (addition
+  isn't associative, so order — not just which values get summed —
+  determines the result). Verified bit-identical output two ways: every
+  existing test passed unchanged with zero tolerance widening, and a new
+  exact-equality regression pin (`tests/cpp/test_indicators.cpp`) was
+  confirmed to match against *both* the pre- and post-rewrite
+  implementation via `git stash` in both directions. Measured speed:
+  negligible at n=2000 (~1.02–1.07×, within noise — fixed Python/pybind
+  call overhead dominates at this size) but a real **~1.21×** at n=50000
+  (min 3.18ms→2.63ms) once the eliminated arrays are large enough
+  (~1.6MB total) for memory bandwidth/allocation cost to matter against
+  the O(n) arithmetic. Memory footprint (5 allocations → 1) improves
+  unconditionally regardless of n.
 - **Performance architecture, item 3:** `garch_volatility_forecast`'s
   scipy L-BFGS-B fit called `_garch11_neg_loglik` every iteration, which
   dispatched to the C++ recursion for a full `sigma2` array, copied it out

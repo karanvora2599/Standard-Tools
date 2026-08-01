@@ -83,68 +83,72 @@ std::vector<double> adx(
     if (period <= 0) return result;
     if (n < 2 || static_cast<int>(n) <= period) return result;
 
-    // ── Step 1: raw DM+, DM-, TR ─────────────────────────────────────────────
-    std::vector<double> dm_plus(n, 0.0), dm_minus(n, 0.0), tr(n, 0.0);
-    for (std::size_t i = 1; i < n; ++i) {
-        const double up_move   = high[i] - high[i - 1];
-        const double down_move = low[i - 1] - low[i];
-
-        dm_plus[i]  = (up_move > down_move && up_move > 0.0)   ? up_move   : 0.0;
-        dm_minus[i] = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
-
-        tr[i] = std::max({
-            high[i] - low[i],
-            std::abs(high[i] - close[i - 1]),
-            std::abs(low[i]  - close[i - 1]),
-        });
-    }
-
-    // ── Step 2: Wilder's seed sums ────────────────────────────────────────────
-    double atr_s = 0.0, dmp_s = 0.0, dmm_s = 0.0;
-    for (int i = 1; i <= period; ++i) {
-        atr_s += tr[i];
-        dmp_s += dm_plus[i];
-        dmm_s += dm_minus[i];
-    }
+    // Single fused O(1)-auxiliary-memory pass -- no dm_plus/dm_minus/tr/
+    // dx_vals arrays (previously 4 full n-sized buffers beyond `result`).
+    // Wilder's smoothing only ever needs the immediately-previous smoothed
+    // sum (atr_s/dmp_s/dmm_s below) plus the CURRENT bar's raw TR/DM
+    // value, which is computable inline from high[i]/high[i-1]/low[i]/
+    // low[i-1]/close[i-1] with no lookback array; DI/DX's own seed window
+    // (Steps 2 and 4 below) only ever needs a running sum of the values
+    // seen so far, not the individual values themselves. This performs the
+    // exact same sequence of `+=`/smoothing operations in the exact same
+    // i=1..n-1 order as the original 4-pass version -- floating-point
+    // addition isn't associative, so preserving the *order* of operations
+    // (not just the set of values summed) is what makes this bit-identical
+    // to the original, not merely numerically close (pinned by an exact-
+    // equality regression test in tests/cpp/test_indicators.cpp).
+    double atr_s = 0.0, dmp_s = 0.0, dmm_s = 0.0;  // Steps 1-3's Wilder sums
+    double dx_seed_sum = 0.0;                       // Step 4's ADX seed accumulator
+    double adx_val = 0.0;
 
     const auto di_p_val = [&]() { return (atr_s != 0.0) ? 100.0 * dmp_s / atr_s : 0.0; };
     const auto di_m_val = [&]() { return (atr_s != 0.0) ? 100.0 * dmm_s / atr_s : 0.0; };
 
-    const double dp0 = di_p_val(), dm0 = di_m_val();
-    result[period * 3 + 0] = dp0;
-    result[period * 3 + 1] = dm0;
+    // Needs `period` DX values to initialise ADX -> starts at bar 2*period-1.
+    const std::size_t adx_start = static_cast<std::size_t>(2 * period - 1);
 
-    std::vector<double> dx_vals(n, 0.0);
-    const double di_sum0 = dp0 + dm0;
-    dx_vals[period] = (di_sum0 != 0.0) ? 100.0 * std::abs(dp0 - dm0) / di_sum0 : 0.0;
+    for (std::size_t i = 1; i < n; ++i) {
+        const double up_move   = high[i] - high[i - 1];
+        const double down_move = low[i - 1] - low[i];
+        const double dm_plus_i  = (up_move > down_move && up_move > 0.0)   ? up_move   : 0.0;
+        const double dm_minus_i = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
+        const double tr_i = std::max({
+            high[i] - low[i],
+            std::abs(high[i] - close[i - 1]),
+            std::abs(low[i]  - close[i - 1]),
+        });
 
-    // ── Step 3: Wilder's smooth forward ──────────────────────────────────────
-    for (std::size_t i = static_cast<std::size_t>(period) + 1; i < n; ++i) {
-        atr_s = atr_s - (atr_s / period) + tr[i];
-        dmp_s = dmp_s - (dmp_s / period) + dm_plus[i];
-        dmm_s = dmm_s - (dmm_s / period) + dm_minus[i];
+        if (static_cast<int>(i) <= period) {
+            // Step 2: Wilder's seed sums.
+            atr_s += tr_i;
+            dmp_s += dm_plus_i;
+            dmm_s += dm_minus_i;
+        } else {
+            // Step 3: Wilder's smooth forward.
+            atr_s = atr_s - (atr_s / period) + tr_i;
+            dmp_s = dmp_s - (dmp_s / period) + dm_plus_i;
+            dmm_s = dmm_s - (dmm_s / period) + dm_minus_i;
+        }
 
-        const double di_p = di_p_val(), di_m = di_m_val();
+        if (static_cast<int>(i) < period) continue;  // DI/DX undefined before bar `period`
+
+        const double di_p = di_p_val();
+        const double di_m = di_m_val();
         result[i * 3 + 0] = di_p;
         result[i * 3 + 1] = di_m;
 
         const double di_sum = di_p + di_m;
-        dx_vals[i] = (di_sum != 0.0) ? 100.0 * std::abs(di_p - di_m) / di_sum : 0.0;
-    }
+        const double dx_i = (di_sum != 0.0) ? 100.0 * std::abs(di_p - di_m) / di_sum : 0.0;
 
-    // ── Step 4: ADX = Wilder's smooth of DX ──────────────────────────────────
-    // Needs `period` DX values to initialise → starts at bar 2*period-1.
-    const std::size_t adx_start = static_cast<std::size_t>(2 * period - 1);
-    if (adx_start < n) {
-        double adx_val = 0.0;
-        for (std::size_t i = static_cast<std::size_t>(period); i <= adx_start; ++i) {
-            adx_val += dx_vals[i];
-        }
-        adx_val /= period;
-        result[adx_start * 3 + 2] = adx_val;
-
-        for (std::size_t i = adx_start + 1; i < n; ++i) {
-            adx_val = (adx_val * (period - 1) + dx_vals[i]) / period;
+        // Step 4: ADX = Wilder's smooth of DX.
+        if (i <= adx_start) {
+            dx_seed_sum += dx_i;
+            if (i == adx_start) {
+                adx_val = dx_seed_sum / period;
+                result[adx_start * 3 + 2] = adx_val;
+            }
+        } else {
+            adx_val = (adx_val * (period - 1) + dx_i) / period;
             result[i * 3 + 2] = adx_val;
         }
     }

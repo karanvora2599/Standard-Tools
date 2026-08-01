@@ -238,6 +238,43 @@ static void test_adx_short_series() {
     for (auto v : result) CHECK_NAN(v);
 }
 
+static void test_adx_exact_regression_pin() {
+    // Regression pin (Tier 4 item 14 / performance architecture item 4):
+    // adx() was rewritten from a 4-array (dm_plus/dm_minus/tr/dx_vals)
+    // implementation to a single fused O(1)-auxiliary-memory pass. The
+    // rewrite preserves the exact same sequence of floating-point
+    // operations in the exact same order (floating-point addition isn't
+    // associative, so *order* matters, not just which values get summed),
+    // so this must match bit-identically -- these expected values were
+    // captured from the verified-correct implementation (cross-checked
+    // against test_adx_uptrend_di_plus_dominates/test_adx_bounds/etc.,
+    // all passing unchanged) and are pinned here as a permanent guard
+    // against any future silent behavior change, intentional or not.
+    const int period = 14;
+    auto close = pseudo_random(200);  // seed=42 default
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+
+    auto result = sqt::adx(high.data(), low.data(), close.data(), 200, period);
+
+    const double tol = 1e-12;
+    CHECK_NEAR(result[14 * 3 + 0], 42.45068784543159, tol);
+    CHECK_NEAR(result[14 * 3 + 1], 46.9763826288027, tol);
+    CHECK_NAN(result[14 * 3 + 2]);
+    CHECK_NEAR(result[27 * 3 + 0], 45.11415518667713, tol);
+    CHECK_NEAR(result[27 * 3 + 1], 42.15672380278956, tol);
+    CHECK_NEAR(result[27 * 3 + 2], 5.134074786054382, tol);
+    CHECK_NEAR(result[28 * 3 + 0], 47.39663558209396, tol);
+    CHECK_NEAR(result[28 * 3 + 1], 39.72096324053475, tol);
+    CHECK_NEAR(result[28 * 3 + 2], 5.396691041837876, tol);
+    CHECK_NEAR(result[100 * 3 + 0], 43.52124279434726, tol);
+    CHECK_NEAR(result[100 * 3 + 1], 43.005228899066054, tol);
+    CHECK_NEAR(result[100 * 3 + 2], 5.354983108893717, tol);
+    CHECK_NEAR(result[199 * 3 + 0], 45.42796779633301, tol);
+    CHECK_NEAR(result[199 * 3 + 1], 40.314428688191065, tol);
+    CHECK_NEAR(result[199 * 3 + 2], 5.04677283529171, tol);
+}
+
 
 // ── Parabolic SAR tests ───────────────────────────────────────────────────────
 
@@ -565,6 +602,7 @@ int main() {
     test_adx_uptrend_di_plus_dominates();
     test_adx_bounds();
     test_adx_short_series();
+    test_adx_exact_regression_pin();
 
     // Parabolic SAR
     test_psar_bootstrap();
