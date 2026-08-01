@@ -466,6 +466,18 @@ bump, consistent with SemVer's pre-1.0 clause.
   before the Python `pytest` step. Also added `tests/cpp/**` to the
   workflow's `paths:` triggers (previously only `_cpp/**`/`CMakeLists.txt`),
   so a native-test-only change still triggers this workflow.
+- `tests/cpp/test_indicators.cpp` failed to compile on GCC/Linux —
+  `std::max({...})` (the initializer-list overload) is declared in
+  `<algorithm>`, which this file never included; MSVC's headers transitively
+  pull it in via other standard headers, so this went undetected until the
+  `build-cpp.yml` fix above actually compiled `tests/cpp/**` on Linux for the
+  first time. Added the missing `#include <algorithm>`. While auditing for
+  the same class of bug, also added `#include <algorithm>`/`#include
+  <stdexcept>` to `bindings.cpp` (uses `std::copy` and `throw
+  std::invalid_argument` ~20+ times, currently working only because
+  pybind11's own headers happen to pull both in transitively) — not
+  currently broken, but relying on transitive includes from a third-party
+  header is fragile the same way the `test_indicators.cpp` bug was.
 - `portfolio_engine.py`: `max_gross_leverage`/`max_position_pct` are now
   enforced against realized post-cost state, not just pre-trade intent;
   added insolvency checks (a rebalance that leaves the account with

@@ -15,6 +15,7 @@
 
 #include "sqt/indicators.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
