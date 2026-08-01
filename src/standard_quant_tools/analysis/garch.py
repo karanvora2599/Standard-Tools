@@ -52,6 +52,17 @@ except ImportError:
     _scipy_minimize = None
     HAS_SCIPY = False
 
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = True
+except ImportError:
+    pass
+
 
 _MIN_OBS = 100
 _MIN_SIGMA2 = 1e-12
@@ -68,7 +79,7 @@ def _require_scipy(context: str) -> None:
 
 
 @njit
-def _garch11_variance_recursion(
+def _garch11_variance_recursion_numba(
     resid_sq: np.ndarray, omega: float, alpha: float, beta: float
 ) -> np.ndarray:
     n = len(resid_sq)
@@ -80,6 +91,24 @@ def _garch11_variance_recursion(
         s2 = omega + alpha * resid_sq[t - 1] + beta * sigma2[t - 1]
         sigma2[t] = s2 if s2 >= _MIN_SIGMA2 else _MIN_SIGMA2
     return sigma2
+
+
+def _garch11_variance_recursion(
+    resid_sq: np.ndarray, omega: float, alpha: float, beta: float
+) -> np.ndarray:
+    """
+    GARCH(1,1) conditional variance recursion -- dispatches to the compiled
+    C++ kernel when `_sqt_core` is built, otherwise the numba-JIT'd
+    reference above. Both are already fast once warm (numba compiles this
+    to machine code on first call); the C++ path exists to eliminate
+    numba's JIT cold-start latency (a few hundred ms on the first call in
+    any fresh process) and immunity to future numpy ABI breakage -- the
+    same permanent rationale this codebase already uses for RSI/ADX/PSAR
+    (see Development/performance_insights.md).
+    """
+    if HAS_CPP and _cpp_core is not None:
+        return _cpp_core.garch11_variance_recursion(resid_sq, omega, alpha, beta)
+    return _garch11_variance_recursion_numba(resid_sq, omega, alpha, beta)
 
 
 def _garch11_neg_loglik(

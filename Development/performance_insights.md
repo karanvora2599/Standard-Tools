@@ -7,7 +7,9 @@
 
 ## Executive Summary
 
-Of the ~20 distinct computational modules in this library, several components account for nearly all theoretical speedup. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-07-02, all originally identified Tier 1 features have been implemented in C++, plus 5 additional functions:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`), backtest kernel (`run_strategy`), **batch backtest grid kernel** (`batch_run_strategy`, 10–50×), **rolling factor loadings** (incremental Cholesky, 50–200×), **rolling beta** (incremental sums, 10–40×), **Bollinger Bands** (fused mean+std, 3–8×), and **Stochastic Oscillator** (fused min+max, 5–15×). The most dramatic realised gain — 30–100× — is on `rolling_hurst`. The `_sqt_core` feature set itself has not grown since 2026-07-02; the backtest engine gained new pure-Python modules afterward (portfolio simulation, pair trading, sizing, costs, constraints, robustness diagnostics — see Tier 3 below) that have not yet been evaluated for a C++ port.
+Of the ~20 distinct computational modules in this library, several components account for nearly all theoretical speedup. The rest are already running at near-C speed via NumPy/BLAS/Cython and porting them would be wasted effort. **As of 2026-07-02, all originally identified Tier 1 features have been implemented in C++, plus 5 additional functions:** Hurst Exponent (DFA + R/S + rolling), RSI, ADX, Parabolic SAR, Wilder's ATR, Engle-Granger Cointegration, 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`), backtest kernel (`run_strategy`), **batch backtest grid kernel** (`batch_run_strategy`, 10–50×), **rolling factor loadings** (incremental Cholesky, 50–200×), **rolling beta** (incremental sums, 10–40×), **Bollinger Bands** (fused mean+std, 3–8×), and **Stochastic Oscillator** (fused min+max, 5–15×). The most dramatic realised gain — 30–100× — is on `rolling_hurst`.
+
+**Update (this pass):** four modules added after 2026-07-24 (GARCH(1,1) volatility forecasting, Kalman-filter dynamic hedge ratio, Monte Carlo simulation, and 4 new backtest strategies) were evaluated and, where genuinely worth it, ported — see items 11–14 below. Unlike every prior port, most of this new code was already `@njit`-decorated (numba), and numba was directly benchmarked as functional on the current dev machine (numpy 2.0.2, not the numpy 2.4 that broke numba and originally motivated porting RSI/ADX/PSAR) — so the case for these four isn't "numba is broken," it's the same *permanent* argument already made for RSI/ADX/PSAR: eliminating numba's ~300–500ms JIT cold-start latency on the first call in a fresh process, and immunity to future numpy ABI breakage. `simulate_forward_paths` (Monte Carlo) is the one exception — it had **zero** acceleration applied before this pass (not even numba) and is also embarrassingly parallel, so it got an additional OpenMP-parallelized path on top of the usual compiled-vs-interpreted gain. Three candidates were investigated and explicitly **not** ported: `implied_volatility` (tiny loop, no batch entry point), `risk_parity_weights` (tiny `n_assets`, negligible absolute work), and EVT tail risk / `mean_variance_optimize` / `black_litterman` / `momentum_timeseries` / `adx_trend` (already closed-form, vectorized, or scipy-delegated — no loop to port).
 
 ---
 
@@ -26,6 +28,10 @@ Of the ~20 distinct computational modules in this library, several components ac
 | 8 | Rolling beta (`rolling_beta` — incremental sum updates) | ✅ IMPLEMENTED | 10–40× vs 2× pandas rolling |
 | 9 | Bollinger Bands (`bollinger_bands` — fused Σx / Σx² pass) | ✅ IMPLEMENTED | 3–8× vs 2× pandas rolling |
 | 10 | Stochastic Oscillator (`stochastic_oscillator` — fused min+max pass) | ✅ IMPLEMENTED | 5–15× vs 2× pandas rolling |
+| 11 | Monte Carlo forward simulation (`simulate_forward_paths` — moving-block bootstrap, optional OpenMP) | ✅ IMPLEMENTED | 10–20× serial; additional near-linear-in-cores speedup with OpenMP |
+| 12 | GARCH(1,1) variance recursion (`garch11_variance_recursion`) | ✅ IMPLEMENTED | Eliminates numba's ~300–500ms JIT cold-start; negligible once warm (numba was already fast) |
+| 13 | Kalman filter, 1-state and 2-state (`kalman_filter_1state`/`kalman_filter_2state`) | ✅ IMPLEMENTED | Same cold-start/ABI-permanence rationale as item 12 |
+| 14 | Donchian breakout / VWAP-reversion signal hysteresis (`donchian_state_machine`/`vwap_reversion_state_machine`) | ✅ IMPLEMENTED | Same cold-start/ABI-permanence rationale as item 12 |
 
 The compiled extension is `_sqt_core.pyd` (Windows). All Python modules fall back to pure Python if the extension is absent, preserving the library's optional-dependency philosophy.
 
@@ -217,6 +223,24 @@ None of these are on the priority list below yet; add `run_portfolio_simulation`
 if profiling shows it's a bottleneck for `run_portfolio_simulation` /
 `run_pair_trade_backtest` at realistic universe sizes.
 
+### Tier 3b — Evaluated and Not Ported (this pass)
+
+Separately from Tier 3 above (which covers the 2026-07-22/23 batch),
+GARCH(1,1), Kalman-filter hedge ratio, Monte Carlo simulation, and 4 new
+backtest strategies were added later still and evaluated in this pass —
+see items 11–14 in Implementation Status for what got ported. The
+following were investigated in the same pass and deliberately **not**
+ported:
+
+| Component | Current implementation | Why not ported |
+|---|---|---|
+| `analysis/options.py: implied_volatility` | Pure Python Newton-Raphson (~10–15 iterations, no numba) + bisection fallback (cap 200) | No batch/vectorized entry point exists today — one call solves one option, so total iteration count per call is tiny. Would become worth porting if a batch vol-surface tool is added; the *inter-option* parallelism across a chain would be the bigger win then, not the intra-option Newton loop itself. |
+| `portfolio/optimize.py: risk_parity_weights` | Pure Python fixed-point iteration (cap 1000, typically converges in tens), O(n_assets²) per iteration | `n_assets` is typically 5–50 (a portfolio, not a bar count) — total absolute work is negligible even at the iteration cap. |
+| `metrics/risk_metrics.py: evt_tail_risk` (default PWM path) | Single `np.sort` + vectorized weighted mean, no loop at all | Already closed-form vectorized numpy — nothing to port. |
+| `metrics/risk_metrics.py: evt_tail_risk` (opt-in MLE path) | Delegates to `scipy.optimize.minimize` (Nelder-Mead) | scipy's optimizer is already compiled; the objective it calls is already vectorized. |
+| `portfolio/optimize.py: mean_variance_optimize`, `black_litterman` | Closed-form `np.linalg.inv` (unconstrained case) or `scipy.optimize` SLSQP (constrained case) | No hand-written loop in either path. |
+| `backtest/strategies.py: momentum_timeseries`, `adx_trend` | Fully vectorized pandas/numpy; `adx_trend` delegates entirely to the already-ported `adx()` | Nothing to port — no loop introduced by the strategy itself. |
+
 ---
 
 ## Aggregate Speedup Estimates by Use Case
@@ -232,6 +256,10 @@ if profiling shows it's a bottleneck for `run_portfolio_simulation` /
 | `run_backtest_optimization` | `backtest_grid` parameter sweep | ✅ Realized (batch kernel)* | **10–50×** |
 | `run_factor_regression` (rolling) | `rolling_factor_loadings` window loop | ✅ Realized (Cholesky) | **50–200×** |
 | `get_rolling_beta` | `rolling_beta` two rolling passes | ✅ Realized (incremental) | **10–40×** |
+| `run_monte_carlo_simulation` (n_simulations=20,000) | `simulate_forward_paths` per-path Python loop | ✅ Realized (serial + OpenMP) | **10–20× serial; multiplicatively higher with OpenMP on multi-core builds** |
+| `run_garch_volatility_forecast` | `garch11_variance_recursion` cold-start | ✅ Realized | Eliminates ~300–500ms JIT warmup per fresh process; negligible once numba is warm |
+| `run_kalman_hedge_ratio` | `kalman_filter_1state`/`kalman_filter_2state` cold-start | ✅ Realized | Same as above |
+| `backtest_grid` with `donchian_breakout`/`vwap_reversion` | signal state-machine cold-start | ✅ Realized | Same as above |
 
 \* Speedup figure is for the 6 return/equity metrics only. Win_rate/profit_factor/
 num_trades/avg_trade_return_pct in these two tools' output come from
@@ -316,6 +344,10 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 8. ✅ **`rolling_beta`** — incremental O(1)-per-bar sum updates (Sxy, Sxx, Sx, Sy); beta = (W·Sxy − Sx·Sy)/(W·Sxx − Sx²); NaN when denominator ≤ 1e-14. Replaces two sequential pandas rolling passes; 10–40×. **Done.**
 9. ✅ **`bollinger_bands`** — fused single-pass Σx / Σx² sliding window; mean = Σx/W, var = (Σx² − Σx²/W)/(W−1); computes upper/middle/lower in one pass. Replaces two pandas rolling calls; 3–8×. **Done.**
 10. ✅ **`stochastic_oscillator`** — O(n × k_period) fused sliding min+max pass, then SMA pass for %D; replaces two pandas rolling min+max calls. 5–15×. **Done.**
+11. ✅ **`simulate_forward_paths`** — the only genuinely unaccelerated (no numba, no vectorization) loop found in this pass, and embarrassingly parallel; ported to `monte_carlo.cpp` with an optional OpenMP loop (per-path splitmix64-derived RNG seeding, no shared mutable state). **Done.**
+12. ✅ **`garch11_variance_recursion`** — sequential GARCH(1,1) variance recursion; already numba-fast when warm (confirmed on this machine), ported for the same cold-start/ABI-permanence reasons as items 2/2b. `garch.py`'s public function name/signature unchanged — the numba reference was renamed to `_garch11_variance_recursion_numba` and kept as the fallback. **Done.**
+13. ✅ **`kalman_filter_1state`/`kalman_filter_2state`** — extended `cointegration.hpp`/`cointegration.cpp` (same feature area as `ols2`/`engle_granger`) rather than a new file; same cold-start/ABI-permanence rationale as item 12. **Done.**
+14. ✅ **`donchian_state_machine`/`vwap_reversion_state_machine`** — same entry/exit hysteresis shape as the already-ported RSI/PSAR state machines, in a new `signal_state_machines.cpp` (kept separate from `indicators.hpp`, which owns indicator *values*, not trading signals). Same cold-start/ABI-permanence rationale as item 12. **Done.**
 
 ---
 
@@ -340,3 +372,5 @@ A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GC
 | Maintenance burden (dual Python + C++ paths) | Keep Python fallback; C++ path is additive, not a replacement |
 | NumPy ABI changes (same problem as Numba) | Pin to `numpy>=2.0` ABI stable tag in the extension; re-test on each numpy major bump |
 | Debugging (C++ segfault inside Python) | Develop with address sanitiser (`-fsanitize=address`) in debug builds |
+| Monte Carlo cross-backend RNG non-reproducibility — this is a genuine **documented behavior change**, not floating-point noise: the same `random_seed` produces different concrete numbers depending on whether `_sqt_core` is built, since the C++ path's RNG doesn't reproduce NumPy's PCG64 bit stream | Documented explicitly in `monte_carlo.py`'s `simulate_forward_paths` docstring and in `build_guide.md` §7; tests assert exact reproducibility only *within* one backend, and only loose statistical-tolerance parity *across* backends (`tests/test_cpp_monte_carlo.py::TestCppVsPythonStatisticalParity`) |
+| OpenMP data race in `simulate_forward_paths`'s parallel loop (each thread must have fully independent RNG state — a shared buffer or RNG object would silently corrupt results under concurrency, not crash) | Every per-simulation-path mutable value (`resampled` buffer, `gen`, `dist`) is declared *inside* the loop body, not hoisted above it, so each iteration/thread gets its own; per-path seed is derived independently via splitmix64 from the base seed and path index, with no shared mutable RNG. Covered by `test_result_independent_of_thread_count` in both the native C++ suite (forces `omp_set_num_threads(1)` vs `4`) and the Python integration suite (forces `OMP_NUM_THREADS`), and by CI's ASan/UBSan job (`build-cpp.yml`), which is well-suited to catching exactly this class of bug |

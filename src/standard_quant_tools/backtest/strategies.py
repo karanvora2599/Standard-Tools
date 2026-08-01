@@ -9,6 +9,7 @@ ProcessPoolExecutor (required for backtest_grid on Windows / spawn).
 """
 
 import logging
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,18 @@ except ImportError:
 
     def njit(func):  # type: ignore[misc]
         return func
+
+
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = True
+except ImportError:
+    pass
 
 
 @njit
@@ -245,9 +258,11 @@ def _donchian_signals(
     close_arr = df["Close"].to_numpy(dtype=float)
     entry_arr = entry_max.to_numpy(dtype=float)
     exit_arr = exit_min.to_numpy(dtype=float)
-    result = pd.Series(
-        _donchian_state_machine(close_arr, entry_arr, exit_arr), index=df.index
-    )
+    if HAS_CPP and _cpp_core is not None:
+        signal_arr = _cpp_core.donchian_state_machine(close_arr, entry_arr, exit_arr)
+    else:
+        signal_arr = _donchian_state_machine(close_arr, entry_arr, exit_arr)
+    result = pd.Series(signal_arr, index=df.index)
     _log_signals("donchian_breakout", result)
     return result
 
@@ -305,10 +320,13 @@ def _vwap_reversion_signals(
     vwap_series = vwap(df["High"], df["Low"], df["Close"], df["Volume"], period=period)
     close_arr = df["Close"].to_numpy(dtype=float)
     vwap_arr = vwap_series.to_numpy(dtype=float)
-    result = pd.Series(
-        _vwap_reversion_state_machine(close_arr, vwap_arr, entry_threshold),
-        index=df.index,
-    )
+    if HAS_CPP and _cpp_core is not None:
+        signal_arr = _cpp_core.vwap_reversion_state_machine(
+            close_arr, vwap_arr, entry_threshold
+        )
+    else:
+        signal_arr = _vwap_reversion_state_machine(close_arr, vwap_arr, entry_threshold)
+    result = pd.Series(signal_arr, index=df.index)
     _log_signals("vwap_reversion", result)
     return result
 

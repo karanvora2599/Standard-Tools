@@ -413,7 +413,15 @@ def kalman_hedge_ratio(
         path,
     )
 
-    if include_intercept:
+    if HAS_CPP and _cpp_core is not None:
+        if include_intercept:
+            r = _cpp_core.kalman_filter_2state(a, b, delta, observation_noise)
+            alpha_path, beta_path, gain_path = r["alpha"], r["beta"], r["gain"]
+        else:
+            r = _cpp_core.kalman_filter_1state(a, b, delta, observation_noise)
+            beta_path, gain_path = r["beta"], r["gain"]
+            alpha_path = np.zeros(n)
+    elif include_intercept:
         alpha_path, beta_path, gain_path, _ = _kalman_filter_2state(
             a, b, delta, observation_noise
         )

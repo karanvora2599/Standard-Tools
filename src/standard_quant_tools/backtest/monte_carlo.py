@@ -9,6 +9,17 @@ from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = True
+except ImportError:
+    pass
+
 
 def simulate_forward_paths(
     returns: pd.Series,
@@ -40,7 +51,13 @@ def simulate_forward_paths(
         n_simulations: Number of independent simulated paths.
         block_size: Length of each resampled block, in bars.
         initial_capital: Starting capital for every simulated path.
-        seed: RNG seed for reproducibility.
+        seed: RNG seed for reproducibility. Reproducibility is only
+            guaranteed WITHIN one backend: if the compiled `_sqt_core`
+            extension is present, the same seed produces different
+            concrete numbers than the pure-Python fallback would (the C++
+            path uses its own RNG, not a reimplementation of numpy's
+            PCG64 bit stream) — repeat calls on the same machine/build are
+            still bit-identical for a given seed.
 
     Returns:
         Dict with terminal-distribution stats (terminal_median, terminal_p5,
@@ -65,19 +82,25 @@ def simulate_forward_paths(
     if block_size <= 0 or block_size > n:
         raise ValidationError(f"block_size must be in (0, {n}], got {block_size}")
 
-    rng = np.random.default_rng(seed)
     values = returns.to_numpy(dtype=float)
-    n_blocks = math.ceil(horizon_days / block_size)
-    max_start = n - block_size
 
-    # (n_simulations, horizon_days) matrix of simulated equity paths
-    paths = np.empty((n_simulations, horizon_days), dtype=float)
-    for i in range(n_simulations):
-        starts = rng.integers(0, max_start + 1, size=n_blocks)
-        resampled = np.concatenate([values[s : s + block_size] for s in starts])[
-            :horizon_days
-        ]
-        paths[i, :] = initial_capital * np.cumprod(1.0 + resampled)
+    if HAS_CPP and _cpp_core is not None:
+        paths = _cpp_core.simulate_forward_paths(
+            values, horizon_days, n_simulations, block_size, initial_capital, seed
+        )
+    else:
+        rng = np.random.default_rng(seed)
+        n_blocks = math.ceil(horizon_days / block_size)
+        max_start = n - block_size
+
+        # (n_simulations, horizon_days) matrix of simulated equity paths
+        paths = np.empty((n_simulations, horizon_days), dtype=float)
+        for i in range(n_simulations):
+            starts = rng.integers(0, max_start + 1, size=n_blocks)
+            resampled = np.concatenate([values[s : s + block_size] for s in starts])[
+                :horizon_days
+            ]
+            paths[i, :] = initial_capital * np.cumprod(1.0 + resampled)
 
     terminal = paths[:, -1]
     terminal_returns = terminal / initial_capital - 1.0

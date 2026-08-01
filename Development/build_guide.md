@@ -290,30 +290,42 @@ Standard Tools/
 │           ├── include/sqt/
 │           │   ├── hurst.hpp                ← Hurst exponent API
 │           │   ├── indicators.hpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic API
-│           │   ├── cointegration.hpp        ← OLS / ADF / Engle-Granger API
+│           │   ├── cointegration.hpp        ← OLS / ADF / Engle-Granger / Kalman (1-state, 2-state) API
 │           │   ├── backtest.hpp             ← run_strategy / batch_run_strategy kernel API
-│           │   └── rolling_regression.hpp   ← rolling_beta / rolling_factor_loadings API
+│           │   ├── rolling_regression.hpp   ← rolling_beta / rolling_factor_loadings API
+│           │   ├── monte_carlo.hpp          ← simulate_forward_paths (moving-block bootstrap) API
+│           │   ├── garch.hpp                ← GARCH(1,1) variance recursion API
+│           │   └── signal_state_machines.hpp ← Donchian / VWAP-reversion signal hysteresis API
 │           ├── src/
 │           │   ├── hurst.cpp                ← Hurst implementation
 │           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic implementation
-│           │   ├── cointegration.cpp        ← OLS / ADF / cointegration implementation
+│           │   ├── cointegration.cpp        ← OLS / ADF / cointegration / Kalman filter implementation
 │           │   ├── backtest.cpp             ← backtest + batch grid kernel implementation
-│           │   └── rolling_regression.cpp   ← incremental rolling beta / factor loadings implementation
+│           │   ├── rolling_regression.cpp   ← incremental rolling beta / factor loadings implementation
+│           │   ├── monte_carlo.cpp          ← moving-block bootstrap, optional OpenMP parallel loop
+│           │   ├── garch.cpp                ← GARCH(1,1) variance recursion implementation
+│           │   └── signal_state_machines.cpp ← Donchian / VWAP-reversion hysteresis implementation
 │           └── bindings/
 │               └── bindings.cpp             ← pybind11 module definition (all features)
 └── tests/
     ├── test_cpp_hurst.py                    ← Python integration tests (Hurst)
     ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR/ATR)
     ├── test_cpp_new_indicators.py           ← Python integration tests (Bollinger/Stochastic)
-    ├── test_cpp_cointegration.py            ← Python integration tests (cointegration+OLS)
+    ├── test_cpp_cointegration.py            ← Python integration tests (cointegration+OLS+Kalman)
     ├── test_cpp_backtest.py                 ← Python integration tests (backtest + batch kernel)
     ├── test_cpp_regression.py               ← Python integration tests (rolling beta/factor loadings)
+    ├── test_cpp_monte_carlo.py              ← Python integration tests (Monte Carlo, statistical parity only)
+    ├── test_cpp_garch.py                    ← Python integration tests (GARCH(1,1) recursion)
+    ├── test_cpp_signals.py                  ← Python integration tests (Donchian/VWAP-reversion signals)
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
         ├── test_hurst.cpp                   ← 17 C++ unit tests (no framework needed)
         ├── test_indicators.cpp              ← 24 C++ unit tests
-        ├── test_cointegration.cpp           ← 18 C++ unit tests
+        ├── test_cointegration.cpp           ← 25 C++ unit tests (incl. Kalman 1-state/2-state)
         ├── test_backtest.cpp                ← 17 C++ unit tests
+        ├── test_monte_carlo.cpp             ← 10 C++ unit tests (incl. thread-count independence)
+        ├── test_garch.cpp                   ← 6 C++ unit tests
+        ├── test_signals.cpp                 ← 11 C++ unit tests
         ├── bench_hurst.cpp                  ← Hurst timing benchmark (run manually)
         └── bench_backtest.cpp               ← Backtest kernel timing benchmark (run manually)
 ```
@@ -337,6 +349,32 @@ Standard Tools/
 | Batch backtest grid kernel (`batch_run_strategy` — returns, equity, all 6 metrics, trade stats) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
 | Rolling beta (incremental sum updates) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/regression.py` |
 | Rolling factor loadings (incremental Cholesky) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
+| Monte Carlo forward simulation (moving-block bootstrap, optional OpenMP) | `monte_carlo.hpp` | `monte_carlo.cpp` | `backtest/monte_carlo.py` |
+| GARCH(1,1) conditional variance recursion | `garch.hpp` | `garch.cpp` | `analysis/garch.py` |
+| Kalman filter, 1-state and 2-state (time-varying hedge ratio) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
+| Donchian breakout / VWAP-reversion signal hysteresis | `signal_state_machines.hpp` | `signal_state_machines.cpp` | `backtest/strategies.py` |
+
+**Monte Carlo RNG note:** the C++ path's RNG (splitmix64-derived per-path
+seeding + `std::mt19937_64`) does **not** reproduce NumPy's PCG64 bit
+stream. `random_seed` is only reproducible *within* one backend — the same
+seed produces different concrete numbers depending on whether `_sqt_core`
+is built, though repeat calls on the same backend are bit-identical.
+`tests/test_cpp_monte_carlo.py` reflects this: same-backend reproducibility
+is asserted exactly, but cross-backend comparisons use loose statistical
+tolerance instead of the usual `atol=1e-10`.
+
+**Monte Carlo OpenMP note:** `simulate_forward_paths`'s per-simulation loop
+is optionally parallelized via `#pragma omp parallel for`, gated on
+`SQT_HAS_OPENMP` (defined only if CMake's `find_package(OpenMP)` succeeds —
+not `REQUIRED`, so a build without an OpenMP runtime, e.g. default Apple
+Clang, still succeeds and just runs the identical loop serially). Each
+simulated path is fully independent — its own per-thread RNG state derived
+from the base seed and path index, no shared mutable state, no locking —
+so this is safe by construction, not by careful scheduling. Verified by
+`test_result_independent_of_thread_count` in both
+`tests/cpp/test_monte_carlo.cpp` and `tests/test_cpp_monte_carlo.py`
+(same seed + inputs must give bit-identical output whether forced to 1
+thread or left unconstrained).
 
 **Trade-stat parity (`run_strategy` vs. `batch_run_strategy`) — native fix implemented 2026-07-24, awaiting CI verification:**
 `sqt::run_strategy`'s own trade-log logic in `backtest.cpp` used to record entry
@@ -399,9 +437,10 @@ if HAS_CPP and _cpp_core is not None:
 
 There are two cases:
 
-### Case A — New standalone module (e.g. `kalman_filter`, `garch`)
+### Case A — New standalone module (e.g. a new `.hpp`/`.cpp` pair)
 
-*Example: `backtest.cpp` — the `run_strategy` kernel was added this way.*
+*Examples: `backtest.cpp` (the `run_strategy` kernel), `monte_carlo.cpp`,
+`garch.cpp`, and `signal_state_machines.cpp` were all added this way.*
 
 1. `_cpp/include/sqt/my_feature.hpp` — C++ API declarations
 2. `_cpp/src/my_feature.cpp` — implementation
@@ -414,7 +453,9 @@ There are two cases:
 
 ### Case B — Extending an existing module (e.g. adding a function to `indicators.cpp`)
 
-*Example: Wilder's ATR was added to `indicators.hpp` / `indicators.cpp` without creating new files.*
+*Examples: Wilder's ATR was added to `indicators.hpp`/`indicators.cpp`, and
+the Kalman filter (1-state/2-state) was added to `cointegration.hpp`/
+`cointegration.cpp` — both without creating new files.*
 
 1. `_cpp/include/sqt/indicators.hpp` — add declaration
 2. `_cpp/src/indicators.cpp` — add implementation
@@ -451,3 +492,13 @@ needed across platforms.
 extension is built separately with cmake and lands in the same directory, so
 both are always importable together after a single `pip install -e .` +
 `cmake --build build --config Release`.
+
+**OpenMP (optional)**  
+`_cpp/CMakeLists.txt` calls `find_package(OpenMP)` (not `REQUIRED`) to
+parallelize `monte_carlo.cpp`'s `simulate_forward_paths` loop. Linux
+(`libgomp`, ships with `build-essential`/`gcc`) and Windows (MSVC's built-in
+`/openmp` support) pick this up automatically with no extra install step.
+Default Apple Clang on macOS ships no OpenMP support — the build still
+succeeds either way (`SQT_HAS_OPENMP` just won't be defined, and the loop
+runs its identical serial fallback). To get the parallel path on macOS,
+install LLVM's OpenMP runtime (`brew install libomp`) before configuring.

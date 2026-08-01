@@ -12,6 +12,7 @@ namespace {
 constexpr double kNaN  = std::numeric_limits<double>::quiet_NaN();
 constexpr double kInf  = std::numeric_limits<double>::infinity();
 constexpr int    kMaxK = 16;  // max regressors in ADF system (max_lag + 2)
+constexpr double kKalmanPriorVariance = 1.0e4;
 
 
 // ── Gaussian elimination (partial pivoting) ───────────────────────────────────
@@ -368,6 +369,106 @@ CointResult engle_granger(
     r.half_life = ar1_halflife(ols.residuals.data(), n);
 
     return r;
+}
+
+// ── Kalman filters (time-varying hedge ratio) ─────────────────────────────────
+//
+// Sequential predict/update recursion -- state at t depends on state at
+// t-1, so this can't be vectorized in plain numpy, same shape as the
+// already-ported RSI/PSAR indicators. Matches _kalman_filter_1state /
+// _kalman_filter_2state in analysis/cointegration.py exactly.
+
+Kalman1StateResult kalman_filter_1state(
+    const double* y, const double* x, std::size_t n,
+    double delta, double observation_noise)
+{
+    Kalman1StateResult result;
+    if (n == 0 || !(delta > 0.0 && delta < 1.0) || !(observation_noise > 0.0)) {
+        return result;
+    }
+
+    result.beta.resize(n);
+    result.gain.resize(n);
+    result.innovation.resize(n);
+
+    const double vw = delta / (1.0 - delta);
+    double beta_prev = 0.0;
+    double p_prev = kKalmanPriorVariance;
+
+    for (std::size_t t = 0; t < n; ++t) {
+        const double r = p_prev + vw;
+        const double y_hat = beta_prev * x[t];
+        const double q = r * x[t] * x[t] + observation_noise;
+        const double e = y[t] - y_hat;
+        const double k = r * x[t] / q;
+
+        const double beta_t = beta_prev + k * e;
+        const double p_t = r - k * x[t] * r;
+
+        result.beta[t] = beta_t;
+        result.gain[t] = k;
+        result.innovation[t] = e;
+
+        beta_prev = beta_t;
+        p_prev = p_t;
+    }
+
+    return result;
+}
+
+Kalman2StateResult kalman_filter_2state(
+    const double* y, const double* x, std::size_t n,
+    double delta, double observation_noise)
+{
+    Kalman2StateResult result;
+    if (n == 0 || !(delta > 0.0 && delta < 1.0) || !(observation_noise > 0.0)) {
+        return result;
+    }
+
+    result.alpha.resize(n);
+    result.beta.resize(n);
+    result.gain.resize(n);
+    result.innovation.resize(n);
+
+    const double vw = delta / (1.0 - delta);
+    double alpha_prev = 0.0;
+    double beta_prev = 0.0;
+    double p00 = kKalmanPriorVariance, p01 = 0.0, p11 = kKalmanPriorVariance;
+
+    for (std::size_t t = 0; t < n; ++t) {
+        const double r00 = p00 + vw;
+        const double r01 = p01;
+        const double r11 = p11 + vw;
+
+        const double xt = x[t];
+        const double q = r00 + 2.0 * r01 * xt + r11 * xt * xt + observation_noise;
+        const double e = y[t] - (alpha_prev + beta_prev * xt);
+
+        const double rx0 = r00 + r01 * xt;
+        const double rx1 = r01 + r11 * xt;
+        const double k0 = rx0 / q;
+        const double k1 = rx1 / q;
+
+        const double alpha_t = alpha_prev + k0 * e;
+        const double beta_t = beta_prev + k1 * e;
+
+        const double p00_t = r00 - k0 * rx0;
+        const double p01_t = r01 - k0 * rx1;
+        const double p11_t = r11 - k1 * rx1;
+
+        result.alpha[t] = alpha_t;
+        result.beta[t] = beta_t;
+        result.gain[t] = k1;
+        result.innovation[t] = e;
+
+        alpha_prev = alpha_t;
+        beta_prev = beta_t;
+        p00 = p00_t;
+        p01 = p01_t;
+        p11 = p11_t;
+    }
+
+    return result;
 }
 
 }  // namespace sqt

@@ -7,6 +7,9 @@
 #include "sqt/cointegration.hpp"
 #include "sqt/backtest.hpp"
 #include "sqt/rolling_regression.hpp"
+#include "sqt/monte_carlo.hpp"
+#include "sqt/garch.hpp"
+#include "sqt/signal_state_machines.hpp"
 
 namespace py = pybind11;
 
@@ -432,4 +435,175 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Returns a dict with keys: intercept, hedge_ratio, adf_statistic,\n"
         "optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct, half_life,\n"
         "n_obs, cointegrated.");
+
+    // ── Monte Carlo (moving-block bootstrap) ──────────────────────────────────
+
+    m.def(
+        "simulate_forward_paths",
+        [](Array1D values, int horizon_days, int n_simulations, int block_size,
+           double initial_capital, py::object seed) -> py::array_t<double>
+        {
+            const bool has_seed = !seed.is_none();
+            const unsigned long long seed_val =
+                has_seed ? seed.cast<unsigned long long>() : 0ULL;
+            const auto n = static_cast<std::size_t>(values.size());
+            auto result  = sqt::simulate_forward_paths(
+                values.data(), n, horizon_days, n_simulations, block_size,
+                initial_capital, seed_val, has_seed);
+
+            const auto expected =
+                static_cast<std::size_t>(n_simulations) * static_cast<std::size_t>(horizon_days);
+            if (result.size() != expected)
+                throw std::invalid_argument(
+                    "simulate_forward_paths: invalid input (check horizon_days, "
+                    "n_simulations, block_size in (0, len(values)], and "
+                    "initial_capital > 0)");
+
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n_simulations), static_cast<py::ssize_t>(horizon_days)});
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("values"),
+        py::arg("horizon_days"),
+        py::arg("n_simulations"),
+        py::arg("block_size"),
+        py::arg("initial_capital"),
+        py::arg("seed") = py::none(),
+        "Moving-block bootstrap Monte Carlo forward simulation.\n\n"
+        "Returns a 2-D float64 array of shape (n_simulations, horizon_days):\n"
+        "  out[i, t] = simulated equity of path i at bar t.\n\n"
+        "Each path is independently seeded (derived from `seed` and its own "
+        "path index) so this does NOT reproduce numpy's PCG64 bit stream -- "
+        "the same seed gives different concrete numbers than the pure-Python "
+        "fallback, though repeat calls with the same seed on this path are "
+        "bit-identical. Raises ValueError if horizon_days/n_simulations <= 0, "
+        "values is empty, block_size is not in (0, len(values)], or "
+        "initial_capital is non-positive.");
+
+    // ── GARCH(1,1) variance recursion ─────────────────────────────────────────
+
+    m.def(
+        "garch11_variance_recursion",
+        [](Array1D resid_sq, double omega, double alpha, double beta) -> py::array_t<double> {
+            const auto n = static_cast<std::size_t>(resid_sq.size());
+            auto result  = sqt::garch11_variance_recursion(
+                resid_sq.data(), n, omega, alpha, beta);
+            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("resid_sq"),
+        py::arg("omega"),
+        py::arg("alpha"),
+        py::arg("beta"),
+        "GARCH(1,1) conditional variance recursion.\n\n"
+        "sigma2[0] = max(mean(resid_sq), 1e-12); sigma2[t] = "
+        "max(omega + alpha*resid_sq[t-1] + beta*sigma2[t-1], 1e-12) for t >= 1.\n"
+        "Returns a 1-D float64 array of the same length as resid_sq.");
+
+    // ── Kalman filters (time-varying hedge ratio) ─────────────────────────────
+
+    m.def(
+        "kalman_filter_1state",
+        [](Array1D y, Array1D x, double delta, double observation_noise) -> py::dict {
+            if (y.size() != x.size())
+                throw std::invalid_argument("y and x must have equal length");
+            const auto n = static_cast<std::size_t>(y.size());
+            auto r = sqt::kalman_filter_1state(
+                y.data(), x.data(), n, delta, observation_noise);
+
+            py::array_t<double> beta(static_cast<py::ssize_t>(r.beta.size()));
+            std::copy(r.beta.begin(), r.beta.end(), beta.mutable_data());
+            py::array_t<double> gain(static_cast<py::ssize_t>(r.gain.size()));
+            std::copy(r.gain.begin(), r.gain.end(), gain.mutable_data());
+            py::array_t<double> innovation(static_cast<py::ssize_t>(r.innovation.size()));
+            std::copy(r.innovation.begin(), r.innovation.end(), innovation.mutable_data());
+
+            py::dict d;
+            d["beta"] = beta;
+            d["gain"] = gain;
+            d["innovation"] = innovation;
+            return d;
+        },
+        py::arg("y"),
+        py::arg("x"),
+        py::arg("delta"),
+        py::arg("observation_noise"),
+        "1-state (slope-only) Kalman filter for a time-varying hedge ratio.\n\n"
+        "Returns a dict with keys: beta, gain, innovation (each length n).\n"
+        "All-empty if delta is not in (0,1) or observation_noise <= 0.");
+
+    m.def(
+        "kalman_filter_2state",
+        [](Array1D y, Array1D x, double delta, double observation_noise) -> py::dict {
+            if (y.size() != x.size())
+                throw std::invalid_argument("y and x must have equal length");
+            const auto n = static_cast<std::size_t>(y.size());
+            auto r = sqt::kalman_filter_2state(
+                y.data(), x.data(), n, delta, observation_noise);
+
+            py::array_t<double> alpha(static_cast<py::ssize_t>(r.alpha.size()));
+            std::copy(r.alpha.begin(), r.alpha.end(), alpha.mutable_data());
+            py::array_t<double> beta(static_cast<py::ssize_t>(r.beta.size()));
+            std::copy(r.beta.begin(), r.beta.end(), beta.mutable_data());
+            py::array_t<double> gain(static_cast<py::ssize_t>(r.gain.size()));
+            std::copy(r.gain.begin(), r.gain.end(), gain.mutable_data());
+            py::array_t<double> innovation(static_cast<py::ssize_t>(r.innovation.size()));
+            std::copy(r.innovation.begin(), r.innovation.end(), innovation.mutable_data());
+
+            py::dict d;
+            d["alpha"] = alpha;
+            d["beta"] = beta;
+            d["gain"] = gain;
+            d["innovation"] = innovation;
+            return d;
+        },
+        py::arg("y"),
+        py::arg("x"),
+        py::arg("delta"),
+        py::arg("observation_noise"),
+        "2-state (intercept + slope) Kalman filter for a time-varying hedge ratio.\n\n"
+        "Returns a dict with keys: alpha, beta, gain, innovation (each length n).\n"
+        "All-empty if delta is not in (0,1) or observation_noise <= 0.");
+
+    // ── Signal state machines (Donchian / VWAP-reversion hysteresis) ──────────
+
+    m.def(
+        "donchian_state_machine",
+        [](Array1D close, Array1D entry_max, Array1D exit_min) -> py::array_t<double> {
+            if (close.size() != entry_max.size() || close.size() != exit_min.size())
+                throw std::invalid_argument("close, entry_max, exit_min must have equal length");
+            const auto n = static_cast<std::size_t>(close.size());
+            auto result  = sqt::donchian_state_machine(
+                close.data(), entry_max.data(), exit_min.data(), n);
+            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("close"),
+        py::arg("entry_max"),
+        py::arg("exit_min"),
+        "Donchian breakout entry/exit hysteresis: 1.0=long, 0.0=flat.\n\n"
+        "A NaN in entry_max/exit_min (rolling warmup) leaves output at 0.0\n"
+        "for that bar without updating the carried position state.");
+
+    m.def(
+        "vwap_reversion_state_machine",
+        [](Array1D close, Array1D vwap, double entry_threshold) -> py::array_t<double> {
+            if (close.size() != vwap.size())
+                throw std::invalid_argument("close and vwap must have equal length");
+            const auto n = static_cast<std::size_t>(close.size());
+            auto result  = sqt::vwap_reversion_state_machine(
+                close.data(), vwap.data(), entry_threshold, n);
+            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
+            std::copy(result.begin(), result.end(), out.mutable_data());
+            return out;
+        },
+        py::arg("close"),
+        py::arg("vwap"),
+        py::arg("entry_threshold"),
+        "VWAP mean-reversion entry/exit hysteresis: 1.0=long, 0.0=flat.\n\n"
+        "A NaN in vwap (rolling warmup) leaves output at 0.0 for that bar\n"
+        "without updating the carried position state.");
 }

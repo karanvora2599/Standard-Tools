@@ -280,6 +280,88 @@ static void test_eg_half_life_positive() {
 }
 
 
+// ── Tests: kalman_filter_1state / kalman_filter_2state ─────────────────────────
+
+static void test_kalman_1state_length() {
+    const int n = 200;
+    auto x = random_walk(n, 71);
+    auto noise = lcg_noise(n, 73, 0.1);
+    std::vector<double> y(n);
+    for (int i = 0; i < n; ++i) y[i] = 1.2 * x[i] + noise[i];
+
+    auto r = sqt::kalman_filter_1state(y.data(), x.data(), n, 1e-4, 1e-3);
+    CHECK(r.beta.size() == static_cast<std::size_t>(n));
+    CHECK(r.gain.size() == static_cast<std::size_t>(n));
+    CHECK(r.innovation.size() == static_cast<std::size_t>(n));
+}
+
+static void test_kalman_1state_empty_on_bad_delta() {
+    std::vector<double> y = {1.0, 2.0, 3.0};
+    std::vector<double> x = {1.0, 2.0, 3.0};
+    for (double bad_delta : {0.0, 1.0, -0.1, 1.5}) {
+        auto r = sqt::kalman_filter_1state(y.data(), x.data(), 3, bad_delta, 1e-3);
+        CHECK(r.beta.empty());
+        CHECK(r.gain.empty());
+        CHECK(r.innovation.empty());
+    }
+}
+
+static void test_kalman_1state_empty_on_bad_observation_noise() {
+    std::vector<double> y = {1.0, 2.0, 3.0};
+    std::vector<double> x = {1.0, 2.0, 3.0};
+    for (double bad_noise : {0.0, -1.0}) {
+        auto r = sqt::kalman_filter_1state(y.data(), x.data(), 3, 1e-4, bad_noise);
+        CHECK(r.beta.empty());
+    }
+}
+
+static void test_kalman_1state_tracks_true_beta() {
+    // y = 1.5*x + small noise -- with a large observation_noise (slow to
+    // adapt) but enough bars, beta should converge toward 1.5, not stay
+    // at its 0.0 prior.
+    const int n = 500;
+    auto x = random_walk(n, 81);
+    auto noise = lcg_noise(n, 83, 0.05);
+    std::vector<double> y(n);
+    for (int i = 0; i < n; ++i) y[i] = 1.5 * x[i] + noise[i];
+
+    auto r = sqt::kalman_filter_1state(y.data(), x.data(), n, 1e-3, 1e-2);
+    CHECK_NEAR(r.beta.back(), 1.5, 0.2);
+}
+
+static void test_kalman_2state_length() {
+    const int n = 200;
+    auto x = random_walk(n, 91);
+    auto noise = lcg_noise(n, 93, 0.1);
+    std::vector<double> y(n);
+    for (int i = 0; i < n; ++i) y[i] = 3.0 + 1.2 * x[i] + noise[i];
+
+    auto r = sqt::kalman_filter_2state(y.data(), x.data(), n, 1e-4, 1e-3);
+    CHECK(r.alpha.size() == static_cast<std::size_t>(n));
+    CHECK(r.beta.size() == static_cast<std::size_t>(n));
+    CHECK(r.gain.size() == static_cast<std::size_t>(n));
+    CHECK(r.innovation.size() == static_cast<std::size_t>(n));
+}
+
+static void test_kalman_2state_empty_on_zero_n() {
+    auto r = sqt::kalman_filter_2state(nullptr, nullptr, 0, 1e-4, 1e-3);
+    CHECK(r.alpha.empty());
+    CHECK(r.beta.empty());
+}
+
+static void test_kalman_2state_tracks_true_alpha_beta() {
+    const int n = 500;
+    auto x = random_walk(n, 101);
+    auto noise = lcg_noise(n, 103, 0.05);
+    std::vector<double> y(n);
+    for (int i = 0; i < n; ++i) y[i] = 2.0 + 1.4 * x[i] + noise[i];
+
+    auto r = sqt::kalman_filter_2state(y.data(), x.data(), n, 1e-3, 1e-2);
+    CHECK_NEAR(r.alpha.back(), 2.0, 1.0);
+    CHECK_NEAR(r.beta.back(), 1.4, 0.2);
+}
+
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -306,6 +388,15 @@ int main() {
     test_eg_intercept_finite();
     test_eg_n_obs_matches_input();
     test_eg_half_life_positive();
+
+    // kalman_filter_1state / kalman_filter_2state
+    test_kalman_1state_length();
+    test_kalman_1state_empty_on_bad_delta();
+    test_kalman_1state_empty_on_bad_observation_noise();
+    test_kalman_1state_tracks_true_beta();
+    test_kalman_2state_length();
+    test_kalman_2state_empty_on_zero_n();
+    test_kalman_2state_tracks_true_alpha_beta();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

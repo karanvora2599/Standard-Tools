@@ -13,6 +13,9 @@ set(SQT_SOURCES
     src/cointegration.cpp
     src/backtest.cpp
     src/rolling_regression.cpp
+    src/monte_carlo.cpp
+    src/garch.cpp
+    src/signal_state_machines.cpp
     bindings/bindings.cpp
 )
 
@@ -51,6 +54,23 @@ else()
         -Wall
         -Wextra
     )
+endif()
+
+# ── OpenMP (optional) ─────────────────────────────────────────────────────────
+# Only used today by monte_carlo.cpp's simulate_forward_paths, where each
+# simulated path is independent (no shared mutable state) so the loop can
+# run on multiple threads with no locking. Not REQUIRED: a build without an
+# OpenMP runtime (e.g. default Apple Clang, which ships no OpenMP support)
+# must still succeed — SQT_HAS_OPENMP simply won't be defined, and the
+# affected loop falls back to the identical serial code path, wrapped in
+# #ifdef SQT_HAS_OPENMP / #endif at the call site.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(_sqt_core PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(_sqt_core PRIVATE SQT_HAS_OPENMP)
+    message(STATUS "OpenMP:   found — simulate_forward_paths will run in parallel")
+else()
+    message(STATUS "OpenMP:   not found — simulate_forward_paths will run serially (still correct, just single-threaded)")
 endif()
 
 # ── Target properties ─────────────────────────────────────────────────────────

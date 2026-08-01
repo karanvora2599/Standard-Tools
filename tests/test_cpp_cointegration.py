@@ -30,9 +30,12 @@ requires_cpp = pytest.mark.skipif(not HAS_CPP, reason="_sqt_core not built")
 
 from standard_quant_tools.analysis.cointegration import HAS_CPP as COINT_HAS_CPP
 from standard_quant_tools.analysis.cointegration import (
+    _kalman_filter_1state,
+    _kalman_filter_2state,
     cointegration_test,
     compute_spread,
     half_life,
+    kalman_hedge_ratio,
 )
 from standard_quant_tools.analysis.regression import HAS_CPP as REG_HAS_CPP
 from standard_quant_tools.analysis.regression import (
@@ -440,3 +443,101 @@ class TestCppOls2Direct:
         spread = compute_spread(y0, y1)
         assert len(spread) == 300
         assert abs(spread.mean()) < 0.5  # spread near zero for cointegrated pair
+
+
+class TestCppKalman1State:
+    """Direct calls to _sqt_core.kalman_filter_1state vs. the numba
+    reference, at the standard atol=1e-10 precedent."""
+
+    @requires_cpp
+    def test_matches_numba_reference(self):
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal(300).cumsum()
+        y = 1.3 * x + rng.standard_normal(300) * 0.2
+
+        cpp_result = _cpp.kalman_filter_1state(y, x, 1e-4, 1e-3)
+        numba_beta, numba_gain, numba_innov = _kalman_filter_1state(y, x, 1e-4, 1e-3)
+
+        np.testing.assert_allclose(cpp_result["beta"], numba_beta, atol=1e-10)
+        np.testing.assert_allclose(cpp_result["gain"], numba_gain, atol=1e-10)
+        np.testing.assert_allclose(cpp_result["innovation"], numba_innov, atol=1e-10)
+
+    @requires_cpp
+    def test_empty_on_bad_delta(self):
+        y = np.array([1.0, 2.0, 3.0])
+        x = np.array([1.0, 2.0, 3.0])
+        for bad_delta in (0.0, 1.0, -0.1, 1.5):
+            r = _cpp.kalman_filter_1state(y, x, bad_delta, 1e-3)
+            assert len(r["beta"]) == 0
+
+    @requires_cpp
+    def test_empty_on_bad_observation_noise(self):
+        y = np.array([1.0, 2.0, 3.0])
+        x = np.array([1.0, 2.0, 3.0])
+        for bad_noise in (0.0, -1.0):
+            r = _cpp.kalman_filter_1state(y, x, 1e-4, bad_noise)
+            assert len(r["beta"]) == 0
+
+
+class TestCppKalman2State:
+    """Direct calls to _sqt_core.kalman_filter_2state vs. the numba
+    reference, at the standard atol=1e-10 precedent."""
+
+    @requires_cpp
+    def test_matches_numba_reference(self):
+        rng = np.random.default_rng(1)
+        x = rng.standard_normal(300).cumsum()
+        y = 5.0 + 1.3 * x + rng.standard_normal(300) * 0.2
+
+        cpp_result = _cpp.kalman_filter_2state(y, x, 1e-4, 1e-3)
+        numba_alpha, numba_beta, numba_gain, numba_innov = _kalman_filter_2state(
+            y, x, 1e-4, 1e-3
+        )
+
+        np.testing.assert_allclose(cpp_result["alpha"], numba_alpha, atol=1e-10)
+        np.testing.assert_allclose(cpp_result["beta"], numba_beta, atol=1e-10)
+        np.testing.assert_allclose(cpp_result["gain"], numba_gain, atol=1e-10)
+        np.testing.assert_allclose(cpp_result["innovation"], numba_innov, atol=1e-10)
+
+
+class TestKalmanHedgeRatioWrapper:
+    """Confirms kalman_hedge_ratio()'s public DataFrame output is column-
+    for-column identical whether _sqt_core is built or not."""
+
+    @requires_cpp
+    def test_output_identical_with_and_without_cpp_2state(self):
+        import standard_quant_tools.analysis.cointegration as coint_module
+
+        rng = np.random.default_rng(2)
+        idx = pd.date_range("2020-01-01", periods=250)
+        b = pd.Series(rng.standard_normal(250).cumsum() + 100, index=idx)
+        a = pd.Series(1.2 * b.values + rng.standard_normal(250) * 0.3, index=idx)
+
+        result_cpp = kalman_hedge_ratio(a, b, include_intercept=True)
+
+        coint_module.HAS_CPP = False
+        try:
+            result_numba = kalman_hedge_ratio(a, b, include_intercept=True)
+        finally:
+            coint_module.HAS_CPP = True
+
+        pd.testing.assert_frame_equal(result_cpp, result_numba, atol=1e-10)
+
+    @requires_cpp
+    def test_output_identical_with_and_without_cpp_1state(self):
+        import standard_quant_tools.analysis.cointegration as coint_module
+
+        rng = np.random.default_rng(3)
+        idx = pd.date_range("2020-01-01", periods=250)
+        b = pd.Series(rng.standard_normal(250).cumsum() + 100, index=idx)
+        a = pd.Series(1.2 * b.values + rng.standard_normal(250) * 0.3, index=idx)
+
+        result_cpp = kalman_hedge_ratio(a, b, include_intercept=False)
+
+        coint_module.HAS_CPP = False
+        try:
+            result_numba = kalman_hedge_ratio(a, b, include_intercept=False)
+        finally:
+            coint_module.HAS_CPP = True
+
+        pd.testing.assert_frame_equal(result_cpp, result_numba, atol=1e-10)

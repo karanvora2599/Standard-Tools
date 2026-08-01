@@ -99,6 +99,86 @@ endif()
 
 add_test(NAME cpp_backtest COMMAND test_backtest)
 
+add_library(sqt_monte_carlo_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/monte_carlo.cpp
+)
+target_include_directories(sqt_monte_carlo_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_monte_carlo_impl PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(sqt_monte_carlo_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(sqt_monte_carlo_impl PRIVATE -O2 -Wall -Wextra)
+endif()
+# Optional, mirrors src/standard_quant_tools/_cpp/CMakeLists.txt: without an
+# OpenMP runtime, SQT_HAS_OPENMP stays undefined and simulate_forward_paths
+# just runs its identical serial fallback -- still correct either way.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(sqt_monte_carlo_impl PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(sqt_monte_carlo_impl PUBLIC SQT_HAS_OPENMP)
+endif()
+
+add_executable(test_monte_carlo test_monte_carlo.cpp)
+target_link_libraries(test_monte_carlo PRIVATE sqt_monte_carlo_impl)
+target_compile_features(test_monte_carlo PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_monte_carlo PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(test_monte_carlo PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_monte_carlo COMMAND test_monte_carlo)
+
+add_library(sqt_garch_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/garch.cpp
+)
+target_include_directories(sqt_garch_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_garch_impl PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(sqt_garch_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(sqt_garch_impl PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_executable(test_garch test_garch.cpp)
+target_link_libraries(test_garch PRIVATE sqt_garch_impl)
+target_compile_features(test_garch PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_garch PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(test_garch PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_garch COMMAND test_garch)
+
+add_library(sqt_signals_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/signal_state_machines.cpp
+)
+target_include_directories(sqt_signals_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_signals_impl PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(sqt_signals_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(sqt_signals_impl PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_executable(test_signals test_signals.cpp)
+target_link_libraries(test_signals PRIVATE sqt_signals_impl)
+target_compile_features(test_signals PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_signals PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(test_signals PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_signals COMMAND test_signals)
+
 
 # ── Performance benchmarks ────────────────────────────────────────────────────
 # Not CTest tests — run manually to inspect timing output:

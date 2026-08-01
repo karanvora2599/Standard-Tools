@@ -40,6 +40,19 @@ struct CointResult {
     bool cointegrated;     // p_value < 0.05
 };
 
+struct Kalman1StateResult {
+    std::vector<double> beta;        // length n
+    std::vector<double> gain;        // length n
+    std::vector<double> innovation;  // length n
+};
+
+struct Kalman2StateResult {
+    std::vector<double> alpha;       // length n
+    std::vector<double> beta;        // length n
+    std::vector<double> gain;        // length n (slope's gain)
+    std::vector<double> innovation;  // length n
+};
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -82,5 +95,45 @@ AdfResult adf_test(const double* y, std::size_t n,
 CointResult engle_granger(
     const double* y0, const double* y1, std::size_t n,
     int max_lag = -1, bool use_aic = true);
+
+/**
+ * 1-state (slope-only) Kalman filter for a time-varying hedge ratio.
+ *
+ * Models y[t] = beta[t]*x[t] + noise, with beta[t] following a random walk
+ * of process variance delta/(1-delta). Matches _kalman_filter_1state in
+ * analysis/cointegration.py exactly (same prior variance constant, same
+ * predict/update recursion).
+ *
+ * @param y, x                Aligned observation arrays, length n.
+ * @param n                   Number of observations.
+ * @param delta               Random-walk tuning knob; must be in (0, 1).
+ * @param observation_noise   Observation noise variance; must be > 0.
+ * @returns  All-empty result if n==0, delta not in (0,1), or
+ *           observation_noise<=0 -- defense-in-depth, since
+ *           kalman_hedge_ratio() already validates both before calling
+ *           either Kalman path.
+ */
+Kalman1StateResult kalman_filter_1state(
+    const double* y, const double* x, std::size_t n,
+    double delta, double observation_noise);
+
+/**
+ * 2-state (intercept + slope) Kalman filter for a time-varying hedge ratio.
+ *
+ * Models y[t] = alpha[t] + beta[t]*x[t] + noise, with alpha[t]/beta[t]
+ * following independent random walks. Matches _kalman_filter_2state in
+ * analysis/cointegration.py exactly.
+ *
+ * @param y, x                Aligned observation arrays, length n.
+ * @param n                   Number of observations.
+ * @param delta               Random-walk tuning knob; must be in (0, 1).
+ * @param observation_noise   Observation noise variance; must be > 0.
+ * @returns  All-empty result if n==0, delta not in (0,1), or
+ *           observation_noise<=0 -- same defense-in-depth as
+ *           kalman_filter_1state.
+ */
+Kalman2StateResult kalman_filter_2state(
+    const double* y, const double* x, std::size_t n,
+    double delta, double observation_noise);
 
 }  // namespace sqt
