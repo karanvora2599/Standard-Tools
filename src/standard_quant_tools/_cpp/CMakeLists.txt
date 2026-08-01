@@ -29,17 +29,36 @@ target_compile_features(_sqt_core PRIVATE cxx_std_17)
 
 target_include_directories(_sqt_core PRIVATE include)
 
+# ── Native-arch optimization (opt-in) ─────────────────────────────────────────
+# -march=native / /arch:AVX2 tune codegen for the exact CPU that compiles the
+# extension -- the resulting binary is not guaranteed to run on a different/
+# older CPU lacking those ISA extensions (an "illegal instruction" crash, not
+# a graceful fallback). Defaulting this off means a build produced on one
+# machine (a CI runner, a shared dev image, a wheel destined for another
+# user's laptop) doesn't silently bake in an assumption about the build
+# machine's own CPU. Opt in explicitly for local development if you want the
+# extra speed -- this session's own measured benchmarks in
+# Development/performance_insights.md were built with it on.
+option(SQT_NATIVE_ARCH
+    "Optimize for the host CPU's instruction set (not portable to a different/older CPU)"
+    OFF)
+if(SQT_NATIVE_ARCH)
+    message(STATUS "Native arch: ON  — /arch:AVX2 or -march=native (not portable off this CPU)")
+else()
+    message(STATUS "Native arch: OFF — portable codegen (pass -DSQT_NATIVE_ARCH=ON for local speed)")
+endif()
+
 # ── Compiler flags ────────────────────────────────────────────────────────────
-# Release/RelWithDebInfo: full optimisation + SIMD tuned for the build machine.
+# Release/RelWithDebInfo: full optimisation, +SIMD tuned for the build
+#   machine only if SQT_NATIVE_ARCH is on.
 # Debug: no optimisation + debug info so the extension is debuggable with
-#   gdb / lldb / WinDbg.  Remove -march=native / /arch:AVX2 for distributable
-#   wheels — see build_guide.md Section 9.
+#   gdb / lldb / WinDbg.
 
 if(MSVC)
     target_compile_options(_sqt_core PRIVATE
         # Optimisation — config-specific
         $<$<CONFIG:Release,RelWithDebInfo>:/O2>
-        $<$<CONFIG:Release>:/arch:AVX2>   # SIMD; drop for older-hardware targets
+        $<$<AND:$<CONFIG:Release>,$<BOOL:${SQT_NATIVE_ARCH}>>:/arch:AVX2>
         $<$<CONFIG:Debug>:/Od /Zi>
         # Warnings
         /W3
@@ -49,7 +68,8 @@ if(MSVC)
 else()
     # Covers GCC on Linux, Apple Clang on macOS, and Clang everywhere
     target_compile_options(_sqt_core PRIVATE
-        $<$<CONFIG:Release,RelWithDebInfo>:-O3 -march=native>
+        $<$<CONFIG:Release,RelWithDebInfo>:-O3>
+        $<$<AND:$<CONFIG:Release,RelWithDebInfo>,$<BOOL:${SQT_NATIVE_ARCH}>>:-march=native>
         $<$<CONFIG:Debug>:-O0 -g>
         -Wall
         -Wextra

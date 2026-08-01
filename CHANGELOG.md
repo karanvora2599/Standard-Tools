@@ -404,6 +404,18 @@ bump, consistent with SemVer's pre-1.0 clause.
   scenario at once), each thread's result checked against its own
   single-threaded reference rather than attempting to prove GIL-release
   timing from Python.
+- **C++ hardening, Tier 3 item 10:** `-march=native`/`/arch:AVX2` (tuning
+  codegen for the exact build machine's CPU, not portable to a
+  different/older one) is now opt-in via a new `SQT_NATIVE_ARCH` CMake
+  option (default `OFF`) instead of always-on in Release builds — applies to
+  both `_cpp/CMakeLists.txt` (the actual extension) and `tests/cpp/
+  CMakeLists.txt`'s `bench_hurst`/`bench_backtest` targets. A default build
+  (what CI and a fresh clone both use) now produces portable codegen; pass
+  `-DSQT_NATIVE_ARCH=ON` for the extra local-dev speed this session's own
+  measured benchmarks in `performance_insights.md` were built with (no
+  re-benchmarking needed — the numbers already reflect `SQT_NATIVE_ARCH=ON`).
+  Verified both configurations build clean and pass the full native ctest
+  suite + Python suite.
 
 ### Fixed
 

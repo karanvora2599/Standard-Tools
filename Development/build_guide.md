@@ -517,12 +517,20 @@ cmake --build build --config Release
 
 ## 9. Notes
 
-**`-march=native` / `/arch:AVX2`**  
-Both flags tune the binary for the CPU of the build machine. They are ideal
-for local development but produce a binary that may crash on machines without
-the same SIMD support. For distributable wheels (PyPI), replace with:
-- Linux/macOS: `-march=x86-64-v2` (SSE4.2, widely supported) or omit for baseline
-- Windows: `/arch:SSE2` or omit `/arch:AVX2`
+**`-march=native` / `/arch:AVX2` (opt-in via `SQT_NATIVE_ARCH`)**  
+Both flags tune the binary for the exact CPU of the build machine — fine for
+local development, but the resulting binary can crash with an illegal-
+instruction fault on a different/older CPU lacking those ISA extensions. This
+is why the default build (`cmake -B build ...` with no extra flags, including
+what CI uses) does **not** enable them: `SQT_NATIVE_ARCH` defaults to `OFF`,
+so a fresh clone always produces portable codegen. Opt in explicitly for
+local speed:
+```
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_NATIVE_ARCH=ON
+```
+This session's own measured benchmarks in `Development/performance_insights.md`
+were built with `SQT_NATIVE_ARCH=ON`. For a distributable wheel (PyPI), leave
+it off (the default) rather than substituting a manual baseline flag.
 
 **Extension suffix**  
 Python automatically picks up the correct suffix

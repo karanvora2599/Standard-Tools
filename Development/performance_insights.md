@@ -379,7 +379,10 @@ extension; the tradeoff is that `pip install` alone does not build
 required. `.github/workflows/build-cpp.yml` runs that same two-step sequence
 in CI.
 
-A `CMakeLists.txt` at the root handles compiler flags (`-O3 -march=native` on GCC/Clang, `/O2 /arch:AVX2` on MSVC) and links the extension.
+A `CMakeLists.txt` at the root handles compiler flags (`-O3` on GCC/Clang,
+`/O2` on MSVC by default; add `-march=native`/`/arch:AVX2` by passing
+`-DSQT_NATIVE_ARCH=ON` — off by default since that flag isn't portable to a
+different/older CPU, see `build_guide.md` Section 9) and links the extension.
 
 ---
 

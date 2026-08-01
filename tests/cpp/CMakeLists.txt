@@ -189,20 +189,37 @@ add_test(NAME cpp_signals COMMAND test_signals)
 #   Linux / macOS     : ./build/tests/cpp/bench_hurst
 #                       ./build/tests/cpp/bench_backtest
 
+# SQT_NATIVE_ARCH: defined and opt-in (default OFF) in
+# src/standard_quant_tools/_cpp/CMakeLists.txt, processed before this file --
+# same portability rationale applies here (a bench binary built with
+# -march=native/AVX2 baked in isn't guaranteed to run on a different CPU).
+
 add_executable(bench_hurst bench_hurst.cpp)
 target_link_libraries(bench_hurst PRIVATE sqt_hurst_impl)
 target_compile_features(bench_hurst PRIVATE cxx_std_17)
 if(MSVC)
-    target_compile_options(bench_hurst PRIVATE /O2 /arch:AVX2 /W3 /wd4244 /wd4267)
+    target_compile_options(bench_hurst PRIVATE /O2 /W3 /wd4244 /wd4267)
+    if(SQT_NATIVE_ARCH)
+        target_compile_options(bench_hurst PRIVATE /arch:AVX2)
+    endif()
 else()
-    target_compile_options(bench_hurst PRIVATE -O3 -march=native -Wall -Wextra)
+    target_compile_options(bench_hurst PRIVATE -O3 -Wall -Wextra)
+    if(SQT_NATIVE_ARCH)
+        target_compile_options(bench_hurst PRIVATE -march=native)
+    endif()
 endif()
 
 add_executable(bench_backtest bench_backtest.cpp)
 target_link_libraries(bench_backtest PRIVATE sqt_backtest_impl)
 target_compile_features(bench_backtest PRIVATE cxx_std_17)
 if(MSVC)
-    target_compile_options(bench_backtest PRIVATE /O2 /arch:AVX2 /W3 /wd4244 /wd4267)
+    target_compile_options(bench_backtest PRIVATE /O2 /W3 /wd4244 /wd4267)
+    if(SQT_NATIVE_ARCH)
+        target_compile_options(bench_backtest PRIVATE /arch:AVX2)
+    endif()
 else()
-    target_compile_options(bench_backtest PRIVATE -O3 -march=native -Wall -Wextra)
+    target_compile_options(bench_backtest PRIVATE -O3 -Wall -Wextra)
+    if(SQT_NATIVE_ARCH)
+        target_compile_options(bench_backtest PRIVATE -march=native)
+    endif()
 endif()
