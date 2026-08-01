@@ -1,10 +1,14 @@
 import logging
-from typing import Any, Dict, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._compat import to_clean_numpy
 from standard_quant_tools.error import ValidationError
+
+if TYPE_CHECKING:
+    import polars as pl
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +121,7 @@ def _ols_slope_r2(log_n: np.ndarray, log_f: np.ndarray):
 
 
 def hurst_exponent(
-    series: pd.Series,
+    series: Union[pd.Series, "pl.Series"],
     method: Literal["dfa", "rs"] = "dfa",
     min_window: int = 10,
     max_window: Optional[int] = None,
@@ -134,7 +138,9 @@ def hurst_exponent(
 
     Parameters
     ----------
-    series     : pd.Series  Return series (NOT price levels).
+    series     : pd.Series or polars.Series (see Documentation/14_polars_support.md
+                 for the full list of what accepts Polars input today) — Return
+                 series (NOT price levels).
     method     : "dfa" (default) or "rs".
     min_window : Smallest sub-window (default 10).
     max_window : Largest sub-window; None = auto (n//4 for DFA, n//2 for R/S).
@@ -155,7 +161,7 @@ def hurst_exponent(
     if max_window is not None and max_window <= 0:
         raise ValidationError(f"max_window must be > 0, got {max_window}")
 
-    arr = series.dropna().to_numpy(dtype=float)
+    arr = to_clean_numpy(series, dtype=float)
     n = len(arr)
     path = "C++" if (HAS_CPP and _cpp is not None) else "python"
     logger.debug(

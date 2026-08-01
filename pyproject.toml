@@ -71,6 +71,9 @@ bloomberg = [
 signing = [
     "cryptography>=42.0.0"
 ]
+polars = [
+    "polars>=0.20.0"
+]
 
 [tool.black]
 line-length = 88

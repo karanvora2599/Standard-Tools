@@ -3,8 +3,8 @@ from functools import wraps
 from typing import Any, Callable
 
 import numpy as np
-import pandas as pd
 
+from ._compat import is_dataframe_like, is_empty, is_series_like
 from .error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,13 @@ def validate_dataframe(required_columns: list[str] = None):
     """
     Decorator to validate input DataFrame.
     Checks for empty DataFrame and missing columns.
+
+    Accepts a pandas or (when polars is installed) a polars DataFrame —
+    `is_dataframe_like` checks both, so a polars.DataFrame is actually
+    validated here rather than silently skipped (a bare
+    `isinstance(arg, pd.DataFrame)` check would never match a polars
+    object, letting an empty/malformed one straight through to fail with
+    a confusing error deep inside the wrapped function instead of here).
     """
 
     def decorator(func: Callable) -> Callable:
@@ -22,18 +29,18 @@ def validate_dataframe(required_columns: list[str] = None):
             # Find the DataFrame argument (usually the first one or named 'data'/'df')
             df = None
             for arg in args:
-                if isinstance(arg, pd.DataFrame):
+                if is_dataframe_like(arg):
                     df = arg
                     break
             if df is None:
                 # check kwargs
                 for key, value in kwargs.items():
-                    if isinstance(value, pd.DataFrame):
+                    if is_dataframe_like(value):
                         df = value
                         break
 
             if df is not None:
-                if df.empty:
+                if is_empty(df):
                     logger.warning(
                         "[validate_dataframe] %s rejected: empty DataFrame",
                         func.__name__,
@@ -64,14 +71,18 @@ def validate_dataframe(required_columns: list[str] = None):
 def validate_series(allow_empty: bool = False):
     """
     Decorator to validate input Series.
+
+    Accepts a pandas or (when polars is installed) a polars Series — see
+    validate_dataframe's docstring for why `is_series_like` (not a bare
+    `isinstance(arg, pd.Series)`) matters here.
     """
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
             for arg in args:
-                if isinstance(arg, pd.Series):
-                    if not allow_empty and arg.empty:
+                if is_series_like(arg):
+                    if not allow_empty and is_empty(arg):
                         logger.warning(
                             "[validate_series] %s rejected: empty Series", func.__name__
                         )
