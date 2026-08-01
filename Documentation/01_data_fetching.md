@@ -77,7 +77,7 @@ All ratio fields are `Optional[float]` — missing data returns `None` rather th
 
 - **TTL cache**: identical calls within 1 hour return a `.copy()` of the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that
 - **Retry**: up to 3 attempts, waiting 1s then 2s between attempts (exponential backoff, factor 2) on transient failures
-- **Cache key**: `(id(self), symbol, start_date, end_date, interval)` — `get_ohlcv` checks the session cache itself rather than via a `@cached()` decorator wrapping the whole method, so an audit record is written on every call, including a session-cache hit, not just on a live fetch. `id(self)` (not just the call args) keeps a fresh provider instance from transparently reusing another instance's cached result. It's not lock-guarded, so it isn't safe against races between concurrent threads hitting the same instance/args at once
+- **Cache key**: `(provider_name, instance_token, symbol, start_date, end_date, interval)` — `get_ohlcv` checks the session cache itself rather than via a `@cached()` decorator wrapping the whole method, so an audit record is written on every call, including a session-cache hit, not just on a live fetch. The per-instance token (a UUID, not `id(self)` — CPython can reuse a freed object's `id()`) keeps a fresh provider instance from transparently reusing another instance's cached result. The cache dict itself is guarded by a module-level lock (`data/_cache.py`), so concurrent threads hitting the same or different instances/args at once are safe — the lock only wraps the get/set, not the network fetch, so calls to different keys still run concurrently
 - **Copy-on-return**: every `get_ohlcv` call — session-cache hit, disk-cache hit, or live fetch — returns a fresh copy, so a caller mutating the result in place can't corrupt the cached object shared with the next caller
 
 To force a fresh fetch, create a new provider instance (cache is per-instance):
@@ -118,7 +118,7 @@ print(f"Cached call: {time.perf_counter() - t0:.3f}s")
 
 **Corrupt cache files evict themselves**: if a Parquet file on disk fails to read (truncated write, disk corruption, etc.), it's logged, deleted, and the data is transparently refetched from yfinance and rewritten — callers never see the corrupt file or an exception because of it.
 
-**Cache path safety**: `symbol`, `start_date`/`end_date`, and `interval` are all validated (allow-listed characters, `..` rejected) before being used to build the Parquet filename, and the resolved path is checked to still resolve inside the cache root — a malformed or adversarial symbol string (these are LLM-reachable via `get_ohlcv`'s own parameters) can't write outside `SQT_CACHE_DIR`.
+**Cache path safety**: `symbol`, `start_date`/`end_date`, and `interval` are all validated (allow-listed characters, `..` rejected) before being used to build the Parquet filename, and the resolved path is checked to still resolve inside the cache root — a malformed or adversarial symbol string (these are LLM-reachable via `get_ohlcv`'s own parameters) can't write outside `SQT_CACHE_DIR`. A symbol that fails this check doesn't cause `get_ohlcv` itself to fail, though: caching is an optimization, not a correctness requirement, so every provider degrades gracefully by skipping the disk cache for that one call (still served live/from the session cache) rather than raising `ValidationError` for a symbol its own live-fetch path can otherwise handle fine.
 
 **Override the cache directory** via the `SQT_CACHE_DIR` environment variable:
 
@@ -134,7 +134,12 @@ The cache is safe for concurrent access — each write goes to a temp file uniqu
 ## Error Handling
 
 ```python
-from standard_quant_tools.error import DataNotFoundError, InvalidSymbolError, APIError
+from standard_quant_tools.error import (
+    APIError,
+    DataNotFoundError,
+    InvalidSymbolError,
+    NonRetryableAPIError,
+)
 
 try:
     df = provider.get_ohlcv("INVALID_XYZ", "2023-01-01", "2024-01-01")
@@ -142,11 +147,15 @@ except DataNotFoundError:
     print("Symbol not found or no data in date range.")
 except InvalidSymbolError:
     print("Symbol string is malformed or empty.")
+except NonRetryableAPIError as e:
+    print(f"Permanent API failure (e.g. a bad key) — won't succeed on retry: {e}")
 except APIError as e:
     print(f"Network/API error: {e}")
 ```
 
 Errors are designed to be descriptive enough for LLM self-correction — the message always includes the symbol and the reason for failure.
+
+`NonRetryableAPIError` is a subclass of `APIError` (so an existing `except APIError` still catches it — it's a narrowing, not a new branch you have to add), used for failures the shared `retry` decorator knows will never succeed no matter how many times it's retried — currently just `PolygonProvider`'s HTTP 401/403 (an invalid/expired API key). Everything else `APIError`-shaped (429 rate limits, 5xx, network errors) is retried with the usual exponential backoff; `DataNotFoundError`/`InvalidSymbolError` are also never retried, for the same reason (retrying "the symbol doesn't exist" can't change the answer).
 
 ---
 
@@ -292,11 +301,15 @@ than silently guessing a mapping.
   yfinance's separate sector/industry fields.
 - `get_metadata()` honestly reports `survivorship_free=False` and
   `point_in_time=False` — this provider makes neither guarantee.
-- No caching layer (session TTL or persistent Parquet) yet, unlike
-  `YFinanceProvider` — every call reaches Polygon. The free tier is
-  rate-limited (5 requests/minute at the time of writing); a 429 is
-  retried like any other transient `APIError` via the shared `retry`
-  decorator, with no Polygon-specific backoff tuning.
+- Shares the same two-tier cache as `YFinanceProvider` (in-memory session
+  TTL cache + persistent Parquet disk cache, both in `data/_cache.py`), so
+  a repeated call for the same symbol/date-range/interval doesn't reach
+  Polygon at all. The free tier is rate-limited (5 requests/minute at the
+  time of writing); a 429 is retried like any other transient `APIError`
+  via the shared `retry` decorator, with no Polygon-specific backoff
+  tuning. A 401/403 (invalid/expired API key) is raised as
+  `NonRetryableAPIError` instead and is never retried, since retrying a
+  bad key can't make it valid.
 
 ---
 

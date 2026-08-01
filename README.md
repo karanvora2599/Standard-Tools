@@ -497,7 +497,7 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 **Diagnostics, capacity & specialized backtests (5):** `run_pair_trade_backtest`, `get_robustness_diagnostics`, `get_capacity_report`, `get_data_quality_report`, `run_backtest_compact`
 
-**Analytics tools (5):** `get_volatility_estimators`, `get_correlation_analysis`, `run_monte_carlo_simulation`, `run_stress_test`, `get_liquidity_metrics`
+**Analytics tools (8):** `get_volatility_estimators`, `get_correlation_analysis`, `run_monte_carlo_simulation`, `run_stress_test`, `get_liquidity_metrics`, `run_garch_volatility_forecast`, `run_kalman_hedge_ratio`, `get_tail_risk_metrics`
 
 **Options pricing tools (2):** `get_option_pricing`, `get_implied_volatility`
 
@@ -594,7 +594,7 @@ sqt anchor <date> [--key PATH]        # sign a checkpoint anchoring a day's chai
 sqt verify --checkpoint <date> --pubkey PATH   # verify a checkpoint's signature (public key only)
 ```
 
-`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. `SQT_AUDIT_REDACT_FIELDS` (comma-separated dotted field paths) replaces matching `input` fields with a non-reversible content-hash placeholder before a record is written.
+`sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. `SQT_AUDIT_REDACT_FIELDS` (comma-separated dotted field paths) replaces matching `input` fields — and, best-effort, an `error_message` that echoes one back — with a non-reversible content-hash placeholder before a record is written; set `SQT_AUDIT_REDACT_SALT` to a long random secret so that placeholder isn't brute-forceable offline for a small value space (an unset salt still works but logs a one-time warning).
 
 **Checkpoint signing** (Ed25519, optional `pip install standard_quant_tools[signing]`) closes the one gap the hash chain can't on its own: a wholesale, internally-consistent rewrite of an entire day file. `checkpoint_and_sign()`/`sqt anchor` signs `{date, final_record_hash, index_hash}`; `verify_checkpoint_signature()`/`sqt verify --checkpoint` verifies it with only the public key. `generate_keypair()`/`sqt keygen` are for local development only — a real deployment should route signing through an HSM/KMS via a `signer` callback instead of a bare key file. Storage itself is behind a pluggable `AuditStorageBackend` (`LocalFilesystemBackend` is the only implementation shipped — a seam for a future WORM backend, not a WORM backend itself). See [Documentation/10_auditability.md](Documentation/10_auditability.md) for the full picture, including what none of this certifies by itself.
 
@@ -626,7 +626,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1631 Python tests total** (1454 passing, 171 skipped pending C++ build across 6 `test_cpp_*.py` files, 6 integration-only) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
+**1748 Python tests total** (1562 passing, 163 skipped pending C++ build across 6 `test_cpp_*.py` files, 23 integration/slow/benchmark) · **76 C++ unit tests** (17 Hurst + 24 indicators + 18 cointegration + 17 backtest, run via `ctest`)
 
 ---
 
@@ -642,7 +642,7 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
 | `Documentation/07_agent_tools.md` | Core 14 LLM tools, full 45-tool registry, Pydantic models, end-to-end agent loop |
 | `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
-| `Documentation/09_advanced_agent_tools.md` | 28 advanced/supplementary/custom-signal/analytics/options/diagnostic tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, portfolio optimization, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation, pair trade backtest, robustness diagnostics, capacity report, data quality report, compact backtest result, volatility estimators, correlation analysis, Monte Carlo simulation, stress test, liquidity metrics, option pricing/Greeks, implied volatility |
+| `Documentation/09_advanced_agent_tools.md` | 31 advanced/supplementary/custom-signal/analytics/options/diagnostic tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, portfolio optimization, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation, pair trade backtest, robustness diagnostics, capacity report, data quality report, compact backtest result, volatility estimators, correlation analysis, Monte Carlo simulation, stress test, liquidity metrics, GARCH volatility forecast, Kalman hedge ratio, EVT tail risk, option pricing/Greeks, implied volatility |
 | `Documentation/10_auditability.md` | Decision-record audit trail, replay verification, correlated logging, `sqt` CLI |
 | `Documentation/11_data_quality.md` | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
 | `Documentation/12_options.md` | Black-Scholes-Merton option pricing, Greeks, implied volatility (European options only) |

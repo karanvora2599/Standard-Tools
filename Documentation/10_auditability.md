@@ -129,7 +129,8 @@ for what they cover and how to verify them.
 | `SQT_AUDIT_ENABLED` | `1` | Set to `0` to disable decision-record writes entirely |
 | `SQT_AUDIT_DIR` | `~/.cache/standard_quant_tools/audit/` | Where JSONL files are written |
 | `SQT_AUDIT_RETENTION_DAYS` | unset (never delete) | Default retention window for `gc()`/`sqt gc` — see [Retention / garbage collection](#retention--garbage-collection) |
-| `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` to redact — see [Field redaction](#field-redaction) |
+| `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` (and, best-effort, `error_message`) to redact — see [Field redaction](#field-redaction) |
+| `SQT_AUDIT_REDACT_SALT` | unset (unsalted) | Salt mixed into the redaction placeholder hash — see [Field redaction](#field-redaction) |
 | `SQT_AUDIT_SIGNING_KEY_PATH` | unset | Private key file for `checkpoint_and_sign` when no `key_path`/`signer` is given — see [Checkpoint signing](#checkpoint-signing-ed25519) |
 
 ### Scope
@@ -537,6 +538,7 @@ every day including future ones.
 
 ```bash
 export SQT_AUDIT_REDACT_FIELDS="account_id,client.ssn"
+export SQT_AUDIT_REDACT_SALT="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Comma-separated, dotted field paths into a tool call's `input`. Each
@@ -547,6 +549,29 @@ compare equal on that field without the raw value ever touching disk. A
 configured path that doesn't match anything in a particular tool's input is
 silently skipped, since not every tool has every field. Unset (the default)
 redacts nothing.
+
+If a tool raises an exception whose message happens to echo a redacted
+value back (e.g. a validation error that repeats the offending input), that
+message is scrubbed the same way before it reaches `error_message` on the
+`DecisionRecord` — a literal-substring replacement of each redacted field's
+raw value with the identical placeholder used in `input`, so the two never
+disagree on what a given value hashes to. This is necessarily a literal
+match, not a fuzzy one: a value the exception message reformats (e.g.
+different float precision) won't be caught.
+
+**Salting the placeholder hash:** `<redacted:xxxxxxxx>` is only 8 hex
+characters (32 bits) of a SHA-256 digest — for a small value space (a
+4-digit PIN, a short numeric ID) that's brute-forceable offline by anyone
+who can read the audit log, since the same unsalted hash function is
+public. Set `SQT_AUDIT_REDACT_SALT` to a long random secret (kept out of
+the audit log itself, e.g. in a secrets manager) to close this gap; the
+salt is mixed into the hash so an offline dictionary attack against the
+placeholder is no longer feasible without it. Leaving it unset keeps the
+previous unsalted behavior (so this is backward compatible) but logs a
+one-time `WARNING` per process so the gap is visible instead of silent.
+The salt only needs to be stable for the life of a given deployment/log —
+rotating it changes future placeholders but doesn't affect already-written
+records.
 
 **Data classification note:** as of this writing, the built-in agent tools'
 input models (`standard_quant_tools/agent/models.py`) only ever carry

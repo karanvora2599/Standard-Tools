@@ -2210,4 +2210,4 @@ print(f"Example params: {playbook['example_params']}")
 
 ## Advanced Tools
 
-The remaining 28 advanced, supplementary, custom-signal, options, and diagnostic tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).
+The remaining 31 advanced, supplementary, custom-signal, analytics, options, and diagnostic tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).
