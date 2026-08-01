@@ -522,13 +522,20 @@ class TestNativeTradeStatsCorrectness:
         trade_log = _build_trade_log(prices.shift(1), prices, executed, 0.001 + 0.0005)
         python_stats = _compute_trade_stats(trade_log)
 
+        # _compute_trade_stats intentionally round()s to 4 decimal places for
+        # display (see engine.py) -- the native kernel returns full
+        # precision, so an exact-tolerance comparison must account for that
+        # rounding step itself, not just floating-point noise. This is not
+        # a discrepancy a real caller ever sees: run_strategy()'s Python
+        # wrapper always overwrites these fields with the Python-computed,
+        # already-rounded values regardless of which backend ran.
         assert native["num_trades"] == python_stats["num_trades"]
-        assert native["win_rate"] == pytest.approx(python_stats["win_rate"], abs=1e-9)
+        assert native["win_rate"] == pytest.approx(python_stats["win_rate"], abs=5e-5)
         assert native["avg_trade_return_pct"] == pytest.approx(
-            python_stats["avg_trade_return_pct"], abs=1e-6
+            python_stats["avg_trade_return_pct"], abs=5e-5
         )
         assert native["profit_factor"] == pytest.approx(
-            python_stats["profit_factor"], abs=1e-6
+            python_stats["profit_factor"], abs=5e-5
         )
 
 

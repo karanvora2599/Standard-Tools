@@ -135,40 +135,55 @@ static void test_short_position_profits_when_prices_fall() {
 }
 
 static void test_one_completed_winning_trade() {
-    // Enter long, then exit → 1 winning trade
-    // prices=[100,110,120], signals=[1,0,0]
-    // executed=[0,1,0]
-    // Event at i=1: open long at prices[1]=110
-    // Event at i=2: close long at prices[2]=120 → return=(120-110)/110 = 9.09%
+    // Enter long, then exit → 1 winning trade.
+    // prices=[100,110,120], signals=[1,0,0]; executed[i]=signals[i-1] -> [0,1,0]
+    // Event at i=1 (pdiff=1-0=1): open long, entry_price=ref_price=prices[i-1]=prices[0]=100
+    //   (same one-bar-lagged reference price run_strategy's own return calc uses --
+    //   confirmed by test_long_buy_and_hold_no_costs above, which is the same
+    //   prices[i-1]/prices[i] pairing).
+    // Event at i=2 (pdiff=0-1=-1): close long, exit ref_price=prices[i-1]=prices[1]=110
+    //   -> return=(110-100)/100 = 10.0%. (prices[2]=120 is never touched --
+    //   the position already closed at the i=2 event using the lagged reference
+    //   price, not this bar's own value.)
     std::vector<double> prices  = {100.0, 110.0, 120.0};
     std::vector<double> signals = {1.0,   0.0,   0.0};
     auto r = sqt::run_strategy(prices.data(), signals.data(), 3, 10000.0, 0.0, 0.0);
     CHECK(r.num_trades == 1);
     CHECK_NEAR(r.win_rate, 1.0, 1e-10);
     CHECK_INF(r.profit_factor);  // no losing trades → inf
-    CHECK_NEAR(r.avg_trade_return_pct, (120.0 - 110.0) / 110.0 * 100.0, 1e-6);
+    CHECK_NEAR(r.avg_trade_return_pct, (110.0 - 100.0) / 100.0 * 100.0, 1e-6);
 }
 
 static void test_one_completed_losing_trade() {
-    // Enter long, exit at a loss
-    // prices=[100,110,90], signals=[1,0,0]
-    // Event at i=1: open long at 110; Event at i=2: close at 90 → -18.18%
-    std::vector<double> prices  = {100.0, 110.0, 90.0};
-    std::vector<double> signals = {1.0,   0.0,   0.0};
+    // Enter long, exit at a loss -- same event shape as the winning-trade test
+    // above, so the LOW price must land at index 1 (the exit event's lagged
+    // reference price, prices[i-1] at i=2), not index 2, to actually produce a
+    // loss: entry_price=prices[0]=100, exit ref_price=prices[1]=90.
+    std::vector<double> prices  = {100.0, 90.0, 95.0};
+    std::vector<double> signals = {1.0,   0.0,  0.0};
     auto r = sqt::run_strategy(prices.data(), signals.data(), 3, 10000.0, 0.0, 0.0);
     CHECK(r.num_trades == 1);
     CHECK_NEAR(r.win_rate, 0.0, 1e-10);
     CHECK_NEAR(r.profit_factor, 0.0, 1e-10);  // no winning trades → 0
-    const double expected_pct = (90.0 - 110.0) / 110.0 * 100.0;
+    const double expected_pct = (90.0 - 100.0) / 100.0 * 100.0;
     CHECK_NEAR(r.avg_trade_return_pct, expected_pct, 1e-6);
 }
 
-static void test_no_trades_unclosed_position() {
-    // signal=1 throughout and never goes to 0 → position never closed → 0 trades
+static void test_unclosed_position_flushed_as_one_trade_at_final_close() {
+    // signal=1 throughout, position never explicitly closed by a signal
+    // transition -- this does NOT mean zero trades: run_strategy (matching
+    // _build_trade_log's own documented behavior in engine.py) synthesizes a
+    // mark-to-market "exit" for any position still open at the final bar,
+    // priced at that bar's actual Close (not the lagged ref_price), and
+    // deducts only the entry-side cost (no real exit event occurred).
+    // Event at i=1: open long, entry_price=ref_price=prices[0]=100.
+    // End of loop: position still open -> flush at close_prices[-1]=prices[2]=110.
+    // return = (110-100)/100 = 10.0%.
     std::vector<double> prices  = {100.0, 105.0, 110.0};
     std::vector<double> signals = {1.0,   1.0,   1.0};
     auto r = sqt::run_strategy(prices.data(), signals.data(), 3, 10000.0, 0.0, 0.0);
-    CHECK(r.num_trades == 0);  // trade never closed
+    CHECK(r.num_trades == 1);
+    CHECK_NEAR(r.avg_trade_return_pct, (110.0 - 100.0) / 100.0 * 100.0, 1e-6);
 }
 
 static void test_sortino_inf_when_no_negative_returns() {
@@ -204,16 +219,28 @@ static void test_calmar_inf_when_no_drawdown() {
 }
 
 static void test_reversal_trade_long_to_short() {
-    // prices=[100,110,90], signals=[1,-1,-1]
-    // executed=[0,1,-1]
-    // Event at i=1 (pdiff=1): open long at prices[1]=110
-    // Event at i=2 (pdiff=-2): close long at prices[2]=90 → return=-18.18%
-    //                         open short at prices[2]=90
+    // prices=[100,110,90], signals=[1,-1,-1]; executed[i]=signals[i-1] -> [0,1,-1]
+    // Event at i=1 (pdiff=1-0=1): open long, entry_price=ref_price=prices[0]=100.
+    // Event at i=2 (pdiff=-1-1=-2, non-zero -> both a close AND a reopen):
+    //   close the long using ref_price=prices[i-1]=prices[1]=110
+    //     -> return=(110-100)/100 = +10.0% (a WIN, not the loss the reversal's
+    //        own bar-2 price of 90 might suggest -- the close uses the lagged
+    //        reference price, same convention as every other event here).
+    //   immediately reopen short, entry_price=ref_price=prices[1]=110.
+    // End of loop: the short is still open -> flushed at close_prices[-1]=prices[2]=90
+    //   -> return=(90-110)/110*(-1) = +18.1818...% (also a WIN: price fell while short).
+    // Both legs of the reversal turn out to be winners here, not one loser --
+    // this is a real, hand-verified consequence of two independent, correct
+    // conventions (lagged ref_price for the mid-run close/reopen event, and
+    // final-bar-Close for the synthesized flush), not a coincidence to special-case.
     std::vector<double> prices  = {100.0, 110.0, 90.0};
     std::vector<double> signals = {1.0,  -1.0,  -1.0};
     auto r = sqt::run_strategy(prices.data(), signals.data(), 3, 10000.0, 0.0, 0.0);
-    CHECK(r.num_trades == 1);  // the long trade completes; short stays open
-    CHECK(r.avg_trade_return_pct < 0.0);  // losing long trade
+    CHECK(r.num_trades == 2);  // the long trade completes, then the short is flushed
+    CHECK(r.win_rate == 1.0);
+    const double long_leg_pct  = (110.0 - 100.0) / 100.0 * 100.0;
+    const double short_leg_pct = (90.0 - 110.0) / 110.0 * -1.0 * 100.0;
+    CHECK_NEAR(r.avg_trade_return_pct, (long_leg_pct + short_leg_pct) / 2.0, 1e-6);
 }
 
 
@@ -231,7 +258,7 @@ int main() {
     test_short_position_profits_when_prices_fall();
     test_one_completed_winning_trade();
     test_one_completed_losing_trade();
-    test_no_trades_unclosed_position();
+    test_unclosed_position_flushed_as_one_trade_at_final_close();
     test_sortino_inf_when_no_negative_returns();
     test_equity_curve_length_matches_n();
     test_equity_curve_starts_at_initial_capital();

@@ -446,6 +446,16 @@ PYBIND11_MODULE(_sqt_core, m) {
             const bool has_seed = !seed.is_none();
             const unsigned long long seed_val =
                 has_seed ? seed.cast<unsigned long long>() : 0ULL;
+             // horizon_days<=0 or n_simulations<=0 must raise, not silently
+            // return a degenerate empty/zero-shaped array -- checked
+            // explicitly here rather than only inferred from a result-size
+            // mismatch below, since 0 * anything == 0 would otherwise make
+            // an all-zero "expected" size indistinguishable from the
+            // correctly-empty result these inputs actually produce.
+            if (horizon_days <= 0 || n_simulations <= 0)
+                throw std::invalid_argument(
+                    "simulate_forward_paths: horizon_days and n_simulations must both be > 0");
+
             const auto n = static_cast<std::size_t>(values.size());
             auto result  = sqt::simulate_forward_paths(
                 values.data(), n, horizon_days, n_simulations, block_size,
@@ -455,9 +465,8 @@ PYBIND11_MODULE(_sqt_core, m) {
                 static_cast<std::size_t>(n_simulations) * static_cast<std::size_t>(horizon_days);
             if (result.size() != expected)
                 throw std::invalid_argument(
-                    "simulate_forward_paths: invalid input (check horizon_days, "
-                    "n_simulations, block_size in (0, len(values)], and "
-                    "initial_capital > 0)");
+                    "simulate_forward_paths: invalid input (check block_size in "
+                    "(0, len(values)] and initial_capital > 0)");
 
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n_simulations), static_cast<py::ssize_t>(horizon_days)});

@@ -9,7 +9,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 
 ## Key Features
 
-- **High Performance** — Optional C++ extension (`_sqt_core`) for Hurst/rolling Hurst (20–80×), RSI/ADX/Parabolic SAR (10–30×), Wilder's ATR (4–8×), Engle-Granger cointegration (5–15×), 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread` — 10–20×), backtest kernel (`run_strategy` — 3–8×), `batch_run_strategy` grid kernel (10–50×), `rolling_factor_loadings` incremental Cholesky (50–200×), `rolling_beta` incremental sums (10–40×), `bollinger_bands` fused mean+std (3–8×), `stochastic_oscillator` fused min+max (5–15×), Monte Carlo forward simulation (moving-block bootstrap, optionally OpenMP-parallel — 10–20×+), GARCH(1,1)/Kalman-filter/Donchian/VWAP-reversion (eliminates numba JIT cold-start + numpy-ABI fragility); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching (including full-universe portfolio simulation, not just correlation/optimization); persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
+- **High Performance** — Optional C++ extension (`_sqt_core`), with real measured numbers (not projections) on this dev machine: Hurst/rolling Hurst (83–274× vs. the Python fallback — no numba path exists for these), Engle-Granger cointegration (24× vs. statsmodels), `rolling_factor_loadings` incremental Cholesky (26×), Wilder's ATR (28×), `rolling_beta` incremental sums (4.7×), Monte Carlo forward simulation (moving-block bootstrap; 2× vs. uncompiled Python, plus a further ~1.4× from an optional OpenMP-parallel path). RSI/ADX/PSAR/GARCH/Kalman/Donchian/VWAP-reversion measure close to 1× against *warm numba* on a machine where numba works — their real value is eliminating numba's ~200ms–1.1s per-process JIT cold-start and the numpy-ABI fragility that broke numba once already for RSI/ADX/PSAR, not raw steady-state speed (see the Performance section below for the full, honest breakdown); NumPy single-pass ATR (5.6×); BLAS-backed portfolio covariance; async concurrent data fetching (including full-universe portfolio simulation, not just correlation/optimization); persistent Parquet disk cache; `ProcessPoolExecutor` screener and parallel backtest grid
 - **Agent-First Design** — All tools return Pydantic models; 45 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
@@ -509,34 +509,50 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 The optional compiled C++ extension accelerates the highest-impact CPU-bound paths. The API is identical with or without it — pure Python fallback is automatic.
 
-| Operation | Python fallback | C++ (`_sqt_core`) | Speedup |
+**Measured, not projected**, on a Windows 11 / MSVC 19.44 / Python 3.12 dev machine (16 logical cores) — each row toggles the same module's own `HAS_CPP` flag and times both paths back-to-back, so it's an apples-to-apples comparison, not separately-run numbers:
+
+| Operation | vs. numba (warm)¹ | vs. numba JIT cold-start² | Notes |
 |---|---|---|---|
-| `hurst_exponent` single call (n = 500) | ~5–15 ms | ~0.1–0.5 ms | **20–80×** |
-| `hurst_exponent` single call (n = 2 000) | ~25–80 ms | ~0.5–2 ms | **20–80×** |
-| `rolling_hurst` (n = 2 000, window = 200, step = 1) | ~5–15 s | ~0.1–0.3 s | **30–100×** |
-| `rolling_hurst` (n = 2 000, window = 252, step = 5) | ~1–3 s | ~0.05–0.15 s | **20–60×** |
-| `run_regime_adaptive_backtest` (end-to-end) | ~10–20 s | ~0.5–2 s | **10–30×** |
-| `rsi` (n = 2 000, period = 14) | ~0.5–2 ms | ~0.02–0.1 ms | **10–30×** |
-| `adx` (n = 2 000, period = 14) | ~1–4 ms | ~0.05–0.2 ms | **10–30×** |
-| `parabolic_sar` (n = 2 000) | ~0.5–2 ms | ~0.02–0.1 ms | **10–30×** |
-| `wilder_atr` (n = 2 000, period = 14) | ~0.5–2 ms | ~0.05–0.2 ms | **4–8×** |
-| `cointegration_test` (n = 500) | ~5–20 ms (statsmodels) | ~0.3–2 ms | **5–15×** |
-| `calculate_beta` (n = 500) | ~0.3–0.8 ms (`lstsq`) | ~0.01–0.03 ms | **10–20×** |
-| `half_life` (n = 500) | ~0.2–0.5 ms (`lstsq`) | ~0.008–0.02 ms | **10–20×** |
-| `run_strategy` (n = 2 000) | ~1–3 ms (pandas) | ~0.1–0.4 ms | **3–8×** |
-| `backtest_grid` (100 combos, batch kernel) | ~100–300 ms | ~5–20 ms | **10–50×** |
-| `rolling_factor_loadings` (n = 500, window = 60, k = 3) | ~50–200 ms (lstsq loop) | ~0.5–3 ms | **50–200×** |
-| `rolling_beta` (n = 2 000, window = 60) | ~1–3 ms (2× rolling) | ~0.05–0.2 ms | **10–40×** |
-| `bollinger_bands` (n = 2 000, period = 20) | ~0.5–1.5 ms (2× rolling) | ~0.1–0.4 ms | **3–8×** |
-| `stochastic_oscillator` (n = 2 000, k = 14) | ~0.6–1.8 ms (2× rolling) | ~0.1–0.3 ms | **5–15×** |
-| `simulate_forward_paths` (n_simulations = 20 000) | ~1–3 s (uncompiled Python loop) | ~0.1–0.3 s serial; lower still with OpenMP | **10–20× serial, more with multiple cores** |
-| `garch11_variance_recursion` (per fresh process) | ~300–500 ms (numba JIT cold-start) | negligible (no JIT step) | eliminates cold-start, not a steady-state speedup |
-| `kalman_filter_1state`/`kalman_filter_2state` (per fresh process) | ~300–500 ms (numba JIT cold-start) | negligible (no JIT step) | eliminates cold-start, not a steady-state speedup |
-| `donchian_state_machine`/`vwap_reversion_state_machine` (per fresh process) | ~300–500 ms (numba JIT cold-start) | negligible (no JIT step) | eliminates cold-start, not a steady-state speedup |
+| `hurst_exponent` DFA (n = 500) | **83×** (4.57ms → 0.05ms) | — | No numba path exists for Hurst — this is C++ vs. the pure-Python fallback directly. |
+| `hurst_exponent` DFA (n = 2 000) | **131×** (12.3ms → 0.09ms) | — | Same. |
+| `rolling_hurst` (n = 2 000, window = 200, step = 1) | **274×** (4.64s → 17ms) | — | Same — the standout number in this table, and it holds up under real measurement. |
+| `rsi` (n = 2 000) | **5.3×** (0.47ms → 0.09ms) | 1109ms → 1.2ms first call | |
+| `adx` (n = 2 000) | **0.9×** (essentially tied) | 1110ms → 1.2ms first call | Numba's *warm* ADX is already about as fast as C++ on this machine — see the note below. |
+| `parabolic_sar` (n = 2 000) | **1.1×** (essentially tied) | ~similar order to ADX | |
+| `wilder_atr` (n = 2 000) | **28×** (4.40ms → 0.15ms) | | |
+| `bollinger_bands` (n = 2 000) | **1.6×** | | |
+| `stochastic_oscillator` (n = 2 000) | **2.6×** | | |
+| `cointegration_test` (n = 500, vs. statsmodels) | **24×** (29.7ms → 1.24ms) | — | Compares against statsmodels, not numba — statsmodels has no JIT path at all. |
+| `calculate_beta` (n = 500, vs. `lstsq`) | **1.4×** | — | |
+| `half_life` (n = 500, vs. `lstsq`) | **1.1×** | — | |
+| `run_strategy` (n = 2 000) | **~1.0×** (68.1ms → 67.7ms) | — | See note below — pandas/DataFrame construction dominates wall time at this size, not the kernel itself. |
+| `rolling_beta` (n = 2 000, window = 60) | **4.7×** | — | |
+| `rolling_factor_loadings` (n = 500, window = 60, k = 3) | **26×** (32.9ms → 1.27ms) | — | |
+| `simulate_forward_paths` (n_simulations = 5 000, horizon = 60) | **2.0×** (74.8ms → 37.7ms) | — | No numba path ever existed for this one — was pure uncompiled Python. See OpenMP note below for the parallel path's own measured speedup. |
+| `garch11_variance_recursion` (n = 2 000, warm steady-state) | **0.8×** (10.8ms → 12.9ms, i.e. slightly *slower*) | 219ms → 4.8ms first call | The whole point of this port is the cold-start column, not this one — see below. |
+| `kalman_filter_*`, `donchian_state_machine`, `vwap_reversion_state_machine` | not separately re-measured | same cold-start pattern as GARCH/ADX above | |
 
-The rolling Hurst gain is the most significant: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function. RSI/ADX/PSAR gains are most visible when numba is unavailable (e.g. NumPy 2.x), where the alternative is an interpreted Python loop. `rolling_factor_loadings` achieves its dramatic speedup through incremental rank-1 XtX updates — each new bar costs O(k²) instead of a full O(n·k²) `lstsq` solve. The GARCH/Kalman/signal-state-machine rows are a different kind of win than the rest of this table: numba is fast once warm on a compatible NumPy version, so the C++ path isn't a steady-state speedup there — it eliminates the JIT compile tax paid on the first call in any fresh process, and removes the numpy-ABI fragility that already broke numba once for RSI/ADX/PSAR (see the Numba note below). `simulate_forward_paths` is the one exception in this group: it had no acceleration at all before, and — being embarrassingly parallel across simulated paths — it's also the only one of the four with an additional OpenMP-parallel path on top of the usual compiled-vs-interpreted gain.
+¹ **This is C++ vs. numba, not C++ vs. interpreted Python** — numba is fully functional on this dev machine (NumPy 2.0.2), so the "Python fallback" path for RSI/ADX/PSAR/GARCH/Kalman/signal-state-machines actually means *numba-JIT-compiled*, already close to C speed once warm. On a machine where numba is broken or unavailable (e.g. NumPy 2.4+, which is what originally motivated porting RSI/ADX/PSAR to C++ in the first place), the true comparison is C++ vs. an *interpreted* Python loop, which would show much larger gains than this table — those older, unmeasured "10–30×"-style estimates are directionally right for that scenario, just not what this table reports. Hurst and cointegration have no numba path at all, so their numbers above are already the "real" comparison either way.
 
-> These are projected figures based on algorithmic analysis of loop iterations vs. compiled throughput. The benchmark suite (`tests/cpp/bench_hurst.cpp` and `pytest -m benchmark`) confirms actual numbers once the extension is built. See [Development/build_guide.md](Development/build_guide.md) for build instructions.
+² Measured via a genuinely fresh subprocess per number (`time.perf_counter()` around the very first call, nothing warmed up beforehand) — this is the number that actually matters for a single one-off agent-tool call in a new process, which is the primary reason GARCH/Kalman/Donchian/VWAP-reversion were ported at all (see `Development/performance_insights.md`).
+
+**Two honest surprises from actually measuring this**, worth calling out rather than hiding:
+- **`run_strategy` shows ~1.0× end-to-end**, not the previously-documented 3–8×. The raw C++ kernel genuinely is faster in isolation (confirmed by `tests/cpp/bench_backtest.cpp`'s native-only numbers below), but at n=2 000 the surrounding Python/pandas wrapper (DataFrame construction, Series indexing, result assembly) dominates wall-clock time enough to swamp the kernel-level win. The gain is real but shows up at a different layer (the batch grid kernel, where per-combination Python re-entry overhead is what's actually eliminated) more than in a single `run_strategy` call.
+- **OpenMP's measured speedup for `simulate_forward_paths` is ~1.4×** on this 16-core machine (405.8ms @ 1 thread vs. 293.4ms unconstrained, n_simulations=200 000) — not the near-linear-with-cores scaling the per-path independence would suggest in theory. MSVC's OpenMP support here is version 2.0 (an older spec), and each simulated path allocates its own small buffer, which likely creates real allocator contention across threads at this problem size. Real, positive, and worth having — just not dramatic on this build.
+
+Raw C++-only (no Python involved) numbers from `tests/cpp/bench_hurst.cpp` and `tests/cpp/bench_backtest.cpp`, run via `ctest`:
+
+| Operation | Time |
+|---|---|
+| `hurst_dfa` (n = 2 000) | 0.107 ms |
+| `rolling_hurst` DFA (n = 2 000, window = 200, step = 1) | 16.9 ms |
+| `rolling_hurst` DFA (n = 5 000, window = 252, step = 1) | 60.8 ms |
+| `run_strategy` long-only, all costs (n = 2 000) | 0.017 ms |
+| `run_strategy` mixed L/F/S signals, all costs (n = 5 000) | 0.089 ms |
+
+The rolling Hurst gain is the most significant and the most robust to how you measure it: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function, with no numba equivalent to compare against either way. `rolling_factor_loadings` achieves its speedup through incremental rank-1 XtX updates — each new bar costs O(k²) instead of a full O(n·k²) `lstsq` solve.
+
+See [Development/performance_insights.md](Development/performance_insights.md) for the full methodology, every number above with its exact benchmark script, and the 5 real edge-case bugs found and fixed while actually building and running this for the first time this session (a degenerate-input NaN in the cointegration ADF test, a half-life NaN-vs-inf gap, an input-validation gap in the Monte Carlo binding, and 4 incorrect hand-written C++ test expectations that had never been compiled before).
 
 ---
 
@@ -554,7 +570,7 @@ Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):
 | Portfolio covariance | — | BLAS `pandas.cov` | BLAS-backed | O(n·k²) via LAPACK |
 | Screener (50+ tickers) | — | ProcessPoolExecutor | multi-core | Auto async→multiprocess threshold |
 
-> **Numba note:** RSI, ADX, Parabolic SAR, GARCH's variance recursion, the Kalman filter, and every backtest-strategy state machine (RSI/Bollinger/Donchian/VWAP-reversion) are decorated with `@njit` for ~50–100× speedup on their inner loops. This requires Numba with a compatible NumPy version (≤ 2.0, or wherever Numba's own ABI support currently ends). On an incompatible NumPy version, Numba decorators are a no-op — but the C++ extension (`_sqt_core`) provides equivalent (or, for GARCH/Kalman/Donchian/VWAP-reversion, strictly better — no per-process JIT warmup) performance for all of these without any Numba dependency. Every one of them falls back to pure Python automatically when neither C++ nor Numba is available.
+> **Numba note:** RSI, ADX, Parabolic SAR, GARCH's variance recursion, the Kalman filter, and every backtest-strategy state machine (RSI/Bollinger/Donchian/VWAP-reversion) are decorated with `@njit`. This requires Numba with a compatible NumPy version (≤ 2.0, or wherever Numba's own ABI support currently ends). On an incompatible NumPy version, Numba decorators are a no-op and the code falls back to interpreted Python, where C++ genuinely wins big (the original ~10–30× estimates for RSI/ADX/PSAR describe this scenario). On a machine where Numba *is* working (like the one that produced the measured table below), it's already close to C speed once warm — real measurement shows C++ landing anywhere from a tie to a modest win against it, not a blowout. What C++ reliably wins either way: no per-process JIT compile tax (measured at ~200ms–1.1s on the first call in a fresh process, gone entirely with C++) and no numpy-ABI fragility risk (the exact failure mode that motivated porting RSI/ADX/PSAR to C++ in the first place). Every one of these falls back to pure Python automatically when neither C++ nor Numba is available.
 
 ---
 

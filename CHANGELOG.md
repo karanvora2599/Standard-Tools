@@ -374,11 +374,15 @@ bump, consistent with SemVer's pre-1.0 clause.
   (added to the existing `cointegration.cpp` rather than a new file), and
   `donchian_state_machine`/`vwap_reversion_state_machine`. The latter three
   were already numba-JIT'd and confirmed fast once warm — ported for the
-  same permanent reason already documented for RSI/ADX/PSAR: no ~300–500ms
-  JIT cold-start latency on a fresh process, and immunity to future numpy
+  same permanent reason already documented for RSI/ADX/PSAR: no JIT
+  cold-start latency on a fresh process (measured at 200ms–1.1s, not the
+  initial ~300–500ms estimate — see below), and immunity to future numpy
   ABI breakage. Every port keeps the existing pure-Python/numba fallback as
   the default when `_sqt_core` isn't built, and follows the same
-  `HAS_CPP`/`_cpp_core` guard pattern as the rest of the extension.
+  `HAS_CPP`/`_cpp_core` guard pattern as the rest of the extension. All four
+  were subsequently built and their full test suites actually run (see the
+  build-verification entry below) — real numbers, not projections, are in
+  `Development/performance_insights.md`.
   **Behavior note:** the Monte Carlo C++ path's RNG does not reproduce
   NumPy's PCG64 bit stream, so `random_seed` is only reproducible *within*
   one backend — the same seed gives different concrete numbers depending on
@@ -539,22 +543,52 @@ bump, consistent with SemVer's pre-1.0 clause.
   wired both tools to use it. Verified against live yfinance: 20 uncached
   tickers fetched concurrently in ~2.1s vs. ~2.4s for 10 tickers
   sequentially beforehand.
+- `_sqt_core` was built and its full test suite actually run for the first
+  time this session (previously blocked by a missing Windows SDK — `cl.exe`
+  was present, `rc.exe`/`mt.exe` were not; see
+  `Development/build_guide.md`'s troubleshooting section). This found 5
+  real, previously-undetectable bugs:
+  - `simulate_forward_paths`'s pybind11 binding didn't raise for
+    `horizon_days<=0`/`n_simulations<=0` — the result-size validation
+    degenerated to `0==0` for exactly those inputs, silently passing them
+    through instead of raising `ValueError`. Fixed with an explicit upfront
+    check.
+  - `adf_test` (cointegration ADF/Engle-Granger) returned `NaN` for a
+    degenerate, (near-)perfectly-collinear input — every regressor has zero
+    variance, so the per-lag OLS solve is singular for every candidate lag —
+    instead of matching statsmodels' own convention for this exact case
+    (`adf_statistic=-inf, p_value≈0`, verified empirically against
+    statsmodels). Fixed with an upfront degenerate-input check.
+  - `ar1_halflife` returned `NaN` instead of `+inf` for a zero-variance
+    lagged predictor, because `beta >= 0.0` is `false` for `NaN` under
+    IEEE 754 — the same "not mean-reverting" case a non-negative beta
+    already gets was falling through a different comparison path. Fixed by
+    testing `!(beta < 0.0)` instead.
+  - 4 of `tests/cpp/test_backtest.cpp`'s own hand-written trade-log test
+    expectations were wrong — written without ever compiling or running
+    them, based on a mistaken `prices[i]`-vs-`prices[i-1]` reference-price
+    assumption. The actual native trade-log implementation (the
+    `backtest_grid` fix from 0.1.0, described in Known Issues below) was
+    already correct; only the tests needed fixing.
+  - A native/Python trade-stats parity test used a tolerance tight enough to
+    fail on Python's own intentional `round(..., 4)` display rounding, not a
+    real discrepancy. Loosened from `abs=1e-9` to `abs=5e-5`.
 
 ### Known Issues
 
-- **Update:** the native trade-stat parity gap described in earlier drafts
+- **Resolved:** the native trade-stat parity gap described in earlier drafts
   of this section (`backtest_grid`'s C++ batch kernel returning uncorrected
-  trade stats) has a fix implemented at the native level (see Fixed above),
-  but it is **unverified** — there is no C++ toolchain available in the
-  environment that wrote the fix, so it hasn't been built and run locally.
-  Verification is deferred to CI via a new gated test,
-  `tests/test_backtest.py::TestNativeTradeStatsCorrectness`, which only runs
-  once `_sqt_core` is actually built (e.g. by `build-cpp.yml`). Until that
-  CI run confirms the native and Python trade-stat accounting genuinely
-  agree, treat `backtest_grid`'s C++-path `win_rate`/`profit_factor`/
-  `num_trades`/`avg_trade_return_pct` (and anything built on top of it,
-  e.g. `run_walk_forward_backtest`/`run_backtest_optimization`) as
-  not yet confirmed trustworthy when `_sqt_core` is built.
+  trade stats) is now **confirmed correct**, not just implemented. A missing
+  Windows SDK component (`cl.exe` was present; `rc.exe`/`mt.exe` were not)
+  was found and fixed, `_sqt_core` was built for the first time, and
+  `tests/test_backtest.py::TestNativeTradeStatsCorrectness` plus the full
+  native `ctest` suite (110 test cases) were actually run. The native/Python
+  trade-stat accounting genuinely agrees — `backtest_grid`'s C++-path
+  `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct` (and
+  anything built on top of it, e.g. `run_walk_forward_backtest`/
+  `run_backtest_optimization`) can now be treated as trustworthy. See
+  Fixed below for the 5 bugs this build-and-test pass actually found (none
+  of them in the trade-stat fix itself).
 
 ## [0.1.0] - 2026-07-24
 

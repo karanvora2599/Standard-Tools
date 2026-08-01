@@ -58,12 +58,44 @@ compiled with MSVC.
    Open "Developer PowerShell for VS 2022" from the Start Menu.
    Same as Option A but in PowerShell.
 
-   **Option C — Visual Studio generator** *(works from any terminal)*
+   **Option C — Visual Studio generator** *(works from any terminal, in theory)*
    Use the VS CMake generator, which finds MSVC without needing it in `PATH`:
    ```
    cmake -B build -G "Visual Studio 17 2022" -A x64
    cmake --build build --config Release
    ```
+   **In practice, this failed** (`No CMAKE_CXX_COMPILER could be found`) on a
+   standalone "Build Tools for Visual Studio 2022" install (no full VS IDE) —
+   the generator's own compiler-discovery mechanism didn't find `cl.exe` even
+   though it was genuinely present and `vcvarsall.bat` found it fine. If you
+   hit this, use Option A/B instead, or activate the environment manually and
+   use the Ninja generator from Section 2 — that combination is confirmed
+   working on exactly this kind of install (see the troubleshooting note
+   immediately below for a real gotcha this can also surface).
+
+**Troubleshooting: `cl.exe` found, but linking fails with an RC error**
+If `cmake --build` gets past compiling (`.obj` files build fine) but fails at
+the link step with something like `RC Pass 1: command "rc /fo ..." failed...
+no such file or directory`, the MSVC **compiler** is installed but the
+**Windows SDK** (which provides `rc.exe`/`mt.exe`, needed for linking any
+Windows binary, not just ones with actual `.rc` resource files) is not —
+confirmed by an empty `Windows Kits\10\bin\` directory (or the directory not
+existing at all). This is a real gap the "Desktop development with C++"
+workload's checkbox list in step 2 doesn't always guarantee gets installed.
+Fix: re-run the Visual Studio Installer and add the SDK component explicitly
+(swap the version ID for whatever `vswhere.exe`/the installer UI shows as
+available):
+```
+"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify ^
+  --installPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools" ^
+  --add Microsoft.VisualStudio.Component.Windows11SDK.22621 ^
+  --quiet --norestart
+```
+This needs elevation (run from an elevated prompt, or via PowerShell's
+`Start-Process -Verb RunAs` if scripting it) — a non-elevated invocation
+exits with code 87 and no other explanation. Verify it worked with
+`Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin"` — you should see
+at least one version-numbered subdirectory containing `rc.exe`.
 
 ---
 

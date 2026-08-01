@@ -185,7 +185,15 @@ static double ar1_halflife(const double* y, std::size_t n) {
 
     const auto res = ols2(dy.data(), lag.data(), m);
     const double beta = res.slope;
-    if (beta >= 0.0) return kInf;
+    // beta>=0.0 is false for NaN under IEEE754 (all NaN comparisons are
+    // false), so a degenerate zero-variance lag series -- ols2's own
+    // det<1e-14 guard returns slope=NaN for that case -- would otherwise
+    // fall through to -log(2)/NaN = NaN instead of the same "not mean-
+    // reverting" +inf sentinel a non-negative beta already gets. A
+    // zero-variance predictor carries no information about mean
+    // reversion, so it belongs in the same bucket as beta>=0, not a
+    // separate silent NaN.
+    if (!(beta < 0.0)) return kInf;
     return -std::log(2.0) / beta;
 }
 
@@ -250,6 +258,30 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic) {
     std::vector<double> dy(nd);
     for (std::size_t i = 0; i < nd; ++i) dy[i] = y[i + 1] - y[i];
 
+    // Degenerate input: y is (numerically) constant, so every regressor in
+    // every candidate lag's design matrix (y_{t-1}, and every lagged Δy)
+    // has zero variance -- the per-lag OLS solve below is singular for
+    // every p, not just some, so the loop would never update best_t/best_ic
+    // away from their initial NaN/+inf sentinels. This happens for real,
+    // not just in theory: an Engle-Granger spread built from two perfectly
+    // (or near-perfectly) collinear series is exactly y≡0. A constant
+    // series is the strongest possible evidence AGAINST a unit root, not
+    // "no evidence either way" -- statsmodels' adfuller()/coint() converge
+    // on adf_statistic=-inf, p_value=0.0 for this exact case (verified
+    // empirically here), so match that rather than surfacing NaN.
+    {
+        bool all_zero_diff = true;
+        for (double d : dy) {
+            if (d != 0.0) { all_zero_diff = false; break; }
+        }
+        if (all_zero_diff) {
+            out.statistic   = -kInf;
+            out.optimal_lag = 0;
+            out.ic_min      = -kInf;
+            return out;
+        }
+    }
+
     double best_ic  = kInf;
     double best_t   = kNaN;
     int    best_lag = 0;
@@ -298,7 +330,25 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic) {
         double bXty = 0;
         for (int i = 0; i < k; ++i) bXty += r.beta[i] * Xty[i];
         const double rss = yty - bXty;
-        if (rss <= 0) continue;
+        if (rss <= 0) {
+            // Degenerate: the regression fits perfectly (residual variance
+            // is identically zero) -- happens when y itself is constant
+            // (e.g. an Engle-Granger spread from two perfectly collinear
+            // series). For a unit-root test this is the strongest possible
+            // evidence AGAINST a unit root, not "no evidence either way" --
+            // statsmodels' adfuller()/coint() converge on
+            // adf_statistic=-inf, p_value=0.0 in this exact case (verified
+            // empirically here). Previously this candidate was silently
+            // skipped for every lag, so a perfectly collinear pair fell
+            // through to the loop's NaN initial value instead of the
+            // maximally-stationary result the math actually supports.
+            if (best_ic > -kInf) {
+                best_ic  = -kInf;
+                best_lag = p;
+                best_t   = -kInf;
+            }
+            continue;
+        }
 
         const double df  = static_cast<double>(T - k);
         const double sig2 = rss / df;
