@@ -5,11 +5,13 @@ on:
     branches: ["**"]
     paths:
       - "src/standard_quant_tools/_cpp/**"
+      - "tests/cpp/**"
       - "CMakeLists.txt"
       - ".github/workflows/build-cpp.yml"
   pull_request:
     paths:
       - "src/standard_quant_tools/_cpp/**"
+      - "tests/cpp/**"
       - "CMakeLists.txt"
       - ".github/workflows/build-cpp.yml"
   # Best-effort parity check: a Python-only change (backtest/**, indicators/**,
@@ -55,8 +57,11 @@ jobs:
 
       - name: Build C++ extension
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_BUILD_TESTS=ON
           cmake --build build --config Release --parallel $(nproc)
+
+      - name: Run native C++ test suite
+        run: ctest --test-dir build --output-on-failure -C Release
 
       - name: Verify extension loaded
         run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
@@ -100,8 +105,18 @@ jobs:
           CXXFLAGS: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -O1"
           LDFLAGS: "-fsanitize=address,undefined"
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSQT_BUILD_TESTS=ON
           cmake --build build --config Debug --parallel $(nproc)
+
+      - name: Run native C++ test suite under ASan/UBSan
+        # The native test executables link the sanitizer runtime directly
+        # (unlike the Python extension below, which needs LD_PRELOAD since
+        # the host interpreter itself isn't sanitized) -- no LD_PRELOAD
+        # needed here.
+        env:
+          ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: ctest --test-dir build --output-on-failure -C Debug
 
       - name: Verify extension loaded
         run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"

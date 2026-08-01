@@ -455,6 +455,17 @@ bump, consistent with SemVer's pre-1.0 clause.
   multi-value `$<CONFIG:Release,RelWithDebInfo>:...>` generator expressions
   require `3.19`. A fresh `3.15`-`3.17` CMake install would have failed at
   configure time regardless of what the stated minimum claimed.
+- `.github/workflows/build-cpp.yml` never actually ran the native `tests/cpp/**`
+  suite — `SQT_BUILD_TESTS=ON` wasn't passed to either `build-and-test`'s or
+  `build-and-test-sanitizers`'s `cmake -B build` invocation, so the compiled
+  test executables never existed, and there was no `ctest` step to run them
+  even if they had. A native-only regression (like several fixed in this
+  release) could land without CI ever compiling or exercising the code that
+  changed. Both jobs now pass `-DSQT_BUILD_TESTS=ON` and run
+  `ctest --test-dir build --output-on-failure` immediately after building,
+  before the Python `pytest` step. Also added `tests/cpp/**` to the
+  workflow's `paths:` triggers (previously only `_cpp/**`/`CMakeLists.txt`),
+  so a native-test-only change still triggers this workflow.
 - `portfolio_engine.py`: `max_gross_leverage`/`max_position_pct` are now
   enforced against realized post-cost state, not just pre-trade intent;
   added insolvency checks (a rebalance that leaves the account with
