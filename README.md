@@ -26,7 +26,7 @@ poetry install
 
 **Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `scikit-learn`, `plotly`, `pyarrow`, `python-dotenv`
 
-**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider).
+**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider). `pip install standard_quant_tools[polars]` adds optional `polars` interop for a growing subset of functions — pandas remains the default and required backend either way; see [Documentation/14_polars_support.md](Documentation/14_polars_support.md).
 
 > **Note on the C++ extension:** the package uses a Flit build backend, so `pip install .` / `poetry install` above installs the **pure-Python package only** — every indicator, backtest, and analysis function works via its Numba/pure-Python fallback, but the compiled `_sqt_core` speedups in the table below are not built by this step. Building `_sqt_core` is a separate, manual CMake step; see [Development/build_guide.md](Development/build_guide.md).
 
@@ -595,7 +595,7 @@ except InvalidSymbolError as e:
 
 Every call routed through `agent.tools.dispatch()` can produce an immutable JSONL decision record capturing its inputs, the market data it pulled (with content hashes), which execution path ran, and a hash of its output — enough to tell a stale/tampered cache apart from a genuine code change. Records are hash-chained (`prev_record_hash` / `record_hash`) **across every calendar day**, not just within one day's file — a first-of-day record commits to the previous active day's last hash via an independent chain index (`_chain_index.jsonl`), so deleting an entire day's file is detectable too, not just editing one record. `verify_audit_log_integrity()` checks one file; `verify_audit_trail_integrity()` checks the full cross-day trail. Every write (record or index entry) is `fsync`'d before its lock is released, and JSONL writes are guarded by a cross-process file lock. Nothing runs automatically; set `SQT_AUDIT_ENABLED=0` to disable record writes, and override the storage directory with `SQT_AUDIT_DIR`.
 
-This is an *engineering control* — tamper detection, not tamper prevention or regulatory certification. See [Documentation/10_auditability.md](Documentation/10_auditability.md#what-this-can-and-cannot-certify) for what it can and can't certify.
+This is an *engineering control* — tamper detection, not tamper prevention or regulatory certification. See [Documentation/10_auditability.md](Documentation/10_auditability.md#auditability) for what it can and can't certify.
 
 The `sqt` command (installed with the package) inspects and verifies these records by `request_id`:
 
@@ -667,6 +667,7 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/11_data_quality.md` | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
 | `Documentation/12_options.md` | Black-Scholes-Merton option pricing, Greeks, implied volatility (European options only) |
 | `Documentation/13_agent_orchestration.md` | Tool-category taxonomy, the lightweight router, and the multi-agent orchestrator-workers architecture |
+| `Documentation/14_polars_support.md` | Optional Polars interop (`pip install standard_quant_tools[polars]`): what's supported today, the conversion-boundary design, and the phased roadmap |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
 

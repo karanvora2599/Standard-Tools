@@ -7,13 +7,19 @@ doesn't guarantee, and flags likely data problems in what's already been
 fetched.
 
 **Scope, stated explicitly upfront:** this is metadata and heuristic
-detection on top of `yfinance` — not a new, more reliable data source.
-Building a real point-in-time / survivorship-free provider (no silent
-historical revisions, delisted securities remain queryable) needs a paid
-data vendor (Polygon, Norgate, Sharadar, etc.) this library has no
-credentials for — `DataFactory`'s `alpaca`/`polygon`/`bloomberg` provider
-names are still `NotImplementedError` placeholders, a real and
-already-documented blocker, not something this module works around.
+detection layered on top of whichever provider is actually configured —
+not a new, more reliable data source in itself. `DataFactory` now has real
+`YFinanceProvider`/`PolygonProvider`/`BloombergProvider` implementations
+(only `alpaca` is still a `NotImplementedError` placeholder), but
+integrating a provider is not the same thing as it being point-in-time or
+survivorship-free: every provider's `get_metadata()` honestly self-reports
+`survivorship_free=False`/`point_in_time=False` today, including Polygon
+and Bloomberg — their reference data and aggregates can still be silently
+restated, and neither integration here guarantees delisted securities stay
+queryable. A genuinely point-in-time / survivorship-free feed (Norgate,
+Sharadar, etc., or a point-in-time-specific Bloomberg/Polygon endpoint this
+library doesn't use) is a real and already-documented gap, not something
+this module works around.
 
 ---
 

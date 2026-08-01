@@ -8,7 +8,7 @@ Thirty-one high-level agentic tools that compose the library's existing primitiv
 
 ## Tool Summary
 
-**Advanced tools (7)**
+**Advanced tools (8)**
 
 | Tool | What it does | Key output fields |
 |---|---|---|
@@ -1969,7 +1969,7 @@ from the prior bar's data) before trusting a `"close"`/`"hl2_exploratory"`-
 filled run's numbers.
 
 **Cost models and liquidity (`04_backtesting.md`'s
-[Pluggable cost models](04_backtesting.md#pluggable-cost-models-backtestcostspy)
+[Pluggable cost models](04_backtesting.md#cost-model-building-blocks-backtestcostspy)
 section has the full reference):** `commission_model` (`"pct"` default or
 `"per_share"` with `per_share_rate`/`min_commission`), `use_impact_model`
 (+ `impact_coefficient`/`impact_lookback`), `borrow_fee_bps`,

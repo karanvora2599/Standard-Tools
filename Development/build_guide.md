@@ -212,17 +212,19 @@ pytest tests/test_cpp_new_indicators.py -v   # Bollinger Bands, Stochastic Oscil
 pytest tests/test_cpp_cointegration.py -v    # Engle-Granger cointegration + OLS
 pytest tests/test_cpp_backtest.py -v         # run_strategy + batch_run_strategy kernels
 pytest tests/test_cpp_regression.py -v       # rolling_beta, rolling_factor_loadings
+pytest tests/test_cpp_monte_carlo.py -v      # simulate_forward_paths
+pytest tests/test_cpp_garch.py -v            # garch11_variance_recursion
+pytest tests/test_cpp_signals.py -v          # kalman_filter_1state/2state, donchian/vwap-reversion state machines
 ```
 
-Or run all six at once:
+Or run all nine at once:
 
 ```
-pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py -v
+pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py tests/test_cpp_monte_carlo.py tests/test_cpp_garch.py tests/test_cpp_signals.py -v
 ```
 
-Once the extension is built all skipped tests activate (156 total across the
-six files above — 25 Hurst, 43 indicators, 24 new-indicators, 23 cointegration,
-25 backtest, 16 regression — counted from each file's `@requires_cpp` markers).
+Once the extension is built all skipped tests activate — 311 tests pass
+across the nine files above with a built `_sqt_core`.
 `tests/test_cpp_indicators.py` and `tests/test_cpp_new_indicators.py` each
 gained one gated test on 2026-07-24 (commit `2242d63`) for the new
 `stochastic_oscillator` `d_period<=0` guard and `parabolic_sar`
@@ -242,7 +244,8 @@ cmake --build build --config Release
 ctest --test-dir build --config Release -V
 ```
 
-This runs four test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`, `cpp_backtest`.
+This runs seven test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`,
+`cpp_backtest`, `cpp_monte_carlo`, `cpp_garch`, `cpp_signals`.
 
 Or run each binary directly:
 
@@ -252,12 +255,18 @@ build\tests\cpp\Release\test_hurst.exe
 build\tests\cpp\Release\test_indicators.exe
 build\tests\cpp\Release\test_cointegration.exe
 build\tests\cpp\Release\test_backtest.exe
+build\tests\cpp\Release\test_monte_carlo.exe
+build\tests\cpp\Release\test_garch.exe
+build\tests\cpp\Release\test_signals.exe
 
 # Windows (Ninja) / Linux / macOS
 ./build/tests/cpp/test_hurst
 ./build/tests/cpp/test_indicators
 ./build/tests/cpp/test_cointegration
 ./build/tests/cpp/test_backtest
+./build/tests/cpp/test_monte_carlo
+./build/tests/cpp/test_garch
+./build/tests/cpp/test_signals
 ```
 
 Each binary prints its own pass count on exit, e.g.:
@@ -267,6 +276,9 @@ N / N tests passed.   ← test_hurst
 N / N tests passed.   ← test_indicators
 N / N tests passed.   ← test_cointegration
 N / N tests passed.   ← test_backtest
+N / N tests passed.   ← test_monte_carlo
+N / N tests passed.   ← test_garch
+N / N tests passed.   ← test_signals
 ```
 
 `N` grows as tests are added to `tests/cpp/test_*.cpp` — do not hardcode a
@@ -408,7 +420,7 @@ so this is safe by construction, not by careful scheduling. Verified by
 (same seed + inputs must give bit-identical output whether forced to 1
 thread or left unconstrained).
 
-**Trade-stat parity (`run_strategy` vs. `batch_run_strategy`) — native fix implemented 2026-07-24, awaiting CI verification:**
+**Trade-stat parity (`run_strategy` vs. `batch_run_strategy`) — fix confirmed correct against a real compiled `_sqt_core`:**
 `sqt::run_strategy`'s own trade-log logic in `backtest.cpp` used to record entry
 one bar later than the true economic reference and exclude commission/slippage
 from each trade's return — a real bug in the native kernel itself.
@@ -427,22 +439,20 @@ construction itself was rewritten to match `_build_trade_log`'s accounting
 exactly (entry_size = signal magnitude rather than sign only, `prices[i-1]` as
 the entry/exit reference price, commission+slippage deducted per completed
 round trip). This applies to both `run_strategy` and `batch_run_strategy`,
-since they share the same trade-log code in `backtest.cpp`. It was verified by
-hand and against a line-for-line Python re-implementation on plain and
-2.5x-leveraged scenarios, but **not yet against a real compiled `_sqt_core`**
-— there is no C++ toolchain available locally to build and run it. Verification
-is deferred to CI via a new gated test class, `TestNativeTradeStatsCorrectness`
-in `tests/test_backtest.py` (skipped unless `_sqt_core` is actually built, e.g.
-by `.github/workflows/build-cpp.yml`).
+since they share the same trade-log code in `backtest.cpp`.
 
-**Current status: fix implemented, awaiting CI verification with the real
-compiled kernel — neither "known unfixed" nor "confirmed fixed."** Until CI
-confirms native/Python agreement, `backtest/engine.py`'s Python-side override
-for `run_strategy()` is being kept in place as a safety net rather than
-removed on unverified native code, and a `batch_run_strategy` grid search
-sorted by `win_rate`/`profit_factor` should still be treated as unverified
-relative to `run_strategy` on the same parameters. See `run_strategy`/
-`backtest_grid` in `backtest/engine.py` for the inline comments tracking this.
+**Status: confirmed correct.** `_sqt_core` has since been built for real and
+`tests/test_backtest.py::TestNativeTradeStatsCorrectness` plus the full native
+`ctest` suite were actually run — every native/Python parity check passed.
+(Along the way, 4 of `tests/cpp/test_backtest.cpp`'s own hand-written
+expectations turned out to be wrong, based on a mistaken `prices[i]`-vs-
+`prices[i-1]` reference-price assumption unrelated to the fix being validated
+— those were corrected too; see `Development/performance_insights.md`'s
+Executive Summary for the full bug list.) `backtest/engine.py`'s Python-side
+override for `run_strategy()` is still kept in place — it's a working safety
+net, not a sign of remaining doubt — but a `batch_run_strategy` grid search
+sorted by `win_rate`/`profit_factor` can now be treated as trustworthy against
+a real compiled `_sqt_core`, not merely "unverified but probably fine."
 
 All Python callers follow the same guard pattern:
 

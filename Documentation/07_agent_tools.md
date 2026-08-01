@@ -106,7 +106,9 @@ for t in tools:
 # get_option_pricing    — Black-Scholes-Merton price and Greeks for a European option.
 # get_implied_volatility — Solve for Black-Scholes-Merton implied volatility from an observed option price.
 # (get_agent_tools() also includes get_volatility_estimators, get_correlation_analysis,
-#  run_monte_carlo_simulation, run_stress_test, and get_liquidity_metrics — see 09_advanced_agent_tools.md)
+#  run_monte_carlo_simulation, run_stress_test, get_liquidity_metrics,
+#  run_garch_volatility_forecast, run_kalman_hedge_ratio, and get_tail_risk_metrics
+#  — see 09_advanced_agent_tools.md)
 
 # Inspect the parameter schema for any tool:
 import json
@@ -211,11 +213,13 @@ Tell the model what tools are available and how to use them together:
 SYSTEM = """
 You are a quantitative analyst assistant with access to a 45-tool financial
 toolkit. The 26 most commonly used are described below (see
-09_advanced_agent_tools.md for the remaining execution/diagnostic tools —
-run_regime_adaptive_walkforward_backtest, get_backtest_diagnostics,
-run_portfolio_simulation, run_pair_trade_backtest, get_robustness_diagnostics,
-get_capacity_report, get_data_quality_report, run_backtest_compact,
-get_volatility_estimators):
+09_advanced_agent_tools.md for the full list of the remaining 19 —
+execution/diagnostic tools like run_regime_adaptive_walkforward_backtest,
+get_backtest_diagnostics, run_portfolio_simulation, run_pair_trade_backtest,
+get_robustness_diagnostics, get_capacity_report, get_data_quality_report,
+run_backtest_compact, and the analytics/options tools like
+get_volatility_estimators, run_garch_volatility_forecast,
+get_tail_risk_metrics, get_option_pricing, and others):
 
 CORE TOOLS (14)
 1. run_sma_backtest / run_rsi_backtest / run_macd_backtest / run_bollinger_backtest
@@ -2057,7 +2061,7 @@ print(f"Example params: {playbook['example_params']}")
 
 ### Input Models
 
-**Backtest tools (6)**
+**Backtest tools (3 models, covering 6 tools — `BacktestInput` is shared by `run_sma_backtest`/`run_rsi_backtest`/`run_macd_backtest`/`run_bollinger_backtest`)**
 
 | Model | Required | Optional (with defaults) |
 |---|---|---|
