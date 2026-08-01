@@ -449,6 +449,12 @@ bump, consistent with SemVer's pre-1.0 clause.
      by the standard, and relying on classify()'s threshold comparisons
      (all false for NaN) to coincidentally fall through to a safe-looking
      label was fragile.
+- Root `CMakeLists.txt`'s `cmake_minimum_required` bumped from `3.15` to
+  `3.19` — `3.15` was never actually sufficient: `find_package(...
+  Development.Module)` requires `3.18`, and `_cpp/CMakeLists.txt`'s
+  multi-value `$<CONFIG:Release,RelWithDebInfo>:...>` generator expressions
+  require `3.19`. A fresh `3.15`-`3.17` CMake install would have failed at
+  configure time regardless of what the stated minimum claimed.
 - `portfolio_engine.py`: `max_gross_leverage`/`max_position_pct` are now
   enforced against realized post-cost state, not just pre-trade intent;
   added insolvency checks (a rebalance that leaves the account with

@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 3.15)
+# 3.19 is the real floor: find_package(... Development.Module) needs 3.18,
+# and the multi-value $<CONFIG:Release,RelWithDebInfo>:...> generator
+# expressions used in _cpp/CMakeLists.txt need 3.19.
+cmake_minimum_required(VERSION 3.19)
 project(sqt_core VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
