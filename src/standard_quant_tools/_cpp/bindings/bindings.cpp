@@ -767,8 +767,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("entry_max"),
         py::arg("exit_min"),
         "Donchian breakout entry/exit hysteresis: 1.0=long, 0.0=flat.\n\n"
-        "A NaN in entry_max/exit_min (rolling warmup) leaves output at 0.0\n"
-        "for that bar without updating the carried position state.");
+        "A NaN in entry_max/exit_min (rolling warmup) does not update the\n"
+        "position state for that bar; output carries the position already\n"
+        "held instead of hardcoding 0.0.");
 
     m.def(
         "vwap_reversion_state_machine",
@@ -794,6 +795,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("vwap"),
         py::arg("entry_threshold"),
         "VWAP mean-reversion entry/exit hysteresis: 1.0=long, 0.0=flat.\n\n"
-        "A NaN in vwap (rolling warmup) leaves output at 0.0 for that bar\n"
-        "without updating the carried position state.");
+        "A NaN in vwap (rolling warmup) does not update the position state\n"
+        "for that bar; output carries the position already held instead of\n"
+        "hardcoding 0.0.");
 }

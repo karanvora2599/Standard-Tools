@@ -57,12 +57,30 @@ class TestCppDonchianStateMachine:
 
     @requires_cpp
     def test_nan_warmup_outputs_zero_and_does_not_update_state(self):
+        """No position has ever opened before these NaN bars, so in_pos is
+        (and stays) false -- carrying the state through them coincidentally
+        still produces 0.0, same as it always did."""
         close = np.array([100.0, 100.0, 100.0, 105.0, 95.0])
         entry_max = np.array([np.nan, np.nan, 102.0, 102.0, 102.0])
         exit_min = np.array([np.nan, np.nan, 98.0, 98.0, 98.0])
         result = _cpp.donchian_state_machine(close, entry_max, exit_min)
         assert result[0] == 0.0
         assert result[1] == 0.0
+
+    @requires_cpp
+    def test_nan_bar_after_position_open_carries_position(self):
+        """Regression test (Tier 4 item 12): a NaN bar while a position is
+        already open must carry that position through in the output (1.0),
+        not hardcode 0.0 -- a caller reading this as a real position series
+        would otherwise see a phantom close/reopen blip that never happened
+        in the internal state. close/entry_max/exit_min: position opens at
+        bar 1 (breakout), bar 2 has NaN exit_min (state untouched), bar 3
+        is a real breakdown that actually closes it."""
+        close = np.array([100.0, 101.0, 95.0, 89.0])
+        entry_max = np.array([100.5, 100.5, 100.5, 100.5])
+        exit_min = np.array([90.0, 90.0, np.nan, 90.0])
+        result = _cpp.donchian_state_machine(close, entry_max, exit_min)
+        assert list(result) == [0.0, 1.0, 1.0, 0.0]
 
     @requires_cpp
     def test_enters_long_on_breakout(self):
@@ -116,6 +134,17 @@ class TestCppVwapReversionStateMachine:
         vwap = np.array([100.0, 100.0, 100.0])
         result = _cpp.vwap_reversion_state_machine(close, vwap, 0.02)
         assert list(result) == [0.0, 1.0, 0.0]
+
+    @requires_cpp
+    def test_nan_bar_after_position_open_carries_position(self):
+        """Regression test (Tier 4 item 12), mirroring the Donchian case:
+        position opens at bar 1 (drops >=2% below vwap), bar 2 has NaN vwap
+        (state untouched, output must carry the held position as 1.0, not
+        hardcode 0.0), bar 3 is a real recovery to vwap that closes it."""
+        close = np.array([100.0, 97.0, 96.0, 100.0])
+        vwap = np.array([100.0, 100.0, np.nan, 100.0])
+        result = _cpp.vwap_reversion_state_machine(close, vwap, 0.02)
+        assert list(result) == [0.0, 1.0, 1.0, 0.0]
 
     @requires_cpp
     def test_length_mismatch_raises(self):

@@ -31,6 +31,29 @@ bump, consistent with SemVer's pre-1.0 clause.
   threads `commission_pct`/`slippage_pct` into every grid combination
   instead of silently ignoring them — `backtest_grid` itself already did
   this correctly; the gap was specific to the agent-tool wrapper.
+- **Breaking (Tier 4 item 12 of the C++ code review):** all four
+  hysteresis signal state machines — `_rsi_state_machine`,
+  `_bollinger_state_machine`, `_donchian_state_machine`,
+  `_vwap_reversion_state_machine` in `backtest/strategies.py`, plus the C++
+  ports `donchian_state_machine`/`vwap_reversion_state_machine` in
+  `signal_state_machines.cpp` — now carry the currently-held position
+  through a NaN (rolling-warmup) bar in their *output*, instead of
+  hardcoding `0.0` regardless of whether a position was actually open. The
+  internal `in_pos` state was never touched by a NaN bar in either version
+  (that part was already correct); only the emitted value for that bar was
+  wrong, previously showing a phantom close/reopen blip in a position
+  series that a real caller (or anything downstream reading these signals
+  as an actual position, not just a steady-state indicator) would not
+  expect — the position was never actually closed. This changes real
+  output values for the `donchian_breakout`/`vwap_reversion` (and any
+  RSI-/Bollinger-hysteresis-based) strategies wherever NaN warmup bars
+  occur alongside an already-open position; confirmed with the user before
+  implementing, given the behavior was previously documented as
+  intentional in both the Python and C++ docstrings. Updated docstrings in
+  both languages and the affected native/Python tests
+  (`tests/cpp/test_signals.cpp`, `tests/test_cpp_signals.py`) accordingly,
+  including new coverage for the previously-untested "NaN bar while a
+  position is already open" case on the VWAP side.
 - **Internal:** `src/standard_quant_tools/audit.py` (~1060 lines after
   audit-trail hardening phases 1–2) was split into a package,
   `standard_quant_tools/audit/` (hashing, context, provenance, paths,

@@ -53,6 +53,13 @@ def _rsi_state_machine(
     in_pos = False
     for i in range(n):
         if np.isnan(rsi_arr[i]):
+            # Carry the current position through a NaN (warmup) bar instead
+            # of hardcoding 0.0 -- the in_pos state itself is untouched by
+            # this bar either way, so a caller reading this as a real
+            # position series should see the position actually held, not a
+            # phantom close/reopen blip around bars this indicator can't
+            # evaluate yet.
+            values[i] = 1.0 if in_pos else 0.0
             continue
         if not in_pos and rsi_arr[i] < oversold:
             in_pos = True
@@ -71,6 +78,7 @@ def _bollinger_state_machine(
     in_pos = False
     for i in range(n):
         if np.isnan(lower_arr[i]):
+            values[i] = 1.0 if in_pos else 0.0
             continue
         if not in_pos and close_arr[i] <= lower_arr[i]:
             in_pos = True
@@ -89,6 +97,7 @@ def _donchian_state_machine(
     in_pos = False
     for i in range(n):
         if np.isnan(entry_max_arr[i]) or np.isnan(exit_min_arr[i]):
+            values[i] = 1.0 if in_pos else 0.0
             continue
         if not in_pos and close_arr[i] >= entry_max_arr[i]:
             in_pos = True
@@ -107,6 +116,7 @@ def _vwap_reversion_state_machine(
     in_pos = False
     for i in range(n):
         if np.isnan(vwap_arr[i]):
+            values[i] = 1.0 if in_pos else 0.0
             continue
         if not in_pos and close_arr[i] <= vwap_arr[i] * (1.0 - entry_threshold):
             in_pos = True

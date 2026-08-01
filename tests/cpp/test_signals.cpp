@@ -84,7 +84,8 @@ static void test_donchian_nan_does_not_update_state() {
         close.data(), entry_max.data(), exit_min.data(), 4);
     CHECK(result[0] == 0.0);
     CHECK(result[1] == 1.0);
-    CHECK(result[2] == 0.0);  // NaN bar: output 0.0, but state NOT updated
+    CHECK(result[2] == 1.0);  // NaN bar: state untouched (in_pos still true),
+                              // output carries it rather than hardcoding 0.0
     CHECK(result[3] == 0.0);  // still in_pos=true carried from bar 1, exits now
 }
 
@@ -126,11 +127,29 @@ static void test_vwap_exits_on_recovery() {
 }
 
 static void test_vwap_nan_warmup_outputs_zero() {
+    // No position has ever opened yet, so in_pos is (and stays) false --
+    // carrying the state through these NaN bars coincidentally still
+    // produces 0.0, same as it always did.
     std::vector<double> close = {100.0, 100.0, 100.0};
     std::vector<double> vwap  = {kNaN,  kNaN,  100.0};
     auto result = sqt::vwap_reversion_state_machine(close.data(), vwap.data(), 0.02, 3);
     CHECK(result[0] == 0.0);
     CHECK(result[1] == 0.0);
+}
+
+static void test_vwap_nan_does_not_update_state() {
+    // Position opens on bar 1 (close drops >=2% below vwap), then bar 2 has
+    // NaN vwap (should NOT close the position or alter state and must
+    // carry the held position through, not hardcode 0.0), bar 3 sees a
+    // real recovery back to vwap that closes it.
+    std::vector<double> close = {100.0, 97.0, 96.0, 100.0};
+    std::vector<double> vwap  = {100.0, 100.0, kNaN, 100.0};
+    auto result = sqt::vwap_reversion_state_machine(close.data(), vwap.data(), 0.02, 4);
+    CHECK(result[0] == 0.0);
+    CHECK(result[1] == 1.0);
+    CHECK(result[2] == 1.0);  // NaN bar: state untouched (in_pos still true),
+                              // output carries it rather than hardcoding 0.0
+    CHECK(result[3] == 0.0);  // still in_pos=true carried from bar 1, exits now
 }
 
 static void test_vwap_stays_flat_without_sufficient_drop() {
@@ -157,6 +176,7 @@ int main() {
     test_vwap_enters_long_on_drop_below_threshold();
     test_vwap_exits_on_recovery();
     test_vwap_nan_warmup_outputs_zero();
+    test_vwap_nan_does_not_update_state();
     test_vwap_stays_flat_without_sufficient_drop();
 
     std::printf("\n%d / %d tests passed.\n",
