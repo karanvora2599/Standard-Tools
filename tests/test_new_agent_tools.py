@@ -1963,7 +1963,7 @@ class TestPortfolioSimulation:
         exactly a 5% one-time cost on the full-notional day-0 entry, flat
         thereafter.
         """
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock, MagicMock
 
         from standard_quant_tools.data.factory import DataFactory
 
@@ -1980,6 +1980,7 @@ class TestPortfolioSimulation:
         )
         provider = MagicMock()
         provider.get_ohlcv.return_value = flat_df
+        provider.get_ohlcv_async = AsyncMock(return_value=flat_df)
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
         weights = {"AAPL": {str(dates[0].date()): 1.0}}

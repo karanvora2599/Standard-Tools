@@ -7,6 +7,8 @@ from .optimize import (
 from .portfolio import (
     build_portfolio,
     correlation_matrix,
+    fetch_ohlcv_panel_async,
+    fetch_ohlcv_panel_sync,
     fetch_returns_async,
     fetch_returns_sync,
     portfolio_metrics,

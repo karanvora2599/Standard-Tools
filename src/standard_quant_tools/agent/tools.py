@@ -246,6 +246,7 @@ from standard_quant_tools.portfolio.optimize import (
 )
 from standard_quant_tools.portfolio.portfolio import (
     build_portfolio,
+    fetch_ohlcv_panel_sync,
     fetch_returns_sync,
     portfolio_metrics,
 )
@@ -2869,11 +2870,16 @@ def run_signal_panel_backtest(
         input_data.start_date,
         input_data.end_date,
     )
-    provider = DataFactory.get_provider()
-    price_data = {
-        t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)
-        for t in input_data.tickers
-    }
+    # Concurrent fetch (bounded by the default executor's thread pool, ~32
+    # in flight) rather than one blocking get_ohlcv() call per ticker in a
+    # loop — for a large universe (e.g. the full S&P 500), the sequential
+    # form used to mean minutes of pure network wait before anything else
+    # even started. Needs the full OHLCV panel (Volume/High/Low, not just
+    # Close-derived returns), hence fetch_ohlcv_panel_sync rather than the
+    # cheaper fetch_returns_sync other multi-ticker tools in this module use.
+    price_data = fetch_ohlcv_panel_sync(
+        input_data.tickers, input_data.start_date, input_data.end_date
+    )
 
     signal_panel = pd.DataFrame(
         {
@@ -2890,7 +2896,7 @@ def run_signal_panel_backtest(
 
     bench_returns = None
     if input_data.benchmark:
-        bench_df = provider.get_ohlcv(
+        bench_df = DataFactory.get_provider().get_ohlcv(
             input_data.benchmark, input_data.start_date, input_data.end_date
         )
         bench_returns = bench_df["Close"].pct_change().dropna()
@@ -3032,11 +3038,16 @@ def run_portfolio_simulation(
         input_data.end_date,
         input_data.max_gross_leverage,
     )
-    provider = DataFactory.get_provider()
-    price_data = {
-        t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)
-        for t in input_data.tickers
-    }
+    # Concurrent fetch (bounded by the default executor's thread pool, ~32
+    # in flight) rather than one blocking get_ohlcv() call per ticker in a
+    # loop — for a large universe (e.g. the full S&P 500), the sequential
+    # form used to mean minutes of pure network wait before anything else
+    # even started. Needs the full OHLCV panel (Volume/High/Low, not just
+    # Close-derived returns), hence fetch_ohlcv_panel_sync rather than the
+    # cheaper fetch_returns_sync other multi-ticker tools in this module use.
+    price_data = fetch_ohlcv_panel_sync(
+        input_data.tickers, input_data.start_date, input_data.end_date
+    )
 
     values_panel = pd.DataFrame(
         {
@@ -3121,7 +3132,7 @@ def run_portfolio_simulation(
 
     ir: Optional[float] = None
     if input_data.benchmark:
-        bench_df = provider.get_ohlcv(
+        bench_df = DataFactory.get_provider().get_ohlcv(
             input_data.benchmark, input_data.start_date, input_data.end_date
         )
         bench_returns = bench_df["Close"].pct_change().dropna()

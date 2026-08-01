@@ -157,3 +157,43 @@ def fetch_returns_sync(
 ) -> pd.DataFrame:
     """Synchronous wrapper around fetch_returns_async."""
     return asyncio.run(fetch_returns_async(tickers, start_date, end_date, interval))
+
+
+async def fetch_ohlcv_panel_async(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    interval: str = "1d",
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch full OHLCV for multiple tickers concurrently. One network
+    round-trip per ticker, fully async — same concurrency pattern as
+    fetch_returns_async, but returns the complete per-ticker DataFrame
+    (Open/High/Low/Close/Volume) instead of collapsing to a single Close-
+    based returns column. For callers that only need Close-derived returns
+    (correlation, optimization, Monte Carlo), fetch_returns_async/
+    fetch_returns_sync above is the right, cheaper choice; this exists for
+    callers that also need Volume/OHLC (e.g. a portfolio simulation's ADV/
+    volatility-based transaction cost model), which a returns-only frame
+    can't supply.
+    """
+    from standard_quant_tools.data.factory import DataFactory
+
+    provider = DataFactory.get_provider()
+
+    tasks = [
+        provider.get_ohlcv_async(ticker, start_date, end_date, interval)
+        for ticker in tickers
+    ]
+    dfs = await asyncio.gather(*tasks)
+    return dict(zip(tickers, dfs))
+
+
+def fetch_ohlcv_panel_sync(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    interval: str = "1d",
+) -> Dict[str, pd.DataFrame]:
+    """Synchronous wrapper around fetch_ohlcv_panel_async."""
+    return asyncio.run(fetch_ohlcv_panel_async(tickers, start_date, end_date, interval))

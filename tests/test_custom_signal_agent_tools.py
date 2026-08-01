@@ -38,7 +38,7 @@ def gapped_factory(sample_close, monkeypatch: pytest.MonkeyPatch):
     Close.shift(1), which makes fill_price="next_open" collapse to "close"
     by construction (no gap to price differently) — see test_fill_price.py.
     """
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     close = sample_close
     spread = pd.Series(0.5, index=close.index)
@@ -53,6 +53,7 @@ def gapped_factory(sample_close, monkeypatch: pytest.MonkeyPatch):
     )
     provider = MagicMock()
     provider.get_ohlcv.return_value = df
+    provider.get_ohlcv_async = AsyncMock(return_value=df)
     monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
     return provider
 
