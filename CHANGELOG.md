@@ -392,6 +392,49 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **C++ hardening, Tier 1 (items 1-4 of an independent code review of the
+  entire `_cpp` surface at commit `d52e9f2`), each verified against the real
+  compiled `_sqt_core` before and after:**
+  1. `cointegration.cpp`'s `mackinnon_pvalue` used a 13-point lookup table
+     with log-linear interpolation, documented as +-0.01-0.02 accurate —
+     independently reproduced the exact algorithm and found errors up to
+     0.08 vs. `statsmodels.tsa.stattools.mackinnonp` mid-distribution.
+     Replaced with the real MacKinnon (2010) regression-surface algorithm
+     (quadratic/cubic polynomial + normal CDF, coefficients extracted from
+     `statsmodels`' own `tsa/adfvalues.py` for `regression="c", N=2`),
+     verified to machine precision (1e-9) across a swept range of ADF
+     statistics.
+  2. `Array1D` (`py::array_t<double, c_style|forcecast>`) enforced dtype and
+     contiguity but not `ndim` — a 2-D array silently passed through every
+     binding and produced garbage (or a native crash) rather than a clear
+     error. Added `require_1d()`, called at the top of all 20 `m.def(...)`
+     lambdas (37 call sites) taking an `Array1D` parameter.
+  3. `bollinger_bands`/`rolling_beta` used raw-moment sliding sums
+     (`Sxx - Sx*Sx/W`-style formulas), which suffer catastrophic
+     cancellation on a large-baseline series — e.g. a ~1e9-level price
+     series previously produced a near-zero variance instead of the true
+     small value, and `rolling_beta`'s denominator could collapse to
+     exactly zero. Rewrote both with a shifted-window + periodic-recompute
+     technique (subtract each window's own first value before accumulating,
+     full recompute every `window` bars) — the same idiom already used by
+     `rolling_factor_loadings` elsewhere in this codebase.
+  4. `backtest.cpp`'s native trade-log cost deduction (and the identical
+     logic in `_build_trade_log`, `backtest/engine.py`) was a flat
+     `2*cost_per_unit`/`1*cost_per_unit` regardless of the position's actual
+     size — a 5x-leveraged SCORE-type trade paid the exact same cost as a
+     1x trade even though the equity curve's own `strat_ret` already scales
+     cost by `abs(pos_diff)`, silently under-costing every leveraged
+     (non-+/-1) position's reported `return_pct`/`avg_trade_return_pct`.
+     Cost is now scaled by `abs(position_size)` per leg in both
+     implementations, matching the equity curve's convention for the common
+     case (full close/reopen, including leveraged round trips). A same-sign
+     *resize* (e.g. 1.0 -> 2.5 in one event) remains a documented
+     approximation — costed as closing the old size and opening the new one
+     independently, which doesn't exactly reconcile with the equity curve's
+     single smaller `abs(pos_diff)`-sized cost for that event; a fully exact
+     reconciliation would require tracking continuous positions with a
+     weighted-average cost basis, a bigger redesign that changes reported
+     `num_trades` for resize-using strategies and was left out of scope here.
 - `portfolio_engine.py`: `max_gross_leverage`/`max_position_pct` are now
   enforced against realized post-cost state, not just pre-trade intent;
   added insolvency checks (a rebalance that leaves the account with

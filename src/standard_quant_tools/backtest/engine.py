@@ -64,12 +64,23 @@ def _build_trade_log(
     decomposition already prices entries/exits at that bar's own reference
     price (no shift needed there).
 
-    return_pct is reduced by 2 * cost_per_unit (entry + exit — matching the
-    two separate pos_diff-triggered cost deductions run_strategy applies to
-    the equity curve for a completed round trip), or 1 * cost_per_unit for
-    a position still open at the final bar (a synthesized mark-to-market
-    "exit", not a real exit event — the equity curve never deducted a
-    second cost for it either).
+    return_pct is reduced by 2 * abs(position_size) * cost_per_unit (entry +
+    exit — matching the two separate pos_diff-triggered cost deductions
+    run_strategy applies to the equity curve for a completed round trip,
+    each of magnitude abs(pdiff) * cost_per_unit), or 1 * abs(position_size)
+    * cost_per_unit for a position still open at the final bar (a
+    synthesized mark-to-market "exit", not a real exit event — the equity
+    curve never deducted a second cost for it either). Scaling by
+    abs(position_size) matters as much as scaling raw_pnl by it: cost_per_unit
+    is a cost *per unit of notional exposure traded*, so a 5x-leveraged
+    trade must pay 5x the cost a 1x trade pays, not the same flat amount —
+    previously it did not, silently under-costing every leveraged (non-±1)
+    SCORE-style position. This does not attempt to reconcile exactly with
+    the equity curve for a same-sign *resize* (e.g. 1.0->2.5, a single
+    pos_diff event treated here as closing a 1.0-sized trade and opening a
+    fresh 2.5-sized one, each independently costed at 2x their own size
+    rather than the smaller abs(pdiff)=1.5 the equity curve actually
+    charges for that one event) — a known, documented approximation.
 
     position_size is the actual executed signal value held during the
     trade (e.g. 2.5 for a SCORE signal sized at 2.5x leverage), not just
@@ -110,7 +121,7 @@ def _build_trade_log(
             position_size = open_trade["position_size"]
             entry_price = open_trade["entry_price"]
             raw_pnl = (ref_price - entry_price) / entry_price * position_size
-            net_pnl = raw_pnl - 2 * cost_per_unit
+            net_pnl = raw_pnl - 2 * abs(position_size) * cost_per_unit
             records.append(
                 {
                     "entry_date": open_trade["entry_date"],
@@ -142,7 +153,7 @@ def _build_trade_log(
         entry_price = open_trade["entry_price"]
         raw_pnl = (last_price - entry_price) / entry_price * position_size
         net_pnl = (
-            raw_pnl - cost_per_unit
+            raw_pnl - abs(position_size) * cost_per_unit
         )  # entry cost only -- no real exit event occurred
         records.append(
             {

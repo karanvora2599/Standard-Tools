@@ -292,8 +292,10 @@ class TestTradeLog:
         label. Same 6-bar deterministic series as the close-mode
         reconciliation test above, but signals=[2.5,2.5,2.5,0,0,0] instead
         of [1,1,1,0,0,0]: raw price return 100->103 is still 3.0%, but the
-        trade's realized return is 3.0% * 2.5 = 7.5%, minus 2 * cost_per_unit
-        (0.3%) = 7.2%.
+        trade's realized return is 3.0% * 2.5 = 7.5%, minus
+        2 * abs(position_size) * cost_per_unit (2 * 2.5 * 0.15% = 0.75%,
+        cost scaled by position size the same way raw_pnl is -- a 2.5x
+        trade must pay 2.5x the cost a 1x trade pays) = 6.75%.
         """
         dates = pd.date_range("2023-01-02", periods=6, freq="B")
         close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
@@ -320,7 +322,99 @@ class TestTradeLog:
         row = trade_log.iloc[0]
         assert row["position_size"] == pytest.approx(2.5)
         assert row["direction"] == "long"
-        assert row["return_pct"] == pytest.approx(7.2, abs=1e-9)
+        assert row["return_pct"] == pytest.approx(6.75, abs=1e-9)
+
+    def test_trade_log_cost_scales_with_leveraged_position_size(self):
+        """
+        Regression test: _build_trade_log's cost deduction used to be a
+        flat 2*cost_per_unit / 1*cost_per_unit regardless of position_size,
+        so a 5x leveraged trade paid the exact same cost as a 1x trade even
+        though the equity curve already scales cost by abs(pos_diff) --
+        silently under-costing every leveraged (non-+/-1) SCORE-style
+        position, not just resize sequences. signals=[size,0,0]: a real
+        close event at bar 2 (pos_diff=-size), not a final-bar flush --
+        both entry and exit legs are costed at abs(position_size)*
+        cost_per_unit each. This is the review's own repro case: before
+        this fix, r1=8.0 and r5=48.0 (a 6x ratio, from a flat 2*cost_per_unit
+        applied regardless of size); after the fix, both pnl and cost are
+        linear in position size for a single trade, so r5 is now exactly 5x
+        r1 (40.0 vs 8.0).
+        """
+        prices = np.array([100.0, 110.0, 121.0])
+        signals_1x = pd.Series([1.0, 0.0, 0.0])
+        signals_5x = pd.Series([5.0, 0.0, 0.0])
+        df = pd.DataFrame(
+            {
+                "Open": prices,
+                "High": prices,
+                "Low": prices,
+                "Close": prices,
+                "Volume": [1_000_000.0] * 3,
+            }
+        )
+        r1 = run_strategy(df, signals_1x, commission_pct=0.01, slippage_pct=0.0)
+        r5 = run_strategy(df, signals_5x, commission_pct=0.01, slippage_pct=0.0)
+        expected_1x = ((110.0 - 100.0) / 100.0 * 1.0 - 2.0 * 1.0 * 0.01) * 100.0
+        expected_5x = ((110.0 - 100.0) / 100.0 * 5.0 - 2.0 * 5.0 * 0.01) * 100.0
+        assert expected_1x == pytest.approx(8.0, abs=1e-9)
+        assert expected_5x == pytest.approx(40.0, abs=1e-9)
+        assert r1["avg_trade_return_pct"] == pytest.approx(expected_1x, abs=1e-9)
+        assert r5["avg_trade_return_pct"] == pytest.approx(expected_5x, abs=1e-9)
+        assert r5["avg_trade_return_pct"] == pytest.approx(
+            5.0 * r1["avg_trade_return_pct"], abs=1e-9
+        )
+
+    def test_trade_log_resize_cost_is_documented_approximation(self):
+        """
+        A same-sign RESIZE (1.0 -> 2.5, a single pos_diff event) is a known,
+        documented approximation: the event is treated as closing a
+        1.0-sized trade AND opening a fresh 2.5-sized one, each
+        independently costed at 2x its own size, rather than the single
+        abs(pos_diff)=1.5 the equity curve actually charges for that one
+        event. This pins the resulting values down as a known quantity
+        rather than letting them silently drift.
+        close=[100,105,110,108,108], signals=[1,2.5,2.5,0,0] ->
+        executed=[0,1,2.5,2.5,0]: event at bar 1 opens 1.0x, event at bar 2
+        (resize) closes the 1.0x trade and opens a 2.5x trade, event at
+        bar 4 closes the 2.5x trade.
+        """
+        dates = pd.date_range("2023-01-02", periods=5, freq="B")
+        close = [100.0, 105.0, 110.0, 108.0, 108.0]
+        df = pd.DataFrame(
+            {
+                "Open": close,
+                "High": close,
+                "Low": close,
+                "Close": close,
+                "Volume": [1_000_000.0] * 5,
+            },
+            index=dates,
+        )
+        signals = pd.Series([1.0, 2.5, 2.5, 0.0, 0.0], index=dates)
+        result = run_strategy(
+            df, signals, commission_pct=0.01, slippage_pct=0.0, include_trade_log=True
+        )
+        trade_log = result["trade_log"]
+        assert len(trade_log) == 2
+
+        trade1_pnl = (105.0 - 100.0) / 100.0 * 1.0
+        trade1_pct = (trade1_pnl - 2.0 * 1.0 * 0.01) * 100.0
+        trade2_pnl = (108.0 - 105.0) / 105.0 * 2.5
+        trade2_pct = (trade2_pnl - 2.0 * 2.5 * 0.01) * 100.0
+
+        # _build_trade_log rounds return_pct to 4 decimal places for display.
+        assert trade_log.iloc[0]["return_pct"] == pytest.approx(trade1_pct, abs=5e-5)
+        assert trade_log.iloc[1]["return_pct"] == pytest.approx(trade2_pct, abs=5e-5)
+
+        # The trade log's own total realized cost for this sequence is
+        # 2*(1.0+2.5)*cost_per_unit = 7*cost_per_unit, vs. the equity
+        # curve's own realized cost across the same 3 pos_diff events,
+        # sum(abs(pdiff))*cost_per_unit = (1.0+1.5+2.5)*0.01 = 5*0.01 --
+        # the two do not match for a resize; this is the documented
+        # approximation, not a bug to chase further here.
+        trade_log_total_cost = 2.0 * (1.0 + 2.5) * 0.01
+        equity_curve_total_cost = (1.0 + 1.5 + 2.5) * 0.01
+        assert trade_log_total_cost != pytest.approx(equity_curve_total_cost)
 
     def test_trade_log_reconciles_with_equity_curve_next_open_mode(self):
         """
@@ -466,9 +560,10 @@ class TestNativeTradeStatsCorrectness:
     with the same hand-verified 6-bar leveraged scenario as
     test_trade_log_return_scales_with_leveraged_position_size: signal
     magnitude 2.5, raw price return 100->103 = 3.0%, realized trade return
-    3.0% * 2.5 - 2*0.15% cost = 7.2%. Cannot run without a compiled
-    _sqt_core (no C++ toolchain available in the environment that wrote
-    this fix) -- verified by CI's build-cpp.yml instead.
+    3.0% * 2.5 - 2*2.5*0.15% cost (cost scaled by position size, not flat)
+    = 6.75%. Cannot run without a compiled _sqt_core (no C++ toolchain
+    available in the environment that wrote this fix) -- verified by CI's
+    build-cpp.yml instead.
     """
 
     @requires_cpp_ext
@@ -478,7 +573,7 @@ class TestNativeTradeStatsCorrectness:
         r = _cpp.run_strategy(close, signals, 10_000.0, 0.001, 0.0005)
         assert r["num_trades"] == 1
         assert r["win_rate"] == pytest.approx(1.0)
-        assert r["avg_trade_return_pct"] == pytest.approx(7.2, abs=1e-9)
+        assert r["avg_trade_return_pct"] == pytest.approx(6.75, abs=1e-9)
 
     @requires_cpp_ext
     def test_batch_run_strategy_native_avg_trade_return_matches_hand_computed(self):
@@ -491,7 +586,7 @@ class TestNativeTradeStatsCorrectness:
         r = results[0]
         assert r["num_trades"] == 1
         assert r["win_rate"] == pytest.approx(1.0)
-        assert r["avg_trade_return_pct"] == pytest.approx(7.2, abs=1e-9)
+        assert r["avg_trade_return_pct"] == pytest.approx(6.75, abs=1e-9)
 
     @requires_cpp_ext
     def test_run_strategy_native_matches_python_recomputed_stats(self, simple_ohlcv):

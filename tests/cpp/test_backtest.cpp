@@ -243,6 +243,75 @@ static void test_reversal_trade_long_to_short() {
     CHECK_NEAR(r.avg_trade_return_pct, (long_leg_pct + short_leg_pct) / 2.0, 1e-6);
 }
 
+static void test_trade_log_cost_scales_with_leveraged_position_size() {
+    // Regression test: the trade log's cost deduction used to be a flat
+    // 2*cost_per_unit / 1*cost_per_unit regardless of entry_size, so a 5x
+    // leveraged trade paid the exact same cost as a 1x trade even though
+    // strat_ret (the equity curve) already scales cost by abs(pdiff) --
+    // silently under-costing every leveraged (non-+/-1) SCORE-style
+    // position. prices=[100,110,121], signals=[size,0,0]: a real close
+    // event at i=2 (pdiff=-size), not a final-bar flush -- both entry and
+    // exit legs are costed at abs(entry_size)*cost_per_unit each.
+    const double cost_per_unit = 0.01;  // commission_pct + slippage_pct
+    std::vector<double> prices = {100.0, 110.0, 121.0};
+
+    std::vector<double> signals_1x = {1.0, 0.0, 0.0};
+    auto r1 = sqt::run_strategy(prices.data(), signals_1x.data(), 3, 10000.0,
+                                 cost_per_unit, 0.0);
+    const double expected_1x = ((110.0 - 100.0) / 100.0 * 1.0 - 2.0 * 1.0 * cost_per_unit) * 100.0;
+    CHECK_NEAR(r1.avg_trade_return_pct, expected_1x, 1e-9);
+    CHECK_NEAR(expected_1x, 8.0, 1e-9);  // matches the review's own repro numbers
+
+    std::vector<double> signals_5x = {5.0, 0.0, 0.0};
+    auto r5 = sqt::run_strategy(prices.data(), signals_5x.data(), 3, 10000.0,
+                                 cost_per_unit, 0.0);
+    const double expected_5x = ((110.0 - 100.0) / 100.0 * 5.0 - 2.0 * 5.0 * cost_per_unit) * 100.0;
+    CHECK_NEAR(r5.avg_trade_return_pct, expected_5x, 1e-9);
+    // Before this fix, r5 came out as 48.0 (flat cost, same as r1's 8.0
+    // flat cost -> a 6x ratio, not a clean 5x one either) instead of the
+    // correctly cost-scaled 40.0 -- both pnl and cost are linear in
+    // position size for a single trade, so the fixed formula now produces
+    // an exactly 5x relationship between r5 and r1, unlike the old bug.
+    CHECK_NEAR(r5.avg_trade_return_pct, 40.0, 1e-9);
+    CHECK_NEAR(r5.avg_trade_return_pct, 5.0 * r1.avg_trade_return_pct, 1e-9);
+}
+
+static void test_trade_log_resize_cost_is_documented_approximation() {
+    // A same-sign RESIZE (1.0 -> 2.5, a single pos_diff event) is a known,
+    // documented approximation: this event is treated as closing a
+    // 1.0-sized trade AND opening a fresh 2.5-sized one, each independently
+    // costed at 2x its own size, rather than the single abs(pdiff)=1.5 the
+    // equity curve actually charges for that one event. This test pins
+    // down the resulting trade-log values as a known quantity rather than
+    // silently drifting if the approximation changes.
+    // prices=[100,105,110,108,108], signals=[1,2.5,2.5,0,0];
+    // exec_i=signals[i-1] for i=1..4 -> exec=[1,2.5,2.5,0].
+    // Event i=1 (pdiff=1): open trade1, entry_price=prices[0]=100, size=1.0.
+    // Event i=2 (pdiff=1.5, resize): close trade1 @ ref_price=prices[1]=105,
+    //   reopen trade2, entry_price=105, size=2.5.
+    // Event i=4 (pdiff=-2.5): close trade2 @ ref_price=prices[3]=108.
+    const double cost_per_unit = 0.01;
+    std::vector<double> prices  = {100.0, 105.0, 110.0, 108.0, 108.0};
+    std::vector<double> signals = {1.0,   2.5,   2.5,   0.0,   0.0};
+    auto r = sqt::run_strategy(prices.data(), signals.data(), 5, 10000.0,
+                                cost_per_unit, 0.0);
+    CHECK(r.num_trades == 2);  // resize splits into a closed 1.0x + closed 2.5x trade
+
+    const double trade1_pnl = (105.0 - 100.0) / 100.0 * 1.0;
+    const double trade1_pct = (trade1_pnl - 2.0 * 1.0 * cost_per_unit) * 100.0;
+
+    const double trade2_pnl = (108.0 - 105.0) / 105.0 * 2.5;
+    const double trade2_pct = (trade2_pnl - 2.0 * 2.5 * cost_per_unit) * 100.0;
+
+    CHECK_NEAR(r.avg_trade_return_pct, (trade1_pct + trade2_pct) / 2.0, 1e-9);
+
+    // The trade log's own total realized cost for this sequence is
+    // 2*(1.0+2.5)*cost_per_unit = 7*cost_per_unit, vs. the equity curve's
+    // own realized cost across the same 3 pos_diff events, sum(abs(pdiff))
+    // * cost_per_unit = (1.0+1.5+2.5)*cost_per_unit = 5*cost_per_unit --
+    // the two do not match for a resize; this is the documented
+    // approximation, not a bug to chase further here.
+}
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -264,6 +333,8 @@ int main() {
     test_equity_curve_starts_at_initial_capital();
     test_calmar_inf_when_no_drawdown();
     test_reversal_trade_long_to_short();
+    test_trade_log_cost_scales_with_leveraged_position_size();
+    test_trade_log_resize_cost_is_documented_approximation();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

@@ -57,10 +57,24 @@ BacktestResult run_strategy(
     // Close[i-1] is this position's true economic entry point (same
     // ref_prices = prices.shift(1) convention _build_trade_log uses for
     // fill_price="close" — the only mode this native kernel implements).
-    // return_pct is reduced by 2*cost_per_unit for a completed round trip
-    // (entry + exit) or 1*cost_per_unit for a position still open at the
-    // final bar, matching the two separate pos_diff-triggered cost
-    // deductions strat_ret already applies to the equity curve.
+    // return_pct's cost deduction is scaled by entry_size: cost_per_unit is
+    // a cost *per unit of notional exposure traded* (this is exactly what
+    // strat_ret's abs(pdiff)*cost_per_unit already means), so opening/
+    // closing an entry_size-sized position must deduct
+    // abs(entry_size)*cost_per_unit per leg, not a flat, size-independent
+    // cost_per_unit -- a real bug found and fixed here: a 5x-sized trade
+    // used to deduct the exact same flat cost as a 1x trade, silently
+    // under-costing every leveraged (non-±1) SCORE-style position. Two legs
+    // (entry + exit) for a completed round trip, one leg (entry only) for
+    // a position still open at the final bar -- same event count the
+    // equity curve's own two separate pos_diff-triggered cost deductions
+    // already reflect. This does not attempt to reconcile exactly with the
+    // equity curve for a same-sign *resize* (e.g. 1.0->2.5, a single event
+    // treated here as closing a 1.0-sized trade and opening a fresh
+    // 2.5-sized one, each independently costed at 2x their own size rather
+    // than the smaller abs(pdiff)=1.5 the equity curve actually charges for
+    // that one event) -- a known, documented approximation, not silently
+    // hidden; see tests/cpp/test_backtest.cpp for what is and isn't covered.
     std::vector<double> trade_rets;  // per-trade return_pct (×100 scale)
     bool   has_open    = false;
     double entry_price = 0.0;
@@ -83,7 +97,8 @@ BacktestResult run_strategy(
                 const double raw_pnl = (entry_price != 0.0)
                     ? (ref_price - entry_price) / entry_price * entry_size
                     : 0.0;
-                trade_rets.push_back((raw_pnl - 2.0 * cost_per_unit) * 100.0);
+                trade_rets.push_back(
+                    (raw_pnl - 2.0 * std::abs(entry_size) * cost_per_unit) * 100.0);
                 has_open = false;
             }
             if (exec_i != 0.0) {
@@ -102,7 +117,8 @@ BacktestResult run_strategy(
         const double raw_pnl = (entry_price != 0.0)
             ? (prices[n - 1] - entry_price) / entry_price * entry_size
             : 0.0;
-        trade_rets.push_back((raw_pnl - cost_per_unit) * 100.0);
+        trade_rets.push_back(
+            (raw_pnl - std::abs(entry_size) * cost_per_unit) * 100.0);
     }
 
     // ── Equity curve: cumprod(1 + strat_ret) ──────────────────────────────────
