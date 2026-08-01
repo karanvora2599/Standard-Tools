@@ -442,6 +442,23 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **C++ hardening, Tier 4 item 13:** `stochastic_oscillator`
+  (`indicators.cpp`) rewritten from an O(n·k_period) full-window rescan
+  (re-scanning the entire `[i-k_period+1, i]` window on every single bar
+  despite an inline comment claiming O(1)-amortized behavior a different,
+  never-actually-implemented technique would have provided) to a genuine
+  O(n) sliding max(high)/min(low) via two monotonic deques of indices —
+  the standard sliding-window-extrema technique. Removed the stale,
+  inaccurate complexity comment. Added native test coverage that didn't
+  exist before at all (`tests/cpp/test_indicators.cpp`), including an
+  independent brute-force O(n·k) reference oracle (deliberately
+  implemented separately from the real function, not just a copy of it)
+  and adversarial monotonic-rising/falling and mid-window-spike cases —
+  the specific patterns that expose an off-by-one in a monotonic deque's
+  front-eviction logic, as opposed to just its back-insertion logic. Added
+  matching adversarial Python-level tests
+  (`tests/test_cpp_new_indicators.py`) against an independent pandas
+  `.rolling().min()/.max()` reference.
 - `build-cpp.yml`'s ASan/UBSan job's "Verify extension loaded" step never
   actually verified anything — it imported the ASan-instrumented `_sqt_core`
   without the `LD_PRELOAD=$(gcc -print-file-name=libasan.so)` the very next

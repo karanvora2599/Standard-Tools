@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <vector>
 
@@ -365,11 +366,6 @@ std::vector<double> bollinger_bands(
 
 
 // ── Stochastic Oscillator ─────────────────────────────────────────────────────
-//
-// Fused sliding-window min (low) and max (high) in one pass.
-// Maintains running min/max with O(1) amortized updates using a combination
-// of tracking the current extremum and resetting when it falls out of window.
-// For k_period ≤ 50 the reset cost is negligible in practice.
 
 std::vector<double> stochastic_oscillator(
     const double* high,
@@ -388,16 +384,39 @@ std::vector<double> stochastic_oscillator(
     // same convention as the k_period guard just above.
     if (d_period <= 0) return result;
 
-    // Compute %K for each bar from k_period-1 onward
+    // Compute %K for each bar from k_period-1 onward.
+    //
+    // Two monotonic deques of indices give O(1)-amortized sliding
+    // max(high)/min(low) per bar -- O(n) total instead of the previous
+    // O(n*k_period) full-window rescan on every single bar. Standard
+    // sliding-window-extrema technique: max_dq stays high[]-decreasing
+    // front-to-back (so its front is always the window max), min_dq stays
+    // low[]-increasing (front is always the window min); an index is
+    // popped from the back whenever a newer bar makes it permanently
+    // irrelevant (that newer bar is both in the window at least as long
+    // and at least as extreme), and popped from the front once it slides
+    // out of the [i-k_period+1, i] window.
     std::vector<double> K_vals(n, kNaN);
-    for (int i = k_period - 1; i < static_cast<int>(n); ++i) {
-        double lo = low[i], hi = high[i];
-        for (int j = i - k_period + 1; j < i; ++j) {
-            if (low[j]  < lo) lo = low[j];
-            if (high[j] > hi) hi = high[j];
+    std::deque<int> max_dq;  // indices, high[] decreasing front-to-back
+    std::deque<int> min_dq;  // indices, low[]  increasing front-to-back
+
+    for (int i = 0; i < static_cast<int>(n); ++i) {
+        const int window_start = i - k_period + 1;
+        while (!max_dq.empty() && max_dq.front() < window_start) max_dq.pop_front();
+        while (!min_dq.empty() && min_dq.front() < window_start) min_dq.pop_front();
+
+        while (!max_dq.empty() && high[max_dq.back()] <= high[i]) max_dq.pop_back();
+        max_dq.push_back(i);
+
+        while (!min_dq.empty() && low[min_dq.back()] >= low[i]) min_dq.pop_back();
+        min_dq.push_back(i);
+
+        if (i >= k_period - 1) {
+            const double hi  = high[max_dq.front()];
+            const double lo  = low[min_dq.front()];
+            const double rng = hi - lo;
+            K_vals[i] = (rng > 0.0) ? 100.0 * (close[i] - lo) / rng : 0.0;
         }
-        const double rng = hi - lo;
-        K_vals[i] = (rng > 0.0) ? 100.0 * (close[i] - lo) / rng : 0.0;
     }
 
     // Compute %D = SMA(%K, d_period) and store both to result

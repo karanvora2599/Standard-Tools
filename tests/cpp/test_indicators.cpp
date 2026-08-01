@@ -19,6 +19,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 // ── Tiny assertion helpers ────────────────────────────────────────────────────
@@ -431,6 +432,122 @@ static void test_wilder_atr_decays_toward_tr() {
 }
 
 
+// ── Stochastic Oscillator tests ─────────────────────────────────────────────────
+
+// Independent brute-force reference (the O(n*k_period) full-window rescan
+// stochastic_oscillator itself used before the monotonic-deque rewrite) --
+// deliberately NOT sharing any code with the real implementation, so this
+// only agrees with it if the O(n) rewrite is actually correct, not just
+// self-consistent.
+static std::vector<double> brute_force_stochastic(
+    const std::vector<double>& high, const std::vector<double>& low,
+    const std::vector<double>& close, int k_period, int d_period)
+{
+    const int n = static_cast<int>(close.size());
+    std::vector<double> result(2 * n, std::numeric_limits<double>::quiet_NaN());
+    if (n < k_period || k_period < 1 || d_period <= 0) return result;
+
+    std::vector<double> K(n, std::numeric_limits<double>::quiet_NaN());
+    for (int i = k_period - 1; i < n; ++i) {
+        double lo = low[i], hi = high[i];
+        for (int j = i - k_period + 1; j <= i; ++j) {
+            if (low[j]  < lo) lo = low[j];
+            if (high[j] > hi) hi = high[j];
+        }
+        const double rng = hi - lo;
+        K[i] = (rng > 0.0) ? 100.0 * (close[i] - lo) / rng : 0.0;
+    }
+    for (int i = k_period - 1; i < n; ++i) {
+        result[i * 2] = K[i];
+        if (i >= k_period - 1 + d_period - 1) {
+            double s = 0.0;
+            for (int j = i - d_period + 1; j <= i; ++j) s += K[j];
+            result[i * 2 + 1] = s / d_period;
+        }
+    }
+    return result;
+}
+
+static void check_matches_brute_force(
+    const std::vector<double>& high, const std::vector<double>& low,
+    const std::vector<double>& close, int k_period, int d_period)
+{
+    auto result   = sqt::stochastic_oscillator(
+        high.data(), low.data(), close.data(), close.size(), k_period, d_period);
+    auto expected = brute_force_stochastic(high, low, close, k_period, d_period);
+    CHECK_EQ(result.size(), expected.size());
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        if (std::isnan(expected[i])) { CHECK_NAN(result[i]); }
+        else                         { CHECK_NEAR(result[i], expected[i], 1e-9); }
+    }
+}
+
+static void test_stochastic_matches_brute_force_random() {
+    auto close = pseudo_random(300);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    check_matches_brute_force(high, low, close, 14, 3);
+}
+
+static void test_stochastic_matches_brute_force_monotonic_rising() {
+    // Regression test (Tier 4 item 13): the O(n*k_period) rescan was
+    // rewritten to O(n) via two monotonic deques for sliding max(high)/
+    // min(low). A strictly monotonic series is the adversarial case for
+    // that kind of algorithm -- every bar is its own new running extremum,
+    // so this exercises the deque's front-eviction (extremum leaving the
+    // window k_period bars later), not just its back-insertion logic.
+    auto close = rising_prices(60);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    check_matches_brute_force(high, low, close, 10, 3);
+}
+
+static void test_stochastic_matches_brute_force_monotonic_falling() {
+    auto close = falling_prices(60);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    check_matches_brute_force(high, low, close, 10, 3);
+}
+
+static void test_stochastic_matches_brute_force_spike_exits_window() {
+    // A single sharp, isolated spike in high[] must stop being the window
+    // max exactly k_period bars later -- exercises front-eviction
+    // specifically when the evicted index is NOT the most recently pushed
+    // one (the spike sits in the middle of the deque while newer, smaller
+    // bars remain behind it).
+    auto close = pseudo_random(60, 7);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    high[20] += 500.0;
+    check_matches_brute_force(high, low, close, 10, 3);
+}
+
+static void test_stochastic_k_bounds_0_to_100() {
+    auto close = pseudo_random(200, 99);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    auto result = sqt::stochastic_oscillator(
+        high.data(), low.data(), close.data(), close.size(), 14, 3);
+    for (std::size_t i = 0; i < close.size(); ++i) {
+        const double k = result[i * 2];
+        if (!std::isnan(k)) { CHECK(k >= 0.0); CHECK(k <= 100.0); }
+    }
+}
+
+static void test_stochastic_close_at_high_yields_k_100() {
+    const int n = 30;
+    std::vector<double> high(n, 10.0), low(n, 5.0), close(n, 10.0);
+    auto result = sqt::stochastic_oscillator(
+        high.data(), low.data(), close.data(), n, 5, 3);
+    for (int i = 4; i < n; ++i) CHECK_NEAR(result[i * 2], 100.0, 1e-9);
+}
+
+static void test_stochastic_empty() {
+    auto result = sqt::stochastic_oscillator(nullptr, nullptr, nullptr, 0, 14, 3);
+    CHECK_EQ(static_cast<int>(result.size()), 0);
+}
+
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -465,6 +582,15 @@ int main() {
     test_wilder_atr_short_series();
     test_wilder_atr_empty();
     test_wilder_atr_decays_toward_tr();
+
+    // Stochastic Oscillator
+    test_stochastic_matches_brute_force_random();
+    test_stochastic_matches_brute_force_monotonic_rising();
+    test_stochastic_matches_brute_force_monotonic_falling();
+    test_stochastic_matches_brute_force_spike_exits_window();
+    test_stochastic_k_bounds_0_to_100();
+    test_stochastic_close_at_high_yields_k_100();
+    test_stochastic_empty();
 
     std::fprintf(
         stdout,

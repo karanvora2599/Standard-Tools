@@ -384,6 +384,45 @@ class TestCppStochasticOscillator:
         assert np.all(np.isnan(out[:, 0]))
 
     @requires_cpp
+    def test_monotonic_trend_matches_pandas_reference(self):
+        """
+        Regression test (Tier 4 item 13): stochastic_oscillator was
+        rewritten from an O(n*k_period) full-window rescan to O(n) sliding
+        min/max via monotonic deques. A strictly monotonic high/low series
+        is the classic adversarial case for that kind of algorithm -- every
+        single bar's own high/low is a new running extremum, so the deque's
+        eviction-by-window-start logic (not just its "is this a new
+        extremum" logic) is what has to be correct: the extremum
+        *entering* the window is trivial to get right, but the previous
+        extremum correctly *leaving* the window k_period bars later is
+        where an off-by-one would actually show up.
+        """
+        n = 60
+        high = np.arange(1.0, n + 1) + 0.5
+        low = np.arange(1.0, n + 1) - 0.5
+        close = np.arange(1.0, n + 1)
+        out = _cpp.stochastic_oscillator(high, low, close, 10, 3)
+        expected = _py_stochastic(high, low, close, 10, 3)
+        np.testing.assert_allclose(out, expected, atol=1e-10, equal_nan=True)
+
+    @requires_cpp
+    def test_spike_exits_window_matches_pandas_reference(self):
+        """A single sharp spike (new extremum) must stop influencing %K
+        exactly k_period bars after it -- exercises the deque's
+        front-eviction path specifically, not just its back-insertion path.
+        """
+        n = 40
+        rng = np.random.default_rng(123)
+        close = 100.0 + rng.standard_normal(n).cumsum()
+        high = close + 0.5
+        low = close - 0.5
+        spike_idx = 15
+        high[spike_idx] += 50.0  # sharp, isolated one-bar spike
+        out = _cpp.stochastic_oscillator(high, low, close, 10, 3)
+        expected = _py_stochastic(high, low, close, 10, 3)
+        np.testing.assert_allclose(out, expected, atol=1e-10, equal_nan=True)
+
+    @requires_cpp
     def test_custom_periods(self, ohlc_arrays):
         h, l, c = (x.astype(np.float64) for x in ohlc_arrays)
         out1 = _cpp.stochastic_oscillator(h, l, c, 5, 2)

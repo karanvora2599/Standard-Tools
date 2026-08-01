@@ -115,7 +115,8 @@ std::vector<double> bollinger_bands(
     double        num_std = 2.0);
 
 /**
- * Stochastic Oscillator — fused sliding min + max in one pass.
+ * Stochastic Oscillator — O(n) sliding min/max via monotonic deques (not a
+ * per-bar window rescan).
  *
  * %K = 100 * (close - lowest_low) / (highest_high - lowest_low)
  * %D = SMA(%K, d_period)
