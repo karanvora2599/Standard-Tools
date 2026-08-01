@@ -31,6 +31,14 @@ std::vector<double> donchian_state_machine(
     const double* exit_min,
     std::size_t   n);
 
+/** Buffer-writing form of donchian_state_machine(). `out` must have length n. */
+void donchian_state_machine_into(
+    const double* close,
+    const double* entry_max,
+    const double* exit_min,
+    std::size_t   n,
+    double*       out);
+
 /**
  * VWAP mean-reversion entry/exit hysteresis.
  *
@@ -54,5 +62,14 @@ std::vector<double> vwap_reversion_state_machine(
     const double* vwap,
     double        entry_threshold,
     std::size_t   n);
+
+/** Buffer-writing form of vwap_reversion_state_machine(). `out` must have
+ *  length n. */
+void vwap_reversion_state_machine_into(
+    const double* close,
+    const double* vwap,
+    double        entry_threshold,
+    std::size_t   n,
+    double*       out);
 
 }  // namespace sqt

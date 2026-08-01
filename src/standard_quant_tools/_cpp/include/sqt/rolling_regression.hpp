@@ -30,6 +30,16 @@ std::vector<double> rolling_factor_loadings(
     std::size_t   k,
     int           window);
 
+/** Buffer-writing form of rolling_factor_loadings(). `out` must have
+ *  length n*(k+1). */
+void rolling_factor_loadings_into(
+    const double* y,
+    const double* factors,
+    std::size_t   n,
+    std::size_t   k,
+    int           window,
+    double*       out);
+
 /**
  * Incremental sliding-window OLS beta of y on x.
  *
@@ -48,5 +58,13 @@ std::vector<double> rolling_beta(
     const double* x,
     std::size_t   n,
     int           window);
+
+/** Buffer-writing form of rolling_beta(). `out` must have length n. */
+void rolling_beta_into(
+    const double* y,
+    const double* x,
+    std::size_t   n,
+    int           window,
+    double*       out);
 
 }  // namespace sqt

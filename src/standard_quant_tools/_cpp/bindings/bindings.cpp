@@ -111,14 +111,12 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(arr, "arr");
             const double* arr_ptr = arr.data();
             const auto    n       = arr.size();
-            std::vector<double> result;
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                result = sqt::rolling_hurst(arr_ptr, n, window, step, method, min_window);
+                sqt::rolling_hurst_into(arr_ptr, n, window, step, method, min_window, out_ptr);
             }
-            // Return a new 1-D numpy array (copy of result vector)
-            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("arr"),
@@ -137,13 +135,12 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(arr, "arr");
             const double* arr_ptr = arr.data();
             const auto    n       = arr.size();
-            std::vector<double> result;
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                result = sqt::rsi(arr_ptr, n, period);
+                sqt::rsi_into(arr_ptr, n, period, out_ptr);
             }
-            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("arr"),
@@ -165,14 +162,13 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* low_ptr   = low.data();
             const double* close_ptr = close.data();
             const auto    n         = high.size();
-            std::vector<double> result;
-            {
-                py::gil_scoped_release release;
-                result = sqt::adx(high_ptr, low_ptr, close_ptr, n, period);
-            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(3)});
-            std::copy(result.begin(), result.end(), out.mutable_data());
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::adx_into(high_ptr, low_ptr, close_ptr, n, period, out_ptr);
+            }
             return out;
         },
         py::arg("high"),
@@ -198,14 +194,13 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* high_ptr = high.data();
             const double* low_ptr  = low.data();
             const auto    n        = high.size();
-            std::vector<double> result;
-            {
-                py::gil_scoped_release release;
-                result = sqt::parabolic_sar(high_ptr, low_ptr, n, af_start, af_step, af_max);
-            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(2)});
-            std::copy(result.begin(), result.end(), out.mutable_data());
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::parabolic_sar_into(high_ptr, low_ptr, n, af_start, af_step, af_max, out_ptr);
+            }
             return out;
         },
         py::arg("high"),
@@ -231,13 +226,12 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* low_ptr   = low.data();
             const double* close_ptr = close.data();
             const auto    n         = high.size();
-            std::vector<double> result;
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                result = sqt::wilder_atr(high_ptr, low_ptr, close_ptr, n, period);
+                sqt::wilder_atr_into(high_ptr, low_ptr, close_ptr, n, period, out_ptr);
             }
-            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("high"),
@@ -415,15 +409,13 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* y_ptr = static_cast<const double*>(y_buf.ptr);
             const double* f_ptr = static_cast<const double*>(f_buf.ptr);
 
-            std::vector<double> flat;
-            {
-                py::gil_scoped_release release;
-                flat = sqt::rolling_factor_loadings(y_ptr, f_ptr, n, k, window);
-            }
-
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), static_cast<py::ssize_t>(p)});
-            std::copy(flat.begin(), flat.end(), out.mutable_data());
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::rolling_factor_loadings_into(y_ptr, f_ptr, n, k, window, out_ptr);
+            }
             return out;
         },
         py::arg("y"),
@@ -450,13 +442,12 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* y_ptr = y_arr.data();
             const double* x_ptr = x_arr.data();
             const auto    n     = static_cast<std::size_t>(y_arr.size());
-            std::vector<double> result;
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                result = sqt::rolling_beta(y_ptr, x_ptr, n, window);
+                sqt::rolling_beta_into(y_ptr, x_ptr, n, window, out_ptr);
             }
-            py::array_t<double> out(static_cast<py::ssize_t>(n));
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("y"),
@@ -475,14 +466,13 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(prices, "prices");
             const double* prices_ptr = prices.data();
             const auto    n          = static_cast<std::size_t>(prices.size());
-            std::vector<double> result;
-            {
-                py::gil_scoped_release release;
-                result = sqt::bollinger_bands(prices_ptr, n, period, num_std);
-            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(3)});
-            std::copy(result.begin(), result.end(), out.mutable_data());
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::bollinger_bands_into(prices_ptr, n, period, num_std, out_ptr);
+            }
             return out;
         },
         py::arg("prices"),
@@ -509,15 +499,14 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* low_ptr   = low.data();
             const double* close_ptr = close.data();
             const auto    n         = static_cast<std::size_t>(high.size());
-            std::vector<double> result;
-            {
-                py::gil_scoped_release release;
-                result = sqt::stochastic_oscillator(
-                    high_ptr, low_ptr, close_ptr, n, k_period, d_period);
-            }
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n), py::ssize_t(2)});
-            std::copy(result.begin(), result.end(), out.mutable_data());
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::stochastic_oscillator_into(
+                    high_ptr, low_ptr, close_ptr, n, k_period, d_period, out_ptr);
+            }
             return out;
         },
         py::arg("high"),
@@ -597,24 +586,23 @@ PYBIND11_MODULE(_sqt_core, m) {
 
             const double* values_ptr = values.data();
             const auto    n          = static_cast<std::size_t>(values.size());
-            std::vector<double> result;
+
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n_simulations), static_cast<py::ssize_t>(horizon_days)});
+            double* out_ptr = out.mutable_data();
+            bool ok;
             {
                 py::gil_scoped_release release;
-                result = sqt::simulate_forward_paths(
+                ok = sqt::simulate_forward_paths_into(
                     values_ptr, n, horizon_days, n_simulations, block_size,
-                    initial_capital, seed_val, has_seed);
+                    initial_capital, seed_val, has_seed, out_ptr);
             }
 
-            const auto expected =
-                static_cast<std::size_t>(n_simulations) * static_cast<std::size_t>(horizon_days);
-            if (result.size() != expected)
+            if (!ok)
                 throw std::invalid_argument(
                     "simulate_forward_paths: invalid input (check block_size in "
                     "(0, len(values)] and initial_capital > 0)");
 
-            py::array_t<double> out(
-                {static_cast<py::ssize_t>(n_simulations), static_cast<py::ssize_t>(horizon_days)});
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("values"),
@@ -642,13 +630,12 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(resid_sq, "resid_sq");
             const double* resid_sq_ptr = resid_sq.data();
             const auto    n            = static_cast<std::size_t>(resid_sq.size());
-            std::vector<double> result;
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                result = sqt::garch11_variance_recursion(resid_sq_ptr, n, omega, alpha, beta);
+                sqt::garch11_variance_recursion_into(resid_sq_ptr, n, omega, alpha, beta, out_ptr);
             }
-            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("resid_sq"),
@@ -813,14 +800,13 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* entry_max_ptr = entry_max.data();
             const double* exit_min_ptr  = exit_min.data();
             const auto    n             = static_cast<std::size_t>(close.size());
-            std::vector<double> result;
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                result = sqt::donchian_state_machine(
-                    close_ptr, entry_max_ptr, exit_min_ptr, n);
+                sqt::donchian_state_machine_into(
+                    close_ptr, entry_max_ptr, exit_min_ptr, n, out_ptr);
             }
-            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("close"),
@@ -841,14 +827,13 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* close_ptr = close.data();
             const double* vwap_ptr  = vwap.data();
             const auto    n         = static_cast<std::size_t>(close.size());
-            std::vector<double> result;
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                result = sqt::vwap_reversion_state_machine(
-                    close_ptr, vwap_ptr, entry_threshold, n);
+                sqt::vwap_reversion_state_machine_into(
+                    close_ptr, vwap_ptr, entry_threshold, n, out_ptr);
             }
-            py::array_t<double> out(static_cast<py::ssize_t>(result.size()));
-            std::copy(result.begin(), result.end(), out.mutable_data());
             return out;
         },
         py::arg("close"),

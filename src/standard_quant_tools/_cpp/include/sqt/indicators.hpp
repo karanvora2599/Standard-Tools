@@ -5,6 +5,14 @@
 
 namespace sqt {
 
+// Every indicator below has a buffer-writing `*_into` variant alongside its
+// vector-returning form. The `_into` variants write directly into a
+// caller-provided buffer -- used by bindings.cpp to write straight into a
+// pre-allocated NumPy array with no intermediate std::vector allocation and
+// no copy at the Python/C++ boundary. Native tests and internal callers
+// continue to use the vector-returning forms unchanged (each is a thin
+// wrapper: allocate, call the `_into` variant, return).
+
 /**
  * RSI — Relative Strength Index (Wilder's smoothing).
  *
@@ -14,6 +22,9 @@ namespace sqt {
  * @returns       Vector of length n; first `period` values are NaN.
  */
 std::vector<double> rsi(const double* prices, std::size_t n, int period = 14);
+
+/** Buffer-writing form of rsi(). `out` must have length n. */
+void rsi_into(const double* prices, std::size_t n, int period, double* out);
 
 /**
  * ADX — Average Directional Index with DI+ and DI-.
@@ -35,6 +46,15 @@ std::vector<double> adx(
     const double* close,
     std::size_t   n,
     int           period = 14);
+
+/** Buffer-writing form of adx(). `out` must have length 3*n. */
+void adx_into(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           period,
+    double*       out);
 
 /**
  * Parabolic SAR — trend-following stop-and-reverse indicator.
@@ -61,6 +81,16 @@ std::vector<double> parabolic_sar(
     double        af_start = 0.02,
     double        af_step  = 0.02,
     double        af_max   = 0.2);
+
+/** Buffer-writing form of parabolic_sar(). `out` must have length 2*n. */
+void parabolic_sar_into(
+    const double* high,
+    const double* low,
+    std::size_t   n,
+    double        af_start,
+    double        af_step,
+    double        af_max,
+    double*       out);
 
 /**
  * Wilder's ATR — Average True Range with Wilder's smoothing.
@@ -89,6 +119,15 @@ std::vector<double> wilder_atr(
     std::size_t   n,
     int           period = 14);
 
+/** Buffer-writing form of wilder_atr(). `out` must have length n. */
+void wilder_atr_into(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           period,
+    double*       out);
+
 /**
  * Bollinger Bands — fused sliding-window mean + std in one pass.
  *
@@ -113,6 +152,14 @@ std::vector<double> bollinger_bands(
     std::size_t   n,
     int           period  = 20,
     double        num_std = 2.0);
+
+/** Buffer-writing form of bollinger_bands(). `out` must have length 3*n. */
+void bollinger_bands_into(
+    const double* prices,
+    std::size_t   n,
+    int           period,
+    double        num_std,
+    double*       out);
 
 /**
  * Stochastic Oscillator — O(n) sliding min/max via monotonic deques (not a
@@ -140,5 +187,15 @@ std::vector<double> stochastic_oscillator(
     std::size_t   n,
     int           k_period = 14,
     int           d_period = 3);
+
+/** Buffer-writing form of stochastic_oscillator(). `out` must have length 2*n. */
+void stochastic_oscillator_into(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           k_period,
+    int           d_period,
+    double*       out);
 
 }  // namespace sqt

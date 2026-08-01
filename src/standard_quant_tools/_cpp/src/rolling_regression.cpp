@@ -77,18 +77,19 @@ namespace {
 
 // ── rolling_factor_loadings ───────────────────────────────────────────────────
 
-std::vector<double> rolling_factor_loadings(
+void rolling_factor_loadings_into(
     const double* y,
     const double* factors,
     std::size_t   n,
     std::size_t   k,
-    int           window)
+    int           window,
+    double*       out)
 {
     const int p = static_cast<int>(k) + 1;  // intercept + k factors
     const int N = static_cast<int>(n);
-    std::vector<double> result(n * p, kNaN);
+    std::fill(out, out + n * static_cast<std::size_t>(p), kNaN);
 
-    if (window < p + 1 || N < window) return result;
+    if (window < p + 1 || N < window) return;
 
     std::vector<double> XtX(p * p), Xty(p);
     std::vector<double> beta;
@@ -100,7 +101,7 @@ std::vector<double> rolling_factor_loadings(
     build_normal_equations(y, factors, 0, window, static_cast<int>(k), p, XtX, Xty);
     if (cholesky_solve(XtX, Xty, beta, p)) {
         for (int j = 0; j < p; ++j)
-            result[(window - 1) * p + j] = beta[j];
+            out[(window - 1) * p + j] = beta[j];
     }
 
     // ── Slide window ─────────────────────────────────────────────────────────
@@ -129,23 +130,35 @@ std::vector<double> rolling_factor_loadings(
 
         if (cholesky_solve(XtX, Xty, beta, p)) {
             for (int j = 0; j < p; ++j)
-                result[i * p + j] = beta[j];
+                out[i * p + j] = beta[j];
         }
     }
+}
 
+std::vector<double> rolling_factor_loadings(
+    const double* y,
+    const double* factors,
+    std::size_t   n,
+    std::size_t   k,
+    int           window)
+{
+    const int p = static_cast<int>(k) + 1;
+    std::vector<double> result(n * static_cast<std::size_t>(p));
+    rolling_factor_loadings_into(y, factors, n, k, window, result.data());
     return result;
 }
 
 // ── rolling_beta ─────────────────────────────────────────────────────────────
 
-std::vector<double> rolling_beta(
+void rolling_beta_into(
     const double* y,
     const double* x,
     std::size_t   n,
-    int           window)
+    int           window,
+    double*       out)
 {
-    std::vector<double> result(n, kNaN);
-    if (window < 2 || static_cast<int>(n) < window) return result;
+    std::fill(out, out + n, kNaN);
+    if (window < 2 || static_cast<int>(n) < window) return;
 
     // beta = cov(x,y) / var(x)
     //      = [W*Sxy - Sx*Sy] / [W*Sxx - Sx^2]
@@ -185,7 +198,7 @@ std::vector<double> rolling_beta(
     auto write_beta = [&](int i) {
         const double denom = W * Sxx - Sx * Sx;
         if (std::abs(denom) > 1e-14)
-            result[i] = (W * Sxy - Sx * Sy) / denom;
+            out[i] = (W * Sxy - Sx * Sy) / denom;
     };
 
     // Seed first window
@@ -209,7 +222,16 @@ std::vector<double> rolling_beta(
 
         write_beta(i);
     }
+}
 
+std::vector<double> rolling_beta(
+    const double* y,
+    const double* x,
+    std::size_t   n,
+    int           window)
+{
+    std::vector<double> result(n);
+    rolling_beta_into(y, x, n, window, result.data());
     return result;
 }
 

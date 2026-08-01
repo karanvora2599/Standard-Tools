@@ -274,15 +274,16 @@ HurstResult hurst_exponent(
 
 // ── rolling_hurst ─────────────────────────────────────────────────────────────
 
-std::vector<double> rolling_hurst(
+void rolling_hurst_into(
     const double*      arr,
     std::size_t        n,
     int                window,
     int                step,
     const std::string& method,
-    int                min_window)
+    int                min_window,
+    double*            out)
 {
-    std::vector<double> out(n, kNaN);
+    std::fill(out, out + n, kNaN);
 
     // Validate eagerly rather than relying on the first hurst_exponent()
     // call inside the loop below to catch it -- for a short input (n <
@@ -297,7 +298,7 @@ std::vector<double> rolling_hurst(
     // advances, or moves backward) — an infinite native loop that hangs
     // the process rather than raising. window <= 0 is equally nonsensical
     // (the slice below would be empty or reversed). Reject both up front.
-    if (step <= 0 || window <= 0) return out;
+    if (step <= 0 || window <= 0) return;
 
     for (int i = window - 1; i < static_cast<int>(n); i += step) {
         const auto result = hurst_exponent(
@@ -308,7 +309,18 @@ std::vector<double> rolling_hurst(
             /*max_window=*/-1);   // auto per chunk size
         out[i] = result.hurst;
     }
+}
 
+std::vector<double> rolling_hurst(
+    const double*      arr,
+    std::size_t        n,
+    int                window,
+    int                step,
+    const std::string& method,
+    int                min_window)
+{
+    std::vector<double> out(n);
+    rolling_hurst_into(arr, n, window, step, method, min_window, out.data());
     return out;
 }
 

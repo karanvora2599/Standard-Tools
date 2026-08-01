@@ -31,6 +31,16 @@ std::vector<double> garch11_variance_recursion(
     double        alpha,
     double        beta);
 
+/** Buffer-writing form of garch11_variance_recursion(). `out` must have
+ *  length n. */
+void garch11_variance_recursion_into(
+    const double* resid_sq,
+    std::size_t   n,
+    double        omega,
+    double        alpha,
+    double        beta,
+    double*       out);
+
 /**
  * GARCH(1,1) negative log-likelihood -- fuses the variance recursion above
  * with the NLL reduction into a single native call, so a Python-side

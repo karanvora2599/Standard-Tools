@@ -442,6 +442,37 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Performance architecture, item 5:** ~16 of `bindings.cpp`'s ~21
+  bindings shared the pattern `std::vector<double> result = sqt::foo(...);
+  py::array_t<double> out(...); std::copy(result.begin(), result.end(),
+  out.mutable_data());` — a `std::vector` allocation plus a full copy into
+  a second, separately-allocated NumPy array, on every call. Added a
+  buffer-writing `*_into` overload alongside 13 of the ~16 identified
+  vector-returning `sqt::` functions (`rsi`, `adx`, `parabolic_sar`,
+  `wilder_atr`, `bollinger_bands`, `stochastic_oscillator`,
+  `rolling_hurst`, `rolling_beta`, `rolling_factor_loadings`,
+  `simulate_forward_paths`, `garch11_variance_recursion`,
+  `donchian_state_machine`, `vwap_reversion_state_machine`) — the
+  existing vector-returning form becomes a thin wrapper (allocate, call
+  `_into`, return), so every native test keeps calling the unchanged API
+  with zero test churn. `bindings.cpp` now allocates the NumPy output
+  array first and passes its buffer straight into the `_into` call: one
+  allocation, zero copies. `simulate_forward_paths_into` needed a small
+  contract change from the vector-returning form (returns `bool` for
+  "was `out` actually written" instead of signaling invalid input via an
+  empty vector, since a pre-sized buffer can't itself be "empty") — the
+  vector-returning wrapper still preserves the original empty-on-invalid
+  contract exactly.
+  **Deliberately scoped out**: `run_strategy`'s `equity_curve` field and
+  the two Kalman filters' 3-4 output arrays each — these return
+  multi-field structs, not a single `std::vector`, so the same pattern
+  would need multiple output-buffer parameters per call; lower value
+  (Kalman filters aren't hot-loop calls, and `run_strategy`'s own copy is
+  already dwarfed by item 1's ~58× wrapper fix) for real added
+  complexity, left as a known, documented gap. Measured on two of the
+  cheapest kernels at small n (where a copy is proportionally largest):
+  `rsi` (n=100) **~1.6×** (0.00429ms→0.00262ms), `adx` (n=100) **~1.9×**
+  (0.00886ms→0.00477ms) — same-machine git-stash-verified.
 - **Performance architecture, item 4:** `adx()` (`indicators.cpp`)
   allocated 4 full n-sized temporary arrays (`dm_plus`, `dm_minus`, `tr`,
   `dx_vals`) beyond its own output array. Traced Wilder's recursion by

@@ -56,4 +56,23 @@ std::vector<double> simulate_forward_paths(
     unsigned long long seed,
     bool          has_seed);
 
+/**
+ * Buffer-writing form of simulate_forward_paths(). `out` must have length
+ * n_simulations*horizon_days -- unlike the vector-returning form (which
+ * signals "invalid input" via an empty vector), this returns false and
+ * leaves `out`'s contents undefined/untouched when the input is invalid,
+ * since a pre-allocated fixed-size buffer can't itself signal "empty".
+ * Returns true iff `out` was actually written.
+ */
+bool simulate_forward_paths_into(
+    const double* values,
+    std::size_t   hist_n,
+    int           horizon_days,
+    int           n_simulations,
+    int           block_size,
+    double        initial_capital,
+    unsigned long long seed,
+    bool          has_seed,
+    double*       out);
+
 }  // namespace sqt

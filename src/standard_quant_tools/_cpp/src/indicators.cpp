@@ -18,16 +18,16 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 // Wilder's smoothing: SMA seed for first `period` bars, then exponential
 // smoothing with alpha = 1/period.  Matches the Numba reference exactly.
 
-std::vector<double> rsi(const double* prices, std::size_t n, int period) {
-    std::vector<double> result(n, kNaN);
+void rsi_into(const double* prices, std::size_t n, int period, double* out) {
+    std::fill(out, out + n, kNaN);
 
-    // period <= 0 would index result[period] with a negative/zero-derived
+    // period <= 0 would index out[period] with a negative/zero-derived
     // value below — for period < 0 that wraps to a huge size_t via the
     // implicit int->size_t conversion in operator[], an out-of-bounds write.
     // Reject up front rather than relying on downstream arithmetic to stay
     // in range.
-    if (period <= 0) return result;
-    if (static_cast<int>(n) <= period) return result;
+    if (period <= 0) return;
+    if (static_cast<int>(n) <= period) return;
 
     // Seed: simple mean of first `period` gains/losses
     double avg_gain = 0.0, avg_loss = 0.0;
@@ -45,7 +45,7 @@ std::vector<double> rsi(const double* prices, std::size_t n, int period) {
         return 100.0 - (100.0 / (1.0 + rs));
     };
 
-    result[period] = to_rsi(avg_gain, avg_loss);
+    out[period] = to_rsi(avg_gain, avg_loss);
 
     // Wilder's forward pass
     for (std::size_t i = static_cast<std::size_t>(period) + 1; i < n; ++i) {
@@ -56,9 +56,13 @@ std::vector<double> rsi(const double* prices, std::size_t n, int period) {
         avg_gain = (avg_gain * (period - 1) + gain) / period;
         avg_loss = (avg_loss * (period - 1) + loss) / period;
 
-        result[i] = to_rsi(avg_gain, avg_loss);
+        out[i] = to_rsi(avg_gain, avg_loss);
     }
+}
 
+std::vector<double> rsi(const double* prices, std::size_t n, int period) {
+    std::vector<double> result(n);
+    rsi_into(prices, n, period, result.data());
     return result;
 }
 
@@ -68,23 +72,24 @@ std::vector<double> rsi(const double* prices, std::size_t n, int period) {
 // Wilder's Average Directional Index.  Flat row-major output: (DI+, DI-, ADX).
 // Matches _adx_numba in trend.py exactly.
 
-std::vector<double> adx(
+void adx_into(
     const double* high,
     const double* low,
     const double* close,
     std::size_t   n,
-    int           period)
+    int           period,
+    double*       out)
 {
     // 3 columns per bar: DI+, DI-, ADX
-    std::vector<double> result(3 * n, kNaN);
+    std::fill(out, out + 3 * n, kNaN);
 
-    // period <= 0 would index result[period*3+...] with a negative/zero
+    // period <= 0 would index out[period*3+...] with a negative/zero
     // value and divide by `period` in the Wilder smoothing below.
-    if (period <= 0) return result;
-    if (n < 2 || static_cast<int>(n) <= period) return result;
+    if (period <= 0) return;
+    if (n < 2 || static_cast<int>(n) <= period) return;
 
     // Single fused O(1)-auxiliary-memory pass -- no dm_plus/dm_minus/tr/
-    // dx_vals arrays (previously 4 full n-sized buffers beyond `result`).
+    // dx_vals arrays (previously 4 full n-sized buffers beyond the output).
     // Wilder's smoothing only ever needs the immediately-previous smoothed
     // sum (atr_s/dmp_s/dmm_s below) plus the CURRENT bar's raw TR/DM
     // value, which is computable inline from high[i]/high[i-1]/low[i]/
@@ -134,8 +139,8 @@ std::vector<double> adx(
 
         const double di_p = di_p_val();
         const double di_m = di_m_val();
-        result[i * 3 + 0] = di_p;
-        result[i * 3 + 1] = di_m;
+        out[i * 3 + 0] = di_p;
+        out[i * 3 + 1] = di_m;
 
         const double di_sum = di_p + di_m;
         const double dx_i = (di_sum != 0.0) ? 100.0 * std::abs(di_p - di_m) / di_sum : 0.0;
@@ -145,14 +150,24 @@ std::vector<double> adx(
             dx_seed_sum += dx_i;
             if (i == adx_start) {
                 adx_val = dx_seed_sum / period;
-                result[adx_start * 3 + 2] = adx_val;
+                out[adx_start * 3 + 2] = adx_val;
             }
         } else {
             adx_val = (adx_val * (period - 1) + dx_i) / period;
-            result[i * 3 + 2] = adx_val;
+            out[i * 3 + 2] = adx_val;
         }
     }
+}
 
+std::vector<double> adx(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           period)
+{
+    std::vector<double> result(3 * n);
+    adx_into(high, low, close, n, period, result.data());
     return result;
 }
 
@@ -162,17 +177,18 @@ std::vector<double> adx(
 // State machine with SAR-clamp rules identical to _psar_numba in trend.py.
 // Flat row-major output: (SAR, Trend) per bar.
 
-std::vector<double> parabolic_sar(
+void parabolic_sar_into(
     const double* high,
     const double* low,
     std::size_t   n,
     double        af_start,
     double        af_step,
-    double        af_max)
+    double        af_max,
+    double*       out)
 {
     // 2 columns per bar: SAR, Trend
-    std::vector<double> result(2 * n, kNaN);
-    if (n == 0) return result;
+    std::fill(out, out + 2 * n, kNaN);
+    if (n == 0) return;
 
     // Not a crash risk (af_* only feed floating-point arithmetic below, no
     // indexing) but a nonsensical combination (e.g. af_max < af_start, a
@@ -182,7 +198,7 @@ std::vector<double> parabolic_sar(
     // file.
     if (!std::isfinite(af_start) || !std::isfinite(af_step) || !std::isfinite(af_max) ||
         af_start <= 0.0 || af_step < 0.0 || af_max <= 0.0 || af_max < af_start) {
-        return result;
+        return;
     }
 
     // Bootstrap: assume rising trend from bar 0
@@ -191,8 +207,8 @@ std::vector<double> parabolic_sar(
     double af        = af_start;
     bool   is_rising = true;
 
-    result[0] = sar;
-    result[1] = 1.0;
+    out[0] = sar;
+    out[1] = 1.0;
 
     for (std::size_t i = 1; i < n; ++i) {
         const double prev_sar = sar;
@@ -235,10 +251,21 @@ std::vector<double> parabolic_sar(
             }
         }
 
-        result[i * 2 + 0] = sar;
-        result[i * 2 + 1] = is_rising ? 1.0 : -1.0;
+        out[i * 2 + 0] = sar;
+        out[i * 2 + 1] = is_rising ? 1.0 : -1.0;
     }
+}
 
+std::vector<double> parabolic_sar(
+    const double* high,
+    const double* low,
+    std::size_t   n,
+    double        af_start,
+    double        af_step,
+    double        af_max)
+{
+    std::vector<double> result(2 * n);
+    parabolic_sar_into(high, low, n, af_start, af_step, af_max, result.data());
     return result;
 }
 
@@ -248,20 +275,21 @@ std::vector<double> parabolic_sar(
 // Identical smoothing to RSI and ADX: SMA seed for the first `period` bars,
 // then alpha=1/period.  Not the same as a simple rolling mean of TR.
 
-std::vector<double> wilder_atr(
+void wilder_atr_into(
     const double* high,
     const double* low,
     const double* close,
     std::size_t   n,
-    int           period)
+    int           period,
+    double*       out)
 {
-    std::vector<double> result(n, kNaN);
+    std::fill(out, out + n, kNaN);
 
-    // period <= 0 would index result[period-1] with a negative/zero-derived
+    // period <= 0 would index out[period-1] with a negative/zero-derived
     // value below — for period <= 0 that wraps to a huge size_t, an
     // out-of-bounds write (this is the exact case the reviewer flagged).
-    if (period <= 0) return result;
-    if (static_cast<int>(n) < period) return result;
+    if (period <= 0) return;
+    if (static_cast<int>(n) < period) return;
 
     // ── True range ────────────────────────────────────────────────────────────
     // Bar 0 has no previous close; use high - low.
@@ -279,14 +307,24 @@ std::vector<double> wilder_atr(
     double atr_val = 0.0;
     for (int i = 0; i < period; ++i) atr_val += tr[i];
     atr_val /= period;
-    result[static_cast<std::size_t>(period) - 1] = atr_val;
+    out[static_cast<std::size_t>(period) - 1] = atr_val;
 
     // ── Wilder's forward smoothing ────────────────────────────────────────────
     for (std::size_t i = static_cast<std::size_t>(period); i < n; ++i) {
         atr_val = (atr_val * (period - 1) + tr[i]) / period;
-        result[i] = atr_val;
+        out[i] = atr_val;
     }
+}
 
+std::vector<double> wilder_atr(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           period)
+{
+    std::vector<double> result(n);
+    wilder_atr_into(high, low, close, n, period, result.data());
     return result;
 }
 
@@ -296,14 +334,15 @@ std::vector<double> wilder_atr(
 // Maintains incremental Sx (sum) and Sxx (sum of squares) so both statistics
 // are computed without re-iterating the window.
 
-std::vector<double> bollinger_bands(
+void bollinger_bands_into(
     const double* prices,
     std::size_t   n,
     int           period,
-    double        num_std)
+    double        num_std,
+    double*       out)
 {
-    std::vector<double> result(3 * n, kNaN);
-    if (static_cast<int>(n) < period || period < 2) return result;
+    std::fill(out, out + 3 * n, kNaN);
+    if (static_cast<int>(n) < period || period < 2) return;
 
     const double W   = static_cast<double>(period);
     const double dof = W - 1.0;  // ddof=1, matching pandas .std()
@@ -341,10 +380,10 @@ std::vector<double> bollinger_bands(
         const double var  = (Sxx - Sx * Sx / W) / dof;
         const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
         const double bw   = num_std * std;
-        const int    out  = i * 3;
-        result[out]     = mean + bw;  // upper
-        result[out + 1] = mean;       // middle
-        result[out + 2] = mean - bw;  // lower
+        const int    o    = i * 3;
+        out[o]     = mean + bw;  // upper
+        out[o + 1] = mean;       // middle
+        out[o + 2] = mean - bw;  // lower
     };
 
     // Seed first window
@@ -364,29 +403,39 @@ std::vector<double> bollinger_bands(
 
         write_bands(i);
     }
+}
 
+std::vector<double> bollinger_bands(
+    const double* prices,
+    std::size_t   n,
+    int           period,
+    double        num_std)
+{
+    std::vector<double> result(3 * n);
+    bollinger_bands_into(prices, n, period, num_std, result.data());
     return result;
 }
 
 
 // ── Stochastic Oscillator ─────────────────────────────────────────────────────
 
-std::vector<double> stochastic_oscillator(
+void stochastic_oscillator_into(
     const double* high,
     const double* low,
     const double* close,
     std::size_t   n,
     int           k_period,
-    int           d_period)
+    int           d_period,
+    double*       out)
 {
-    std::vector<double> result(2 * n, kNaN);
-    if (static_cast<int>(n) < k_period || k_period < 1) return result;
+    std::fill(out, out + 2 * n, kNaN);
+    if (static_cast<int>(n) < k_period || k_period < 1) return;
 
     // d_period <= 0 would make `Sk -= K_vals[i - d_period + 1]` below read
     // out of bounds (i - d_period + 1 >= i + 1 for d_period <= 0) and
     // `Sk / d_period` divide by zero for d_period == 0 — reject up front,
     // same convention as the k_period guard just above.
-    if (d_period <= 0) return result;
+    if (d_period <= 0) return;
 
     // Compute %K for each bar from k_period-1 onward.
     //
@@ -423,20 +472,31 @@ std::vector<double> stochastic_oscillator(
         }
     }
 
-    // Compute %D = SMA(%K, d_period) and store both to result
+    // Compute %D = SMA(%K, d_period) and store both to out
     double Sk = 0.0;
     int    count = 0;
     for (int i = k_period - 1; i < static_cast<int>(n); ++i) {
-        result[i * 2] = K_vals[i];  // %K
+        out[i * 2] = K_vals[i];  // %K
 
         Sk += K_vals[i];
         ++count;
         if (count >= d_period) {
-            result[i * 2 + 1] = Sk / d_period;  // %D
+            out[i * 2 + 1] = Sk / d_period;  // %D
             Sk -= K_vals[i - d_period + 1];
         }
     }
+}
 
+std::vector<double> stochastic_oscillator(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    int           k_period,
+    int           d_period)
+{
+    std::vector<double> result(2 * n);
+    stochastic_oscillator_into(high, low, close, n, k_period, d_period, result.data());
     return result;
 }
 
