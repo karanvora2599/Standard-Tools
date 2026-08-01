@@ -459,26 +459,29 @@ class TestTradeLog:
 
 
 class TestCppTradeStatsParity:
-    def test_native_trade_stats_overwritten_with_python_computed_ones(
-        self, monkeypatch
-    ):
+    def test_native_trade_stats_pass_through_unmodified(self, monkeypatch):
         """
-        Regression test (P0-2): the native C++ kernel's own trade-log logic
-        records entry at prices[i] (not the economically correct prior
-        close) and excludes commission/slippage from trade returns -- the
-        same bug _build_trade_log's Python-side fix addressed. Since the
-        C++ source can't be rebuilt in this environment, the interim fix is
-        to overwrite win_rate/profit_factor/num_trades/avg_trade_return_pct
-        with _compute_trade_stats(_build_trade_log(...)) regardless of
-        which path computed the equity curve, so results (and the optional
-        trade_log) are identical whether or not _sqt_core is built.
+        Regression test, updated for the run_strategy wrapper performance
+        fix: the native C++ kernel's own trade-log logic used to have real
+        bugs (entry at prices[i] instead of the economically correct prior
+        close, no commission/slippage in trade returns), so a Python-side
+        override recomputed win_rate/profit_factor/num_trades/
+        avg_trade_return_pct from _build_trade_log(...) unconditionally,
+        regardless of which path computed the equity curve. That native bug
+        was fixed directly in backtest.cpp this session, and
+        TestNativeTradeStatsCorrectness (below) confirms native and Python
+        trade stats now agree exactly on real (non-mocked) data -- so the
+        override was removed as pure redundant work, not a correctness
+        requirement.
 
-        This fakes a native result with DELIBERATELY WRONG trade stats
-        (values that could never legitimately arise from this scenario) and
-        confirms they get replaced by the Python-computed correct values,
-        not passed through -- using the same 6-bar hand-verified scenario
-        as test_trade_log_reconciles_with_equity_curve_close_mode (entry
-        at Close[0]=100, exit at Close[3]=103, return_pct=2.7%).
+        This test now verifies the *opposite* of what it used to: the
+        native result's summary stats flow straight through UNMODIFIED,
+        even when they're deliberately distinctive fake values that could
+        never legitimately arise from this scenario -- proving nothing
+        recomputes or overwrites them anymore. The separately-built
+        trade_log (only built at all because include_trade_log=True) is
+        independent of those summary stats now, not a source they get
+        derived from.
         """
         from unittest.mock import MagicMock
 
@@ -508,8 +511,8 @@ class TestCppTradeStatsParity:
             "sortino_ratio": 0.0,
             "max_drawdown": 0.0,
             "calmar_ratio": 0.0,
-            # Deliberately wrong / implausible native trade stats -- these
-            # must NOT survive into the final result.
+            # Deliberately distinctive fake trade stats -- these must now
+            # survive into the final result completely unmodified.
             "win_rate": 0.0,
             "profit_factor": 0.0,
             "num_trades": 999,
@@ -526,12 +529,19 @@ class TestCppTradeStatsParity:
             include_trade_log=True,
         )
 
-        assert result["num_trades"] == 1
-        assert result["win_rate"] == pytest.approx(1.0)
-        assert result["avg_trade_return_pct"] == pytest.approx(2.7, abs=1e-9)
-        # Reconciles with the Python-side trade log built alongside it.
+        assert result["num_trades"] == 999
+        assert result["win_rate"] == pytest.approx(0.0)
+        assert result["profit_factor"] == pytest.approx(0.0)
+        assert result["avg_trade_return_pct"] == pytest.approx(-50.0)
+        # The Python trade_log is still built (include_trade_log=True) from
+        # the real (non-mocked) price/signal data -- its own contents
+        # reflect the real 6-bar scenario (entry at Close[0]=100, exit at
+        # Close[3]=103, return_pct=2.7%), independent of and unreconciled
+        # with the fake summary stats above -- proving the two are no
+        # longer coupled the way they used to be.
         row = result["trade_log"].iloc[0]
-        assert result["avg_trade_return_pct"] == pytest.approx(row["return_pct"])
+        assert row["return_pct"] == pytest.approx(2.7, abs=1e-9)
+        assert result["avg_trade_return_pct"] != pytest.approx(row["return_pct"])
 
 
 from typing import Any as _Any

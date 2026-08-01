@@ -269,7 +269,14 @@ def run_strategy(
                 f"{name} must be non-negative and finite, got {value!r}"
             )
 
-    idx = price_data.index.intersection(signal_series.index)
+    # Fast path: skip the intersection + two .loc[] calls entirely when the
+    # indices are already identical (the common case for a signal derived
+    # directly from price_data) -- .equals() is a cheap array comparison,
+    # intersection+loc is real allocation work neither index needs here.
+    if price_data.index.equals(signal_series.index):
+        idx = price_data.index
+    else:
+        idx = price_data.index.intersection(signal_series.index)
     prices = price_data.loc[idx, "Close"]
     signals = signal_series.loc[idx]
 
@@ -283,8 +290,14 @@ def run_strategy(
         fill_price,
     )
 
-    returns = prices.pct_change().fillna(0.0)
-    executed = signals.shift(1).fillna(0.0)
+    # `returns`/`executed` are NOT computed here anymore -- the C++ path
+    # below needs neither (it recomputes both internally from raw prices/
+    # signals), and building them unconditionally was pure waste whenever
+    # the C++ kernel actually ran. Each is now computed only where it's
+    # actually used: `executed` lazily inside the C++ branch (only if
+    # include_trade_log requests a Python-side trade log) or unconditionally
+    # at the top of the Python fallback branch below (where both are
+    # genuinely needed for the return/cost calculation itself).
 
     warnings: List[str] = []
     if fill_price == "close":
@@ -318,26 +331,19 @@ def run_strategy(
             prices_arr, signals_arr, initial_capital, commission_pct, slippage_pct
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
-        # win_rate/profit_factor/num_trades/avg_trade_return_pct: overwrite
-        # the native kernel's own trade-log stats with the same fill-aware,
-        # cost-aware Python accounting used elsewhere, so these reconcile
-        # with trade_log below regardless of path. backtest.cpp's own
-        # trade-log logic was itself corrected to use this same convention
+        # win_rate/profit_factor/num_trades/avg_trade_return_pct: read
+        # straight from the native result. backtest.cpp's own trade-log
+        # logic uses the identical convention _build_trade_log does
         # (entry_price = prices[i-1], entry_size = signal magnitude, cost
-        # deducted per round trip) — see tests/test_backtest.py's
-        # TestNativeTradeStatsCorrectness for the gated (CI-only, no local
-        # C++ toolchain to verify against here) equivalence check. This
-        # override is kept in place as belt-and-suspenders until that CI
-        # run has actually confirmed native and Python agree exactly; it's
-        # otherwise redundant computation, not a correctness requirement,
-        # once confirmed.
-        trade_log_for_stats = _build_trade_log(
-            prices.shift(1),
-            prices,
-            executed,
-            commission_pct + slippage_pct,
-        )
-        trade_stats = _compute_trade_stats(trade_log_for_stats)
+        # scaled by position size) and this session's own CI verification
+        # work (TestNativeTradeStatsCorrectness, run against a real
+        # compiled _sqt_core on live CI, not just locally) already
+        # confirmed native and Python trade stats agree exactly -- so
+        # rebuilding the full Python trade log here just to recompute
+        # numbers the C++ kernel already returned was pure redundant work,
+        # not a correctness requirement. The Python trade log itself is
+        # still built below, but only when include_trade_log actually asks
+        # for the DataFrame, not for its stats.
         result: Dict[str, Any] = {
             "final_equity": round(float(r["final_equity"]), 2),
             "total_return": round(float(r["total_return"]), 6),
@@ -346,12 +352,21 @@ def run_strategy(
             "sortino_ratio": round(float(r["sortino_ratio"]), 4),
             "max_drawdown": round(float(r["max_drawdown"]), 6),
             "calmar_ratio": round(float(r["calmar_ratio"]), 4),
+            "num_trades": int(r["num_trades"]),
+            "win_rate": round(float(r["win_rate"]), 4),
+            "profit_factor": round(float(r["profit_factor"]), 4),
+            "avg_trade_return_pct": round(float(r["avg_trade_return_pct"]), 4),
             "equity_curve": equity_curve,
             "warnings": warnings,
-            **trade_stats,
         }
         if include_trade_log:
-            result["trade_log"] = trade_log_for_stats
+            executed = signals.shift(1).fillna(0.0)
+            result["trade_log"] = _build_trade_log(
+                prices.shift(1),
+                prices,
+                executed,
+                commission_pct + slippage_pct,
+            )
         logger.debug(
             "[run_strategy] C++  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
             result["total_return"] * 100,
@@ -363,6 +378,8 @@ def run_strategy(
 
     # ── Python fallback ───────────────────────────────────────────────────────
     logger.debug("[run_strategy] using Python fallback  fill_price=%s", fill_price)
+    returns = prices.pct_change().fillna(0.0)
+    executed = signals.shift(1).fillna(0.0)
     cost_per_unit = commission_pct + slippage_pct
     pos_diff = executed.diff().fillna(executed.iloc[0])
     transaction_costs = pos_diff.abs() * cost_per_unit

@@ -442,6 +442,30 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Performance architecture, item 1 of an independent review of the C++/
+  Python boundary:** `run_strategy()` (`backtest/engine.py`) measured
+  ~1.0× end-to-end against its own pure-C++ kernel time (68ms wrapper vs.
+  0.017ms native kernel) despite the kernel itself being fast — the
+  wrapper computed `prices.pct_change()`/`signals.shift(1)` unconditionally
+  before even checking whether the C++ path would run (never used on that
+  path — the kernel recomputes both internally), and after the kernel
+  returned, unconditionally rebuilt the entire Python trade log
+  (`_build_trade_log`/`_compute_trade_stats`) purely to overwrite native
+  `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct` fields
+  that were already correct — confirmed correct by this session's own CI
+  verification work (`TestNativeTradeStatsCorrectness` passing against a
+  real compiled `_sqt_core` on live CI), which is exactly the precondition
+  an existing code comment had flagged as needed before removing the
+  override. Both are now gone: the pandas calls are computed only where
+  actually used (Python fallback path, or lazily inside the C++ path only
+  when `include_trade_log=True` asks for the DataFrame), and the C++
+  path's summary stats flow straight from the native result, unmodified.
+  Also added an `index.equals()` fast path ahead of the existing
+  `intersection()`+`.loc[]` calls for the common case where `price_data`
+  and `signal_series` already share an index. Measured end-to-end
+  (n=2000, `include_trade_log=False`, the common case): **26.8ms → 0.46ms,
+  ~58×** — real numbers, stashed/unstashed the fix to measure the same
+  benchmark before and after on the same machine, not a projection.
 - **C++ hardening, Tier 4 item 13:** `stochastic_oscillator`
   (`indicators.cpp`) rewritten from an O(n·k_period) full-window rescan
   (re-scanning the entire `[i-k_period+1, i]` window on every single bar
