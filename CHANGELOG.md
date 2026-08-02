@@ -9,9 +9,26 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- **Breaking:** `fill_price="midpoint"` renamed to `fill_price="hl2_exploratory"`
+- **Correctness/portability pass (native ISA dispatch), item 1/2 of 20:**
+  `isa_dispatch.cpp` previously (a) would not compile on non-x86
+  architectures at all (its CPUID logic was unguarded), and (b) checked
+  only CPUID's AVX2/FMA hardware-support bits, not whether the OS had
+  actually enabled AVX register-state saving (OSXSAVE + XGETBV/XCR0) --
+  some hypervisors/sandboxes report AVX2 hardware support via CPUID while
+  leaving that OS-level bit unset, which would have made `rolling_beta`'s
+  AVX2 dispatch path unsafe on such a machine. Both fixed: detection now
+  collapses to `{false, false}` on non-x86 (guarded behind a new
+  `SQT_ARCH_X86` macro) and additionally requires XCR0 bits 1+2 (SSE+AVX
+  state) before ever reporting AVX2 available. Also fixed a latent data
+  race: `detect_isa_features()`'s test-only override previously stored an
+  `IsaFeatures` struct as one non-atomic global paired with only an atomic
+  "active" flag -- a real race a ThreadSanitizer build would flag, even
+  though today's tests only exercise it sequentially. `detect_isa_features()`
+  now returns `IsaFeatures` by value (was `const IsaFeatures&`, source-
+  compatible with the one existing call site in `rolling_regression.cpp`),
+  backed by independent atomics for the override's `avx2`/`fma` bits.
   everywhere (`run_strategy`, `run_portfolio_simulation`, `run_pair_backtest`,
   their agent-tool input models, and docs) — it was never a real bid/ask
   midpoint (just `(High+Low)/2`), and the old name implied a market-quote

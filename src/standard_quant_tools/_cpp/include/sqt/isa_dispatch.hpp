@@ -12,11 +12,18 @@ struct IsaFeatures {
     bool fma;
 };
 
-// Thread-safe (C++11 magic static), computed once on first call via CPUID.
+// Thread-safe (C++11 magic static), computed once on first call via CPUID
+// (plus an OSXSAVE/XGETBV check that the OS has actually enabled AVX
+// register-state saving -- CPUID alone can report hardware support even
+// when it hasn't). Always returns {false, false} on non-x86 architectures
+// (ARM/Apple Silicon, etc.), where CPUID/XGETBV don't exist. Returned by
+// value (not by reference) since the struct is two bools -- trivially
+// cheap to copy, and by-value avoids ever exposing a reference into
+// mutable override state shared across threads.
 // Real detection cannot be exercised on a non-AVX2 machine in this
 // project's own CI/dev environment -- see force_isa_features_for_testing()
 // below for the only practical way to test the scalar-fallback path here.
-const IsaFeatures& detect_isa_features();
+IsaFeatures detect_isa_features();
 
 // Test-only override: forces detect_isa_features() to return `f` for the
 // remainder of the process, regardless of what CPUID actually reports.
