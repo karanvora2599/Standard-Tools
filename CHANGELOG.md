@@ -442,6 +442,51 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Deep native optimization, Phase 1 (`rolling_regression.cpp`):** three
+  changes to `rolling_factor_loadings`'s per-bar Cholesky solve, following a
+  third-party review of what's left in the native layer after the
+  performance-architecture pass above. (1) `build_normal_equations()` and
+  the rank-1 XtX update/downdate loop computed all p² entries of the
+  symmetric normal-equations matrix; `cholesky_solve()`'s decomposition loop
+  only ever reads the lower triangle (`j <= i`), so the upper triangle was
+  provably dead work — removed outright (`c < p` → `c <= r`), no mirror step
+  needed since nothing downstream ever reads those entries. Verified
+  bit-identical two ways: a same-machine `git stash`/`git stash pop`
+  comparison of `rolling_factor_loadings()`'s full output array (exact `==`,
+  not tolerance) on a fixed random `(n=400, k=5, window=30)` input, and a
+  new from-scratch independent-reference regression test (dense Gaussian
+  elimination on the full normal equations, sharing no code with the
+  production lower-triangle-only path). (2) `cholesky_solve()` allocated a
+  fresh `L`/`z` vector on every single call — one call per bar in the
+  rolling window, so `(n-window+1)` allocations per series. Now takes
+  caller-owned `L_scratch`/`z_scratch` buffers, sized once outside the
+  loop and reused across every call; traced the read pattern by hand and
+  confirmed the old `L(p*p, 0.0)` zero-fill was never actually load-bearing
+  (every read of `L` is to an entry the same call already wrote earlier in
+  its own iteration order), so the scratch buffer is reused with no re-zero
+  needed either — also verified bit-identical via the same two methods.
+  (3) Added `#pragma omp simd reduction(+:Sx,Sy,Sxy,Sxx)` above
+  `rolling_beta_into`'s 4-accumulator reduction loop as a vectorization
+  hint. **First attempt broke the MSVC build**: MSVC's default `/openmp`
+  only implements OpenMP 2.0, which doesn't recognize `omp simd` (that's
+  4.0+) — this is a hard `C7660` compile error requiring
+  `/openmp:experimental`, not the silently-ignored no-op initially assumed;
+  scoped the pragma to non-MSVC compilers only (`!defined(_MSC_VER)`)
+  rather than pulling in a project-wide experimental-flag change for one
+  hint whose payoff is itself unproven. Also added `tests/cpp/test_rolling_regression.cpp`
+  (new `sqt_rolling_regression_impl`/`cpp_rolling_regression` CMake target) —
+  `rolling_regression.cpp` previously had no native-level test coverage at
+  all, only the existing Python-level `tests/test_cpp_regression.py`.
+  Measured (`rolling_factor_loadings`, n=2000, window=60, min of 9 runs,
+  same-machine before/after): **k=3 (this library's own typical/tested
+  factor count) 0.269ms → 0.150ms, ~1.79×** — the allocator overhead from
+  item (2) turned out to dominate total cost at this library's actual
+  problem size, a bigger and more directly-relevant win than the review's
+  own "matters more at k=10-50" framing suggested; **k=10: 1.058ms →
+  0.811ms, ~1.30×**; **k=30: 7.452ms → 6.833ms (best of 2 runs), ~1.09×** —
+  as p grows, `cholesky_solve`'s O(p³) decomposition dominates total cost
+  more, so the O(1)/O(p²) savings from items (1)/(2) become proportionally
+  smaller, not larger.
 - **Performance architecture, item 6:** two changes, per the review's own
   final priority item. (1) `batch_run_strategy` (`bindings.cpp`) returned
   `py::list` of `py::dict`, one per grid combo; `backtest_grid`

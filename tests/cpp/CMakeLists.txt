@@ -179,6 +179,30 @@ endif()
 
 add_test(NAME cpp_signals COMMAND test_signals)
 
+add_library(sqt_rolling_regression_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_regression.cpp
+)
+target_include_directories(sqt_rolling_regression_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_rolling_regression_impl PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(sqt_rolling_regression_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(sqt_rolling_regression_impl PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_executable(test_rolling_regression test_rolling_regression.cpp)
+target_link_libraries(test_rolling_regression PRIVATE sqt_rolling_regression_impl)
+target_compile_features(test_rolling_regression PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_rolling_regression PRIVATE /O2 /W3 /wd4244 /wd4267)
+else()
+    target_compile_options(test_rolling_regression PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_rolling_regression COMMAND test_rolling_regression)
+
 
 # ── Performance benchmarks ────────────────────────────────────────────────────
 # Not CTest tests — run manually to inspect timing output:
