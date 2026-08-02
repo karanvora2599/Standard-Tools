@@ -124,6 +124,27 @@ static void test_ols2_flat_predictor() {
     CHECK_TRUE(true);  // survived without crash
 }
 
+static void test_ols2_large_baseline_no_catastrophic_cancellation() {
+    // Regression test for ols2's raw-moment cancellation bug (native
+    // mirror of TestCppOls2Direct::test_large_baseline_no_catastrophic_cancellation
+    // in tests/test_cpp_cointegration.py): an x series with a ~1e9
+    // baseline used to make det = s1*sxx - sx*sx compute to exactly 0.0
+    // (total cancellation between two ~1e20-magnitude terms), falsely
+    // declaring the pair singular. The shift-by-reference-point fix must
+    // recover the true slope.
+    const int n = 300;
+    auto noise_x = lcg_noise(n, 5, 3.0);
+    std::vector<double> x(n), y(n);
+    for (int i = 0; i < n; ++i) {
+        x[i] = 1.0e9 + noise_x[i];
+        y[i] = 10.0 + 1.5 * noise_x[i];  // slope wrt x's *variation* is 1.5
+    }
+    auto r = sqt::ols2(y.data(), x.data(), x.size());
+    CHECK_NOT_NAN(r.slope);
+    CHECK_NOT_NAN(r.intercept);
+    CHECK_NEAR(r.slope, 1.5, 1e-6);
+}
+
 
 // ── Tests: adf_test ───────────────────────────────────────────────────────────
 
@@ -176,6 +197,19 @@ static void test_adf_explicit_lag_zero() {
     CHECK_NOT_NAN(r.statistic);
 }
 
+static void test_adf_max_lag_above_old_silent_cap_is_honored() {
+    // Regression test: adf_test() used to silently clamp any max_lag
+    // above 14 (kMaxK - 2, a fixed max-regressor-count constant) to at
+    // most 12, with no error. kMaxK is now removed entirely -- the XtX/
+    // Xty/xrow buffers are dynamically sized per candidate lag, and the
+    // loop's own data-driven `T < p + 3` break is the sole limiter. This
+    // must not crash/error at a max_lag far beyond the old ceiling.
+    auto s = ar1_series(600, 0.75, 71);
+    auto r = sqt::adf_test(s.data(), s.size(), /*max_lag=*/50, true);
+    CHECK_NOT_NAN(r.statistic);
+    CHECK(r.optimal_lag >= 0 && r.optimal_lag <= 50);
+}
+
 
 // ── Tests: engle_granger ──────────────────────────────────────────────────────
 
@@ -195,6 +229,24 @@ static void test_eg_cointegrated_pair() {
     CHECK_TRUE(r.cointegrated);
     CHECK(r.half_life > 0.0 && r.half_life < 50.0);
     CHECK(r.n_obs == n);
+}
+
+static void test_eg_large_baseline_hedge_ratio_recovered() {
+    // engle_granger's step-1 OLS (ols2) at a ~1e9 baseline -- same
+    // catastrophic-cancellation regression as
+    // test_ols2_large_baseline_no_catastrophic_cancellation, exercised
+    // end-to-end through the full two-variable cointegration pipeline.
+    int n = 400;
+    auto rw = random_walk(n, 3);
+    auto noise = lcg_noise(n, 7, 0.05);
+    std::vector<double> y0(n), y1(n);
+    for (int i = 0; i < n; ++i) {
+        y1[i] = 1.0e9 + rw[i];
+        y0[i] = 1.8 * y1[i] + noise[i];
+    }
+    auto r = sqt::engle_granger(y0.data(), y1.data(), n);
+    CHECK_NOT_NAN(r.hedge_ratio);
+    CHECK_NEAR(r.hedge_ratio, 1.8, 0.1);
 }
 
 static void test_eg_independent_random_walks() {
@@ -421,6 +473,7 @@ int main() {
     test_ols2_residuals_sum_to_zero();
     test_ols2_r2_in_unit_interval();
     test_ols2_flat_predictor();
+    test_ols2_large_baseline_no_catastrophic_cancellation();
 
     // adf_test
     test_adf_stationary_series();
@@ -429,9 +482,11 @@ int main() {
     test_adf_auto_max_lag();
     test_adf_bic_vs_aic();
     test_adf_explicit_lag_zero();
+    test_adf_max_lag_above_old_silent_cap_is_honored();
 
     // engle_granger
     test_eg_cointegrated_pair();
+    test_eg_large_baseline_hedge_ratio_recovered();
     test_eg_independent_random_walks();
     test_eg_hedge_ratio_sign();
     test_eg_critical_values_ordered();

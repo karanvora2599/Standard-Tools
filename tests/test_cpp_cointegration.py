@@ -303,6 +303,42 @@ class TestCppEngleGrangerDirect:
         result = _cpp.engle_granger(y0, y1, max_lag=3)
         assert result["optimal_lag"] <= 3
 
+    @requires_cpp
+    def test_large_baseline_hedge_ratio_recovered(self):
+        """engle_granger's step-1 OLS (ols2) at a ~1e9 baseline -- same
+        catastrophic-cancellation regression as TestCppOls2Direct's own
+        large-baseline test, exercised end-to-end through the full
+        two-variable cointegration pipeline."""
+        rng = np.random.default_rng(11)
+        n = 400
+        baseline = 1e9
+        rw = rng.standard_normal(n).cumsum()
+        y1 = baseline + rw
+        y0 = 1.8 * y1 + rng.standard_normal(n) * 0.05
+        result = _cpp.engle_granger(y0, y1)
+        assert not np.isnan(result["hedge_ratio"])
+        assert result["hedge_ratio"] == pytest.approx(1.8, abs=0.1)
+
+    @requires_cpp
+    def test_max_lag_above_old_silent_cap_is_honored(self):
+        """Regression test: adf_test() used to silently clamp any max_lag
+        above 14 (a fixed kMaxK-derived ceiling) to at most 12, with no
+        error. kMaxK is now removed -- the loop's own data-driven
+        `T < p + 3` break is the sole limiter, so a large series with a
+        large explicit max_lag must not raise/crash and must be free to
+        select a lag beyond the old ceiling if AIC favors one."""
+        rng = np.random.default_rng(71)
+        n = 600
+        y0 = rng.standard_normal(n).cumsum()
+        y1 = rng.standard_normal(n).cumsum()
+        # No crash/error at a max_lag far beyond the old silent cap of 14.
+        result = _cpp.engle_granger(y0, y1, max_lag=50)
+        assert 0.0 <= result["p_value"] <= 1.0
+        assert result["n_obs"] == n
+        # The candidate lag space genuinely extends past the old cap: the
+        # data-driven T >= p+3 bound allows lags well beyond 14 for this n.
+        assert result["optimal_lag"] <= 50
+
 
 class TestCppVsStatsmodels:
     """Cross-validate C++ against the statsmodels fallback on the same data."""
@@ -510,6 +546,38 @@ class TestCppOls2Direct:
         spread = compute_spread(y0, y1)
         assert len(spread) == 300
         assert abs(spread.mean()) < 0.5  # spread near zero for cointegrated pair
+
+    @requires_cpp
+    def test_large_baseline_no_catastrophic_cancellation(self):
+        """Regression test for ols2's raw-moment cancellation bug (mirrors
+        rolling_beta's own large-baseline test in test_cpp_regression.py):
+        an x series with a ~1e9 baseline used to make
+        det = s1*sxx - sx*sx compute to exactly 0.0 (total cancellation
+        between two ~1e20-magnitude terms), falsely declaring the pair
+        singular and returning all-NaN for a perfectly well-posed
+        regression. The shift-by-reference-point fix must now recover the
+        true slope/intercept, matching an independent numpy.polyfit
+        reference."""
+        rng = np.random.default_rng(3)
+        n = 500
+        baseline = 1e9
+        x = baseline + rng.standard_normal(n)
+        true_slope, true_intercept = 1.5, 10.0
+        y = true_intercept + true_slope * x + rng.standard_normal(n) * 0.01
+
+        r = _cpp.ols2(y, x)
+        assert not np.isnan(r["slope"])
+        assert not np.isnan(r["intercept"])
+
+        ref_slope, ref_intercept = np.polyfit(x, y, 1)
+        assert r["slope"] == pytest.approx(ref_slope, rel=1e-6)
+        # Un-shifted intercept is an extrapolation ~1e9 units from the data
+        # (inherently poorly determined -- even numpy's own polyfit differs
+        # from the "naive" true_intercept by ~1e5 here, since slope noise
+        # gets amplified by the extrapolation distance) -- match the
+        # independent numpy reference at moderate relative tolerance, not
+        # the naive true_intercept.
+        assert r["intercept"] == pytest.approx(ref_intercept, rel=1e-3)
 
 
 class TestCppKalman1State:

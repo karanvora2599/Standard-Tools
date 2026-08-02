@@ -9,6 +9,22 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added
+
+- **Correctness/portability pass, item 9 of 20:** new adversarial
+  large-baseline/large-`max_lag` regression tests for the cointegration
+  kernels, mirroring `rolling_beta`'s own large-baseline test pattern --
+  `test_large_baseline_no_catastrophic_cancellation` /
+  `test_large_baseline_hedge_ratio_recovered` /
+  `test_max_lag_above_old_silent_cap_is_honored` in
+  `tests/test_cpp_cointegration.py`, plus native mirrors
+  (`test_ols2_large_baseline_no_catastrophic_cancellation`,
+  `test_eg_large_baseline_hedge_ratio_recovered`,
+  `test_adf_max_lag_above_old_silent_cap_is_honored`) in
+  `tests/cpp/test_cointegration.cpp` calling `sqt::ols2`/
+  `sqt::engle_granger`/`sqt::adf_test` directly. These pin the items 5/6/7
+  fixes above against regression.
+
 ### Fixed
 
 - **Correctness/portability pass, item 8 of 20:** `hurst.cpp`'s
