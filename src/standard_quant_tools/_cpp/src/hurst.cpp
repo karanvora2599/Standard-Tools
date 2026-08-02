@@ -252,7 +252,17 @@ dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points
             const double b = (x_var > 0.0) ? cross / (sz * x_var) : 0.0;
             const double a = seg_mean - b * x_mean;
 
-            const double sse = Syy - a * Sy - b * S_jy;
+            // sse is mathematically the sum of squared OLS residuals for
+            // this chunk -- guaranteed >= 0 -- but this sum-of-squares
+            // style accumulation (unlike dfa_impl's deviation-from-mean
+            // style) can drift slightly negative under floating-point
+            // cancellation for an ill-conditioned chunk. Clamp to 0 only
+            // when the negative magnitude is negligible relative to Syy
+            // (the dominant raw term feeding the subtraction); otherwise
+            // this is not noise and numerics::clamp_near_zero_sumsq throws,
+            // surfacing a real bug instead of silently hiding it.
+            const double sse = numerics::clamp_near_zero_sumsq(
+                Syy - a * Sy - b * S_jy, Syy, "hurst::dfa_onepass");
             rms_acc += sse / sz;
         }
 

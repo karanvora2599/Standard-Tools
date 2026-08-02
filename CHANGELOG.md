@@ -11,6 +11,24 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, item 8 of 20:** `hurst.cpp`'s
+  `dfa_onepass` (the one-pass DFA reformulation shipped in the prior
+  performance pass) computed each chunk's sum-of-squared-residuals via a
+  sum-of-squares-style accumulation (`Syy - a*Sy - b*S_jy`) with no guard
+  against it drifting slightly negative under floating-point cancellation
+  before feeding a `sqrt` -- never observed to actually trigger, but no
+  guard existed either. Routed through the new
+  `numerics::clamp_near_zero_sumsq`: clamps to exactly `0.0` only when the
+  negative magnitude is negligible relative to `Syy` (the dominant raw
+  term feeding the subtraction); otherwise throws, surfacing a real bug
+  instead of silently hiding it with a blind `max(x, 0)`. **Hard gate,
+  passed cleanly**: the existing ill-conditioned adversarial test
+  (`test_dfa_onepass_tolerance_ill_conditioned`, strongly-trending and
+  near-constant series) plus a new, deliberately more extreme combined
+  fixture (strong trend *and* tiny chunk-local variance together) both
+  exercise the clamp path with zero throws -- this item ships as designed,
+  no escape-hatch revert needed. Full native ctest (8/8) + full pytest
+  (1830 passed) green.
 - **Correctness/portability pass, item 5 of 20:** `cointegration.cpp`'s
   `ols2()` (backing `calculate_beta`, `half_life`, `compute_spread`, and
   `engle_granger`'s hedge-ratio step) accumulated raw, uncentered sums

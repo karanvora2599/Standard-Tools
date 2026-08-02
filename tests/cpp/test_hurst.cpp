@@ -363,6 +363,16 @@ static void test_dfa_onepass_tolerance_ill_conditioned() {
         for (std::size_t i = 0; i < v.size(); ++i) v[i] = 1.0 + 1e-8 * noise[i];
         cases.emplace_back("near_constant", v);
     }
+    // Extreme combination: strong trend AND tiny chunk-local variance --
+    // as ill-conditioned as practically achievable, stress-testing the
+    // negative-SSE guard's boundary (numerics::clamp_near_zero_sumsq in
+    // dfa_onepass) harder than either factor alone.
+    {
+        auto noise = white_noise(400, /*seed=*/23);
+        std::vector<double> v(400);
+        for (std::size_t i = 0; i < v.size(); ++i) v[i] = 0.5 + 1e-9 * noise[i];
+        cases.emplace_back("extreme_trend_tiny_variance", v);
+    }
     // Ordinary white noise, as a control.
     {
         auto v = white_noise(400, /*seed=*/17);
