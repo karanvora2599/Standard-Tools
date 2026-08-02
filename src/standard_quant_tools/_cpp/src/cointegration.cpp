@@ -212,26 +212,40 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n) {
 
     if (n < 2) return r;
 
-    // Compute sums for normal equations
-    double s1 = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+    // Raw-moment sums on the *unshifted* x/y suffer catastrophic
+    // cancellation for a large-baseline series -- the same bug class
+    // already fixed in rolling_beta_into (rolling_regression.cpp) and
+    // bollinger_bands_into (indicators.cpp). ols2 is a one-shot fit (no
+    // sliding window), so a single shift by the series' own first values
+    // (x[0]/y[0]) suffices -- no periodic re-centering is needed the way
+    // the rolling kernels require to bound drift over many windows.
+    const double cx = x[0], cy = y[0];
+    double s1 = 0, sxd = 0, syd = 0, sxxd = 0, sxyd = 0;
     for (std::size_t i = 0; i < n; ++i) {
-        s1  += 1.0;
-        sx  += x[i];
-        sy  += y[i];
-        sxx += x[i] * x[i];
-        sxy += x[i] * y[i];
-        syy += y[i] * y[i];
+        const double xd = x[i] - cx;
+        const double yd = y[i] - cy;
+        s1   += 1.0;
+        sxd  += xd;
+        syd  += yd;
+        sxxd += xd * xd;
+        sxyd += xd * yd;
     }
 
-    // Normal equations: [n, sx; sx, sxx] [b0; b1] = [sy; sxy]
-    const double det = s1 * sxx - sx * sx;
-    if (std::abs(det) < 1e-14) return r;
+    // Normal equations on shifted data:
+    // [n, sxd; sxd, sxxd] [b0'; b1'] = [syd; sxyd], where b1' = slope
+    // (unchanged by a pure shift) and b0' = intercept - slope*cx + cy
+    // (un-shifted below). Relative-epsilon singularity threshold (same
+    // rationale as gauss_elim/cholesky_solve's fixes elsewhere in this
+    // pass), scaled to the shifted design matrix's own magnitude.
+    const double det = s1 * sxxd - sxd * sxd;
+    if (numerics::is_negligible_pivot(det, sxxd)) return r;
 
-    r.intercept = (sy * sxx - sxy * sx) / det;
-    r.slope     = (s1 * sxy - sx * sy) / det;
+    const double intercept_shifted = (syd * sxxd - sxyd * sxd) / det;
+    r.slope     = (s1 * sxyd - sxd * syd) / det;
+    r.intercept = intercept_shifted + cy - r.slope * cx;  // un-shift
 
     double ss_res = 0, ss_tot = 0;
-    const double y_mean = sy / s1;
+    const double y_mean = cy + syd / s1;  // = sy/s1, computed stably
     for (std::size_t i = 0; i < n; ++i) {
         const double pred = r.intercept + r.slope * x[i];
         r.residuals[i]    = y[i] - pred;

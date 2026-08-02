@@ -11,6 +11,32 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, item 5 of 20:** `cointegration.cpp`'s
+  `ols2()` (backing `calculate_beta`, `half_life`, `compute_spread`, and
+  `engle_granger`'s hedge-ratio step) accumulated raw, uncentered sums
+  (`Σx`, `Σx²`, `Σxy`, ...) -- the same catastrophic-cancellation bug
+  class already fixed in `rolling_beta_into` and `bollinger_bands_into`
+  for exactly this reason. Confirmed empirically before fixing: for a
+  ~1e9-baseline `x` with genuine unit variance and a well-posed linear
+  relationship, the raw formula's `det = s1*sxx - sx*sx` computed to
+  *exactly* `0.0` (total cancellation between two ~1e20-magnitude terms),
+  making the pre-existing absolute `1e-14` singularity guard falsely
+  declare the pair singular -- `ols2` silently returned all-`NaN` for a
+  regression that isn't singular at all, just poorly conditioned by the
+  baseline. Fixed via the same shift-by-reference-point technique as
+  `rolling_beta` -- here a single shift by `x[0]`/`y[0]` suffices (`ols2`
+  is a one-shot fit, no sliding window, so no periodic re-centering is
+  needed) -- with the un-shifted intercept recovered algebraically at the
+  end. Also replaced the `det` singularity check's fixed absolute `1e-14`
+  threshold with a relative one (`numerics::is_negligible_pivot`, scaled
+  to the shifted matrix's own magnitude), consistent with this pass's
+  other singularity-threshold fixes. Verified against the same adversarial
+  case: the fixed implementation now recovers slope/intercept matching an
+  independent `numpy.polyfit` reference to 4+ significant figures, instead
+  of `NaN`. Full native ctest (8/8) + full pytest (1830 passed) green,
+  confirming the existing (tolerance-based, not exact-equality)
+  `ols2`/`engle_granger` test suite is unaffected for well-conditioned
+  inputs. Dedicated pinned adversarial tests land in a follow-up commit.
 - **Correctness/portability pass, item 6 of 20 (second consumer):**
   `rolling_regression.cpp`'s `cholesky_solve` used the same fixed absolute
   `s <= 1e-14` singularity threshold on its Cholesky diagonal as
