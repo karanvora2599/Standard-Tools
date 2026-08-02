@@ -33,6 +33,24 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 18 of 20:** new strict/zero-copy
+  `_zerocopy` sibling bindings for the six highest-value large-array entry
+  points: `rolling_beta_zerocopy`, `rolling_factor_loadings_zerocopy`,
+  `simulate_forward_paths_zerocopy`, `batch_run_strategy_zerocopy`,
+  `technical_indicators_zerocopy`, `rolling_hurst_zerocopy`. The existing
+  `Array1D` binding type uses `forcecast`, silently copying any input
+  that isn't already exactly float64 + C-contiguous -- a real, avoidable
+  cost for a caller who already has correctly-typed arrays. Each
+  `_zerocopy` sibling takes an untyped `py::array` and validates dtype/
+  layout manually via new `require_strict_f64_1d`/`require_strict_f64_2d`
+  helpers, raising a clear `ValueError` (not pybind11's own generic
+  "incompatible function arguments" message) on a mismatch, then casts
+  without `forcecast` -- a correctly-typed input is used in place with
+  zero copy. Existing default bindings are unchanged -- fully additive.
+  New `tests/test_cpp_zerocopy_bindings.py`: each variant verified to
+  produce output identical to its non-strict counterpart for correctly-
+  typed input, and to raise a clear error (not a copy) for wrong dtype/
+  non-contiguous input.
 - **Correctness/portability pass, item 17 of 20:** new
   `simulate_forward_paths_terminal()` (native `simulate_forward_paths_terminal`/
   `simulate_forward_paths_terminal_into`, pybind11 binding, and

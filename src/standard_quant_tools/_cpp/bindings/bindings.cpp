@@ -33,6 +33,59 @@ static void require_1d(const Array1D& arr, const char* name) {
             std::to_string(arr.ndim()));
 }
 
+// ── Strict/zero-copy binding support ────────────────────────────────────────
+//
+// Array1D (above) uses `forcecast`: any input that isn't already exactly
+// float64 + C-contiguous gets silently copied before the kernel ever sees
+// it -- convenient, but for a caller who already has a correctly-typed
+// contiguous array and is calling one of the highest-value large-array
+// entry points (rolling_beta, rolling_factor_loadings,
+// simulate_forward_paths, batch_run_strategy, technical_indicators,
+// rolling_hurst), that copy is a real, avoidable cost. The `_zerocopy`
+// sibling bindings below take an untyped py::array and validate dtype/
+// layout manually via this helper -- raising a clear, actionable error
+// instead of pybind11's own generic "incompatible function arguments"
+// message on a mismatch -- then cast without `forcecast`, so a
+// correctly-typed input is used in place with zero copy.
+using Array1DStrict = py::array_t<double, py::array::c_style>;
+
+static Array1DStrict require_strict_f64_1d(const py::array& arr, const char* name) {
+    if (!py::isinstance<py::array_t<double>>(arr) ||
+        !(arr.flags() & py::array::c_style)) {
+        throw std::invalid_argument(
+            std::string(name) + " must already be a C-contiguous float64 "
+            "array for this zero-copy binding (no implicit dtype/layout "
+            "conversion happens here) -- use the non-'_zerocopy' binding "
+            "for automatic conversion.");
+    }
+    auto typed = arr.cast<Array1DStrict>();
+    if (typed.ndim() != 1)
+        throw std::invalid_argument(
+            std::string(name) + " must be a 1-D array, got ndim=" +
+            std::to_string(typed.ndim()));
+    return typed;
+}
+
+// 2-D counterpart of require_strict_f64_1d, for factors/signals matrices.
+static py::array_t<double, py::array::c_style> require_strict_f64_2d(
+    const py::array& arr, const char* name)
+{
+    if (!py::isinstance<py::array_t<double>>(arr) ||
+        !(arr.flags() & py::array::c_style)) {
+        throw std::invalid_argument(
+            std::string(name) + " must already be a C-contiguous float64 "
+            "array for this zero-copy binding (no implicit dtype/layout "
+            "conversion happens here) -- use the non-'_zerocopy' binding "
+            "for automatic conversion.");
+    }
+    auto typed = arr.cast<py::array_t<double, py::array::c_style>>();
+    if (typed.ndim() != 2)
+        throw std::invalid_argument(
+            std::string(name) + " must be a 2-D array, got ndim=" +
+            std::to_string(typed.ndim()));
+    return typed;
+}
+
 static py::dict hurst_result_to_dict(const sqt::HurstResult& r) {
     py::dict d;
     d["hurst"]          = r.hurst;
@@ -126,6 +179,31 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("min_window") = 10,
         "Rolling Hurst exponent in a single C++ pass — no Python re-entry per bar.\n\n"
         "Returns a 1-D float64 array of length n; first (window-1) values are NaN.");
+
+    m.def(
+        "rolling_hurst_zerocopy",
+        [](py::array arr, int window, int step,
+           const std::string& method, int min_window) -> py::array_t<double>
+        {
+            auto arr_typed = require_strict_f64_1d(arr, "arr");
+            const double* arr_ptr = arr_typed.data();
+            const auto    n       = arr_typed.size();
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::rolling_hurst_into(arr_ptr, n, window, step, method, min_window, out_ptr);
+            }
+            return out;
+        },
+        py::arg("arr"),
+        py::arg("window")     = 200,
+        py::arg("step")       = 1,
+        py::arg("method")     = "dfa",
+        py::arg("min_window") = 10,
+        "Strict/zero-copy variant of rolling_hurst() -- `arr` must already be "
+        "a C-contiguous float64 array (raises instead of implicitly copying "
+        "on a mismatch). Same semantics/output otherwise.");
 
     // ── RSI ───────────────────────────────────────────────────────────────────
 
@@ -368,6 +446,63 @@ PYBIND11_MODULE(_sqt_core, m) {
         "(stored as float, cast back to int on the Python side),\n"
         "avg_trade_return_pct. equity_curve is NOT included, to save memory.");
 
+    m.def(
+        "batch_run_strategy_zerocopy",
+        [](py::array prices_obj, py::array signals_obj,
+           double initial_capital, double commission_pct, double slippage_pct)
+        -> py::array_t<double>
+        {
+            auto prices_arr  = require_strict_f64_1d(prices_obj, "prices");
+            auto signals_arr = require_strict_f64_2d(signals_obj, "signals");
+            auto prices_buf  = prices_arr.request();
+            auto signals_buf = signals_arr.request();
+
+            const auto n         = static_cast<std::size_t>(prices_buf.shape[0]);
+            const auto num_tests = static_cast<std::size_t>(signals_buf.shape[0]);
+
+            if (static_cast<std::size_t>(signals_buf.shape[1]) != n)
+                throw std::invalid_argument("signals.shape[1] must equal len(prices)");
+
+            const double* p_ptr = static_cast<const double*>(prices_buf.ptr);
+            const double* s_ptr = static_cast<const double*>(signals_buf.ptr);
+
+            constexpr py::ssize_t kNumCols = 11;
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(num_tests), kNumCols});
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                const auto results = sqt::batch_run_strategy(
+                    p_ptr, s_ptr, n, num_tests,
+                    initial_capital, commission_pct, slippage_pct);
+                for (std::size_t i = 0; i < results.size(); ++i) {
+                    const auto& r = results[i];
+                    double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
+                    row[0]  = r.final_equity;
+                    row[1]  = r.total_return;
+                    row[2]  = r.annualized_vol;
+                    row[3]  = r.sharpe_ratio;
+                    row[4]  = r.sortino_ratio;
+                    row[5]  = r.max_drawdown;
+                    row[6]  = r.calmar_ratio;
+                    row[7]  = r.win_rate;
+                    row[8]  = r.profit_factor;
+                    row[9]  = static_cast<double>(r.num_trades);
+                    row[10] = r.avg_trade_return_pct;
+                }
+            }
+            return out;
+        },
+        py::arg("prices"),
+        py::arg("signals"),
+        py::arg("initial_capital") = 10'000.0,
+        py::arg("commission_pct")  = 0.001,
+        py::arg("slippage_pct")    = 0.0005,
+        "Strict/zero-copy variant of batch_run_strategy() -- `prices`/"
+        "`signals` must already be C-contiguous float64 arrays (raises "
+        "instead of implicitly copying on a mismatch). Same "
+        "semantics/output otherwise.");
+
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
     m.def(
@@ -441,6 +576,42 @@ PYBIND11_MODULE(_sqt_core, m) {
         "  col 0 = alpha (intercept); cols 1..k = factor loadings.\n"
         "First (window-1) rows are NaN.");
 
+    m.def(
+        "rolling_factor_loadings_zerocopy",
+        [](py::array y_obj, py::array factors_obj, int window) -> py::array_t<double>
+        {
+            auto y_arr       = require_strict_f64_1d(y_obj, "y");
+            auto factors_arr = require_strict_f64_2d(factors_obj, "factors");
+            auto y_buf = y_arr.request();
+            auto f_buf = factors_arr.request();
+
+            if (y_buf.shape[0] != f_buf.shape[0])
+                throw std::invalid_argument("len(y) must equal factors.shape[0]");
+
+            const auto n = static_cast<std::size_t>(y_buf.shape[0]);
+            const auto k = static_cast<std::size_t>(f_buf.shape[1]);
+            const int  p = static_cast<int>(k) + 1;
+
+            const double* y_ptr = static_cast<const double*>(y_buf.ptr);
+            const double* f_ptr = static_cast<const double*>(f_buf.ptr);
+
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n), static_cast<py::ssize_t>(p)});
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::rolling_factor_loadings_into(y_ptr, f_ptr, n, k, window, out_ptr);
+            }
+            return out;
+        },
+        py::arg("y"),
+        py::arg("factors"),
+        py::arg("window"),
+        "Strict/zero-copy variant of rolling_factor_loadings() -- `y`/"
+        "`factors` must already be C-contiguous float64 arrays (raises "
+        "instead of implicitly copying on a mismatch). Same "
+        "semantics/output otherwise.");
+
     // ── Rolling beta ──────────────────────────────────────────────────────────
 
     m.def(
@@ -468,6 +639,32 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Rolling OLS beta using incremental O(1) sum updates.\n\n"
         "Returns a 1-D float64 array of length n;\n"
         "first (window-1) values are NaN.");
+
+    m.def(
+        "rolling_beta_zerocopy",
+        [](py::array y_obj, py::array x_obj, int window) -> py::array_t<double>
+        {
+            auto y_arr = require_strict_f64_1d(y_obj, "y");
+            auto x_arr = require_strict_f64_1d(x_obj, "x");
+            if (y_arr.size() != x_arr.size())
+                throw std::invalid_argument("y and x must have equal length");
+            const double* y_ptr = y_arr.data();
+            const double* x_ptr = x_arr.data();
+            const auto    n     = static_cast<std::size_t>(y_arr.size());
+            py::array_t<double> out(static_cast<py::ssize_t>(n));
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::rolling_beta_into(y_ptr, x_ptr, n, window, out_ptr);
+            }
+            return out;
+        },
+        py::arg("y"),
+        py::arg("x"),
+        py::arg("window"),
+        "Strict/zero-copy variant of rolling_beta() -- `y`/`x` must already "
+        "be C-contiguous float64 arrays (raises instead of implicitly "
+        "copying on a mismatch). Same semantics/output otherwise.");
 
     // ── Bollinger Bands ───────────────────────────────────────────────────────
 
@@ -628,6 +825,93 @@ PYBIND11_MODULE(_sqt_core, m) {
         "(n,3), 'stochastic_oscillator' (n,2) -- same shapes/column layout\n"
         "as each indicator's own standalone binding.");
 
+    m.def(
+        "technical_indicators_zerocopy",
+        [](py::array high_obj, py::array low_obj, py::array close_obj,
+           bool compute_rsi, int rsi_period,
+           bool compute_adx, int adx_period,
+           bool compute_atr, int atr_period,
+           bool compute_bollinger, int bollinger_period, double bollinger_num_std,
+           bool compute_stochastic, int stoch_k_period, int stoch_d_period) -> py::dict
+        {
+            auto high  = require_strict_f64_1d(high_obj, "high");
+            auto low   = require_strict_f64_1d(low_obj, "low");
+            auto close = require_strict_f64_1d(close_obj, "close");
+            if (high.size() != low.size() || high.size() != close.size())
+                throw std::invalid_argument("high, low, close must have equal length");
+            const double* high_ptr  = high.data();
+            const double* low_ptr   = low.data();
+            const double* close_ptr = close.data();
+            const auto    n         = static_cast<std::size_t>(high.size());
+
+            sqt::TechnicalIndicatorsConfig cfg;
+            cfg.compute_rsi        = compute_rsi;
+            cfg.rsi_period         = rsi_period;
+            cfg.compute_adx        = compute_adx;
+            cfg.adx_period         = adx_period;
+            cfg.compute_atr        = compute_atr;
+            cfg.atr_period         = atr_period;
+            cfg.compute_bollinger  = compute_bollinger;
+            cfg.bollinger_period   = bollinger_period;
+            cfg.bollinger_num_std  = bollinger_num_std;
+            cfg.compute_stochastic = compute_stochastic;
+            cfg.stoch_k_period     = stoch_k_period;
+            cfg.stoch_d_period     = stoch_d_period;
+
+            sqt::TechnicalIndicatorsResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::technical_indicators(high_ptr, low_ptr, close_ptr, n, cfg);
+            }
+
+            py::dict d;
+            if (compute_rsi) {
+                py::array_t<double> arr(static_cast<py::ssize_t>(n));
+                std::copy(r.rsi.begin(), r.rsi.end(), arr.mutable_data());
+                d["rsi"] = arr;
+            }
+            if (compute_adx) {
+                py::array_t<double> arr({static_cast<py::ssize_t>(n), py::ssize_t(3)});
+                std::copy(r.adx.begin(), r.adx.end(), arr.mutable_data());
+                d["adx"] = arr;
+            }
+            if (compute_atr) {
+                py::array_t<double> arr(static_cast<py::ssize_t>(n));
+                std::copy(r.atr.begin(), r.atr.end(), arr.mutable_data());
+                d["atr"] = arr;
+            }
+            if (compute_bollinger) {
+                py::array_t<double> arr({static_cast<py::ssize_t>(n), py::ssize_t(3)});
+                std::copy(r.bollinger.begin(), r.bollinger.end(), arr.mutable_data());
+                d["bollinger_bands"] = arr;
+            }
+            if (compute_stochastic) {
+                py::array_t<double> arr({static_cast<py::ssize_t>(n), py::ssize_t(2)});
+                std::copy(r.stochastic.begin(), r.stochastic.end(), arr.mutable_data());
+                d["stochastic_oscillator"] = arr;
+            }
+            return d;
+        },
+        py::arg("high"),
+        py::arg("low"),
+        py::arg("close"),
+        py::arg("compute_rsi")        = false,
+        py::arg("rsi_period")         = 14,
+        py::arg("compute_adx")        = false,
+        py::arg("adx_period")         = 14,
+        py::arg("compute_atr")        = false,
+        py::arg("atr_period")         = 14,
+        py::arg("compute_bollinger")  = false,
+        py::arg("bollinger_period")   = 20,
+        py::arg("bollinger_num_std")  = 2.0,
+        py::arg("compute_stochastic") = false,
+        py::arg("stoch_k_period")     = 14,
+        py::arg("stoch_d_period")     = 3,
+        "Strict/zero-copy variant of technical_indicators() -- `high`/`low`/"
+        "`close` must already be C-contiguous float64 arrays (raises "
+        "instead of implicitly copying on a mismatch). Same "
+        "semantics/output otherwise.");
+
     // ── Engle-Granger cointegration ───────────────────────────────────────────
 
     m.def(
@@ -729,6 +1013,50 @@ PYBIND11_MODULE(_sqt_core, m) {
         "bit-identical. Raises ValueError if horizon_days/n_simulations <= 0, "
         "values is empty, block_size is not in (0, len(values)], or "
         "initial_capital is non-positive.");
+
+    m.def(
+        "simulate_forward_paths_zerocopy",
+        [](py::array values_obj, int horizon_days, int n_simulations, int block_size,
+           double initial_capital, py::object seed) -> py::array_t<double>
+        {
+            auto values = require_strict_f64_1d(values_obj, "values");
+            const bool has_seed = !seed.is_none();
+            const unsigned long long seed_val =
+                has_seed ? seed.cast<unsigned long long>() : 0ULL;
+            if (horizon_days <= 0 || n_simulations <= 0)
+                throw std::invalid_argument(
+                    "simulate_forward_paths_zerocopy: horizon_days and n_simulations must both be > 0");
+
+            const double* values_ptr = values.data();
+            const auto    n          = static_cast<std::size_t>(values.size());
+
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n_simulations), static_cast<py::ssize_t>(horizon_days)});
+            double* out_ptr = out.mutable_data();
+            bool ok;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::simulate_forward_paths_into(
+                    values_ptr, n, horizon_days, n_simulations, block_size,
+                    initial_capital, seed_val, has_seed, out_ptr);
+            }
+
+            if (!ok)
+                throw std::invalid_argument(
+                    "simulate_forward_paths_zerocopy: invalid input (check block_size in "
+                    "(0, len(values)] and initial_capital > 0)");
+
+            return out;
+        },
+        py::arg("values"),
+        py::arg("horizon_days"),
+        py::arg("n_simulations"),
+        py::arg("block_size"),
+        py::arg("initial_capital"),
+        py::arg("seed") = py::none(),
+        "Strict/zero-copy variant of simulate_forward_paths() -- `values` "
+        "must already be a C-contiguous float64 array (raises instead of "
+        "implicitly copying on a mismatch). Same semantics/output otherwise.");
 
     m.def(
         "simulate_forward_paths_terminal",
