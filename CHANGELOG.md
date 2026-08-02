@@ -442,6 +442,33 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Deep native optimization, Phase 5: `SQT_RESTRICT` portable `restrict`
+  qualifier across every `_into` kernel.** New `include/sqt/platform.hpp`
+  (`__restrict` on MSVC, `__restrict__` on GCC/Clang). Applied to all 12
+  confirmed `_into`-style functions' pointer parameters (both `.hpp`
+  declaration and `.cpp` definition): `rolling_hurst_into`,
+  `rolling_factor_loadings_into`, `rolling_beta_into`,
+  `simulate_forward_paths_into`, `garch11_variance_recursion_into`,
+  `donchian_state_machine_into`, `vwap_reversion_state_machine_into`,
+  `rsi_into`, `adx_into`, `parabolic_sar_into`, `wilder_atr_into`,
+  `bollinger_bands_into`, `stochastic_oscillator_into`. Audited every call
+  site in `bindings.cpp` first (not assumed): each one's `out` buffer is
+  always a freshly-constructed `py::array_t<double>` immediately before the
+  call, never derived from or aliased with any input array — the
+  non-aliasing contract `restrict` promises genuinely holds. `backtest.cpp`'s
+  `run_strategy_summary`/`batch_run_strategy` were deliberately left out of
+  this item's scope — they have no output-pointer parameter at all (return
+  by value), so the usual "protect a written buffer from being
+  conservatively treated as possibly-aliased with the inputs" restrict use
+  case doesn't apply the same way there. Full native ctest + full pytest
+  passed unchanged as the correctness gate (pure codegen hint — no behavior
+  change possible if the aliasing audit is correct). Measured honestly, not
+  assumed: `rsi`/`adx`/`rolling_factor_loadings`/`run_strategy` (n=2000)
+  showed **no measurable difference** on this MSVC build — consistent with
+  MSVC's optimizer historically extracting less benefit from `__restrict`
+  than GCC/Clang; kept anyway as a correctness-neutral hint that may help on
+  other compilers, matching this item's own documented expectation rather
+  than an assumed win.
 - **Deep native optimization, Phase 4 (`hurst.cpp`): one-pass DFA
   reformulation.** New internal `dfa_onepass()`, used only by
   `hurst_exponent_scratch()`'s "dfa" branch — the public `dfa()`/`dfa_impl()`

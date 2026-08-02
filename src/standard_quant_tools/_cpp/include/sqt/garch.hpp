@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sqt/platform.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -32,14 +34,15 @@ std::vector<double> garch11_variance_recursion(
     double        beta);
 
 /** Buffer-writing form of garch11_variance_recursion(). `out` must have
- *  length n. */
+ *  length n. SQT_RESTRICT: `out` is always freshly allocated at every call
+ *  site (bindings.cpp), never aliased with `resid_sq`. */
 void garch11_variance_recursion_into(
-    const double* resid_sq,
+    const double* SQT_RESTRICT resid_sq,
     std::size_t   n,
     double        omega,
     double        alpha,
     double        beta,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 /**
  * GARCH(1,1) negative log-likelihood -- fuses the variance recursion above

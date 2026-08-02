@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sqt/platform.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -23,8 +25,11 @@ namespace sqt {
  */
 std::vector<double> rsi(const double* prices, std::size_t n, int period = 14);
 
-/** Buffer-writing form of rsi(). `out` must have length n. */
-void rsi_into(const double* prices, std::size_t n, int period, double* out);
+/** Buffer-writing form of rsi(). `out` must have length n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with `prices`. */
+void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
+              double* SQT_RESTRICT out);
 
 /**
  * ADX — Average Directional Index with DI+ and DI-.
@@ -47,14 +52,16 @@ std::vector<double> adx(
     std::size_t   n,
     int           period = 14);
 
-/** Buffer-writing form of adx(). `out` must have length 3*n. */
+/** Buffer-writing form of adx(). `out` must have length 3*n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with high/low/close. */
 void adx_into(
-    const double* high,
-    const double* low,
-    const double* close,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
+    const double* SQT_RESTRICT close,
     std::size_t   n,
     int           period,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 /**
  * Parabolic SAR — trend-following stop-and-reverse indicator.
@@ -82,15 +89,17 @@ std::vector<double> parabolic_sar(
     double        af_step  = 0.02,
     double        af_max   = 0.2);
 
-/** Buffer-writing form of parabolic_sar(). `out` must have length 2*n. */
+/** Buffer-writing form of parabolic_sar(). `out` must have length 2*n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with high/low. */
 void parabolic_sar_into(
-    const double* high,
-    const double* low,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
     std::size_t   n,
     double        af_start,
     double        af_step,
     double        af_max,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 /**
  * Wilder's ATR — Average True Range with Wilder's smoothing.
@@ -119,14 +128,16 @@ std::vector<double> wilder_atr(
     std::size_t   n,
     int           period = 14);
 
-/** Buffer-writing form of wilder_atr(). `out` must have length n. */
+/** Buffer-writing form of wilder_atr(). `out` must have length n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with high/low/close. */
 void wilder_atr_into(
-    const double* high,
-    const double* low,
-    const double* close,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
+    const double* SQT_RESTRICT close,
     std::size_t   n,
     int           period,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 /**
  * Bollinger Bands — fused sliding-window mean + std in one pass.
@@ -153,13 +164,15 @@ std::vector<double> bollinger_bands(
     int           period  = 20,
     double        num_std = 2.0);
 
-/** Buffer-writing form of bollinger_bands(). `out` must have length 3*n. */
+/** Buffer-writing form of bollinger_bands(). `out` must have length 3*n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with `prices`. */
 void bollinger_bands_into(
-    const double* prices,
+    const double* SQT_RESTRICT prices,
     std::size_t   n,
     int           period,
     double        num_std,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 /**
  * Stochastic Oscillator — O(n) sliding min/max via monotonic deques (not a
@@ -188,15 +201,17 @@ std::vector<double> stochastic_oscillator(
     int           k_period = 14,
     int           d_period = 3);
 
-/** Buffer-writing form of stochastic_oscillator(). `out` must have length 2*n. */
+/** Buffer-writing form of stochastic_oscillator(). `out` must have length 2*n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with high/low/close. */
 void stochastic_oscillator_into(
-    const double* high,
-    const double* low,
-    const double* close,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
+    const double* SQT_RESTRICT close,
     std::size_t   n,
     int           k_period,
     int           d_period,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 // ── Fused technical indicators ─────────────────────────────────────────────
 //

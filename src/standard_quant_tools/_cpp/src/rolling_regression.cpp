@@ -99,12 +99,12 @@ namespace {
 // ── rolling_factor_loadings ───────────────────────────────────────────────────
 
 void rolling_factor_loadings_into(
-    const double* y,
-    const double* factors,
+    const double* SQT_RESTRICT y,
+    const double* SQT_RESTRICT factors,
     std::size_t   n,
     std::size_t   k,
     int           window,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     const int p = static_cast<int>(k) + 1;  // intercept + k factors
     const int N = static_cast<int>(n);
@@ -176,11 +176,11 @@ std::vector<double> rolling_factor_loadings(
 // ── rolling_beta ─────────────────────────────────────────────────────────────
 
 void rolling_beta_into(
-    const double* y,
-    const double* x,
+    const double* SQT_RESTRICT y,
+    const double* SQT_RESTRICT x,
     std::size_t   n,
     int           window,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     std::fill(out, out + n, kNaN);
     if (window < 2 || static_cast<int>(n) < window) return;

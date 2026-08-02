@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sqt/platform.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -31,13 +33,15 @@ std::vector<double> donchian_state_machine(
     const double* exit_min,
     std::size_t   n);
 
-/** Buffer-writing form of donchian_state_machine(). `out` must have length n. */
+/** Buffer-writing form of donchian_state_machine(). `out` must have length n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with close/entry_max/exit_min. */
 void donchian_state_machine_into(
-    const double* close,
-    const double* entry_max,
-    const double* exit_min,
+    const double* SQT_RESTRICT close,
+    const double* SQT_RESTRICT entry_max,
+    const double* SQT_RESTRICT exit_min,
     std::size_t   n,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 /**
  * VWAP mean-reversion entry/exit hysteresis.
@@ -64,12 +68,13 @@ std::vector<double> vwap_reversion_state_machine(
     std::size_t   n);
 
 /** Buffer-writing form of vwap_reversion_state_machine(). `out` must have
- *  length n. */
+ *  length n. SQT_RESTRICT: `out` is always freshly allocated at every call
+ *  site (bindings.cpp), never aliased with close/vwap. */
 void vwap_reversion_state_machine_into(
-    const double* close,
-    const double* vwap,
+    const double* SQT_RESTRICT close,
+    const double* SQT_RESTRICT vwap,
     double        entry_threshold,
     std::size_t   n,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 }  // namespace sqt

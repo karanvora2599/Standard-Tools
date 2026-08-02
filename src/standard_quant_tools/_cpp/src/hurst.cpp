@@ -451,13 +451,13 @@ HurstResult hurst_exponent_scratch(
 // ── rolling_hurst ─────────────────────────────────────────────────────────────
 
 void rolling_hurst_into(
-    const double*      arr,
+    const double* SQT_RESTRICT      arr,
     std::size_t        n,
     int                window,
     int                step,
     const std::string& method,
     int                min_window,
-    double*            out)
+    double* SQT_RESTRICT            out)
 {
     std::fill(out, out + n, kNaN);
 

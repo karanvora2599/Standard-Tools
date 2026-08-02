@@ -11,12 +11,12 @@ constexpr double kPi        = 3.14159265358979323846;
 }
 
 void garch11_variance_recursion_into(
-    const double* resid_sq,
+    const double* SQT_RESTRICT resid_sq,
     std::size_t   n,
     double        omega,
     double        alpha,
     double        beta,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     if (n == 0) return;
 

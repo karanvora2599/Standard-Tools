@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sqt/platform.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -31,14 +33,15 @@ std::vector<double> rolling_factor_loadings(
     int           window);
 
 /** Buffer-writing form of rolling_factor_loadings(). `out` must have
- *  length n*(k+1). */
+ *  length n*(k+1). SQT_RESTRICT: `out` is always freshly allocated at every
+ *  call site (bindings.cpp), never aliased with y/factors. */
 void rolling_factor_loadings_into(
-    const double* y,
-    const double* factors,
+    const double* SQT_RESTRICT y,
+    const double* SQT_RESTRICT factors,
     std::size_t   n,
     std::size_t   k,
     int           window,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 /**
  * Incremental sliding-window OLS beta of y on x.
@@ -59,12 +62,14 @@ std::vector<double> rolling_beta(
     std::size_t   n,
     int           window);
 
-/** Buffer-writing form of rolling_beta(). `out` must have length n. */
+/** Buffer-writing form of rolling_beta(). `out` must have length n.
+ *  SQT_RESTRICT: `out` is always freshly allocated at every call site
+ *  (bindings.cpp), never aliased with y/x. */
 void rolling_beta_into(
-    const double* y,
-    const double* x,
+    const double* SQT_RESTRICT y,
+    const double* SQT_RESTRICT x,
     std::size_t   n,
     int           window,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 }  // namespace sqt

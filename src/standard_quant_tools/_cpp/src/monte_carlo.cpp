@@ -27,7 +27,7 @@ std::uint64_t splitmix64(std::uint64_t& state) {
 }  // namespace
 
 bool simulate_forward_paths_into(
-    const double* values,
+    const double* SQT_RESTRICT values,
     std::size_t   hist_n,
     int           horizon_days,
     int           n_simulations,
@@ -35,7 +35,7 @@ bool simulate_forward_paths_into(
     double        initial_capital,
     unsigned long long seed,
     bool          has_seed,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     if (horizon_days <= 0 || n_simulations <= 0) return false;
 

@@ -5,11 +5,11 @@
 namespace sqt {
 
 void donchian_state_machine_into(
-    const double* close,
-    const double* entry_max,
-    const double* exit_min,
+    const double* SQT_RESTRICT close,
+    const double* SQT_RESTRICT entry_max,
+    const double* SQT_RESTRICT exit_min,
     std::size_t   n,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     bool in_pos = false;
     for (std::size_t i = 0; i < n; ++i) {
@@ -44,11 +44,11 @@ std::vector<double> donchian_state_machine(
 }
 
 void vwap_reversion_state_machine_into(
-    const double* close,
-    const double* vwap,
+    const double* SQT_RESTRICT close,
+    const double* SQT_RESTRICT vwap,
     double        entry_threshold,
     std::size_t   n,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     bool in_pos = false;
     for (std::size_t i = 0; i < n; ++i) {

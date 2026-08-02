@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sqt/platform.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -62,10 +64,12 @@ std::vector<double> simulate_forward_paths(
  * signals "invalid input" via an empty vector), this returns false and
  * leaves `out`'s contents undefined/untouched when the input is invalid,
  * since a pre-allocated fixed-size buffer can't itself signal "empty".
- * Returns true iff `out` was actually written.
+ * Returns true iff `out` was actually written. SQT_RESTRICT: `out` is
+ * always freshly allocated at the one call site (bindings.cpp), never
+ * aliased with `values`.
  */
 bool simulate_forward_paths_into(
-    const double* values,
+    const double* SQT_RESTRICT values,
     std::size_t   hist_n,
     int           horizon_days,
     int           n_simulations,
@@ -73,6 +77,6 @@ bool simulate_forward_paths_into(
     double        initial_capital,
     unsigned long long seed,
     bool          has_seed,
-    double*       out);
+    double* SQT_RESTRICT       out);
 
 }  // namespace sqt

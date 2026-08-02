@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sqt/platform.hpp"
+
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -92,14 +94,16 @@ std::vector<double> rolling_hurst(
     const std::string& method     = "dfa",
     int                min_window = 10);
 
-/** Buffer-writing form of rolling_hurst(). `out` must have length n. */
+/** Buffer-writing form of rolling_hurst(). `out` must have length n.
+ *  SQT_RESTRICT: `out` is always a freshly-allocated buffer at every call
+ *  site (bindings.cpp), never aliased with `arr`. */
 void rolling_hurst_into(
-    const double*      arr,
+    const double* SQT_RESTRICT      arr,
     std::size_t        n,
     int                window,
     int                step,
     const std::string& method,
     int                min_window,
-    double*            out);
+    double* SQT_RESTRICT            out);
 
 }  // namespace sqt

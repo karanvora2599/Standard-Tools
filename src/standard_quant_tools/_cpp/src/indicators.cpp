@@ -18,7 +18,8 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 // Wilder's smoothing: SMA seed for first `period` bars, then exponential
 // smoothing with alpha = 1/period.  Matches the Numba reference exactly.
 
-void rsi_into(const double* prices, std::size_t n, int period, double* out) {
+void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
+              double* SQT_RESTRICT out) {
     std::fill(out, out + n, kNaN);
 
     // period <= 0 would index out[period] with a negative/zero-derived
@@ -73,12 +74,12 @@ std::vector<double> rsi(const double* prices, std::size_t n, int period) {
 // Matches _adx_numba in trend.py exactly.
 
 void adx_into(
-    const double* high,
-    const double* low,
-    const double* close,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
+    const double* SQT_RESTRICT close,
     std::size_t   n,
     int           period,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     // 3 columns per bar: DI+, DI-, ADX
     std::fill(out, out + 3 * n, kNaN);
@@ -178,13 +179,13 @@ std::vector<double> adx(
 // Flat row-major output: (SAR, Trend) per bar.
 
 void parabolic_sar_into(
-    const double* high,
-    const double* low,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
     std::size_t   n,
     double        af_start,
     double        af_step,
     double        af_max,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     // 2 columns per bar: SAR, Trend
     std::fill(out, out + 2 * n, kNaN);
@@ -276,12 +277,12 @@ std::vector<double> parabolic_sar(
 // then alpha=1/period.  Not the same as a simple rolling mean of TR.
 
 void wilder_atr_into(
-    const double* high,
-    const double* low,
-    const double* close,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
+    const double* SQT_RESTRICT close,
     std::size_t   n,
     int           period,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     std::fill(out, out + n, kNaN);
 
@@ -335,11 +336,11 @@ std::vector<double> wilder_atr(
 // are computed without re-iterating the window.
 
 void bollinger_bands_into(
-    const double* prices,
+    const double* SQT_RESTRICT prices,
     std::size_t   n,
     int           period,
     double        num_std,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     std::fill(out, out + 3 * n, kNaN);
     if (static_cast<int>(n) < period || period < 2) return;
@@ -420,13 +421,13 @@ std::vector<double> bollinger_bands(
 // ── Stochastic Oscillator ─────────────────────────────────────────────────────
 
 void stochastic_oscillator_into(
-    const double* high,
-    const double* low,
-    const double* close,
+    const double* SQT_RESTRICT high,
+    const double* SQT_RESTRICT low,
+    const double* SQT_RESTRICT close,
     std::size_t   n,
     int           k_period,
     int           d_period,
-    double*       out)
+    double* SQT_RESTRICT       out)
 {
     std::fill(out, out + 2 * n, kNaN);
     if (static_cast<int>(n) < k_period || k_period < 1) return;
