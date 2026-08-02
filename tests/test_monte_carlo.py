@@ -148,3 +148,21 @@ class TestSimulateForwardPaths:
     def test_empty_returns_raises(self):
         with pytest.raises(ValidationError, match="empty"):
             simulate_forward_paths(pd.Series([], dtype=float), horizon_days=30)
+
+    def test_nan_in_returns_raises(self, sample_returns):
+        """NaN/Inf input contract: simulate_forward_paths_into validates
+        initial_capital's finiteness but never checked `values` itself --
+        a single NaN/Inf in the historical returns being resampled from
+        poisons `equity` permanently for every path/bar downstream of
+        when it's sampled, with no explicit check anywhere in the native
+        kernel."""
+        bad = sample_returns.copy()
+        bad.iloc[len(bad) // 2] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            simulate_forward_paths(bad, horizon_days=30)
+
+    def test_inf_in_returns_raises(self, sample_returns):
+        bad = sample_returns.copy()
+        bad.iloc[3] = np.inf
+        with pytest.raises(ValidationError, match="non-finite"):
+            simulate_forward_paths(bad, horizon_days=30)

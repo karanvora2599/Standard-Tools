@@ -11,6 +11,18 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 12 of 20 (NaN/Inf input contract,
+  Monte Carlo):** `backtest/monte_carlo.py::simulate_forward_paths()`
+  validated `initial_capital`'s finiteness (in the native kernel) but
+  never checked `values` (the historical returns being resampled from)
+  itself -- a single NaN/Inf poisons `equity` permanently for every
+  path/bar downstream of when it's sampled
+  (`equity *= (1.0 + values[start+k])`), with no explicit check anywhere
+  in the native kernel, header, or binding. Wired `require_finite_array()`
+  in right after `values = returns.to_numpy(...)`, before dispatch to
+  either the C++ or pure-Python fallback path. New tests:
+  `test_nan_in_returns_raises`/`test_inf_in_returns_raises` in
+  `tests/test_monte_carlo.py`.
 - **Correctness/portability pass, item 11 of 20 (NaN/Inf input contract,
   GARCH):** `analysis/garch.py::garch_volatility_forecast()` already
   called `returns.dropna()`, stripping NaN, but not `+/-Inf` --

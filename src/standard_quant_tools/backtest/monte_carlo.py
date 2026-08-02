@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,13 @@ def simulate_forward_paths(
         raise ValidationError(f"block_size must be in (0, {n}], got {block_size}")
 
     values = returns.to_numpy(dtype=float)
+    # simulate_forward_paths_into validates initial_capital's finiteness
+    # but never checked `values` itself -- a single NaN/Inf in the
+    # historical returns being resampled from poisons `equity` permanently
+    # for every path/bar downstream of when it's sampled
+    # (equity *= (1.0 + values[start+k])), with no explicit check anywhere
+    # in the native kernel, header, or binding.
+    require_finite_array(values, "returns", "simulate_forward_paths")
 
     if HAS_CPP and _cpp_core is not None:
         paths = _cpp_core.simulate_forward_paths(
