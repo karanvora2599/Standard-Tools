@@ -207,16 +207,25 @@ target_include_directories(sqt_rolling_regression_impl PUBLIC
 target_compile_features(sqt_rolling_regression_impl PUBLIC cxx_std_17)
 if(MSVC)
     target_compile_options(sqt_rolling_regression_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
-    set_source_files_properties(
-        ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_beta_avx2.cpp
-        PROPERTIES COMPILE_OPTIONS "/arch:AVX2"
-    )
 else()
     target_compile_options(sqt_rolling_regression_impl PRIVATE -O2 -Wall -Wextra)
-    set_source_files_properties(
-        ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_beta_avx2.cpp
-        PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
-    )
+endif()
+# See src/standard_quant_tools/_cpp/CMakeLists.txt's matching block for why
+# these flags are x86/x64-gated: they're x86-only and a hard compile error
+# on other toolchains, while rolling_beta_avx2.cpp's own source-level #if
+# guard already compiles a portable stub everywhere else.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i686|X86|i386)$")
+    if(MSVC)
+        set_source_files_properties(
+            ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_beta_avx2.cpp
+            PROPERTIES COMPILE_OPTIONS "/arch:AVX2"
+        )
+    else()
+        set_source_files_properties(
+            ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_beta_avx2.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
+        )
+    endif()
 endif()
 
 add_executable(test_rolling_regression test_rolling_regression.cpp)

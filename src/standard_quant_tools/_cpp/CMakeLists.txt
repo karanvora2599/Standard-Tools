@@ -35,10 +35,19 @@ pybind11_add_module(_sqt_core MODULE ${SQT_SOURCES})
 # /arch:AVX2 is the only portable way to keep the rest of the module's
 # codegen (which must stay safe on non-AVX2 CPUs when SQT_NATIVE_ARCH=OFF)
 # unaffected.
-if(MSVC)
-    set_source_files_properties(src/rolling_beta_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
-else()
-    set_source_files_properties(src/rolling_beta_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+#
+# -mavx2/-mfma (and /arch:AVX2) are x86/x64-only flags -- passing them on a
+# non-x86 toolchain (e.g. GCC/Clang targeting ARM/Apple Silicon) is a hard
+# compile error, not a graceful no-op. Only apply them on x86/x64; on any
+# other CMAKE_SYSTEM_PROCESSOR, rolling_beta_avx2.cpp's own source-level
+# #if guard already compiles it down to a portable (unreachable) stub, so no
+# special flags -- and no source-file exclusion -- are needed here.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i686|X86|i386)$")
+    if(MSVC)
+        set_source_files_properties(src/rolling_beta_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties(src/rolling_beta_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+    endif()
 endif()
 
 # ── C++ standard ──────────────────────────────────────────────────────────────

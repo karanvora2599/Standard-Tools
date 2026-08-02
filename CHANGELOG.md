@@ -29,6 +29,21 @@ bump, consistent with SemVer's pre-1.0 clause.
   now returns `IsaFeatures` by value (was `const IsaFeatures&`, source-
   compatible with the one existing call site in `rolling_regression.cpp`),
   backed by independent atomics for the override's `avx2`/`fma` bits.
+- **Correctness/portability pass, item 1 of 20:** the AVX2+FMA translation
+  unit (`rolling_beta_avx2.cpp`) was unconditionally compiled with
+  `-mavx2;-mfma` / `/arch:AVX2` on every platform, including non-x86 --
+  those flags are x86-only and a hard compile error on e.g. ARM/Apple
+  Silicon toolchains. Both `_cpp/CMakeLists.txt` and the duplicated block
+  in `tests/cpp/CMakeLists.txt` now gate those flags behind
+  `CMAKE_SYSTEM_PROCESSOR` matching an x86/x64 pattern; the file itself
+  also gained a source-level `#if` architecture guard so it compiles to a
+  portable (unreachable -- `isa_dispatch` always reports AVX2 unavailable
+  on non-x86) stub on any other architecture, since flag-gating alone
+  doesn't make AVX2 intrinsics compile without the matching codegen flags.
+
+### Changed
+
+- **Breaking:** `fill_price="midpoint"` renamed to `fill_price="hl2_exploratory"`
   everywhere (`run_strategy`, `run_portfolio_simulation`, `run_pair_backtest`,
   their agent-tool input models, and docs) — it was never a real bid/ask
   midpoint (just `(High+Low)/2`), and the old name implied a market-quote

@@ -9,9 +9,24 @@
 
 #include "sqt/rolling_beta_avx2.hpp"
 
-#include <immintrin.h>
+// This file is compiled with AVX2+FMA codegen enabled ONLY on x86/x64 (see
+// CMakeLists.txt's architecture-gated set_source_files_properties for this
+// file); on any other architecture (ARM/Apple Silicon, etc.) it's compiled
+// as a portable stub instead. The stub is unreachable in practice --
+// isa_dispatch.cpp's detect_isa_features() always reports AVX2 unavailable
+// on non-x86, so rolling_beta_into never calls this on such a platform --
+// but a definition must still exist for the translation unit to link.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    #define SQT_ROLLING_BETA_AVX2_REAL 1
+    #include <immintrin.h>
+#else
+    #define SQT_ROLLING_BETA_AVX2_REAL 0
+    #include <cstdlib>
+#endif
 
 namespace sqt {
+
+#if SQT_ROLLING_BETA_AVX2_REAL
 
 void rolling_beta_reduce_avx2(
     const double* x,
@@ -68,5 +83,29 @@ void rolling_beta_reduce_avx2(
         Sxx += xd * xd;
     }
 }
+
+#else  // !SQT_ROLLING_BETA_AVX2_REAL
+
+void rolling_beta_reduce_avx2(
+    const double* /*x*/,
+    const double* /*y*/,
+    std::size_t   /*start*/,
+    int           /*window*/,
+    double        /*cx*/,
+    double        /*cy*/,
+    double&       /*Sx*/,
+    double&       /*Sy*/,
+    double&       /*Sxy*/,
+    double&       /*Sxx*/)
+{
+    // Unreachable: detect_isa_features().avx2 is unconditionally false on
+    // non-x86 (isa_dispatch.cpp), so rolling_beta_into's AVX2 dispatch
+    // branch never calls this here. Abort loudly rather than silently
+    // returning wrong (zeroed/uninitialized) accumulators if that
+    // invariant is ever violated.
+    std::abort();
+}
+
+#endif  // SQT_ROLLING_BETA_AVX2_REAL
 
 }  // namespace sqt
