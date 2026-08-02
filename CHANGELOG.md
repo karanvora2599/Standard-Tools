@@ -11,6 +11,25 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, items 6/7/15 of 20:** `adf_test()`
+  (backing `engle_granger`) silently clamped any `max_lag` request above
+  14 (`kMaxK - 2`, a fixed max-regressor-count constant) with no error or
+  warning -- a caller asking for 30 lags of Δy silently got at most 12.
+  `kMaxK` is now removed entirely: the ADF regression's `XtX`/`Xty`/`xrow`
+  buffers are dynamically sized per candidate lag (`std::vector`, not a
+  fixed `double[16*16]`), and the loop's already-existing data-driven
+  `if (T < p + 3) break;` is the sole limiter -- a requested `max_lag` is
+  now honored up to what the data can actually support, never silently
+  truncated below that. Also replaced `gauss_elim`'s fixed absolute
+  `< 1e-14` singularity/pivot threshold (shared by both the beta-solve and
+  `(X'X)^-1`-diagonal solve inside `ols_normal_eq`) with a relative-epsilon
+  threshold (new `numerics::is_negligible_pivot`, scaled to the original
+  matrix's own magnitude) -- the same class of large-baseline-tolerance
+  gap as the raw-moment cancellation fixes below, just on the singularity
+  side rather than the arithmetic side. Structural changes only (same
+  formulas, differently-sized/typed buffers) -- verified bit-identical
+  against the full existing native + Python test suite; no engle_granger
+  and no ADF pinned value changed.
 - **Correctness/portability pass, item 4 of 20:** MSVC's `/wd4244`/`/wd4267`
   narrowing-warning suppression was applied target-wide in both
   `_cpp/CMakeLists.txt` and `tests/cpp/CMakeLists.txt`, silencing exactly

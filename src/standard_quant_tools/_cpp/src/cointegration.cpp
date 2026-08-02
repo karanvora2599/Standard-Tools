@@ -1,5 +1,7 @@
 #include "sqt/cointegration.hpp"
 
+#include "sqt/numerics.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -11,15 +13,28 @@ namespace {
 
 constexpr double kNaN  = std::numeric_limits<double>::quiet_NaN();
 constexpr double kInf  = std::numeric_limits<double>::infinity();
-constexpr int    kMaxK = 16;  // max regressors in ADF system (max_lag + 2)
 constexpr double kKalmanPriorVariance = 1.0e4;
+
+
+// Max abs diagonal entry of a k×k row-major matrix BEFORE elimination
+// mutates it -- used as the relative-epsilon pivot threshold's scale
+// reference (numerics::is_negligible_pivot). Computed once from the
+// original matrix, not the in-progress elimination, since the diagonal
+// shrinks as elimination proceeds and would otherwise make the "negligible"
+// threshold drift smaller each step.
+static double matrix_diag_scale(const double* A, int k) {
+    double scale = 0.0;
+    for (int i = 0; i < k; ++i) scale = std::max(scale, std::abs(A[i * k + i]));
+    return scale;
+}
 
 
 // ── Gaussian elimination (partial pivoting) ───────────────────────────────────
 // Solves A x = b in place (modifies both A and b).
-// A is stored row-major, size k×k. Returns false if singular.
+// A is stored row-major, size k×k. Returns false if singular (relative to
+// `scale`, the original matrix's magnitude -- see matrix_diag_scale()).
 
-static bool gauss_elim(double A[], double b[], int k) {
+static bool gauss_elim(double A[], double b[], int k, double scale) {
     for (int col = 0; col < k; ++col) {
         // Partial pivot
         int pivot = col;
@@ -27,7 +42,7 @@ static bool gauss_elim(double A[], double b[], int k) {
             if (std::abs(A[row * k + col]) > std::abs(A[pivot * k + col]))
                 pivot = row;
 
-        if (std::abs(A[pivot * k + col]) < 1e-14) return false;
+        if (numerics::is_negligible_pivot(A[pivot * k + col], scale)) return false;
 
         if (pivot != col) {
             for (int j = 0; j < k; ++j)
@@ -60,32 +75,34 @@ static bool gauss_elim(double A[], double b[], int k) {
 // X is passed implicitly: caller fills XtX and Xty.
 
 struct OlsCore {
-    double beta[kMaxK];  // coefficients
+    std::vector<double> beta;  // coefficients, length k
     double rss;
     double diag_inv;     // (X'X)^{-1}[diag_idx, diag_idx]
     bool   ok;
 };
 
-static OlsCore ols_normal_eq(double XtX[], double Xty[], int k, int diag_idx) {
+static OlsCore ols_normal_eq(const double* XtX, const double* Xty, int k, int diag_idx) {
     OlsCore res;
     res.ok       = false;
     res.rss      = kNaN;
     res.diag_inv = kNaN;
-    for (int i = 0; i < k; ++i) res.beta[i] = kNaN;
+    res.beta.assign(static_cast<std::size_t>(k), kNaN);
+
+    const double scale = matrix_diag_scale(XtX, k);
+    const std::size_t k_sz = static_cast<std::size_t>(k);
 
     // Solve for beta
-    double A[kMaxK * kMaxK], b[kMaxK];
-    std::copy(XtX, XtX + k * k, A);
-    std::copy(Xty, Xty + k, b);
-    if (!gauss_elim(A, b, k)) return res;
-    std::copy(b, b + k, res.beta);
+    std::vector<double> A(XtX, XtX + k_sz * k_sz);
+    std::vector<double> b(Xty, Xty + k_sz);
+    if (!gauss_elim(A.data(), b.data(), k, scale)) return res;
+    res.beta = b;
 
     // Solve for the `diag_idx`-th column of (X'X)^{-1}
-    double A2[kMaxK * kMaxK], e[kMaxK] = {};
-    std::copy(XtX, XtX + k * k, A2);
-    e[diag_idx] = 1.0;
-    if (!gauss_elim(A2, e, k)) return res;
-    res.diag_inv = e[diag_idx];
+    std::vector<double> A2(XtX, XtX + k_sz * k_sz);
+    std::vector<double> e(k_sz, 0.0);
+    e[static_cast<std::size_t>(diag_idx)] = 1.0;
+    if (!gauss_elim(A2.data(), e.data(), k, scale)) return res;
+    res.diag_inv = e[static_cast<std::size_t>(diag_idx)];
 
     res.ok = true;
     return res;
@@ -96,7 +113,7 @@ static OlsCore ols_normal_eq(double XtX[], double Xty[], int k, int diag_idx) {
 // Response surface: cv(T) = c_inf + c1/T + c2/T²
 // For 2-variable cointegration, constant (trend="c").
 
-static double mackinnon_cv(double level_pct, int n) {
+static double mackinnon_cv(double level_pct, std::size_t n) {
     // Coefficients from MacKinnon (2010), Table 2, N=2, c.
     double c_inf, c1, c2;
     if (level_pct <= 1.0) {
@@ -232,12 +249,16 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic) {
     AdfResult out{kNaN, 0, kNaN};
     if (n < 4) return out;
 
-    // Auto max lag: floor(12 * (n/100)^(1/4)), capped at (n-2)/3
+    // Auto max lag: floor(12 * (n/100)^(1/4)), capped at (n-2)/3. No longer
+    // separately capped against a fixed max-regressor-count constant (the
+    // XtX/Xty/xrow buffers below are now sized dynamically per candidate
+    // lag) -- the loop's own data-driven `if (T < p + 3) break;` below is
+    // the sole limiter, so a caller-supplied max_lag is never silently
+    // truncated to less than what was actually requested.
     if (max_lag < 0) {
         max_lag = static_cast<int>(std::floor(12.0 * std::pow(n / 100.0, 0.25)));
         max_lag = std::min(max_lag, static_cast<int>((n - 2) / 3));
     }
-    max_lag = std::min(max_lag, kMaxK - 2);  // never exceed kMaxK regressors
 
     // Pre-compute first differences
     const std::size_t nd = n - 1;
@@ -273,48 +294,60 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic) {
     int    best_lag = 0;
 
     for (int p = 0; p <= max_lag; ++p) {
-        // Number of usable observations: T = n - 1 - p
-        const int T = static_cast<int>(n) - 1 - p;
+        // Number of usable observations: T = n - 1 - p. long long (not
+        // int): n can exceed INT_MAX for a large series, and T needs to
+        // stay signed since the `T < p + 3` check below can legitimately
+        // see T go non-positive as p grows toward n.
+        const long long T = static_cast<long long>(n) - 1 - p;
         if (T < p + 3) break;  // too few obs for the k = p+2 regressors
 
         const int k = p + 2;  // constant + y_{t-1} + p lags of Δy
+        const std::size_t k_sz = static_cast<std::size_t>(k);
 
-        // Build X'X (k×k) and X'y (k) by iterating over t = p+1 .. n-1
-        double XtX[kMaxK * kMaxK] = {};
-        double Xty[kMaxK]         = {};
+        // Build X'X (k×k) and X'y (k) by iterating over t = p+1 .. n-1.
+        // Dynamically sized (not a fixed kMaxK*kMaxK buffer) -- k is no
+        // longer capped against an arbitrary regressor-count ceiling.
+        std::vector<double> XtX(k_sz * k_sz, 0.0);
+        std::vector<double> Xty(k_sz, 0.0);
+        std::vector<double> xrow(k_sz);
 
-        for (int t = p + 1; t < static_cast<int>(n); ++t) {
+        // size_t (not int): this loop ranges over up to the full series
+        // length, which can exceed INT_MAX.
+        for (std::size_t t = static_cast<std::size_t>(p) + 1; t < n; ++t) {
             // x[0]=1, x[1]=y[t-1], x[j+1]=dy[t-j] for j=1..p
-            double xrow[kMaxK];
             xrow[0] = 1.0;
             xrow[1] = y[t - 1];
             // Δy_{t-j} = y[t-j] - y[t-j-1] = dy[t-j-1]
-            for (int j = 1; j <= p; ++j) xrow[j + 1] = dy[t - 1 - j];
+            for (int j = 1; j <= p; ++j)
+                xrow[static_cast<std::size_t>(j) + 1] = dy[t - 1 - static_cast<std::size_t>(j)];
 
             const double response = dy[t - 1];  // Δy_t = y[t] - y[t-1] = dy[t-1]
 
             for (int i = 0; i < k; ++i) {
                 for (int jj = i; jj < k; ++jj)
-                    XtX[i * k + jj] += xrow[i] * xrow[jj];
-                Xty[i] += xrow[i] * response;
+                    XtX[static_cast<std::size_t>(i) * k_sz + static_cast<std::size_t>(jj)] +=
+                        xrow[static_cast<std::size_t>(i)] * xrow[static_cast<std::size_t>(jj)];
+                Xty[static_cast<std::size_t>(i)] += xrow[static_cast<std::size_t>(i)] * response;
             }
         }
         // Symmetrize
         for (int i = 0; i < k; ++i)
             for (int jj = i + 1; jj < k; ++jj)
-                XtX[jj * k + i] = XtX[i * k + jj];
+                XtX[static_cast<std::size_t>(jj) * k_sz + static_cast<std::size_t>(i)] =
+                    XtX[static_cast<std::size_t>(i) * k_sz + static_cast<std::size_t>(jj)];
 
         // Solve
-        const auto r = ols_normal_eq(XtX, Xty, k, /*diag_idx=*/1);
+        const auto r = ols_normal_eq(XtX.data(), Xty.data(), k, /*diag_idx=*/1);
         if (!r.ok) continue;
 
         // RSS from beta: RSS = y'y - beta' X'y
         double yty = 0;
-        for (int t = p + 1; t < static_cast<int>(n); ++t)
+        for (std::size_t t = static_cast<std::size_t>(p) + 1; t < n; ++t)
             yty += dy[t - 1] * dy[t - 1];
 
         double bXty = 0;
-        for (int i = 0; i < k; ++i) bXty += r.beta[i] * Xty[i];
+        for (int i = 0; i < k; ++i)
+            bXty += r.beta[static_cast<std::size_t>(i)] * Xty[static_cast<std::size_t>(i)];
         const double rss = yty - bXty;
         if (rss <= 0) {
             // Degenerate: the regression fits perfectly (residual variance
@@ -376,7 +409,10 @@ CointResult engle_granger(
     r.cv_5pct       = kNaN;
     r.cv_10pct      = kNaN;
     r.half_life     = kInf;
-    r.n_obs         = static_cast<int>(n);
+    // Public struct field (int) -- checked-narrowed rather than silently
+    // wrapped, so an astronomically large n fails loud instead of storing
+    // a wrong (wrapped) observation count.
+    r.n_obs         = numerics::checked_narrow_to_int(n, "engle_granger: n_obs");
     r.cointegrated  = false;
 
     if (n < 8) return r;
@@ -392,9 +428,9 @@ CointResult engle_granger(
     r.optimal_lag   = adf.optimal_lag;
 
     // ── Step 3: MacKinnon (2010) critical values and p-value ─────────────────
-    r.cv_1pct  = mackinnon_cv(1.0,  static_cast<int>(n));
-    r.cv_5pct  = mackinnon_cv(5.0,  static_cast<int>(n));
-    r.cv_10pct = mackinnon_cv(10.0, static_cast<int>(n));
+    r.cv_1pct  = mackinnon_cv(1.0,  n);
+    r.cv_5pct  = mackinnon_cv(5.0,  n);
+    r.cv_10pct = mackinnon_cv(10.0, n);
 
     if (!std::isnan(adf.statistic)) {
         r.p_value     = mackinnon_pvalue(adf.statistic);
