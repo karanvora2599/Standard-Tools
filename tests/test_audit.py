@@ -412,7 +412,9 @@ class TestHashChainIntegrity:
         dispatch(
             "analyze_stock_risk", {"symbol": "MSFT", "benchmark": "SPY", "period": "1y"}
         )
-        jsonl_path = next(iter(audit_dir.glob("*.jsonl")))
+        jsonl_path = next(
+            p for p in audit_dir.glob("*.jsonl") if audit._DAY_FILE_RE.match(p.name)
+        )
         lines = jsonl_path.read_text(encoding="utf-8").splitlines()
 
         first = json.loads(lines[0])
@@ -435,7 +437,9 @@ class TestHashChainIntegrity:
             "analyze_stock_risk",
             {"symbol": "GOOGL", "benchmark": "SPY", "period": "1y"},
         )
-        jsonl_path = next(iter(audit_dir.glob("*.jsonl")))
+        jsonl_path = next(
+            p for p in audit_dir.glob("*.jsonl") if audit._DAY_FILE_RE.match(p.name)
+        )
         lines = jsonl_path.read_text(encoding="utf-8").splitlines()
         del lines[1]  # remove the middle record
         jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
