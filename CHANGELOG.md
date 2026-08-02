@@ -440,8 +440,41 @@ bump, consistent with SemVer's pre-1.0 clause.
   Verified both configurations build clean and pass the full native ctest
   suite + Python suite.
 
-### Fixed
+### Not shipped
 
+- **Deep native optimization, item J: rank-1 Cholesky update/downdate for
+  `rolling_factor_loadings` — attempted, hard numerical-stability gate
+  failed, reverted.** Implemented the standard Givens-rotation-based
+  Cholesky update/downdate (Golub & Van Loan §6.5.4 — the same algorithm
+  LINPACK's `dchud`/`dchdd` and MATLAB's `cholupdate` implement) to
+  maintain the Cholesky factor `L` directly in O(p²) as bars enter/leave
+  the rolling window, instead of `cholesky_solve()`'s O(p³) full refactor
+  every step (with a downdate-failure fallback reusing the existing
+  `refresh` cadence). Gated it — per this project's established
+  hard-gate-with-escape-hatch pattern — behind a comparison against the
+  existing full-refactor-per-step path (same-machine `git stash`/`git
+  stash pop`, real before/after output, not a re-derived reference) across
+  8 configs: `k` = 3, 10, 30, 50 on well-conditioned random data, `k` = 5
+  and 10 on deliberately near-singular/collinear factor data (one column a
+  near-duplicate of another), and a large-baseline-offset case (`+1e6` on
+  every factor value, small relative variation per window — the same
+  shape of numerical stress that motivated `rolling_beta`'s own
+  large-baseline fix). **Result: well-conditioned data agreed to
+  ~1e-13–3e-10 relative tolerance (excellent) across every `k` tested, but
+  the near-singular/collinear cases showed max relative differences of
+  ~30× and ~1.2× (i.e., a real, not marginal, numerical breakdown), and the
+  large-baseline case showed a ~5.3% relative difference.** This matches
+  exactly the risk this item's own spec flagged going in — Cholesky
+  *downdate* is a well-known harder numerical problem than update, most
+  fragile precisely where the periodic full-refactor safety net matters
+  most. **Per the documented escape hatch, this was reverted — not
+  shipped.** `rolling_factor_loadings_into` still benefits from items A/B
+  above (dead upper-triangle removal, `cholesky_solve` scratch reuse),
+  unconditionally safe and independent of this item. The implementation
+  and its gate results are documented here rather than silently dropped,
+  matching this project's "record the real outcome, including a
+  disappointing one" standard (e.g. the GARCH gradient's documented
+  tolerance-loosening, Phase 3's LTO/IPO null result).
 - **Deep native optimization, Phase 5: `SQT_RESTRICT` portable `restrict`
   qualifier across every `_into` kernel.** New `include/sqt/platform.hpp`
   (`__restrict` on MSVC, `__restrict__` on GCC/Clang). Applied to all 12
