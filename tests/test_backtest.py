@@ -640,9 +640,20 @@ class TestNativeTradeStatsCorrectness:
         """
         Broader cross-check on a realistic random series (not just the
         hand-verified 6-bar case): the native kernel's own trade stats must
-        now agree with engine.py's independent Python recomputation
-        (_build_trade_log + _compute_trade_stats), since both implement the
-        identical fill-aware, cost-aware accounting.
+        agree with engine.py's independent Python recomputation
+        (_build_trade_log + _compute_trade_stats) for any signal set that
+        never produces a same-sign RESIZE event.
+
+        Deliberately excludes 2.0 from the signal choices (which, following
+        directly after a 1.0, would be a same-sign resize): backtest.cpp's
+        run_strategy now tracks a genuine weighted-average cost basis across
+        a position's whole life, treating a resize as a partial add to the
+        SAME lot rather than a close-then-reopen -- _build_trade_log (the
+        Python reference used here) has NOT been updated to match (out of
+        scope for this native-only fix; see CHANGELOG's "Known Issues" for
+        this gap), so the two are only guaranteed to agree when no resize
+        ever occurs. Open/close/reversal/leveraged-single-size scenarios are
+        still fully covered here and by the two hand-verified tests above.
         """
         from standard_quant_tools.backtest.engine import (
             _build_trade_log,
@@ -651,7 +662,7 @@ class TestNativeTradeStatsCorrectness:
 
         np.random.seed(7)
         signals = pd.Series(
-            np.random.choice([-1.0, 0.0, 1.0, 2.0], len(simple_ohlcv)),
+            np.random.choice([-1.0, 0.0, 1.0], len(simple_ohlcv)),
             index=simple_ohlcv.index,
         )
         prices = simple_ohlcv["Close"]

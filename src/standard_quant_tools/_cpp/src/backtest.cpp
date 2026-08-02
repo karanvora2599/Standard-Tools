@@ -16,6 +16,108 @@ namespace sqt {
 namespace {
     constexpr double kInf = std::numeric_limits<double>::infinity();
     constexpr double kPPY = 252.0;  // periods per year
+
+    // ── Trade-log position accounting (weighted-average cost basis) ─────────
+    //
+    // Replaces the old "any pos_diff event closes-then-reopens" model, whose
+    // same-sign RESIZE handling (e.g. size 1.0 -> 2.5) double-counted cost --
+    // it treated a resize as closing a 1.0-sized trade AND opening a fresh
+    // 2.5-sized one, each independently costed at 2*abs(own size), totaling
+    // 2*(1.0+2.5)=7*cost_per_unit for a lot the equity curve itself only
+    // ever charged sum(abs(pdiff))*cost_per_unit = (1.0+1.5+2.5)=5*cost_per_unit
+    // for. PositionState now tracks a genuine weighted-average cost basis
+    // across a lot's whole life (open, any same-sign resizes, and the final
+    // close), so a resize is a partial ADD (blending cost basis, charging
+    // only the incremental amount actually transacted that event) instead of
+    // a full close+reopen -- equity P&L and trade-log stats now derive from
+    // the same economic events instead of the previous approximation.
+    //
+    // A full close, a flip (close-then-reopen in one event), and the
+    // final-bar flush of a still-open lot are UNCHANGED in total cost/pnl
+    // from the old model for any sequence with no intermediate resize (see
+    // tests/cpp/test_backtest.cpp's pinned open/close/reversal/flush tests,
+    // which are unaffected by this rewrite) -- only the resize case's
+    // accounting actually changes.
+    struct PositionState {
+        double size               = 0.0;  // signed net units held (0 = flat)
+        double cost_basis         = 0.0;  // weighted-average entry price of the open lot
+        double cost_accrued       = 0.0;  // sum of abs(delta)*cost_per_unit over the lot's life so far
+        double realized_pnl_accum = 0.0;  // sum of realized pnl from any partial closes of this lot
+    };
+
+    struct TradeCompletion {
+        bool   completed  = false;
+        double return_pct = 0.0;
+    };
+
+    // Applies one bar's position-changing event (exec_i != prev_exec) to
+    // `st`. exec_i/prev_exec are used directly wherever a raw *target*
+    // position size is needed (never a delta-derived value), matching the
+    // original entry_size=exec_i convention. Returns a completed trade's
+    // return_pct only when this event fully closes the current lot (a
+    // same-sign resize or a partial reduce never completes a trade by
+    // itself) -- the caller decides what to do with a completion (push to a
+    // vector, or fold into running scalar trade stats).
+    TradeCompletion apply_position_event(
+        PositionState& st, double exec_i, double prev_exec, double ref_price,
+        double cost_per_unit)
+    {
+        const double pdiff = exec_i - prev_exec;
+        TradeCompletion result;
+        if (pdiff == 0.0) return result;
+
+        if (st.size != 0.0 && (pdiff > 0.0) != (st.size > 0.0)) {
+            // Opposite sign: reduce, fully close, or close-then-flip.
+            const double pos_sign    = (st.size > 0.0) ? 1.0 : -1.0;
+            const double closing_qty = std::min(std::abs(pdiff), std::abs(st.size));
+
+            st.cost_accrued += closing_qty * cost_per_unit;
+            st.realized_pnl_accum += (st.cost_basis != 0.0)
+                ? (ref_price - st.cost_basis) / st.cost_basis * (closing_qty * pos_sign)
+                : 0.0;
+            st.size -= closing_qty * pos_sign;
+
+            if (st.size == 0.0) {
+                result.completed  = true;
+                result.return_pct = (st.realized_pnl_accum - st.cost_accrued) * 100.0;
+                st = PositionState{};
+            }
+        } else if (st.size != 0.0) {
+            // Same sign: a resize/add -- blend cost basis, charge cost only
+            // for the incremental amount actually transacted this event.
+            const double old_notional = st.size * st.cost_basis;
+            st.size += pdiff;
+            st.cost_basis     = (old_notional + pdiff * ref_price) / st.size;
+            st.cost_accrued  += std::abs(pdiff) * cost_per_unit;
+            return result;  // a resize never completes a trade
+        }
+
+        if (st.size == 0.0 && exec_i != 0.0) {
+            // Opening a fresh lot -- either already flat, or the branch
+            // above just fully closed the prior lot (a flip). Uses exec_i
+            // directly (the raw target position), not a delta-derived
+            // value.
+            st.cost_basis    = ref_price;
+            st.size          = exec_i;
+            st.cost_accrued += std::abs(exec_i) * cost_per_unit;
+        }
+        return result;
+    }
+
+    // Mark-to-market close of a still-open lot at the series' final price
+    // (mirrors the original "no real exit event occurred" flush -- entry/
+    // resize costs only, already reflected in st.cost_accrued; no
+    // additional cost charged here).
+    TradeCompletion flush_open_lot(const PositionState& st, double final_price) {
+        TradeCompletion result;
+        if (st.size == 0.0) return result;
+        const double pnl = (st.cost_basis != 0.0)
+            ? (final_price - st.cost_basis) / st.cost_basis * st.size
+            : 0.0;
+        result.completed  = true;
+        result.return_pct = (st.realized_pnl_accum + pnl - st.cost_accrued) * 100.0;
+        return result;
+    }
 }
 
 BacktestResult run_strategy(
@@ -51,40 +153,14 @@ BacktestResult run_strategy(
 
     std::vector<double> strat_ret(n, 0.0);
 
-    // ── Trade log state machine (mirrors _build_trade_log in engine.py) ──────
-    // entry_size (not just its sign) matches strat_ret[i] = exec_i * ret_i
-    // above — a leveraged SCORE signal (e.g. 2.5) must scale the trade's
-    // return the same way it scales the equity curve's, or reported
-    // win_rate/profit_factor/avg_trade_return_pct silently disagree with the
-    // actual P&L for any non-±1 signal. entry_price is prices[i-1] (Close
-    // one bar before the trade-open event), not prices[i]: executed[i] =
-    // signals[i-1] earns its first return over Close[i-1] -> Close[i], so
-    // Close[i-1] is this position's true economic entry point (same
-    // ref_prices = prices.shift(1) convention _build_trade_log uses for
-    // fill_price="close" — the only mode this native kernel implements).
-    // return_pct's cost deduction is scaled by entry_size: cost_per_unit is
-    // a cost *per unit of notional exposure traded* (this is exactly what
-    // strat_ret's abs(pdiff)*cost_per_unit already means), so opening/
-    // closing an entry_size-sized position must deduct
-    // abs(entry_size)*cost_per_unit per leg, not a flat, size-independent
-    // cost_per_unit -- a real bug found and fixed here: a 5x-sized trade
-    // used to deduct the exact same flat cost as a 1x trade, silently
-    // under-costing every leveraged (non-±1) SCORE-style position. Two legs
-    // (entry + exit) for a completed round trip, one leg (entry only) for
-    // a position still open at the final bar -- same event count the
-    // equity curve's own two separate pos_diff-triggered cost deductions
-    // already reflect. This does not attempt to reconcile exactly with the
-    // equity curve for a same-sign *resize* (e.g. 1.0->2.5, a single event
-    // treated here as closing a 1.0-sized trade and opening a fresh
-    // 2.5-sized one, each independently costed at 2x their own size rather
-    // than the smaller abs(pdiff)=1.5 the equity curve actually charges for
-    // that one event) -- a known, documented approximation, not silently
-    // hidden; see tests/cpp/test_backtest.cpp for what is and isn't covered.
+    // ── Trade log: weighted-average-cost-basis position accounting ───────────
+    // (mirrors _build_trade_log in engine.py) via the shared
+    // PositionState/apply_position_event/flush_open_lot helpers above --
+    // see their doc comments for the full rationale (this replaces a
+    // same-sign-resize approximation that used to double-count cost).
     std::vector<double> trade_rets;  // per-trade return_pct (×100 scale)
-    bool   has_open    = false;
-    double entry_price = 0.0;
-    double entry_size  = 0.0;
-    double prev_exec   = 0.0;
+    PositionState pos;
+    double prev_exec = 0.0;
 
     for (std::size_t i = 1; i < n; ++i) {
         const double ref_price = prices[i - 1];
@@ -97,34 +173,16 @@ BacktestResult run_strategy(
 
         strat_ret[i] = exec_i * ret_i - tcost;
 
-        if (pdiff != 0.0) {
-            if (has_open) {
-                const double raw_pnl = (entry_price != 0.0)
-                    ? (ref_price - entry_price) / entry_price * entry_size
-                    : 0.0;
-                trade_rets.push_back(
-                    (raw_pnl - 2.0 * std::abs(entry_size) * cost_per_unit) * 100.0);
-                has_open = false;
-            }
-            if (exec_i != 0.0) {
-                entry_price = ref_price;
-                entry_size  = exec_i;
-                has_open    = true;
-            }
-        }
+        const auto tc = apply_position_event(pos, exec_i, prev_exec, ref_price, cost_per_unit);
+        if (tc.completed) trade_rets.push_back(tc.return_pct);
 
         prev_exec = exec_i;
     }
 
     // Flush last open trade at final Close price (mirrors Python's
-    // synthesized final-bar exit — entry cost only, no real exit event).
-    if (has_open) {
-        const double raw_pnl = (entry_price != 0.0)
-            ? (prices[n - 1] - entry_price) / entry_price * entry_size
-            : 0.0;
-        trade_rets.push_back(
-            (raw_pnl - std::abs(entry_size) * cost_per_unit) * 100.0);
-    }
+    // synthesized final-bar exit — entry/resize costs only, no real exit event).
+    const auto final_tc = flush_open_lot(pos, prices[n - 1]);
+    if (final_tc.completed) trade_rets.push_back(final_tc.return_pct);
 
     // ── Equity curve: cumprod(1 + strat_ret) ──────────────────────────────────
     r.equity_curve[0] = initial_capital;
@@ -256,12 +314,13 @@ BacktestResult run_strategy_summary(
     // exceed INT_MAX for a large series.
     const double n_d = static_cast<double>(n);
 
-    // ── Pass 1: trade-log state machine + running equity/peak/drawdown/sum,
-    //    fused into one forward loop, zero array allocation. ──────────────
-    bool   has_open    = false;
-    double entry_price = 0.0;
-    double entry_size  = 0.0;
-    double prev_exec   = 0.0;
+    // ── Pass 1: trade-log position accounting + running equity/peak/
+    //    drawdown/sum, fused into one forward loop, zero array allocation.
+    //    Trade-log accounting uses the same shared PositionState/
+    //    apply_position_event/flush_open_lot helpers run_strategy() uses
+    //    (see their doc comments above). ───────────────────────────────
+    PositionState pos;
+    double prev_exec = 0.0;
 
     // long long (not int): num_trades is bounded by n and accumulated one
     // increment at a time, so it can't itself exceed n -- kept wide here
@@ -276,6 +335,13 @@ BacktestResult run_strategy_summary(
     double peak   = initial_capital;
     double mdd    = 0.0;
     double sum_r  = 0.0;
+
+    auto fold_trade = [&](double tr) {
+        ++num_trades;
+        sum_tr += tr;
+        if (tr > 0.0) { ++n_wins; gross_win += tr; }
+        else gross_loss += std::abs(tr);
+    };
 
     for (std::size_t i = 1; i < n; ++i) {
         const double ref_price = prices[i - 1];
@@ -297,40 +363,15 @@ BacktestResult run_strategy_summary(
 
         sum_r += strat_ret_i;
 
-        if (pdiff != 0.0) {
-            if (has_open) {
-                const double raw_pnl = (entry_price != 0.0)
-                    ? (ref_price - entry_price) / entry_price * entry_size
-                    : 0.0;
-                const double tr =
-                    (raw_pnl - 2.0 * std::abs(entry_size) * cost_per_unit) * 100.0;
-                ++num_trades;
-                sum_tr += tr;
-                if (tr > 0.0) { ++n_wins; gross_win += tr; }
-                else gross_loss += std::abs(tr);
-                has_open = false;
-            }
-            if (exec_i != 0.0) {
-                entry_price = ref_price;
-                entry_size  = exec_i;
-                has_open    = true;
-            }
-        }
+        const auto tc = apply_position_event(pos, exec_i, prev_exec, ref_price, cost_per_unit);
+        if (tc.completed) fold_trade(tc.return_pct);
 
         prev_exec = exec_i;
     }
 
     // Flush last open trade at final Close price (mirrors run_strategy()).
-    if (has_open) {
-        const double raw_pnl = (entry_price != 0.0)
-            ? (prices[n - 1] - entry_price) / entry_price * entry_size
-            : 0.0;
-        const double tr = (raw_pnl - std::abs(entry_size) * cost_per_unit) * 100.0;
-        ++num_trades;
-        sum_tr += tr;
-        if (tr > 0.0) { ++n_wins; gross_win += tr; }
-        else gross_loss += std::abs(tr);
-    }
+    const auto final_tc = flush_open_lot(pos, prices[n - 1]);
+    if (final_tc.completed) fold_trade(final_tc.return_pct);
 
     r.final_equity = equity;
     r.total_return = (r.final_equity - initial_capital) / initial_capital;

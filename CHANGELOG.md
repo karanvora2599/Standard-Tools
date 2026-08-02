@@ -9,6 +9,28 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Known Issues
+
+- **Correctness/portability pass, item 14 of 20 (native/Python trade-log
+  divergence for resize scenarios):** `backtest.cpp`'s `run_strategy()`/
+  `run_strategy_summary()` now track a genuine weighted-average cost basis
+  for the trade log (see the Fixed entry below), but `engine.py`'s
+  `_build_trade_log()` (the Python reference implementation, used to build
+  the optional `trade_log` DataFrame when `run_strategy(..., 
+  include_trade_log=True)` is called) has **not** been updated to match --
+  it still treats a same-sign resize as closing-then-reopening two separate
+  trades. `run_strategy()`'s scalar stats (`num_trades`, `win_rate`,
+  `profit_factor`, `avg_trade_return_pct`) are read directly from the
+  native kernel (already fixed), but the returned `trade_log` DataFrame
+  (when requested) is still built by the unfixed Python path -- for any
+  signal sequence containing a same-sign resize, the DataFrame's row count
+  can now disagree with `result["num_trades"]`. Out of scope for this
+  native-only pass; tracked here rather than silently shipped unnoticed.
+  `tests/test_backtest.py::TestNativeTradeStatsCorrectness::
+  test_run_strategy_native_matches_python_recomputed_stats` documents this
+  explicitly and excludes resize scenarios from its native/Python
+  cross-check accordingly.
+
 ### Added
 
 - **Correctness/portability pass, item 13 of 20 (NaN/Inf input contract,
@@ -100,6 +122,47 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, item 14 of 20 (highest-risk item in this
+  pass):** `backtest.cpp`'s `run_strategy()`/`run_strategy_summary()` trade
+  log used to treat a same-sign position RESIZE (e.g. size 1.0 -> 2.5) as
+  closing the 1.0-sized trade and opening a fresh 2.5-sized one, each
+  independently costed at `2*abs(own size)*cost_per_unit` -- double-counting
+  cost relative to what the equity curve itself charges for that one event
+  (`abs(pdiff)*cost_per_unit`). This was an explicitly documented, tested
+  approximation, not a hidden bug -- now replaced with a genuine
+  weighted-average cost basis: a new shared `PositionState` +
+  `apply_position_event()`/`flush_open_lot()` (anonymous-namespace helpers
+  used identically by both `run_strategy()` and `run_strategy_summary()`)
+  track `size`/`cost_basis`/`cost_accrued`/`realized_pnl_accum` across a
+  lot's whole life, so a resize is now a partial ADD that blends cost basis
+  and charges only the incremental amount actually transacted, and a lot's
+  final trade-log cost always equals `sum(abs(pdiff))*cost_per_unit` summed
+  over every event that touched it -- matching the equity curve exactly.
+
+  A full open-then-close (via a real event or the final-bar flush) and a
+  sign-flip (close-then-reopen in one event) are **unchanged** in total
+  cost/pnl from the old model and remain bit-identical-by-construction
+  (verified: all pre-existing pinned tests in `tests/cpp/test_backtest.cpp`
+  pass unmodified except the resize test below). Only a same-sign resize's
+  accounting actually changes -- for the resize case in
+  `test_trade_log_resize_cost_is_documented_approximation` (renamed
+  `test_trade_log_resize_cost_is_weighted_cost_basis`), the whole
+  open→resize→close sequence is now correctly ONE continuous trade (was 2),
+  with total cost `5*cost_per_unit` (was `7*cost_per_unit`) -- this is the
+  fix, not a regression. New
+  `test_trade_log_cost_matches_equity_curve_cost_property` pins the general
+  invariant (trade-log total cost == equity-curve total cost, for any
+  signal sequence, via a costed-vs-cost-free differential) rather than only
+  the one hand-verified case.
+
+  See the "Known Issues" entry above for a real, honestly-scoped gap this
+  surfaced: `engine.py`'s Python-side `_build_trade_log()` (used only for
+  the optional `trade_log` DataFrame, not for `run_strategy()`'s own scalar
+  stats) has not been updated to match, so that DataFrame can now disagree
+  with `result["num_trades"]` for resize scenarios specifically.
+
+  Verified: full native ctest (8/8, including the updated/new backtest
+  tests) + full pytest (1851 passed) green.
 - **Correctness/portability pass, item 8 of 20:** `hurst.cpp`'s
   `dfa_onepass` (the one-pass DFA reformulation shipped in the prior
   performance pass) computed each chunk's sum-of-squared-residuals via a
