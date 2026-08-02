@@ -1,6 +1,7 @@
 #include "sqt/rolling_regression.hpp"
 
 #include "sqt/isa_dispatch.hpp"
+#include "sqt/numerics.hpp"
 #include "sqt/rolling_beta_avx2.hpp"
 
 #include <algorithm>
@@ -15,7 +16,8 @@ namespace {
 
     // ── Cholesky solve: A * beta = b ─────────────────────────────────────────
     // A is (p×p) symmetric positive definite (stored row-major).
-    // Returns false if A is singular or near-singular (diagonal entry ≤ 1e-14).
+    // Returns false if A is singular or near-singular (diagonal entry not
+    // sufficiently positive relative to A's own magnitude -- see below).
     //
     // L_scratch/z_scratch are caller-owned buffers reused across every call
     // in a rolling-window loop (sized once, outside the loop) instead of
@@ -35,6 +37,24 @@ namespace {
         std::vector<double>&       L_scratch,
         std::vector<double>&       z_scratch)
     {
+        // Relative-epsilon singularity threshold, scaled to A's own
+        // original diagonal magnitude -- replaces a fixed absolute
+        // `s <= 1e-14` threshold that didn't scale with A's magnitude (a
+        // matrix with e.g. ~1e9-scale factor values could have genuinely
+        // significant diagonal entries the old absolute threshold would
+        // never see as "small," while a well-conditioned but small-
+        // magnitude matrix could be rejected too aggressively). Deliberately
+        // NOT numerics::is_negligible_pivot() here: that helper tests
+        // |value| against the threshold (correct for Gaussian-elimination
+        // pivots, which can legitimately be negative), whereas a Cholesky
+        // diagonal entry must be POSITIVE before its sqrt below -- a large-
+        // magnitude negative `s` (definitely not positive-definite) must
+        // still fail this check, exactly as the original `s <= 1e-14` did.
+        double scale = 0.0;
+        for (int i = 0; i < p; ++i) scale = std::max(scale, std::abs(A[i * p + i]));
+        const double rel_eps = 1e-12;
+        const double min_diag = rel_eps * std::max(scale, 1.0);
+
         std::vector<double>& L = L_scratch;
         L.resize(static_cast<std::size_t>(p) * static_cast<std::size_t>(p));
         for (int i = 0; i < p; ++i) {
@@ -43,7 +63,7 @@ namespace {
                 for (int kk = 0; kk < j; ++kk)
                     s -= L[i * p + kk] * L[j * p + kk];
                 if (i == j) {
-                    if (s <= 1e-14) return false;
+                    if (s <= min_diag) return false;
                     L[i * p + i] = std::sqrt(s);
                 } else {
                     L[i * p + j] = s / L[j * p + j];

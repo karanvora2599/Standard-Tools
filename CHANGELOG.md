@@ -11,6 +11,27 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, item 6 of 20 (second consumer):**
+  `rolling_regression.cpp`'s `cholesky_solve` used the same fixed absolute
+  `s <= 1e-14` singularity threshold on its Cholesky diagonal as
+  `cointegration.cpp`'s `gauss_elim` (fixed above) -- a threshold that
+  doesn't scale with the design matrix's own magnitude. Now a relative
+  threshold (`s <= 1e-12 * max(diagonal_scale, 1.0)`), scale computed once
+  from the matrix's own original diagonal before decomposition begins.
+  Deliberately NOT routed through the shared `numerics::is_negligible_pivot`
+  helper used elsewhere -- that helper tests `|value|` (correct for
+  Gaussian-elimination pivots, which can legitimately be negative), whereas
+  a Cholesky diagonal entry must be positive before its `sqrt` immediately
+  below, so a large-magnitude *negative* value (definitely not positive-
+  definite) must still fail this check exactly as the original threshold
+  did. New adversarial tests in `tests/cpp/test_rolling_regression.cpp`:
+  a well-conditioned single-factor window at ~1e6 magnitude still recovers
+  the exact true coefficients (proving the relative threshold isn't overly
+  strict), and a genuinely singular (duplicate-column) window at the same
+  magnitude still correctly produces `NaN` (proving it isn't accidentally
+  *more* permissive at scale than the old fixed threshold was). Existing
+  well-conditioned tests confirmed bit-identical against the full native +
+  Python suite.
 - **Correctness/portability pass, items 6/7/15 of 20:** `adf_test()`
   (backing `engle_granger`) silently clamped any `max_lag` request above
   14 (`kMaxK - 2`, a fixed max-regressor-count constant) with no error or

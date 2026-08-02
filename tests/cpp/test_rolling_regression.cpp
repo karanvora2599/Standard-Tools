@@ -187,6 +187,54 @@ static void test_singular_window_produces_nan() {
     CHECK_NAN(out[(window - 1) * (k + 1) + 0]);
 }
 
+static void test_large_magnitude_recovers_known_coefficients() {
+    // Same construction as test_single_factor_recovers_known_coefficients,
+    // but x is scaled to ~1e6 magnitude instead of O(1) -- exercises
+    // cholesky_solve's relative-epsilon singularity threshold (replacing a
+    // fixed absolute `s <= 1e-14` that didn't scale with the matrix's own
+    // magnitude): XtX's diagonal entries here are ~1e12, so a threshold
+    // that stayed fixed at an O(1)-scale absolute value could fail to
+    // reject a genuinely near-singular window at this scale (see the
+    // companion NaN test below). Deliberately zero-mean-ish random scaling
+    // (not a huge constant offset + tiny variation) -- an offset-based
+    // construction hits a separate, out-of-scope raw-moment catastrophic-
+    // cancellation issue in build_normal_equations' uncentered sums, which
+    // this test isn't targeting.
+    const int n = 40, k = 1, window = 15;
+    std::vector<double> x(n), y(n);
+    std::uint64_t state = 2024;
+    for (int i = 0; i < n; ++i) {
+        x[i] = pseudo_random(state) * 1.0e6;
+        y[i] = 3.0 + 2.0 * x[i];
+    }
+    auto out = sqt::rolling_factor_loadings(y.data(), x.data(), n, k, window);
+    for (int i = window - 1; i < n; ++i) {
+        CHECK_NEAR(out[i * (k + 1) + 0], 3.0, 1e-4);
+        CHECK_NEAR(out[i * (k + 1) + 1], 2.0, 1e-12);
+    }
+}
+
+static void test_singular_window_at_large_magnitude_produces_nan() {
+    // Same duplicate-column construction as test_singular_window_produces_nan,
+    // but scaled to ~1e6 magnitude -- proves the relative-epsilon threshold
+    // isn't accidentally MORE permissive at large scale than the old fixed
+    // absolute threshold was: a genuinely singular window (two identical
+    // factor columns) must still be rejected (NaN output) regardless of
+    // the matrix's magnitude, since two identical columns make the exact
+    // same direction singular whether their magnitude is O(1) or O(1e6).
+    const int n = 40, k = 2, window = 20;
+    std::vector<double> y(n), factors(n * k);
+    std::uint64_t state = 9901;
+    for (int i = 0; i < n; ++i) {
+        y[i] = pseudo_random(state) * 1.0e6;
+        const double v = pseudo_random(state) * 1.0e6;
+        factors[i * k + 0] = v;
+        factors[i * k + 1] = v;  // duplicate column
+    }
+    auto out = sqt::rolling_factor_loadings(y.data(), factors.data(), n, k, window);
+    CHECK_NAN(out[(window - 1) * (k + 1) + 0]);
+}
+
 static void test_window_larger_than_n_all_nan() {
     const int n = 10, k = 1, window = 50;
     std::vector<double> y(n), x(n);
@@ -297,6 +345,8 @@ int main() {
     test_single_factor_recovers_known_coefficients();
     test_matches_independent_reference_multi_factor();
     test_singular_window_produces_nan();
+    test_large_magnitude_recovers_known_coefficients();
+    test_singular_window_at_large_magnitude_produces_nan();
     test_window_larger_than_n_all_nan();
     test_rolling_beta_recovers_known_slope();
     test_rolling_beta_nan_prefix();
