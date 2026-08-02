@@ -33,6 +33,33 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 20b of 20 (final item -- closes out
+  the 20-finding pass):** new `.github/workflows/nightly-tsan.yml` --
+  scheduled (`03:00 UTC daily`, plus `workflow_dispatch` for manual runs)
+  ThreadSanitizer build+test job, separate from `build-cpp.yml` since TSan
+  is meaningfully slower than a normal cycle and only useful periodically,
+  not on every push. Explicitly depends on item 2's earlier
+  `isa_dispatch.cpp` atomicity fix (`g_override_value`'s independent
+  atomics for the override's `avx2`/`fma` bits) -- adding this job before
+  that fix would have immediately flagged that race with zero signal about
+  anything else; the fix landed first in this same pass. `continue-on-error:
+  true`, mirroring `build-and-test-sanitizers`' own established "unproven
+  sanitizer config" precedent -- unlike ASan, no `LD_PRELOAD` gymnastics
+  are needed to import the TSan-instrumented extension (TSan's runtime
+  loads as a normal shared-library dependency, unlike ASan's global-
+  allocator interception). Verification is the scheduled CI run itself
+  once this lands (no local Linux/TSan toolchain available in this
+  session) -- YAML syntax validated locally via `yaml.safe_load`.
+
+  This closes out the full correctness/scale/numerical-stability/
+  portability/CI review (all 20 findings, "everything" scope as selected).
+  See this file's "Not shipped" section for the one item this session's
+  broader work deliberately did NOT ship (the rank-1 Cholesky update/
+  downdate, reverted after failing its own numerical-stability gate, and
+  explicitly re-validated as the correct call by this same review), and
+  the "Known Issues" entry above for the one honestly-scoped gap this pass
+  surfaced (native/Python trade-log divergence for backtest resize
+  scenarios).
 - **Correctness/portability pass, item 20a of 20:** new
   `tests/cpp/fuzz_cointegration.cpp` -- a randomized-input stress test for
   `cointegration.cpp`'s `gauss_elim` and `rolling_regression.cpp`'s

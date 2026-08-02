@@ -1,0 +1,89 @@
+name: Nightly ThreadSanitizer
+
+# Separate from build-cpp.yml (which triggers on every push/PR touching
+# _cpp/**) rather than a scheduled job bolted onto that file -- TSan is
+# meaningfully slower than a normal build+test cycle and only useful to run
+# periodically, not on every push, so keeping it in its own
+# schedule-triggered workflow avoids complicating build-cpp.yml's existing
+# push/pull_request/workflow_run triggers with an unrelated cadence.
+on:
+  schedule:
+    # 03:00 UTC daily -- arbitrary off-peak time, not tied to any specific
+    # release cadence.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  tsan:
+    name: C++ extension (ThreadSanitizer, ubuntu)
+    runs-on: ubuntu-latest
+    # This job's TSan build/run has not been verified on a real CI run
+    # (this environment has no way to trigger and observe one, and no local
+    # Linux/TSan toolchain) -- continue-on-error until confirmed working,
+    # mirroring build-cpp.yml's own established "unproven sanitizer config"
+    # precedent for build-and-test-sanitizers (ASan/UBSan). Flip to false
+    # once confirmed green.
+    #
+    # Prerequisite this job depends on: isa_dispatch.cpp's g_override_value
+    # used to be a single non-atomic struct guarded only by an atomic
+    # "active" flag -- a real data race TSan would have flagged
+    # immediately, with zero useful signal about anything else. That was
+    # fixed (independent atomics for the override's avx2/fma bits) before
+    # this job was added; do not add a nightly TSan job before a similar
+    # fix if this codebase ever reintroduces that pattern elsewhere.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y cmake build-essential
+
+      - name: Install Python dependencies
+        run: |
+          pip install flit_core pybind11
+          pip install -e ".[test]"
+
+      - name: Build C++ extension with ThreadSanitizer
+        env:
+          CXXFLAGS: "-fsanitize=thread -fno-omit-frame-pointer -g -O1"
+          LDFLAGS: "-fsanitize=thread"
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSQT_BUILD_TESTS=ON
+          cmake --build build --config Debug --parallel
+
+      - name: Run native C++ test suite under ThreadSanitizer
+        # halt_on_error=1: fail the step (not just log) on the first race
+        # detected. second_deadlock_stack=1: more actionable output if a
+        # deadlock is ever found, at negligible extra cost.
+        env:
+          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+        run: ctest --test-dir build --output-on-failure -C Debug
+
+      - name: Verify extension loaded
+        # Unlike ASan, a TSan-instrumented Python extension does not
+        # require LD_PRELOAD-ing the sanitizer runtime into the host
+        # interpreter first -- ThreadSanitizer's runtime is designed to be
+        # loaded as a normal shared-library dependency of the sanitized
+        # .so, since (unlike ASan's global allocator interception) it does
+        # not need to be the first thing the process loads.
+        run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
+
+      - name: Run tests under ThreadSanitizer
+        # Only the OpenMP-parallelized kernels (simulate_forward_paths,
+        # batch_run_strategy, rolling_hurst_into, and rolling_beta_into's
+        # AVX2/isa_dispatch override path) can meaningfully race -- this
+        # runs the same full suite build-cpp.yml's other jobs do rather
+        # than hand-picking a subset, since a race could in principle
+        # surface through any test path that happens to exercise one of
+        # those parallel loops or the shared isa_dispatch override state.
+        env:
+          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+        run: |
+          pytest -m "not integration and not slow" --tb=short -q -s
