@@ -195,6 +195,16 @@ class TestValidation:
         with pytest.raises(ValidationError, match="at least 100"):
             garch_volatility_forecast(returns)
 
+    def test_inf_in_returns_raises(self):
+        """Inf input contract: returns.dropna() strips NaN but not +/-Inf,
+        and garch11_variance_recursion_into's floor-clamp (mean <
+        kMinSigma2) is false for Inf, so it would otherwise silently
+        propagate through the entire native recursion uncaught."""
+        returns = _simulate_garch11(200, 1e-6, 0.08, 0.90)
+        returns.iloc[50] = np.inf
+        with pytest.raises(ValidationError, match="non-finite"):
+            garch_volatility_forecast(returns)
+
 
 # ── Scale / performance sanity (not a hard perf assertion elsewhere) ─────────
 

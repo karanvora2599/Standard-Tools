@@ -11,6 +11,18 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 11 of 20 (NaN/Inf input contract,
+  GARCH):** `analysis/garch.py::garch_volatility_forecast()` already
+  called `returns.dropna()`, stripping NaN, but not `+/-Inf` --
+  `garch11_variance_recursion_into`'s floor-clamp (`mean < kMinSigma2`)
+  is false for both NaN and Inf, so an Inf would otherwise silently
+  propagate through the entire native recursion uncaught (confirmed: all
+  three of `garch11_variance_recursion_into`,
+  `garch11_neg_loglik`/`garch11_neg_loglik_grad` share this pattern).
+  Wired `require_finite_array()` in right after `dropna()`, before the
+  mean/residual computation (catching an Inf at its source, before
+  Inf-arithmetic could turn it into a masking NaN first). New test:
+  `test_inf_in_returns_raises` in `tests/test_garch.py`.
 - **Correctness/portability pass, items 10/13 of 20 (NaN/Inf input
   contract, first two call sites):** new `require_finite_array()` in
   `validation.py`, raising the existing `ValidationError` -- extends the

@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,14 @@ def garch_volatility_forecast(
             f"observations (GARCH fits are unstable on small samples), got {n}"
         )
 
+    # dropna() above already strips NaN for this call path, but not
+    # +/-Inf -- garch11_variance_recursion_into's floor-clamp
+    # (mean < kMinSigma2) is false for both NaN and Inf, so either would
+    # otherwise silently propagate through the entire native recursion
+    # uncaught. Checked before the mean/resid computation below (not
+    # after) so an Inf is caught at its source instead of producing a
+    # NaN via inf-arithmetic in that subtraction first.
+    require_finite_array(arr, "returns", "garch_volatility_forecast")
     resid = arr - arr.mean()
     resid_sq = resid**2
 
