@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
+from standard_quant_tools.error import ValidationError
 
 
 class TestCalculateBeta:
@@ -53,6 +54,12 @@ class TestCalculateBeta:
         short_bench = sample_returns.iloc[:100]
         result = calculate_beta(sample_returns, short_bench)
         assert isinstance(result["beta"], float)
+
+    def test_nan_in_input_raises(self, sample_returns, benchmark_returns):
+        bad = sample_returns.copy()
+        bad.iloc[5] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            calculate_beta(bad, benchmark_returns)
 
     def test_minimal_data_returns_zeros(self):
         """With only 1 data point, should return safe zero dict."""

@@ -151,6 +151,13 @@ class TestCointegrationTestValues:
         result = cointegration_test(a_ext, b)
         assert result["n_obs"] == len(b)
 
+    def test_nan_in_series_raises(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        bad = a.copy()
+        bad.iloc[10] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            cointegration_test(bad, b)
+
 
 # ── compute_spread ─────────────────────────────────────────────────────────────
 
@@ -197,6 +204,13 @@ class TestComputeSpread:
         hl = half_life(spread)
         assert 0 < hl < 60  # mean-reverts within 60 bars
 
+    def test_inf_in_series_raises(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        bad = b.copy()
+        bad.iloc[7] = np.inf
+        with pytest.raises(ValidationError, match="non-finite"):
+            compute_spread(a, bad)
+
 
 # ── half_life ──────────────────────────────────────────────────────────────────
 
@@ -240,6 +254,12 @@ class TestHalfLife:
     def test_insufficient_data_returns_inf(self):
         s = pd.Series([1.0, 2.0])
         assert half_life(s) == float("inf")
+
+    def test_inf_in_spread_raises(self, mean_reverting_spread):
+        bad = mean_reverting_spread.copy()
+        bad.iloc[20] = np.inf
+        with pytest.raises(ValidationError, match="non-finite"):
+            half_life(bad)
 
 
 # ── spread_zscore ──────────────────────────────────────────────────────────────

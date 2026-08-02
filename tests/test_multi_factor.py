@@ -8,6 +8,7 @@ from standard_quant_tools.analysis.multi_factor import (
     multi_factor_regression,
     rolling_factor_loadings,
 )
+from standard_quant_tools.error import ValidationError
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -230,6 +231,13 @@ class TestRollingFactorLoadings:
         window = 60
         result = rolling_factor_loadings(asset, factors, window=window)
         assert not result.iloc[window - 1 :].isna().any(axis=None)
+
+    def test_nan_in_asset_returns_raises(self, two_factor_data):
+        asset, factors = two_factor_data
+        bad = asset.copy()
+        bad.iloc[30] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            rolling_factor_loadings(bad, factors, window=60)
 
     def test_stable_loadings_converge_to_true_values(self, two_factor_data):
         """

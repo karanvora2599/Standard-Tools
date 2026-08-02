@@ -137,6 +137,19 @@ def stochastic_oscillator(
         "C++" if (HAS_CPP and _cpp_core is not None) else "pandas",
     )
 
+    # Checked once, unconditionally, BEFORE the C++ try/except below --
+    # that except catches Exception broadly (to fall back to pandas on any
+    # C++ failure), which would otherwise silently swallow a
+    # ValidationError raised inside the try block and mask bad input
+    # behind a confusing fallback instead of rejecting it.
+    require_finite_array(
+        high.to_numpy(dtype=np.float64), "high", "stochastic_oscillator"
+    )
+    require_finite_array(low.to_numpy(dtype=np.float64), "low", "stochastic_oscillator")
+    require_finite_array(
+        close.to_numpy(dtype=np.float64), "close", "stochastic_oscillator"
+    )
+
     # ── C++ fast path ─────────────────────────────────────────────────────────
     if HAS_CPP and _cpp_core is not None:
         try:

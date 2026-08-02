@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,13 @@ def bollinger_bands(
         len(series),
         "C++" if (HAS_CPP and _cpp_core is not None) else "pandas",
     )
+
+    # Checked once, unconditionally, BEFORE the C++ try/except below --
+    # that except catches Exception broadly (to fall back to pandas on any
+    # C++ failure), which would otherwise silently swallow a
+    # ValidationError raised inside the try block and mask bad input
+    # behind a confusing fallback instead of rejecting it.
+    require_finite_array(series.to_numpy(dtype=np.float64), "series", "bollinger_bands")
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
     if HAS_CPP and _cpp_core is not None:
@@ -128,6 +136,10 @@ def wilder_atr(
     l = low.to_numpy(dtype=np.float64)
     c = close.to_numpy(dtype=np.float64)
     n = len(h)
+
+    require_finite_array(h, "high", "wilder_atr")
+    require_finite_array(l, "low", "wilder_atr")
+    require_finite_array(c, "close", "wilder_atr")
 
     if HAS_CPP and _cpp_core is not None:
         raw = _cpp_core.wilder_atr(h, l, c, period)

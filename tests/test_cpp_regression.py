@@ -36,6 +36,7 @@ from standard_quant_tools.analysis.regression import HAS_CPP as REGRESSION_HAS_C
 from standard_quant_tools.analysis.regression import (
     rolling_beta as rolling_beta_wrapper,
 )
+from standard_quant_tools.error import ValidationError
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -235,6 +236,13 @@ class TestRollingBetaWrapper:
         result = rolling_beta_wrapper(y_s, x_s, window=window)
         assert result["Rolling_Beta"].iloc[: window - 1].isna().all()
         assert result["Rolling_Beta"].iloc[window - 1 :].notna().all()
+
+    def test_nan_in_input_raises(self, yx_series):
+        y_s, x_s = yx_series
+        bad = y_s.copy()
+        bad.iloc[10] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            rolling_beta_wrapper(bad, x_s, window=60)
 
     def test_known_beta_2_wrapper(self):
         """y = 2*x → all valid betas must be ≈ 2."""

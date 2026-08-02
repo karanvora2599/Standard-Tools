@@ -6,6 +6,7 @@ import pandas as pd
 from statsmodels.tsa.stattools import coint
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,8 @@ def cointegration_test(
     b = series_b.loc[common_idx]
     a_vals = a.to_numpy(dtype=float)
     b_vals = b.to_numpy(dtype=float)
+    require_finite_array(a_vals, "series_a", "cointegration_test")
+    require_finite_array(b_vals, "series_b", "cointegration_test")
     n = len(a_vals)
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "statsmodels"
     logger.debug("[cointegration] n_obs=%d  autolag=%s  path=%s", n, autolag, path)
@@ -155,6 +158,8 @@ def compute_spread(
     common_idx = series_a.index.intersection(series_b.index)
     a = series_a.loc[common_idx].to_numpy(dtype=float)
     b = series_b.loc[common_idx].to_numpy(dtype=float)
+    require_finite_array(a, "series_a", "compute_spread")
+    require_finite_array(b, "series_b", "compute_spread")
 
     if hedge_ratio is None:
         if HAS_CPP and _cpp_core is not None:
@@ -188,6 +193,9 @@ def half_life(spread: pd.Series) -> float:
 
     if len(y) < 3:
         return float("inf")
+
+    require_finite_array(y, "spread", "half_life")
+    require_finite_array(x, "spread", "half_life")
 
     if HAS_CPP and _cpp_core is not None:
         r = _cpp_core.ols2(y, x)

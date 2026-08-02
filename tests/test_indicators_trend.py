@@ -151,6 +151,12 @@ class TestADX:
         # No single bar should jump more than 30 points
         assert adx_vals.diff().abs().dropna().max() < 30
 
+    def test_nan_in_input_raises(self, sample_ohlcv):
+        bad_low = sample_ohlcv["Low"].copy()
+        bad_low.iloc[10] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            adx(sample_ohlcv["High"], bad_low, sample_ohlcv["Close"])
+
 
 class TestParabolicSAR:
     def test_returns_correct_columns(self, sample_ohlcv):

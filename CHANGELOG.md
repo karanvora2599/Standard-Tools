@@ -11,6 +11,36 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 13 of 20 (NaN/Inf input contract,
+  remaining `_cpp_core.*` wrappers):** mechanical sweep wiring
+  `require_finite_array()` into every remaining Python wrapper that
+  dispatches to a `_cpp_core.*` kernel with no prior NaN/Inf check:
+  `adx`, `wilder_atr`, `bollinger_bands`, `stochastic_oscillator`
+  (indicators); `calculate_beta`, `rolling_beta`, `rolling_factor_loadings`
+  (regression/multi-factor); `cointegration_test`, `compute_spread`,
+  `half_life` (cointegration); `run_strategy`, `backtest_grid` (backtest
+  engine). Deliberately **excluded** `hurst_exponent`/`rolling_hurst` --
+  both already have documented, intentional NaN-tolerant behavior (silent
+  `dropna()` via `to_clean_numpy()`/manual `.dropna()`), and overriding
+  that with a hard rejection would be a real behavior change outside this
+  pass's scope, not a bug fix.
+
+  Several wrappers (`bollinger_bands`, `stochastic_oscillator`,
+  `rolling_beta`, `rolling_factor_loadings`) wrap their C++ call in a
+  broad `try: ... except Exception: fall back to pandas/python`, which
+  would otherwise silently swallow a `ValidationError` raised inside the
+  `try` block and mask bad input behind a confusing fallback instead of
+  rejecting it -- every check in this sweep is placed **before** the
+  corresponding `try` block (or, in `backtest_grid`'s case where the
+  matrix is genuinely built inside the `try`, guarded by an explicit
+  `except ValidationError: raise` ahead of the broad `except Exception`).
+
+  New tests across `tests/test_indicators_trend.py`,
+  `tests/test_indicators_volatility.py` (including a new `TestWilderATR`
+  class -- no prior Python-level coverage existed for that wrapper),
+  `tests/test_indicators_momentum.py`, `tests/test_multi_factor.py`,
+  `tests/test_cointegration.py`, `tests/test_cpp_regression.py`,
+  `tests/test_analysis.py`, and `tests/test_backtest.py`.
 - **Correctness/portability pass, item 12 of 20 (NaN/Inf input contract,
   Monte Carlo):** `backtest/monte_carlo.py::simulate_forward_paths()`
   validated `initial_capital`'s finiteness (in the native kernel) but

@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.indicators.volatility import atr, bollinger_bands
+from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators.volatility import atr, bollinger_bands, wilder_atr
 
 
 class TestBollingerBands:
@@ -64,6 +65,20 @@ class TestBollingerBands:
         period = 20
         result = bollinger_bands(sample_close, period=period)
         assert result.iloc[: period - 1].isna().all(axis=None)
+
+    def test_nan_in_input_raises(self, sample_close):
+        bad = sample_close.copy()
+        bad.iloc[10] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            bollinger_bands(bad)
+
+
+class TestWilderATR:
+    def test_nan_in_input_raises(self, sample_ohlcv):
+        bad_high = sample_ohlcv["High"].copy()
+        bad_high.iloc[5] = np.inf
+        with pytest.raises(ValidationError, match="non-finite"):
+            wilder_atr(bad_high, sample_ohlcv["Low"], sample_ohlcv["Close"])
 
 
 class TestATR:

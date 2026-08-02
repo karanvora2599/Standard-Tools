@@ -22,6 +22,7 @@ from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio,
     sortino_ratio,
 )
+from standard_quant_tools.validation import require_finite_array
 
 _VALID_FILL_PRICES = ("close", "next_open", "hl2_exploratory")
 
@@ -344,6 +345,8 @@ def run_strategy(
         logger.debug("[run_strategy] using C++ kernel")
         prices_arr = prices.to_numpy(dtype=np.float64)
         signals_arr = signals.to_numpy(dtype=np.float64)
+        require_finite_array(prices_arr, "prices", "run_strategy")
+        require_finite_array(signals_arr, "signals", "run_strategy")
         r = _cpp_core.run_strategy(
             prices_arr, signals_arr, initial_capital, commission_pct, slippage_pct
         )
@@ -652,9 +655,14 @@ def backtest_grid(
     # in a single call — no subprocess overhead, no per-combo boundary crossing.
     # Scoped to fill_price="close" — the compiled kernel only knows Close prices.
     if fill_price == "close" and HAS_CPP and _cpp_core is not None:
+        # Checked before the try/except below -- that except catches
+        # Exception broadly (to fall back to the Python grid loop on any
+        # C++ failure), which would otherwise silently swallow a
+        # ValidationError and mask bad input behind a confusing fallback
+        # instead of rejecting it.
+        prices_arr = price_data["Close"].to_numpy(dtype=np.float64)
+        require_finite_array(prices_arr, "prices", "batch_run_strategy")
         try:
-            prices_arr = price_data["Close"].to_numpy(dtype=np.float64)
-
             # Build (num_combos × n_bars) signal matrix
             sig_rows = []
             for combo in combos:
@@ -665,6 +673,7 @@ def backtest_grid(
             signals_mat = np.ascontiguousarray(
                 np.vstack(sig_rows), dtype=np.float64
             )  # shape: (num_combos, n_bars)
+            require_finite_array(signals_mat, "signals", "batch_run_strategy")
 
             logger.debug(
                 "[backtest_grid] strategy=%s  combos=%d  path=C++  sort_by=%s",
@@ -743,6 +752,11 @@ def backtest_grid(
                 )
             return df_out
 
+        except ValidationError:
+            # Bad input (e.g. NaN/Inf in a generated signal array) is a
+            # real problem to surface, not something to silently retry
+            # via the Python fallback below.
+            raise
         except Exception as exc:
             logger.warning(
                 "[backtest_grid] C++ batch path failed (%s) — falling back to Python",

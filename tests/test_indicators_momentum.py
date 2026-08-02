@@ -135,6 +135,12 @@ class TestStochasticOscillator:
         d = result["Stoch_D"].dropna()
         assert (d >= 0).all() and (d <= 100).all()
 
+    def test_nan_in_input_raises(self, sample_ohlcv):
+        bad_close = sample_ohlcv["Close"].copy()
+        bad_close.iloc[15] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            stochastic_oscillator(sample_ohlcv["High"], sample_ohlcv["Low"], bad_close)
+
     def test_close_at_high_yields_k_100(self):
         """When close equals high, %K = 100."""
         n = 30

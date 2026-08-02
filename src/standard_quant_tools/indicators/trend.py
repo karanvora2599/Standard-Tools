@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,9 @@ def adx(
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
     c = close.to_numpy(dtype=np.float64)
+    require_finite_array(h, "high", "adx")
+    require_finite_array(l, "low", "adx")
+    require_finite_array(c, "close", "adx")
 
     if HAS_CPP and _cpp_core is not None:
         raw = _cpp_core.adx(h, l, c, period)

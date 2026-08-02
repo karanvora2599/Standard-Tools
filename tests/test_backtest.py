@@ -117,6 +117,37 @@ class TestInputValidation:
                 commission_pct=-0.001,
             )
 
+    def test_run_strategy_rejects_nan_in_prices(self, simple_ohlcv):
+        """NaN/Inf input contract: run_strategy's C++ path (fill_price=
+        "close") passes prices_arr/signals_arr straight into the native
+        kernel with no finiteness check on either -- must raise before
+        dispatch, not silently propagate."""
+        bad = simple_ohlcv.copy()
+        bad.loc[bad.index[50], "Close"] = np.nan
+        signals = pd.Series(1, index=simple_ohlcv.index)
+        with pytest.raises(ValidationError, match="non-finite"):
+            run_strategy(bad, signals)
+
+    def test_run_strategy_rejects_inf_in_signals(self, simple_ohlcv):
+        signals = pd.Series(1.0, index=simple_ohlcv.index)
+        signals.iloc[10] = np.inf
+        with pytest.raises(ValidationError, match="non-finite"):
+            run_strategy(simple_ohlcv, signals)
+
+    def test_backtest_grid_rejects_nan_in_prices(self, simple_ohlcv):
+        """NaN/Inf input contract: backtest_grid's C++ batch path (fill_price
+        ="close") passes prices_arr/signals_mat straight into the native
+        kernel with no finiteness check on either -- must raise before
+        dispatch, not silently propagate through the whole grid."""
+        bad = simple_ohlcv.copy()
+        bad.loc[bad.index[20], "Close"] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            backtest_grid(
+                bad,
+                strategy="sma_crossover",
+                param_grid={"fast_period": [5], "slow_period": [20]},
+            )
+
 
 class TestNoSignal:
     def test_zero_signal_yields_flat_equity(self, simple_ohlcv):

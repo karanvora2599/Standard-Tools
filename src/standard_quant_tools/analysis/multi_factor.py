@@ -5,6 +5,8 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.validation import require_finite_array
+
 logger = logging.getLogger(__name__)
 
 _scipy_stats = None
@@ -160,6 +162,9 @@ def rolling_factor_loadings(
     )
     factor_names = list(factor_returns.columns)
     col_names = ["alpha"] + factor_names
+
+    require_finite_array(y_arr, "asset_returns", "rolling_factor_loadings")
+    require_finite_array(X_arr, "factor_returns", "rolling_factor_loadings")
 
     n = len(y_arr)
     k = X_arr.shape[1] if X_arr.ndim == 2 else 1

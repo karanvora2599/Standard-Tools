@@ -4,6 +4,8 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.validation import require_finite_array
+
 logger = logging.getLogger(__name__)
 
 _cpp_core: Any = None
@@ -27,6 +29,8 @@ def calculate_beta(
     common_index = asset_returns.index.intersection(benchmark_returns.index)
     y = asset_returns.loc[common_index].to_numpy(dtype=np.float64)
     x = benchmark_returns.loc[common_index].to_numpy(dtype=np.float64)
+    require_finite_array(y, "asset_returns", "calculate_beta")
+    require_finite_array(x, "benchmark_returns", "calculate_beta")
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "numpy"
     logger.debug("[beta] n_obs=%d  path=%s", len(y), path)
 
@@ -74,6 +78,16 @@ def rolling_beta(
     x = benchmark_returns.loc[common_index]
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "pandas"
     logger.debug("[rolling_beta] window=%d  bars=%d  path=%s", window, len(y), path)
+
+    # Checked once, unconditionally, BEFORE the C++ try/except below --
+    # that except catches Exception broadly (to fall back to pandas on any
+    # C++ failure), which would otherwise silently swallow a
+    # ValidationError raised inside the try block and mask bad input
+    # behind a confusing fallback instead of rejecting it.
+    require_finite_array(y.to_numpy(dtype=np.float64), "asset_returns", "rolling_beta")
+    require_finite_array(
+        x.to_numpy(dtype=np.float64), "benchmark_returns", "rolling_beta"
+    )
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
     if HAS_CPP and _cpp_core is not None:
