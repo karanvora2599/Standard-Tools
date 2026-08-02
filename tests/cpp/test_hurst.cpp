@@ -297,6 +297,83 @@ static void test_rolling_hurst_invalid_method_throws() {
     CHECK_TRUE(threw);
 }
 
+// ── rolling_hurst OpenMP + scratch-buffer path vs. direct hurst_exponent() ──
+//
+// rolling_hurst_into() internally uses a scratch-buffer sibling
+// (hurst_exponent_scratch/dfa_impl) and (when SQT_HAS_OPENMP) runs the
+// window loop in parallel -- neither of those internal implementation
+// details is exposed, but their combined effect must produce EXACTLY the
+// values the public, unchanged hurst_exponent() would produce for the same
+// window slice, called directly. This test isolates both risk surfaces at
+// once: any scratch-reuse bug or any OpenMP data race would show up as a
+// mismatch here. Run this executable under different OMP_NUM_THREADS
+// values (1/2/4+) at the process level to additionally confirm exact
+// reproducibility regardless of thread count/scheduling.
+
+static void test_rolling_hurst_matches_direct_hurst_exponent_dfa() {
+    auto data = white_noise(500, /*seed=*/2024);
+    const int window = 80, step = 3, min_window = 10;
+    auto out = sqt::rolling_hurst(data.data(), data.size(), window, step, "dfa", min_window);
+
+    int checked = 0;
+    for (int i = window - 1; i < static_cast<int>(data.size()); i += step) {
+        auto direct = sqt::hurst_exponent(
+            data.data() + (i - window + 1), static_cast<std::size_t>(window),
+            "dfa", min_window, -1);
+        if (std::isnan(direct.hurst)) {
+            CHECK_NAN(out[i]);
+        } else {
+            CHECK(out[i] == direct.hurst);  // bit-identical, not just close
+        }
+        ++checked;
+    }
+    CHECK_TRUE(checked > 5);
+}
+
+static void test_rolling_hurst_matches_direct_hurst_exponent_rs() {
+    auto data = white_noise(500, /*seed=*/99);
+    const int window = 60, step = 2, min_window = 10;
+    auto out = sqt::rolling_hurst(data.data(), data.size(), window, step, "rs", min_window);
+
+    int checked = 0;
+    for (int i = window - 1; i < static_cast<int>(data.size()); i += step) {
+        auto direct = sqt::hurst_exponent(
+            data.data() + (i - window + 1), static_cast<std::size_t>(window),
+            "rs", min_window, -1);
+        if (std::isnan(direct.hurst)) {
+            CHECK_NAN(out[i]);
+        } else {
+            CHECK(out[i] == direct.hurst);
+        }
+        ++checked;
+    }
+    CHECK_TRUE(checked > 5);
+}
+
+static void test_rolling_hurst_large_step_matches_direct() {
+    // A step that doesn't evenly divide (n - window) exercises the counted
+    // rewrite's boundary math (count = (last_i - (window-1))/step + 1).
+    auto data = white_noise(300, /*seed=*/7);
+    const int window = 50, step = 17, min_window = 10;
+    auto out = sqt::rolling_hurst(data.data(), data.size(), window, step, "dfa", min_window);
+
+    int checked = 0;
+    for (int i = window - 1; i < static_cast<int>(data.size()); i += step) {
+        auto direct = sqt::hurst_exponent(
+            data.data() + (i - window + 1), static_cast<std::size_t>(window),
+            "dfa", min_window, -1);
+        if (std::isnan(direct.hurst)) {
+            CHECK_NAN(out[i]);
+        } else {
+            CHECK(out[i] == direct.hurst);
+        }
+        ++checked;
+    }
+    CHECK_TRUE(checked > 2);
+    // Positions not landed on by the strided walk must stay NaN.
+    CHECK_NAN(out[window - 1 + 1]);  // one bar after the first hit, step=17
+}
+
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -329,6 +406,9 @@ int main() {
     test_rolling_hurst_step2();
     test_rolling_hurst_values_in_range();
     test_rolling_hurst_invalid_method_throws();
+    test_rolling_hurst_matches_direct_hurst_exponent_dfa();
+    test_rolling_hurst_matches_direct_hurst_exponent_rs();
+    test_rolling_hurst_large_step_matches_direct();
 
     std::printf("\n%d / %d tests passed.\n", g_tests_run - g_tests_failed, g_tests_run);
     return (g_tests_failed == 0) ? 0 : 1;

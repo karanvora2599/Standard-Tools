@@ -6,6 +6,10 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#ifdef SQT_HAS_OPENMP
+#include <omp.h>
+#endif
+
 namespace sqt {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -81,14 +85,28 @@ std::pair<double, double> ols_slope_r2(
 
 // ── DFA-1 ─────────────────────────────────────────────────────────────────────
 
+namespace {
+
+// Shared implementation behind both the public dfa() and the internal
+// scratch-based rolling_hurst_into() fast path. `y_scratch`, if non-null, is
+// a caller-owned buffer reused across many calls (one per rolling window)
+// instead of a fresh `std::vector<double> y(n)` allocation every call;
+// passing nullptr reproduces dfa()'s original always-allocate-locally
+// behavior exactly, so dfa() itself (public, standalone-tested) stays
+// byte-identical in every way that matters -- same code path, just an extra
+// indirection through a pointer that's always null on that path.
 std::pair<std::vector<double>, std::vector<double>>
-dfa(const double* arr, std::size_t n, int min_w, int max_w, int n_points) {
+dfa_impl(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
+          std::vector<double>* y_scratch)
+{
     // Step 1: mean-centred cumulative sum
     double mean = 0.0;
     for (std::size_t i = 0; i < n; ++i) mean += arr[i];
     mean /= static_cast<double>(n);
 
-    std::vector<double> y(n);
+    std::vector<double> local_y;
+    std::vector<double>& y = y_scratch ? *y_scratch : local_y;
+    y.resize(n);
     double cs = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
         cs  += arr[i] - mean;
@@ -141,6 +159,13 @@ dfa(const double* arr, std::size_t n, int min_w, int max_w, int n_points) {
     }
 
     return {valid_sizes, flucts};
+}
+
+}  // namespace
+
+std::pair<std::vector<double>, std::vector<double>>
+dfa(const double* arr, std::size_t n, int min_w, int max_w, int n_points) {
+    return dfa_impl(arr, n, min_w, max_w, n_points, nullptr);
 }
 
 
@@ -271,6 +296,71 @@ HurstResult hurst_exponent(
     return {h, classify(h), r2, method, n};
 }
 
+namespace {
+
+// Per-thread scratch reused across every rolling window that thread
+// processes, instead of a fresh allocation per window.
+struct RollingHurstScratch {
+    std::vector<double> y;
+};
+
+// Mirrors hurst_exponent() exactly, except the "dfa" branch calls
+// dfa_impl(..., &scratch.y) instead of the public dfa() -- reusing the
+// scratch buffer instead of allocating a fresh one per call. The "rs"
+// branch is unchanged (calls rs_analysis() directly, as hurst_exponent()
+// does) -- not worth threading scratch through for its small
+// n_points-bounded vectors. Used only by rolling_hurst_into() below; the
+// public hurst_exponent() is untouched.
+HurstResult hurst_exponent_scratch(
+    const double* arr, std::size_t n, const std::string& method,
+    int min_window, int max_window, RollingHurstScratch& scratch)
+{
+    const HurstResult nan_result{kNaN, "unknown", kNaN, method, n};
+
+    if (min_window <= 0) return nan_result;
+
+    const int max_w_auto = (method == "dfa")
+        ? static_cast<int>(n) / 4
+        : static_cast<int>(n) / 2;
+    const int max_w = (max_window <= 0)
+        ? max_w_auto
+        : std::min(max_window, max_w_auto);
+
+    if (static_cast<int>(n) < min_window * 4 || min_window >= max_w)
+        return nan_result;
+
+    std::vector<double> sizes, values;
+    if (method == "dfa") {
+        auto [s, v] = dfa_impl(arr, n, min_window, max_w, /*n_points=*/20, &scratch.y);
+        sizes  = std::move(s);
+        values = std::move(v);
+    } else {
+        auto [s, v] = rs_analysis(arr, n, min_window, max_w);
+        sizes  = std::move(s);
+        values = std::move(v);
+    }
+
+    if (sizes.size() < 3) return nan_result;
+
+    for (const double v : values)
+        if (v <= 0.0) return nan_result;
+
+    std::vector<double> log_s(sizes.size()), log_v(values.size());
+    for (std::size_t i = 0; i < sizes.size(); ++i) {
+        log_s[i] = std::log(sizes[i]);
+        log_v[i] = std::log(values[i]);
+    }
+
+    auto [h, r2] = ols_slope_r2(log_s, log_v);
+
+    if (std::isnan(h)) return nan_result;
+
+    h = std::clamp(h, 0.0, 1.5);
+
+    return {h, classify(h), r2, method, n};
+}
+
+}  // namespace
 
 // ── rolling_hurst ─────────────────────────────────────────────────────────────
 
@@ -285,10 +375,13 @@ void rolling_hurst_into(
 {
     std::fill(out, out + n, kNaN);
 
-    // Validate eagerly rather than relying on the first hurst_exponent()
+    // Validate eagerly rather than relying on the first hurst_exponent_scratch()
     // call inside the loop below to catch it -- for a short input (n <
     // window) that loop runs zero times, so a bad method string would
-    // otherwise silently produce an all-NaN result instead of raising.
+    // otherwise silently produce an all-NaN result instead of raising. Also
+    // ensures no exception can be thrown from inside the parallel region
+    // below -- throwing across an #pragma omp for boundary is undefined
+    // behavior / terminates the process.
     if (method != "dfa" && method != "rs")
         throw std::invalid_argument(
             "rolling_hurst: method must be exactly \"dfa\" or \"rs\", got \"" +
@@ -300,14 +393,40 @@ void rolling_hurst_into(
     // (the slice below would be empty or reversed). Reject both up front.
     if (step <= 0 || window <= 0) return;
 
-    for (int i = window - 1; i < static_cast<int>(n); i += step) {
-        const auto result = hurst_exponent(
-            arr + static_cast<std::size_t>(i - window + 1),
-            static_cast<std::size_t>(window),
-            method,
-            min_window,
-            /*max_window=*/-1);   // auto per chunk size
-        out[i] = result.hurst;
+    // Precompute the window-position count so the parallel loop below can
+    // use a counted, unit-stride induction variable derived from it --
+    // OpenMP's canonical-for-loop form technically permits `i += step`
+    // directly (a loop-invariant increment is allowed by the spec), but
+    // this codebase's only prior OpenMP loop (monte_carlo.cpp) is
+    // unit-stride, so there was no local precedent confirming every
+    // targeted compiler accepts the strided form cleanly; a counted
+    // rewrite is unambiguously canonical everywhere and was confirmed to
+    // build correctly on this project's MSVC toolchain.
+    const int last_i = static_cast<int>(n) - 1;
+    if (window - 1 > last_i) return;
+    const int count = (last_i - (window - 1)) / step + 1;
+
+#ifdef SQT_HAS_OPENMP
+    #pragma omp parallel if(count > 1)
+#endif
+    {
+        RollingHurstScratch scratch;
+        scratch.y.reserve(static_cast<std::size_t>(window));
+
+#ifdef SQT_HAS_OPENMP
+        #pragma omp for schedule(static)
+#endif
+        for (int idx = 0; idx < count; ++idx) {
+            const int i = window - 1 + idx * step;
+            const auto result = hurst_exponent_scratch(
+                arr + static_cast<std::size_t>(i - window + 1),
+                static_cast<std::size_t>(window),
+                method,
+                min_window,
+                /*max_window=*/-1,   // auto per chunk size
+                scratch);
+            out[i] = result.hurst;
+        }
     }
 }
 

@@ -12,6 +12,15 @@ if(MSVC)
 else()
     target_compile_options(sqt_hurst_impl PRIVATE -O2 -Wall -Wextra)
 endif()
+# Optional, mirrors sqt_monte_carlo_impl/sqt_backtest_impl above:
+# rolling_hurst_into runs each window in parallel when an OpenMP runtime is
+# available; without one, SQT_HAS_OPENMP stays undefined and it just runs
+# its identical serial loop.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(sqt_hurst_impl PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(sqt_hurst_impl PUBLIC SQT_HAS_OPENMP)
+endif()
 
 add_library(sqt_indicators_impl STATIC
     ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/indicators.cpp

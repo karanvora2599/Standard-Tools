@@ -442,6 +442,36 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Deep native optimization, Phase 3b (`hurst.cpp`): OpenMP across
+  `rolling_hurst`'s window loop + scratch-buffer reuse.** `dfa()` split
+  into a shared `dfa_impl(..., y_scratch)` — `y_scratch == nullptr`
+  reproduces the exact original always-allocate-locally behavior, so the
+  public, standalone-tested `dfa()` is now a one-line wrapper with
+  byte-identical behavior in every way that matters. New internal
+  `hurst_exponent_scratch()` mirrors `hurst_exponent()` but reuses a
+  per-thread `RollingHurstScratch{ y }` buffer across every window that
+  thread processes (the "rs" method branch is unchanged — not worth the
+  complexity for its small `n_points`-bounded vectors). `rolling_hurst_into`
+  now runs the window loop under `#pragma omp parallel` + `#pragma omp for`,
+  one scratch buffer constructed per thread. The loop originally incremented
+  by a runtime `step` value (not unit stride); rather than assume OpenMP's
+  canonical-loop-form permits this cleanly on every targeted compiler (no
+  local precedent — `monte_carlo.cpp`'s only prior OpenMP loop is
+  unit-stride), rewrote it as a counted loop (`idx` in `[0, count)`,
+  `i = window-1 + idx*step`) — confirmed to build correctly on this
+  project's MSVC toolchain either way, so this was a deliberate
+  robustness choice, not a workaround for an actual failure. Verified two
+  ways: (1) `rolling_hurst`'s output exactly matches calling the unchanged
+  public `hurst_exponent()` directly on the same window slice, for both
+  "dfa" and "rs" methods plus a non-evenly-dividing step size that
+  exercises the counted rewrite's boundary math — isolates the
+  scratch-reuse and OpenMP risk surfaces from each other by checking
+  against an independent, already-trusted code path rather than only
+  self-consistency; (2) exact reproducibility across
+  `OMP_NUM_THREADS=1/2/4/8`. Measured (min of 7 runs, same-machine
+  before/after, 16 logical cores): **n=1000/window=100: 4.05ms → 0.90ms,
+  ~4.5×**; **n=2000/window=200: 15.28ms → 2.68ms, ~5.7×**;
+  **n=5000/window=200: 40.77ms → 6.92ms, ~5.9×**.
 - **Deep native optimization, Phase 3 (build): LTO/IPO enabled for Release
   builds.** `_cpp/CMakeLists.txt` now runs `CheckIPOSupported` and applies
   `INTERPROCEDURAL_OPTIMIZATION_RELEASE` automatically when the toolchain
