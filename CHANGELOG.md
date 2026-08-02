@@ -33,6 +33,33 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 20a of 20:** new
+  `tests/cpp/fuzz_cointegration.cpp` -- a randomized-input stress test for
+  `cointegration.cpp`'s `gauss_elim` and `rolling_regression.cpp`'s
+  `cholesky_solve`. Both are anonymous-namespace internals, not directly
+  linkable from an external test binary, so this fuzzes them indirectly
+  through the public functions that call them: `sqt::ols2`/
+  `sqt::engle_granger` (exercise `gauss_elim`) and
+  `sqt::rolling_factor_loadings` (exercises `cholesky_solve`). ~1,050
+  randomized trials across 7 deliberately varied input shapes (ordinary
+  random walk, huge baseline + small variation, near-constant, huge
+  dynamic range, all-zero, strongly trending, plain white noise) plus 50
+  below-minimum-length edge cases, asserting (1) no crash/UB and (2)
+  structural invariants whenever a function reports success: `ols2`
+  residuals sum to ~0 (relative tolerance, since these shapes span many
+  orders of magnitude by design), `r_squared` in `[0,1]`, `engle_granger`'s
+  `p_value` in `[0,1]` and critical values ordered
+  `cv_1pct < cv_5pct < cv_10pct`, `rolling_factor_loadings` never produces
+  `+/-inf` (only `NaN` or finite). Fixed seed for deterministic default CI
+  runs. Registered as a normal ctest (`cpp_fuzz_cointegration`) -- gets
+  ASan/UBSan coverage for free via the existing
+  `build-and-test-sanitizers` CI job, no separate sanitizer-specific
+  wiring needed. Deliberately a lightweight in-repo harness (reusing this
+  project's own `pseudo_random`-style PRNG convention already used
+  elsewhere in `tests/cpp/`) rather than libFuzzer/AFL++ -- proportionate
+  to the review's own "lower priority" framing for this item. All 49,980
+  assertions pass locally; full native ctest (9/9) + full pytest (1868
+  passed) green.
 - **Correctness/portability pass, item 19 of 20:** `build-cpp.yml`'s
   `build-and-test` job now builds/tests `_sqt_core` on a
   `[ubuntu-latest, windows-latest, macos-latest]` matrix (`fail-fast:

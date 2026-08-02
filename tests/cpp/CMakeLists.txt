@@ -239,6 +239,26 @@ endif()
 
 add_test(NAME cpp_rolling_regression COMMAND test_rolling_regression)
 
+# ── Fuzz/property harness (correctness/portability pass item 20a) ────────────
+# Randomized-input stress test for cointegration.cpp's gauss_elim (via
+# ols2/adf_test/engle_granger) and rolling_regression.cpp's cholesky_solve
+# (via rolling_factor_loadings) -- fixed seed for deterministic default CI
+# runs. Registered as a normal ctest, so it automatically gets ASan/UBSan
+# coverage for free via the existing build-and-test-sanitizers CI job.
+add_executable(fuzz_cointegration fuzz_cointegration.cpp)
+target_link_libraries(fuzz_cointegration PRIVATE
+    sqt_cointegration_impl
+    sqt_rolling_regression_impl
+)
+target_compile_features(fuzz_cointegration PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(fuzz_cointegration PRIVATE /O2 /W3)
+else()
+    target_compile_options(fuzz_cointegration PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_fuzz_cointegration COMMAND fuzz_cointegration)
+
 
 # ── Performance benchmarks ────────────────────────────────────────────────────
 # Not CTest tests — run manually to inspect timing output:
