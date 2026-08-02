@@ -440,6 +440,35 @@ bump, consistent with SemVer's pre-1.0 clause.
   Verified both configurations build clean and pass the full native ctest
   suite + Python suite.
 
+### Added
+
+- **Deep native optimization, item K: opt-in, local-only PGO (Profile-Guided
+  Optimization) build workflow.** New `SQT_PGO_GENERATE`/`SQT_PGO_USE`
+  CMake options (default `OFF`, mutually exclusive — `FATAL_ERROR` if both
+  set), mirroring `SQT_NATIVE_ARCH`'s existing "opt-in for local max speed"
+  philosophy. MSVC: `/GL` + `/LTCG:PGInstrument` / `/LTCG:PGOptimize`.
+  GCC/Clang: `-fprofile-generate` / `-fprofile-use -fprofile-correction`.
+  Documented the 2-step local workflow in `Development/build_guide.md`
+  (instrumented build → train against a representative workload → optimized
+  rebuild), including a real gotcha discovered while writing it: every
+  CMake build directory in this repo writes `_sqt_core` to the same
+  absolute package path regardless of which directory produced it, so a
+  PGO experiment silently overwrites your normal working extension unless
+  you use a separate build directory and rebuild the normal one afterward
+  — confirmed by actually doing this, not just reasoned about (an
+  `SQT_PGO_GENERATE=ON` test build in a separate `build-pgo-test/` dir did
+  overwrite the real extension, caught by `python -c "from
+  standard_quant_tools import _sqt_core"` still loading successfully but
+  being the wrong build, then restored by rebuilding `build/` normally).
+  **Explicitly not wired into any CI workflow** — same reasoning
+  `SQT_NATIVE_ARCH` already documents for itself, now doubled by PGO's own
+  two-build-step requirement not fitting a simple CI pipeline.
+  **Verification:** the default-OFF path (unaffected — confirmed full
+  native ctest + full pytest green on a normal build after the CMake
+  changes) is the real gate here; separately confirmed `SQT_PGO_GENERATE=ON`
+  actually configures and builds successfully on this project's MSVC
+  toolchain (not just assumed from the flag names).
+
 ### Not shipped
 
 - **Deep native optimization, item J: rank-1 Cholesky update/downdate for

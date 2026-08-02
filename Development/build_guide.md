@@ -545,10 +545,76 @@ both are always importable together after a single `pip install -e .` +
 
 **OpenMP (optional)**  
 `_cpp/CMakeLists.txt` calls `find_package(OpenMP)` (not `REQUIRED`) to
-parallelize `monte_carlo.cpp`'s `simulate_forward_paths` loop. Linux
-(`libgomp`, ships with `build-essential`/`gcc`) and Windows (MSVC's built-in
-`/openmp` support) pick this up automatically with no extra install step.
-Default Apple Clang on macOS ships no OpenMP support — the build still
-succeeds either way (`SQT_HAS_OPENMP` just won't be defined, and the loop
-runs its identical serial fallback). To get the parallel path on macOS,
-install LLVM's OpenMP runtime (`brew install libomp`) before configuring.
+parallelize `monte_carlo.cpp`'s `simulate_forward_paths` loop and
+`backtest.cpp`'s `batch_run_strategy` loop. Linux (`libgomp`, ships with
+`build-essential`/`gcc`) and Windows (MSVC's built-in `/openmp` support)
+pick this up automatically with no extra install step. Default Apple Clang
+on macOS ships no OpenMP support — the build still succeeds either way
+(`SQT_HAS_OPENMP` just won't be defined, and the affected loops run their
+identical serial fallback). To get the parallel path on macOS, install
+LLVM's OpenMP runtime (`brew install libomp`) before configuring.
+
+**PGO (Profile-Guided Optimization, opt-in, local-only, `SQT_PGO_GENERATE`/`SQT_PGO_USE`)**  
+Same "opt-in for local max speed, off by default" philosophy as
+`SQT_NATIVE_ARCH` — but PGO is a **two-step workflow**, not a single build
+flag: you build an instrumented binary, run it against a representative
+workload to collect a profile, then rebuild using that profile. Both
+options default `OFF` and are mutually exclusive (a `FATAL_ERROR` if both
+are set at once). **Deliberately not wired into any CI workflow** — a
+simple `cmake -B build && cmake --build build` pipeline has no natural
+place for the extra training run between the two builds, and the profile
+itself is workload- and machine-specific (a profile trained on one
+machine's realistic data isn't guaranteed to transfer cleanly to another).
+
+⚠️ **Every CMake build directory in this repo writes `_sqt_core` to the
+same absolute package path** (`src/standard_quant_tools/`), regardless of
+which build directory produced it — there's no per-build-dir isolation of
+the *output*, only of intermediate object files. Building an instrumented
+or PGO-optimized extension **overwrites your normal working extension** in
+place. Use a separate build directory for PGO experiments
+(`build-pgo` below) and rebuild your normal `build/` directory afterward
+to restore it — don't assume the two build dirs are independent just
+because their *names* differ.
+
+Step 1 — instrumented build:
+```
+cmake -B build-pgo -DCMAKE_BUILD_TYPE=Release -DSQT_PGO_GENERATE=ON
+cmake --build build-pgo --config Release
+```
+
+Step 2 — train it. Run a workload that's representative of real usage
+across the functions that matter most — the existing benchmark binaries are
+a reasonable starting point, but for a real profile also exercise the
+Python-level call paths (`run_strategy`, `batch_run_strategy`,
+`rolling_hurst`, `rolling_factor_loadings`, `rolling_beta`,
+`simulate_forward_paths`, the technical indicators) across realistic
+size/parameter ranges, not just the benchmark binaries' own fixed inputs:
+```
+./build-pgo/tests/cpp/bench_backtest    # or .exe on Windows
+./build-pgo/tests/cpp/bench_hurst
+python -c "
+from standard_quant_tools import _sqt_core as c
+import numpy as np
+rng = np.random.default_rng(0)
+prices = 100 + np.cumsum(rng.normal(0, 1, 2000))
+signals = rng.choice([-1.0, 0.0, 1.0], size=(2000, 2000))
+c.batch_run_strategy(prices, signals, 10000.0, 0.001, 0.0005)
+c.rolling_hurst(rng.normal(0, 1, 2000), 200, 1, 'dfa', 10)
+"
+```
+MSVC writes profile data to a `.pgd` file next to the `.pyd`/import
+library in the build tree (merged automatically across runs by the
+`/LTCG:PGInstrument` runtime); GCC/Clang write `.gcda` files next to each
+translation unit's object file, merged automatically when the same build
+tree is reused for step 3.
+
+Step 3 — optimized rebuild using the collected profile:
+```
+cmake -B build-pgo -DCMAKE_BUILD_TYPE=Release -DSQT_PGO_USE=ON
+cmake --build build-pgo --config Release
+```
+
+Then restore your normal working extension:
+```
+cmake --build build --config Release
+```

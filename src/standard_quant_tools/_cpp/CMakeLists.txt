@@ -48,6 +48,27 @@ else()
     message(STATUS "Native arch: OFF — portable codegen (pass -DSQT_NATIVE_ARCH=ON for local speed)")
 endif()
 
+# ── PGO (Profile-Guided Optimization, opt-in, local-only) ───────────────────
+# A two-step workflow, not a single build: (1) build with SQT_PGO_GENERATE=ON,
+# run a representative workload to collect a profile, (2) build with
+# SQT_PGO_USE=ON to feed that profile back in. See
+# Development/build_guide.md's PGO section for the full local-only workflow
+# -- deliberately NOT wired into any CI workflow (too heavy/fragile for a
+# simple `cmake -B build && cmake --build build` pipeline: it requires an
+# extra training run between two separate builds, and the profile itself is
+# workload- and machine-specific). Same "opt-in for local max speed, off by
+# default" philosophy as SQT_NATIVE_ARCH above.
+option(SQT_PGO_GENERATE "Build an instrumented binary for PGO training (local-only, not for distribution)" OFF)
+option(SQT_PGO_USE       "Build using previously-collected PGO profile data (local-only, not for distribution)" OFF)
+if(SQT_PGO_GENERATE AND SQT_PGO_USE)
+    message(FATAL_ERROR "SQT_PGO_GENERATE and SQT_PGO_USE are mutually exclusive -- run the two-step workflow one flag at a time (see Development/build_guide.md).")
+endif()
+if(SQT_PGO_GENERATE)
+    message(STATUS "PGO:      GENERATE — instrumented build for training, not for distribution")
+elseif(SQT_PGO_USE)
+    message(STATUS "PGO:      USE — optimizing with previously-collected profile data")
+endif()
+
 # ── Compiler flags ────────────────────────────────────────────────────────────
 # Release/RelWithDebInfo: full optimisation, +SIMD tuned for the build
 #   machine only if SQT_NATIVE_ARCH is on.
@@ -64,6 +85,14 @@ if(MSVC)
         /W3
         /wd4244    # size_t → int narrowing from pybind11 internals
         /wd4267    # same
+        # PGO: /GL (whole-program optimization) is required for either half
+        # of the instrument/use cycle.
+        $<$<BOOL:${SQT_PGO_GENERATE}>:/GL>
+        $<$<BOOL:${SQT_PGO_USE}>:/GL>
+    )
+    target_link_options(_sqt_core PRIVATE
+        $<$<BOOL:${SQT_PGO_GENERATE}>:/LTCG:PGInstrument>
+        $<$<BOOL:${SQT_PGO_USE}>:/LTCG:PGOptimize>
     )
 else()
     # Covers GCC on Linux, Apple Clang on macOS, and Clang everywhere
@@ -73,6 +102,13 @@ else()
         $<$<CONFIG:Debug>:-O0 -g>
         -Wall
         -Wextra
+        $<$<BOOL:${SQT_PGO_GENERATE}>:-fprofile-generate>
+        $<$<BOOL:${SQT_PGO_USE}>:-fprofile-use>
+        $<$<BOOL:${SQT_PGO_USE}>:-fprofile-correction>
+    )
+    target_link_options(_sqt_core PRIVATE
+        $<$<BOOL:${SQT_PGO_GENERATE}>:-fprofile-generate>
+        $<$<BOOL:${SQT_PGO_USE}>:-fprofile-use>
     )
 endif()
 
