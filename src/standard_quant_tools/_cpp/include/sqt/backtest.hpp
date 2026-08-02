@@ -74,6 +74,31 @@ BacktestResult run_strategy(
  * @return               Vector of BacktestResult, one per test in input order.
  *                       equity_curve is empty in every result to save memory.
  */
+/**
+ * Same algorithm and output as run_strategy(), but computes only the 11
+ * scalar metrics with zero equity_curve/strat_ret/trade_rets array
+ * allocation -- a two-pass design exploiting the fact that strat_ret[i] has
+ * no true loop-carried dependency (exec_i = signals[i-1] and the prev_exec
+ * needed for pos_diff equal signals[i-2], or 0.0 for i==1, both directly
+ * index-derivable): pass 1 fuses the trade-log state machine with running
+ * equity/peak/drawdown/mean tracking (no array ever written); pass 2
+ * recomputes strat_ret[i] on demand, now that mean is known, to get
+ * variance and downside deviation. The returned BacktestResult's
+ * equity_curve is always left empty (default-constructed, zero
+ * allocation) -- callers needing the curve must call run_strategy() instead.
+ *
+ * @param prices, signals, n, initial_capital, commission_pct, slippage_pct
+ *   Same meaning as run_strategy().
+ */
+BacktestResult run_strategy_summary(
+    const double* prices,
+    const double* signals,
+    std::size_t   n,
+    double initial_capital = 10'000.0,
+    double commission_pct  = 0.001,
+    double slippage_pct    = 0.0005
+);
+
 std::vector<BacktestResult> batch_run_strategy(
     const double* prices,
     const double* signals_flat,

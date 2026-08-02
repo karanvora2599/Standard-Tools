@@ -442,6 +442,43 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Deep native optimization, Phase 2 (`backtest.cpp`): allocation-free
+  summary kernel + OpenMP across the batch grid.** New `run_strategy_summary()`
+  computes `run_strategy()`'s 11 scalar metrics with zero heap allocation at
+  all (no `equity_curve`, no `strat_ret`, no `trade_rets` vector), exploiting
+  a fact discovered during verification: `strat_ret[i]` has no true
+  loop-carried dependency (`exec_i = signals[i-1]` and the `prev_exec`
+  needed for `pos_diff` equals `signals[i-2]`, or 0.0 for `i==1`, both
+  directly index-derivable) — only the trade-log open/close bookkeeping is
+  a genuine sequential state machine. Two passes: pass 1 fuses that state
+  machine with running equity/peak/drawdown/mean tracking (trade stats
+  accumulated as running scalars instead of a `trade_rets` vector); pass 2
+  recomputes `strat_ret[i]` on demand, now that the mean is known, to get
+  variance and downside deviation. Verified bit-identical against
+  `run_strategy()`'s 11 fields across 40 random `(n, prices, signals,
+  commission, slippage)` trials plus edge cases (`n==0`, `n==1`, all-flat,
+  all-short, leveraged/non-±1 signals, zero-price bars) — the design
+  guarantees this by construction (same formulas, same op order, index-0's
+  implicit `strat_ret[0]=0.0` contribution to the variance sum seeded
+  directly since `0.0 + x == x` exactly in IEEE 754), and the new test is
+  what actually proved it held.
+  `batch_run_strategy` now calls `run_strategy_summary` directly (no more
+  manual `equity_curve.clear()/shrink_to_fit()` after the fact) and runs
+  every test index in parallel via `#pragma omp parallel for` — each call is
+  a pure function of its own `(prices, signals_flat + t*n, n, ...)` slice
+  with no shared mutable state, so (unlike `simulate_forward_paths_into` in
+  `monte_carlo.cpp`, which needs a thread-local RNG) no per-thread setup is
+  needed, just the simpler combined form. `results` switched from
+  `reserve()+push_back()` to `resize()`+indexed writes first, since
+  `push_back` on a shared vector is not thread-safe across concurrent
+  writers. Verified exact reproducibility of `batch_run_strategy`'s output
+  across `OMP_NUM_THREADS=1/2/4/8` (every row is fully independent, unlike
+  Monte Carlo's per-path-seed reproducibility, so output must be identical
+  regardless of thread count, not just per-path-deterministic). Measured
+  (`batch_run_strategy`, min of 7 runs, same-machine before/after, 16
+  logical cores): **n=500/num_tests=500: 3.26ms → 0.54ms, ~6.0×**;
+  **n=2000/num_tests=2000: 51.55ms → 4.55ms, ~11.3×**;
+  **n=2000/num_tests=10000: 255.25ms → 29.81ms, ~8.6×**.
 - **Deep native optimization, Phase 1 (`rolling_regression.cpp`):** three
   changes to `rolling_factor_loadings`'s per-bar Cholesky solve, following a
   third-party review of what's left in the native layer after the

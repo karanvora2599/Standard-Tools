@@ -5,6 +5,10 @@
 #include <limits>
 #include <vector>
 
+#ifdef SQT_HAS_OPENMP
+#include <omp.h>
+#endif
+
 namespace sqt {
 
 namespace {
@@ -198,8 +202,195 @@ BacktestResult run_strategy(
     return r;
 }
 
-// ── batch_run_strategy ────────────────────────────────────────────────────────
+// ── run_strategy_summary ────────────────────────────────────────────────────
+//
+// Same algorithm as run_strategy() above -- every formula, every op order,
+// is copied verbatim -- just restructured into two allocation-free passes
+// instead of six array-backed passes. strat_ret[i] has no true loop-carried
+// dependency: exec_i = signals[i-1], and the prev_exec pdiff needs equals
+// signals[i-2] for i>=2 (or 0.0 for i==1), both directly index-derivable.
+// Only the trade-log open/close bookkeeping is a genuine sequential state
+// machine, and that's preserved exactly as-is in pass 1.
+//
+// Bit-identical-by-construction with run_strategy(): pass 1's fused
+// equity/peak/drawdown/mean tracking processes i=1..n-1 in the same order
+// as run_strategy()'s separate equity-curve and max-drawdown loops (the
+// underlying arithmetic per step is unchanged, only where the running
+// equity value lives -- a scalar here instead of equity_curve[i]). Pass 2's
+// sum_sq/down_sq_sum accumulation is seeded with index 0's implicit
+// strat_ret[0]=0.0 contribution ((0-mean_r)^2 = mean_r*mean_r exactly, and
+// min(0,0)^2=0) before looping i=1..n-1 -- 0.0 + x == x exactly in IEEE 754,
+// so this reproduces run_strategy()'s i=0..N-1 accumulation order bit for
+// bit, just starting the running sum from the i=0 term's value directly
+// instead of adding it as a loop iteration.
+BacktestResult run_strategy_summary(
+    const double* prices,
+    const double* signals,
+    std::size_t   n,
+    double initial_capital,
+    double commission_pct,
+    double slippage_pct)
+{
+    BacktestResult r{};
+    r.final_equity         = initial_capital;
+    r.total_return         = 0.0;
+    r.annualized_vol       = 0.0;
+    r.sharpe_ratio         = 0.0;
+    r.sortino_ratio        = kInf;
+    r.max_drawdown         = 0.0;
+    r.calmar_ratio         = 0.0;
+    r.num_trades           = 0;
+    r.win_rate             = 0.0;
+    r.profit_factor        = 0.0;
+    r.avg_trade_return_pct = 0.0;
 
+    if (n == 0) return r;
+
+    const double cost_per_unit = commission_pct + slippage_pct;
+    const int    N             = static_cast<int>(n);
+
+    // ── Pass 1: trade-log state machine + running equity/peak/drawdown/sum,
+    //    fused into one forward loop, zero array allocation. ──────────────
+    bool   has_open    = false;
+    double entry_price = 0.0;
+    double entry_size  = 0.0;
+    double prev_exec   = 0.0;
+
+    int    num_trades = 0;
+    int    n_wins     = 0;
+    double gross_win  = 0.0, gross_loss = 0.0, sum_tr = 0.0;
+
+    double equity = initial_capital;
+    double peak   = initial_capital;
+    double mdd    = 0.0;
+    double sum_r  = 0.0;
+
+    for (std::size_t i = 1; i < n; ++i) {
+        const double ref_price = prices[i - 1];
+        const double ret_i     = (ref_price != 0.0)
+            ? (prices[i] - ref_price) / ref_price
+            : 0.0;
+        const double exec_i = signals[i - 1];
+        const double pdiff  = exec_i - prev_exec;
+        const double tcost  = std::abs(pdiff) * cost_per_unit;
+
+        const double strat_ret_i = exec_i * ret_i - tcost;
+
+        equity *= (1.0 + strat_ret_i);
+        if (equity > peak) peak = equity;
+        if (peak > 0.0) {
+            const double dd = (equity - peak) / peak;
+            if (dd < mdd) mdd = dd;
+        }
+
+        sum_r += strat_ret_i;
+
+        if (pdiff != 0.0) {
+            if (has_open) {
+                const double raw_pnl = (entry_price != 0.0)
+                    ? (ref_price - entry_price) / entry_price * entry_size
+                    : 0.0;
+                const double tr =
+                    (raw_pnl - 2.0 * std::abs(entry_size) * cost_per_unit) * 100.0;
+                ++num_trades;
+                sum_tr += tr;
+                if (tr > 0.0) { ++n_wins; gross_win += tr; }
+                else gross_loss += std::abs(tr);
+                has_open = false;
+            }
+            if (exec_i != 0.0) {
+                entry_price = ref_price;
+                entry_size  = exec_i;
+                has_open    = true;
+            }
+        }
+
+        prev_exec = exec_i;
+    }
+
+    // Flush last open trade at final Close price (mirrors run_strategy()).
+    if (has_open) {
+        const double raw_pnl = (entry_price != 0.0)
+            ? (prices[n - 1] - entry_price) / entry_price * entry_size
+            : 0.0;
+        const double tr = (raw_pnl - std::abs(entry_size) * cost_per_unit) * 100.0;
+        ++num_trades;
+        sum_tr += tr;
+        if (tr > 0.0) { ++n_wins; gross_win += tr; }
+        else gross_loss += std::abs(tr);
+    }
+
+    r.final_equity = equity;
+    r.total_return = (r.final_equity - initial_capital) / initial_capital;
+    r.max_drawdown = mdd;
+
+    const double mean_r = sum_r / N;
+
+    // ── Calmar: same formula/placement as run_strategy() ─────────────────────
+    if (n > 1 && r.final_equity > 0.0 && initial_capital > 0.0) {
+        const double ann_ret = std::pow(r.final_equity / initial_capital,
+                                        kPPY / static_cast<double>(n)) - 1.0;
+        const double abs_mdd = std::abs(mdd);
+        r.calmar_ratio = (abs_mdd > 0.0) ? ann_ret / abs_mdd : kInf;
+    }
+
+    // ── Pass 2: recompute strat_ret[i] on demand (no state carried across
+    //    iterations -- exec_i/prev_exec are both directly index-derivable)
+    //    to get variance and downside deviation now that mean_r is known.
+    //    Seeded with index 0's implicit strat_ret[0]=0.0 term. ────────────
+    double sum_sq      = mean_r * mean_r;
+    double down_sq_sum = 0.0;
+
+    for (std::size_t i = 1; i < n; ++i) {
+        const double ref_price = prices[i - 1];
+        const double ret_i     = (ref_price != 0.0)
+            ? (prices[i] - ref_price) / ref_price
+            : 0.0;
+        const double exec_i      = signals[i - 1];
+        const double prev_exec_i = (i >= 2) ? signals[i - 2] : 0.0;
+        const double pdiff       = exec_i - prev_exec_i;
+        const double tcost       = std::abs(pdiff) * cost_per_unit;
+        const double strat_ret_i = exec_i * ret_i - tcost;
+
+        const double d = strat_ret_i - mean_r;
+        sum_sq += d * d;
+
+        const double down_d = std::min(strat_ret_i, 0.0);
+        down_sq_sum += down_d * down_d;
+    }
+
+    const double sample_std = (N > 1) ? std::sqrt(sum_sq / (N - 1)) : 0.0;
+    r.annualized_vol = sample_std * std::sqrt(kPPY);
+    r.sharpe_ratio   = (sample_std > 0.0)
+        ? (mean_r / sample_std) * std::sqrt(kPPY) : 0.0;
+
+    const double down_dev = std::sqrt(down_sq_sum / N) * std::sqrt(kPPY);
+    r.sortino_ratio = (down_dev > 0.0) ? (mean_r * kPPY) / down_dev : kInf;
+
+    // ── Trade statistics ──────────────────────────────────────────────────────
+    r.num_trades = num_trades;
+    if (r.num_trades > 0) {
+        r.win_rate           = static_cast<double>(n_wins) / r.num_trades;
+        r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss
+                             : (gross_win > 0.0   ? kInf : 0.0);
+        r.avg_trade_return_pct = sum_tr / r.num_trades;
+    }
+
+    return r;
+}
+
+// ── batch_run_strategy ────────────────────────────────────────────────────────
+//
+// Each test index t is fully independent: run_strategy_summary() is a pure
+// function of its own (prices, signals_flat + t*n, n, ...) slice, with no
+// shared mutable state and no RNG -- unlike simulate_forward_paths_into
+// (monte_carlo.cpp), no per-thread setup is needed before the loop, so the
+// simpler combined `#pragma omp parallel for` form is correct here (that
+// file's nested `#pragma omp parallel { ... #pragma omp for ... }` form
+// exists specifically to declare a thread-local RNG once per thread, which
+// this loop has no equivalent need for). `results` must be pre-sized via
+// resize() and written through indexed assignment -- reserve()+push_back()
+// is not thread-safe across concurrent writers.
 std::vector<BacktestResult> batch_run_strategy(
     const double* prices,
     const double* signals_flat,
@@ -209,20 +400,23 @@ std::vector<BacktestResult> batch_run_strategy(
     double commission_pct,
     double slippage_pct)
 {
-    std::vector<BacktestResult> results;
-    results.reserve(num_tests);
-    for (std::size_t t = 0; t < num_tests; ++t) {
-        BacktestResult r = run_strategy(
+    std::vector<BacktestResult> results(num_tests);
+
+    // Signed loop variable: MSVC's OpenMP 2.0 canonical-for-loop form
+    // requires a signed integer induction variable, not std::size_t.
+    const long long num_tests_ll = static_cast<long long>(num_tests);
+
+#ifdef SQT_HAS_OPENMP
+    #pragma omp parallel for schedule(static) if(num_tests > 1)
+#endif
+    for (long long t = 0; t < num_tests_ll; ++t) {
+        results[static_cast<std::size_t>(t)] = run_strategy_summary(
             prices,
-            signals_flat + t * n,
+            signals_flat + static_cast<std::size_t>(t) * n,
             n,
             initial_capital,
             commission_pct,
             slippage_pct);
-        // Strip equity curve to save memory — not needed for grid search
-        r.equity_curve.clear();
-        r.equity_curve.shrink_to_fit();
-        results.push_back(std::move(r));
     }
     return results;
 }

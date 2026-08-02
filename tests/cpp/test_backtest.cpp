@@ -13,6 +13,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <vector>
@@ -313,6 +314,183 @@ static void test_trade_log_resize_cost_is_documented_approximation() {
     // approximation, not a bug to chase further here.
 }
 
+// ── run_strategy_summary() vs run_strategy() ────────────────────────────────
+//
+// run_strategy_summary() is a from-scratch two-pass reimplementation of
+// run_strategy()'s 11 scalar fields with zero equity_curve/strat_ret/
+// trade_rets array allocation. Every field must match run_strategy()'s
+// output exactly (bit-identical, not just close) -- the design guarantees
+// this by construction (see backtest.cpp's comment above the function), and
+// this is the regression test that actually proves it held.
+
+static double pseudo_random(std::uint64_t& state) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    std::uint64_t x = state;
+    x ^= x >> 33;
+    x *= 0xFF51AFD7ED558CCDULL;
+    x ^= x >> 33;
+    return (static_cast<double>(x >> 11) / 9007199254740992.0) * 2.0 - 1.0;  // [-1, 1)
+}
+
+static void check_all_fields_match(
+    const sqt::BacktestResult& a, const sqt::BacktestResult& b)
+{
+    // Plain == is correct even for the +inf-valued fields (sortino_ratio,
+    // calmar_ratio, profit_factor never take -inf or NaN in this code path)
+    // -- IEEE 754 defines +inf == +inf as true.
+    CHECK(a.final_equity == b.final_equity);
+    CHECK(a.total_return == b.total_return);
+    CHECK(a.annualized_vol == b.annualized_vol);
+    CHECK(a.sharpe_ratio == b.sharpe_ratio);
+    CHECK(a.sortino_ratio == b.sortino_ratio);
+    CHECK(a.max_drawdown == b.max_drawdown);
+    CHECK(a.calmar_ratio == b.calmar_ratio);
+    CHECK(a.num_trades == b.num_trades);
+    CHECK(a.win_rate == b.win_rate);
+    CHECK(a.profit_factor == b.profit_factor);
+    CHECK(a.avg_trade_return_pct == b.avg_trade_return_pct);
+    CHECK(b.equity_curve.empty());  // summary kernel never populates this
+}
+
+static void test_run_strategy_summary_matches_run_strategy_random() {
+    std::uint64_t state = 777;
+    // Random (n, commission, slippage) combos, including leveraged/non-±1
+    // signals and occasional zero-price bars.
+    for (int trial = 0; trial < 40; ++trial) {
+        const int n = 5 + static_cast<int>(std::abs(pseudo_random(state)) * 300);
+        std::vector<double> prices(n), signals(n);
+        for (int i = 0; i < n; ++i) {
+            double p = 50.0 + pseudo_random(state) * 40.0;
+            if (trial % 13 == 0 && i == n / 2) p = 0.0;  // occasional zero price
+            prices[i]  = p;
+            double s = pseudo_random(state) * 3.0;  // leveraged, non-±1 signal
+            if (trial % 5 == 0) s = (s > 0.0) ? 1.0 : (s < 0.0 ? -1.0 : 0.0);
+            signals[i] = s;
+        }
+        const double commission = std::abs(pseudo_random(state)) * 0.01;
+        const double slippage   = std::abs(pseudo_random(state)) * 0.01;
+        const double capital    = 1000.0 + std::abs(pseudo_random(state)) * 9000.0;
+
+        auto full = sqt::run_strategy(prices.data(), signals.data(), n,
+                                       capital, commission, slippage);
+        auto summ = sqt::run_strategy_summary(prices.data(), signals.data(), n,
+                                               capital, commission, slippage);
+        check_all_fields_match(full, summ);
+    }
+}
+
+static void test_run_strategy_summary_edge_cases() {
+    // n==0
+    {
+        auto full = sqt::run_strategy(nullptr, nullptr, 0, 10000.0, 0.001, 0.0005);
+        auto summ = sqt::run_strategy_summary(nullptr, nullptr, 0, 10000.0, 0.001, 0.0005);
+        check_all_fields_match(full, summ);
+    }
+    // n==1
+    {
+        double price = 100.0, signal = 1.0;
+        auto full = sqt::run_strategy(&price, &signal, 1, 5000.0, 0.001, 0.0005);
+        auto summ = sqt::run_strategy_summary(&price, &signal, 1, 5000.0, 0.001, 0.0005);
+        check_all_fields_match(full, summ);
+    }
+    // all-flat signal
+    {
+        std::vector<double> prices  = {100.0, 105.0, 110.0, 95.0};
+        std::vector<double> signals = {0.0,   0.0,   0.0,   0.0};
+        auto full = sqt::run_strategy(prices.data(), signals.data(), 4, 10000.0, 0.001, 0.0005);
+        auto summ = sqt::run_strategy_summary(prices.data(), signals.data(), 4, 10000.0, 0.001, 0.0005);
+        check_all_fields_match(full, summ);
+    }
+    // all-short
+    {
+        std::vector<double> prices  = {100.0, 95.0, 90.0, 92.0, 88.0};
+        std::vector<double> signals = {-1.0, -1.0, -1.0, -1.0, -1.0};
+        auto full = sqt::run_strategy(prices.data(), signals.data(), 5, 10000.0, 0.001, 0.0005);
+        auto summ = sqt::run_strategy_summary(prices.data(), signals.data(), 5, 10000.0, 0.001, 0.0005);
+        check_all_fields_match(full, summ);
+    }
+    // leveraged resize (matches test_trade_log_resize_cost_is_documented_approximation's shape)
+    {
+        std::vector<double> prices  = {100.0, 105.0, 110.0, 108.0, 108.0};
+        std::vector<double> signals = {1.0,   2.5,   2.5,   0.0,   0.0};
+        auto full = sqt::run_strategy(prices.data(), signals.data(), 5, 10000.0, 0.01, 0.0);
+        auto summ = sqt::run_strategy_summary(prices.data(), signals.data(), 5, 10000.0, 0.01, 0.0);
+        check_all_fields_match(full, summ);
+    }
+}
+
+static void test_run_strategy_summary_multi_trade_count() {
+    // Hand-constructed multi-trade series: long -> flat -> short -> flat ->
+    // long, still open at the end. Targeted check on the new scalar
+    // trade-stat accumulation (replacing the old trade_rets vector) beyond
+    // the aggregate field-by-field comparison above.
+    // exec_i = signals[i-1] for i=1..7 (n=8, so signals[6] is actually
+    // consumed as exec_7 -- an n=7 array would leave the last signal
+    // element unused, since exec only ever reads up to signals[n-2]).
+    std::vector<double> prices  = {100.0, 102.0, 101.0, 98.0, 99.0, 97.0, 100.0, 101.0};
+    std::vector<double> signals = {1.0,   1.0,   0.0,   -1.0, -1.0, 0.0,  1.0,   1.0};
+    auto summ = sqt::run_strategy_summary(prices.data(), signals.data(), 8,
+                                           10000.0, 0.001, 0.0005);
+    // trade1: open @ exec_1=1 (i=1), close @ exec_3=0 (i=3) -> closed
+    // trade2: open @ exec_4=-1 (i=4), close @ exec_6=0 (i=6) -> closed
+    // trade3: open @ exec_7=1 (i=7), still open at end -> flushed
+    CHECK(summ.num_trades == 3);
+    CHECK_NOT_NAN(summ.avg_trade_return_pct);
+}
+
+// ── batch_run_strategy() vs a serial reference loop ─────────────────────────
+//
+// batch_run_strategy() parallelizes (when SQT_HAS_OPENMP) an embarrassingly
+// independent loop over test indices, each a pure call to
+// run_strategy_summary() with no shared mutable state -- so its output must
+// be exactly reproducible regardless of how many threads actually ran it.
+// This test doesn't control OMP_NUM_THREADS itself (that's an environment
+// variable read once at OpenMP thread-pool creation, not something a single
+// process can usefully vary mid-run) -- the Python-level
+// tests/test_cpp_backtest.py test suite covers the OMP_NUM_THREADS=1/2/4+
+// comparison via separate process invocations instead. This test's job is
+// simpler: prove the batch path's output matches calling
+// run_strategy_summary() directly, test by test, in this process as-built.
+
+static void test_batch_run_strategy_matches_serial_reference() {
+    const int n = 300, num_tests = 37;  // enough tests to plausibly span >1 thread
+    std::uint64_t state = 4242;
+    std::vector<double> prices(n);
+    for (int i = 0; i < n; ++i) prices[i] = 50.0 + pseudo_random(state) * 30.0;
+
+    std::vector<double> signals_flat(static_cast<std::size_t>(num_tests) * n);
+    for (int t = 0; t < num_tests; ++t) {
+        for (int i = 0; i < n; ++i) {
+            double s = pseudo_random(state) * 2.0;
+            signals_flat[static_cast<std::size_t>(t) * n + i] = s;
+        }
+    }
+
+    auto batch = sqt::batch_run_strategy(
+        prices.data(), signals_flat.data(), n, num_tests, 10000.0, 0.001, 0.0005);
+    CHECK(batch.size() == static_cast<std::size_t>(num_tests));
+
+    for (int t = 0; t < num_tests; ++t) {
+        auto ref = sqt::run_strategy_summary(
+            prices.data(), signals_flat.data() + static_cast<std::size_t>(t) * n,
+            n, 10000.0, 0.001, 0.0005);
+        check_all_fields_match(ref, batch[static_cast<std::size_t>(t)]);
+    }
+}
+
+static void test_batch_run_strategy_single_test() {
+    // num_tests=1 exercises the `if(num_tests > 1)` OpenMP guard's false
+    // branch -- must still produce a correct (serial) result.
+    std::vector<double> prices  = {100.0, 105.0, 110.0, 95.0};
+    std::vector<double> signals = {1.0,   1.0,   -1.0,  0.0};
+    auto batch = sqt::batch_run_strategy(prices.data(), signals.data(), 4, 1,
+                                          10000.0, 0.001, 0.0005);
+    CHECK(batch.size() == 1);
+    auto ref = sqt::run_strategy_summary(prices.data(), signals.data(), 4,
+                                          10000.0, 0.001, 0.0005);
+    check_all_fields_match(ref, batch[0]);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -335,6 +513,11 @@ int main() {
     test_reversal_trade_long_to_short();
     test_trade_log_cost_scales_with_leveraged_position_size();
     test_trade_log_resize_cost_is_documented_approximation();
+    test_run_strategy_summary_matches_run_strategy_random();
+    test_run_strategy_summary_edge_cases();
+    test_run_strategy_summary_multi_trade_count();
+    test_batch_run_strategy_matches_serial_reference();
+    test_batch_run_strategy_single_test();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

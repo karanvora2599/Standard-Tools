@@ -87,6 +87,14 @@ if(MSVC)
 else()
     target_compile_options(sqt_backtest_impl PRIVATE -O2 -Wall -Wextra)
 endif()
+# Optional, mirrors sqt_monte_carlo_impl above: batch_run_strategy runs each
+# test index in parallel when an OpenMP runtime is available; without one,
+# SQT_HAS_OPENMP stays undefined and it just runs its identical serial loop.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(sqt_backtest_impl PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(sqt_backtest_impl PUBLIC SQT_HAS_OPENMP)
+endif()
 
 add_executable(test_backtest test_backtest.cpp)
 target_link_libraries(test_backtest PRIVATE sqt_backtest_impl)
