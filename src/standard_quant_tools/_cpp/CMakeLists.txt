@@ -112,13 +112,19 @@ if(MSVC)
         $<$<CONFIG:Debug>:/Od /Zi>
         # Warnings
         /W3
-        /wd4244    # size_t → int narrowing from pybind11 internals
-        /wd4267    # same
         # PGO: /GL (whole-program optimization) is required for either half
         # of the instrument/use cycle.
         $<$<BOOL:${SQT_PGO_GENERATE}>:/GL>
         $<$<BOOL:${SQT_PGO_USE}>:/GL>
     )
+    # size_t -> int narrowing warnings (C4244/C4267) are suppressed ONLY for
+    # bindings.cpp, where pybind11's own API forces some narrowing (e.g.
+    # py::ssize_t <-> size_t conversions at the Python boundary) -- every
+    # other file compiles under the full warning set, so a real narrowing
+    # bug (like the ones eliminated project-wide in the size_t narrowing
+    # sweep) surfaces as a build warning instead of being silently hidden.
+    set_source_files_properties(bindings/bindings.cpp PROPERTIES
+        COMPILE_OPTIONS "/wd4244;/wd4267")
     target_link_options(_sqt_core PRIVATE
         $<$<BOOL:${SQT_PGO_GENERATE}>:/LTCG:PGInstrument>
         $<$<BOOL:${SQT_PGO_USE}>:/LTCG:PGOptimize>

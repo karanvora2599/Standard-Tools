@@ -11,6 +11,18 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, item 4 of 20:** MSVC's `/wd4244`/`/wd4267`
+  narrowing-warning suppression was applied target-wide in both
+  `_cpp/CMakeLists.txt` and `tests/cpp/CMakeLists.txt`, silencing exactly
+  the class of warning that would have caught the `size_t`->`int`
+  narrowing bugs fixed in the item above -- in every kernel file, not just
+  `bindings.cpp` (the one place pybind11's own API genuinely forces some
+  narrowing). Now scoped to `bindings/bindings.cpp` only in the main
+  extension target, and removed entirely from every target in
+  `tests/cpp/CMakeLists.txt` (none of those link pybind11). A full clean
+  MSVC rebuild under the now-unsuppressed `/W3` produces zero
+  `C4244`/`C4267` warnings outside `bindings.cpp`, confirming the
+  preceding narrowing sweep was thorough.
 - **Correctness/portability pass, item 3 of 20:** eliminated `size_t`->`int`
   narrowing (`static_cast<int>(n)` and friends) across `hurst.cpp`,
   `indicators.cpp`, `backtest.cpp`, and `rolling_regression.cpp` -- for a
