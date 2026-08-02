@@ -420,6 +420,52 @@ static void test_wilder_atr_smoothing_recurrence() {
     }
 }
 
+static void test_wilder_atr_matches_unfused_array_reference_exactly() {
+    // Regression pin (correctness/portability pass item 16): wilder_atr_into
+    // was rewritten from a std::vector<double> tr(n) precomputed-array
+    // implementation to an O(1)-auxiliary-memory fused pass (mirroring
+    // adx_into's existing precedent) -- a pure refactor with the exact same
+    // arithmetic in the exact same order, not a reassociation, so this must
+    // match an independent array-based reference implementation
+    // bit-for-bit, not just within a tolerance.
+    const int period = 14;
+    const int n = 200;
+    auto close = pseudo_random(n, 55);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+
+    auto fused = sqt::wilder_atr(high.data(), low.data(), close.data(), n, period);
+
+    // Independent reference: precompute tr[] as its own array first (the
+    // pre-fusion approach), then run the identical seed/smoothing loops.
+    std::vector<double> tr(n);
+    tr[0] = high[0] - low[0];
+    for (int i = 1; i < n; ++i) {
+        tr[i] = std::max({
+            high[i] - low[i],
+            std::abs(high[i] - close[i - 1]),
+            std::abs(low[i]  - close[i - 1]),
+        });
+    }
+    std::vector<double> reference(n, std::numeric_limits<double>::quiet_NaN());
+    double atr_val = 0.0;
+    for (int i = 0; i < period; ++i) atr_val += tr[i];
+    atr_val /= period;
+    reference[period - 1] = atr_val;
+    for (int i = period; i < n; ++i) {
+        atr_val = (atr_val * (period - 1) + tr[i]) / period;
+        reference[i] = atr_val;
+    }
+
+    for (int i = 0; i < n; ++i) {
+        if (std::isnan(reference[i])) {
+            CHECK_NAN(fused[i]);
+        } else {
+            CHECK(fused[i] == reference[i]);  // exact, not CHECK_NEAR
+        }
+    }
+}
+
 static void test_wilder_atr_short_series() {
     // n < period → all NaN; n == period → first valid value at index period-1
     const double h[] = {10.0, 11.0, 12.0};
@@ -711,6 +757,7 @@ int main() {
     test_wilder_atr_non_negative();
     test_wilder_atr_constant_prices();
     test_wilder_atr_smoothing_recurrence();
+    test_wilder_atr_matches_unfused_array_reference_exactly();
     test_wilder_atr_short_series();
     test_wilder_atr_empty();
     test_wilder_atr_decays_toward_tr();

@@ -122,6 +122,20 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, item 16 of 20:** `indicators.cpp`'s
+  `wilder_atr_into` allocated a full `std::vector<double> tr(n)` temp
+  buffer despite every `TR[i]` depending only on `high[i]`/`low[i]`/
+  `close[i-1]` (and `high[0]`/`low[0]` for bar 0) -- no lookback beyond
+  that. Fused to O(1) auxiliary memory via an inline `tr_at(i)` helper
+  used by both the seed and forward-smoothing loops, mirroring
+  `adx_into`'s existing precedent in the same file exactly (same
+  technique, same file, already applied to DM/TR there). Pure refactor --
+  same arithmetic, same order, not a reassociation -- verified bit-
+  identical against an independent unfused array-based reference
+  implementation via a new
+  `test_wilder_atr_matches_unfused_array_reference_exactly` in
+  `tests/cpp/test_indicators.cpp` (exact `==`, not `CHECK_NEAR`). Full
+  native ctest (8/8) + full pytest (1851 passed) green.
 - **Correctness/portability pass, item 14 of 20 (highest-risk item in this
   pass):** `backtest.cpp`'s `run_strategy()`/`run_strategy_summary()` trade
   log used to treat a same-sign position RESIZE (e.g. size 1.0 -> 2.5) as

@@ -294,27 +294,32 @@ void wilder_atr_into(
     if (period <= 0) return;
     if (n < static_cast<std::size_t>(period)) return;
 
-    // ── True range ────────────────────────────────────────────────────────────
-    // Bar 0 has no previous close; use high - low.
-    std::vector<double> tr(n);
-    tr[0] = high[0] - low[0];
-    for (std::size_t i = 1; i < n; ++i) {
-        tr[i] = std::max({
-            high[i] - low[i],
-            std::abs(high[i] - close[i - 1]),
-            std::abs(low[i]  - close[i - 1]),
-        });
-    }
+    // ── True range, computed inline (no O(n) tr[] buffer) ─────────────────────
+    // Every TR[i] depends only on high[i]/low[i]/close[i-1] (and high[0]/
+    // low[0] for bar 0) -- no lookback beyond the immediately-preceding
+    // close -- so it's computable on demand in both the seed and forward-
+    // smoothing loops below with O(1) auxiliary memory, exactly like
+    // adx_into's existing fused single-pass design above (see that
+    // function's own comment for the same technique applied to DM/TR).
+    auto tr_at = [&](std::size_t i) {
+        return (i == 0)
+            ? (high[0] - low[0])
+            : std::max({
+                  high[i] - low[i],
+                  std::abs(high[i] - close[i - 1]),
+                  std::abs(low[i]  - close[i - 1]),
+              });
+    };
 
     // ── Seed: SMA of first `period` TR values ─────────────────────────────────
     double atr_val = 0.0;
-    for (int i = 0; i < period; ++i) atr_val += tr[i];
+    for (int i = 0; i < period; ++i) atr_val += tr_at(static_cast<std::size_t>(i));
     atr_val /= period;
     out[static_cast<std::size_t>(period) - 1] = atr_val;
 
     // ── Wilder's forward smoothing ────────────────────────────────────────────
     for (std::size_t i = static_cast<std::size_t>(period); i < n; ++i) {
-        atr_val = (atr_val * (period - 1) + tr[i]) / period;
+        atr_val = (atr_val * (period - 1) + tr_at(i)) / period;
         out[i] = atr_val;
     }
 }
