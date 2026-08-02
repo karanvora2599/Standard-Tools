@@ -442,6 +442,35 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Deep native optimization, Phase 4 (`hurst.cpp`): one-pass DFA
+  reformulation.** New internal `dfa_onepass()`, used only by
+  `hurst_exponent_scratch()`'s "dfa" branch — the public `dfa()`/`dfa_impl()`
+  stay on the original 3-pass arithmetic permanently, so this genuine
+  reassociation never touches the standalone-tested public function.
+  Collapses `dfa_impl()`'s 3 passes per chunk (mean, cross-product, residual
+  sum-of-squares) into 1, using two algebraic identities that are exact at
+  the OLS optimum, not approximations: the cross-product's `seg_mean`
+  cross-term cancels algebraically (`cross = Σ(j·y) - x_mean·Σy`, since
+  `Σ(j-x_mean) == 0` on the fixed integer grid), and the residual
+  sum-of-squares reduces to the standard OLS sufficient-statistics identity
+  `SSE = Σy² - a·Σy - b·Σ(j·y)`. `x_var` also replaced with its closed form
+  `(sz²-1)/12` instead of a per-window-size loop. **Hard numerical-stability
+  gate, not assumed bit-identical** (sum-of-squares-style accumulation is,
+  in general, less robust to catastrophic cancellation than the original's
+  deviation-from-mean style): tested `rolling_hurst`'s "dfa" output against
+  the unchanged public `hurst_exponent()` at `rel`≈`1e-9` absolute tolerance
+  on ordinary series, plus a dedicated adversarial test at `1e-6` absolute
+  tolerance against deliberately ill-conditioned inputs (a strongly-trending
+  series — large-magnitude, near-linear cumulative sum after DFA's own
+  Step-1 transform — and a near-constant series with tiny variance). **Gate
+  passed cleanly** on every tested case, so this is wired in (the
+  alternative — keeping Phase 3b's scratch-reuse-only 3-pass path — was the
+  documented fallback if it hadn't). Measured (min of 7 runs, isolating this
+  item's effect on top of Phase 3b's OpenMP+scratch baseline): **n=1000:
+  0.90ms → 0.78ms, ~1.15×**; **n=2000: 2.68ms → 1.45ms, ~1.85×**;
+  **n=5000: 6.92ms → 3.81ms, ~1.82×** — combined with Phase 3b,
+  `rolling_hurst` is now **~5.2×, ~10.5×, ~10.7×** faster than the original
+  fully-serial 3-pass-per-chunk baseline at these three sizes respectively.
 - **Deep native optimization, Phase 3b (`hurst.cpp`): OpenMP across
   `rolling_hurst`'s window loop + scratch-buffer reuse.** `dfa()` split
   into a shared `dfa_impl(..., y_scratch)` — `y_scratch == nullptr`

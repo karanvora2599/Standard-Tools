@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 // ── Tiny assertion helpers ────────────────────────────────────────────────────
@@ -311,6 +312,11 @@ static void test_rolling_hurst_invalid_method_throws() {
 // reproducibility regardless of thread count/scheduling.
 
 static void test_rolling_hurst_matches_direct_hurst_exponent_dfa() {
+    // Tolerance, not bit-identical: rolling_hurst_into's internal "dfa"
+    // path uses dfa_onepass() (item H's one-pass sufficient-statistics
+    // reformulation), a genuine floating-point reassociation vs. the
+    // public hurst_exponent()'s 3-pass dfa_impl(). Verified across a range
+    // of series below, including deliberately ill-conditioned ones.
     auto data = white_noise(500, /*seed=*/2024);
     const int window = 80, step = 3, min_window = 10;
     auto out = sqt::rolling_hurst(data.data(), data.size(), window, step, "dfa", min_window);
@@ -323,11 +329,63 @@ static void test_rolling_hurst_matches_direct_hurst_exponent_dfa() {
         if (std::isnan(direct.hurst)) {
             CHECK_NAN(out[i]);
         } else {
-            CHECK(out[i] == direct.hurst);  // bit-identical, not just close
+            CHECK_NEAR(out[i], direct.hurst, 1e-9);
         }
         ++checked;
     }
     CHECK_TRUE(checked > 5);
+}
+
+static void test_dfa_onepass_tolerance_ill_conditioned() {
+    // Item H's hard numerical-stability gate: dfa_onepass's sum-of-squares
+    // style accumulation (Sy, Syy, S_jy) is, in general, less robust to
+    // catastrophic cancellation than dfa_impl's deviation-from-mean style
+    // (seg_mean subtracted before squaring). Stress-test with series shaped
+    // to make that cancellation risk real: a strongly-trending cumulative
+    // sum (large magnitude relative to local chunk variation -- exactly
+    // what dfa's own Step 1 cumulative-sum transform produces for
+    // real return series with any drift) and a near-constant series
+    // (tiny variance, so relative error is easily amplified).
+    std::vector<std::pair<std::string, std::vector<double>>> cases;
+
+    // Strongly-trending input (large drift -> large-magnitude, near-linear
+    // cumulative sum after DFA's own Step-1 transform).
+    {
+        auto noise = white_noise(400, /*seed=*/3);
+        std::vector<double> v(400);
+        for (std::size_t i = 0; i < v.size(); ++i) v[i] = 0.05 + 0.001 * noise[i];
+        cases.emplace_back("strong_trend", v);
+    }
+    // Near-constant input (tiny variance).
+    {
+        auto noise = white_noise(400, /*seed=*/5);
+        std::vector<double> v(400);
+        for (std::size_t i = 0; i < v.size(); ++i) v[i] = 1.0 + 1e-8 * noise[i];
+        cases.emplace_back("near_constant", v);
+    }
+    // Ordinary white noise, as a control.
+    {
+        auto v = white_noise(400, /*seed=*/17);
+        cases.emplace_back("white_noise", v);
+    }
+
+    for (const auto& [label, data] : cases) {
+        const int window = 100, min_window = 10;
+        auto out = sqt::rolling_hurst(data.data(), data.size(), window, 5, "dfa", min_window);
+        for (int i = window - 1; i < static_cast<int>(data.size()); i += 5) {
+            auto direct = sqt::hurst_exponent(
+                data.data() + (i - window + 1), static_cast<std::size_t>(window),
+                "dfa", min_window, -1);
+            if (std::isnan(direct.hurst)) {
+                CHECK_NAN(out[i]);
+            } else {
+                // .hurst is clamped to [0, 1.5] -- an absolute tolerance is
+                // appropriate here (no need for a scale-relative one, this
+                // isn't a quantity spanning many orders of magnitude).
+                CHECK_NEAR(out[i], direct.hurst, 1e-6);
+            }
+        }
+    }
 }
 
 static void test_rolling_hurst_matches_direct_hurst_exponent_rs() {
@@ -365,7 +423,7 @@ static void test_rolling_hurst_large_step_matches_direct() {
         if (std::isnan(direct.hurst)) {
             CHECK_NAN(out[i]);
         } else {
-            CHECK(out[i] == direct.hurst);
+            CHECK_NEAR(out[i], direct.hurst, 1e-9);  // tolerance: see item H comment above
         }
         ++checked;
     }
@@ -409,6 +467,7 @@ int main() {
     test_rolling_hurst_matches_direct_hurst_exponent_dfa();
     test_rolling_hurst_matches_direct_hurst_exponent_rs();
     test_rolling_hurst_large_step_matches_direct();
+    test_dfa_onepass_tolerance_ill_conditioned();
 
     std::printf("\n%d / %d tests passed.\n", g_tests_run - g_tests_failed, g_tests_run);
     return (g_tests_failed == 0) ? 0 : 1;

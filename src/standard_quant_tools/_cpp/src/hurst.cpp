@@ -87,6 +87,13 @@ std::pair<double, double> ols_slope_r2(
 
 namespace {
 
+// Per-thread scratch reused across every rolling window that thread
+// processes, instead of a fresh allocation per window. Declared here
+// (ahead of dfa_impl/dfa_onepass) so both can reference it.
+struct RollingHurstScratch {
+    std::vector<double> y;
+};
+
 // Shared implementation behind both the public dfa() and the internal
 // scratch-based rolling_hurst_into() fast path. `y_scratch`, if non-null, is
 // a caller-owned buffer reused across many calls (one per rolling window)
@@ -152,6 +159,91 @@ dfa_impl(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
                 rms += r * r;
             }
             rms_acc += rms / sz;
+        }
+
+        flucts.push_back(std::sqrt(rms_acc / n_chunks));
+        valid_sizes.push_back(static_cast<double>(sz));
+    }
+
+    return {valid_sizes, flucts};
+}
+
+// One-pass reformulation of dfa_impl()'s per-chunk math, used ONLY by
+// hurst_exponent_scratch()'s "dfa" branch (item H) -- the public dfa()/
+// dfa_impl() above stay on the original 3-pass arithmetic permanently, so
+// this genuine reassociation never touches the standalone-tested public
+// function. Two algebraic identities (both exact at the OLS optimum, not
+// approximations) collapse dfa_impl()'s 3 passes over each chunk down to 1:
+//
+//   cross = sum_j (j-x_mean)*(y_j-seg_mean)
+//         = sum_j(j*y_j) - x_mean*sum_j(y_j)      [the seg_mean cross-term
+//                                                    cancels exactly, since
+//                                                    sum_j(j-x_mean) == 0
+//                                                    on the fixed integer
+//                                                    grid 0..sz-1]
+//         = S_jy - x_mean*Sy
+//
+//   SSE = sum_j (y_j - (a+b*j))^2 = Syy - a*Sy - b*S_jy   [standard OLS
+//         sufficient-statistics identity -- holds exactly because (a,b) are
+//         the actual least-squares fit, giving Sum(residual)=0 and
+//         Sum(j*residual)=0 at the optimum]
+//
+// So one pass accumulating Sy, Syy, S_jy per chunk is enough; no second
+// pass for `cross` and no third pass for the residual sum of squares.
+// x_var also replaced with its closed form (sz^2-1)/12 -- population
+// variance of the integers 0..sz-1 -- instead of a per-size loop.
+//
+// This is a genuine floating-point reassociation (sum-of-squares style
+// accumulation is less numerically robust than deviation-from-mean style,
+// in general) -- NOT assumed bit-identical to dfa_impl(); see
+// tests/cpp/test_hurst.cpp's tolerance-gated comparison, including
+// deliberately ill-conditioned inputs, before this is trusted.
+std::pair<std::vector<double>, std::vector<double>>
+dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
+             RollingHurstScratch& scratch)
+{
+    double mean = 0.0;
+    for (std::size_t i = 0; i < n; ++i) mean += arr[i];
+    mean /= static_cast<double>(n);
+
+    std::vector<double>& y = scratch.y;
+    y.resize(n);
+    double cs = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        cs  += arr[i] - mean;
+        y[i] = cs;
+    }
+
+    const auto sizes = log_sizes(min_w, max_w, n_points);
+    std::vector<double> flucts, valid_sizes;
+
+    for (const int sz : sizes) {
+        const int n_chunks = static_cast<int>(n) / sz;
+        if (n_chunks < 2) continue;
+
+        const double x_mean = (sz - 1) * 0.5;
+        // Closed form: mean of squared deviations of 0..sz-1 from x_mean.
+        const double x_var = (static_cast<double>(sz) * sz - 1.0) / 12.0;
+
+        double rms_acc = 0.0;
+        for (int chunk = 0; chunk < n_chunks; ++chunk) {
+            const double* seg = y.data() + static_cast<std::size_t>(chunk * sz);
+
+            double Sy = 0.0, Syy = 0.0, S_jy = 0.0;
+            for (int j = 0; j < sz; ++j) {
+                const double yj = seg[j];
+                Sy   += yj;
+                Syy  += yj * yj;
+                S_jy += j * yj;
+            }
+            const double seg_mean = Sy / sz;
+
+            const double cross = S_jy - x_mean * Sy;
+            const double b = (x_var > 0.0) ? cross / (sz * x_var) : 0.0;
+            const double a = seg_mean - b * x_mean;
+
+            const double sse = Syy - a * Sy - b * S_jy;
+            rms_acc += sse / sz;
         }
 
         flucts.push_back(std::sqrt(rms_acc / n_chunks));
@@ -298,12 +390,6 @@ HurstResult hurst_exponent(
 
 namespace {
 
-// Per-thread scratch reused across every rolling window that thread
-// processes, instead of a fresh allocation per window.
-struct RollingHurstScratch {
-    std::vector<double> y;
-};
-
 // Mirrors hurst_exponent() exactly, except the "dfa" branch calls
 // dfa_impl(..., &scratch.y) instead of the public dfa() -- reusing the
 // scratch buffer instead of allocating a fresh one per call. The "rs"
@@ -331,7 +417,7 @@ HurstResult hurst_exponent_scratch(
 
     std::vector<double> sizes, values;
     if (method == "dfa") {
-        auto [s, v] = dfa_impl(arr, n, min_window, max_w, /*n_points=*/20, &scratch.y);
+        auto [s, v] = dfa_onepass(arr, n, min_window, max_w, /*n_points=*/20, scratch);
         sizes  = std::move(s);
         values = std::move(v);
     } else {
