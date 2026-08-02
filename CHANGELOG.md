@@ -442,6 +442,54 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Performance architecture, item 6:** two changes, per the review's own
+  final priority item. (1) `batch_run_strategy` (`bindings.cpp`) returned
+  `py::list` of `py::dict`, one per grid combo; `backtest_grid`
+  (`engine.py`) then rebuilt a Python dict per row before handing them to
+  `pd.DataFrame`. Changed the binding to return a single `(num_tests, 11)`
+  `py::array_t<double>` (fixed column order, `_BATCH_METRIC_COLUMNS` in
+  `engine.py`) and `backtest_grid` to build the metrics `DataFrame`
+  directly via `pd.DataFrame(arr, columns=_BATCH_METRIC_COLUMNS)`, then
+  concat the parameter-combo columns — no per-row dict ever built. Isolated
+  micro-benchmark: the binding call itself (array vs list-of-dict
+  construction in C++) **~1.21×**; the Python-side `DataFrame`-construction
+  step alone (array→DataFrame vs `num_tests` dicts→DataFrame) **~7×**. At a
+  1,200-combo end-to-end `backtest_grid()` (n=1,500 bars, the review's own
+  "1,000+ combos" scale), the two measured within noise of each other
+  (~0.26s either way) — at that grid size the C++ kernel itself (1,200 full
+  backtests) dominates wall time, so the marshaling-layer win, while real,
+  is a small fraction of the total; it matters more for cheaper
+  strategies/shorter series or larger combo counts relative to series
+  length, not uniformly at every grid size. (2) New fused
+  `sqt::technical_indicators(high, low, close, config)` (`indicators.cpp`)
+  computes whichever of {RSI, ADX, ATR, Bollinger Bands, Stochastic
+  Oscillator} the caller requests in one native call instead of up to 5
+  separate ones — pure orchestration over the same already-tested `*_into`
+  kernels from item 5, no new algorithm logic. New `technical_indicators`
+  pybind11 binding (`py::dict` of arrays, conditional keys). Wired as an
+  additive fast path into `agent/tools.py`'s technical-analysis tool: when
+  2+ of {rsi, adx, bollinger, stochastic} are requested (and C++ is
+  available), one fused call replaces up to 4 separate Python-wrapper round
+  trips; the plain `atr` indicator is deliberately excluded from the fused
+  path since the tool's `atr()` uses a simple rolling mean while the fused
+  call's ATR field is Wilder-smoothed — a different algorithm, not the same
+  one computed faster — so fusing it would have silently changed the tool's
+  output. Individual indicator wrappers (`rsi()`, `adx()`, etc.) are
+  unchanged and still used standalone elsewhere, and as the fallback when
+  fewer than 2 fusable indicators are requested. Verified the fused path
+  produces byte-identical `last_values`/`signals` to the per-indicator
+  fallback (forced via a `HAS_CPP` monkeypatch) in
+  `tests/test_agent_tools.py`. Measured at the actual integration point
+  (`get_technical_analysis`, n=2,000 bars, all 4 fusable indicators
+  requested): **~4.6×** (1,467µs → 314µs, median of 9 runs) — the win here
+  is eliminating 3 of 4 redundant Python-wrapper layers (validation,
+  logging, numpy conversion, per-call pandas construction), not a faster
+  native kernel; at the raw C++-binding level alone the 4 individual
+  bindings vs. 1 fused call measure ~1.0× (n=2,000, ~100µs either way — the
+  pybind11 call overhead itself is negligible at this size next to the
+  kernels' own O(n) work), consistent with the review's own framing that
+  the win comes from removing Python-side glue, not from a faster inner
+  loop.
 - **Performance architecture, item 5:** ~16 of `bindings.cpp`'s ~21
   bindings shared the pattern `std::vector<double> result = sqt::foo(...);
   py::array_t<double> out(...); std::copy(result.begin(), result.end(),

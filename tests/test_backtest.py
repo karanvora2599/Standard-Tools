@@ -588,15 +588,21 @@ class TestNativeTradeStatsCorrectness:
     @requires_cpp_ext
     def test_batch_run_strategy_native_avg_trade_return_matches_hand_computed(self):
         """batch_run_strategy has no Python-side override at all -- this is
-        the scenario that was silently wrong end-to-end before this fix."""
+        the scenario that was silently wrong end-to-end before this fix.
+
+        batch_run_strategy returns a flat (num_tests, 11) array, not a list
+        of dicts (performance architecture review item 6) -- column order
+        (win_rate=7, num_trades=9, avg_trade_return_pct=10) matches
+        backtest/engine.py's _BATCH_METRIC_COLUMNS exactly.
+        """
         close = np.array([100.0, 102.0, 104.0, 103.0, 105.0, 106.0])
         signals_mat = np.array([[2.5, 2.5, 2.5, 0.0, 0.0, 0.0]])
         results = _cpp.batch_run_strategy(close, signals_mat, 10_000.0, 0.001, 0.0005)
-        assert len(results) == 1
+        assert results.shape == (1, 11)
         r = results[0]
-        assert r["num_trades"] == 1
-        assert r["win_rate"] == pytest.approx(1.0)
-        assert r["avg_trade_return_pct"] == pytest.approx(6.75, abs=1e-9)
+        assert r[9] == 1  # num_trades
+        assert r[7] == pytest.approx(1.0)  # win_rate
+        assert r[10] == pytest.approx(6.75, abs=1e-9)  # avg_trade_return_pct
 
     @requires_cpp_ext
     def test_run_strategy_native_matches_python_recomputed_stats(self, simple_ohlcv):

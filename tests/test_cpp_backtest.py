@@ -320,7 +320,32 @@ class TestCppRunStrategyDirect:
 
 
 class TestCppBatchRunStrategy:
-    """Direct calls to _sqt_core.batch_run_strategy."""
+    """Direct calls to _sqt_core.batch_run_strategy.
+
+    Regression: this binding used to return a Python list of dicts, one
+    per test. Performance architecture review item 6 changed it to a flat
+    (num_tests, 11) NumPy array instead -- for a large grid, building
+    thousands of Python dict objects just to feed them into
+    pd.DataFrame(rows) was itself real, avoidable overhead. Column order
+    is a fixed contract with backtest/engine.py's _BATCH_METRIC_COLUMNS:
+    final_equity, total_return, annualized_volatility, sharpe_ratio,
+    sortino_ratio, max_drawdown, calmar_ratio, win_rate, profit_factor,
+    num_trades, avg_trade_return_pct.
+    """
+
+    # Column indices, matching bindings.cpp's fixed write order exactly.
+    COL_FINAL_EQUITY = 0
+    COL_TOTAL_RETURN = 1
+    COL_ANNUALIZED_VOLATILITY = 2
+    COL_SHARPE_RATIO = 3
+    COL_SORTINO_RATIO = 4
+    COL_MAX_DRAWDOWN = 5
+    COL_CALMAR_RATIO = 6
+    COL_WIN_RATE = 7
+    COL_PROFIT_FACTOR = 8
+    COL_NUM_TRADES = 9
+    COL_AVG_TRADE_RETURN_PCT = 10
+    NUM_COLS = 11
 
     def _signals_matrix(self, n: int, num_tests: int, seed: int = 0) -> np.ndarray:
         rng = np.random.default_rng(seed)
@@ -330,14 +355,13 @@ class TestCppBatchRunStrategy:
         return np.vstack(rows)
 
     @requires_cpp
-    def test_returns_list_of_dicts(self):
+    def test_returns_2d_array(self):
         prices = np.linspace(100.0, 110.0, 50)
         signals = np.vstack([np.ones(50), np.zeros(50)])
         results = _cpp.batch_run_strategy(prices, signals)
-        assert isinstance(results, list)
-        assert len(results) == 2
-        for r in results:
-            assert isinstance(r, dict)
+        assert isinstance(results, np.ndarray)
+        assert results.shape == (2, self.NUM_COLS)
+        assert results.dtype == np.float64
 
     @requires_cpp
     def test_result_count_equals_num_tests(self):
@@ -345,49 +369,30 @@ class TestCppBatchRunStrategy:
         for num_tests in (1, 3, 10):
             sig_mat = np.tile(np.ones(100), (num_tests, 1))
             results = _cpp.batch_run_strategy(prices, sig_mat)
-            assert len(results) == num_tests
+            assert results.shape[0] == num_tests
 
     @requires_cpp
-    def test_each_result_has_required_keys(self):
+    def test_column_count_matches_expected_metrics(self):
         prices = np.linspace(100.0, 110.0, 60)
         sig_mat = np.vstack([np.ones(60), np.zeros(60)])
-        required = {
-            "final_equity",
-            "total_return",
-            "annualized_volatility",
-            "sharpe_ratio",
-            "sortino_ratio",
-            "max_drawdown",
-            "calmar_ratio",
-            "num_trades",
-            "win_rate",
-            "profit_factor",
-            "avg_trade_return_pct",
-        }
-        for r in _cpp.batch_run_strategy(prices, sig_mat):
-            assert required <= set(r.keys())
-
-    @requires_cpp
-    def test_equity_curve_stripped(self):
-        """batch_run_strategy strips the equity_curve to save memory."""
-        prices = np.linspace(100.0, 110.0, 50)
-        sig_mat = np.vstack([np.ones(50)])
-        r = _cpp.batch_run_strategy(prices, sig_mat)[0]
-        assert "equity_curve" not in r
+        results = _cpp.batch_run_strategy(prices, sig_mat)
+        # 11 metric columns -- equity_curve is not included, to save memory
+        # (same "not included" contract the old list-of-dicts form had).
+        assert results.shape[1] == self.NUM_COLS
 
     @requires_cpp
     def test_flat_signal_zero_return(self):
         prices = np.linspace(100.0, 130.0, 80)
         sig_mat = np.zeros((1, 80))
         r = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.0, 0.0)[0]
-        assert abs(r["total_return"]) < 1e-10
+        assert abs(r[self.COL_TOTAL_RETURN]) < 1e-10
 
     @requires_cpp
     def test_all_long_rising_prices_positive_return(self):
         prices = np.linspace(100.0, 130.0, 100)
         sig_mat = np.ones((1, 100))
         r = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.0, 0.0)[0]
-        assert r["total_return"] > 0.0
+        assert r[self.COL_TOTAL_RETURN] > 0.0
 
     @requires_cpp
     def test_matches_single_run_strategy(self):
@@ -398,11 +403,18 @@ class TestCppBatchRunStrategy:
         sig_mat = self._signals_matrix(n, 4, seed=99)
 
         batch = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.001, 0.0005)
-        for i, br in enumerate(batch):
+        for i in range(sig_mat.shape[0]):
+            br = batch[i]
             sr = _cpp.run_strategy(prices, sig_mat[i], 10_000.0, 0.001, 0.0005)
-            assert abs(br["total_return"] - sr["total_return"]) < 1e-10, f"row {i}"
-            assert abs(br["sharpe_ratio"] - sr["sharpe_ratio"]) < 1e-10, f"row {i}"
-            assert abs(br["max_drawdown"] - sr["max_drawdown"]) < 1e-10, f"row {i}"
+            assert (
+                abs(br[self.COL_TOTAL_RETURN] - sr["total_return"]) < 1e-10
+            ), f"row {i}"
+            assert (
+                abs(br[self.COL_SHARPE_RATIO] - sr["sharpe_ratio"]) < 1e-10
+            ), f"row {i}"
+            assert (
+                abs(br[self.COL_MAX_DRAWDOWN] - sr["max_drawdown"]) < 1e-10
+            ), f"row {i}"
 
     @requires_cpp
     def test_different_signals_produce_different_results(self):
@@ -410,7 +422,7 @@ class TestCppBatchRunStrategy:
         prices = np.linspace(100.0, 115.0, n)
         sig_mat = np.vstack([np.ones(n), -np.ones(n)])
         results = _cpp.batch_run_strategy(prices, sig_mat, 10_000.0, 0.0, 0.0)
-        assert results[0]["total_return"] != results[1]["total_return"]
+        assert results[0, self.COL_TOTAL_RETURN] != results[1, self.COL_TOTAL_RETURN]
 
     @requires_cpp
     def test_shape_mismatch_raises(self):

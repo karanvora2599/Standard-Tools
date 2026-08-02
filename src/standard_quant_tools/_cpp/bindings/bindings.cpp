@@ -302,7 +302,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](Array1D prices,
            py::array_t<double, py::array::c_style | py::array::forcecast> signals_2d,
            double initial_capital, double commission_pct, double slippage_pct)
-        -> py::list
+        -> py::array_t<double>
         {
             require_1d(prices, "prices");
             auto prices_buf  = prices.request();
@@ -320,29 +320,37 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* p_ptr = static_cast<const double*>(prices_buf.ptr);
             const double* s_ptr = static_cast<const double*>(signals_buf.ptr);
 
-            std::vector<sqt::BacktestResult> results;
+            // 11 metric columns, fixed order -- see docstring below. Returning a
+            // flat (num_tests, 11) array instead of a Python list of dicts means
+            // building num_tests Python objects is no longer part of this call
+            // at all; the Python side builds one DataFrame directly from the
+            // array instead of iterating a list of dicts first. Column order
+            // here MUST stay in sync with backtest_grid's _BATCH_METRIC_COLUMNS
+            // in backtest/engine.py.
+            constexpr py::ssize_t kNumCols = 11;
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(num_tests), kNumCols});
+            double* out_ptr = out.mutable_data();
             {
                 py::gil_scoped_release release;
-                results = sqt::batch_run_strategy(
+                const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
                     initial_capital, commission_pct, slippage_pct);
-            }
-
-            py::list out;
-            for (const auto& r : results) {
-                py::dict d;
-                d["final_equity"]          = r.final_equity;
-                d["total_return"]          = r.total_return;
-                d["annualized_volatility"] = r.annualized_vol;
-                d["sharpe_ratio"]          = r.sharpe_ratio;
-                d["sortino_ratio"]         = r.sortino_ratio;
-                d["max_drawdown"]          = r.max_drawdown;
-                d["calmar_ratio"]          = r.calmar_ratio;
-                d["num_trades"]            = r.num_trades;
-                d["win_rate"]              = r.win_rate;
-                d["profit_factor"]         = r.profit_factor;
-                d["avg_trade_return_pct"]  = r.avg_trade_return_pct;
-                out.append(d);
+                for (std::size_t i = 0; i < results.size(); ++i) {
+                    const auto& r = results[i];
+                    double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
+                    row[0]  = r.final_equity;
+                    row[1]  = r.total_return;
+                    row[2]  = r.annualized_vol;
+                    row[3]  = r.sharpe_ratio;
+                    row[4]  = r.sortino_ratio;
+                    row[5]  = r.max_drawdown;
+                    row[6]  = r.calmar_ratio;
+                    row[7]  = r.win_rate;
+                    row[8]  = r.profit_factor;
+                    row[9]  = static_cast<double>(r.num_trades);
+                    row[10] = r.avg_trade_return_pct;
+                }
             }
             return out;
         },
@@ -353,8 +361,12 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("slippage_pct")    = 0.0005,
         "Batch vectorized backtest — run all parameter combinations in one C++ call.\n\n"
         "signals must be a 2-D float64 array of shape (num_tests, n_bars).\n"
-        "Returns a Python list of dicts, one per test, in input order.\n"
-        "equity_curve is NOT included in the output to save memory.");
+        "Returns a 2-D float64 array of shape (num_tests, 11), one row per\n"
+        "test in input order. Columns (fixed order): final_equity,\n"
+        "total_return, annualized_volatility, sharpe_ratio, sortino_ratio,\n"
+        "max_drawdown, calmar_ratio, win_rate, profit_factor, num_trades\n"
+        "(stored as float, cast back to int on the Python side),\n"
+        "avg_trade_return_pct. equity_curve is NOT included, to save memory.");
 
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
@@ -519,6 +531,102 @@ PYBIND11_MODULE(_sqt_core, m) {
         "  col 0 = %%K, col 1 = %%D.\n"
         "First (k_period-1) rows have NaN in %%K;\n"
         "first (k_period + d_period - 2) rows have NaN in %%D.");
+
+    // ── Fused technical indicators ────────────────────────────────────────────
+
+    m.def(
+        "technical_indicators",
+        [](Array1D high, Array1D low, Array1D close,
+           bool compute_rsi, int rsi_period,
+           bool compute_adx, int adx_period,
+           bool compute_atr, int atr_period,
+           bool compute_bollinger, int bollinger_period, double bollinger_num_std,
+           bool compute_stochastic, int stoch_k_period, int stoch_d_period) -> py::dict
+        {
+            require_1d(high, "high");
+            require_1d(low, "low");
+            require_1d(close, "close");
+            if (high.size() != low.size() || high.size() != close.size())
+                throw std::invalid_argument("high, low, close must have equal length");
+            const double* high_ptr  = high.data();
+            const double* low_ptr   = low.data();
+            const double* close_ptr = close.data();
+            const auto    n         = static_cast<std::size_t>(high.size());
+
+            sqt::TechnicalIndicatorsConfig cfg;
+            cfg.compute_rsi        = compute_rsi;
+            cfg.rsi_period         = rsi_period;
+            cfg.compute_adx        = compute_adx;
+            cfg.adx_period         = adx_period;
+            cfg.compute_atr        = compute_atr;
+            cfg.atr_period         = atr_period;
+            cfg.compute_bollinger  = compute_bollinger;
+            cfg.bollinger_period   = bollinger_period;
+            cfg.bollinger_num_std  = bollinger_num_std;
+            cfg.compute_stochastic = compute_stochastic;
+            cfg.stoch_k_period     = stoch_k_period;
+            cfg.stoch_d_period     = stoch_d_period;
+
+            sqt::TechnicalIndicatorsResult r;
+            {
+                py::gil_scoped_release release;
+                r = sqt::technical_indicators(high_ptr, low_ptr, close_ptr, n, cfg);
+            }
+
+            py::dict d;
+            if (compute_rsi) {
+                py::array_t<double> arr(static_cast<py::ssize_t>(n));
+                std::copy(r.rsi.begin(), r.rsi.end(), arr.mutable_data());
+                d["rsi"] = arr;
+            }
+            if (compute_adx) {
+                py::array_t<double> arr({static_cast<py::ssize_t>(n), py::ssize_t(3)});
+                std::copy(r.adx.begin(), r.adx.end(), arr.mutable_data());
+                d["adx"] = arr;
+            }
+            if (compute_atr) {
+                py::array_t<double> arr(static_cast<py::ssize_t>(n));
+                std::copy(r.atr.begin(), r.atr.end(), arr.mutable_data());
+                d["atr"] = arr;
+            }
+            if (compute_bollinger) {
+                py::array_t<double> arr({static_cast<py::ssize_t>(n), py::ssize_t(3)});
+                std::copy(r.bollinger.begin(), r.bollinger.end(), arr.mutable_data());
+                d["bollinger_bands"] = arr;
+            }
+            if (compute_stochastic) {
+                py::array_t<double> arr({static_cast<py::ssize_t>(n), py::ssize_t(2)});
+                std::copy(r.stochastic.begin(), r.stochastic.end(), arr.mutable_data());
+                d["stochastic_oscillator"] = arr;
+            }
+            return d;
+        },
+        py::arg("high"),
+        py::arg("low"),
+        py::arg("close"),
+        py::arg("compute_rsi")        = false,
+        py::arg("rsi_period")         = 14,
+        py::arg("compute_adx")        = false,
+        py::arg("adx_period")         = 14,
+        py::arg("compute_atr")        = false,
+        py::arg("atr_period")         = 14,
+        py::arg("compute_bollinger")  = false,
+        py::arg("bollinger_period")   = 20,
+        py::arg("bollinger_num_std")  = 2.0,
+        py::arg("compute_stochastic") = false,
+        py::arg("stoch_k_period")     = 14,
+        py::arg("stoch_d_period")     = 3,
+        "Fused multi-indicator call: computes whichever of RSI/ADX/ATR/\n"
+        "Bollinger Bands/Stochastic Oscillator are requested in ONE native\n"
+        "call instead of up to 5 separate Python/C++ boundary crossings --\n"
+        "each indicator's own algorithm and output shape are unchanged\n"
+        "(this is pure orchestration, calling the same *_into kernels the\n"
+        "individual rsi()/adx()/wilder_atr()/bollinger_bands()/\n"
+        "stochastic_oscillator() bindings use).\n\n"
+        "Returns a dict containing only the keys for indicators actually\n"
+        "requested: 'rsi' (n,), 'adx' (n,3), 'atr' (n,), 'bollinger_bands'\n"
+        "(n,3), 'stochastic_oscillator' (n,2) -- same shapes/column layout\n"
+        "as each indicator's own standalone binding.");
 
     // ── Engle-Granger cointegration ───────────────────────────────────────────
 

@@ -585,6 +585,100 @@ static void test_stochastic_empty() {
 }
 
 
+// ── Fused technical_indicators() tests ────────────────────────────────────────
+
+static void test_technical_indicators_matches_individual_functions() {
+    // Regression test (performance architecture item 6): technical_indicators()
+    // is pure orchestration over the same *_into kernels the individual
+    // rsi()/adx()/wilder_atr()/bollinger_bands()/stochastic_oscillator()
+    // functions use -- every field it returns must match calling each
+    // function standalone, exactly (not just approximately: same kernel,
+    // same inputs, must produce bit-identical output).
+    auto close = pseudo_random(300, 7);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    const std::size_t n = close.size();
+
+    sqt::TechnicalIndicatorsConfig cfg;
+    cfg.compute_rsi        = true;  cfg.rsi_period        = 14;
+    cfg.compute_adx        = true;  cfg.adx_period        = 14;
+    cfg.compute_atr        = true;  cfg.atr_period        = 14;
+    cfg.compute_bollinger  = true;  cfg.bollinger_period  = 20; cfg.bollinger_num_std = 2.0;
+    cfg.compute_stochastic = true;  cfg.stoch_k_period    = 14; cfg.stoch_d_period    = 3;
+
+    auto fused = sqt::technical_indicators(high.data(), low.data(), close.data(), n, cfg);
+
+    auto expected_rsi = sqt::rsi(close.data(), n, cfg.rsi_period);
+    CHECK_EQ(fused.rsi.size(), expected_rsi.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        if (std::isnan(expected_rsi[i])) CHECK_NAN(fused.rsi[i]);
+        else CHECK_NEAR(fused.rsi[i], expected_rsi[i], 1e-15);
+    }
+
+    auto expected_adx = sqt::adx(high.data(), low.data(), close.data(), n, cfg.adx_period);
+    CHECK_EQ(fused.adx.size(), expected_adx.size());
+    for (std::size_t i = 0; i < expected_adx.size(); ++i) {
+        if (std::isnan(expected_adx[i])) CHECK_NAN(fused.adx[i]);
+        else CHECK_NEAR(fused.adx[i], expected_adx[i], 1e-15);
+    }
+
+    auto expected_atr = sqt::wilder_atr(high.data(), low.data(), close.data(), n, cfg.atr_period);
+    CHECK_EQ(fused.atr.size(), expected_atr.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        if (std::isnan(expected_atr[i])) CHECK_NAN(fused.atr[i]);
+        else CHECK_NEAR(fused.atr[i], expected_atr[i], 1e-15);
+    }
+
+    auto expected_bb = sqt::bollinger_bands(
+        close.data(), n, cfg.bollinger_period, cfg.bollinger_num_std);
+    CHECK_EQ(fused.bollinger.size(), expected_bb.size());
+    for (std::size_t i = 0; i < expected_bb.size(); ++i) {
+        if (std::isnan(expected_bb[i])) CHECK_NAN(fused.bollinger[i]);
+        else CHECK_NEAR(fused.bollinger[i], expected_bb[i], 1e-15);
+    }
+
+    auto expected_stoch = sqt::stochastic_oscillator(
+        high.data(), low.data(), close.data(), n, cfg.stoch_k_period, cfg.stoch_d_period);
+    CHECK_EQ(fused.stochastic.size(), expected_stoch.size());
+    for (std::size_t i = 0; i < expected_stoch.size(); ++i) {
+        if (std::isnan(expected_stoch[i])) CHECK_NAN(fused.stochastic[i]);
+        else CHECK_NEAR(fused.stochastic[i], expected_stoch[i], 1e-15);
+    }
+}
+
+static void test_technical_indicators_only_requested_fields_populated() {
+    auto close = pseudo_random(100, 3);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    const std::size_t n = close.size();
+
+    sqt::TechnicalIndicatorsConfig cfg;  // everything false/default
+    cfg.compute_rsi = true;
+    cfg.rsi_period  = 10;
+
+    auto r = sqt::technical_indicators(high.data(), low.data(), close.data(), n, cfg);
+    CHECK(!r.rsi.empty());
+    CHECK(r.adx.empty());
+    CHECK(r.atr.empty());
+    CHECK(r.bollinger.empty());
+    CHECK(r.stochastic.empty());
+}
+
+static void test_technical_indicators_empty_config_returns_all_empty() {
+    auto close = pseudo_random(50, 5);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    sqt::TechnicalIndicatorsConfig cfg;  // all flags default false
+    auto r = sqt::technical_indicators(
+        high.data(), low.data(), close.data(), close.size(), cfg);
+    CHECK(r.rsi.empty());
+    CHECK(r.adx.empty());
+    CHECK(r.atr.empty());
+    CHECK(r.bollinger.empty());
+    CHECK(r.stochastic.empty());
+}
+
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -629,6 +723,11 @@ int main() {
     test_stochastic_k_bounds_0_to_100();
     test_stochastic_close_at_high_yields_k_100();
     test_stochastic_empty();
+
+    // Fused technical_indicators()
+    test_technical_indicators_matches_individual_functions();
+    test_technical_indicators_only_requested_fields_populated();
+    test_technical_indicators_empty_config_returns_all_empty();
 
     std::fprintf(
         stdout,

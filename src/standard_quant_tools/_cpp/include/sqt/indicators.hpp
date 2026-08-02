@@ -198,4 +198,57 @@ void stochastic_oscillator_into(
     int           d_period,
     double*       out);
 
+// ── Fused technical indicators ─────────────────────────────────────────────
+//
+// A single native call computing whichever of {RSI, ADX, ATR, Bollinger
+// Bands, Stochastic Oscillator} the caller asks for, in one Python/C++
+// boundary crossing instead of up to 5 separate ones -- the real
+// integration point is agent/tools.py's technical-analysis tool, which
+// previously called each indicator's own separate wrapper independently.
+// Internally this is pure orchestration: each requested indicator is
+// computed via its own already-tested `*_into` kernel above (no new
+// algorithm logic here, so no new numerical-correctness surface), just
+// called from one entry point instead of several. Sharing intermediates
+// between indicators (e.g. True Range between ATR and ADX) is a possible
+// future refinement, not attempted in this pass.
+
+struct TechnicalIndicatorsConfig {
+    bool   compute_rsi         = false;
+    int    rsi_period          = 14;
+    bool   compute_adx         = false;
+    int    adx_period          = 14;
+    bool   compute_atr         = false;
+    int    atr_period          = 14;
+    bool   compute_bollinger   = false;
+    int    bollinger_period    = 20;
+    double bollinger_num_std   = 2.0;
+    bool   compute_stochastic  = false;
+    int    stoch_k_period      = 14;
+    int    stoch_d_period      = 3;
+};
+
+struct TechnicalIndicatorsResult {
+    std::vector<double> rsi;         // length n if compute_rsi, else empty
+    std::vector<double> adx;         // length 3*n if compute_adx, else empty
+    std::vector<double> atr;         // length n if compute_atr, else empty
+    std::vector<double> bollinger;   // length 3*n if compute_bollinger, else empty
+    std::vector<double> stochastic;  // length 2*n if compute_stochastic, else empty
+};
+
+/**
+ * Compute whichever indicators `config` requests, in one native call.
+ *
+ * @param high, low, close  Contiguous OHLC arrays, each length n.
+ * @param n                 Number of bars.
+ * @param config            Which indicators to compute and their periods.
+ * @returns  Result struct; each field is populated only if its
+ *   corresponding `config.compute_*` flag was set, otherwise left empty.
+ */
+TechnicalIndicatorsResult technical_indicators(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    const TechnicalIndicatorsConfig& config);
+
 }  // namespace sqt

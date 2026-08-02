@@ -252,6 +252,23 @@ from standard_quant_tools.portfolio.portfolio import (
 )
 from standard_quant_tools.screener.screener import screen_stocks
 
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = True
+except ImportError:
+    pass
+
+# Indicators technical_indicators() can compute in one native call. "atr" is
+# deliberately excluded: the tool's plain atr() uses a simple rolling mean,
+# while the fused call's ATR field is Wilder-smoothed -- a different
+# algorithm, not just a faster path to the same numbers.
+_FUSABLE_INDICATORS = {"rsi", "adx", "bollinger", "stochastic"}
+
 
 def _parse_period(period: str) -> datetime.datetime:
     """Convert period string ('1y', '6mo', '2y') to a start datetime."""
@@ -611,6 +628,36 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
     signals: Dict[str, Any] = {}
     requested = [ind.lower() for ind in input_data.indicators]
 
+    # Fused fast path: when 2+ of {rsi, adx, bollinger, stochastic} are
+    # requested, compute them in one native call instead of one per
+    # indicator. Additive only -- the individual wrappers below are
+    # unchanged and still used standalone whenever the fast path doesn't
+    # apply (fewer than 2 fusable indicators, or C++ unavailable).
+    fused: Optional[Dict[str, Any]] = None
+    fusable_requested = _FUSABLE_INDICATORS & set(requested)
+    if HAS_CPP and _cpp_core is not None and len(fusable_requested) >= 2:
+        try:
+            fused = _cpp_core.technical_indicators(
+                high.to_numpy(dtype=np.float64),
+                low.to_numpy(dtype=np.float64),
+                close.to_numpy(dtype=np.float64),
+                compute_rsi="rsi" in fusable_requested,
+                compute_adx="adx" in fusable_requested,
+                compute_bollinger="bollinger" in fusable_requested,
+                compute_stochastic="stochastic" in fusable_requested,
+            )
+            logger.debug(
+                "[tech_analysis] fused technical_indicators path for %s",
+                sorted(fusable_requested),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[tech_analysis] fused technical_indicators failed (%s) — "
+                "falling back to per-indicator calls",
+                exc,
+            )
+            fused = None
+
     if "sma" in requested:
         for p in (20, 50, 200):
             s = sma(close, p).dropna()
@@ -636,7 +683,10 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
         signals["macd_bullish"] = last_macd > last_sig
 
     if "rsi" in requested:
-        r = rsi(close, 14).dropna()
+        if fused is not None and "rsi" in fused:
+            r = pd.Series(fused["rsi"], index=close.index).dropna()
+        else:
+            r = rsi(close, 14).dropna()
         if not r.empty:
             last_rsi = float(r.iloc[-1])
             last_vals["rsi_14"] = round(last_rsi, 2)
@@ -644,7 +694,13 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
             signals["rsi_overbought"] = last_rsi > 70
 
     if "stochastic" in requested:
-        stoch = stochastic_oscillator(high, low, close)
+        if fused is not None and "stochastic_oscillator" in fused:
+            arr = fused["stochastic_oscillator"]
+            stoch = pd.DataFrame(
+                {"Stoch_K": arr[:, 0], "Stoch_D": arr[:, 1]}, index=close.index
+            )
+        else:
+            stoch = stochastic_oscillator(high, low, close)
         k = float(stoch["Stoch_K"].dropna().iloc[-1])
         d = float(stoch["Stoch_D"].dropna().iloc[-1])
         last_vals["stoch_k"] = round(k, 2)
@@ -652,7 +708,14 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
         signals["stoch_oversold"] = k < 20 and d < 20
 
     if "bollinger" in requested:
-        bb = bollinger_bands(close)
+        if fused is not None and "bollinger_bands" in fused:
+            arr = fused["bollinger_bands"]
+            bb = pd.DataFrame(
+                {"BB_Upper": arr[:, 0], "BB_Middle": arr[:, 1], "BB_Lower": arr[:, 2]},
+                index=close.index,
+            )
+        else:
+            bb = bollinger_bands(close)
         upper = float(bb["BB_Upper"].dropna().iloc[-1])
         middle = float(bb["BB_Middle"].dropna().iloc[-1])
         lower = float(bb["BB_Lower"].dropna().iloc[-1])
@@ -681,7 +744,14 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
             signals["price_above_vwap"] = last_close > last_vwap
 
     if "adx" in requested:
-        adx_df = adx(high, low, close).dropna()
+        if fused is not None and "adx" in fused:
+            arr = fused["adx"]
+            adx_df = pd.DataFrame(
+                {"DI_Plus": arr[:, 0], "DI_Minus": arr[:, 1], "ADX": arr[:, 2]},
+                index=close.index,
+            ).dropna()
+        else:
+            adx_df = adx(high, low, close).dropna()
         if not adx_df.empty:
             last_vals["adx"] = round(float(adx_df["ADX"].iloc[-1]), 2)
             last_vals["di_plus"] = round(float(adx_df["DI_Plus"].iloc[-1]), 2)

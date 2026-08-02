@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from standard_quant_tools.agent import tools as tools_module
 from standard_quant_tools.agent.models import (
     AnalysisInput,
     BacktestInput,
@@ -440,6 +441,30 @@ class TestGetTechnicalAnalysis:
         )
         result = get_technical_analysis(inp)
         assert "obv" in result.last_values
+
+    def test_fused_path_matches_per_indicator_fallback(self, patched_factory):
+        """When 2+ of {rsi, adx, bollinger, stochastic} are requested, the
+        fused technical_indicators() native call is used instead of one C++
+        round trip per indicator. Its numeric output must be identical to
+        the per-indicator fallback path (forced here by disabling the fused
+        path), since it's the same underlying kernels -- just one call."""
+        inp = TechnicalInput(
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            indicators=["rsi", "adx", "bollinger", "stochastic"],
+        )
+        fused_result = get_technical_analysis(inp)
+
+        original_has_cpp = tools_module.HAS_CPP
+        tools_module.HAS_CPP = False
+        try:
+            fallback_result = get_technical_analysis(inp)
+        finally:
+            tools_module.HAS_CPP = original_has_cpp
+
+        assert fused_result.last_values == fallback_result.last_values
+        assert fused_result.signals == fallback_result.signals
 
 
 class TestGetPortfolioAnalysis:

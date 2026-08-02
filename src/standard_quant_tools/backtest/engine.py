@@ -25,6 +25,23 @@ from standard_quant_tools.metrics.risk_metrics import (
 
 _VALID_FILL_PRICES = ("close", "next_open", "hl2_exploratory")
 
+# Column order for _cpp_core.batch_run_strategy's flat (num_tests, 11) array
+# return -- MUST stay in sync with bindings.cpp's batch_run_strategy binding,
+# which writes exactly these 11 columns in exactly this order.
+_BATCH_METRIC_COLUMNS = [
+    "final_equity",
+    "total_return",
+    "annualized_volatility",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "max_drawdown",
+    "calmar_ratio",
+    "win_rate",
+    "profit_factor",
+    "num_trades",
+    "avg_trade_return_pct",
+]
+
 # ── Optional C++ fast path ────────────────────────────────────────────────────
 from typing import Any as _Any
 
@@ -670,35 +687,38 @@ def backtest_grid(
             # recomputation without an override -- see
             # tests/test_backtest.py's TestNativeTradeStatsCorrectness for
             # the gated equivalence check.
-            cpp_results = _cpp_core.batch_run_strategy(
+            # A flat (num_tests, 11) NumPy array instead of a Python list of
+            # dicts -- for a large grid (thousands of combos), building that
+            # many Python dict objects just to immediately feed them into
+            # pd.DataFrame(rows) was itself real, avoidable overhead. Column
+            # order is a fixed contract with bindings.cpp -- see
+            # _BATCH_METRIC_COLUMNS above.
+            metrics_arr = _cpp_core.batch_run_strategy(
                 prices_arr,
                 signals_mat,
                 initial_capital,
                 commission_pct,
                 slippage_pct,
             )
+            metrics_df = pd.DataFrame(metrics_arr, columns=_BATCH_METRIC_COLUMNS)
+            metrics_df["num_trades"] = metrics_df["num_trades"].astype(int)
+            metrics_df["final_equity"] = metrics_df["final_equity"].round(2)
+            metrics_df["total_return"] = metrics_df["total_return"].round(6)
+            metrics_df["annualized_volatility"] = metrics_df[
+                "annualized_volatility"
+            ].round(6)
+            metrics_df["sharpe_ratio"] = metrics_df["sharpe_ratio"].round(4)
+            metrics_df["sortino_ratio"] = metrics_df["sortino_ratio"].round(4)
+            metrics_df["max_drawdown"] = metrics_df["max_drawdown"].round(6)
+            metrics_df["calmar_ratio"] = metrics_df["calmar_ratio"].round(4)
+            metrics_df["win_rate"] = metrics_df["win_rate"].round(4)
+            metrics_df["profit_factor"] = metrics_df["profit_factor"].round(4)
+            metrics_df["avg_trade_return_pct"] = metrics_df[
+                "avg_trade_return_pct"
+            ].round(4)
 
-            rows = []
-            for combo, r in zip(combos, cpp_results):
-                row = {
-                    "final_equity": round(float(r["final_equity"]), 2),
-                    "total_return": round(float(r["total_return"]), 6),
-                    "annualized_volatility": round(
-                        float(r["annualized_volatility"]), 6
-                    ),
-                    "sharpe_ratio": round(float(r["sharpe_ratio"]), 4),
-                    "sortino_ratio": round(float(r["sortino_ratio"]), 4),
-                    "max_drawdown": round(float(r["max_drawdown"]), 6),
-                    "calmar_ratio": round(float(r["calmar_ratio"]), 4),
-                    "win_rate": round(float(r["win_rate"]), 4),
-                    "profit_factor": round(float(r["profit_factor"]), 4),
-                    "num_trades": int(r["num_trades"]),
-                    "avg_trade_return_pct": round(float(r["avg_trade_return_pct"]), 4),
-                }
-                row.update(dict(zip(keys, combo)))
-                rows.append(row)
-
-            df_out = pd.DataFrame(rows)
+            params_df = pd.DataFrame(combos, columns=keys)
+            df_out = pd.concat([metrics_df, params_df.reset_index(drop=True)], axis=1)
             if sort_by in df_out.columns:
                 df_out = df_out.sort_values(sort_by, ascending=ascending).reset_index(
                     drop=True

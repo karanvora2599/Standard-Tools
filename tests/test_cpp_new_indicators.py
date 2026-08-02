@@ -535,3 +535,85 @@ class TestStochasticOscillatorWrapper:
         h_s, l_s, c_s = ohlc_series
         with pytest.raises(ValidationError, match="k_period"):
             stoch_wrapper(h_s, l_s, c_s, k_period=bad_k_period)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# technical_indicators — fused multi-indicator C++ call (performance
+# architecture review item 6)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCppTechnicalIndicators:
+    """Direct calls to _sqt_core.technical_indicators -- pure orchestration
+    over the same individual indicator kernels, so every field it returns
+    must match calling each function standalone, exactly."""
+
+    @requires_cpp
+    def test_matches_individual_calls_when_all_requested(self, ohlc_arrays):
+        high, low, close = ohlc_arrays
+        fused = _cpp.technical_indicators(
+            high,
+            low,
+            close,
+            compute_rsi=True,
+            rsi_period=14,
+            compute_adx=True,
+            adx_period=14,
+            compute_atr=True,
+            atr_period=14,
+            compute_bollinger=True,
+            bollinger_period=20,
+            bollinger_num_std=2.0,
+            compute_stochastic=True,
+            stoch_k_period=14,
+            stoch_d_period=3,
+        )
+        assert set(fused.keys()) == {
+            "rsi",
+            "adx",
+            "atr",
+            "bollinger_bands",
+            "stochastic_oscillator",
+        }
+
+        np.testing.assert_array_equal(fused["rsi"], _cpp.rsi(close, 14))
+        np.testing.assert_array_equal(fused["adx"], _cpp.adx(high, low, close, 14))
+        np.testing.assert_array_equal(
+            fused["atr"], _cpp.wilder_atr(high, low, close, 14)
+        )
+        np.testing.assert_array_equal(
+            fused["bollinger_bands"], _cpp.bollinger_bands(close, 20, 2.0)
+        )
+        np.testing.assert_array_equal(
+            fused["stochastic_oscillator"],
+            _cpp.stochastic_oscillator(high, low, close, 14, 3),
+        )
+
+    @requires_cpp
+    def test_only_requested_keys_present(self, ohlc_arrays):
+        high, low, close = ohlc_arrays
+        fused = _cpp.technical_indicators(
+            high, low, close, compute_rsi=True, compute_bollinger=True
+        )
+        assert set(fused.keys()) == {"rsi", "bollinger_bands"}
+
+    @requires_cpp
+    def test_no_indicators_requested_returns_empty_dict(self, ohlc_arrays):
+        high, low, close = ohlc_arrays
+        fused = _cpp.technical_indicators(high, low, close)
+        assert fused == {}
+
+    @requires_cpp
+    def test_single_indicator_matches_standalone_call(self, ohlc_arrays):
+        high, low, close = ohlc_arrays
+        fused = _cpp.technical_indicators(
+            high, low, close, compute_adx=True, adx_period=10
+        )
+        assert set(fused.keys()) == {"adx"}
+        np.testing.assert_array_equal(fused["adx"], _cpp.adx(high, low, close, 10))
+
+    @requires_cpp
+    def test_mismatched_length_raises(self, ohlc_arrays):
+        high, low, close = ohlc_arrays
+        with pytest.raises(Exception):
+            _cpp.technical_indicators(high[:-1], low, close, compute_rsi=True)

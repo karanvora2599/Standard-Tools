@@ -500,4 +500,42 @@ std::vector<double> stochastic_oscillator(
     return result;
 }
 
+
+// ── Fused technical indicators ─────────────────────────────────────────────
+
+TechnicalIndicatorsResult technical_indicators(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n,
+    const TechnicalIndicatorsConfig& config)
+{
+    TechnicalIndicatorsResult r;
+
+    if (config.compute_rsi) {
+        r.rsi.resize(n);
+        rsi_into(close, n, config.rsi_period, r.rsi.data());
+    }
+    if (config.compute_adx) {
+        r.adx.resize(3 * n);
+        adx_into(high, low, close, n, config.adx_period, r.adx.data());
+    }
+    if (config.compute_atr) {
+        r.atr.resize(n);
+        wilder_atr_into(high, low, close, n, config.atr_period, r.atr.data());
+    }
+    if (config.compute_bollinger) {
+        r.bollinger.resize(3 * n);
+        bollinger_bands_into(close, n, config.bollinger_period,
+                              config.bollinger_num_std, r.bollinger.data());
+    }
+    if (config.compute_stochastic) {
+        r.stochastic.resize(2 * n);
+        stochastic_oscillator_into(high, low, close, n, config.stoch_k_period,
+                                    config.stoch_d_period, r.stochastic.data());
+    }
+
+    return r;
+}
+
 }  // namespace sqt
