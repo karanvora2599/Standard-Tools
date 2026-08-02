@@ -77,20 +77,37 @@ else()
 endif()
 
 # ── OpenMP (optional) ─────────────────────────────────────────────────────────
-# Only used today by monte_carlo.cpp's simulate_forward_paths, where each
-# simulated path is independent (no shared mutable state) so the loop can
-# run on multiple threads with no locking. Not REQUIRED: a build without an
-# OpenMP runtime (e.g. default Apple Clang, which ships no OpenMP support)
-# must still succeed — SQT_HAS_OPENMP simply won't be defined, and the
-# affected loop falls back to the identical serial code path, wrapped in
+# Used by monte_carlo.cpp's simulate_forward_paths and backtest.cpp's
+# batch_run_strategy, where each simulated path / test index is independent
+# (no shared mutable state) so the loop can run on multiple threads with no
+# locking. Not REQUIRED: a build without an OpenMP runtime (e.g. default
+# Apple Clang, which ships no OpenMP support) must still succeed —
+# SQT_HAS_OPENMP simply won't be defined, and the affected loops fall back
+# to their identical serial code paths, each wrapped in
 # #ifdef SQT_HAS_OPENMP / #endif at the call site.
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(_sqt_core PRIVATE OpenMP::OpenMP_CXX)
     target_compile_definitions(_sqt_core PRIVATE SQT_HAS_OPENMP)
-    message(STATUS "OpenMP:   found — simulate_forward_paths will run in parallel")
+    message(STATUS "OpenMP:   found — simulate_forward_paths/batch_run_strategy will run in parallel")
 else()
-    message(STATUS "OpenMP:   not found — simulate_forward_paths will run serially (still correct, just single-threaded)")
+    message(STATUS "OpenMP:   not found — affected loops will run serially (still correct, just single-threaded)")
+endif()
+
+# ── Link-time optimization / interprocedural optimization (automatic) ────────
+# Unlike SQT_NATIVE_ARCH above, LTO/IPO carries no "illegal instruction on a
+# different CPU" portability risk -- it doesn't change the target ISA, only
+# how the compiler optimizes across translation-unit boundaries at link
+# time. Applied automatically whenever the toolchain supports it (no opt-in
+# flag needed), scoped to Release only -- Debug/RelWithDebInfo stay fast to
+# build and easy to debug, matching the existing /O2-vs-/Od split above.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT SQT_IPO_SUPPORTED OUTPUT SQT_IPO_ERROR)
+if(SQT_IPO_SUPPORTED)
+    set_property(TARGET _sqt_core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    message(STATUS "LTO/IPO:  enabled for Release builds")
+else()
+    message(STATUS "LTO/IPO:  not supported by this toolchain (${SQT_IPO_ERROR}) — skipping")
 endif()
 
 # ── Target properties ─────────────────────────────────────────────────────────

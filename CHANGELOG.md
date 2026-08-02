@@ -442,6 +442,25 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Deep native optimization, Phase 3 (build): LTO/IPO enabled for Release
+  builds.** `_cpp/CMakeLists.txt` now runs `CheckIPOSupported` and applies
+  `INTERPROCEDURAL_OPTIMIZATION_RELEASE` automatically when the toolchain
+  supports it — unlike `SQT_NATIVE_ARCH`, this carries no "illegal
+  instruction on a different CPU" portability risk (link-time only, doesn't
+  change the target ISA), so it's not gated behind an opt-in flag. Scoped to
+  Release only, same as the existing `/O2`-vs-`/Od` split. Full native
+  ctest + full pytest passed unchanged as the actual correctness gate (LTO
+  can in principle shift FP instruction selection under whole-program
+  visibility; no regression surfaced). Measured honestly, not assumed:
+  clean-build time on this (small, 9-source-file) extension is unaffected
+  either way (~5.7-6.0s, noise-level difference); a handful of representative
+  kernels (`rsi`, `adx`, `rolling_factor_loadings`, `run_strategy`, n=2000)
+  showed **no measurable runtime difference** (~1.0× across the board) —
+  each kernel's hot loop already lives entirely within its own translation
+  unit, so there wasn't much cross-TU inlining opportunity for LTO to
+  exploit in this codebase's current structure. Kept anyway since it's a
+  free, correctness-neutral toolchain improvement with no measured downside,
+  matching the review's own framing ("percentages, not multiples... low-effort").
 - **Deep native optimization, Phase 2 (`backtest.cpp`): allocation-free
   summary kernel + OpenMP across the batch grid.** New `run_strategy_summary()`
   computes `run_strategy()`'s 11 scalar metrics with zero heap allocation at
