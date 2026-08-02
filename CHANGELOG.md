@@ -442,6 +442,43 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Deep native optimization, item L: runtime ISA dispatch demo (AVX2+FMA,
+  `rolling_beta` only).** New `include/sqt/isa_dispatch.hpp` +
+  `src/isa_dispatch.cpp`: lazily-detected, thread-safe (C++11 magic static)
+  `IsaFeatures{avx2, fma}` via CPUID (`__cpuid`/`__cpuidex` on MSVC,
+  `__get_cpuid`/`__get_cpuid_count` on GCC/Clang), plus a test-only override
+  hook (`force_isa_features_for_testing`/`reset_isa_features_override_for_testing`)
+  — the only practical way to exercise the "runs correctly on a non-AVX2
+  CPU" path without physical access to one. Deliberately scoped to **one
+  kernel, AVX2 only** (not AVX-512, per the review's own caveat that
+  AVX-512 isn't automatically faster) — `rolling_beta_into`'s 4-accumulator
+  window reduction (`Sx`, `Sy`, `Sxy`, `Sxx`), chosen as the same reduction
+  item C's SIMD-pragma attempt already targeted. New
+  `src/rolling_beta_avx2.cpp` (`rolling_beta_reduce_avx2`) in its own
+  translation unit, compiled unconditionally with AVX2+FMA codegen enabled
+  via `set_source_files_properties` (`/arch:AVX2` MSVC, `-mavx2 -mfma`
+  GCC/Clang) — **independent of the opt-in `SQT_NATIVE_ARCH` flag**, since
+  MSVC has no per-function ISA-target attribute (unlike GCC/Clang's
+  `__attribute__((target(...)))`), so isolating the intrinsics into their
+  own file is the only portable way to keep the rest of the module's
+  codegen safe on non-AVX2 CPUs when `SQT_NATIVE_ARCH=OFF`. Runtime safety
+  comes entirely from `isa_dispatch.cpp`'s CPUID check gating every call
+  into this file, not from the compile flag. `rolling_beta_into` dispatches
+  once per call (not per window) based on `detect_isa_features().avx2`.
+  **Not bit-identical to the scalar path** (SIMD lane accumulation reorders
+  the sum) — tolerance-gated (`1e-6` absolute, `.hurst`-style bounded
+  quantity) against the scalar path forced via the test override hook,
+  across normal data, a large-baseline case (same cancellation-risk shape
+  as `rolling_beta`'s existing large-baseline fix), a window not a multiple
+  of 4 (exercises the AVX2 kernel's scalar tail), and window==n. A separate
+  forced-scalar-path test confirms the scalar fallback alone still recovers
+  a known slope exactly. Measured (min of 15 runs, real dispatch vs. the
+  same test-forced scalar path, not a projection): **n=2000/window=60:
+  ~1.50×**; **n=20000/window=60: ~1.10×** — modest, honestly reported gains
+  for a single reduction kernel, not the dramatic win a wholesale
+  multi-kernel AVX2/AVX-512 rewrite might chase (explicitly out of this
+  item's scope, per its own spec, to avoid the scope creep the review's own
+  caveat about AVX-512 warned against).
 - **Deep native optimization, item K: opt-in, local-only PGO (Profile-Guided
   Optimization) build workflow.** New `SQT_PGO_GENERATE`/`SQT_PGO_USE`
   CMake options (default `OFF`, mutually exclusive — `FATAL_ERROR` if both

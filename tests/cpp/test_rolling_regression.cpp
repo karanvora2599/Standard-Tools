@@ -12,6 +12,8 @@
 
 #include "sqt/rolling_regression.hpp"
 
+#include "sqt/isa_dispatch.hpp"
+
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -219,6 +221,77 @@ static void test_rolling_beta_nan_prefix() {
     CHECK_NOT_NAN(out[window - 1]);
 }
 
+// ── rolling_beta: runtime ISA dispatch (item L) ─────────────────────────────
+//
+// rolling_beta_into dispatches to an AVX2+FMA reduction when
+// detect_isa_features().avx2 is true, otherwise the portable scalar path.
+// NOT bit-identical between the two (SIMD lane accumulation reorders the
+// sum) -- tolerance-gated here, comparing the AVX2 path (this machine is
+// AVX2-capable, so this is the real dispatched path in every other test in
+// this file) against the scalar path forced via the test-only override
+// hook -- the only practical way to exercise "runs correctly on a
+// non-AVX2 CPU" without physical access to one.
+
+static void test_rolling_beta_avx2_matches_scalar_tolerance() {
+    struct Case { int n, window; bool huge_baseline; };
+    const Case cases[] = {
+        {500, 60, false},
+        {500, 60, true},   // large-baseline cancellation stress, same shape
+                            // as the existing large-baseline fix this file
+                            // already covers for the scalar path
+        {200, 7, false},   // window not a multiple of 4 -> exercises the
+                            // AVX2 kernel's scalar tail
+        {37, 37, false},   // window == n (single output value)
+    };
+
+    for (const auto& c : cases) {
+        std::vector<double> x(c.n), y(c.n);
+        std::uint64_t state = 909;
+        for (int i = 0; i < c.n; ++i) {
+            double xv = pseudo_random(state) * 3.0;
+            double yv = pseudo_random(state) * 3.0;
+            if (c.huge_baseline) { xv += 1e9; yv += 1e9; }
+            x[i] = xv;
+            y[i] = yv;
+        }
+
+        sqt::reset_isa_features_override_for_testing();
+        auto out_avx2 = sqt::rolling_beta(y.data(), x.data(), c.n, c.window);
+
+        sqt::force_isa_features_for_testing({false, false});
+        auto out_scalar = sqt::rolling_beta(y.data(), x.data(), c.n, c.window);
+        sqt::reset_isa_features_override_for_testing();
+
+        for (int i = c.window - 1; i < c.n; ++i) {
+            if (std::isnan(out_scalar[i])) {
+                CHECK_NAN(out_avx2[i]);
+            } else {
+                CHECK_NEAR(out_avx2[i], out_scalar[i], 1e-6);
+            }
+        }
+    }
+}
+
+static void test_rolling_beta_forced_scalar_path_correct() {
+    // With the AVX2 path forced off, the scalar path alone must still
+    // recover a known slope exactly (same assertion as
+    // test_rolling_beta_recovers_known_slope, but with the dispatch
+    // explicitly pinned to scalar rather than relying on this machine
+    // happening to route there).
+    sqt::force_isa_features_for_testing({false, false});
+    const int n = 60, window = 20;
+    std::vector<double> x(n), y(n);
+    std::uint64_t state = 55;
+    for (int i = 0; i < n; ++i) {
+        x[i] = pseudo_random(state) * 4.0;
+        y[i] = 1.5 * x[i];
+    }
+    auto out = sqt::rolling_beta(y.data(), x.data(), n, window);
+    sqt::reset_isa_features_override_for_testing();
+
+    for (int i = window - 1; i < n; ++i) CHECK_NEAR(out[i], 1.5, 1e-6);
+}
+
 int main() {
     test_nan_prefix_and_shape();
     test_single_factor_recovers_known_coefficients();
@@ -227,6 +300,8 @@ int main() {
     test_window_larger_than_n_all_nan();
     test_rolling_beta_recovers_known_slope();
     test_rolling_beta_nan_prefix();
+    test_rolling_beta_avx2_matches_scalar_tolerance();
+    test_rolling_beta_forced_scalar_path_correct();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

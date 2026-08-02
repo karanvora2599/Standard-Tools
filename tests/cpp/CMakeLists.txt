@@ -198,6 +198,8 @@ add_test(NAME cpp_signals COMMAND test_signals)
 
 add_library(sqt_rolling_regression_impl STATIC
     ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_regression.cpp
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/isa_dispatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_beta_avx2.cpp
 )
 target_include_directories(sqt_rolling_regression_impl PUBLIC
     ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
@@ -205,8 +207,16 @@ target_include_directories(sqt_rolling_regression_impl PUBLIC
 target_compile_features(sqt_rolling_regression_impl PUBLIC cxx_std_17)
 if(MSVC)
     target_compile_options(sqt_rolling_regression_impl PRIVATE /O2 /W3 /wd4244 /wd4267)
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_beta_avx2.cpp
+        PROPERTIES COMPILE_OPTIONS "/arch:AVX2"
+    )
 else()
     target_compile_options(sqt_rolling_regression_impl PRIVATE -O2 -Wall -Wextra)
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/rolling_beta_avx2.cpp
+        PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
+    )
 endif()
 
 add_executable(test_rolling_regression test_rolling_regression.cpp)

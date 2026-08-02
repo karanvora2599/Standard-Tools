@@ -16,10 +16,30 @@ set(SQT_SOURCES
     src/monte_carlo.cpp
     src/garch.cpp
     src/signal_state_machines.cpp
+    src/isa_dispatch.cpp
+    src/rolling_beta_avx2.cpp
     bindings/bindings.cpp
 )
 
 pybind11_add_module(_sqt_core MODULE ${SQT_SOURCES})
+
+# ── AVX2+FMA translation unit (item L: runtime ISA dispatch demo) ────────────
+# rolling_beta_avx2.cpp uses AVX2/FMA intrinsics directly and must always be
+# compiled with those instructions enabled, INDEPENDENT of SQT_NATIVE_ARCH
+# (that flag is opt-in/off-by-default; this file's codegen must be on
+# unconditionally for the intrinsics it uses to even compile) -- the actual
+# runtime safety comes from isa_dispatch.cpp's CPUID check gating every call
+# into this file, not from the compile flag. MSVC has no per-function
+# ISA-target attribute (unlike GCC/Clang's __attribute__((target(...)))), so
+# isolating these intrinsics into their own translation unit compiled with
+# /arch:AVX2 is the only portable way to keep the rest of the module's
+# codegen (which must stay safe on non-AVX2 CPUs when SQT_NATIVE_ARCH=OFF)
+# unaffected.
+if(MSVC)
+    set_source_files_properties(src/rolling_beta_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+else()
+    set_source_files_properties(src/rolling_beta_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+endif()
 
 # ── C++ standard ──────────────────────────────────────────────────────────────
 

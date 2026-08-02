@@ -1,5 +1,8 @@
 #include "sqt/rolling_regression.hpp"
 
+#include "sqt/isa_dispatch.hpp"
+#include "sqt/rolling_beta_avx2.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -205,29 +208,42 @@ void rolling_beta_into(
     double Sx = 0.0, Sy = 0.0, Sxy = 0.0, Sxx = 0.0;
     std::size_t since_refresh = 0;
 
+    // Runtime ISA dispatch (item L): use the AVX2+FMA reduction when the
+    // actual CPU supports it, otherwise the portable scalar path -- a
+    // single build/wheel gets the fast path on capable hardware without
+    // risking an illegal-instruction crash on older CPUs the way the
+    // opt-in SQT_NATIVE_ARCH compile flag would. NOT bit-identical between
+    // the two paths (SIMD lane accumulation reorders the sum) -- verified
+    // via a tolerance gate, not assumed; see tests/test_cpp_regression.py.
+    const bool use_avx2 = detect_isa_features().avx2;
+
     auto recompute_window = [&](std::size_t start) {
         cx = x[start];
         cy = y[start];
-        Sx = Sy = Sxy = Sxx = 0.0;
-        // Vectorization hint only, not a functional requirement -- a
-        // 4-accumulator reduction the compiler may already auto-vectorize
-        // at -O3/-march=native without it. MSVC's default /openmp only
-        // implements OpenMP 2.0, which doesn't recognize `omp simd` (that's
-        // 4.0+) -- confirmed this is a hard C7660 compile error there
-        // (requires /openmp:experimental), not a silent no-op as initially
-        // assumed, so this pragma is scoped to non-MSVC compilers only
-        // rather than pulling in a project-wide experimental-flag change
-        // for one vectorization hint.
+        if (use_avx2) {
+            rolling_beta_reduce_avx2(x, y, start, window, cx, cy, Sx, Sy, Sxy, Sxx);
+        } else {
+            Sx = Sy = Sxy = Sxx = 0.0;
+            // Vectorization hint only, not a functional requirement -- a
+            // 4-accumulator reduction the compiler may already auto-vectorize
+            // at -O3/-march=native without it. MSVC's default /openmp only
+            // implements OpenMP 2.0, which doesn't recognize `omp simd` (that's
+            // 4.0+) -- confirmed this is a hard C7660 compile error there
+            // (requires /openmp:experimental), not a silent no-op as initially
+            // assumed, so this pragma is scoped to non-MSVC compilers only
+            // rather than pulling in a project-wide experimental-flag change
+            // for one vectorization hint.
 #if defined(SQT_HAS_OPENMP) && !defined(_MSC_VER)
-        #pragma omp simd reduction(+:Sx,Sy,Sxy,Sxx)
+            #pragma omp simd reduction(+:Sx,Sy,Sxy,Sxx)
 #endif
-        for (std::size_t j = start; j < start + static_cast<std::size_t>(window); ++j) {
-            const double xd = x[j] - cx;
-            const double yd = y[j] - cy;
-            Sx  += xd;
-            Sy  += yd;
-            Sxy += xd * yd;
-            Sxx += xd * xd;
+            for (std::size_t j = start; j < start + static_cast<std::size_t>(window); ++j) {
+                const double xd = x[j] - cx;
+                const double yd = y[j] - cy;
+                Sx  += xd;
+                Sy  += yd;
+                Sxy += xd * yd;
+                Sxx += xd * xd;
+            }
         }
         since_refresh = 0;
     };
