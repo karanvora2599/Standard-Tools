@@ -2,11 +2,11 @@
 
 The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
 
-- **Hurst exponent** — 20–80× faster (DFA/R-S); 30–100× for rolling Hurst. Pure-Python fallback is automatic when the extension is not built.
-- **Cointegration** — 5–15× faster (Engle-Granger OLS + ADF + MacKinnon 2010); bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
-- **`calculate_beta`, `half_life`, `compute_spread`** — 10–20× faster (2-variable OLS via closed-form normal equations, avoids LAPACK `lstsq` overhead).
-- **`rolling_beta`** — 10–40× faster (incremental O(1)-per-bar sum updates replace two sequential pandas `.rolling().cov()/.var()` passes).
-- **`rolling_factor_loadings`** — 50–200× faster (incremental rank-1 XtX/Xty updates with periodic Cholesky re-solve to prevent drift; each bar costs O(k²) instead of a full O(n·k²) `lstsq`).
+- **Hurst exponent** — measured 83–131× faster (DFA, n=500/n=2 000); measured 274× for rolling Hurst (n=2 000, window=200). Pure-Python fallback is automatic when the extension is not built.
+- **Cointegration** — measured 24× faster (Engle-Granger OLS + ADF + MacKinnon 2010, n=500 vs. statsmodels); bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
+- **`calculate_beta`, `half_life`, `compute_spread`** — measured 1.1–1.4× faster (2-variable OLS via closed-form normal equations, avoids LAPACK `lstsq` overhead) — a real but modest win; `lstsq` on a 2-variable system turned out not to carry as much LAPACK-call overhead as originally estimated. (An earlier, unmeasured 10–20× projection appeared in this doc before `_sqt_core` was actually built and benchmarked — see `Development/performance_insights.md` for the full before/after story.)
+- **`rolling_beta`** — measured 4.7× faster (incremental O(1)-per-bar sum updates replace two sequential pandas `.rolling().cov()/.var()` passes, n=2 000, window=60), plus a further ~1.1–1.5× from an optional runtime AVX2+FMA dispatch path on capable CPUs (falls back to the same scalar kernel elsewhere). (An earlier, unmeasured 10–40× projection appeared in this doc before real measurement — see `Development/performance_insights.md`.)
+- **`rolling_factor_loadings`** — measured 26× faster (incremental rank-1 XtX/Xty updates with periodic Cholesky re-solve to prevent drift; each bar costs O(k²) instead of a full O(n·k²) `lstsq`), plus a further ~1.1–1.8× (larger at smaller k) from later allocation-elimination work on the Cholesky solve itself. (An earlier, unmeasured 50–200× projection appeared in this doc before real measurement — see `Development/performance_insights.md`.)
 
 `scipy` is used for precise p-values in `multi_factor_regression` when available and falls back gracefully to a `math.erf`-based normal approximation otherwise.
 
@@ -153,7 +153,7 @@ When `_sqt_core` is built, `rolling_factor_loadings` uses an incremental rank-1 
 - **Slide** each subsequent bar: add the new row to `XtX`/`Xty` (rank-1 update, O(k²)) and subtract the leaving row, then re-solve the updated system.
 - **Refresh** every `window` steps with a full rebuild to prevent floating-point drift from accumulating in the incremental updates.
 
-This replaces the Python fallback's O(n · n·k²) per-window `np.linalg.lstsq` loop, giving **50–200× speedup** on typical inputs (n=500, window=60, k=3 factors: ~100 ms → ~0.5 ms).
+This replaces the Python fallback's O(n · n·k²) per-window `np.linalg.lstsq` loop, giving a **measured 26× speedup** on typical inputs (n=500, window=60, k=3 factors, vs. `lstsq`). A later optimization pass (eliminating dead upper-triangle work in the normal-equations build and reusing scratch buffers across the whole rolling loop instead of reallocating per bar) added a further **~1.1–1.8× on top of that** — larger at smaller `k`, where allocator overhead turns out to matter more than the O(k²)/O(k³) math itself; see `Development/performance_insights.md` for the full breakdown across `k`.
 
 ```python
 from standard_quant_tools.analysis.multi_factor import HAS_CPP

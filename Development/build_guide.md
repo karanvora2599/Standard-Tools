@@ -206,35 +206,34 @@ Each C++ feature has a matching Python integration test file. Tests that require
 the compiled extension are automatically skipped when it is not built.
 
 ```
-pytest tests/test_cpp_hurst.py -v            # Hurst + rolling Hurst
-pytest tests/test_cpp_indicators.py -v       # RSI, ADX, Parabolic SAR, Wilder's ATR
-pytest tests/test_cpp_new_indicators.py -v   # Bollinger Bands, Stochastic Oscillator
-pytest tests/test_cpp_cointegration.py -v    # Engle-Granger cointegration + OLS
-pytest tests/test_cpp_backtest.py -v         # run_strategy + batch_run_strategy kernels
-pytest tests/test_cpp_regression.py -v       # rolling_beta, rolling_factor_loadings
-pytest tests/test_cpp_monte_carlo.py -v      # simulate_forward_paths
-pytest tests/test_cpp_garch.py -v            # garch11_variance_recursion
-pytest tests/test_cpp_signals.py -v          # kalman_filter_1state/2state, donchian/vwap-reversion state machines
+pytest tests/test_cpp_hurst.py -v                  # Hurst + rolling Hurst
+pytest tests/test_cpp_indicators.py -v             # RSI, ADX, Parabolic SAR, Wilder's ATR
+pytest tests/test_cpp_new_indicators.py -v         # Bollinger Bands, Stochastic Oscillator, fused technical_indicators()
+pytest tests/test_cpp_cointegration.py -v          # Engle-Granger cointegration + OLS
+pytest tests/test_cpp_backtest.py -v               # run_strategy + batch_run_strategy kernels
+pytest tests/test_cpp_regression.py -v             # rolling_beta (incl. AVX2 dispatch), rolling_factor_loadings
+pytest tests/test_cpp_monte_carlo.py -v            # simulate_forward_paths
+pytest tests/test_cpp_garch.py -v                  # garch11_variance_recursion, fused NLL + analytic gradient
+pytest tests/test_cpp_signals.py -v                # kalman_filter_1state/2state, donchian/vwap-reversion state machines
+pytest tests/test_cpp_array1d_validation.py -v     # 1-D array validation across every Array1D binding
+pytest tests/test_cpp_gil_release.py -v            # GIL is actually released around every pure-C++ kernel call
 ```
 
-Or run all nine at once:
+Or run all eleven at once:
 
 ```
-pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py tests/test_cpp_monte_carlo.py tests/test_cpp_garch.py tests/test_cpp_signals.py -v
+pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py tests/test_cpp_monte_carlo.py tests/test_cpp_garch.py tests/test_cpp_signals.py tests/test_cpp_array1d_validation.py tests/test_cpp_gil_release.py -v
 ```
 
-Once the extension is built all skipped tests activate — 311 tests pass
-across the nine files above with a built `_sqt_core`.
-`tests/test_cpp_indicators.py` and `tests/test_cpp_new_indicators.py` each
-gained one gated test on 2026-07-24 (commit `2242d63`) for the new
-`stochastic_oscillator` `d_period<=0` guard and `parabolic_sar`
-`af_start`/`af_step`/`af_max` validation.
+Once the extension is built all skipped tests activate — run the suite to
+see the current numbers rather than trusting a hardcoded count here; it
+grows as tests are added.
 
-A separate gated test class outside these six files, `TestNativeTradeStatsCorrectness`
-in `tests/test_backtest.py`, was added the same day to verify `run_strategy`'s
-and `batch_run_strategy`'s native trade-log accounting against hand-computed
-values once `_sqt_core` is built — see `Development/performance_insights.md`
-for the trade-stat parity background.
+A separate gated test class outside these files, `TestNativeTradeStatsCorrectness`
+in `tests/test_backtest.py`, verifies `run_strategy`'s and `batch_run_strategy`'s
+native trade-log accounting against hand-computed values once `_sqt_core`
+is built — see `Development/performance_insights.md` for the trade-stat
+parity background.
 
 ### C++ unit tests
 
@@ -244,8 +243,8 @@ cmake --build build --config Release
 ctest --test-dir build --config Release -V
 ```
 
-This runs seven test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`,
-`cpp_backtest`, `cpp_monte_carlo`, `cpp_garch`, `cpp_signals`.
+This runs eight test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`,
+`cpp_backtest`, `cpp_monte_carlo`, `cpp_garch`, `cpp_signals`, `cpp_rolling_regression`.
 
 Or run each binary directly:
 
@@ -258,6 +257,7 @@ build\tests\cpp\Release\test_backtest.exe
 build\tests\cpp\Release\test_monte_carlo.exe
 build\tests\cpp\Release\test_garch.exe
 build\tests\cpp\Release\test_signals.exe
+build\tests\cpp\Release\test_rolling_regression.exe
 
 # Windows (Ninja) / Linux / macOS
 ./build/tests/cpp/test_hurst
@@ -267,6 +267,7 @@ build\tests\cpp\Release\test_signals.exe
 ./build/tests/cpp/test_monte_carlo
 ./build/tests/cpp/test_garch
 ./build/tests/cpp/test_signals
+./build/tests/cpp/test_rolling_regression
 ```
 
 Each binary prints its own pass count on exit, e.g.:
@@ -279,6 +280,7 @@ N / N tests passed.   ← test_backtest
 N / N tests passed.   ← test_monte_carlo
 N / N tests passed.   ← test_garch
 N / N tests passed.   ← test_signals
+N / N tests passed.   ← test_rolling_regression
 ```
 
 `N` grows as tests are added to `tests/cpp/test_*.cpp` — do not hardcode a
@@ -330,46 +332,54 @@ Standard Tools/
 │   └── standard_quant_tools/
 │       ├── _sqt_core.[pyd|so]               ← Compiled output (generated, gitignored)
 │       └── _cpp/                            ← All C++ sources
-│           ├── CMakeLists.txt               ← Extension build rules
+│           ├── CMakeLists.txt               ← Extension build rules (LTO/IPO, PGO options, OpenMP, AVX2 file override)
 │           ├── include/sqt/
-│           │   ├── hurst.hpp                ← Hurst exponent API
-│           │   ├── indicators.hpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic API
+│           │   ├── platform.hpp             ← SQT_RESTRICT portable qualifier macro
+│           │   ├── isa_dispatch.hpp         ← Runtime CPUID feature detection (IsaFeatures{avx2,fma})
+│           │   ├── hurst.hpp                ← Hurst exponent / rolling Hurst API
+│           │   ├── indicators.hpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + fused technical_indicators() API
 │           │   ├── cointegration.hpp        ← OLS / ADF / Engle-Granger / Kalman (1-state, 2-state) API
-│           │   ├── backtest.hpp             ← run_strategy / batch_run_strategy kernel API
+│           │   ├── backtest.hpp             ← run_strategy / run_strategy_summary / batch_run_strategy kernel API
 │           │   ├── rolling_regression.hpp   ← rolling_beta / rolling_factor_loadings API
+│           │   ├── rolling_beta_avx2.hpp    ← AVX2+FMA rolling_beta reduction kernel API (internal, used only by rolling_regression.cpp)
 │           │   ├── monte_carlo.hpp          ← simulate_forward_paths (moving-block bootstrap) API
-│           │   ├── garch.hpp                ← GARCH(1,1) variance recursion API
+│           │   ├── garch.hpp                ← GARCH(1,1) variance recursion + fused NLL/gradient API
 │           │   └── signal_state_machines.hpp ← Donchian / VWAP-reversion signal hysteresis API
 │           ├── src/
-│           │   ├── hurst.cpp                ← Hurst implementation
-│           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic implementation
+│           │   ├── isa_dispatch.cpp         ← CPUID detection + test-only override hook
+│           │   ├── hurst.cpp                ← Hurst implementation (OpenMP across rolling windows, one-pass DFA)
+│           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + technical_indicators() implementation
 │           │   ├── cointegration.cpp        ← OLS / ADF / cointegration / Kalman filter implementation
-│           │   ├── backtest.cpp             ← backtest + batch grid kernel implementation
-│           │   ├── rolling_regression.cpp   ← incremental rolling beta / factor loadings implementation
+│           │   ├── backtest.cpp             ← run_strategy / run_strategy_summary / batch_run_strategy (OpenMP across the grid) implementation
+│           │   ├── rolling_regression.cpp   ← incremental rolling beta (+ AVX2 dispatch) / factor loadings implementation
+│           │   ├── rolling_beta_avx2.cpp    ← AVX2+FMA kernel, its own translation unit (compiled with /arch:AVX2 unconditionally)
 │           │   ├── monte_carlo.cpp          ← moving-block bootstrap, optional OpenMP parallel loop
-│           │   ├── garch.cpp                ← GARCH(1,1) variance recursion implementation
+│           │   ├── garch.cpp                ← GARCH(1,1) variance recursion + fused NLL/analytic-gradient implementation
 │           │   └── signal_state_machines.cpp ← Donchian / VWAP-reversion hysteresis implementation
 │           └── bindings/
-│               └── bindings.cpp             ← pybind11 module definition (all features)
+│               └── bindings.cpp             ← pybind11 module definition (all features, direct-write NumPy buffers)
 └── tests/
     ├── test_cpp_hurst.py                    ← Python integration tests (Hurst)
     ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR/ATR)
-    ├── test_cpp_new_indicators.py           ← Python integration tests (Bollinger/Stochastic)
+    ├── test_cpp_new_indicators.py           ← Python integration tests (Bollinger/Stochastic, fused technical_indicators())
     ├── test_cpp_cointegration.py            ← Python integration tests (cointegration+OLS+Kalman)
-    ├── test_cpp_backtest.py                 ← Python integration tests (backtest + batch kernel)
-    ├── test_cpp_regression.py               ← Python integration tests (rolling beta/factor loadings)
+    ├── test_cpp_backtest.py                 ← Python integration tests (backtest + batch kernel, array-based batch return)
+    ├── test_cpp_regression.py               ← Python integration tests (rolling beta incl. AVX2 dispatch, rolling factor loadings)
     ├── test_cpp_monte_carlo.py              ← Python integration tests (Monte Carlo, statistical parity only)
-    ├── test_cpp_garch.py                    ← Python integration tests (GARCH(1,1) recursion)
+    ├── test_cpp_garch.py                    ← Python integration tests (GARCH(1,1) recursion, fused NLL/gradient)
     ├── test_cpp_signals.py                  ← Python integration tests (Donchian/VWAP-reversion signals)
+    ├── test_cpp_array1d_validation.py       ← Python integration tests (1-D array validation across every binding)
+    ├── test_cpp_gil_release.py              ← Python integration tests (GIL actually released around pure-C++ calls)
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
-        ├── test_hurst.cpp                   ← 17 C++ unit tests (no framework needed)
-        ├── test_indicators.cpp              ← 24 C++ unit tests
-        ├── test_cointegration.cpp           ← 25 C++ unit tests (incl. Kalman 1-state/2-state)
-        ├── test_backtest.cpp                ← 17 C++ unit tests
+        ├── test_hurst.cpp                   ← 23 C++ unit tests (no framework needed)
+        ├── test_indicators.cpp              ← 35 C++ unit tests
+        ├── test_cointegration.cpp           ← 26 C++ unit tests (incl. Kalman 1-state/2-state)
+        ├── test_backtest.cpp                ← 24 C++ unit tests (incl. run_strategy_summary/batch OpenMP reproducibility)
         ├── test_monte_carlo.cpp             ← 10 C++ unit tests (incl. thread-count independence)
-        ├── test_garch.cpp                   ← 6 C++ unit tests
-        ├── test_signals.cpp                 ← 11 C++ unit tests
+        ├── test_garch.cpp                   ← 13 C++ unit tests (incl. analytic-gradient vs. numerical central differences)
+        ├── test_signals.cpp                 ← 12 C++ unit tests
+        ├── test_rolling_regression.cpp      ← 9 C++ unit tests (incl. AVX2-vs-scalar tolerance gate, forced-scalar-path test)
         ├── bench_hurst.cpp                  ← Hurst timing benchmark (run manually)
         └── bench_backtest.cpp               ← Backtest kernel timing benchmark (run manually)
 ```
@@ -380,23 +390,27 @@ Standard Tools/
 
 | Feature | Header | Source | Python caller |
 |---|---|---|---|
-| Hurst exponent + rolling Hurst | `hurst.hpp` | `hurst.cpp` | `analysis/hurst.py` |
+| Hurst exponent + rolling Hurst (OpenMP across windows, one-pass DFA reformulation) | `hurst.hpp` | `hurst.cpp` | `analysis/hurst.py` |
 | RSI (Wilder's smoothing) | `indicators.hpp` | `indicators.cpp` | `indicators/momentum.py` |
-| ADX + DI+/DI− | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
+| ADX + DI+/DI− (O(1) auxiliary memory) | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
 | Parabolic SAR | `indicators.hpp` | `indicators.cpp` | `indicators/trend.py` |
 | Wilder's ATR (SMA seed + Wilder's smooth) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
 | Bollinger Bands (fused Σx/Σx² pass) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
 | Stochastic Oscillator (fused min+max pass) | `indicators.hpp` | `indicators.cpp` | `indicators/momentum.py` |
+| Fused `technical_indicators()` — RSI/ADX/ATR/Bollinger/Stochastic in one native call | `indicators.hpp` | `indicators.cpp` | `agent/tools.py`'s technical-analysis tool (additive fast path when ≥2 fusable indicators requested) |
 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | `cointegration.hpp` | `cointegration.cpp` | `analysis/regression.py`, `analysis/cointegration.py` |
 | Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
-| Backtest kernel (`run_strategy` — returns, equity, all 6 metrics; trade stats also computed but see note below) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
-| Batch backtest grid kernel (`batch_run_strategy` — returns, equity, all 6 metrics, trade stats) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
-| Rolling beta (incremental sum updates) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/regression.py` |
-| Rolling factor loadings (incremental Cholesky) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
+| Backtest kernel (`run_strategy` — equity curve + all 11 metrics) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
+| Allocation-free summary kernel (`run_strategy_summary` — same 11 metrics, zero heap allocation, no equity curve) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` (internal — used by `batch_run_strategy`, not exposed to Python directly) |
+| Batch backtest grid kernel (`batch_run_strategy` — `(num_tests, 11)` NumPy array, OpenMP across parameter combinations) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
+| Rolling beta (incremental sum updates + optional runtime AVX2+FMA dispatch) | `rolling_regression.hpp` | `rolling_regression.cpp`, `rolling_beta_avx2.cpp` | `analysis/regression.py` |
+| Rolling factor loadings (incremental Cholesky, dead-triangle elimination, scratch-buffer reuse) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
 | Monte Carlo forward simulation (moving-block bootstrap, optional OpenMP) | `monte_carlo.hpp` | `monte_carlo.cpp` | `backtest/monte_carlo.py` |
-| GARCH(1,1) conditional variance recursion | `garch.hpp` | `garch.cpp` | `analysis/garch.py` |
+| GARCH(1,1) conditional variance recursion + fused NLL/analytic gradient | `garch.hpp` | `garch.cpp` | `analysis/garch.py` |
 | Kalman filter, 1-state and 2-state (time-varying hedge ratio) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 | Donchian breakout / VWAP-reversion signal hysteresis | `signal_state_machines.hpp` | `signal_state_machines.cpp` | `backtest/strategies.py` |
+
+**`batch_run_strategy`'s return format changed** from a `py::list` of `py::dict` (one dict per grid combination) to a single `(num_tests, 11)` `py::array_t<double>` with a fixed column order (`_BATCH_METRIC_COLUMNS` in `engine.py`) — a direct C++-caller integration, not a public Python API most users touch directly (`backtest_grid()` still returns a `pd.DataFrame` either way).
 
 **Monte Carlo RNG note:** the C++ path's RNG (splitmix64-derived per-path
 seeding + `std::mt19937_64`) does **not** reproduce NumPy's PCG64 bit

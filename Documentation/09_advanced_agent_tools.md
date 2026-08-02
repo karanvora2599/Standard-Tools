@@ -82,7 +82,7 @@ Thirty-one high-level agentic tools that compose the library's existing primitiv
 
 > **In-sample only — not out-of-sample validated:** this tool computes Hurst, optimises parameters, *and* backtests all on the same requested date range. That's fast and useful for a quick exploratory look, but it's in-sample selection bias, not a trustworthy performance estimate — the parameters were chosen using the same data they're then "tested" on. When you need a genuinely out-of-sample answer (or want to avoid the hardcoded regime → strategy map below), use [`run_regime_adaptive_walkforward_backtest`](#14-regime-adaptive-walk-forward-backtest-leakage-free) instead — same idea, walked forward window by window like `run_walk_forward_backtest`, with every window's strategy choice tested against *all four* registered strategies rather than assumed from Hurst alone.
 
-> **Performance:** The dominant cost in this tool is the `hurst_exponent` call on the full return series. With the optional C++ extension (`_sqt_core`) built, this step runs 20–80× faster, reducing total wall-clock time for the tool from ~10–20 s to ~0.5–2 s on a 2 000-bar series. See [Development/build_guide.md](../Development/build_guide.md).
+> **Performance:** The dominant cost in this tool is the `hurst_exponent` call on the full return series. With the optional C++ extension (`_sqt_core`) built, this step runs measured 83–131× faster (n=500/n=2 000), reducing total wall-clock time for the tool from ~10–20 s to well under a second on a 2 000-bar series. See [Development/build_guide.md](../Development/build_guide.md).
 
 **Regime → Strategy mapping:**
 
@@ -260,7 +260,7 @@ else:
 
 `scan_pairs` tests all O(n²/2) ticker combinations for cointegration, filters by p-value and half-life bounds, and returns the top N pairs sorted by half-life (shortest first = fastest mean reversion = most tradeable). Each ticker's prices are fetched **once** before testing begins.
 
-> **Performance:** Each pair test calls `cointegration_test`, which uses the C++ extension (`_sqt_core`) when available — **5–15× faster** than the statsmodels fallback. For a universe of 10 tickers (45 pairs), the C++ path reduces total scan time from ~15–20 s to ~1–3 s.
+> **Performance:** Each pair test calls `cointegration_test`, which uses the C++ extension (`_sqt_core`) when available — measured **24× faster** than the statsmodels fallback (n=500). For a universe of 10 tickers (45 pairs), the C++ path reduces total scan time from ~15–20 s to well under 2 s.
 
 ```python
 from standard_quant_tools.agent.tools import scan_pairs

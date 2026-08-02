@@ -6,6 +6,8 @@ Performance-critical indicators use a three-tier execution stack: **C++ extensio
 
 The following indicators have a **C++ fast path** via `_sqt_core`: RSI, ADX, Parabolic SAR, Wilder's ATR, Bollinger Bands, and Stochastic Oscillator. `atr()` uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series. All C++ paths fall back to pure Python/pandas automatically when the extension is not built — the API is identical either way.
 
+Internally, when the AI-agent technical-analysis tool (`get_technical_analysis`) needs 2 or more of {RSI, ADX, Bollinger Bands, Stochastic Oscillator} at once, it uses a single fused native call (`technical_indicators()` in `_sqt_core`) instead of one C++ round trip per indicator — measured ~4.6× faster than calling the individual Python wrappers separately at that integration point (n=2 000; the win is eliminating redundant Python-side validation/logging/conversion overhead per call, not a faster indicator kernel — see `Development/performance_insights.md`). This is purely an internal optimization; the individual `rsi()`/`adx()`/`bollinger_bands()`/`stochastic_oscillator()` functions documented below are unaffected and still used standalone everywhere else.
+
 ---
 
 ## Trend Indicators
@@ -120,7 +122,7 @@ df['overbought'] = df['RSI'] > 70
 
 ### Stochastic Oscillator *(C++ extension)*
 
-Uses a C++ fused sliding min+max pass (5–15× faster than two separate pandas rolling operations). Falls back to pandas when the extension is not built.
+Uses a C++ fused sliding min+max pass — measured 2.6× faster than two separate pandas rolling operations (n=2 000; an earlier, unmeasured 5–15× projection appeared in this doc before `_sqt_core` was actually benchmarked — see `Development/performance_insights.md`). Falls back to pandas when the extension is not built.
 
 ```python
 from standard_quant_tools.indicators import stochastic_oscillator
@@ -143,7 +145,7 @@ out-of-bounds read rather than a catchable Python error).
 
 ### Bollinger Bands *(C++ extension)*
 
-Uses a C++ fused single-pass mean+std computation — one sliding window maintains both `Σx` and `Σx²`, computing mean and variance together rather than running two separate pandas rolling operations (3–8× faster). Falls back to pandas when the extension is not built.
+Uses a C++ fused single-pass mean+std computation — one sliding window maintains both `Σx` and `Σx²`, computing mean and variance together rather than running two separate pandas rolling operations — measured 1.6× faster (n=2 000; an earlier, unmeasured 3–8× projection appeared in this doc before `_sqt_core` was actually benchmarked — see `Development/performance_insights.md`). Falls back to pandas when the extension is not built.
 
 ```python
 from standard_quant_tools.indicators import bollinger_bands
