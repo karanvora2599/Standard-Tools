@@ -580,6 +580,76 @@ class HurstResult(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# Rally Detection
+# ──────────────────────────────────────────────
+
+
+class RallyDetectionInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    lookback: int = Field(
+        20, gt=0, description="Trailing-return window in bars (default ~1 trading month)."
+    )
+    zscore_window: int = Field(
+        252,
+        gt=0,
+        description="Historical window the return z-score is measured against (default ~1 trading year).",
+    )
+    adx_period: int = Field(14, gt=0, description="ADX lookback (default 14).")
+    adx_threshold: float = Field(
+        25.0, gt=0, description="ADX level considered a 'strong' trend."
+    )
+    breakout_period: int = Field(
+        20, gt=0, description="Bars for the new-high breakout check."
+    )
+    hurst_method: Literal["dfa", "rs"] = Field(
+        "dfa", description="Estimation method passed through to the Hurst regime check."
+    )
+    auto_tune_adx_threshold: bool = Field(
+        False,
+        description=(
+            "If True, ignore adx_threshold and instead use the "
+            "auto_tune_percentile-th percentile of this symbol's OWN "
+            "trailing ADX history as the 'strong trend' bar -- a "
+            "chronically choppy stock and a chronically trending one each "
+            "get a threshold calibrated to their own history, rather than "
+            "one fixed number for every asset. Default False: unchanged, "
+            "exact prior behavior."
+        ),
+    )
+    auto_tune_percentile: float = Field(
+        60.0,
+        gt=0.0,
+        lt=100.0,
+        description=(
+            "Percentile of this symbol's own historical ADX distribution "
+            "used when auto_tune_adx_threshold=True. Default 60 -- "
+            "'stronger than most of this symbol's own recent bars,' a "
+            "deliberately modest bar. Unused otherwise."
+        ),
+    )
+
+
+class RallyDetectionResult(BaseModel):
+    symbol: str
+    is_rally: bool
+    rally_score: float
+    trailing_return_pct: float
+    return_zscore: float
+    adx: float
+    di_plus: float
+    di_minus: float
+    trend_direction: str  # "bullish" | "bearish" | "neutral"
+    hurst: float
+    regime: str  # "trending" | "random_walk" | "mean_reverting"
+    is_new_high: bool
+    n_obs: int
+    adx_threshold_used: float
+    auto_tuned: bool
+
+
+# ──────────────────────────────────────────────
 # Realized Volatility Estimators (Parkinson, Garman-Klass, Yang-Zhang)
 # ──────────────────────────────────────────────
 

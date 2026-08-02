@@ -56,7 +56,7 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **45 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **46 tool definitions** in the format both OpenAI and Anthropic expect. The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
@@ -128,7 +128,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 45 valid names.
+- **`ValueError`** — unknown tool name; message lists all 46 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -211,7 +211,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to a 45-tool financial
+You are a quantitative analyst assistant with access to a 46-tool financial
 toolkit. The 26 most commonly used are described below (see
 09_advanced_agent_tools.md for the full list of the remaining 19 —
 execution/diagnostic tools like run_regime_adaptive_walkforward_backtest,
@@ -1252,7 +1252,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have access to a 45-tool
+You are a quantitative investment analyst. You have access to a 46-tool
 financial toolkit; the 27 covered here are the most commonly used (see
 09_advanced_agent_tools.md for the remaining execution/diagnostic tools):
 

@@ -1017,3 +1017,21 @@ evt_tail_risk(returns, confidence=0.99, tail_fraction=0.05, method="pwm")
 ```
 
 Default `method="pwm"` (probability-weighted moments, Hosking & Wallis 1987) is closed-form pure numpy (one sort + cumulative arithmetic) — zero optional-dependency surface out of the box, and the reason it's the default rather than `"mle"`. `method="mle"` refines the fit via `scipy.optimize`, seeded from the PWM estimate. Returns a dict with the fitted shape/scale (`shape_xi`, `scale_beta`), `var_evt`/`cvar_evt`, and `tail_classification` (`"heavy_tailed"` when `shape_xi > 0.1`). Raises `ValidationError` below 20 exceedances — the tail fit is unreliable below that threshold.
+
+---
+
+## Rally Detection
+
+`standard_quant_tools.analysis.rally.detect_rally` — combines four already-proven signals from elsewhere in this codebase (ADX trend strength, Donchian-style breakout, Hurst regime classification, trailing-return momentum) plus one new one (a volatility-normalized return z-score, not implemented anywhere else in this codebase) into a single multi-confirmation rally score, rather than trusting any one indicator alone. See [09_advanced_agent_tools.md, Tool 29](09_advanced_agent_tools.md) for the agent-tool wrapper (`get_rally_signal`) and the full signal-by-signal breakdown.
+
+```python
+from standard_quant_tools.analysis.rally import detect_rally
+
+detect_rally(
+    df, lookback=20, zscore_window=252, adx_period=14, adx_threshold=25.0,
+    breakout_period=20, hurst_method="dfa",
+    auto_tune_adx_threshold=False, auto_tune_percentile=60.0,
+)
+```
+
+`rally_score` is the fraction of 5 boolean signals that agree; `is_rally = rally_score >= 0.6` (at least 3 of 5). `auto_tune_adx_threshold=True` replaces the fixed `adx_threshold` with the `auto_tune_percentile`-th percentile of the symbol's *own* trailing ADX history — calibrating "strong trend" per-asset instead of applying one number to every symbol, without needing a human to pick a threshold per name. Disabled by default; enabling it changes nothing else and a caller who never sets it gets identical output to before this option existed. Raises `ValidationError` for missing OHLC columns, fewer than `zscore_window + lookback` observations, or an out-of-range `auto_tune_percentile` when auto-tuning is on.

@@ -1,8 +1,8 @@
 # Advanced Agent Tools
 
-Thirty-one high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Thirty-two high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 45), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 46), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -66,6 +66,12 @@ Thirty-one high-level agentic tools that compose the library's existing primitiv
 | `run_garch_volatility_forecast` | Fit GARCH(1,1) conditional volatility and forecast it forward, unlike `get_volatility_estimators`' backward-looking realized estimates | `persistence`, `current_annualized_vol`, `long_run_annualized_vol`, `forecast_annualized_vol` |
 | `run_kalman_hedge_ratio` | Time-varying hedge ratio via a Kalman filter — a staleness diagnostic companion to `run_cointegration_test`'s static OLS hedge ratio | `current_hedge_ratio`, `hedge_ratio_std`, `current_zscore`, `signal` |
 | `get_tail_risk_metrics` | Extreme Value Theory tail risk (Peaks-Over-Threshold GPD fit): VaR/CVaR extrapolated from the fitted tail, vs. the naive historical quantile | `var_evt`, `cvar_evt`, `var_historical_comparison`, `tail_classification` |
+
+**Regime/momentum diagnostic tools (1)**
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `get_rally_signal` | Detect a rally via 5 confirming signals (return z-score, ADX trend strength, DI+/DI- direction, Hurst trending regime, new-high breakout) rather than any single indicator alone; optionally auto-tunes the ADX threshold to the symbol's own history | `is_rally`, `rally_score`, `adx_threshold_used`, `auto_tuned` |
 
 **Options pricing tools (2)** — see [12_options.md](12_options.md) for the full reference
 
@@ -2739,3 +2745,79 @@ print(f"Tail shape            : xi={result.shape_xi}  ({result.tail_classificati
 **Interpreting the results:**
 
 `tail_classification == "heavy_tailed"` combined with `var_evt` meaningfully exceeding `var_historical_comparison` means the historical-quantile VaR is understating true tail risk — the empirical sample simply hasn't contained a large enough loss yet for the naive quantile to reflect it, while the fitted GPD tail extrapolates beyond what's actually been observed. Prefer `var_evt`/`cvar_evt` over `get_extended_risk_metrics`' historical/parametric VaR for genuinely fat-tailed names or short historical windows.
+
+---
+
+## 29. Rally Detection
+
+`get_rally_signal` answers "is this symbol currently rallying" via **5 independent confirming signals**, rather than trusting any single indicator alone — ADX by itself only says "trending," not which direction; a raw trailing-return threshold doesn't distinguish a genuine breakout from an asset's normal drift; Hurst alone says "persistent," not "up." No new indicator math is used except the return z-score — everything else reuses `indicators.trend.adx`, `analysis.hurst.hurst_exponent`, and the same look-ahead-safe Donchian-breakout convention `backtest/strategies.py` already uses.
+
+The 5 signals:
+1. **`unusual_positive_return`** — trailing `lookback`-bar return, z-scored against its own rolling `zscore_window`-bar history, `> 1.0`. Volatility-normalized (not a fixed % threshold), so a low-vol and a high-vol name are judged on the same relative-move scale.
+2. **`strong_trend`** — ADX(`adx_period`) above the effective threshold (see auto-tuning below).
+3. **`bullish_direction`** — ADX's DI+ > DI-.
+4. **`trending_regime`** — Hurst exponent regime `== "trending"` (H > 0.55), confirming genuine persistence rather than a random-walk blip.
+5. **`new_high_breakout`** — Close breaks above its own prior `breakout_period`-bar High (today's own bar excluded from the comparison window, the same tautology-avoiding convention used everywhere else in this codebase).
+
+`rally_score` = fraction of the 5 that are true; `is_rally = rally_score >= 0.6` (at least 3 of 5).
+
+**Auto-tuned ADX threshold (`auto_tune_adx_threshold`):** by default, `strong_trend` compares against a single fixed `adx_threshold` (25.0) for every symbol — reasonable in general, but a chronically choppy stock may never clear 25, and a chronically trending one may clear it constantly regardless of whether *today* is unusual for it. Setting `auto_tune_adx_threshold=True` instead calibrates the threshold to the symbol's **own** trailing ADX history: the effective threshold becomes the `auto_tune_percentile`-th percentile (default 60) of that symbol's ADX values over the fetched window. This is the recommended setting for an automated/agentic pipeline that calls this tool across many different symbols without a human tuning `adx_threshold` per name — see "Interpreting the results" below for why. Enabling it does not change any other default; a caller who never sets it gets byte-for-byte the same result as before this option existed.
+
+```python
+from standard_quant_tools.agent.tools import get_rally_signal
+from standard_quant_tools.agent.models import RallyDetectionInput
+
+# Manual, fixed threshold (works fine for a single symbol you already know)
+result = get_rally_signal(RallyDetectionInput(
+    symbol="NVDA",
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+))
+print(f"is_rally={result.is_rally}  score={result.rally_score}  "
+      f"direction={result.trend_direction}")
+
+# Auto-tuned threshold (recommended for an agentic pipeline scanning many symbols)
+auto_result = get_rally_signal(RallyDetectionInput(
+    symbol="NVDA",
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    auto_tune_adx_threshold=True,
+    auto_tune_percentile=60.0,
+))
+print(f"threshold used: {auto_result.adx_threshold_used}  "
+      f"(auto-tuned: {auto_result.auto_tuned})")
+```
+
+**RallyDetectionInput fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | str | — | Ticker symbol |
+| `start_date` / `end_date` | str | — | ISO dates |
+| `lookback` | int | `20` | Trailing-return window in bars (~1 trading month) |
+| `zscore_window` | int | `252` | Historical window the return z-score is measured against (~1 trading year) |
+| `adx_period` | int | `14` | ADX lookback |
+| `adx_threshold` | float | `25.0` | ADX level considered a "strong" trend. Ignored when `auto_tune_adx_threshold=True` |
+| `breakout_period` | int | `20` | Bars for the new-high breakout check |
+| `hurst_method` | `"dfa"` \| `"rs"` | `"dfa"` | Estimation method passed through to the Hurst regime check |
+| `auto_tune_adx_threshold` | bool | `False` | If True, calibrate the ADX threshold to this symbol's own history instead of the fixed default |
+| `auto_tune_percentile` | float | `60.0` | Percentile (0, 100) of the symbol's own ADX history used when auto-tuning; unused otherwise |
+
+**Output reference:**
+
+| Field | Type | Description |
+|---|---|---|
+| `is_rally` | `bool` | `rally_score >= 0.6` |
+| `rally_score` | `float` | Fraction of the 5 signals that are true (0.0-1.0 in steps of 0.2) |
+| `trailing_return_pct` / `return_zscore` | `float` | The raw trailing return and its z-score vs. the symbol's own history |
+| `adx` / `di_plus` / `di_minus` | `float` | Latest ADX/DI+/DI- values |
+| `trend_direction` | `str` | `"bullish"` (DI+ > DI-), `"bearish"` (DI- > DI+), or `"neutral"` |
+| `hurst` / `regime` | `float` / `str` | Latest Hurst exponent and its regime classification |
+| `is_new_high` | `bool` | Whether Close broke its own prior `breakout_period`-bar High |
+| `n_obs` | `int` | Observations used |
+| `adx_threshold_used` | `float` | The actual threshold `strong_trend` was compared against — equals `adx_threshold` unless auto-tuned |
+| `auto_tuned` | `bool` | Whether `auto_tune_adx_threshold` was actually applied |
+
+**Interpreting the results:**
+
+Don't just read `is_rally` — check `rally_score` and the individual fields to see *which* signals actually fired, since 3/5 agreeing (the minimum) looks very different from 5/5 agreeing. A common false-negative pattern: a genuinely rallying but historically low-ADX name (a "sleepy" stock breaking out) never clears the fixed `adx_threshold=25`, so `strong_trend` never fires even though the other 4 signals do — this is exactly what `auto_tune_adx_threshold=True` fixes, by comparing the symbol against its own history instead of a one-size-fits-all bar. Conversely, a chronically high-ADX name (already always "trending") clearing 25 tells you little on its own — `bullish_direction`, `unusual_positive_return`, and `new_high_breakout` are the signals that actually distinguish "trending as usual" from "rallying right now" for that kind of name.

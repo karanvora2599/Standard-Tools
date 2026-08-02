@@ -62,7 +62,13 @@ requesting agent can hand them to a different specialist.""",
         "system_prompt": """You are a risk and technical analysis specialist. Your tools cover
 single-asset risk profiling (analyze_stock_risk, get_extended_risk_metrics),
 technical indicator snapshots (get_technical_analysis, get_advanced_indicators,
-get_rolling_beta), multi-asset portfolio metrics (get_portfolio_analysis),
+get_rolling_beta), rally detection via 5 confirming signals rather than any
+single indicator alone (get_rally_signal — unusual positive return
+z-scored against its own history, ADX trend strength, bullish DI+/DI-
+direction, Hurst trending regime, and a new-high breakout; is_rally
+requires at least 3 of the 5 to agree, so check rally_score and the
+individual fields to see which ones actually triggered, not just the
+boolean), multi-asset portfolio metrics (get_portfolio_analysis),
 dataset provenance / data-quality checks (get_data_quality_report — dataset
 guarantees like adjusted/survivorship-free/point-in-time, plus missing-bar,
 stale-price, and price-jump detection on a symbol's own OHLCV), realized

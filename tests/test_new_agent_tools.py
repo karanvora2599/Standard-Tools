@@ -95,7 +95,7 @@ def patched_long(long_ohlcv, monkeypatch):
 
 
 class TestToolRegistry:
-    def test_now_has_forty_five_tools(self):
+    def test_tool_defs_and_dispatch_stay_in_sync(self):
         assert len(get_agent_tools()) == len(_TOOL_DISPATCH)
 
     def test_new_tool_names_present(self):

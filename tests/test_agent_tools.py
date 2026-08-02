@@ -20,6 +20,7 @@ from standard_quant_tools.agent.models import (
     MonteCarloSimulationInput,
     PCAInput,
     PortfolioInput,
+    RallyDetectionInput,
     ScreenerInput,
     StressTestInput,
     TailRiskInput,
@@ -35,6 +36,7 @@ from standard_quant_tools.agent.tools import (
     get_correlation_analysis,
     get_liquidity_metrics,
     get_portfolio_analysis,
+    get_rally_signal,
     get_tail_risk_metrics,
     get_technical_analysis,
     get_volatility_estimators,
@@ -903,6 +905,102 @@ class TestRunHurstAnalysis:
         fracs = result.rolling_regime_fractions
         assert set(fracs.keys()) == {"trending", "random_walk", "mean_reverting"}
         assert abs(sum(fracs.values()) - 1.0) < 0.01
+
+
+class TestGetRallySignal:
+    def test_returns_result_for_symbol(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.symbol == "AAPL"
+
+    def test_rally_score_is_fraction_of_five_signals(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.rally_score in {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}
+
+    def test_is_rally_matches_score_threshold(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.is_rally == (result.rally_score >= 0.6)
+
+    def test_trend_direction_is_valid_string(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.trend_direction in {"bullish", "bearish", "neutral"}
+
+    def test_regime_is_valid_string(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.regime in {"trending", "random_walk", "mean_reverting", "unknown"}
+
+    def test_adx_is_nonnegative(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.adx >= 0.0
+
+    def test_n_obs_positive(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.n_obs > 0
+
+    def test_default_reports_fixed_adx_threshold_not_auto_tuned(self, patched_factory):
+        inp = RallyDetectionInput(symbol="AAPL", start_date=START, end_date=END)
+        result = get_rally_signal(inp)
+        assert result.auto_tuned is False
+        assert result.adx_threshold_used == 25.0
+
+    def test_auto_tune_reports_a_different_threshold(self, patched_factory):
+        inp = RallyDetectionInput(
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            auto_tune_adx_threshold=True,
+            auto_tune_percentile=60.0,
+        )
+        result = get_rally_signal(inp)
+        assert result.auto_tuned is True
+        assert isinstance(result.adx_threshold_used, float)
+
+    def test_auto_tune_percentile_out_of_range_rejected_by_pydantic(
+        self, patched_factory
+    ):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            RallyDetectionInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                auto_tune_percentile=0.0,
+            )
+
+    def test_custom_thresholds_respected(self, patched_factory):
+        inp = RallyDetectionInput(
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            lookback=10,
+            adx_threshold=30.0,
+            breakout_period=15,
+        )
+        result = get_rally_signal(inp)
+        assert result.symbol == "AAPL"
+
+    def test_invalid_hurst_method_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            RallyDetectionInput(
+                symbol="AAPL", start_date=START, end_date=END, hurst_method="DFA"
+            )
+
+    def test_non_positive_lookback_rejected_by_pydantic(self, patched_factory):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            RallyDetectionInput(
+                symbol="AAPL", start_date=START, end_date=END, lookback=0
+            )
 
 
 class TestGetVolatilityEstimators:

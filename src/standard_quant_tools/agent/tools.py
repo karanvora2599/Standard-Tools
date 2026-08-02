@@ -89,6 +89,8 @@ from standard_quant_tools.agent.models import (
     PositionSizerInput,
     PositionSizerResult,
     PriceJump,
+    RallyDetectionInput,
+    RallyDetectionResult,
     RebalanceEvent,
     RegimeAdaptiveInput,
     RegimeAdaptiveResult,
@@ -135,6 +137,7 @@ from standard_quant_tools.analysis.correlation import (
 )
 from standard_quant_tools.analysis.garch import garch_volatility_forecast
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
+from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.multi_factor import (
     multi_factor_regression,
     rolling_factor_loadings,
@@ -1356,6 +1359,60 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
         n_obs=result["n_obs"],
         rolling_current=rolling_current,
         rolling_regime_fractions=rolling_regime_fractions,
+    )
+
+
+def get_rally_signal(input_data: RallyDetectionInput) -> RallyDetectionResult:
+    """
+    Detect whether a symbol is currently rallying via 5 independent
+    confirming signals (unusual positive return, ADX trend strength,
+    bullish DI+/DI- direction, Hurst trending regime, new-high breakout)
+    rather than trusting any single indicator alone. Optionally auto-tunes
+    the ADX "strong trend" threshold to this symbol's own trailing ADX
+    history instead of a fixed default (see auto_tune_adx_threshold).
+    """
+    logger.debug(
+        "[rally] %s  %s → %s  lookback=%d  adx_threshold=%.1f  auto_tune=%s",
+        input_data.symbol,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.lookback,
+        input_data.adx_threshold,
+        input_data.auto_tune_adx_threshold,
+    )
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(
+        input_data.symbol, input_data.start_date, input_data.end_date
+    )
+
+    result = detect_rally(
+        df,
+        lookback=input_data.lookback,
+        zscore_window=input_data.zscore_window,
+        adx_period=input_data.adx_period,
+        adx_threshold=input_data.adx_threshold,
+        breakout_period=input_data.breakout_period,
+        hurst_method=input_data.hurst_method,
+        auto_tune_adx_threshold=input_data.auto_tune_adx_threshold,
+        auto_tune_percentile=input_data.auto_tune_percentile,
+    )
+
+    return RallyDetectionResult(
+        symbol=input_data.symbol,
+        is_rally=result["is_rally"],
+        rally_score=round(result["rally_score"], 4),
+        trailing_return_pct=round(result["trailing_return_pct"], 6),
+        return_zscore=round(result["return_zscore"], 4),
+        adx=round(result["adx"], 4),
+        di_plus=round(result["di_plus"], 4),
+        di_minus=round(result["di_minus"], 4),
+        trend_direction=result["trend_direction"],
+        hurst=round(result["hurst"], 4),
+        regime=result["regime"],
+        is_new_high=result["is_new_high"],
+        n_obs=result["n_obs"],
+        adx_threshold_used=round(result["adx_threshold_used"], 4),
+        auto_tuned=result["auto_tuned"],
     )
 
 
@@ -4148,6 +4205,11 @@ def get_agent_tools(
             HurstInput,
         ),
         (
+            "get_rally_signal",
+            "Detect a rally via 5 confirming signals: return z-score, ADX trend strength, DI+/DI- direction, Hurst trending regime, and new-high breakout.",
+            RallyDetectionInput,
+        ),
+        (
             "get_volatility_estimators",
             "Realized volatility via Parkinson, Garman-Klass, and Yang-Zhang estimators vs. plain close-to-close.",
             VolatilityEstimatorsInput,
@@ -4331,6 +4393,7 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_pca_analysis": (run_pca_analysis, PCAInput),
     "get_correlation_analysis": (get_correlation_analysis, CorrelationAnalysisInput),
     "run_hurst_analysis": (run_hurst_analysis, HurstInput),
+    "get_rally_signal": (get_rally_signal, RallyDetectionInput),
     "get_volatility_estimators": (get_volatility_estimators, VolatilityEstimatorsInput),
     "run_garch_volatility_forecast": (
         run_garch_volatility_forecast,
@@ -4399,6 +4462,7 @@ TOOL_CATEGORY: Dict[str, str] = {
     "analyze_stock_risk": "analysis",
     "get_technical_analysis": "analysis",
     "get_advanced_indicators": "analysis",
+    "get_rally_signal": "analysis",
     "get_rolling_beta": "analysis",
     "get_extended_risk_metrics": "analysis",
     "get_tail_risk_metrics": "analysis",
