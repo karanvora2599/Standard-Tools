@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.validation import validate_series
+from standard_quant_tools.validation import require_finite_array, validate_series
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
         raise ValidationError(f"period must be > 0, got {period}")
 
     values: np.ndarray = np.asarray(series.values, dtype=np.float64)
+    require_finite_array(values, "prices", "rsi")
     path = (
         "C++"
         if (HAS_CPP and _cpp_core is not None)

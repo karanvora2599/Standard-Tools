@@ -97,3 +97,22 @@ def validate_series(allow_empty: bool = False):
         return wrapper
 
     return decorator
+
+
+def require_finite_array(arr: np.ndarray, name: str, func: str) -> None:
+    """
+    Raise ValidationError if `arr` contains any NaN/Inf.
+
+    Core numeric kernels require finite observations unless their
+    documented semantics explicitly support NaN warm-up values -- this is
+    the single enforcement point for that contract, called once at the
+    Python/API boundary (before dispatching into either the C++ or
+    numba-fallback implementation) rather than duplicated inside each
+    native kernel.
+    """
+    if not np.all(np.isfinite(arr)):
+        n_bad = int(np.sum(~np.isfinite(arr)))
+        raise ValidationError(
+            f"{func}: {name} contains {n_bad} non-finite value(s) (NaN/Inf); "
+            f"{name} must be finite."
+        )

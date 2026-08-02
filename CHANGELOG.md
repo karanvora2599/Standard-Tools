@@ -11,6 +11,25 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, items 10/13 of 20 (NaN/Inf input
+  contract, first two call sites):** new `require_finite_array()` in
+  `validation.py`, raising the existing `ValidationError` -- extends the
+  same convention already used for `parabolic_sar`'s `af_*` params and
+  `stochastic_oscillator`'s `d_period`. Core numeric kernels require
+  finite observations unless their documented semantics explicitly
+  support NaN warm-up values; this is the single enforcement point for
+  that contract, called once at the Python/API boundary rather than
+  duplicated inside each native kernel. Wired into
+  `indicators/momentum.py::rsi()` -- deliberately at the Python boundary,
+  not inside `rsi_into` itself, which has two internally-inconsistent NaN
+  behaviors (its seed loop's `if/else` propagates a NaN into `avg_loss`
+  via `-= NaN`; its forward-pass ternaries silently treat NaN as zero
+  movement) that this fix doesn't attempt to reconcile -- enforcing
+  finiteness before either C++/numba path is reached makes that internal
+  inconsistency unreachable rather than papering over it. New tests:
+  `test_nan_in_input_raises`/`test_inf_in_input_raises` in
+  `tests/test_indicators_momentum.py`. Remaining `_cpp_core.*`-dispatching
+  wrappers land in follow-up commits.
 - **Correctness/portability pass, item 9 of 20:** new adversarial
   large-baseline/large-`max_lag` regression tests for the cointegration
   kernels, mirroring `rolling_beta`'s own large-baseline test pattern --

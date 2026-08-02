@@ -90,6 +90,23 @@ class TestRSI:
         with pytest.raises(ValidationError):
             rsi(pd.Series(dtype=float), 14)
 
+    def test_nan_in_input_raises(self, sample_close):
+        """NaN/Inf input contract enforced at the Python boundary (not
+        inside the C++ kernel, which has two internally-inconsistent NaN
+        behaviors depending on whether the NaN lands in the seed window or
+        the forward pass) -- must raise before either the C++ or Numba/
+        Python path is reached."""
+        s = sample_close.copy()
+        s.iloc[len(s) // 2] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            rsi(s, 14)
+
+    def test_inf_in_input_raises(self, sample_close):
+        s = sample_close.copy()
+        s.iloc[3] = np.inf
+        with pytest.raises(ValidationError, match="non-finite"):
+            rsi(s, 14)
+
 
 class TestStochasticOscillator:
     def test_returns_correct_columns(self, sample_ohlcv):
