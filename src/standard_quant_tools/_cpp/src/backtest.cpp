@@ -1,5 +1,7 @@
 #include "sqt/backtest.hpp"
 
+#include "sqt/numerics.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -41,7 +43,6 @@ BacktestResult run_strategy(
     if (n == 0) return r;
 
     const double cost_per_unit = commission_pct + slippage_pct;
-    const int    N             = static_cast<int>(n);
 
     // ── Strategy returns (vectorized formula) ─────────────────────────────────
     // executed[i] = signals[i-1] for i≥1, 0 for i=0
@@ -148,17 +149,21 @@ BacktestResult run_strategy(
     // ── Volatility, Sharpe, Sortino ───────────────────────────────────────────
     // pandas .std() uses sample variance (ddof=1) over all N elements of strat_ret.
 
+    // Loop bounds/accumulation use n (size_t) directly rather than
+    // narrowing to int first -- n can exceed INT_MAX for a large series.
+    const double n_d = static_cast<double>(n);
+
     double mean_r = 0.0;
-    for (int i = 0; i < N; ++i) mean_r += strat_ret[i];
-    mean_r /= N;
+    for (std::size_t i = 0; i < n; ++i) mean_r += strat_ret[i];
+    mean_r /= n_d;
 
     double sum_sq = 0.0;
-    for (int i = 0; i < N; ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
         const double d = strat_ret[i] - mean_r;
         sum_sq += d * d;
     }
 
-    const double sample_std = (N > 1) ? std::sqrt(sum_sq / (N - 1)) : 0.0;
+    const double sample_std = (n > 1) ? std::sqrt(sum_sq / (n_d - 1.0)) : 0.0;
     r.annualized_vol = sample_std * std::sqrt(kPPY);
     r.sharpe_ratio   = (sample_std > 0.0)
         ? (mean_r / sample_std) * std::sqrt(kPPY) : 0.0;
@@ -167,11 +172,11 @@ BacktestResult run_strategy(
     // Sortino & Price (1994) definition — zero contribution from profitable bars.
     {
         double down_sq_sum = 0.0;
-        for (int i = 0; i < N; ++i) {
+        for (std::size_t i = 0; i < n; ++i) {
             const double d = std::min(strat_ret[i], 0.0);
             down_sq_sum += d * d;
         }
-        const double down_dev = std::sqrt(down_sq_sum / N) * std::sqrt(kPPY);
+        const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(kPPY);
         r.sortino_ratio = (down_dev > 0.0) ? (mean_r * kPPY) / down_dev : kInf;
     }
 
@@ -184,7 +189,7 @@ BacktestResult run_strategy(
     }
 
     // ── Trade statistics ──────────────────────────────────────────────────────
-    r.num_trades = static_cast<int>(trade_rets.size());
+    r.num_trades = numerics::checked_narrow_to_int(trade_rets.size(), "run_strategy: num_trades");
     if (r.num_trades > 0) {
         int    n_wins    = 0;
         double gross_win = 0.0, gross_loss = 0.0, sum_tr = 0.0;
@@ -247,7 +252,9 @@ BacktestResult run_strategy_summary(
     if (n == 0) return r;
 
     const double cost_per_unit = commission_pct + slippage_pct;
-    const int    N             = static_cast<int>(n);
+    // n (size_t) used directly below rather than narrowed to int -- n can
+    // exceed INT_MAX for a large series.
+    const double n_d = static_cast<double>(n);
 
     // ── Pass 1: trade-log state machine + running equity/peak/drawdown/sum,
     //    fused into one forward loop, zero array allocation. ──────────────
@@ -256,8 +263,13 @@ BacktestResult run_strategy_summary(
     double entry_size  = 0.0;
     double prev_exec   = 0.0;
 
-    int    num_trades = 0;
-    int    n_wins     = 0;
+    // long long (not int): num_trades is bounded by n and accumulated one
+    // increment at a time, so it can't itself exceed n -- kept wide here
+    // and only checked-narrowed to the public BacktestResult::num_trades
+    // (int) field at the end, rather than risking silent int-overflow
+    // during accumulation for a pathologically trade-dense huge series.
+    long long num_trades = 0;
+    long long n_wins     = 0;
     double gross_win  = 0.0, gross_loss = 0.0, sum_tr = 0.0;
 
     double equity = initial_capital;
@@ -324,7 +336,7 @@ BacktestResult run_strategy_summary(
     r.total_return = (r.final_equity - initial_capital) / initial_capital;
     r.max_drawdown = mdd;
 
-    const double mean_r = sum_r / N;
+    const double mean_r = sum_r / n_d;
 
     // ── Calmar: same formula/placement as run_strategy() ─────────────────────
     if (n > 1 && r.final_equity > 0.0 && initial_capital > 0.0) {
@@ -359,16 +371,17 @@ BacktestResult run_strategy_summary(
         down_sq_sum += down_d * down_d;
     }
 
-    const double sample_std = (N > 1) ? std::sqrt(sum_sq / (N - 1)) : 0.0;
+    const double sample_std = (n > 1) ? std::sqrt(sum_sq / (n_d - 1.0)) : 0.0;
     r.annualized_vol = sample_std * std::sqrt(kPPY);
     r.sharpe_ratio   = (sample_std > 0.0)
         ? (mean_r / sample_std) * std::sqrt(kPPY) : 0.0;
 
-    const double down_dev = std::sqrt(down_sq_sum / N) * std::sqrt(kPPY);
+    const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(kPPY);
     r.sortino_ratio = (down_dev > 0.0) ? (mean_r * kPPY) / down_dev : kInf;
 
     // ── Trade statistics ──────────────────────────────────────────────────────
-    r.num_trades = num_trades;
+    r.num_trades = numerics::checked_narrow_to_int(
+        static_cast<std::size_t>(num_trades), "run_strategy_summary: num_trades");
     if (r.num_trades > 0) {
         r.win_rate           = static_cast<double>(n_wins) / r.num_trades;
         r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss

@@ -28,7 +28,7 @@ void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
     // Reject up front rather than relying on downstream arithmetic to stay
     // in range.
     if (period <= 0) return;
-    if (static_cast<int>(n) <= period) return;
+    if (n <= static_cast<std::size_t>(period)) return;
 
     // Seed: simple mean of first `period` gains/losses
     double avg_gain = 0.0, avg_loss = 0.0;
@@ -87,7 +87,7 @@ void adx_into(
     // period <= 0 would index out[period*3+...] with a negative/zero
     // value and divide by `period` in the Wilder smoothing below.
     if (period <= 0) return;
-    if (n < 2 || static_cast<int>(n) <= period) return;
+    if (n < 2 || n <= static_cast<std::size_t>(period)) return;
 
     // Single fused O(1)-auxiliary-memory pass -- no dm_plus/dm_minus/tr/
     // dx_vals arrays (previously 4 full n-sized buffers beyond the output).
@@ -111,7 +111,9 @@ void adx_into(
     const auto di_m_val = [&]() { return (atr_s != 0.0) ? 100.0 * dmm_s / atr_s : 0.0; };
 
     // Needs `period` DX values to initialise ADX -> starts at bar 2*period-1.
-    const std::size_t adx_start = static_cast<std::size_t>(2 * period - 1);
+    // Computed in size_t space -- 2*period could overflow int for an
+    // extreme (if unrealistic) period near INT_MAX/2.
+    const std::size_t adx_start = static_cast<std::size_t>(period) * 2 - 1;
 
     for (std::size_t i = 1; i < n; ++i) {
         const double up_move   = high[i] - high[i - 1];
@@ -124,7 +126,7 @@ void adx_into(
             std::abs(low[i]  - close[i - 1]),
         });
 
-        if (static_cast<int>(i) <= period) {
+        if (i <= static_cast<std::size_t>(period)) {
             // Step 2: Wilder's seed sums.
             atr_s += tr_i;
             dmp_s += dm_plus_i;
@@ -136,7 +138,7 @@ void adx_into(
             dmm_s = dmm_s - (dmm_s / period) + dm_minus_i;
         }
 
-        if (static_cast<int>(i) < period) continue;  // DI/DX undefined before bar `period`
+        if (i < static_cast<std::size_t>(period)) continue;  // DI/DX undefined before bar `period`
 
         const double di_p = di_p_val();
         const double di_m = di_m_val();
@@ -290,7 +292,7 @@ void wilder_atr_into(
     // value below — for period <= 0 that wraps to a huge size_t, an
     // out-of-bounds write (this is the exact case the reviewer flagged).
     if (period <= 0) return;
-    if (static_cast<int>(n) < period) return;
+    if (n < static_cast<std::size_t>(period)) return;
 
     // ── True range ────────────────────────────────────────────────────────────
     // Bar 0 has no previous close; use high - low.
@@ -343,7 +345,10 @@ void bollinger_bands_into(
     double* SQT_RESTRICT       out)
 {
     std::fill(out, out + 3 * n, kNaN);
-    if (static_cast<int>(n) < period || period < 2) return;
+    // period < 2 checked first (before period is ever cast to size_t
+    // below) since a negative period would otherwise wrap to a huge
+    // unsigned value in the second comparison.
+    if (period < 2 || n < static_cast<std::size_t>(period)) return;
 
     const double W   = static_cast<double>(period);
     const double dof = W - 1.0;  // ddof=1, matching pandas .std()
@@ -376,12 +381,12 @@ void bollinger_bands_into(
         since_refresh = 0;
     };
 
-    auto write_bands = [&](int i) {
+    auto write_bands = [&](std::size_t i) {
         const double mean = c + Sx / W;
         const double var  = (Sxx - Sx * Sx / W) / dof;
         const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
         const double bw   = num_std * std;
-        const int    o    = i * 3;
+        const std::size_t o = i * 3;
         out[o]     = mean + bw;  // upper
         out[o + 1] = mean;       // middle
         out[o + 2] = mean - bw;  // lower
@@ -389,17 +394,19 @@ void bollinger_bands_into(
 
     // Seed first window
     recompute_window(0);
-    write_bands(period - 1);
+    write_bands(static_cast<std::size_t>(period) - 1);
 
-    // Slide
-    for (int i = period; i < static_cast<int>(n); ++i) {
-        const int old = i - period;
+    // Slide. size_t throughout (not int): i-period could exceed INT_MAX
+    // for a large series, silently wrapping under int arithmetic.
+    const std::size_t period_sz = static_cast<std::size_t>(period);
+    for (std::size_t i = period_sz; i < n; ++i) {
+        const std::size_t old = i - period_sz;
         Sx  += (prices[i] - c) - (prices[old] - c);
         Sxx += (prices[i] - c) * (prices[i] - c) - (prices[old] - c) * (prices[old] - c);
         ++since_refresh;
 
-        if (since_refresh >= static_cast<std::size_t>(period)) {
-            recompute_window(static_cast<std::size_t>(old) + 1);
+        if (since_refresh >= period_sz) {
+            recompute_window(old + 1);
         }
 
         write_bands(i);
@@ -430,7 +437,9 @@ void stochastic_oscillator_into(
     double* SQT_RESTRICT       out)
 {
     std::fill(out, out + 2 * n, kNaN);
-    if (static_cast<int>(n) < k_period || k_period < 1) return;
+    // k_period < 1 checked first (before it's cast to size_t) since a
+    // negative k_period would otherwise wrap to a huge unsigned value.
+    if (k_period < 1 || n < static_cast<std::size_t>(k_period)) return;
 
     // d_period <= 0 would make `Sk -= K_vals[i - d_period + 1]` below read
     // out of bounds (i - d_period + 1 >= i + 1 for d_period <= 0) and
@@ -451,39 +460,53 @@ void stochastic_oscillator_into(
     // and at least as extreme), and popped from the front once it slides
     // out of the [i-k_period+1, i] window.
     std::vector<double> K_vals(n, kNaN);
-    std::deque<int> max_dq;  // indices, high[] decreasing front-to-back
-    std::deque<int> min_dq;  // indices, low[]  increasing front-to-back
+    // long long (not int) indices/deques: window_start and the loop bound
+    // below are derived from n, which can exceed INT_MAX for a large
+    // series -- matching the signed-induction-variable precedent already
+    // established in backtest.cpp's batch_run_strategy. Signed (not
+    // size_t) because window_start = i - k_period + 1 is negative for the
+    // first few bars, same as the original int version.
+    std::deque<long long> max_dq;  // indices, high[] decreasing front-to-back
+    std::deque<long long> min_dq;  // indices, low[]  increasing front-to-back
 
-    for (int i = 0; i < static_cast<int>(n); ++i) {
-        const int window_start = i - k_period + 1;
+    const long long n_ll       = static_cast<long long>(n);
+    const long long k_period_ll = k_period;
+
+    for (long long i = 0; i < n_ll; ++i) {
+        const std::size_t i_sz = static_cast<std::size_t>(i);
+        const long long window_start = i - k_period_ll + 1;
         while (!max_dq.empty() && max_dq.front() < window_start) max_dq.pop_front();
         while (!min_dq.empty() && min_dq.front() < window_start) min_dq.pop_front();
 
-        while (!max_dq.empty() && high[max_dq.back()] <= high[i]) max_dq.pop_back();
+        while (!max_dq.empty() &&
+               high[static_cast<std::size_t>(max_dq.back())] <= high[i_sz]) max_dq.pop_back();
         max_dq.push_back(i);
 
-        while (!min_dq.empty() && low[min_dq.back()] >= low[i]) min_dq.pop_back();
+        while (!min_dq.empty() &&
+               low[static_cast<std::size_t>(min_dq.back())] >= low[i_sz]) min_dq.pop_back();
         min_dq.push_back(i);
 
-        if (i >= k_period - 1) {
-            const double hi  = high[max_dq.front()];
-            const double lo  = low[min_dq.front()];
+        if (i >= k_period_ll - 1) {
+            const double hi  = high[static_cast<std::size_t>(max_dq.front())];
+            const double lo  = low[static_cast<std::size_t>(min_dq.front())];
             const double rng = hi - lo;
-            K_vals[i] = (rng > 0.0) ? 100.0 * (close[i] - lo) / rng : 0.0;
+            K_vals[i_sz] = (rng > 0.0) ? 100.0 * (close[i_sz] - lo) / rng : 0.0;
         }
     }
 
     // Compute %D = SMA(%K, d_period) and store both to out
-    double Sk = 0.0;
-    int    count = 0;
-    for (int i = k_period - 1; i < static_cast<int>(n); ++i) {
-        out[i * 2] = K_vals[i];  // %K
+    double    Sk    = 0.0;
+    long long count  = 0;
+    const long long d_period_ll = d_period;
+    for (long long i = k_period_ll - 1; i < n_ll; ++i) {
+        const std::size_t i_sz = static_cast<std::size_t>(i);
+        out[i_sz * 2] = K_vals[i_sz];  // %K
 
-        Sk += K_vals[i];
+        Sk += K_vals[i_sz];
         ++count;
-        if (count >= d_period) {
-            out[i * 2 + 1] = Sk / d_period;  // %D
-            Sk -= K_vals[i - d_period + 1];
+        if (count >= d_period_ll) {
+            out[i_sz * 2 + 1] = Sk / d_period;  // %D
+            Sk -= K_vals[static_cast<std::size_t>(i - d_period_ll + 1)];
         }
     }
 }

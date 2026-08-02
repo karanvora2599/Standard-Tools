@@ -79,15 +79,18 @@ namespace {
     void build_normal_equations(
         const double* y,
         const double* factors,
-        int start, int end,
+        std::size_t start, std::size_t end,
         int k, int p,
         std::vector<double>& XtX,
         std::vector<double>& Xty)
     {
         std::fill(XtX.begin(), XtX.end(), 0.0);
         std::fill(Xty.begin(), Xty.end(), 0.0);
-        for (int i = start; i < end; ++i) {
-            const double* fi = factors + i * k;
+        // start/end are bar indices into the full n-length series -- size_t,
+        // not int, since n (and so these indices) can exceed INT_MAX for a
+        // large series.
+        for (std::size_t i = start; i < end; ++i) {
+            const double* fi = factors + i * static_cast<std::size_t>(k);
             for (int r = 0; r < p; ++r) {
                 const double xr = (r == 0) ? 1.0 : fi[r - 1];
                 for (int c = 0; c <= r; ++c) {
@@ -110,30 +113,34 @@ void rolling_factor_loadings_into(
     double* SQT_RESTRICT       out)
 {
     const int p = static_cast<int>(k) + 1;  // intercept + k factors
-    const int N = static_cast<int>(n);
     std::fill(out, out + n * static_cast<std::size_t>(p), kNaN);
 
-    if (window < p + 1 || N < window) return;
+    if (window < p + 1 || n < static_cast<std::size_t>(window)) return;
 
     std::vector<double> XtX(p * p), Xty(p);
     std::vector<double> beta;
     std::vector<double> L_scratch, z_scratch;  // reused across every cholesky_solve call below
 
     // Recompute XtX from scratch every `window` steps to prevent drift.
-    const int refresh = window;
+    // size_t throughout the slide loop below (not int): this loop is
+    // inherently serial (XtX/Xty carry state across iterations, so it's
+    // never OpenMP-parallelized) and i/old can exceed INT_MAX for a large
+    // series -- no signed-induction-variable constraint applies here.
+    const std::size_t window_sz = static_cast<std::size_t>(window);
+    const std::size_t refresh   = window_sz;
 
     // ── Seed: first full window ───────────────────────────────────────────────
-    build_normal_equations(y, factors, 0, window, static_cast<int>(k), p, XtX, Xty);
+    build_normal_equations(y, factors, 0, window_sz, static_cast<int>(k), p, XtX, Xty);
     if (cholesky_solve(XtX, Xty, beta, p, L_scratch, z_scratch)) {
         for (int j = 0; j < p; ++j)
-            out[(window - 1) * p + j] = beta[j];
+            out[(window_sz - 1) * static_cast<std::size_t>(p) + static_cast<std::size_t>(j)] = beta[j];
     }
 
     // ── Slide window ─────────────────────────────────────────────────────────
-    for (int i = window; i < N; ++i) {
-        const int old = i - window;
+    for (std::size_t i = window_sz; i < n; ++i) {
+        const std::size_t old = i - window_sz;
 
-        if ((i - window + 1) % refresh == 0) {
+        if ((i - window_sz + 1) % refresh == 0) {
             // Periodic full recompute to flush floating-point accumulation
             build_normal_equations(y, factors, old + 1, i + 1,
                                    static_cast<int>(k), p, XtX, Xty);
@@ -186,7 +193,7 @@ void rolling_beta_into(
     double* SQT_RESTRICT       out)
 {
     std::fill(out, out + n, kNaN);
-    if (window < 2 || static_cast<int>(n) < window) return;
+    if (window < 2 || n < static_cast<std::size_t>(window)) return;
 
     // beta = cov(x,y) / var(x)
     //      = [W*Sxy - Sx*Sy] / [W*Sxx - Sx^2]
@@ -248,7 +255,7 @@ void rolling_beta_into(
         since_refresh = 0;
     };
 
-    auto write_beta = [&](int i) {
+    auto write_beta = [&](std::size_t i) {
         const double denom = W * Sxx - Sx * Sx;
         if (std::abs(denom) > 1e-14)
             out[i] = (W * Sxy - Sx * Sy) / denom;
@@ -256,11 +263,14 @@ void rolling_beta_into(
 
     // Seed first window
     recompute_window(0);
-    write_beta(window - 1);
+    write_beta(static_cast<std::size_t>(window) - 1);
 
-    // Slide
-    for (int i = window; i < static_cast<int>(n); ++i) {
-        const int old = i - window;
+    // Slide. size_t throughout (not int): this loop is inherently serial
+    // (Sx/Sy/Sxy/Sxx carry state across iterations, never OpenMP-
+    // parallelized) and i/old can exceed INT_MAX for a large series.
+    const std::size_t window_sz = static_cast<std::size_t>(window);
+    for (std::size_t i = window_sz; i < n; ++i) {
+        const std::size_t old = i - window_sz;
         const double xdi = x[i] - cx, ydi = y[i] - cy;
         const double xdo = x[old] - cx, ydo = y[old] - cy;
         Sx  += xdi - xdo;
@@ -269,8 +279,8 @@ void rolling_beta_into(
         Sxx += xdi * xdi - xdo * xdo;
         ++since_refresh;
 
-        if (since_refresh >= static_cast<std::size_t>(window)) {
-            recompute_window(static_cast<std::size_t>(old) + 1);
+        if (since_refresh >= window_sz) {
+            recompute_window(old + 1);
         }
 
         write_beta(i);

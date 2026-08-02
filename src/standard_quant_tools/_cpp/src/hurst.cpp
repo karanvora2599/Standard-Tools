@@ -1,5 +1,7 @@
 #include "sqt/hurst.hpp"
 
+#include "sqt/numerics.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -124,7 +126,12 @@ dfa_impl(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
     std::vector<double> flucts, valid_sizes;
 
     for (const int sz : sizes) {
-        const int n_chunks = static_cast<int>(n) / sz;
+        // n_chunks is n/sz, which can exceed INT_MAX for a large series
+        // even though sz itself (a window size) fits comfortably in int --
+        // compute and iterate it in size_t space rather than narrowing n
+        // first, which would silently wrap for n > INT_MAX.
+        const std::size_t sz_sz    = static_cast<std::size_t>(sz);
+        const std::size_t n_chunks = n / sz_sz;
         if (n_chunks < 2) continue;   // need ≥ 2 chunks for a meaningful fit
 
         // Precompute x-statistics (same for every chunk of size sz)
@@ -137,8 +144,8 @@ dfa_impl(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
         x_var /= sz;  // mean of squared deviations, matching numpy's .mean()
 
         double rms_acc = 0.0;
-        for (int chunk = 0; chunk < n_chunks; ++chunk) {
-            const double* seg      = y.data() + static_cast<std::size_t>(chunk * sz);
+        for (std::size_t chunk = 0; chunk < n_chunks; ++chunk) {
+            const double* seg      = y.data() + chunk * sz_sz;
             double        seg_mean = 0.0;
             for (int j = 0; j < sz; ++j) seg_mean += seg[j];
             seg_mean /= sz;
@@ -161,7 +168,7 @@ dfa_impl(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
             rms_acc += rms / sz;
         }
 
-        flucts.push_back(std::sqrt(rms_acc / n_chunks));
+        flucts.push_back(std::sqrt(rms_acc / static_cast<double>(n_chunks)));
         valid_sizes.push_back(static_cast<double>(sz));
     }
 
@@ -218,7 +225,10 @@ dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points
     std::vector<double> flucts, valid_sizes;
 
     for (const int sz : sizes) {
-        const int n_chunks = static_cast<int>(n) / sz;
+        // See dfa_impl()'s matching comment: n_chunks = n/sz can exceed
+        // INT_MAX for a large series even though sz itself fits in int.
+        const std::size_t sz_sz    = static_cast<std::size_t>(sz);
+        const std::size_t n_chunks = n / sz_sz;
         if (n_chunks < 2) continue;
 
         const double x_mean = (sz - 1) * 0.5;
@@ -226,8 +236,8 @@ dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points
         const double x_var = (static_cast<double>(sz) * sz - 1.0) / 12.0;
 
         double rms_acc = 0.0;
-        for (int chunk = 0; chunk < n_chunks; ++chunk) {
-            const double* seg = y.data() + static_cast<std::size_t>(chunk * sz);
+        for (std::size_t chunk = 0; chunk < n_chunks; ++chunk) {
+            const double* seg = y.data() + chunk * sz_sz;
 
             double Sy = 0.0, Syy = 0.0, S_jy = 0.0;
             for (int j = 0; j < sz; ++j) {
@@ -246,7 +256,7 @@ dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points
             rms_acc += sse / sz;
         }
 
-        flucts.push_back(std::sqrt(rms_acc / n_chunks));
+        flucts.push_back(std::sqrt(rms_acc / static_cast<double>(n_chunks)));
         valid_sizes.push_back(static_cast<double>(sz));
     }
 
@@ -269,14 +279,17 @@ rs_analysis(const double* arr, std::size_t n, int min_w, int max_w, int n_points
     std::vector<double> rs_vals, valid_sizes;
 
     for (const int sz : sizes) {
-        const int n_chunks = static_cast<int>(n) / sz;
+        // See dfa_impl()'s matching comment: n_chunks = n/sz can exceed
+        // INT_MAX for a large series even though sz itself fits in int.
+        const std::size_t sz_sz    = static_cast<std::size_t>(sz);
+        const std::size_t n_chunks = n / sz_sz;
         if (n_chunks < 1) continue;
 
-        double rs_acc = 0.0;
-        int    count  = 0;
+        double      rs_acc = 0.0;
+        std::size_t count  = 0;
 
-        for (int chunk = 0; chunk < n_chunks; ++chunk) {
-            const double* c    = arr + static_cast<std::size_t>(chunk * sz);
+        for (std::size_t chunk = 0; chunk < n_chunks; ++chunk) {
+            const double* c    = arr + chunk * sz_sz;
             double        mean = 0.0;
             for (int j = 0; j < sz; ++j) mean += c[j];
             mean /= sz;
@@ -302,7 +315,7 @@ rs_analysis(const double* arr, std::size_t n, int min_w, int max_w, int n_points
         }
 
         if (count > 0) {
-            rs_vals.push_back(rs_acc / count);
+            rs_vals.push_back(rs_acc / static_cast<double>(count));
             valid_sizes.push_back(static_cast<double>(sz));
         }
     }
@@ -338,16 +351,24 @@ HurstResult hurst_exponent(
     // reject explicitly instead.
     if (min_window <= 0) return nan_result;
 
-    // Auto-select max window: n/4 for DFA (less biased), n/2 for R/S
-    const int max_w_auto = (method == "dfa")
-        ? static_cast<int>(n) / 4
-        : static_cast<int>(n) / 2;
+    // Auto-select max window: n/4 for DFA (less biased), n/2 for R/S.
+    // Computed in size_t space (n can exceed INT_MAX for a large series)
+    // and only narrowed to int -- window sizes are int throughout this
+    // file's public API -- via a checked cast that fails loud instead of
+    // silently wrapping if a series is so large the auto-selected window
+    // itself wouldn't fit in an int.
+    const std::size_t max_w_auto_sz = (method == "dfa") ? (n / 4) : (n / 2);
+    const int max_w_auto = numerics::checked_narrow_to_int(
+        max_w_auto_sz, "hurst_exponent: auto-selected max_window");
     const int max_w = (max_window <= 0)
         ? max_w_auto
         : std::min(max_window, max_w_auto);
 
-    // Need at least 4 min-windows of data
-    if (static_cast<int>(n) < min_window * 4 || min_window >= max_w)
+    // Need at least 4 min-windows of data. Compared in size_t space (not
+    // narrowing n to int first) and with min_window*4 computed in size_t
+    // space too, since min_window is caller-supplied and could itself be
+    // large enough for an int*int multiplication to overflow.
+    if (n < static_cast<std::size_t>(min_window) * 4 || min_window >= max_w)
         return nan_result;
 
     std::vector<double> sizes, values;
@@ -405,14 +426,16 @@ HurstResult hurst_exponent_scratch(
 
     if (min_window <= 0) return nan_result;
 
-    const int max_w_auto = (method == "dfa")
-        ? static_cast<int>(n) / 4
-        : static_cast<int>(n) / 2;
+    // See hurst_exponent()'s matching comment: computed in size_t space and
+    // checked-narrowed rather than truncating n to int first.
+    const std::size_t max_w_auto_sz = (method == "dfa") ? (n / 4) : (n / 2);
+    const int max_w_auto = numerics::checked_narrow_to_int(
+        max_w_auto_sz, "hurst_exponent_scratch: auto-selected max_window");
     const int max_w = (max_window <= 0)
         ? max_w_auto
         : std::min(max_window, max_w_auto);
 
-    if (static_cast<int>(n) < min_window * 4 || min_window >= max_w)
+    if (n < static_cast<std::size_t>(min_window) * 4 || min_window >= max_w)
         return nan_result;
 
     std::vector<double> sizes, values;
@@ -478,6 +501,7 @@ void rolling_hurst_into(
     // the process rather than raising. window <= 0 is equally nonsensical
     // (the slice below would be empty or reversed). Reject both up front.
     if (step <= 0 || window <= 0) return;
+    if (n == 0 || static_cast<std::size_t>(window) > n) return;
 
     // Precompute the window-position count so the parallel loop below can
     // use a counted, unit-stride induction variable derived from it --
@@ -488,25 +512,35 @@ void rolling_hurst_into(
     // targeted compiler accepts the strided form cleanly; a counted
     // rewrite is unambiguously canonical everywhere and was confirmed to
     // build correctly on this project's MSVC toolchain.
-    const int last_i = static_cast<int>(n) - 1;
-    if (window - 1 > last_i) return;
-    const int count = (last_i - (window - 1)) / step + 1;
+    //
+    // Computed and iterated in size_t/long long, not int: n (and so the
+    // window-position count, particularly at step==1) can exceed INT_MAX
+    // for a large series -- narrowing to int here would silently wrap.
+    // long long (not int) is used for the OpenMP induction variable
+    // itself, matching the precedent already established in
+    // backtest.cpp's batch_run_strategy: MSVC's OpenMP 2.0 canonical-for
+    // form requires a signed integer induction variable, and long long
+    // qualifies just as int does, while covering the full practical range.
+    const std::size_t win_sz  = static_cast<std::size_t>(window);
+    const std::size_t last_i  = n - 1;
+    const std::size_t step_sz = static_cast<std::size_t>(step);
+    const long long count = static_cast<long long>((last_i - (win_sz - 1)) / step_sz + 1);
 
 #ifdef SQT_HAS_OPENMP
     #pragma omp parallel if(count > 1)
 #endif
     {
         RollingHurstScratch scratch;
-        scratch.y.reserve(static_cast<std::size_t>(window));
+        scratch.y.reserve(win_sz);
 
 #ifdef SQT_HAS_OPENMP
         #pragma omp for schedule(static)
 #endif
-        for (int idx = 0; idx < count; ++idx) {
-            const int i = window - 1 + idx * step;
+        for (long long idx = 0; idx < count; ++idx) {
+            const std::size_t i = (win_sz - 1) + static_cast<std::size_t>(idx) * step_sz;
             const auto result = hurst_exponent_scratch(
-                arr + static_cast<std::size_t>(i - window + 1),
-                static_cast<std::size_t>(window),
+                arr + (i - win_sz + 1),
+                win_sz,
                 method,
                 min_window,
                 /*max_window=*/-1,   // auto per chunk size

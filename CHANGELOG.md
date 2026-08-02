@@ -11,6 +11,25 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+- **Correctness/portability pass, item 3 of 20:** eliminated `size_t`->`int`
+  narrowing (`static_cast<int>(n)` and friends) across `hurst.cpp`,
+  `indicators.cpp`, `backtest.cpp`, and `rolling_regression.cpp` -- for a
+  series with more than ~2.1 billion elements (`n > INT_MAX`), these casts
+  silently wrapped instead of erroring, corrupting loop bounds, comparisons,
+  and buffer indices. Bar-count/index variables in these files are now
+  `std::size_t` throughout; OpenMP-parallelized loops (`rolling_hurst_into`,
+  `stochastic_oscillator_into`) use `long long` induction variables instead
+  (MSVC's OpenMP 2.0 canonical-for-loop form requires a signed type, and
+  `long long` covers the full practical range where `int` didn't -- matching
+  the precedent already set by `backtest.cpp`'s `batch_run_strategy`).
+  Values narrowed into a public struct field (`BacktestResult::num_trades`)
+  now go through `numerics::checked_narrow_to_int`, which throws instead of
+  silently wrapping if that count itself somehow exceeded `INT_MAX`. All
+  changes in `hurst.cpp`/`indicators.cpp`/`backtest.cpp` are pure
+  reassociation-free refactors (same arithmetic, wider index types) verified
+  bit-identical via the existing exact-equality native test suite;
+  `rolling_regression.cpp`'s `build_normal_equations`/slide-loop indices
+  changed the same way with no formula change.
 - **Correctness/portability pass (native ISA dispatch), item 1/2 of 20:**
   `isa_dispatch.cpp` previously (a) would not compile on non-x86
   architectures at all (its CPUID logic was unguarded), and (b) checked
