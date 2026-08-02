@@ -33,6 +33,31 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 19 of 20:** `build-cpp.yml`'s
+  `build-and-test` job now builds/tests `_sqt_core` on a
+  `[ubuntu-latest, windows-latest, macos-latest]` matrix (`fail-fast:
+  false`) instead of Linux only -- every job that builds or `ctest`s the
+  native extension used to run exclusively on `ubuntu-latest`, despite
+  local development happening on Windows/MSVC and the codebase having
+  compiler-specific branches (`if(MSVC)`/`else()`) throughout its
+  CMakeLists.txt that were never exercised in CI. macOS ships no OpenMP
+  runtime, so `SQT_HAS_OPENMP` stays undefined there -- genuine coverage
+  of the codebase's own already-documented serial fallback path, not just
+  an architecture/compiler check. `windows-latest`/`macos-latest` are new,
+  unverified legs (this environment has no way to trigger and observe a
+  live GitHub Actions run) -- soft-gated via
+  `continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}`, mirroring the
+  existing `build-and-test-sanitizers` job's own established "unproven
+  config, continue-on-error until confirmed green" precedent; the
+  existing, already-proven `ubuntu-latest` leg stays a hard gate. The
+  sanitizer job and the parity-check job stay Linux-only (ASan/UBSan flag
+  syntax differs meaningfully on MSVC, out of scope here). Verification is
+  the CI run itself once this lands -- YAML syntax validated locally via
+  `yaml.safe_load`, and the CMake files audited for any Ninja-generator-
+  specific assumption that could break under `windows-latest`'s default
+  Visual Studio generator (none found -- the existing `$<CONFIG:...>`
+  generator expressions and per-config `RUNTIME_OUTPUT_DIRECTORY_*`
+  properties already support both single- and multi-config generators).
 - **Correctness/portability pass, item 18 of 20:** new strict/zero-copy
   `_zerocopy` sibling bindings for the six highest-value large-array entry
   points: `rolling_beta_zerocopy`, `rolling_factor_loadings_zerocopy`,

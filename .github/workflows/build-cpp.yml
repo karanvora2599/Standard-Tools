@@ -31,12 +31,27 @@ on:
 
 jobs:
   build-and-test:
-    name: C++ extension (ubuntu)
+    name: C++ extension (${{ matrix.os }})
     # Skip when triggered by workflow_run -- that path is handled by the
     # parity-check job below, which checks out the actual tested commit
     # (github.event.workflow_run.head_sha) rather than this job's default ref.
     if: github.event_name != 'workflow_run'
-    runs-on: ubuntu-latest
+    strategy:
+      # fail-fast: false -- a genuine platform-specific failure (e.g. the
+      # AVX2 architecture-gating fix landing without cross-platform testing
+      # before this matrix existed) should be visible for every OS, not
+      # hidden the moment the first one fails.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # windows-latest/macos-latest are new legs, unverified on a real CI run
+    # (this environment has no way to trigger and observe one) -- soft-gate
+    # them the same way build-and-test-sanitizers below already does for an
+    # unproven config, so a CI-environment quirk on either new platform
+    # doesn't block merges until confirmed green. ubuntu-latest is the
+    # existing, already-proven leg and stays a hard gate.
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +62,21 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get install -y cmake build-essential
+
+      # windows-latest ships MSVC Build Tools + CMake preinstalled; cmake's
+      # default generator on that image already discovers the MSVC
+      # toolchain without any vcvarsall step (unlike this project's local
+      # Windows dev flow, which uses the Ninja generator and so needs
+      # vcvarsall run explicitly first -- the CI image's default Visual
+      # Studio generator handles that itself).
+      # macos-latest ships Apple Clang + CMake preinstalled. It ships no
+      # OpenMP runtime, so SQT_HAS_OPENMP stays undefined here -- this is
+      # the codebase's own already-documented serial fallback path, so this
+      # job is genuine additional coverage of that path, not just an
+      # architecture/compiler check.
 
       - name: Install Python dependencies
         run: |
@@ -56,9 +84,12 @@ jobs:
           pip install -e ".[test]"
 
       - name: Build C++ extension
+        # --parallel with no explicit job count (not $(nproc), which is
+        # Linux-only) -- CMake auto-detects available cores on every
+        # platform this matrix runs on.
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_BUILD_TESTS=ON
-          cmake --build build --config Release --parallel $(nproc)
+          cmake --build build --config Release --parallel
 
       - name: Run native C++ test suite
         run: ctest --test-dir build --output-on-failure -C Release
