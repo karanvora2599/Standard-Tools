@@ -730,6 +730,54 @@ PYBIND11_MODULE(_sqt_core, m) {
         "values is empty, block_size is not in (0, len(values)], or "
         "initial_capital is non-positive.");
 
+    m.def(
+        "simulate_forward_paths_terminal",
+        [](Array1D values, int horizon_days, int n_simulations, int block_size,
+           double initial_capital, py::object seed) -> py::array_t<double>
+        {
+            require_1d(values, "values");
+            const bool has_seed = !seed.is_none();
+            const unsigned long long seed_val =
+                has_seed ? seed.cast<unsigned long long>() : 0ULL;
+            if (horizon_days <= 0 || n_simulations <= 0)
+                throw std::invalid_argument(
+                    "simulate_forward_paths_terminal: horizon_days and n_simulations must both be > 0");
+
+            const double* values_ptr = values.data();
+            const auto    n          = static_cast<std::size_t>(values.size());
+
+            py::array_t<double> out(static_cast<py::ssize_t>(n_simulations));
+            double* out_ptr = out.mutable_data();
+            bool ok;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::simulate_forward_paths_terminal_into(
+                    values_ptr, n, horizon_days, n_simulations, block_size,
+                    initial_capital, seed_val, has_seed, out_ptr);
+            }
+
+            if (!ok)
+                throw std::invalid_argument(
+                    "simulate_forward_paths_terminal: invalid input (check block_size in "
+                    "(0, len(values)] and initial_capital > 0)");
+
+            return out;
+        },
+        py::arg("values"),
+        py::arg("horizon_days"),
+        py::arg("n_simulations"),
+        py::arg("block_size"),
+        py::arg("initial_capital"),
+        py::arg("seed") = py::none(),
+        "Terminal-only variant of simulate_forward_paths(): identical RNG/"
+        "block-bootstrap core, but returns only each path's TERMINAL equity "
+        "(1-D float64 array, length n_simulations) instead of the full "
+        "(n_simulations, horizon_days) path matrix -- for memory-constrained "
+        "large-simulation use where only the terminal distribution is needed. "
+        "For identical (seed, inputs), result[i] == "
+        "simulate_forward_paths(...)[i, -1] exactly. Same validation/error "
+        "conventions as simulate_forward_paths().");
+
     // ── GARCH(1,1) variance recursion ─────────────────────────────────────────
 
     m.def(

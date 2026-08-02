@@ -33,6 +33,27 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Added
 
+- **Correctness/portability pass, item 17 of 20:** new
+  `simulate_forward_paths_terminal()` (native `simulate_forward_paths_terminal`/
+  `simulate_forward_paths_terminal_into`, pybind11 binding, and
+  `backtest/monte_carlo.py` Python wrapper) -- a memory-bounded variant of
+  `simulate_forward_paths()` that never materializes the full
+  `(n_simulations, horizon_days)` path matrix, only each path's terminal
+  equity. For a large `n_simulations x horizon_days` (e.g. 1,000,000 x 252
+  would be a ~2GB full path matrix), this avoids that allocation entirely.
+  Identical RNG/block-bootstrap core (same per-path seed derivation, same
+  block-draw/concatenate/cumprod logic, in the same order) -- for identical
+  `(seed, inputs)`, `simulate_forward_paths_terminal(...)[i]` equals
+  `simulate_forward_paths(...)[i, -1]` exactly, verified via a new
+  `test_terminal_matches_full_matrix_last_column_exactly` in
+  `tests/cpp/test_monte_carlo.cpp` (exact `==`) and
+  `TestSimulateForwardPathsTerminal::test_matches_full_matrix_terminal_stats_exactly`
+  in `tests/test_monte_carlo.py`. Trade-off: no per-day
+  `equity_band_p5`/`p50`/`p95` in the result (those require the full
+  per-day matrix this variant never builds) -- only the terminal-
+  distribution stats (`terminal_median`, `terminal_p5`, `terminal_p95`,
+  `prob_loss`, `terminal_var_95`, `terminal_cvar_95`). Purely additive --
+  the existing `simulate_forward_paths()` is unchanged.
 - **Correctness/portability pass, item 13 of 20 (NaN/Inf input contract,
   remaining `_cpp_core.*` wrappers):** mechanical sweep wiring
   `require_finite_array()` into every remaining Python wrapper that

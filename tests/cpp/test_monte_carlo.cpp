@@ -174,6 +174,43 @@ static void test_different_paths_diverge() {
 }
 
 
+// ── simulate_forward_paths_terminal ─────────────────────────────────────────
+
+static void test_terminal_matches_full_matrix_last_column_exactly() {
+    // Correctness/portability pass item 17: simulate_forward_paths_terminal
+    // is identical RNG/block-bootstrap core to simulate_forward_paths,
+    // writing only the terminal equity per path instead of the full
+    // per-day matrix. For identical (seed, inputs), both draw from the
+    // exact same RNG sequence -- this must match exactly, not just within
+    // a tolerance.
+    std::vector<double> values(300);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        values[i] = 0.0005 * static_cast<double>((i * 37) % 23) - 0.005;
+    }
+    const int horizon = 60, n_sim = 25, block = 15;
+    auto full = sqt::simulate_forward_paths(
+        values.data(), values.size(), horizon, n_sim, block, 10000.0, 5, true);
+    auto terminal = sqt::simulate_forward_paths_terminal(
+        values.data(), values.size(), horizon, n_sim, block, 10000.0, 5, true);
+
+    CHECK(full.size() == static_cast<std::size_t>(horizon) * n_sim);
+    CHECK(terminal.size() == static_cast<std::size_t>(n_sim));
+    for (int i = 0; i < n_sim; ++i) {
+        const double last_col = full[static_cast<std::size_t>(i) * horizon + (horizon - 1)];
+        CHECK(terminal[static_cast<std::size_t>(i)] == last_col);  // exact
+    }
+}
+
+static void test_terminal_empty_on_invalid_input() {
+    std::vector<double> values(100, 0.001);
+    CHECK(sqt::simulate_forward_paths_terminal(
+              values.data(), values.size(), 0, 10, 5, 10000.0, 1, true)
+              .empty());
+    CHECK(sqt::simulate_forward_paths_terminal(
+              values.data(), values.size(), 10, 10, 5, 0.0, 1, true)
+              .empty());
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -187,6 +224,8 @@ int main() {
     test_same_seed_reproducible();
     test_result_independent_of_thread_count();
     test_different_paths_diverge();
+    test_terminal_matches_full_matrix_last_column_exactly();
+    test_terminal_empty_on_invalid_input();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

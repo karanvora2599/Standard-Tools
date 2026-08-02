@@ -79,4 +79,47 @@ bool simulate_forward_paths_into(
     bool          has_seed,
     double* SQT_RESTRICT       out);
 
+/**
+ * Terminal-only variant of simulate_forward_paths(): identical RNG/
+ * block-bootstrap core, but returns only each path's TERMINAL equity
+ * (length n_simulations) instead of the full (n_simulations x
+ * horizon_days) path matrix. For memory-constrained large-simulation use
+ * where only the terminal distribution is needed -- e.g. n_simulations=
+ * 1,000,000 x horizon_days=252 would be a ~2GB full path matrix that this
+ * variant avoids allocating entirely.
+ *
+ * For identical (seed, inputs), result[i] == simulate_forward_paths(...)
+ * [i*horizon_days + (horizon_days-1)] exactly (both draw from the
+ * identical RNG sequence and bootstrap logic; only the write target
+ * differs).
+ *
+ * @returns  Length n_simulations. Empty vector under the same invalid-
+ *           input conditions as simulate_forward_paths().
+ */
+std::vector<double> simulate_forward_paths_terminal(
+    const double* values,
+    std::size_t   hist_n,
+    int           horizon_days,
+    int           n_simulations,
+    int           block_size,
+    double        initial_capital,
+    unsigned long long seed,
+    bool          has_seed);
+
+/**
+ * Buffer-writing form of simulate_forward_paths_terminal(). `out_terminal`
+ * must have length n_simulations. Same invalid-input/return-value
+ * conventions as simulate_forward_paths_into().
+ */
+bool simulate_forward_paths_terminal_into(
+    const double* SQT_RESTRICT values,
+    std::size_t   hist_n,
+    int           horizon_days,
+    int           n_simulations,
+    int           block_size,
+    double        initial_capital,
+    unsigned long long seed,
+    bool          has_seed,
+    double* SQT_RESTRICT       out_terminal);
+
 }  // namespace sqt

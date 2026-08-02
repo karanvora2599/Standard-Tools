@@ -4,7 +4,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths
+from standard_quant_tools.backtest.monte_carlo import (
+    simulate_forward_paths,
+    simulate_forward_paths_terminal,
+)
 from standard_quant_tools.error import ValidationError
 
 
@@ -166,3 +169,48 @@ class TestSimulateForwardPaths:
         bad.iloc[3] = np.inf
         with pytest.raises(ValidationError, match="non-finite"):
             simulate_forward_paths(bad, horizon_days=30)
+
+
+class TestSimulateForwardPathsTerminal:
+    """Correctness/portability pass item 17: memory-bounded terminal-only
+    variant. For identical (seed, inputs), its stats must agree exactly
+    with simulate_forward_paths()'s own terminal-distribution stats."""
+
+    def test_matches_full_matrix_terminal_stats_exactly(self, sample_returns):
+        full = simulate_forward_paths(
+            sample_returns, horizon_days=30, n_simulations=200, seed=42
+        )
+        term = simulate_forward_paths_terminal(
+            sample_returns, horizon_days=30, n_simulations=200, seed=42
+        )
+        assert term["terminal_median"] == full["terminal_median"]
+        assert term["terminal_p5"] == full["terminal_p5"]
+        assert term["terminal_p95"] == full["terminal_p95"]
+        assert term["prob_loss"] == full["prob_loss"]
+        assert term["terminal_var_95"] == full["terminal_var_95"]
+        assert term["terminal_cvar_95"] == full["terminal_cvar_95"]
+
+    def test_no_equity_band_keys(self, sample_returns):
+        """Terminal-only variant never builds the full per-day matrix, so
+        it has no equity_band_* keys to report."""
+        term = simulate_forward_paths_terminal(
+            sample_returns, horizon_days=30, n_simulations=50, seed=1
+        )
+        assert set(term.keys()) == {
+            "terminal_median",
+            "terminal_p5",
+            "terminal_p95",
+            "prob_loss",
+            "terminal_var_95",
+            "terminal_cvar_95",
+        }
+
+    def test_nan_in_returns_raises(self, sample_returns):
+        bad = sample_returns.copy()
+        bad.iloc[len(bad) // 2] = np.nan
+        with pytest.raises(ValidationError, match="non-finite"):
+            simulate_forward_paths_terminal(bad, horizon_days=30)
+
+    def test_empty_returns_raises(self):
+        with pytest.raises(ValidationError, match="empty"):
+            simulate_forward_paths_terminal(pd.Series([], dtype=float), horizon_days=30)
