@@ -37,11 +37,15 @@ except ImportError:
 
 def sma(series: pd.Series, period: int = 14) -> pd.Series:
     """Simple Moving Average."""
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
     return series.rolling(window=period).mean()
 
 
 def ema(series: pd.Series, period: int = 14) -> pd.Series:
     """Exponential Moving Average."""
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
     return series.ewm(span=period, adjust=False).mean()
 
 
@@ -52,6 +56,15 @@ def macd(
     MACD: Moving Average Convergence Divergence.
     Returns DataFrame with columns ['MACD', 'Signal', 'Histogram'].
     """
+    for name, value in (("fast", fast), ("slow", slow), ("signal", signal)):
+        if value <= 0:
+            raise ValidationError(f"{name} must be > 0, got {value}")
+    if fast >= slow:
+        raise ValidationError(
+            f"fast ({fast}) must be < slow ({slow}) — MACD is the fast EMA "
+            "minus the slow one, so an inverted pair silently produces a "
+            "sign-flipped indicator rather than an error."
+        )
     logger.debug(
         "[macd] fast=%d  slow=%d  signal=%d  bars=%d", fast, slow, signal, len(series)
     )
@@ -92,6 +105,16 @@ def _adx_numba(
     """
     n = len(close)
     result = np.full((n, 3), np.nan)
+
+    # Wilder's seed needs `period` bars of DM/TR before the first DI can be
+    # written at row `period`. With n <= period every write below
+    # (result[period], dx_vals[period], result[2*period-1]) indexes past the
+    # end of an n-row array -- and @njit compiles without bounds checking, so
+    # that is an out-of-bounds heap write, not an IndexError. Return the
+    # all-NaN warm-up result before any of them, matching what the C++ kernel
+    # already does for this case.
+    if n <= period:
+        return result
 
     dm_plus = np.zeros(n)
     dm_minus = np.zeros(n)
@@ -165,6 +188,14 @@ def adx(
     """
     if period <= 0:
         raise ValidationError(f"period must be > 0, got {period}")
+    # The kernels index high[i]/low[i] against a result array sized from
+    # close, so a shorter high/low is an out-of-bounds read under @njit (no
+    # bounds checking) rather than an IndexError. Reject up front.
+    if not (len(high) == len(low) == len(close)):
+        raise ValidationError(
+            "adx: high/low/close must all be the same length, got "
+            f"{len(high)}/{len(low)}/{len(close)}"
+        )
 
     path = (
         "C++"
@@ -219,6 +250,12 @@ def _psar_numba(
     """
     n = len(high)
     result = np.full((n, 2), np.nan)
+
+    # The bootstrap below reads low[0]/high[0] unconditionally. @njit compiles
+    # without bounds checking, so on an empty input that is an out-of-bounds
+    # read rather than an IndexError -- return the (empty) result first.
+    if n == 0:
+        return result
 
     # Bootstrap: assume rising trend from bar 0
     sar = low[0]
@@ -303,9 +340,22 @@ def parabolic_sar(
         raise ValidationError(f"af_max must be > 0, got {af_max!r}")
     if af_max < af_start:
         raise ValidationError(f"af_max ({af_max!r}) must be >= af_start ({af_start!r})")
+    # Same out-of-bounds-read rationale as adx(): the state machine indexes
+    # low[i] against a result array sized from high.
+    if len(high) != len(low):
+        raise ValidationError(
+            f"parabolic_sar: high/low must be the same length, got "
+            f"{len(high)}/{len(low)}"
+        )
 
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
+    # Consistent with adx()/rsi(): NaN/Inf must be rejected at the API
+    # boundary rather than silently producing a garbage SAR path (the state
+    # machine's comparisons are all false against NaN, so it would carry the
+    # bootstrap value forward for the whole series and look like real output).
+    require_finite_array(h, "high", "parabolic_sar")
+    require_finite_array(l, "low", "parabolic_sar")
 
     if HAS_CPP and _cpp_core is not None:
         raw = _cpp_core.parabolic_sar(h, l, af_start, af_step, af_max)
@@ -333,8 +383,20 @@ def williams_r(
     Williams %R — momentum oscillator, -100 to 0.
     Below -80 is oversold; above -20 is overbought.
     Vectorized rolling window; no Numba needed.
+
+    A zero-range window (flat prices across the whole lookback) yields NaN —
+    %R is a position within the range, which is undefined when there is no
+    range — rather than an unguarded 0/0.
     """
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
+    if not (len(high) == len(low) == len(close)):
+        raise ValidationError(
+            "williams_r: high/low/close must all be the same length, got "
+            f"{len(high)}/{len(low)}/{len(close)}"
+        )
     highest_high = high.rolling(window=period).max()
     lowest_low = low.rolling(window=period).min()
-    wr = -100.0 * (highest_high - close) / (highest_high - lowest_low)
+    price_range = highest_high - lowest_low
+    wr = -100.0 * (highest_high - close) / price_range.where(price_range > 0)
     return wr.rename("Williams_R")

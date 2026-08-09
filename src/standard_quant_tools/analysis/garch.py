@@ -264,6 +264,12 @@ def garch_volatility_forecast(
     # forecast's own h=1 base are supposed to mean.
     current_var = float(omega + alpha * resid_sq[-1] + beta * sigma2[-1])
 
+    # A fit with persistence >= 1 is non-stationary: the unconditional
+    # variance omega/(1-persistence) does not exist. The clamp below keeps the
+    # forecast recursion finite, but it means long_run_annualized_vol is then
+    # an artifact of the 0.9999 clamp (~omega*10000), NOT an estimated
+    # quantity — `converged` is False in exactly that case, so check it before
+    # using long_run_annualized_vol for anything.
     persistence_safe = min(persistence, 0.9999)
     long_run_var = omega / (1.0 - persistence_safe)
 

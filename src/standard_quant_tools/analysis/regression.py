@@ -4,6 +4,7 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,11 @@ def rolling_beta(
     Uses C++ incremental O(1)-per-step sum updates when available (10-40× faster
     than two sequential pandas rolling operations).  Falls back to pandas otherwise.
     """
+    if window <= 1:
+        raise ValidationError(
+            f"window must be > 1 (a 1-bar window has no variance to regress "
+            f"against), got {window}"
+        )
     common_index = asset_returns.index.intersection(benchmark_returns.index)
     y = asset_returns.loc[common_index]
     x = benchmark_returns.loc[common_index]

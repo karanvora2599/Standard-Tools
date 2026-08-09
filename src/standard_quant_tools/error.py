@@ -1,7 +1,10 @@
+from typing import Optional
+
+
 class QuantError(Exception):
     """Base class for all standard-quant-tools exceptions."""
 
-    def __init__(self, message: str, original_exception: Exception = None):
+    def __init__(self, message: str, original_exception: Optional[Exception] = None):
         super().__init__(message)
         self.original_exception = original_exception
 

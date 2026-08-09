@@ -144,6 +144,10 @@ def block_bootstrap_ci(
         raise ValidationError(f"block_size must be in (0, {n}], got {block_size}")
     if not 0.0 < confidence < 1.0:
         raise ValidationError(f"confidence must be in (0, 1), got {confidence}")
+    if n_iterations <= 0:
+        # np.percentile over an empty boot_metrics array raises an opaque
+        # numpy error instead of naming the actual problem.
+        raise ValidationError(f"n_iterations must be > 0, got {n_iterations}")
 
     rng = np.random.default_rng(seed)
     values = returns.to_numpy(dtype=float)
@@ -199,10 +203,13 @@ def parameter_sensitivity(
         Dict with n_trials, best, median, best_minus_median,
         best_minus_rank2 (gap to the second-best trial), and
         best_minus_top5_mean (gap to the mean of ranks 2-5, or 0.0 when
-        fewer than 2 trials exist).
+        fewer than 2 trials exist). Trials whose metric_col is NaN/Inf are
+        excluded from the ranking (and from n_trials) with a warning — they
+        have no comparable value to rank.
 
     Raises:
-        ValidationError: empty grid_df, or metric_col not present.
+        ValidationError: empty grid_df, metric_col not present, or no finite
+            values in metric_col.
     """
     if grid_df.empty:
         raise ValidationError("grid_df is empty")
@@ -211,7 +218,26 @@ def parameter_sensitivity(
             f"metric_col {metric_col!r} not found in grid_df columns: {list(grid_df.columns)}"
         )
 
-    values = grid_df[metric_col].to_numpy(dtype=float)
+    raw_values = grid_df[metric_col].to_numpy(dtype=float)
+    # np.sort places NaN LAST, so [::-1] puts it FIRST -- a single NaN metric
+    # (a grid row whose returns had zero variance is the common source) would
+    # otherwise become `best`, making every reported gap NaN. A trial that
+    # produced no comparable metric is excluded from the ranking rather than
+    # allowed to win it.
+    values = raw_values[np.isfinite(raw_values)]
+    n_dropped = len(raw_values) - len(values)
+    if len(values) == 0:
+        raise ValidationError(
+            f"grid_df[{metric_col!r}] has no finite values "
+            f"({len(raw_values)} row(s), all NaN/Inf) — nothing to rank."
+        )
+    if n_dropped:
+        logger.warning(
+            "[robustness] parameter_sensitivity: excluded %d trial(s) with a "
+            "non-finite %s from the ranking",
+            n_dropped,
+            metric_col,
+        )
     sorted_desc = np.sort(values)[::-1]
     n = len(sorted_desc)
     best = float(sorted_desc[0])

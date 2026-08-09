@@ -30,6 +30,10 @@ def bollinger_bands(
     Uses C++ fused mean+std path when available (3-8× faster than two pandas
     rolling passes).  Falls back to pandas otherwise.
     """
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
+    if not np.isfinite(num_std):
+        raise ValidationError(f"num_std must be finite, got {num_std!r}")
     logger.debug(
         "[bollinger] period=%d  std=%.1f  bars=%d  path=%s",
         period,
@@ -97,10 +101,24 @@ def atr(
     Calculate Average True Range (ATR).
     Uses np.maximum for a single-pass true range instead of pd.concat.
     """
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
+    if not (len(high) == len(low) == len(close)):
+        raise ValidationError(
+            "atr: high/low/close must all be the same length, got "
+            f"{len(high)}/{len(low)}/{len(close)}"
+        )
     logger.debug("[atr] period=%d  bars=%d", period, len(close))
     prev_close = close.shift(1).to_numpy(dtype=float)
     h = high.to_numpy(dtype=float)
     l = low.to_numpy(dtype=float)
+    # Same finite-input contract wilder_atr already enforces — these two are
+    # siblings computing the same true range, and it made no sense for one to
+    # reject NaN/Inf while the other quietly propagated it into the rolling
+    # mean.
+    require_finite_array(h, "high", "atr")
+    require_finite_array(l, "low", "atr")
+    require_finite_array(close.to_numpy(dtype=float), "close", "atr")
     tr = pd.Series(
         np.maximum(h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close))),
         index=close.index,

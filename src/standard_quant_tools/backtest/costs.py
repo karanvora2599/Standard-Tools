@@ -26,7 +26,15 @@ def per_share_commission(
     """
     Commission as a flat rate per share traded, with an optional minimum
     floor (e.g. many brokers charge max($0.005/share, $1.00) per order).
+
+    A zero-share trade costs 0.0, not `minimum` — the floor is a per-ORDER
+    minimum, and no order is placed when nothing is traded. (run_portfolio_
+    simulation already skips zero-size trades before reaching here, but this
+    function is public and documented as composable, so it must not invent a
+    commission for a trade that never happened.)
     """
+    if shares == 0:
+        return 0.0
     return max(abs(shares) * rate_per_share, minimum)
 
 
@@ -57,9 +65,12 @@ def sqrt_impact_bps(
     participation: float, volatility: float, coefficient: float = 1.0
 ) -> float:
     """
-    Square-root market impact model: impact_bps = coefficient * volatility
-    * sqrt(participation), the standard form used in practitioner impact
-    models (e.g. Almgren et al.). `participation` = order notional /
+    Square-root market impact model, returned in BASIS POINTS:
+    impact_bps = coefficient * volatility * sqrt(participation) * 10_000
+    — the standard form used in practitioner impact models (e.g. Almgren et
+    al.), with the trailing 1e4 converting the fractional impact into the bps
+    unit this function's name promises (impact_cost below divides it back
+    out). `participation` = order notional /
     average dollar volume (caller supplies avg_dollar_volume, typically a
     rolling mean of Close * Volume — no new data dependency, Volume is
     already present in every OHLCV frame). `volatility` is a per-bar

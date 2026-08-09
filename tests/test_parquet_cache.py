@@ -154,7 +154,19 @@ class TestParquetPathContainment:
         traversal attempts are rejected, not every symbol containing '/'."""
         p = _parquet_path("BRK/B", "2022-01-01", "2023-01-01", "1d")
         assert "/" not in p.name
-        assert "BRK-B" in p.name
+        assert "BRK" in p.name and p.name.endswith(".parquet")
+
+    def test_slash_and_dash_tickers_do_not_collide(self):
+        """
+        Regression test: '/' used to be encoded by replacing it with '-',
+        which made BRK/B and BRK-B -- two genuinely different symbols in real
+        ticker vocabularies -- resolve to the SAME cache file, so one symbol
+        could be served the other's cached bars.
+        """
+        slash = _parquet_path("BRK/B", "2022-01-01", "2023-01-01", "1d")
+        dash = _parquet_path("BRK-B", "2022-01-01", "2023-01-01", "1d")
+        assert slash != dash
+        assert "/" not in slash.name and "/" not in dash.name
 
 
 class TestNormDateValidation:

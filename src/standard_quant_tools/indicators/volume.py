@@ -4,6 +4,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import validate_series
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,13 @@ def vwap(
 
     Typical price = (H + L + C) / 3 — the standard VWAP numerator.
     """
+    if period is not None and period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
+    if not (len(high) == len(low) == len(close) == len(volume)):
+        raise ValidationError(
+            "vwap: high/low/close/volume must all be the same length, got "
+            f"{len(high)}/{len(low)}/{len(close)}/{len(volume)}"
+        )
     mode = f"rolling({period})" if period is not None else "cumulative"
     logger.debug("[vwap] mode=%s  bars=%d", mode, len(close))
     typical_price = (high + low + close) / 3.0
@@ -76,6 +84,13 @@ def mfi(
     Oscillates 0–100. Values below 20 suggest oversold, above 80 overbought.
     Fully vectorized: uses rolling sums of positive/negative money flow.
     """
+    if period <= 0:
+        raise ValidationError(f"period must be > 0, got {period}")
+    if not (len(high) == len(low) == len(close) == len(volume)):
+        raise ValidationError(
+            "mfi: high/low/close/volume must all be the same length, got "
+            f"{len(high)}/{len(low)}/{len(close)}/{len(volume)}"
+        )
     typical_price = (high + low + close) / 3.0
     raw_money_flow = typical_price * volume
 
@@ -87,8 +102,14 @@ def mfi(
     neg_flow = raw_money_flow.where(tp_diff <= 0, 0.0).rolling(period).sum()
 
     # When neg_flow = 0 (all bars up), MFI = 100; when pos_flow = 0, MFI = 0.
+    # When BOTH are 0 there was no money flow at all in the window (e.g. zero
+    # volume), so neither saturation applies and MFI is genuinely undefined —
+    # NaN, not the 0.0 the unconditional second .where() used to overwrite the
+    # first one with.
     mfr = pos_flow / neg_flow.replace(0.0, np.nan)
     result = 100.0 - (100.0 / (1.0 + mfr))
+    no_flow = (pos_flow == 0) & (neg_flow == 0)
     result = result.where(neg_flow != 0, 100.0)
     result = result.where(pos_flow != 0, 0.0)
+    result = result.where(~no_flow, np.nan)
     return result.rename("MFI")

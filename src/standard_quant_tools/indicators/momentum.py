@@ -79,8 +79,8 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     Uses C++ fast path when built, then Numba JIT, then pure Python fallback.
     All three paths use Wilder's smoothing (SMA seed, then alpha=1/period).
     """
-    if series.empty:
-        return pd.Series(dtype=float)
+    # No `if series.empty` branch here: @validate_series() above already
+    # rejects an empty Series, so it was unreachable.
     if period <= 0:
         raise ValidationError(f"period must be > 0, got {period}")
 
@@ -177,7 +177,18 @@ def stochastic_oscillator(
     lowest_low = low.rolling(window=k_period).min()
     highest_high = high.rolling(window=k_period).max()
 
-    k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+    # A zero-range window (flat prices across the whole lookback) makes %K a
+    # 0/0. Raw pandas yields NaN there while the C++ kernel above yields 0.0,
+    # so the same call returned different values depending only on whether
+    # _sqt_core happened to be built. Match the compiled kernel's convention
+    # so the result is build-independent; `range_safe` also keeps this from
+    # being an unguarded division, consistent with the degenerate-window
+    # handling in spread_zscore/rolling_beta.
+    price_range = highest_high - lowest_low
+    range_safe = price_range.where(price_range > 0)
+    k = (100 * ((close - lowest_low) / range_safe)).where(
+        price_range.isna() | (price_range > 0), 0.0
+    )
     d = k.rolling(window=d_period).mean()
 
     result = pd.DataFrame({"Stoch_K": k, "Stoch_D": d})

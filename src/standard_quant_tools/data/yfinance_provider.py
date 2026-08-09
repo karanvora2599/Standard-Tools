@@ -4,7 +4,6 @@ import functools
 import logging
 import time
 import uuid
-from datetime import date as _date
 from datetime import datetime
 from typing import Union
 

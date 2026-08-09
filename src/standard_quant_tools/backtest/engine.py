@@ -132,8 +132,11 @@ def _build_trade_log(
     open_trade: Dict[str, Any] = {}
 
     for date in trade_event_idx:
-        ref_price = ref_prices[date]
-        new_pos = executed[date]
+        # .loc, not []: bare [] on a Series is positional for an integer
+        # index and label-based otherwise, so it silently changed meaning
+        # with the index type pandas happened to infer.
+        ref_price = ref_prices.loc[date]
+        new_pos = executed.loc[date]
 
         if open_trade:
             position_size = open_trade["position_size"]
@@ -287,6 +290,21 @@ def run_strategy(
                 f"{name} must be non-negative and finite, got {value!r}"
             )
 
+    # Columns each fill mode actually reads — checked up front so a missing
+    # one is a clear error naming the mode that needs it, not a raw KeyError
+    # from deep inside the return calculation.
+    _required_cols = {
+        "close": ("Close",),
+        "next_open": ("Close", "Open"),
+        "hl2_exploratory": ("Close", "High", "Low"),
+    }[fill_price]
+    missing_cols = [c for c in _required_cols if c not in price_data.columns]
+    if missing_cols:
+        raise ValidationError(
+            f"price_data is missing column(s) {missing_cols} required for "
+            f"fill_price={fill_price!r}"
+        )
+
     # Fast path: skip the intersection + two .loc[] calls entirely when the
     # indices are already identical (the common case for a signal derived
     # directly from price_data) -- .equals() is a cheap array comparison,
@@ -297,6 +315,39 @@ def run_strategy(
         idx = price_data.index.intersection(signal_series.index)
     prices = price_data.loc[idx, "Close"]
     signals = signal_series.loc[idx]
+
+    # Finite-input contract, enforced once here for EVERY path.
+    #
+    # This used to live inside the C++ branch only, which made the contract
+    # depend on whether the extension happened to be built: the same call with
+    # the same data raised ValidationError with _sqt_core present and silently
+    # produced NaN metrics without it. It also never covered fill_price=
+    # "next_open"/"hl2_exploratory" at all, where a NaN reference price is
+    # worse than merely NaN-poisoning the result -- pandas' cumprod() is
+    # skipna=True, so the NaN bar's return is silently DROPPED from the
+    # compounded equity curve and total_return is computed over a quietly
+    # shortened series that still looks like a complete one.
+    prices_arr = prices.to_numpy(dtype=np.float64)
+    signals_arr = signals.to_numpy(dtype=np.float64)
+    require_finite_array(prices_arr, "prices", "run_strategy")
+    require_finite_array(signals_arr, "signals", "run_strategy")
+    if fill_price == "next_open":
+        require_finite_array(
+            price_data.loc[idx, "Open"].to_numpy(dtype=np.float64),
+            "Open",
+            "run_strategy",
+        )
+    elif fill_price == "hl2_exploratory":
+        require_finite_array(
+            price_data.loc[idx, "High"].to_numpy(dtype=np.float64),
+            "High",
+            "run_strategy",
+        )
+        require_finite_array(
+            price_data.loc[idx, "Low"].to_numpy(dtype=np.float64),
+            "Low",
+            "run_strategy",
+        )
 
     n_bars = len(prices)
     logger.debug(
@@ -343,10 +394,8 @@ def run_strategy(
     # fill_price="close" — "next_open" always routes to the Python path below.
     if fill_price == "close" and HAS_CPP and _cpp_core is not None:
         logger.debug("[run_strategy] using C++ kernel")
-        prices_arr = prices.to_numpy(dtype=np.float64)
-        signals_arr = signals.to_numpy(dtype=np.float64)
-        require_finite_array(prices_arr, "prices", "run_strategy")
-        require_finite_array(signals_arr, "signals", "run_strategy")
+        # prices_arr/signals_arr were built and validated above, for every
+        # path — not just this one.
         r = _cpp_core.run_strategy(
             prices_arr, signals_arr, initial_capital, commission_pct, slippage_pct
         )

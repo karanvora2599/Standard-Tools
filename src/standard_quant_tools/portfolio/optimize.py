@@ -334,6 +334,19 @@ def mean_variance_optimize(
             max_weight,
         )
 
+    if not converged:
+        # The solver's iterate is still returned (callers who only want a
+        # starting point can use it), but it is NOT guaranteed to satisfy
+        # sum(w)==1 or the bounds — say so loudly rather than leaving that
+        # buried in a boolean the caller may not read.
+        logger.warning(
+            "[portfolio_optimize] SLSQP did not converge for objective=%s — "
+            "returned weights may violate the sum-to-1 constraint (actual "
+            "sum: %.6f) and/or the weight bounds. Check result['converged'].",
+            objective,
+            float(np.sum(w)),
+        )
+
     exp_ret = float(w @ mu)
     exp_vol = float(np.sqrt(w @ cov @ w))
     sharpe = (exp_ret - risk_free_rate) / exp_vol if exp_vol > 1e-12 else 0.0

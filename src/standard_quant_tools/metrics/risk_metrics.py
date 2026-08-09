@@ -224,6 +224,17 @@ def _fit_gpd_pwm(exceedances: np.ndarray) -> Tuple[float, float]:
     weights = (n - 1 - np.arange(n, dtype=float)) / (n - 1)
     b1 = float(np.mean(weights * x_sorted))
     denom = b0 - 2.0 * b1
+    # denom -> 0 when the exceedances carry no usable dispersion (e.g. every
+    # exceedance identical), which would otherwise divide by ~zero and return
+    # inf/nan shape and scale that then propagate silently into var_evt/
+    # cvar_evt as if they were a real fitted tail.
+    if abs(denom) < 1e-300 or not np.isfinite(denom):
+        raise ValidationError(
+            "GPD probability-weighted-moment fit is degenerate (b0 - 2*b1 ~ 0) "
+            "— the exceedances above the threshold carry no usable dispersion "
+            "to fit a tail shape to. Use a larger tail_fraction or a longer "
+            "history."
+        )
     xi = 2.0 - b0 / denom
     beta = 2.0 * b0 * b1 / denom
     return xi, beta
@@ -285,7 +296,10 @@ def evt_tail_risk(
     Parameters
     ----------
     returns       : pd.Series  Return series (NOT price levels).
-    confidence    : VaR/CVaR confidence level, strictly between 0.5 and 1.0.
+    confidence    : VaR/CVaR confidence level, strictly between 0 and 1, and
+        additionally strictly greater than 1 - tail_fraction (the POT model
+        can only extrapolate above the threshold it was fitted at — with the
+        0.05 default that means confidence > 0.95).
     tail_fraction : Fraction of observations (by loss) treated as the tail
         for threshold selection — default 0.05 (top 5%), the standard POT
         choice. Must be strictly between 0 and 0.5.
@@ -302,11 +316,12 @@ def evt_tail_risk(
 
     Raises
     ------
-    ValidationError: confidence or tail_fraction out of range, method is
+    ValidationError: confidence or tail_fraction out of range, confidence
+        <= 1 - tail_fraction (outside what POT can extrapolate), method is
         neither "pwm" nor "mle", method="mle" requested without scipy
-        installed, or fewer than 20 exceedances result (the tail fit is
+        installed, fewer than 20 exceedances result (the tail fit is
         unreliable below that — a documented threshold, not a silent bad
-        fit).
+        fit), or the GPD moment fit is degenerate.
     """
     _check_confidence(confidence)
     if not (0.0 < tail_fraction < 0.5):
@@ -317,6 +332,22 @@ def evt_tail_risk(
         raise ValidationError(f"method must be 'pwm' or 'mle', got {method!r}")
     if method == "mle":
         _require_scipy_evt("EVT MLE fitting (method='mle')")
+    # Peaks-Over-Threshold extrapolates BEYOND the threshold, so the requested
+    # quantile has to sit in the tail the GPD was actually fitted to. When
+    # confidence <= 1 - tail_fraction the exceedance probability
+    # (n/n_u)*(1-confidence) is >= 1, which makes tail_prob**(-xi) - 1 negative
+    # and returns a "VaR" BELOW the threshold -- a silently wrong number, not
+    # a less precise one. Rejected rather than clamped: the caller asked for a
+    # level this method cannot answer, and var_historical/cvar already cover
+    # the in-sample region correctly.
+    if confidence <= 1.0 - tail_fraction:
+        raise ValidationError(
+            f"evt_tail_risk(confidence={confidence}, tail_fraction={tail_fraction}): "
+            f"Peaks-Over-Threshold can only extrapolate above its own threshold, "
+            f"so confidence must exceed 1 - tail_fraction "
+            f"({1.0 - tail_fraction:.4f}). Use a larger confidence, a larger "
+            "tail_fraction, or var_historical/cvar for in-sample quantiles."
+        )
 
     arr = returns.dropna().to_numpy(dtype=np.float64)
     n_obs = len(arr)

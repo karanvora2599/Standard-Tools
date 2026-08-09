@@ -93,12 +93,33 @@ def run_signal_panel_backtest(
 
     returns_df = pd.DataFrame(returns_cols).dropna(how="any")
 
+    # The docstring has always required weights to cover every ticker and sum
+    # to 1.0, but nothing enforced it: a dict missing a ticker raised a bare
+    # KeyError naming only the ticker, a wrong-length list silently
+    # misaligned weights against columns, and weights summing to anything
+    # other than 1.0 produced a scaled portfolio that still looked valid.
     if weights is None:
         w: List[float] = [1.0 / len(tickers)] * len(tickers)
     elif isinstance(weights, dict):
-        w = [weights[t] for t in tickers]
+        missing_w = [t for t in tickers if t not in weights]
+        if missing_w:
+            raise ValidationError(f"weights is missing entries for: {missing_w}")
+        extra_w = [t for t in weights if t not in tickers]
+        if extra_w:
+            raise ValidationError(
+                f"weights has entries for tickers not in signal_panel: {extra_w}"
+            )
+        w = [float(weights[t]) for t in tickers]
     else:
-        w = list(weights)
+        w = [float(x) for x in weights]
+        if len(w) != len(tickers):
+            raise ValidationError(
+                f"weights length ({len(w)}) must match the number of tickers "
+                f"({len(tickers)}) in signal_panel"
+            )
+    total_w = sum(w)
+    if abs(total_w - 1.0) > 1e-6:
+        raise ValidationError(f"weights must sum to 1.0, got {total_w:.6f}")
 
     metrics = portfolio_metrics(returns_df, w, benchmark_returns=benchmark_returns)
     portfolio_returns = build_portfolio(returns_df, w)

@@ -172,7 +172,12 @@ def _parquet_path(
     if not _SYMBOL_RE.match(provider) or ".." in provider:
         raise ValidationError(f"provider={provider!r} is not a valid identifier.")
 
-    safe = symbol.replace("/", "-").upper()
+    # "/" is not usable in a filename, but a plain replace with "-" made
+    # "BRK/B" and "BRK-B" — two genuinely different symbols in real ticker
+    # vocabularies — collide on one cache entry, so one symbol could be
+    # served the other's bars. Use a token that _SYMBOL_RE itself rejects, so
+    # no real symbol can ever produce it by other means.
+    safe = symbol.replace("/", "__SLASH__").upper()
     path = _CACHE_ROOT / f"{provider}_{safe}_{start}_{end}_{interval}.parquet"
     root = _CACHE_ROOT.resolve()
     resolved = path.resolve()

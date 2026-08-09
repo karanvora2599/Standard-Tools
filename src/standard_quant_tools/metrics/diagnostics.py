@@ -245,7 +245,20 @@ def exposure_stats(
                 exit_pos = idx.get_loc(row["exit_date"])
             except KeyError:
                 continue
-            holding_bars.append(int(exit_pos) - int(entry_pos))
+            # On a non-unique index get_loc returns a slice or boolean mask
+            # instead of an int, and int() on either raises TypeError — which
+            # the KeyError-only guard above did not catch, turning a duplicate
+            # timestamp into a crash instead of a skipped trade.
+            if not isinstance(entry_pos, int) or not isinstance(exit_pos, int):
+                logger.warning(
+                    "[exposure_stats] ambiguous index position for trade "
+                    "%s -> %s (duplicate timestamps?) — excluded from "
+                    "avg_holding_period_bars",
+                    row["entry_date"],
+                    row["exit_date"],
+                )
+                continue
+            holding_bars.append(exit_pos - entry_pos)
         if holding_bars:
             avg_holding_period_bars = round(float(np.mean(holding_bars)), 2)
 

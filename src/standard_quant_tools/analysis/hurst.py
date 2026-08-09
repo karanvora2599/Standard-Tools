@@ -185,6 +185,18 @@ def hurst_exponent(
             result = _cpp.hurst_rs(arr, min_window, max_w)
         # pybind11 returns a Python dict — convert n_obs back to int
         result["n_obs"] = int(result["n_obs"])
+        # Apply the SAME post-processing the Python fallback below does, so
+        # the two paths can't report different regimes for identical input:
+        # clip H into [0, 1.5] and derive `regime` from this module's own
+        # _classify thresholds rather than trusting the kernel's copy of them.
+        h_cpp = float(result["hurst"])
+        if np.isnan(h_cpp):
+            result["hurst"] = float("nan")
+            result["regime"] = "unknown"
+        else:
+            h_cpp = float(np.clip(h_cpp, 0.0, 1.5))
+            result["hurst"] = h_cpp
+            result["regime"] = _classify(h_cpp)
         return result
 
     # ── Python fallback ───────────────────────────────────────────────────────

@@ -240,6 +240,184 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+#### Python-codebase audit pass (31 findings)
+
+A line-by-line correctness audit of the Python tier (`src/`, plus the
+`Implementation/` and `Multi_Agent_Implementation/` trees), complementing
+the C++-focused 20-finding pass above. Every finding below was reproduced
+against a live interpreter before being fixed, and each is pinned by a
+regression test in the new `tests/test_bugfix_regressions.py` (39 tests).
+Full suite after the pass: **1961 passed, 1 skipped** (baseline before:
+1921 passed, 1 skipped).
+
+**Memory safety**
+
+- **`indicators/trend.py` — out-of-bounds heap writes in `_adx_numba`.**
+  The kernel wrote `result[period, ...]`, `dx_vals[period]` and
+  `result[2*period-1, ...]` without ever bounding them against `n`. Numba's
+  `@njit` compiles with bounds checking DISABLED, so for `n <= period` (e.g.
+  `adx(..., period=14)` on 10 bars) these wrote roughly 96 bytes past the
+  end of the output buffer and returned "successfully". The same source run
+  as pure Python (numba absent) raised `IndexError`, and the C++ kernel
+  returned all-NaN — three dispatch paths, three behaviors, one of them
+  memory-unsafe. Added an early all-NaN return for `n <= period`, matching
+  the C++ kernel. `_psar_numba` had the same class of defect (unconditional
+  `low[0]`/`high[0]` bootstrap read on an empty array) and is guarded the
+  same way. `adx()`/`parabolic_sar()`/`atr()`/`williams_r()`/`vwap()`/`mfi()`
+  now also reject mismatched input lengths up front, which was the other
+  route into an out-of-bounds read under `@njit`.
+
+**Silently-wrong results**
+
+- **`backtest/engine.py` — `run_strategy`'s finite-input contract depended
+  on whether the C++ extension was built.** `require_finite_array` ran only
+  inside the `fill_price="close"` C++ branch, so identical input raised
+  `ValidationError` with `_sqt_core` present and silently produced NaN
+  metrics without it. Worse, `fill_price="next_open"`/`"hl2_exploratory"`
+  were never validated at all: `intraday_leg` lacked the `.fillna(0.0)` its
+  sibling `overnight_leg` had, and because `Series.cumprod()` is
+  `skipna=True` a NaN `Open` did not poison the curve — it silently DROPPED
+  that bar's P&L, leaving a NaN hole and a `total_return` computed over a
+  quietly shortened series that still looked complete. Validation now runs
+  once for every path and covers the reference-price columns each fill mode
+  actually reads; missing columns are named explicitly instead of surfacing
+  as a raw `KeyError`.
+- **`metrics/risk_metrics.py` — `evt_tail_risk` extrapolated below its own
+  threshold.** Peaks-Over-Threshold is only valid above the fitted
+  threshold, but nothing enforced `confidence > 1 - tail_fraction`. With the
+  documented default `tail_fraction=0.05`, `confidence=0.90` gives an
+  exceedance probability of 2.0, making `tail_prob**(-xi) - 1` negative and
+  returning a "VaR" *below* the threshold — a wrong number, not an imprecise
+  one. Now rejected with a message pointing at `var_historical`/`cvar` for
+  in-sample quantiles. The docstring also claimed a (0.5, 1.0) bound that
+  `_check_confidence` never enforced; corrected. `_fit_gpd_pwm`'s unguarded
+  `b0 - 2*b1` division is now caught as a degenerate fit.
+- **`backtest/robustness.py` — `parameter_sensitivity` could rank NaN as the
+  best trial.** `np.sort` places NaN last, so `[::-1]` placed it *first*: a
+  single NaN metric (a grid row with zero-variance returns is the common
+  source) became `best` and made every reported gap NaN. Non-finite trials
+  are now excluded from the ranking with a warning, and an all-NaN column
+  raises instead of returning nonsense.
+- **`audit/hashing.py` — two provenance-hash collisions.**
+  `hash_dataframe` used `pd.util.hash_pandas_object`, a per-row digest that
+  never sees column labels, so two frames holding identical numbers under
+  entirely different column names (a `Close`/`Open` frame and a
+  `Volume`/`Adj` frame) produced the *same* fingerprint. Column names,
+  dtypes and order are now part of the hash. Separately, `hash_payload`'s
+  `default=str` routed ndarrays through numpy's abbreviating repr, so two
+  10,000-element arrays differing only in the middle hashed identically; the
+  fallback encoder is now lossless. **`hash_payload`'s output is unchanged
+  for records made only of native JSON types**, which is every
+  `DecisionRecord`/chain-index entry — so the tamper-evident record chain
+  built on it still verifies across this change (pinned by
+  `test_chain_hash_unchanged_for_plain_json_records`). `hash_dataframe` IS a
+  format change: replaying a record captured by an older version will report
+  a `data_source` mismatch even when the data is unchanged.
+
+**`data/_retry.py` — three defects in one decorator**
+
+- `ValidationError` (and every other non-`APIError` `QuantError`) was caught
+  by the broad `except Exception` and re-raised as `APIError`, so a caller's
+  `except ValidationError` never fired.
+- `retry(times=0)` silently returned `None` **without ever calling the
+  wrapped function** — the loop body never executed and the trailing
+  `if last_exc` was falsy. `times < 1` now raises at decoration time.
+- Raw network exceptions (`ConnectionError`, `TimeoutError`, and anything
+  else outside this package's hierarchy) hit the catch-all and were wrapped
+  and raised on the **first** attempt, so the single most common transient
+  failure mode was never actually retried. Classification now happens inside
+  one handler rather than across overlapping `except` clauses — the previous
+  clause ordering also silently decided the wrong outcome for
+  `NonRetryableAPIError`, which is itself an `APIError`.
+
+**Cross-path divergences (same call, different answer per build)**
+
+- `indicators/momentum.py` — `stochastic_oscillator` on a zero-range window:
+  the C++ kernel returned `0.0`, the pandas fallback `NaN`. The fallback now
+  matches the compiled kernel, with warm-up bars still NaN.
+- `analysis/cointegration.py` — `cointegration_test(autolag=...)`: the C++
+  path mapped anything that wasn't exactly `"bic"` onto AIC while the
+  statsmodels fallback passed the string straight through to `coint()`, so a
+  typo ran a *different* lag-selection criterion depending on the build.
+  Now validated against `{"aic", "bic"}`.
+- `analysis/hurst.py` — the C++ path returned the kernel's dict verbatim,
+  skipping the `clip(0, 1.5)` and the `_classify` regime thresholds the
+  Python fallback applies. Both paths now share the same post-processing.
+
+**Validation-consistency gaps**
+
+- `require_finite_array` added to `parabolic_sar`, `atr`,
+  `multi_factor_regression` and `kalman_hedge_ratio` — each had siblings in
+  the same module already enforcing the contract while these quietly
+  propagated NaN into a result that looked complete (`parabolic_sar` on
+  `[1, nan, 3]` returned `[1.0, 1.0, 1.0]`).
+- `backtest/panel.py` — `run_signal_panel_backtest`'s docstring has always
+  required `weights` to cover every ticker and sum to 1.0; nothing enforced
+  it. A dict missing a ticker raised a bare `KeyError`, a wrong-length list
+  silently misaligned weights against columns, and weights summing to
+  anything else produced a scaled portfolio that still looked valid.
+- `backtest/portfolio_engine.py` — `target_weights.index` was checked for
+  duplicates but `price_data` was not; a duplicated bar made
+  `.loc[date, "Close"]` return a Series and `float()` raise a bare
+  `TypeError` from deep inside the per-bar loop.
+- Missing period/window validation added across `sma`, `ema`, `macd` (which
+  also now rejects `fast >= slow`), `bollinger_bands`, `williams_r`, `vwap`,
+  `mfi`, `rolling_beta` and `block_bootstrap_ci`. `rolling_factor_loadings`
+  keeps its documented `window=1` minimum-norm behavior and only rejects
+  `window <= 0`.
+
+**Edge cases**
+
+- `metrics/return_metrics.py` — `cagr` on a wiped-out equity curve
+  (`total_ret <= -1`, reachable since `run_strategy` applies no bankruptcy
+  floor) computed `(1 + total_ret) ** (1/years)`, yielding NaN plus a
+  `RuntimeWarning` that then propagated silently into `calmar_ratio`. Now
+  reports `-1.0` (total loss) with a warning.
+- `backtest/costs.py` — `per_share_commission(0, ...)` returned the
+  per-order `minimum`, inventing a commission for a trade that never
+  happened.
+- `data/_cache.py` — `"/"` was encoded by replacing it with `"-"`, making
+  `BRK/B` and `BRK-B` (two genuinely different symbols) resolve to the same
+  cache file, so one symbol could be served the other's cached bars.
+- `indicators/volume.py` — `mfi` returned `0.0` ("maximally oversold") for a
+  window with no money flow at all: the second unconditional `.where()`
+  overwrote the first one's `100.0`. Now NaN, which is what an undefined
+  ratio actually is.
+- `metrics/diagnostics.py` — `exposure_stats` guarded `idx.get_loc` against
+  `KeyError` only; on a non-unique index it returns a slice or mask and
+  `int()` raises `TypeError`, crashing instead of skipping the trade.
+- `agent/tools.py` — `_sanitize_for_json` walked only dicts and lists and
+  tested `isinstance(obj, float)`, so a non-finite value inside a tuple, or
+  an `np.float32`/ndarray, survived to `json.dumps` and emitted the
+  non-standard `Infinity`/`NaN` tokens that strict parsers reject.
+  (`np.float64` subclasses `float` and was already covered.)
+- `backtest/engine.py` — `_build_trade_log` indexed with bare `[]`, which is
+  positional for an integer index and label-based otherwise; now `.loc`.
+- `portfolio/optimize.py` — a non-converged SLSQP result is still returned
+  (callers may want the iterate) but now logs a warning with the actual
+  weight sum, rather than leaving the violated sum-to-1 constraint buried in
+  a boolean.
+- Typing/cleanup: implicit `Optional` corrected in `error.py` and
+  `validation.py`; unused imports removed from `agent/tools.py`,
+  `data/base.py`, `data/yfinance_provider.py`, `portfolio/portfolio.py`;
+  dead unreachable `series.empty` branch removed from `rsi` (its
+  `@validate_series()` decorator already rejects empty input);
+  `sqrt_impact_bps`'s docstring formula corrected to include the 1e4 bps
+  conversion the code applies.
+
+**Investigated and confirmed NOT bugs** (recorded so the same ground isn't
+re-covered): all three pylint E-level hits in `agent/models.py`/`tools.py`
+are pydantic/`or`-narrowing false positives; `pandas.DataFrame.attrs`
+survives the `ProcessPoolExecutor` pickle boundary, so `screen_stocks`'
+`failed_filters`/`failed_tickers` aggregation is sound;
+`portfolio_engine.py`'s `prev_date` IS updated (line 605), so calendar-day
+financing accrual is correct; the `not v != v` NaN idiom is correct; and the
+Black-Scholes Greeks, Corwin-Schultz, Yang-Zhang, Merton two-fund frontier
+and Deflated-Sharpe implementations were each checked against their
+published forms and are correct as written.
+
+#### C++ correctness/portability pass (20 findings)
+
 - **Correctness/portability pass, item 16 of 20:** `indicators.cpp`'s
   `wilder_atr_into` allocated a full `std::vector<double> tr(n)` temp
   buffer despite every `TR[i]` depending only on `high[i]`/`low[i]`/

@@ -235,6 +235,20 @@ def run_portfolio_simulation(
     if missing:
         raise ValidationError(f"price_data is missing OHLCV for: {missing}")
 
+    # target_weights.index is already checked for duplicates above; price_data
+    # was not. A duplicated bar makes .loc[date, "Close"] return a Series
+    # instead of a scalar, so float() raises a bare TypeError from deep inside
+    # the per-bar loop with no indication of which ticker or date caused it.
+    for t in tickers:
+        if price_data[t].index.has_duplicates:
+            dupes = (
+                price_data[t].index[price_data[t].index.duplicated()].unique().tolist()
+            )
+            raise ValidationError(
+                f"price_data[{t!r}].index has duplicate date(s): "
+                f"{[str(d) for d in dupes[:5]]} — every bar must be unique."
+            )
+
     required_cols = {
         "close": ["Close"],
         "next_open": ["Close", "Open"],

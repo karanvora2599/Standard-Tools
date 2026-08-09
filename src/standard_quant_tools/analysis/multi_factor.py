@@ -5,6 +5,7 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
@@ -63,11 +64,23 @@ def multi_factor_regression(
         r_squared     : float
         adj_r_squared : float
         n_obs         : int
+
+    Note
+    ----
+    p_values use the t-distribution with `n - k` degrees of freedom when
+    scipy is installed, and a normal approximation otherwise. The two agree
+    closely for large samples but differ materially for small ones — check
+    `n_obs` before comparing p-values computed in different environments.
     """
     common_idx = asset_returns.index.intersection(factor_returns.index)
     y = asset_returns.loc[common_idx].to_numpy(dtype=float)
     X_f = factor_returns.loc[common_idx].to_numpy(dtype=float)
     factor_names = list(factor_returns.columns)
+    # Same finite-input contract rolling_factor_loadings below already
+    # enforces — without it lstsq quietly returns all-NaN coefficients that
+    # look like a completed regression.
+    require_finite_array(y, "asset_returns", "multi_factor_regression")
+    require_finite_array(X_f, "factor_returns", "multi_factor_regression")
 
     n = len(y)
     k = X_f.shape[1] + 1  # +1 for intercept
@@ -155,6 +168,14 @@ def rolling_factor_loadings(
     Uses C++ incremental Cholesky path when available (50-200× faster than
     the Python numpy.linalg.lstsq loop).
     """
+    # window == 1 is intentionally allowed: each bar becomes its own
+    # underdetermined 1-observation OLS and lstsq returns the minimum-norm
+    # solution (alpha=y, loading=0), which is a documented, tested behavior.
+    # Only window <= 0 is genuinely invalid — it makes the loop start at a
+    # negative index and build a design matrix whose row count doesn't match
+    # the window slice.
+    if window <= 0:
+        raise ValidationError(f"window must be > 0, got {window}")
     common_idx = asset_returns.index.intersection(factor_returns.index)
     y_arr = asset_returns.loc[common_idx].to_numpy(dtype=np.float64)
     X_arr = np.ascontiguousarray(

@@ -68,6 +68,16 @@ def cointegration_test(
         half_life_days : float  – AR(1) half-life of the spread in bars
         n_obs          : int
     """
+    # Validated rather than silently coerced: the C++ path below maps
+    # anything that isn't exactly "bic" onto AIC, while the statsmodels
+    # fallback passes the string straight through to coint(). A typo
+    # therefore ran a DIFFERENT lag-selection criterion depending on whether
+    # the extension was built, and echoed the typo back either way.
+    if autolag.lower() not in ("aic", "bic"):
+        raise ValidationError(
+            f"autolag must be 'aic' or 'bic', got {autolag!r}"
+        )
+
     common_idx = series_a.index.intersection(series_b.index)
     a = series_a.loc[common_idx]
     b = series_b.loc[common_idx]
@@ -406,6 +416,11 @@ def kalman_hedge_ratio(
     common_idx = series_a.index.intersection(series_b.index)
     a = series_a.loc[common_idx].to_numpy(dtype=float)
     b = series_b.loc[common_idx].to_numpy(dtype=float)
+    # Consistent with cointegration_test/compute_spread/half_life above: a
+    # NaN/Inf here silently poisons every subsequent state of the sequential
+    # filter recursion, with no check anywhere in the numba or native kernel.
+    require_finite_array(a, "series_a", "kalman_hedge_ratio")
+    require_finite_array(b, "series_b", "kalman_hedge_ratio")
     n = len(a)
     if n < 3:
         raise ValidationError(

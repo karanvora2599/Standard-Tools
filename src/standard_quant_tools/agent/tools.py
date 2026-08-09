@@ -6,6 +6,7 @@ All inputs/outputs use Pydantic models for clean JSON serialization.
 import datetime
 import logging
 import math
+import numbers
 import time
 import uuid
 from collections import Counter
@@ -31,7 +32,6 @@ from standard_quant_tools.agent.models import (
     BacktestOptResult,
     BacktestResult,
     BacktestResultV2,
-    BLViewInput,
     BuyAndHoldInput,
     CapacityReportInput,
     CapacityReportResult,
@@ -4587,8 +4587,14 @@ def _sanitize_for_json(obj: Any) -> Any:
     """
     if isinstance(obj, dict):
         return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
+    # Tuples/sets are JSON-encoded as arrays by json.dumps but were not walked
+    # here, so a non-finite value inside one survived to the encoder. np.float64
+    # subclasses float and was already covered; np.float32 and other numpy
+    # scalars/arrays are not, hence the explicit numeric check below.
+    if isinstance(obj, (list, tuple, set, frozenset)):
         return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, float) and not math.isfinite(obj):
+    if hasattr(obj, "tolist") and callable(obj.tolist):  # numpy array/scalar
+        return _sanitize_for_json(obj.tolist())
+    if isinstance(obj, numbers.Real) and not math.isfinite(float(obj)):
         return None
     return obj

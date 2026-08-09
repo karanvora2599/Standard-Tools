@@ -7,13 +7,12 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.metrics.return_metrics import annualized_volatility, cagr
+from standard_quant_tools.metrics.return_metrics import cagr
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     cvar,
     information_ratio,
     max_drawdown,
-    sharpe_ratio,
     sortino_ratio,
     var_historical,
 )

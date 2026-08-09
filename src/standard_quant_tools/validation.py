@@ -1,6 +1,6 @@
 import logging
 from functools import wraps
-from typing import Any, Callable
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -10,7 +10,7 @@ from .error import ValidationError
 logger = logging.getLogger(__name__)
 
 
-def validate_dataframe(required_columns: list[str] = None):
+def validate_dataframe(required_columns: Optional[list[str]] = None):
     """
     Decorator to validate input DataFrame.
     Checks for empty DataFrame and missing columns.
@@ -34,7 +34,7 @@ def validate_dataframe(required_columns: list[str] = None):
                     break
             if df is None:
                 # check kwargs
-                for key, value in kwargs.items():
+                for value in kwargs.values():
                     if is_dataframe_like(value):
                         df = value
                         break
