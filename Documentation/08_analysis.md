@@ -117,6 +117,22 @@ rolling = rolling_factor_loadings(aapl, factors, window=60)
 print(rolling.tail())
 ```
 
+**`window` must be at least `k + 2`** (`k` factors plus an intercept, plus one
+observation to fit against). Below that every window is underdetermined and
+the entire result is NaN, on both backends. There is no unique least-squares
+solution to report at that size, and the minimum-norm one `numpy.linalg.lstsq`
+would return is an artifact of the solver rather than an estimated loading.
+
+This was previously a cross-backend divergence: the C++ kernel returned
+all-NaN while the Python fallback returned lstsq's minimum-norm answer, so the
+same call produced NaN or numbers depending only on whether `_sqt_core` was
+built. Both now short-circuit to NaN before dispatching.
+
+Inputs are also validated for finiteness — a NaN in `asset_returns` or
+`factor_returns` raises `ValidationError` rather than quietly yielding
+all-NaN coefficients that look like a completed regression. The same contract
+applies to `multi_factor_regression`.
+
 ### Detecting regime shifts
 
 ```python
@@ -210,6 +226,8 @@ print(json.dumps(payload, indent=2))
 Two price series are **cointegrated** when a linear combination of them is stationary, even though each series individually follows a random walk. This is the statistical foundation of pairs trading.
 
 `cointegration_test` uses the **C++ extension** (`_sqt_core`) when available — a self-contained Engle-Granger implementation (OLS + ADF + MacKinnon 2010 response surface) with no dependency on `statsmodels`. The C++ path is **5–15× faster** on typical series lengths (n = 250–1 000). The statsmodels fallback is used automatically when the extension is not built; the API and return format are identical either way.
+
+`autolag` must be exactly `"aic"` or `"bic"`; anything else raises `ValidationError`. This is enforced because the two backends previously disagreed on a typo: the C++ path mapped any string that wasn't exactly `"bic"` onto AIC, while the statsmodels fallback passed it straight through to `coint()`. A misspelled criterion therefore ran a *different* lag selection depending on the build, and echoed the typo back in the result either way.
 
 The toolkit provides four functions covering the full pairs workflow:
 
@@ -1016,7 +1034,11 @@ from standard_quant_tools.metrics.risk_metrics import evt_tail_risk
 evt_tail_risk(returns, confidence=0.99, tail_fraction=0.05, method="pwm")
 ```
 
-Default `method="pwm"` (probability-weighted moments, Hosking & Wallis 1987) is closed-form pure numpy (one sort + cumulative arithmetic) — zero optional-dependency surface out of the box, and the reason it's the default rather than `"mle"`. `method="mle"` refines the fit via `scipy.optimize`, seeded from the PWM estimate. Returns a dict with the fitted shape/scale (`shape_xi`, `scale_beta`), `var_evt`/`cvar_evt`, and `tail_classification` (`"heavy_tailed"` when `shape_xi > 0.1`). Raises `ValidationError` below 20 exceedances — the tail fit is unreliable below that threshold.
+Default `method="pwm"` (probability-weighted moments, Hosking & Wallis 1987) is closed-form pure numpy (one sort + cumulative arithmetic) — zero optional-dependency surface out of the box, and the reason it's the default rather than `"mle"`. `method="mle"` refines the fit via `scipy.optimize`, seeded from the PWM estimate. Returns a dict with the fitted shape/scale (`shape_xi`, `scale_beta`), `var_evt`/`cvar_evt`, and `tail_classification` (`"heavy_tailed"` when `shape_xi > 0.1`).
+
+**`confidence` must exceed `1 - tail_fraction`.** Peaks-Over-Threshold extrapolates *above* the threshold it fitted, so the requested quantile has to sit inside that tail. With the default `tail_fraction=0.05` this means `confidence > 0.95`. Requesting less (e.g. `confidence=0.90`) makes the exceedance probability `(n/n_u)·(1-confidence)` reach or exceed 1, which drives `tail_prob**(-xi) - 1` negative and returns a "VaR" *below* the threshold — a silently wrong number, not a less precise one. That combination now raises `ValidationError` rather than returning it. Use `var_historical`/`cvar` for in-sample quantiles below the POT threshold; they read the empirical distribution directly and are the right tool there.
+
+Also raises `ValidationError` below 20 exceedances (the tail fit is unreliable below that threshold), and if the GPD moment fit is degenerate — the exceedances carrying no usable dispersion to fit a shape to, which previously divided by ~zero and produced `inf`/`nan` shape and scale that propagated into `var_evt`/`cvar_evt` as though they were a real fitted tail.
 
 ---
 

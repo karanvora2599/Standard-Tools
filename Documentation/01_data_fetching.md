@@ -157,6 +157,35 @@ Errors are designed to be descriptive enough for LLM self-correction — the mes
 
 `NonRetryableAPIError` is a subclass of `APIError` (so an existing `except APIError` still catches it — it's a narrowing, not a new branch you have to add), used for failures the shared `retry` decorator knows will never succeed no matter how many times it's retried — currently just `PolygonProvider`'s HTTP 401/403 (an invalid/expired API key). Everything else `APIError`-shaped (429 rate limits, 5xx, network errors) is retried with the usual exponential backoff; `DataNotFoundError`/`InvalidSymbolError` are also never retried, for the same reason (retrying "the symbol doesn't exist" can't change the answer).
 
+### What `retry` retries, precisely
+
+| Exception | Retried? | Final type seen by the caller |
+|---|---|---|
+| `APIError` (429, 5xx) | yes | `APIError` |
+| `ValueError` | yes | `APIError` |
+| Raw network/stdlib errors (`ConnectionError`, `TimeoutError`, `socket.gaierror`, `aiohttp`/`requests` client errors) | yes | `APIError`, chained from the original |
+| `NonRetryableAPIError` (401/403) | no | `NonRetryableAPIError` |
+| `InvalidSymbolError`, `DataNotFoundError` | no | unchanged |
+| `ValidationError` and every other non-`APIError` `QuantError` | no | **unchanged** |
+
+Two of those rows describe behavior that was fixed rather than merely
+documented, and are worth knowing if you have code depending on the old
+shape:
+
+- **Raw network exceptions are now genuinely retried.** They are neither
+  `ValueError` nor `APIError`, so a catch-all previously wrapped them and
+  re-raised on the *first* attempt — the single most common transient
+  failure mode was never actually retried. (Providers wrap most of their own
+  network errors as `APIError` internally, which masked this in practice, but
+  the decorator's own contract was wrong.)
+- **`ValidationError` keeps its type.** It used to be caught by the same
+  catch-all and re-raised as `APIError`, so `except ValidationError` around a
+  decorated provider call never fired.
+
+`retry(times=...)` requires `times >= 1` and raises `ValueError` at
+decoration time otherwise. `times=0` previously returned `None` without ever
+calling the wrapped function.
+
 ---
 
 ## Portfolio-Level Async Fetch

@@ -145,6 +145,34 @@ No special shell setup needed.
 The cmake commands are **identical on all platforms** once the compiler is
 in `PATH` (see platform notes above).
 
+> **Do not pass `-DCMAKE_CXX_FLAGS=...` to add warning flags.** CMake
+> *replaces* the variable rather than appending to it, so the project's own
+> flag set is discarded — on MSVC that silently drops `/EHsc`, which governs
+> exception-unwinding semantics. The build then succeeds, links, and emits
+> only warning C4530 ("C++ exception handler used, but unwind semantics are
+> not enabled"), which reads like noise. The failure appears much later, as a
+> **Windows access violation** the first time a kernel throws across the
+> pybind11 boundary — for example `rolling_hurst`'s negative-SSE guard or any
+> `ValidationError` raised from native code. This is a real trap, hit while
+> auditing this project; nothing about the build output points at the cause.
+>
+> Two related hazards with the same root:
+>
+> - **Every configure directory writes to the same output location.**
+>   `LIBRARY_OUTPUT_DIRECTORY` is `src/standard_quant_tools/`, so
+>   `cmake -B build_something_else` will *overwrite* the extension your main
+>   `build/` produced. If you need a second configuration (a warnings audit,
+>   a sanitizer build), redirect its output or expect to rebuild `build/`
+>   afterwards to restore a good `.pyd`.
+> - **If you suspect a stale or bad extension**, delete
+>   `src/standard_quant_tools/_sqt_core*.pyd` and run `cmake --build build`
+>   again. Ninja tracks its own outputs, so a file replaced by a *different*
+>   build directory will not always be detected as dirty.
+>
+> To add warning flags safely, use a toolchain file or
+> `target_compile_options` on the target, both of which compose with the
+> existing flags instead of replacing them.
+
 ### Standard build (all platforms)
 
 ```

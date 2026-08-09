@@ -13,6 +13,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 - **Agent-First Design** — All tools return Pydantic models; 46 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
+- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), with every finding pinned by a regression test. 1964 Python tests + 9 C++ suites, all green.
 
 ---
 
@@ -591,7 +592,57 @@ except InvalidSymbolError as e:
     print(f"Bad symbol: {e}")
 ```
 
-**Exception hierarchy:** `QuantError` → `DataProviderError` → `DataNotFoundError / InvalidSymbolError / APIError`
+**Exception hierarchy:** `QuantError` → `DataProviderError` → `DataNotFoundError / InvalidSymbolError / APIError / NonRetryableAPIError`
+
+`ValidationError` (a `QuantError`, not a `DataProviderError`) is raised for
+caller-side input problems — a bad period, a non-finite price, mismatched
+series lengths — and is **never retried or re-typed** by the `retry`
+decorator. See [01_data_fetching.md](Documentation/01_data_fetching.md) for
+the full retry classification table.
+
+---
+
+## Correctness & Backend Parity
+
+Most functions here have two implementations: a C++ kernel in `_sqt_core`
+and a Python/NumPy fallback used when the extension isn't built. **The two
+are contractually required to return the same answer**, and that requirement
+is now tested directly rather than assumed.
+
+Both tiers went through a line-by-line correctness audit (31 findings in the
+Python tier, 10 in the C++ tier — full write-ups in
+[CHANGELOG.md](CHANGELOG.md)). Three themes are worth knowing as a user:
+
+1. **Backend divergences.** Five cases were found where the same call
+   returned a different answer depending on whether `_sqt_core` was built —
+   `stochastic_oscillator` on a flat window, `cointegration_test`'s
+   `autolag` handling, `hurst_exponent`'s regime post-processing,
+   `rolling_factor_loadings` on an underdetermined window, and
+   `profit_factor` when no trade wins or loses. All are fixed and pinned by
+   tests that assert the two backends against *each other* — a test pinning
+   only one side cannot see a divergence, which is exactly how several of
+   these survived.
+
+2. **Input validation is now uniform across tiers.** Non-finite inputs,
+   invalid periods, and mismatched series lengths raise `ValidationError`
+   at the Python boundary regardless of which tier executes. Previously
+   several checks lived inside the C++ branch only, so the same bad input
+   raised with the extension present and silently produced NaN without it.
+   The most consequential case: `run_strategy(fill_price="next_open")` never
+   validated `Open`, and because `cumprod` skips NaN, a gap there silently
+   *dropped* that bar's P&L rather than surfacing — see
+   [04_backtesting.md](Documentation/04_backtesting.md#input-validation-contract).
+
+3. **Memory safety in the Numba tier.** `@njit` compiles with bounds
+   checking disabled. Two kernels (`_adx_numba`, `_psar_numba`) could write
+   or read past their output arrays on short/empty input, returning
+   plausible numbers instead of raising. Both are guarded, and all three
+   execution tiers now agree on those inputs.
+
+If you have audit records written before this release, note that
+`content_hash` values are not comparable across the change — see the format
+note in [10_auditability.md](Documentation/10_auditability.md). The
+tamper-evident record chain is unaffected and still verifies.
 
 ---
 
@@ -650,7 +701,20 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1853 Python tests total** (1588 passing, 242 skipped pending C++ build across 11 `test_cpp_*.py` files, 23 integration/slow/benchmark) · **152 C++ unit tests** (23 Hurst + 35 indicators + 26 cointegration + 24 backtest + 10 Monte Carlo + 13 GARCH + 12 signal state machines + 9 rolling regression, run via `ctest` — 8 test executables, ~10,800 individual assertion-level checks between them)
+**1965 Python tests total** — 1964 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `test_cpp_*.py` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+
+**9 C++ test executables** run via `ctest` (Hurst, indicators, cointegration, backtest, Monte Carlo, GARCH, signal state machines, rolling regression, plus a randomized-input cointegration fuzz harness) — ~61,300 assertion-level checks between them, ~50,000 of which come from the fuzz harness alone.
+
+> **If you build the extension yourself, don't override `CMAKE_CXX_FLAGS`.**
+> Passing `-DCMAKE_CXX_FLAGS=...` *replaces* the project's defaults rather
+> than appending to them, which silently drops `/EHsc` on MSVC. The result
+> builds and links cleanly, emits only a C4530 warning that is easy to
+> dismiss, and then takes an access violation the first time a kernel throws
+> across the Python boundary. All build output also lands in
+> `src/standard_quant_tools/`, so a second configure directory will overwrite
+> the extension your main build produced. Use the documented
+> `cmake -B build` invocation in
+> [Development/build_guide.md](Development/build_guide.md).
 
 ---
 

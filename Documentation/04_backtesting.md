@@ -27,7 +27,13 @@ print(f"C++ kernel active: {HAS_CPP}")
 
 The optional per-trade log (`include_trade_log=True`) still runs in Python — it requires DatetimeIndex-aware iteration to produce labeled entry/exit dates.
 
-**Trade-stat parity (single-call vs. batch) — current status:** `run_strategy`'s single-call C++ path and `backtest_grid`'s batch kernel used to disagree on `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct`: the native kernel's own trade-log construction recorded entries one bar late and excluded commission/slippage, so `run_strategy` masked this by overwriting those four fields with a correct Python recomputation (`_build_trade_log`), while `backtest_grid`'s batch path had no such override and returned the native kernel's uncorrected numbers as-is. `backtest.cpp`'s native trade-log construction has since been rewritten to match `_build_trade_log`'s accounting exactly (entry size = signal magnitude rather than just its sign, `prices[i-1]` as the reference price, correct commission/slippage deduction), so the batch path's stats *should* now agree with the single-call/Python path. **This has not yet been verified against a real compiled `_sqt_core` extension** — the fix was written in an environment with no C++ toolchain available, so confirmation is deferred to CI, via a gated test (`tests/test_backtest.py::TestNativeTradeStatsCorrectness`) that only runs once `_sqt_core` is actually built (e.g. in `build-cpp.yml`). Until a CI run confirms agreement, `run_strategy`'s Python-side override of the native trade stats is being left in place as a safety net rather than removed.
+**Trade-stat parity (single-call vs. batch) — verified.** `run_strategy`'s single-call C++ path and `backtest_grid`'s batch kernel used to disagree on `win_rate`/`profit_factor`/`num_trades`/`avg_trade_return_pct`: the native kernel's own trade-log construction recorded entries one bar late and excluded commission/slippage, so `run_strategy` masked this by overwriting those four fields with a correct Python recomputation (`_build_trade_log`), while `backtest_grid`'s batch path had no such override and returned the native kernel's uncorrected numbers as-is. `backtest.cpp`'s native trade-log construction was rewritten to match `_build_trade_log`'s accounting exactly (entry size = signal magnitude rather than just its sign, `prices[i-1]` as the reference price, correct commission/slippage deduction).
+
+Agreement is now **confirmed against a real compiled `_sqt_core`**: all three tests in `tests/test_backtest.py::TestNativeTradeStatsCorrectness` pass with the extension built, covering the single-call path, the batch path, and a native-vs-Python-recomputation cross-check. (An earlier revision of this section deferred that confirmation to CI because the fix had been written without a C++ toolchain available; that is no longer the case.)
+
+One documented exception remains, and it is why the cross-check test excludes resize scenarios: a same-sign **resize** (e.g. position 1.0 → 2.5) is accounted differently by the two implementations. `backtest.cpp` tracks a genuine weighted-average cost basis across a lot's whole life, while `engine.py`'s `_build_trade_log` still treats a resize as closing one trade and opening another. For any signal sequence containing a resize, the returned `trade_log` DataFrame's row count can therefore disagree with `result["num_trades"]`. See the "Known Issues" entry in `CHANGELOG.md`.
+
+**Cross-backend parity generally.** Both audit passes (see `CHANGELOG.md`) specifically hunted for cases where the same call returns a different answer depending on whether `_sqt_core` is built. Four were found and fixed — `stochastic_oscillator` on a zero-range window, `cointegration_test`'s `autolag` handling, `hurst_exponent`'s regime post-processing, and `rolling_factor_loadings` on an underdetermined window — plus `profit_factor`'s 0/0 case described under [Understanding the Output](#understanding-the-output) below. Each is now pinned by a test asserting the two backends against *each other* rather than against a constant, since a test pinning only one side cannot see a divergence.
 
 | Scenario | Python (pandas) | C++ single calls | C++ batch kernel | Speedup (batch) |
 |---|---|---|---|---|
@@ -172,6 +178,35 @@ out-of-sample/simulated leg ultimately calls `run_strategy`,
 `run_regime_adaptive_backtest` (the older, in-sample exploratory tool, kept
 deliberately simple — see its own docstring), which still always uses
 `"close"`.
+
+### Input validation contract
+
+`run_strategy` rejects non-finite (NaN/Inf) input **on every path**, and
+the check covers whichever price columns the chosen `fill_price` actually
+reads:
+
+| `fill_price` | Columns required and validated |
+|---|---|
+| `"close"` | `Close` |
+| `"next_open"` | `Close`, `Open` |
+| `"hl2_exploratory"` | `Close`, `High`, `Low` |
+
+A missing column raises a `ValidationError` naming both the column and the
+fill mode, rather than surfacing as a bare `KeyError` from inside the return
+calculation. `signal_series` is validated for finiteness too.
+
+This contract used to be enforced only inside the `fill_price="close"` C++
+branch, which had two consequences worth knowing if you are upgrading:
+
+- **The same call behaved differently depending on whether `_sqt_core` was
+  built** — raising with the extension present, silently producing NaN
+  metrics without it.
+- **`"next_open"`/`"hl2_exploratory"` were never validated at all.** A NaN
+  `Open` did not merely poison the result: because `Series.cumprod()` skips
+  NaN, that bar's P&L was silently *dropped* from the compounded curve, so
+  `total_return` was computed over a quietly shortened series that still
+  looked complete. Any historical result produced from a frame with gaps in
+  `Open`/`High`/`Low` under those fill modes is worth re-running.
 
 ---
 
@@ -500,7 +535,7 @@ print(result["portfolio_returns"].tail())
 | `portfolio_metrics` | `dict` | Same shape as `portfolio.portfolio_metrics()` output |
 
 **Notes:**
-- `weights` accepts a list (matching `signal_panel`'s column order) or a `{ticker: weight}` dict; defaults to equal weight. Must sum to 1.0 — validated by the existing `build_portfolio` check.
+- `weights` accepts a list (matching `signal_panel`'s column order) or a `{ticker: weight}` dict; defaults to equal weight. Validation happens in `run_signal_panel_backtest` itself, up front: the weights must sum to 1.0, a dict must have an entry for every ticker and no extras, and a list must match the ticker count. Earlier revisions of this page claimed the sum was "validated by the existing `build_portfolio` check" — it was not, and nothing enforced it: a dict missing a ticker raised a bare `KeyError` naming only that ticker, a wrong-length list silently misaligned weights against columns, and weights summing to anything else produced a scaled portfolio that still looked valid.
 - Per-ticker equity curves are aligned to their **common date range** (inner join) before combining into the portfolio — a ticker whose `price_data` doesn't fully cover `signal_panel`'s dates will shrink the portfolio's effective range.
 - Pass `benchmark_returns=` to get an `information_ratio` in `portfolio_metrics`, and `include_trade_log=True` to get a per-ticker trade log in `per_ticker[ticker]["trade_log"]`.
 
@@ -728,10 +763,10 @@ engine.
 | Function | Signature | Behavior |
 |---|---|---|
 | `percentage_commission` | `(notional, rate)` | `abs(notional) * rate` — today's default model. |
-| `per_share_commission` | `(shares, rate_per_share, minimum=0.0)` | Flat rate per share, floored at `minimum`. |
+| `per_share_commission` | `(shares, rate_per_share, minimum=0.0)` | Flat rate per share, floored at `minimum`. `shares=0` costs `0.0`, **not** `minimum` — the floor is a per-*order* minimum, and no order exists when nothing trades. |
 | `fixed_bps_spread` | `(notional, bps)` | Spread cost as a fixed number of basis points of notional. Not wired into `run_portfolio_simulation` (which uses `slippage_pct` instead) — available for standalone use. |
 | `pct_of_range_spread` | `(notional, high, low, close, pct)` | Spread cost as a fraction of the bar's own `(High - Low)` range, scaled to notional via `Close`. Raises `ValidationError` if `close <= 0`. Not wired into the engine. |
-| `sqrt_impact_bps` | `(participation, volatility, coefficient=1.0)` | Square-root impact model in bps: `coefficient * volatility * sqrt(participation)`. Raises `ValidationError` if `participation < 0`. |
+| `sqrt_impact_bps` | `(participation, volatility, coefficient=1.0)` | Square-root impact model, returned in **basis points**: `coefficient * volatility * sqrt(participation) * 10_000` (`impact_cost` divides the 1e4 back out). Raises `ValidationError` if `participation < 0`. |
 | `impact_cost` | `(notional, avg_dollar_volume, volatility, coefficient=1.0)` | Dollar impact cost combining `sqrt_impact_bps` with trade notional; returns `0.0` if `avg_dollar_volume <= 0` (no volume baseline). |
 | `short_borrow_cost` | `(notional, annual_bps, days=1.0)` | Daily-accrued borrow fee on short notional. |
 | `margin_interest` | `(cash, annual_rate, days=1.0)` | Daily-accrued interest on negative cash; `0.0` when `cash >= 0`. |
@@ -912,6 +947,13 @@ ci = block_bootstrap_ci(best_trial_returns, sharpe_ratio, block_size=20, seed=42
 overfitting — the "best" combination may just be the one that happened to
 fit this particular sample.
 
+Trials whose `metric_col` is NaN or infinite are **excluded from the
+ranking** (and from `n_trials`), with a warning — a grid row whose returns
+had zero variance is the common source. This matters because `np.sort`
+places NaN last, so a descending sort would otherwise put it *first* and
+report NaN as the best trial, poisoning every gap. `ValidationError` is
+raised if no finite values remain.
+
 **`deflated_sharpe_ratio(observed_sharpe, sharpe_trials_std, n_trials, n_obs, skew=0.0, kurtosis=3.0)`:**
 implements Bailey & López de Prado's Deflated Sharpe Ratio (2014).
 `sharpe_trials_std` is the standard deviation of the Sharpe ratios actually
@@ -954,7 +996,7 @@ trial in one call.
 | `max_drawdown` | float | Worst peak-to-trough decline (negative) |
 | `calmar_ratio` | float | CAGR / \|max drawdown\| |
 | `win_rate` | float | Fraction of profitable trades |
-| `profit_factor` | float | Gross profit / gross loss |
+| `profit_factor` | float | Gross profit / gross loss. `inf` whenever gross loss is zero (no losing trades) — including the degenerate case where gross profit is *also* zero, e.g. every trade returning exactly 0.00%. Both backends agree on this; the C++ kernel previously returned `0.0` for that 0/0 case while Python returned `inf`. |
 | `num_trades` | int | Number of completed round-trips |
 | `avg_trade_return_pct` | float | Average trade P&L in % |
 | `equity_curve` | pd.Series | Day-by-day portfolio value |

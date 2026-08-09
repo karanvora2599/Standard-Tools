@@ -10,6 +10,48 @@ Internally, when the AI-agent technical-analysis tool (`get_technical_analysis`)
 
 ---
 
+## Input Validation Contract
+
+Every indicator validates its inputs at the Python boundary, before any
+execution tier is chosen — so the same call raises the same error whether or
+not `_sqt_core` is built.
+
+| Check | Applies to | Behavior |
+|---|---|---|
+| `period`/`window` > 0 | all periodised indicators | `ValidationError`. `bollinger_bands` requires ≥ 2 (it needs a sample variance); `macd` additionally requires `fast < slow`. |
+| Equal input lengths | multi-series indicators (`adx`, `atr`, `wilder_atr`, `williams_r`, `parabolic_sar`, `vwap`, `mfi`) | `ValidationError` naming the actual lengths. |
+| Finite (no NaN/Inf) | `rsi`, `adx`, `atr`, `wilder_atr`, `parabolic_sar`, `bollinger_bands`, `stochastic_oscillator` | `ValidationError` reporting how many non-finite values were found. |
+
+Two of these were genuine safety fixes rather than ergonomics, and are worth
+knowing about if you call the kernels in unusual ways:
+
+- **Equal-length validation closes an out-of-bounds read.** The Numba kernels
+  size their output from one series and index the others positionally.
+  `@njit` compiles with bounds checking *disabled*, so a shorter `low` or
+  `high` was an out-of-bounds read that returned plausible-looking numbers
+  instead of raising.
+- **`adx` with `period >= len(close)` now returns all-NaN on every tier.**
+  Previously the Numba kernel wrote past the end of its own output array in
+  that case (again, no bounds checking under `@njit`) while the C++ kernel
+  returned all-NaN correctly and the pure-Python fallback raised
+  `IndexError` — three tiers, three behaviors. `parabolic_sar` on an empty
+  series had the same shape.
+
+**Degenerate windows.** A window with zero price range (perfectly flat
+prices across the whole lookback) makes `%K` and `%R` a `0/0`:
+
+- `williams_r` yields **NaN** — "position within the range" is undefined when
+  there is no range.
+- `stochastic_oscillator` yields **0.0**, matching the compiled kernel's
+  convention. The pandas fallback previously yielded NaN here while C++ gave
+  `0.0`, so the answer depended only on whether the extension was built; the
+  fallback now follows C++. Warm-up bars remain NaN on both.
+- `mfi` yields **NaN** for a window with no money flow at all (both positive
+  and negative flow zero, e.g. zero volume) — it previously reported `0.0`,
+  i.e. "maximally oversold", for a window carrying no information.
+
+---
+
 ## Trend Indicators
 
 ### SMA — Simple Moving Average

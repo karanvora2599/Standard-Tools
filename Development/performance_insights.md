@@ -363,12 +363,22 @@ ported:
 \* Speedup figure is for the 6 return/equity metrics only. Win_rate/profit_factor/
 num_trades/avg_trade_return_pct in these two tools' output come from
 `batch_run_strategy`'s native trade-log accounting, which was rewritten
-2026-07-24 to match `_build_trade_log` exactly but is not yet verified against
-a real compiled `_sqt_core` (no local C++ toolchain; verification deferred to
-CI) — see Item 6 in Implementation Status and the Risk Factors table. Until
-that CI run confirms native/Python agreement, treat a grid ranked or filtered
-on those fields as unverified relative to a single `run_strategy` call on the
-same parameters.
+2026-07-24 to match `_build_trade_log` exactly — see Item 6 in Implementation
+Status and the Risk Factors table.
+
+**Status: verified against a real compiled `_sqt_core`.** All three tests in
+`tests/test_backtest.py::TestNativeTradeStatsCorrectness` pass with the
+extension built, covering the single-call path, the batch path, and a
+native-vs-Python cross-check, so a grid ranked or filtered on those fields
+can be treated as trustworthy. (Earlier revisions of this paragraph deferred
+that confirmation to CI because no local C++ toolchain was available; that is
+no longer the case, and the Risk Factors table below already reflected it.)
+
+The one documented exception is a same-sign **resize** (e.g. 1.0 → 2.5), which
+`backtest.cpp` accounts with a weighted-average cost basis while
+`engine.py`'s `_build_trade_log` still treats as a close-then-reopen — the
+cross-check test excludes resize scenarios for exactly this reason. See the
+"Known Issues" entry in `CHANGELOG.md`.
 
 ---
 
@@ -467,7 +477,8 @@ different/older CPU, see `build_guide.md` Section 9) and links the extension.
 
 | Risk | Mitigation |
 |---|---|
-| Windows build toolchain (MSVC vs MinGW) | `build_guide.md` documents the MSVC path only (Build Tools for Visual Studio 2022). CI (`build-cpp.yml`) only builds/tests on `ubuntu-latest` with gcc — there is no Windows or MinGW job, so the Windows path is currently unverified by CI. |
+| Windows build toolchain (MSVC vs MinGW) | `build_guide.md` documents the MSVC path only (Build Tools for Visual Studio 2022). `build-cpp.yml`'s `build-and-test` job now runs a `[ubuntu-latest, windows-latest, macos-latest]` matrix; `ubuntu-latest` is the proven hard gate, the other two are soft-gated (`continue-on-error`) until confirmed green on a real CI run. MinGW remains unsupported and untested. The full C++ suite (9 `ctest` executables) has been run locally on MSVC 19.44. |
+| Overriding `CMAKE_CXX_FLAGS` silently drops `/EHsc` (realized, not hypothetical) | Passing `-DCMAKE_CXX_FLAGS=...` *replaces* the project's flag set rather than appending, so an ad-hoc warnings build (e.g. `/W4 /permissive-`) loses MSVC's exception-unwinding semantics. It compiles and links cleanly, emitting only C4530 — easy to dismiss as noise — and then takes an access violation the first time a kernel throws across the pybind11 boundary. Compounding it, every configure directory writes its output to the same `LIBRARY_OUTPUT_DIRECTORY` (`src/standard_quant_tools/`), so a second build dir silently overwrites the extension the main build produced. Mitigation: use the documented `cmake -B build` invocation; if you need extra warning flags, append them via `CMAKE_CXX_FLAGS` in a toolchain file or add a separate target rather than overriding the variable, and point `LIBRARY_OUTPUT_DIRECTORY` elsewhere. |
 | Floating-point result divergence from pandas fallback | Unit test C++ output against Python reference implementation with `atol=1e-10` |
 | Logic divergence, not just floating-point, between the native kernel and Python (realized, not hypothetical: `run_strategy`'s native trade-log accounting was found wrong on 2026-07-24 — wrong entry bar, costs excluded) | Interim fix for `run_strategy`: `backtest/engine.py` always recomputes trade stats in Python regardless of which path ran. Root-cause fix (same day, commit `2242d63`): `backtest.cpp`'s native trade-log logic was rewritten to match `_build_trade_log` exactly, which also applies to `batch_run_strategy` (no Python-side override exists for the batch grid path). **Status: verified correct** — a real compiled `_sqt_core` was built for the first time and `TestNativeTradeStatsCorrectness` plus the full native `ctest` suite confirmed native/Python agreement (see Executive Summary for the 4 test-file bugs this uncovered along the way, in the tests themselves, not the implementation). Grid rankings by win_rate/profit_factor from `_sqt_core` builds can now be treated as trustworthy; `run_strategy`'s Python override remains in place as belt-and-suspenders, not because the native path is in doubt |
 | Unvalidated/degenerate input reaching a native kernel produces silently wrong output (`NaN`) instead of raising or matching the documented reference implementation's own convention for that edge case (realized, not hypothetical: found by actually building and running the extension this pass — see Executive Summary's bug list) | `adf_test`'s degenerate-collinear-input case and `ar1_halflife`'s zero-variance-predictor case both now return the same sentinel their pandas/statsmodels reference implementations converge on (`-inf`/`+inf`) instead of `NaN`; `simulate_forward_paths`' binding now raises `ValueError` explicitly for `horizon_days<=0`/`n_simulations<=0` instead of relying on a result-size check that degenerated to `0==0` for exactly those inputs. All three are now covered by regression tests. |

@@ -100,6 +100,32 @@ lineage instead of an empty `data_sources` list. Failed calls still produce
 a record — `status: "error"` with `error_type` / `error_message` set, and
 `output_hash: null`.
 
+> **Format change: `content_hash` values differ from those written before
+> this release.** `hash_dataframe` now covers the frame's **column names,
+> dtypes and column order** in addition to its values. It previously used
+> `pd.util.hash_pandas_object` alone, which is a per-row digest that never
+> sees column labels — so two frames holding identical numbers under
+> entirely different column names produced the *same* fingerprint (a
+> `Close`/`Open` frame and a `Volume`/`Adj` frame collided), which defeats
+> the purpose of a provenance hash.
+>
+> **What this means for existing logs:** replaying a decision record captured
+> before this change will report a `data_source` mismatch even when the
+> underlying data is completely unchanged, because the stored hash was
+> computed by the old algorithm. That is expected and is not evidence of
+> tampering or data revision. Records written from this release forward are
+> comparable with each other.
+>
+> **The tamper-evident chain is unaffected.** `prev_record_hash`/
+> `record_hash`/`index_hash` are built by `hash_payload`, not
+> `hash_dataframe`, and `hash_payload`'s output is byte-identical to the
+> previous implementation for any object made only of native JSON types —
+> which is every `DecisionRecord` and chain-index entry. Existing audit
+> trails still verify. (`hash_payload`'s non-JSON fallback encoder did
+> change: it used `default=str`, which routed NumPy arrays through their
+> abbreviating `...` repr, so two large arrays differing only in the middle
+> hashed identically. That path is not reachable from any decision record.)
+
 `git_commit_sha` and `package_version` are reproducibility provenance: the
 exact commit and library version that produced this record, so a replay
 months later can tell "the code changed since this ran" apart from "the
