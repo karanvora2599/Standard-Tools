@@ -277,7 +277,13 @@ void rolling_beta_into(
 
     auto write_beta = [&](std::size_t i) {
         const double denom = W * Sxx - Sx * Sx;
-        if (std::abs(denom) > 1e-14)
+        // Relative-epsilon threshold scaled to the denominator's own natural
+        // magnitude (W*Sxx), not a fixed absolute 1e-14 -- the same
+        // convention numerics.hpp exists to enforce and that cholesky_solve
+        // above already uses. A fixed absolute cut doesn't scale: it is
+        // simultaneously too lenient for large-magnitude inputs and too
+        // aggressive for genuinely well-conditioned small-magnitude ones.
+        if (!numerics::is_negligible_pivot(denom, W * Sxx))
             out[i] = (W * Sxy - Sx * Sy) / denom;
     };
 

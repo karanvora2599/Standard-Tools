@@ -10,6 +10,7 @@ crashes, which is exactly the kind that comes back unnoticed.
 
 import hashlib
 import json
+import math
 
 import numpy as np
 import pandas as pd
@@ -19,10 +20,17 @@ from standard_quant_tools.analysis.cointegration import (
     cointegration_test,
     kalman_hedge_ratio,
 )
-from standard_quant_tools.analysis.multi_factor import multi_factor_regression
+from standard_quant_tools.analysis.multi_factor import (
+    multi_factor_regression,
+    rolling_factor_loadings,
+)
 from standard_quant_tools.audit.hashing import hash_dataframe, hash_payload
 from standard_quant_tools.backtest.costs import per_share_commission
-from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.backtest.engine import (
+    _build_trade_log,
+    _compute_trade_stats,
+    run_strategy,
+)
 from standard_quant_tools.backtest.panel import run_signal_panel_backtest
 from standard_quant_tools.backtest.robustness import parameter_sensitivity
 from standard_quant_tools.data._cache import _parquet_path
@@ -403,6 +411,74 @@ class TestFiniteInputConsistency:
         f.iloc[7, 0] = np.nan
         with pytest.raises(ValidationError, match="non-finite"):
             multi_factor_regression(y, f)
+
+
+class TestCppPythonEquivalence:
+    """
+    Cross-path equivalence for the C++ audit's two confirmed divergences.
+
+    These assert the two backends against EACH OTHER rather than against a
+    constant — the failure mode in both cases was "same call, different answer
+    depending on whether _sqt_core happened to be built", which a test pinning
+    only one side cannot see.
+    """
+
+    @staticmethod
+    def _cpp():
+        try:
+            from standard_quant_tools import _sqt_core
+
+            return _sqt_core
+        except ImportError:
+            return None
+
+    def test_profit_factor_zero_over_zero_agrees(self):
+        """
+        Flat prices + zero costs → every trade returns exactly 0.0, so
+        gross_win and gross_loss are both 0. C++ returned 0.0 here while
+        Python returned inf; both must now report inf ("no losing trades").
+        """
+        cpp = self._cpp()
+        if cpp is None:
+            pytest.skip("_sqt_core not built")
+
+        n = 10
+        prices = np.full(n, 100.0)
+        signals = np.full(n, 1.0)
+
+        cpp_pf = cpp.run_strategy(prices, signals, 10_000.0, 0.0, 0.0)["profit_factor"]
+
+        idx = pd.RangeIndex(n)
+        p = pd.Series(prices, index=idx)
+        executed = pd.Series(signals, index=idx).shift(1).fillna(0.0)
+        py_pf = _compute_trade_stats(_build_trade_log(p.shift(1), p, executed, 0.0))[
+            "profit_factor"
+        ]
+
+        assert math.isinf(cpp_pf), f"C++ profit_factor should be inf, got {cpp_pf}"
+        assert math.isinf(py_pf), f"Python profit_factor should be inf, got {py_pf}"
+
+    def test_rolling_factor_loadings_underdetermined_agrees(self):
+        """
+        window < k+2: the C++ kernel returns all-NaN; the Python fallback used
+        to return numpy's minimum-norm lstsq solution instead. Both must now
+        be all-NaN.
+        """
+        n = 40
+        idx = pd.date_range("2024-01-01", periods=n)
+        rng = np.random.default_rng(3)
+        y = pd.Series(rng.normal(0, 0.01, n), index=idx)
+        f = pd.DataFrame({"f": rng.normal(0, 0.01, n)}, index=idx)
+
+        for window in (1, 2):  # k=1 → k+2 == 3
+            out = rolling_factor_loadings(y, f, window=window)
+            assert out.isna().all().all(), f"window={window} must be all-NaN"
+
+        cpp = self._cpp()
+        if cpp is not None:
+            arr = np.ascontiguousarray(f.to_numpy(dtype=np.float64))
+            raw = cpp.rolling_factor_loadings(y.to_numpy(dtype=np.float64), arr, 2)
+            assert np.isnan(raw).all()
 
 
 class TestMiscEdgeCases:

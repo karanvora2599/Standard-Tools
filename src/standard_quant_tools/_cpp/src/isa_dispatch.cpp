@@ -116,7 +116,14 @@ IsaFeatures detect_isa_features() {
 }
 
 void force_isa_features_for_testing(IsaFeatures f) {
-    g_override_avx2.store(f.avx2, std::memory_order_relaxed);
+    // Apply the SAME conflation detect_isa_features_real() applies: "avx2"
+    // throughout this project means "AVX2 and FMA both usable", because
+    // rolling_beta_avx2.cpp's kernel issues _mm256_fmadd_pd. Without this,
+    // forcing {avx2=true, fma=false} would route rolling_beta_into into that
+    // kernel on a CPU the override just declared has no FMA -- an illegal
+    // instruction, from the very function whose job is to prevent one.
+    const bool avx2_usable = f.avx2 && f.fma;
+    g_override_avx2.store(avx2_usable, std::memory_order_relaxed);
     g_override_fma.store(f.fma, std::memory_order_relaxed);
     // Release-store the active flag last so it publishes the two stores
     // above to any thread that acquire-loads it in detect_isa_features().

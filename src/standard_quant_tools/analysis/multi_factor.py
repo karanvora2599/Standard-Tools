@@ -165,15 +165,15 @@ def rolling_factor_loadings(
     Returns a DataFrame indexed like asset_returns with columns
     ["alpha", factor1, factor2, ...]. The first (window-1) rows are NaN.
 
+    A `window` smaller than k+2 (fewer observations than the intercept plus
+    k loadings being estimated) makes every window underdetermined, and the
+    whole result is NaN — there is no unique least-squares solution to
+    report, and the minimum-norm one numpy would return is an artifact of
+    the solver, not an estimated loading.
+
     Uses C++ incremental Cholesky path when available (50-200× faster than
     the Python numpy.linalg.lstsq loop).
     """
-    # window == 1 is intentionally allowed: each bar becomes its own
-    # underdetermined 1-observation OLS and lstsq returns the minimum-norm
-    # solution (alpha=y, loading=0), which is a documented, tested behavior.
-    # Only window <= 0 is genuinely invalid — it makes the loop start at a
-    # negative index and build a design matrix whose row count doesn't match
-    # the window slice.
     if window <= 0:
         raise ValidationError(f"window must be > 0, got {window}")
     common_idx = asset_returns.index.intersection(factor_returns.index)
@@ -189,6 +189,22 @@ def rolling_factor_loadings(
 
     n = len(y_arr)
     k = X_arr.shape[1] if X_arr.ndim == 2 else 1
+
+    # Underdetermined window: fewer observations than the k+1 coefficients
+    # (intercept + k loadings) the regression has to estimate. Checked here,
+    # ahead of the path dispatch, so BOTH backends answer identically -- the
+    # C++ kernel already bails to all-NaN for window < k+2
+    # (rolling_regression.cpp), while numpy.linalg.lstsq below happily
+    # returns its minimum-norm solution instead, so the same call produced
+    # NaN or numbers depending only on whether the extension was built. The
+    # minimum-norm solution is a numerical artifact of an underdetermined
+    # system, not an estimated factor loading, so NaN is the honest answer
+    # and the one both paths now give.
+    if window < k + 2:
+        return pd.DataFrame(
+            np.full((n, len(col_names)), np.nan), index=common_idx, columns=col_names
+        )
+
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "python"
     logger.debug(
         "[rolling_factor_loadings] window=%d  factors=%d  bars=%d  path=%s",

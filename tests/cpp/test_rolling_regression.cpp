@@ -244,6 +244,32 @@ static void test_window_larger_than_n_all_nan() {
     for (double v : out) CHECK_NAN(v);
 }
 
+static void test_underdetermined_window_all_nan() {
+    // window < k+2 leaves fewer observations than the k+1 coefficients being
+    // estimated, so every window is underdetermined and the whole result is
+    // NaN. Pinned on the C++ side too because the PYTHON fallback used to
+    // disagree here: numpy.linalg.lstsq returned its minimum-norm solution
+    // instead of NaN, so the same call produced numbers or NaN depending only
+    // on whether the extension was built. analysis/multi_factor.py now
+    // short-circuits to NaN before dispatching, matching this kernel.
+    const int n = 40, k = 1;
+    std::vector<double> y(n), x(n);
+    std::uint64_t state = 7;
+    for (int i = 0; i < n; ++i) { y[i] = pseudo_random(state); x[i] = pseudo_random(state); }
+
+    for (int window = 1; window <= k + 1; ++window) {
+        auto out = sqt::rolling_factor_loadings(y.data(), x.data(), n, k, window);
+        for (double v : out) CHECK_NAN(v);
+    }
+
+    // window == k+2 is the smallest DETERMINED window -- must produce values,
+    // so the guard above can't silently swallow every legitimate call too.
+    auto ok = sqt::rolling_factor_loadings(y.data(), x.data(), n, k, k + 2);
+    bool any_finite = false;
+    for (double v : ok) if (!std::isnan(v)) { any_finite = true; break; }
+    CHECK_TRUE(any_finite);
+}
+
 // ── rolling_beta tests (no existing C++ coverage before this file) ─────────
 
 static void test_rolling_beta_recovers_known_slope() {
@@ -348,6 +374,7 @@ int main() {
     test_large_magnitude_recovers_known_coefficients();
     test_singular_window_at_large_magnitude_produces_nan();
     test_window_larger_than_n_all_nan();
+    test_underdetermined_window_all_nan();
     test_rolling_beta_recovers_known_slope();
     test_rolling_beta_nan_prefix();
     test_rolling_beta_avx2_matches_scalar_tolerance();

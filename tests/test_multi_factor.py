@@ -254,14 +254,36 @@ class TestRollingFactorLoadings:
         assert mean_mkt == pytest.approx(full["loadings"]["mkt"], abs=0.05)
         assert mean_smb == pytest.approx(full["loadings"]["smb"], abs=0.05)
 
-    def test_window_equals_1_factor_loads_trivially(self):
-        """window=1: each bar is its own OLS with 1 obs — alpha=y, loading=0 (underdetermined)."""
+    def test_underdetermined_window_is_all_nan(self):
+        """
+        window < k+2 leaves fewer observations than the k+1 coefficients being
+        estimated, so every window is underdetermined and the whole result is
+        NaN — on BOTH backends.
+
+        This assertion used to check only `result.shape`, which is why it
+        passed while the two paths silently disagreed: the C++ kernel bailed
+        to all-NaN for window < k+2, while numpy.linalg.lstsq returned its
+        minimum-norm solution. Assert the values, not just the shape, so that
+        divergence can never hide here again.
+        """
         np.random.seed(5)
         n = 50
         dates = pd.date_range("2022-01-01", periods=n, freq="B")
         asset = pd.Series(np.random.normal(0, 0.01, n), index=dates)
         factors = pd.DataFrame({"f": np.random.normal(0, 0.01, n)}, index=dates)
-        # window=1 means n=1, k=2 → underdetermined → lstsq returns minimum-norm solution
-        # We just verify it doesn't raise and returns correct shape
-        result = rolling_factor_loadings(asset, factors, window=1)
+        # k=1, so k+2 == 3: windows of 1 and 2 are both underdetermined.
+        for window in (1, 2):
+            result = rolling_factor_loadings(asset, factors, window=window)
+            assert result.shape == (n, 2)
+            assert result.isna().all().all(), f"window={window} must be all-NaN"
+
+    def test_smallest_determined_window_produces_values(self):
+        """window == k+2 is the smallest determined window — must NOT be NaN."""
+        np.random.seed(6)
+        n = 50
+        dates = pd.date_range("2022-01-01", periods=n, freq="B")
+        asset = pd.Series(np.random.normal(0, 0.01, n), index=dates)
+        factors = pd.DataFrame({"f": np.random.normal(0, 0.01, n)}, index=dates)
+        result = rolling_factor_loadings(asset, factors, window=3)
         assert result.shape == (n, 2)
+        assert not result.iloc[2:].isna().all().all()

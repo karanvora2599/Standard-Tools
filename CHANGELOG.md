@@ -240,6 +240,110 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+#### C++-codebase audit pass (10 findings)
+
+A line-by-line correctness audit of the native tier (~5,000 lines across
+`_cpp/src`, `_cpp/include`, and `bindings.cpp`), the counterpart to the
+Python audit below. Built clean under MSVC `/W4 /permissive-`. Suites after
+the pass: **9/9 C++ (ctest)** and **1964 passed, 1 skipped** (Python).
+
+The native tier was in materially better shape than the Python tier —
+no memory-safety defects, no data races, and no incorrect math. The real
+findings were two cross-backend divergences and one invariant the code
+documented but did not hold.
+
+**Cross-backend divergences (same call, different answer per build)**
+
+- **`rolling_factor_loadings` disagreed for `window < k+2`.**
+  `rolling_regression.cpp` bails to all-NaN when the window has fewer
+  observations than the `k+1` coefficients being estimated, but
+  `analysis/multi_factor.py`'s fallback handed the underdetermined system to
+  `numpy.linalg.lstsq`, which returns its minimum-norm solution instead. The
+  same call therefore produced NaN or numbers depending only on whether
+  `_sqt_core` was built. Resolved toward the C++ behavior — a minimum-norm
+  solution to an underdetermined system is an artifact of the solver, not an
+  estimated factor loading — via a short-circuit ahead of the path dispatch
+  so both backends answer identically.
+  `tests/test_multi_factor.py::test_window_equals_1_factor_loads_trivially`
+  is why this went unnoticed: it asserted only `result.shape`, so it passed
+  on both paths. Replaced with value assertions covering both the
+  underdetermined case and the smallest determined window.
+- **`profit_factor` disagreed when every trade returns exactly 0.0.**
+  `backtest.cpp` used `(gross_loss > 0) ? win/loss : (gross_win > 0 ? inf : 0.0)`,
+  returning `0.0` when gross_win and gross_loss are both zero (a flat price
+  series with zero costs), where `engine.py`'s `_compute_trade_stats` returns
+  `inf`. Resolved toward Python — which also makes the kernel consistent with
+  its OWN documented rule, since `tests/cpp/test_backtest.cpp` already pinned
+  "no losing trades -> inf". Fixed in both `run_strategy` and
+  `run_strategy_summary` (separate copies of the expression, so
+  `batch_run_strategy` would otherwise have kept disagreeing).
+
+**Exceptions escaping OpenMP parallel regions (undefined behavior)**
+
+`hurst.cpp` carried an explicit comment asserting that no exception could be
+thrown inside `rolling_hurst_into`'s parallel region — "throwing across an
+`#pragma omp for` boundary is undefined behavior / terminates the process."
+That claim was false: two throw sites were live inside it
+(`numerics::clamp_near_zero_sumsq` via `dfa_onepass`, reachable on exactly
+the ill-conditioned input it exists to detect, and
+`numerics::checked_narrow_to_int` via `hurst_exponent_scratch`), and
+`batch_run_strategy` had the same shape via `run_strategy_summary`. Fixed by
+hoisting the loop-invariant narrowing checks out of both regions (making the
+inner copies unreachable rather than merely improbable) and converting the
+negative-SSE condition into a per-thread flag combined with
+`reduction(||:)`, rethrown as a real exception after the region — so a
+genuine numerical bug still surfaces instead of killing the process. The
+misleading comment now states what is actually guaranteed, and why.
+
+**Consistency against the project's own `numerics.hpp`**
+
+`numerics.hpp` exists to replace ad-hoc absolute thresholds with a
+relative-epsilon convention, but several kernels predated or bypassed it:
+
+- `rolling_regression.cpp`'s `rolling_beta_into` used a fixed
+  `abs(denom) > 1e-14` while `cholesky_solve` in the *same file* already used
+  the relative test; both now use `is_negligible_pivot`.
+- `hurst.cpp`'s `ols_slope_r2` used fixed `1e-14` twice, and returned
+  `{0.0, 0.0}` as its "couldn't fit" sentinel. 0.0 is a perfectly valid slope
+  that `classify()` labels `"mean_reverting"`, so an unfittable series was
+  reported as confidently mean-reverting; it now returns NaN, which
+  `hurst_exponent` already maps to the `"unknown"` regime.
+- `cointegration.cpp`'s `ols2` tested `det = s1*sxxd - sxd^2` against a scale
+  of `sxxd` alone. `det` grows with the observation count as well as the
+  spread of x, so the singularity check was roughly n times too lenient — a
+  genuinely near-singular system passed on any long series. Scale is now
+  `s1*sxxd`.
+- `indicators.cpp`'s `bollinger_bands_into` clamped ANY negative variance to
+  zero (`var > 0.0 ? sqrt(var) : 0.0`), collapsing the bands onto the moving
+  average with no signal — the exact silent failure the shift-by-reference
+  centering directly above it was added to prevent, left undetectable if it
+  ever recurred. Now `clamp_near_zero_sumsq`, which clamps genuine noise and
+  throws on anything larger.
+- `isa_dispatch.cpp`'s `force_isa_features_for_testing` did not apply the
+  `avx2 && fma` conflation that real detection applies, so forcing
+  `{avx2=true, fma=false}` would route `rolling_beta_into` into the
+  `_mm256_fmadd_pd` kernel — an illegal instruction, from the very function
+  whose job is to prevent one. Test-only (not exposed through the bindings).
+- `monte_carlo.cpp`'s `simulate_forward_paths` computed its output size
+  without `numerics::checked_mul`, which exists for exactly that.
+
+**Investigated and confirmed NOT bugs** (recorded so this ground isn't
+re-covered): `SQT_RESTRICT` is sound — it is applied to inputs Python callers
+CAN alias (e.g. `stochastic_oscillator(s, s, s)`), but every `out` across all
+39 `mutable_data()` sites is freshly allocated (`_zerocopy` refers to inputs
+only), and read-only aliasing among `const` restrict pointers is not UB.
+OpenMP data races: none — `monte_carlo` declares `gen`/`dist` per-thread with
+per-path derived seeds (so results are thread-count independent) and
+`batch_run_strategy` writes distinct pre-sized indices. GARCH's analytic
+gradient recurrences were verified term by term, including that
+`new_g_beta` reads `sigma2_prev` before it is updated. The MacKinnon p-value
+coefficients match statsmodels' N=2/`"c"` response-surface values, with the
+correct branch direction. `run_strategy`/`run_strategy_summary`'s
+bit-identity contract holds. `rolling_beta_reduce_avx2` correctly assigns
+rather than accumulates, paired with the caller not pre-zeroing on that
+branch. Binding-level length/dtype validation is consistent across every
+multi-array entry point.
+
 #### Python-codebase audit pass (31 findings)
 
 A line-by-line correctness audit of the Python tier (`src/`, plus the

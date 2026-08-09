@@ -128,12 +128,29 @@ static void test_ols_flat_line() {
 }
 
 static void test_ols_too_few_points() {
-    // Single-point input → returns {0, 0}
+    // Single-point input → returns {NaN, NaN}, not {0, 0}.
+    //
+    // 0.0 is a perfectly VALID slope (see test_ols_flat_line above), so using
+    // it as the "couldn't fit" sentinel made the two indistinguishable. That
+    // matters downstream: hurst_exponent() feeds this slope to classify(),
+    // where 0.0 is labelled "mean_reverting" — so an unfittable series would
+    // have been reported as confidently mean-reverting rather than unknown.
+    // NaN is unambiguous, and hurst_exponent() already maps it to "unknown".
     std::vector<double> x = {1.0};
     std::vector<double> y = {2.0};
     auto [slope, r2] = sqt::ols_slope_r2(x, y);
-    CHECK_NEAR(slope, 0.0, 1e-10);
-    CHECK_NEAR(r2,    0.0, 1e-10);
+    CHECK_NAN(slope);
+    CHECK_NAN(r2);
+}
+
+static void test_ols_degenerate_denominator_is_nan() {
+    // Zero-variance x (a vertical "line") has no unique slope — the same
+    // {NaN, NaN} "couldn't fit" sentinel, for the same reason as above.
+    std::vector<double> x = {3.0, 3.0, 3.0, 3.0};
+    std::vector<double> y = {1.0, 2.0, 3.0, 4.0};
+    auto [slope, r2] = sqt::ols_slope_r2(x, y);
+    CHECK_NAN(slope);
+    CHECK_NAN(r2);
 }
 
 
@@ -455,6 +472,7 @@ int main() {
     test_ols_with_intercept();
     test_ols_flat_line();
     test_ols_too_few_points();
+    test_ols_degenerate_denominator_is_nan();
 
     // hurst_exponent — DFA
     test_hurst_dfa_too_short();

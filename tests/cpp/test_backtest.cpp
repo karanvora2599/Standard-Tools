@@ -170,6 +170,32 @@ static void test_one_completed_losing_trade() {
     CHECK_NEAR(r.avg_trade_return_pct, expected_pct, 1e-6);
 }
 
+static void test_profit_factor_zero_over_zero_is_inf() {
+    // Regression: a flat price series with zero costs produces trades whose
+    // return is exactly 0.0 -- neither wins nor losses, so gross_win AND
+    // gross_loss are both 0.
+    //
+    // profit_factor used to be `(gross_loss > 0) ? win/loss
+    //                          : (gross_win > 0 ? inf : 0.0)`, which returned
+    // 0.0 here. That contradicted this file's own no-losing-trades -> inf
+    // convention (test_one_completed_winning_trade above) AND disagreed with
+    // engine.py's _compute_trade_stats, which returns inf whenever
+    // gross_loss == 0 -- so the same call answered differently depending on
+    // whether the C++ extension happened to be built.
+    std::vector<double> prices  = {100.0, 100.0, 100.0, 100.0};
+    std::vector<double> signals = {1.0,   1.0,   1.0,   1.0};
+    auto r = sqt::run_strategy(prices.data(), signals.data(), 4, 10000.0, 0.0, 0.0);
+    CHECK(r.num_trades == 1);
+    CHECK_NEAR(r.avg_trade_return_pct, 0.0, 1e-12);
+    CHECK_INF(r.profit_factor);
+
+    // run_strategy_summary carries its own copy of this expression -- both
+    // must agree, or batch_run_strategy silently disagrees with run_strategy.
+    auto s = sqt::run_strategy_summary(prices.data(), signals.data(), 4, 10000.0, 0.0, 0.0);
+    CHECK_INF(s.profit_factor);
+    CHECK(s.num_trades == r.num_trades);
+}
+
 static void test_unclosed_position_flushed_as_one_trade_at_final_close() {
     // signal=1 throughout, position never explicitly closed by a signal
     // transition -- this does NOT mean zero trades: run_strategy (matching
@@ -543,6 +569,7 @@ int main() {
     test_short_position_profits_when_prices_fall();
     test_one_completed_winning_trade();
     test_one_completed_losing_trade();
+    test_profit_factor_zero_over_zero_is_inf();
     test_unclosed_position_flushed_as_one_trade_at_final_close();
     test_sortino_inf_when_no_negative_returns();
     test_equity_curve_length_matches_n();

@@ -55,7 +55,7 @@ std::pair<double, double> ols_slope_r2(
     const std::vector<double>& y)
 {
     const int m = static_cast<int>(x.size());
-    if (m < 2) return {0.0, 0.0};
+    if (m < 2) return {kNaN, kNaN};
 
     double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
     for (int i = 0; i < m; ++i) {
@@ -65,8 +65,16 @@ std::pair<double, double> ols_slope_r2(
         sxy += x[i] * y[i];
     }
 
+    // NaN (not {0.0, 0.0}) for a degenerate fit: a slope of exactly 0.0 is a
+    // legitimate Hurst value that classify() labels "mean_reverting", so
+    // returning it as the failure sentinel silently mislabeled an
+    // unfittable series as a confidently mean-reverting one. hurst_exponent()
+    // already guards on isnan(h) and maps it to the "unknown" regime.
+    // Relative-epsilon threshold, scaled to the denominator's own magnitude,
+    // for the same reason as rolling_beta_into's matching fix.
     const double denom = m * sxx - sx * sx;
-    if (std::abs(denom) < 1e-14) return {0.0, 0.0};
+    if (numerics::is_negligible_pivot(denom, static_cast<double>(m) * sxx))
+        return {kNaN, kNaN};
 
     const double slope     = (m * sxy - sx * sy) / denom;
     const double intercept = (sy - slope * sx) / m;
@@ -79,7 +87,11 @@ std::pair<double, double> ols_slope_r2(
         const double dev = y[i] - y_mean;
         ss_tot += dev * dev;
     }
-    const double r2 = (ss_tot > 1e-14) ? 1.0 - ss_res / ss_tot : 0.0;
+    // ss_tot is a sum of squares, so the only meaningful question is whether
+    // it is negligible relative to its own scale -- same relative-epsilon
+    // convention as the pivot test above.
+    const double r2 =
+        numerics::is_negligible_pivot(ss_tot, ss_tot) ? 0.0 : 1.0 - ss_res / ss_tot;
 
     return {slope, r2};
 }
@@ -207,7 +219,7 @@ dfa_impl(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
 // deliberately ill-conditioned inputs, before this is trusted.
 std::pair<std::vector<double>, std::vector<double>>
 dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points,
-             RollingHurstScratch& scratch)
+             RollingHurstScratch& scratch, bool& sse_error)
 {
     double mean = 0.0;
     for (std::size_t i = 0; i < n; ++i) mean += arr[i];
@@ -261,8 +273,23 @@ dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points
             // (the dominant raw term feeding the subtraction); otherwise
             // this is not noise and numerics::clamp_near_zero_sumsq throws,
             // surfacing a real bug instead of silently hiding it.
-            const double sse = numerics::clamp_near_zero_sumsq(
-                Syy - a * Sy - b * S_jy, Syy, "hurst::dfa_onepass");
+            //
+            // Reported through `sse_error` rather than thrown directly:
+            // dfa_onepass runs inside rolling_hurst_into's OpenMP parallel
+            // region, and an exception escaping an OpenMP structured block
+            // is undefined behavior (in practice, process termination). The
+            // flag is checked and converted back into a real exception by
+            // the caller, outside the region.
+            const double raw_sse = Syy - a * Sy - b * S_jy;
+            double sse;
+            if (raw_sse >= 0.0) {
+                sse = raw_sse;
+            } else if (std::abs(raw_sse) < 1.0e-9 * std::max(std::abs(Syy), 1.0)) {
+                sse = 0.0;
+            } else {
+                sse_error = true;
+                sse = 0.0;
+            }
             rms_acc += sse / sz;
         }
 
@@ -430,7 +457,8 @@ namespace {
 // public hurst_exponent() is untouched.
 HurstResult hurst_exponent_scratch(
     const double* arr, std::size_t n, const std::string& method,
-    int min_window, int max_window, RollingHurstScratch& scratch)
+    int min_window, int max_window, RollingHurstScratch& scratch,
+    bool& sse_error)
 {
     const HurstResult nan_result{kNaN, "unknown", kNaN, method, n};
 
@@ -450,7 +478,8 @@ HurstResult hurst_exponent_scratch(
 
     std::vector<double> sizes, values;
     if (method == "dfa") {
-        auto [s, v] = dfa_onepass(arr, n, min_window, max_w, /*n_points=*/20, scratch);
+        auto [s, v] = dfa_onepass(arr, n, min_window, max_w, /*n_points=*/20,
+                                   scratch, sse_error);
         sizes  = std::move(s);
         values = std::move(v);
     } else {
@@ -497,10 +526,18 @@ void rolling_hurst_into(
     // Validate eagerly rather than relying on the first hurst_exponent_scratch()
     // call inside the loop below to catch it -- for a short input (n <
     // window) that loop runs zero times, so a bad method string would
-    // otherwise silently produce an all-NaN result instead of raising. Also
-    // ensures no exception can be thrown from inside the parallel region
-    // below -- throwing across an #pragma omp for boundary is undefined
-    // behavior / terminates the process.
+    // otherwise silently produce an all-NaN result instead of raising.
+    //
+    // This is also one of THREE things that together keep any exception from
+    // escaping the parallel region below (escaping an OpenMP structured
+    // block is undefined behavior -- in practice, process termination):
+    //   1. this method check, hoisted here;
+    //   2. the checked_narrow_to_int pre-validation just below, which makes
+    //      hurst_exponent_scratch()'s own inner narrowing unreachable;
+    //   3. dfa_onepass()'s negative-SSE condition, which now sets a per-
+    //      thread flag instead of throwing, rethrown after the region.
+    // An earlier version of this comment claimed the method check alone was
+    // sufficient; it was not -- (2) and (3) were both live throw sites.
     if (method != "dfa" && method != "rs")
         throw std::invalid_argument(
             "rolling_hurst: method must be exactly \"dfa\" or \"rs\", got \"" +
@@ -536,8 +573,21 @@ void rolling_hurst_into(
     const std::size_t step_sz = static_cast<std::size_t>(step);
     const long long count = static_cast<long long>((last_i - (win_sz - 1)) / step_sz + 1);
 
+    // Every call below passes the SAME n (win_sz), so hurst_exponent_scratch's
+    // auto-max-window narrowing is loop-invariant -- performing it once here,
+    // where a throw is safe, makes the copy inside the parallel region
+    // unreachable instead of merely improbable.
+    (void)numerics::checked_narrow_to_int(
+        (method == "dfa") ? (win_sz / 4) : (win_sz / 2),
+        "rolling_hurst: auto-selected max_window");
+
+    // One flag per thread, combined after the region -- a plain shared bool
+    // written from several threads would be a data race even though every
+    // write stores the same value.
+    bool sse_error = false;
+
 #ifdef SQT_HAS_OPENMP
-    #pragma omp parallel if(count > 1)
+    #pragma omp parallel if(count > 1) reduction(||: sse_error)
 #endif
     {
         RollingHurstScratch scratch;
@@ -554,9 +604,21 @@ void rolling_hurst_into(
                 method,
                 min_window,
                 /*max_window=*/-1,   // auto per chunk size
-                scratch);
+                scratch,
+                sse_error);
             out[i] = result.hurst;
         }
+    }
+
+    // Rethrown here, outside the region, with the same meaning
+    // numerics::clamp_near_zero_sumsq's own throw carries: a residual sum of
+    // squares this far below zero is not floating-point noise, it indicates
+    // a real bug, and must surface rather than being silently clamped.
+    if (sse_error) {
+        throw std::runtime_error(
+            "rolling_hurst: sum-of-squares went unexpectedly negative in "
+            "hurst::dfa_onepass -- larger than floating-point noise, "
+            "indicates a real bug.");
     }
 }
 

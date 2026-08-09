@@ -237,8 +237,12 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n) {
     // (un-shifted below). Relative-epsilon singularity threshold (same
     // rationale as gauss_elim/cholesky_solve's fixes elsewhere in this
     // pass), scaled to the shifted design matrix's own magnitude.
+    // Scale reference is s1*sxxd, not sxxd alone: det = s1*sxxd - sxd^2 grows
+    // with the OBSERVATION COUNT as well as the spread of x, so testing it
+    // against sxxd alone made the singularity check ~n times too lenient --
+    // a genuinely near-singular system passed on any long series.
     const double det = s1 * sxxd - sxd * sxd;
-    if (numerics::is_negligible_pivot(det, sxxd)) return r;
+    if (numerics::is_negligible_pivot(det, s1 * sxxd)) return r;
 
     const double intercept_shifted = (syd * sxxd - sxyd * sxd) / det;
     r.slope     = (s1 * sxyd - sxd * syd) / det;

@@ -1,5 +1,7 @@
 #include "sqt/monte_carlo.hpp"
 
+#include "sqt/numerics.hpp"
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -116,8 +118,10 @@ std::vector<double> simulate_forward_paths(
 {
     if (horizon_days <= 0 || n_simulations <= 0) return {};
 
-    const std::size_t out_size =
-        static_cast<std::size_t>(n_simulations) * static_cast<std::size_t>(horizon_days);
+    const std::size_t out_size = numerics::checked_mul(
+        static_cast<std::size_t>(n_simulations),
+        static_cast<std::size_t>(horizon_days),
+        "simulate_forward_paths: output size");
     std::vector<double> result(out_size, 0.0);
 
     const bool ok = simulate_forward_paths_into(

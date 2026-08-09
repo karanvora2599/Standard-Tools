@@ -257,8 +257,16 @@ BacktestResult run_strategy(
             else gross_loss += std::abs(tr);
         }
         r.win_rate           = static_cast<double>(n_wins) / r.num_trades;
-        r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss
-                             : (gross_win > 0.0   ? kInf : 0.0);
+        // gross_loss == 0 means there were no losing trades at all, which is
+        // reported as +inf regardless of gross_win -- the convention this
+        // file's own test already documents ("no losing trades -> inf",
+        // tests/cpp/test_backtest.cpp) and the one engine.py's
+        // _compute_trade_stats uses. The previous `gross_win > 0.0` sub-
+        // condition made the 0/0 case (every trade returning exactly 0.0,
+        // e.g. a flat price series with zero costs) return 0.0 here while
+        // Python returned inf -- the same call disagreeing across backends,
+        // and inconsistent with this function's own no-losing-trades rule.
+        r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss : kInf;
         r.avg_trade_return_pct = sum_tr / r.num_trades;
     }
 
@@ -425,8 +433,16 @@ BacktestResult run_strategy_summary(
         static_cast<std::size_t>(num_trades), "run_strategy_summary: num_trades");
     if (r.num_trades > 0) {
         r.win_rate           = static_cast<double>(n_wins) / r.num_trades;
-        r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss
-                             : (gross_win > 0.0   ? kInf : 0.0);
+        // gross_loss == 0 means there were no losing trades at all, which is
+        // reported as +inf regardless of gross_win -- the convention this
+        // file's own test already documents ("no losing trades -> inf",
+        // tests/cpp/test_backtest.cpp) and the one engine.py's
+        // _compute_trade_stats uses. The previous `gross_win > 0.0` sub-
+        // condition made the 0/0 case (every trade returning exactly 0.0,
+        // e.g. a flat price series with zero costs) return 0.0 here while
+        // Python returned inf -- the same call disagreeing across backends,
+        // and inconsistent with this function's own no-losing-trades rule.
+        r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss : kInf;
         r.avg_trade_return_pct = sum_tr / r.num_trades;
     }
 
@@ -455,6 +471,16 @@ std::vector<BacktestResult> batch_run_strategy(
     double slippage_pct)
 {
     std::vector<BacktestResult> results(num_tests);
+
+    // run_strategy_summary() calls numerics::checked_narrow_to_int(), which
+    // THROWS on overflow -- and it is invoked from inside the parallel region
+    // below. An exception that escapes an OpenMP structured block is
+    // undefined behavior (the spec requires it to be caught by the same
+    // thread inside the same region); in practice it terminates the process.
+    // num_trades is bounded by n, so validating n here -- once, before the
+    // region, where a throw is safe -- makes that inner narrowing
+    // unreachable rather than merely unlikely.
+    (void)numerics::checked_narrow_to_int(n, "batch_run_strategy: bars per test");
 
     // Signed loop variable: MSVC's OpenMP 2.0 canonical-for-loop form
     // requires a signed integer induction variable, not std::size_t.

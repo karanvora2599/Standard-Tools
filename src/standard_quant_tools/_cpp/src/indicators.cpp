@@ -1,5 +1,7 @@
 #include "sqt/indicators.hpp"
 
+#include "sqt/numerics.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <deque>
@@ -388,7 +390,17 @@ void bollinger_bands_into(
 
     auto write_bands = [&](std::size_t i) {
         const double mean = c + Sx / W;
-        const double var  = (Sxx - Sx * Sx / W) / dof;
+        const double raw_var = (Sxx - Sx * Sx / W) / dof;
+        // A variance is a sum of squares over dof -- mathematically >= 0, but
+        // it can drift slightly negative under cancellation. The previous
+        // `(var > 0.0) ? sqrt(var) : 0.0` clamped ANY negative value to zero,
+        // collapsing the bands onto the moving average with no signal -- the
+        // exact silent failure the shift-by-reference-point centering above
+        // was introduced to prevent, left undetectable if it ever recurred.
+        // clamp_near_zero_sumsq clamps genuine noise and throws on anything
+        // larger, so a real regression surfaces instead of hiding.
+        const double var = numerics::clamp_near_zero_sumsq(
+            raw_var, Sxx / dof, "indicators::bollinger_bands");
         const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
         const double bw   = num_std * std;
         const std::size_t o = i * 3;
