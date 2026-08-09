@@ -35,9 +35,11 @@ def hash_dataframe(df: Any) -> str:
     # Column identity, in the frame's own column order (a reordering is a
     # genuinely different frame for provenance purposes).
     schema = json.dumps(
-        [[str(c), str(dtype)] for c, dtype in zip(df.columns, df.dtypes)]
-        if hasattr(df, "columns")
-        else [],
+        (
+            [[str(c), str(dtype)] for c, dtype in zip(df.columns, df.dtypes)]
+            if hasattr(df, "columns")
+            else []
+        ),
         sort_keys=False,
     )
     combined = f"{schema}|{values_digest}"

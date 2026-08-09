@@ -36,9 +36,7 @@ _RETURN_ZSCORE_THRESHOLD = 1.0
 _AUTO_TUNE_DEFAULT_PERCENTILE = 60.0
 
 
-def _return_zscore(
-    close: pd.Series, lookback: int, zscore_window: int
-) -> pd.Series:
+def _return_zscore(close: pd.Series, lookback: int, zscore_window: int) -> pd.Series:
     """
     Z-score the trailing `lookback`-bar return against its own rolling
     `zscore_window`-bar history — volatility-normalized, so a low-vol
@@ -157,7 +155,9 @@ def detect_rally(
     trailing_return = close.pct_change(periods=lookback)
     zscore_series = _return_zscore(close, lookback, zscore_window)
     current_return = float(trailing_return.iloc[-1])
-    current_zscore = float(zscore_series.iloc[-1]) if not np.isnan(zscore_series.iloc[-1]) else 0.0
+    current_zscore = (
+        float(zscore_series.iloc[-1]) if not np.isnan(zscore_series.iloc[-1]) else 0.0
+    )
 
     adx_df = adx(df["High"], df["Low"], close, period=adx_period)
     current_adx = float(adx_df["ADX"].iloc[-1])

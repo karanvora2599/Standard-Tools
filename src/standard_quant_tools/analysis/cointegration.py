@@ -74,9 +74,7 @@ def cointegration_test(
     # therefore ran a DIFFERENT lag-selection criterion depending on whether
     # the extension was built, and echoed the typo back either way.
     if autolag.lower() not in ("aic", "bic"):
-        raise ValidationError(
-            f"autolag must be 'aic' or 'bic', got {autolag!r}"
-        )
+        raise ValidationError(f"autolag must be 'aic' or 'bic', got {autolag!r}")
 
     common_idx = series_a.index.intersection(series_b.index)
     a = series_a.loc[common_idx]

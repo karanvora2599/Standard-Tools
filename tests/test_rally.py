@@ -165,9 +165,7 @@ class TestAutoTuneAdxThreshold:
         assert result["auto_tuned"] is False
         assert result["adx_threshold_used"] == 25.0
 
-    def test_auto_tuned_threshold_matches_hand_computed_percentile(
-        self, rising_ohlcv
-    ):
+    def test_auto_tuned_threshold_matches_hand_computed_percentile(self, rising_ohlcv):
         result = detect_rally(
             rising_ohlcv, auto_tune_adx_threshold=True, auto_tune_percentile=60.0
         )

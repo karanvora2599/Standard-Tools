@@ -589,7 +589,9 @@ class RallyDetectionInput(BaseModel):
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     lookback: int = Field(
-        20, gt=0, description="Trailing-return window in bars (default ~1 trading month)."
+        20,
+        gt=0,
+        description="Trailing-return window in bars (default ~1 trading month).",
     )
     zscore_window: int = Field(
         252,

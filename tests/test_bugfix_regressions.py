@@ -514,9 +514,7 @@ class TestMiscEdgeCases:
     def test_panel_weights_are_validated(self):
         df = _ohlcv(n=60)
         price_data = {"AAA": df, "BBB": df}
-        panel = pd.DataFrame(
-            {"AAA": 1.0, "BBB": 1.0}, index=df.index, dtype=float
-        )
+        panel = pd.DataFrame({"AAA": 1.0, "BBB": 1.0}, index=df.index, dtype=float)
         with pytest.raises(ValidationError, match="sum to 1.0"):
             run_signal_panel_backtest(price_data, panel, weights=[0.3, 0.3])
         with pytest.raises(ValidationError, match="missing entries"):

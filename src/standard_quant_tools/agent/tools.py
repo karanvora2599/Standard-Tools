@@ -137,7 +137,6 @@ from standard_quant_tools.analysis.correlation import (
 )
 from standard_quant_tools.analysis.garch import garch_volatility_forecast
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
-from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.multi_factor import (
     multi_factor_regression,
     rolling_factor_loadings,
@@ -150,6 +149,7 @@ from standard_quant_tools.analysis.options import (
     implied_volatility as _implied_volatility,
 )
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
+from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.backtest.artifacts import save_artifact
 from standard_quant_tools.backtest.constraints import (
