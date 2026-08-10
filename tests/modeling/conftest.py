@@ -6,7 +6,7 @@ panel/PCA test (every entity would be perfectly correlated) — so this
 package gets its own per-symbol randomized provider fixture.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pandas as pd
@@ -27,14 +27,25 @@ def make_ohlcv(symbol: str, n: int = _N) -> pd.DataFrame:
     high = close * (1 + np.abs(rng.normal(0, 0.004, n)))
     low = close * (1 - np.abs(rng.normal(0, 0.004, n)))
     open_ = close * (1 + rng.normal(0, 0.001, n))
+    volume = rng.integers(500_000, 5_000_000, n).astype(float)
     dates = pd.date_range("2022-01-01", periods=n, freq="B")
-    return pd.DataFrame({"Open": open_, "High": high, "Low": low, "Close": close}, index=dates)
+    return pd.DataFrame(
+        {"Open": open_, "High": high, "Low": low, "Close": close, "Volume": volume},
+        index=dates,
+    )
 
 
 @pytest.fixture
 def multi_symbol_provider() -> MagicMock:
     provider = MagicMock()
     provider.get_ohlcv.side_effect = lambda symbol, start, end: make_ohlcv(symbol)
+    # Some existing agent.tools functions (e.g. run_signal_panel_backtest,
+    # via portfolio.fetch_ohlcv_panel_async) fetch through the async path
+    # instead of get_ohlcv -- without this, asyncio.gather chokes on a
+    # plain (non-awaitable) MagicMock return value.
+    provider.get_ohlcv_async = AsyncMock(
+        side_effect=lambda symbol, start, end, interval="1d": make_ohlcv(symbol)
+    )
     return provider
 
 

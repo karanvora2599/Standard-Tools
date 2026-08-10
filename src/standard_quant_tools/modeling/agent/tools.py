@@ -132,12 +132,7 @@ def run_model_experiment(input_data: RunModelExperimentInput) -> RunModelExperim
         "data_hash": meta["data_hash"],
     }
     result = _run_experiment(dataset, input_data.spec, dataset_id=input_data.dataset_id)
-    return RunModelExperimentResult(
-        model_id=result["model_id"],
-        oos_metrics=result["oos_metrics"],
-        feature_importance_summary=result["feature_importance_summary"],
-        n_folds=result["n_folds"],
-    )
+    return RunModelExperimentResult(**result)
 
 
 def score_model(input_data: ScoreModelInput) -> ScoreModelResult:
@@ -177,6 +172,7 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
         data = {
             "dataset_id": manifest.dataset_id,
             "dataset_hash": manifest.dataset_hash,
+            "oos_predictions_uri": manifest.oos_predictions_uri,
             "random_seed": manifest.random_seed,
             "git_commit_sha": manifest.git_commit_sha,
             "package_version": manifest.package_version,

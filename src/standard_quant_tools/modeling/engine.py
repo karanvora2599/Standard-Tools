@@ -20,9 +20,10 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from . import artifacts as _artifacts
 from .estimators.registry import get_estimator_class, validate_params
 from .features.transforms import apply_preprocessing, fit_preprocessing
-from .registry.model_registry import save_model
+from .registry.model_registry import new_model_id, save_model
 from .specs import ModelSpec
 from .validation.diagnostics import fold_feature_importance, summarize_importance
 from .validation.metrics import (
@@ -66,12 +67,21 @@ def _validate_classification_target(panel: pd.DataFrame) -> None:
         )
 
 
-def _predict_fold(task: str, estimator: Any, test_X: pd.DataFrame, test_y: Any) -> Dict[str, float]:
+def _predict_fold(
+    task: str, estimator: Any, test_X: pd.DataFrame, test_y: Any
+) -> "tuple[Dict[str, float], np.ndarray]":
+    """
+    Returns (metrics, prediction_values). `prediction_values` is always a
+    continuous score suitable for downstream signal construction (see
+    modeling.bridge) -- the raw regression prediction for a regression
+    task, or the positive-class probability (not the discrete 0/1
+    predicted label) for a classification task.
+    """
     preds = estimator.predict(test_X.to_numpy())
     if task == "regression":
-        return regression_metrics(test_y, preds)
+        return regression_metrics(test_y, preds), preds
     proba = positive_class_proba(estimator, test_X.to_numpy())
-    return classification_metrics(test_y, preds, proba)
+    return classification_metrics(test_y, preds, proba), proba
 
 
 def run_experiment(
@@ -114,6 +124,7 @@ def run_experiment(
 
     fold_metrics = []
     fold_importance = []
+    oos_prediction_frames = []
     for train_pos, test_pos in splitter.split(dates):
         train_dates = dates[train_pos]
         test_dates = dates[test_pos]
@@ -139,8 +150,18 @@ def run_experiment(
         estimator = _instantiate(estimator_cls, model_spec.estimator.params, model_spec.random_seed)
         estimator.fit(train_X.to_numpy(), train_y)
 
-        fold_metrics.append(_predict_fold(model_spec.task, estimator, test_X, test_y))
+        metrics, prediction_values = _predict_fold(model_spec.task, estimator, test_X, test_y)
+        fold_metrics.append(metrics)
         fold_importance.append(fold_feature_importance(estimator, feature_ids))
+        oos_prediction_frames.append(
+            pd.DataFrame(
+                {
+                    "date": test_df["date"].to_numpy(),
+                    "entity": test_df["entity"].to_numpy(),
+                    "prediction": prediction_values,
+                }
+            )
+        )
 
     if not fold_metrics:
         raise ValidationError(
@@ -165,6 +186,20 @@ def run_experiment(
     )
     final_estimator.fit(full_X.to_numpy(), full_y)
 
+    # model_id generated here (not left to save_model's own default)
+    # so the OOS predictions artifact lands in the same
+    # SQT_RUNS_DIR/<model_id>/ directory as the model's other files --
+    # these predictions are the leakage-safe source
+    # modeling.bridge.oos_predictions_to_signal_panel needs to turn a
+    # model into an actual strategy backtest (never score_model, whose
+    # single as-of snapshot comes from this same final_estimator and
+    # would leak if used to "predict" dates it was trained on).
+    model_id = new_model_id()
+    oos_predictions_df = pd.concat(oos_prediction_frames, ignore_index=True)
+    oos_predictions_uri = _artifacts.save_artifact(
+        oos_predictions_df, run_id=model_id, name="oos_predictions"
+    )
+
     manifest = save_model(
         estimator=final_estimator,
         model_spec=model_spec,
@@ -176,6 +211,8 @@ def run_experiment(
         feature_importance_summary=importance_summary,
         n_folds=len(fold_metrics),
         preprocessing_stats=full_stats,
+        oos_predictions_uri=oos_predictions_uri,
+        model_id=model_id,
     )
 
     return {
@@ -183,4 +220,5 @@ def run_experiment(
         "oos_metrics": oos_metrics,
         "feature_importance_summary": importance_summary,
         "n_folds": len(fold_metrics),
+        "oos_predictions_uri": oos_predictions_uri,
     }

@@ -258,3 +258,112 @@ class TestFactorContributions:
         n = 3
         df = factor_contributions(two_factor_data, n_components=n)
         assert df.shape == (len(two_factor_data.columns), n)
+
+
+# ── method="power_iteration" — Tier 0 of the C++ optimization pipeline ────────
+#
+# power_iteration avoids computing every singular triplet when only a few
+# components are wanted (the exact case modeling/features/factors.py's
+# rolling PCA refit needs: n_components=1, refit many times). Parity is
+# only guaranteed for well-separated eigenvalues (true of PC1 in real,
+# factor-structured data) -- near-degenerate eigenvalues make eigenVECTORS
+# unstable for either method, not a bug in power_iteration specifically,
+# so these tests deliberately use one_factor_data/two_factor_data (a
+# genuinely dominant PC1) rather than pure random-noise data.
+
+
+class TestPowerIterationMethod:
+    def test_default_method_unchanged(self, one_factor_data):
+        """method defaults to "svd" -- omitting it must be byte-for-byte
+        the same result as before this parameter existed."""
+        explicit = pca_returns(one_factor_data, method="svd")
+        default = pca_returns(one_factor_data)
+        pd.testing.assert_frame_equal(explicit["loadings"], default["loadings"])
+        pd.testing.assert_series_equal(
+            explicit["explained_variance_ratio"], default["explained_variance_ratio"]
+        )
+
+    def test_pc1_loadings_match_svd_for_dominant_factor(self, one_factor_data):
+        svd_result = pca_returns(one_factor_data, n_components=1, method="svd")
+        pi_result = pca_returns(one_factor_data, n_components=1, method="power_iteration")
+        np.testing.assert_allclose(
+            svd_result["loadings"].to_numpy(),
+            pi_result["loadings"].to_numpy(),
+            atol=1e-6,
+        )
+
+    def test_pc1_explained_variance_ratio_matches_svd(self, one_factor_data):
+        svd_result = pca_returns(one_factor_data, n_components=1, method="svd")
+        pi_result = pca_returns(one_factor_data, n_components=1, method="power_iteration")
+        np.testing.assert_allclose(
+            svd_result["explained_variance_ratio"].to_numpy(),
+            pi_result["explained_variance_ratio"].to_numpy(),
+            atol=1e-6,
+        )
+
+    def test_pc1_factor_returns_match_svd(self, one_factor_data):
+        svd_result = pca_returns(one_factor_data, n_components=1, method="svd")
+        pi_result = pca_returns(one_factor_data, n_components=1, method="power_iteration")
+        np.testing.assert_allclose(
+            svd_result["factor_returns"].to_numpy(),
+            pi_result["factor_returns"].to_numpy(),
+            atol=1e-6,
+        )
+
+    def test_two_factor_pc1_and_pc2_match_svd(self, two_factor_data):
+        """two_factor_data's PC1 and PC2 are each dominant within their
+        own factor block (see test_two_factor_data_pc1_pc2_dominant
+        above), well-separated enough from the noise floor for both
+        components' eigenvectors to be stable."""
+        svd_result = pca_returns(two_factor_data, n_components=2, method="svd")
+        pi_result = pca_returns(two_factor_data, n_components=2, method="power_iteration")
+        np.testing.assert_allclose(
+            svd_result["loadings"].to_numpy(),
+            pi_result["loadings"].to_numpy(),
+            atol=1e-3,
+        )
+
+    def test_wide_matrix_more_assets_than_observations(self):
+        """The regime power_iteration's matrix-free deflation exists for:
+        n_assets > n_obs, where forming an explicit covariance matrix
+        would cost MORE than SVD itself and defeat the point."""
+        rng = np.random.default_rng(3)
+        n_obs, n_assets = 60, 200
+        factor = rng.normal(0, 0.015, n_obs)
+        true_loadings = rng.normal(1.0, 0.3, n_assets)
+        idio = rng.normal(0, 0.003, (n_obs, n_assets))
+        returns = pd.DataFrame(factor[:, None] * true_loadings[None, :] + idio)
+        svd_result = pca_returns(returns, n_components=1, method="svd")
+        pi_result = pca_returns(returns, n_components=1, method="power_iteration")
+        np.testing.assert_allclose(
+            svd_result["loadings"].to_numpy(),
+            pi_result["loadings"].to_numpy(),
+            atol=1e-4,
+        )
+
+    def test_unstandardized_wide_matrix_matches_svd(self):
+        rng = np.random.default_rng(4)
+        n_obs, n_assets = 60, 150
+        factor = rng.normal(0, 0.02, n_obs)
+        true_loadings = rng.normal(1.0, 0.4, n_assets)
+        idio = rng.normal(0, 0.004, (n_obs, n_assets))
+        returns = pd.DataFrame(factor[:, None] * true_loadings[None, :] + idio)
+        svd_result = pca_returns(returns, n_components=1, standardize=False, method="svd")
+        pi_result = pca_returns(
+            returns, n_components=1, standardize=False, method="power_iteration"
+        )
+        np.testing.assert_allclose(
+            svd_result["loadings"].to_numpy(),
+            pi_result["loadings"].to_numpy(),
+            atol=1e-4,
+        )
+
+    def test_sign_convention_applied_identically(self, one_factor_data):
+        """Both methods apply the same largest-magnitude-positive sign
+        fix, so the loading with the largest absolute value must be
+        positive for both -- not just "equal up to an arbitrary sign"."""
+        for method in ("svd", "power_iteration"):
+            result = pca_returns(one_factor_data, n_components=1, method=method)
+            pc1 = result["loadings"]["PC1"]
+            assert pc1[pc1.abs().idxmax()] > 0
+

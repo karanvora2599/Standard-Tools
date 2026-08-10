@@ -27,6 +27,7 @@ class ModelManifest(BaseModel):
     oos_metrics: Dict[str, float]
     feature_importance_summary: Dict[str, Dict[str, float]]
     n_folds: int
+    oos_predictions_uri: str
     random_seed: int
     created_at_utc: str
     git_commit_sha: Optional[str] = None

@@ -1,6 +1,7 @@
 """Tests for modeling.features: every built-in feature against the
 underlying primitive it wraps, plus FEATURE_REGISTRY behavior."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -8,9 +9,15 @@ from standard_quant_tools.analysis.hurst import rolling_hurst
 from standard_quant_tools.analysis.pca import pca_returns
 from standard_quant_tools.analysis.regression import rolling_beta
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.indicators.momentum import rsi
-from standard_quant_tools.indicators.trend import adx
-from standard_quant_tools.metrics.volatility_estimators import yang_zhang_volatility
+from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
+from standard_quant_tools.indicators.trend import adx, macd, parabolic_sar, williams_r
+from standard_quant_tools.indicators.volatility import bollinger_bands, wilder_atr
+from standard_quant_tools.indicators.volume import mfi, obv, vwap
+from standard_quant_tools.metrics.volatility_estimators import (
+    garman_klass_volatility,
+    parkinson_volatility,
+    yang_zhang_volatility,
+)
 from standard_quant_tools.modeling.dataset.alignment import build_returns_panel
 from standard_quant_tools.modeling.features.base import (
     FeatureContext,
@@ -98,6 +105,92 @@ class TestBuiltInFeaturesMatchUnderlyingPrimitives:
         pd.testing.assert_series_equal(result, expected, check_names=False)
 
 
+class TestExpandedFeaturesMatchUnderlyingPrimitives:
+    """The 12 features added on top of the original 9 -- same
+    match-the-underlying-primitive-directly discipline."""
+
+    def test_technical_macd_histogram(self, ohlcv):
+        definition = get_feature("technical.macd_histogram")
+        result = definition.fn(ohlcv, _CONTEXT, fast=12, slow=26, signal=9)
+        expected = macd(ohlcv["Close"], fast=12, slow=26, signal=9)["Histogram"]
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_technical_stochastic_k(self, ohlcv):
+        definition = get_feature("technical.stochastic_k")
+        result = definition.fn(ohlcv, _CONTEXT, k_period=14, d_period=3)
+        expected = stochastic_oscillator(
+            ohlcv["High"], ohlcv["Low"], ohlcv["Close"], k_period=14, d_period=3
+        )["Stoch_K"]
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_technical_williams_r(self, ohlcv):
+        definition = get_feature("technical.williams_r")
+        result = definition.fn(ohlcv, _CONTEXT, period=14)
+        expected = williams_r(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=14)
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_market_psar_trend(self, ohlcv):
+        definition = get_feature("market.psar_trend")
+        result = definition.fn(ohlcv, _CONTEXT, af_start=0.02, af_step=0.02, af_max=0.2)
+        expected = parabolic_sar(ohlcv["High"], ohlcv["Low"])["Trend"]
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+        assert set(result.dropna().unique()) <= {1.0, -1.0}
+
+    def test_risk_atr_pct(self, ohlcv):
+        definition = get_feature("risk.atr_pct")
+        result = definition.fn(ohlcv, _CONTEXT, period=14)
+        expected = wilder_atr(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=14) / ohlcv["Close"]
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_risk_bollinger_pct_b(self, ohlcv):
+        definition = get_feature("risk.bollinger_pct_b")
+        result = definition.fn(ohlcv, _CONTEXT, period=20, num_std=2.0)
+        bands = bollinger_bands(ohlcv["Close"], period=20, num_std=2.0)
+        expected = (ohlcv["Close"] - bands["BB_Lower"]) / (bands["BB_Upper"] - bands["BB_Lower"])
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_risk_parkinson_volatility(self, ohlcv):
+        definition = get_feature("risk.parkinson_volatility")
+        result = definition.fn(ohlcv, _CONTEXT, period=20)
+        expected = parkinson_volatility(ohlcv["High"], ohlcv["Low"], period=20)
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_risk_garman_klass_volatility(self, ohlcv):
+        definition = get_feature("risk.garman_klass_volatility")
+        result = definition.fn(ohlcv, _CONTEXT, period=20)
+        expected = garman_klass_volatility(
+            ohlcv["Open"], ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=20
+        )
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_risk_rolling_drawdown(self, ohlcv):
+        definition = get_feature("risk.rolling_drawdown")
+        result = definition.fn(ohlcv, _CONTEXT, window=252)
+        rolling_peak = ohlcv["Close"].rolling(252).max()
+        expected = (ohlcv["Close"] - rolling_peak) / rolling_peak
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+        assert (result.dropna() <= 1e-9).all()  # never positive -- can't exceed its own trailing peak
+
+    def test_volume_mfi(self, ohlcv):
+        definition = get_feature("volume.mfi")
+        result = definition.fn(ohlcv, _CONTEXT, period=14)
+        expected = mfi(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=14)
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_volume_obv_roc(self, ohlcv):
+        definition = get_feature("volume.obv_roc")
+        result = definition.fn(ohlcv, _CONTEXT, lookback=20)
+        expected = obv(ohlcv["Close"], ohlcv["Volume"]).pct_change(periods=20)
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_volume_vwap_deviation(self, ohlcv):
+        definition = get_feature("volume.vwap_deviation")
+        result = definition.fn(ohlcv, _CONTEXT, period=20)
+        vwap_series = vwap(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=20)
+        expected = (ohlcv["Close"] - vwap_series) / vwap_series
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+
 class TestUniverseScopePcaFeatures:
     @pytest.fixture(scope="class")
     def returns_panel(self) -> pd.DataFrame:
@@ -140,11 +233,46 @@ class TestUniverseScopePcaFeatures:
 
         refit_pos = window - 1  # first index where i+1 >= window and (i+1-window) % refit_every == 0
         window_slice = returns_panel.iloc[refit_pos + 1 - window : refit_pos + 1]
-        pca_result = pca_returns(window_slice, n_components=1)
+        # method="power_iteration" matches what the feature itself calls
+        # internally (see features/factors.py) -- comparing against the
+        # default svd method here would only coincidentally agree.
+        pca_result = pca_returns(window_slice, n_components=1, method="power_iteration")
         loadings = pca_result["loadings"]["PC1"]
         expected = float(returns_panel.iloc[refit_pos].to_numpy() @ loadings.to_numpy())
 
         assert result.iloc[refit_pos, 0] == pytest.approx(expected)
+
+
+class TestPcaFeatureUsesPowerIterationAccurately:
+    """factors.pca_loading/pca_factor_return call pca_returns internally
+    with method="power_iteration" (see features/factors.py) for speed --
+    this confirms that choice doesn't cost accuracy on real,
+    factor-structured data (parity is only guaranteed for a well-
+    separated PC1, which is exactly the regime a genuine common factor
+    creates -- see analysis/pca.py's method docstring)."""
+
+    @pytest.fixture(scope="class")
+    def factor_structured_panel(self) -> pd.DataFrame:
+        rng = np.random.default_rng(11)
+        n, n_assets = 400, 8
+        factor = rng.normal(0, 0.012, n)
+        true_loadings = rng.normal(1.0, 0.3, n_assets)
+        idio = rng.normal(0, 0.003, (n, n_assets))
+        dates = pd.date_range("2021-01-01", periods=n, freq="B")
+        returns = factor[:, None] * true_loadings[None, :] + idio
+        return pd.DataFrame(returns, index=dates, columns=[f"S{i}" for i in range(n_assets)])
+
+    def test_pca_loading_matches_svd_reference_on_factor_data(self, factor_structured_panel):
+        definition = get_feature("factors.pca_loading")
+        result = definition.fn(factor_structured_panel, _CONTEXT, window=200, refit_every=20)
+
+        refit_pos = 199
+        window_slice = factor_structured_panel.iloc[refit_pos + 1 - 200 : refit_pos + 1]
+        svd_reference = pca_returns(window_slice, n_components=1, method="svd")["loadings"]["PC1"]
+
+        np.testing.assert_allclose(
+            result.iloc[refit_pos].to_numpy(), svd_reference.to_numpy(), atol=1e-4
+        )
 
 
 class TestPcaFeatureParamValidation:
@@ -177,28 +305,53 @@ class TestPcaFeatureParamValidation:
 
 
 class TestFeatureRegistry:
-    def test_all_nine_built_in_features_registered(self):
+    def test_all_built_in_features_registered(self):
         expected_ids = {
             "technical.rsi",
             "technical.adx",
+            "technical.macd_histogram",
+            "technical.stochastic_k",
+            "technical.williams_r",
             "market.momentum",
             "market.new_high_breakout",
+            "market.psar_trend",
             "risk.realized_volatility",
             "risk.rolling_beta",
+            "risk.atr_pct",
+            "risk.bollinger_pct_b",
+            "risk.parkinson_volatility",
+            "risk.garman_klass_volatility",
+            "risk.rolling_drawdown",
+            "volume.mfi",
+            "volume.obv_roc",
+            "volume.vwap_deviation",
             "statistical.hurst",
             "factors.pca_loading",
             "factors.pca_factor_return",
         }
         assert expected_ids <= set(FEATURE_REGISTRY.keys())
+        assert expected_ids == set(FEATURE_REGISTRY.keys())
 
     def test_entity_scope_features_are_entity_scope(self):
         for feature_id in (
             "technical.rsi",
             "technical.adx",
+            "technical.macd_histogram",
+            "technical.stochastic_k",
+            "technical.williams_r",
             "market.momentum",
             "market.new_high_breakout",
+            "market.psar_trend",
             "risk.realized_volatility",
             "risk.rolling_beta",
+            "risk.atr_pct",
+            "risk.bollinger_pct_b",
+            "risk.parkinson_volatility",
+            "risk.garman_klass_volatility",
+            "risk.rolling_drawdown",
+            "volume.mfi",
+            "volume.obv_roc",
+            "volume.vwap_deviation",
             "statistical.hurst",
         ):
             assert get_feature(feature_id).scope == FeatureScope.ENTITY
@@ -236,7 +389,13 @@ class TestFeatureRegistry:
 
     def test_list_features_filters_by_category(self):
         technical_only = list_features(category="technical")
-        assert {d.id for d in technical_only} == {"technical.rsi", "technical.adx"}
+        assert {d.id for d in technical_only} == {
+            "technical.rsi",
+            "technical.adx",
+            "technical.macd_histogram",
+            "technical.stochastic_k",
+            "technical.williams_r",
+        }
 
     def test_list_features_no_category_returns_full_catalog(self):
         assert len(list_features()) == len(FEATURE_REGISTRY)

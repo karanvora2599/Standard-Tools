@@ -7,11 +7,19 @@ time, which is why these declare scope=UNIVERSE (see features/base.py's
 docstring) rather than fitting the entity-scope fn(ohlcv, ...) contract
 every other feature in this package uses.
 
-Both features share one rolling-refit design: refitting the SVD on every
+Both features share one rolling-refit design: refitting PCA on every
 single bar would be wasted work for a value (a factor's own composition)
 that doesn't move much day to day, so PCA is refit only every
 `refit_every` bars over a trailing `window`-bar panel, and the fitted PC1
-is held fixed until the next refit:
+is held fixed until the next refit. Each refit calls pca_returns with
+method="power_iteration" rather than the default full SVD -- since only
+PC1 is ever needed here, power iteration is meaningfully cheaper (it
+solves for just the requested component instead of every singular
+triplet regardless of how many were asked for), with no accuracy cost
+for a real, factor-structured universe where PC1's eigenvalue is
+well-separated from the rest (see pca_returns's `method` docstring for
+the one case -- near-degenerate eigenvalues -- where this wouldn't hold,
+which doesn't apply here since only the single dominant component is used):
 
   factors.pca_loading      — each entity's PC1 loading, forward-filled
                               between refits.
@@ -56,7 +64,7 @@ def _pca_loading(
     out = pd.DataFrame(np.nan, index=returns_panel.index, columns=returns_panel.columns)
     for end in range(window, n + 1, refit_every):
         window_slice = returns_panel.iloc[end - window : end]
-        result = _pca_returns(window_slice, n_components=1)
+        result = _pca_returns(window_slice, n_components=1, method="power_iteration")
         out.iloc[end - 1] = result["loadings"]["PC1"]
     return out.ffill()
 
@@ -74,7 +82,7 @@ def _pca_factor_return(
     for i in range(n):
         if i + 1 >= window and (i + 1 - window) % refit_every == 0:
             window_slice = returns_panel.iloc[i + 1 - window : i + 1]
-            result = _pca_returns(window_slice, n_components=1)
+            result = _pca_returns(window_slice, n_components=1, method="power_iteration")
             current_loadings = result["loadings"]["PC1"]
         if current_loadings is not None:
             values.iloc[i] = float(returns_panel.iloc[i].to_numpy() @ current_loadings.to_numpy())

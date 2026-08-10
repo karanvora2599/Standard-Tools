@@ -10,6 +10,7 @@ artifact store (`backtest.artifacts`), and the audit pipeline
 Documentation/15_modeling.md for the full architecture rationale.
 """
 
+from .bridge import oos_predictions_to_signal_panel
 from .dataset.builder import build_dataset
 from .engine import run_experiment
 from .features.registry import list_features, register_feature
@@ -32,6 +33,7 @@ __all__ = [
     "ValidationSpec",
     "build_dataset",
     "list_features",
+    "oos_predictions_to_signal_panel",
     "register_feature",
     "run_experiment",
     "score_model",

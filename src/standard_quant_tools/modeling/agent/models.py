@@ -72,6 +72,13 @@ class RunModelExperimentResult(BaseModel):
     oos_metrics: Dict[str, float]
     feature_importance_summary: Dict[str, Dict[str, float]]
     n_folds: int
+    oos_predictions_uri: str = Field(
+        ...,
+        description="Walk-forward out-of-sample predictions (date, entity, prediction) — "
+        "leakage-safe by construction, unlike score_model's single as-of snapshot. Feed "
+        "to modeling.bridge.oos_predictions_to_signal_panel to backtest this model as a "
+        "strategy via the existing run_signal_panel_backtest tool.",
+    )
 
 
 # ── score_model ─────────────────────────────────────────────────────────

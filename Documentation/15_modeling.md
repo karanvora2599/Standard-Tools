@@ -118,7 +118,7 @@ audit implementation).
 
 ## The feature catalog
 
-`modeling.features.registry.FEATURE_REGISTRY` — 9 built-in features,
+`modeling.features.registry.FEATURE_REGISTRY` — 21 built-in features,
 each a thin wrapper over a primitive that already exists elsewhere in
 this codebase, not new indicator math:
 
@@ -126,13 +126,28 @@ this codebase, not new indicator math:
 |---|---|---|
 | `technical.rsi` | `indicators.momentum.rsi` | entity |
 | `technical.adx` | `indicators.trend.adx` | entity |
+| `technical.macd_histogram` | `indicators.trend.macd` — `Histogram` column | entity |
+| `technical.stochastic_k` | `indicators.momentum.stochastic_oscillator` — `Stoch_K` column | entity |
+| `technical.williams_r` | `indicators.trend.williams_r` | entity |
 | `market.momentum` | trailing `pct_change` | entity |
 | `market.new_high_breakout` | look-ahead-safe Donchian breakout (same `.shift(1)` convention as `backtest.strategies`/`analysis.rally`) | entity |
+| `market.psar_trend` | `indicators.trend.parabolic_sar` — `Trend` column (±1; the raw `SAR` price level isn't cross-sectionally comparable) | entity |
 | `risk.realized_volatility` | `metrics.volatility_estimators.yang_zhang_volatility` | entity |
 | `risk.rolling_beta` | `analysis.regression.rolling_beta` against `DatasetSpec.benchmark` | entity |
+| `risk.atr_pct` | `indicators.volatility.wilder_atr` ÷ Close (normalized — raw ATR is a price level) | entity |
+| `risk.bollinger_pct_b` | `indicators.volatility.bollinger_bands` — %B, Close's position within the bands | entity |
+| `risk.parkinson_volatility` | `metrics.volatility_estimators.parkinson_volatility` | entity |
+| `risk.garman_klass_volatility` | `metrics.volatility_estimators.garman_klass_volatility` | entity |
+| `risk.rolling_drawdown` | trailing `.rolling(window).max()` peak, **not** `metrics.risk_metrics.drawdown_series` (that function's whole-series `cummax()` gives a stale peak inside a multi-year training window) | entity |
+| `volume.mfi` | `indicators.volume.mfi` | entity |
+| `volume.obv_roc` | `indicators.volume.obv`, rate of change over `lookback` (raw OBV is unbounded/cumulative) | entity |
+| `volume.vwap_deviation` | `indicators.volume.vwap` — `(Close - VWAP) / VWAP` | entity |
 | `statistical.hurst` | `analysis.hurst.rolling_hurst` | entity |
 | `factors.pca_loading` | `analysis.pca.pca_returns` — entity's loading on PC1, refit every `refit_every` bars | universe |
 | `factors.pca_factor_return` | same PCA fit, projected onto each date's realized return — a shared macro factor | universe |
+
+The three `volume.*` features are the only ones that need the OHLCV
+panel's `Volume` column — every other feature only needs Open/High/Low/Close.
 
 **Two scopes** exist because PCA needs the whole universe's return panel
 at once, not one symbol's OHLCV. `entity`-scope features get
@@ -142,13 +157,22 @@ at once, not one symbol's OHLCV. `entity`-scope features get
 `dataset.builder.build_dataset` dispatches each feature to the right path
 and merges both into one long `(date, entity, <feature_ids>, target)` panel.
 
-PCA's SVD is refit only every `refit_every` bars (default 21, ~1 trading
+PCA is refit only every `refit_every` bars (default 21, ~1 trading
 month) over a trailing `window`-bar panel, not on every single date —
 refitting daily would be wasted work for a value (a factor's own
 composition) that barely moves day to day. `factors.pca_factor_return`
 projects each day's realized return onto the currently-held loadings, so
 it still updates every bar even though the loadings only change at each
 refit.
+
+Each refit calls `pca_returns(..., n_components=1, method="power_iteration")`
+rather than the default full SVD — since only PC1 is ever needed here,
+solving for just that one component (power iteration + deflation) is 12–45×
+faster than computing every singular triplet, with no accuracy cost for a
+real, factor-structured universe (see `analysis.pca.pca_returns`'s `method`
+docstring for the full explanation, including the one case — near-degenerate
+eigenvalues beyond the single dominant component used here — where the two
+methods can pick different eigenvectors within an unstable subspace).
 
 ### Adding your own feature
 
@@ -198,8 +222,8 @@ than building the guardrail before the first fundamentals feature ships.
 keyed by `(task, name)`, all from `scikit-learn>=1.3.0` (already a core
 dependency — no new install):
 
-- **regression**: `linear`, `ridge`, `lasso`, `elastic_net`, `hist_gradient_boosting`
-- **classification**: `logistic`, `hist_gradient_boosting`, `random_forest`
+- **regression**: `linear`, `ridge`, `lasso`, `elastic_net`, `hist_gradient_boosting`, `random_forest`, `gradient_boosting`
+- **classification**: `logistic`, `hist_gradient_boosting`, `random_forest`, `gradient_boosting`
 
 `engine.run_experiment` refuses any estimator type not in this registry,
 and `validate_params` refuses any constructor param outside that
@@ -241,10 +265,12 @@ in the scoring call.
 SQT_RUNS_DIR/<model_id>/
     manifest.json            # task, estimator, features, target, dataset lineage,
                               # oos_metrics, feature_importance_summary, git_commit_sha,
-                              # package_version, random_seed
+                              # package_version, random_seed, oos_predictions_uri
     model.joblib
     model_spec.json
     preprocessing_stats.json
+    oos_predictions.parquet  # walk-forward OOS predictions -- see "Backtesting a
+                              # trained model" below
 ```
 
 Same directory-per-id convention `backtest.artifacts.save_artifact`
@@ -254,6 +280,60 @@ pattern and identifier/path-escape validation — `modeling.artifacts`
 reuses `backtest.artifacts.save_artifact`/`load_artifact` directly for
 Parquet panels/predictions, and adds small JSON/joblib helpers following
 the identical pattern for manifest/model files.
+
+---
+
+## Backtesting a trained model
+
+`run_model_experiment` answers "how did this model do out-of-sample."
+It doesn't answer "does this work as a trading strategy" — that requires
+an actual backtest, and this codebase already has one
+(`run_signal_panel_backtest`, in the *other* 46-tool registry).
+`modeling.bridge.oos_predictions_to_signal_panel` connects the two —
+a plain Python function, **not a 6th agent tool** (the 5-tool surface
+stays exactly 5; this is the "artifacts, not tool calls" boundary between
+the two registries).
+
+**Why the bridge reads `run_model_experiment`'s output, not
+`score_model`'s**: `score_model` produces a single as-of snapshot for
+live/production scoring — using it to "predict" historical dates would
+mean using the final, fully-trained model to score data it was trained
+on, which is leakage and would produce a falsely optimistic backtest.
+`run_model_experiment`'s walk-forward out-of-sample fold predictions are
+leakage-safe by construction (each fold's predictions come from a model
+that never saw that fold's dates) and already span the whole dataset's
+date range, so they're persisted (`oos_predictions.parquet`,
+`RunModelExperimentResult.oos_predictions_uri`) specifically for this use.
+
+**Why the bridge converts to `DIRECTION`, not `SCORE`**: investigated
+`run_signal_panel_backtest` directly — it never normalizes a `SCORE`
+value; the value is multiplied straight into
+`strategy_return = lagged_signal * market_return` as a raw leverage
+multiplier. A raw regression prediction like `0.02` passed through as
+`SCORE` would become a ~2%-leveraged position — economically meaningless.
+`oos_predictions_to_signal_panel` converts to `DIRECTION` instead (sign
+of the prediction for regression, a thresholded positive-class
+probability for classification), which is units-invariant regardless of
+the model's prediction scale.
+
+```python
+from standard_quant_tools.agent.models import SignalPanelBacktestInput, SignalType
+from standard_quant_tools.agent.tools import run_signal_panel_backtest
+from standard_quant_tools.modeling.agent import run_model_experiment, RunModelExperimentInput
+from standard_quant_tools.modeling.bridge import oos_predictions_to_signal_panel
+
+exp = run_model_experiment(RunModelExperimentInput(dataset_id=ds.dataset_id, spec=model_spec))
+
+signal_panel = oos_predictions_to_signal_panel(exp.oos_predictions_uri, task="regression")
+
+result = run_signal_panel_backtest(SignalPanelBacktestInput(
+    tickers=list(signal_panel.keys()),
+    start_date="2018-01-01", end_date="2024-01-01",
+    signal_panel=signal_panel,
+    signal_type=SignalType.DIRECTION,
+))
+print(result.portfolio_metrics["sharpe_ratio"])
+```
 
 ---
 
@@ -297,8 +377,8 @@ own `ValidationError`).
 Not built in this phase, and not accidentally half-built either:
 
 - **Semantic feature search** — `list_features` is a plain catalog
-  lookup. A ~9-entry catalog doesn't need ranking; this is revisited only
-  if the catalog grows large enough that it does.
+  lookup. A ~21-entry catalog doesn't need ranking; this is revisited
+  only if the catalog grows large enough that it does.
 - **Fundamentals / true point-in-time revision tracking** — the
   `CURRENT_ONLY` mechanism exists, but no fundamentals feature is
   registered yet, since none of the current data providers expose

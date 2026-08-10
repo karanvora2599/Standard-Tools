@@ -53,11 +53,19 @@ def _model_spec() -> ModelSpec:
 class TestListFeatures:
     def test_returns_full_catalog_by_default(self):
         result = list_features(ListFeaturesInput(category=None))
-        assert len(result.features) >= 9
+        assert len(result.features) >= 21
 
     def test_filters_by_category(self):
         result = list_features(ListFeaturesInput(category="risk"))
-        assert {f.id for f in result.features} == {"risk.realized_volatility", "risk.rolling_beta"}
+        assert {f.id for f in result.features} == {
+            "risk.realized_volatility",
+            "risk.rolling_beta",
+            "risk.atr_pct",
+            "risk.bollinger_pct_b",
+            "risk.parkinson_volatility",
+            "risk.garman_klass_volatility",
+            "risk.rolling_drawdown",
+        }
 
 
 class TestFullPipeline:

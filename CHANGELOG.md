@@ -9,6 +9,82 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (modeling: model→backtest bridge, feature/estimator expansion)
+
+- **`modeling.bridge.oos_predictions_to_signal_panel`** — a trained
+  model's out-of-sample predictions can now actually be backtested as a
+  strategy, closing a real gap: `score_model` produced a predictions
+  Parquet and stopped, with nothing turning it into a
+  `run_signal_panel_backtest` call. Deliberately a plain Python function,
+  **not a 6th agent tool** — the 5-tool modeling surface stays exactly 5;
+  this is the "artifacts, not tool calls" boundary between the modeling
+  registry and the existing 46-tool `agent` registry. Two findings drove
+  the design: (1) `score_model`'s single as-of snapshot is the wrong data
+  source — using its final, fully-trained model to "predict" historical
+  dates would be leakage — so the bridge reads `run_model_experiment`'s
+  walk-forward out-of-sample fold predictions instead (leakage-safe by
+  construction, now persisted as a new `oos_predictions.parquet` artifact
+  and exposed via `RunModelExperimentResult.oos_predictions_uri` /
+  `ModelManifest.oos_predictions_uri`); (2) `run_signal_panel_backtest`
+  never normalizes `SignalType.SCORE` — it's a raw leverage multiplier —
+  so a raw `0.02` forward-return prediction passed through as `SCORE`
+  would become an economically meaningless ~2%-leveraged position. The
+  bridge converts to `SignalType.DIRECTION` instead (sign of the
+  prediction, or a thresholded classifier probability), units-invariant
+  regardless of prediction scale.
+- **12 new features** (9 → 21), all thin wrappers over existing,
+  already-implemented primitives (no new indicator math):
+  `technical.macd_histogram`, `technical.stochastic_k`,
+  `technical.williams_r`, `market.psar_trend`, `risk.atr_pct`,
+  `risk.bollinger_pct_b`, `risk.parkinson_volatility`,
+  `risk.garman_klass_volatility`, `risk.rolling_drawdown`, `volume.mfi`,
+  `volume.obv_roc`, `volume.vwap_deviation` (new
+  `modeling/features/volume.py` — the first feature file needing the
+  OHLCV panel's `Volume` column, so `tests/modeling/conftest.py`'s
+  synthetic fixture gained one). `risk.rolling_drawdown` is deliberately
+  **not** a direct wrap of `metrics.risk_metrics.drawdown_series` — that
+  function's whole-series `cummax()` gives a stale all-time peak inside a
+  multi-year training window; the feature uses a bounded
+  `.rolling(window).max()` peak instead.
+- **4 new estimators**: `random_forest` for regression (closing an
+  asymmetry — it already existed for classification only) and
+  `gradient_boosting` for both tasks (the classic, non-histogram GBM).
+  Regression 5→7, classification 3→5. Still an explicit allowlist, still
+  `scikit-learn>=1.3.0` only — no new dependency.
+
+28 new tests (modeling suite 99 → 127), full suite 2099 passed / 1
+skipped, zero regressions.
+
+### Added (performance)
+
+- **`analysis.pca.pca_returns` gained a `method: "svd" | "power_iteration"`
+  parameter** (default `"svd"`, exact prior behavior for every existing
+  caller). Investigated whether `modeling`'s rolling PCA features
+  (`factors.pca_loading`/`factors.pca_factor_return`, which always request
+  `n_components=1` and refit repeatedly over a sliding window) were a good
+  candidate for a new `_sqt_core` C++ kernel. Finding: `pca_returns`'s
+  "slow path" already calls into compiled LAPACK via `np.linalg.svd`, so a
+  hand-rolled C++ full-SVD would not reliably beat it — the actual waste is
+  algorithmic (full SVD computes every singular triplet regardless of how
+  many are wanted). Added `method="power_iteration"` — power iteration +
+  deflation applied directly to the return matrix (never forms the
+  `n_assets × n_assets` covariance matrix explicitly, since for a wide
+  matrix, n_assets > n_obs, that costs more than SVD itself and would
+  defeat the point) — computing only the requested components. Wired into
+  `modeling/features/factors.py`'s two PCA features. Benchmarked on
+  synthetic factor-structured data: **12–45× faster** depending on universe
+  size (500-name universe, ~120 refits: 7.0s → 0.16s). Parity with SVD is
+  exact for any well-separated eigenvalue (true of PC1 for real market
+  data — the only component either `factors.py` feature ever requests);
+  near-degenerate eigenvalues beyond PC1 can yield a different orthonormal
+  basis within that subspace between methods, an inherent PCA property
+  documented in the `method` parameter's docstring, not a bug in either
+  path. A C++ kernel (`rolling_top1_pca`, incremental covariance
+  maintenance + warm-started power iteration across refits) was scoped in
+  detail but explicitly not built — Tier 0 alone made PCA feature
+  computation negligible next to the OHLCV fetch it's part of, so building
+  a C++ kernel now would be speculative, not evidence-driven.
+
 ### Known Issues
 
 - **Correctness/portability pass, item 14 of 20 (native/Python trade-log

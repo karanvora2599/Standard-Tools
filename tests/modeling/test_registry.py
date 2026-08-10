@@ -39,6 +39,7 @@ class TestSaveLoadRoundTrip:
             feature_importance_summary={"f1": {"mean": 0.1, "std": 0.01}},
             n_folds=3,
             preprocessing_stats={"f1": {"lo": 0.0, "hi": 1.0, "mean": 0.5, "std": 0.2}},
+            oos_predictions_uri="unused.parquet",
         )
         reloaded = load_manifest(manifest.model_id)
         assert reloaded.model_id == manifest.model_id
@@ -62,6 +63,7 @@ class TestSaveLoadRoundTrip:
             feature_importance_summary={},
             n_folds=1,
             preprocessing_stats={},
+            oos_predictions_uri="unused.parquet",
         )
         reloaded_model = load_model(manifest.model_id)
         assert reloaded_model.predict([[5.0]])[0] == pytest.approx(5.0, abs=0.1)
@@ -79,6 +81,7 @@ class TestSaveLoadRoundTrip:
             feature_importance_summary={},
             n_folds=1,
             preprocessing_stats={},
+            oos_predictions_uri="unused.parquet",
         )
         reloaded_spec = load_model_spec(manifest.model_id)
         assert reloaded_spec.estimator.type == "ridge"
@@ -97,6 +100,7 @@ class TestSaveLoadRoundTrip:
             feature_importance_summary={},
             n_folds=1,
             preprocessing_stats=stats,
+            oos_predictions_uri="unused.parquet",
         )
         assert load_preprocessing_stats(manifest.model_id) == stats
 
@@ -113,6 +117,7 @@ class TestSaveLoadRoundTrip:
             feature_importance_summary={},
             n_folds=1,
             preprocessing_stats={},
+            oos_predictions_uri="unused.parquet",
             model_id=model_id,
         )
         assert manifest.model_id == model_id

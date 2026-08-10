@@ -55,6 +55,8 @@ class TestRunExperimentRegression:
             ("lasso", {"alpha": 0.01}),
             ("elastic_net", {"alpha": 0.01, "l1_ratio": 0.5}),
             ("hist_gradient_boosting", {"max_iter": 20}),
+            ("random_forest", {"n_estimators": 10, "max_depth": 3}),
+            ("gradient_boosting", {"n_estimators": 10, "max_depth": 3}),
         ],
     )
     def test_every_allowlisted_regressor_runs_end_to_end(self, dataset, estimator, params):
@@ -92,12 +94,23 @@ def _synthetic_binary_dataset(n: int = 300, n_features: int = 2) -> dict:
 
 
 class TestRunExperimentClassification:
-    def test_logistic_runs_end_to_end(self, patched_multi_factory):
+    @pytest.mark.parametrize(
+        "estimator,params",
+        [
+            ("logistic", {}),
+            ("hist_gradient_boosting", {"max_iter": 20}),
+            ("random_forest", {"n_estimators": 10, "max_depth": 3}),
+            ("gradient_boosting", {"n_estimators": 10, "max_depth": 3}),
+        ],
+    )
+    def test_every_allowlisted_classifier_runs_end_to_end(
+        self, patched_multi_factory, estimator, params
+    ):
         built = build_dataset(_dataset_spec())
         panel = built["panel"].copy()
         panel["target"] = (panel["target"] > 0).astype(int)
         built = {**built, "panel": panel}
-        model_spec = _model_spec(task="classification", estimator="logistic")
+        model_spec = _model_spec(task="classification", estimator=estimator, **params)
         result = run_experiment(built, model_spec, dataset_id="ds_test")
         assert set(result["oos_metrics"].keys()) == {"accuracy", "auc"}
 

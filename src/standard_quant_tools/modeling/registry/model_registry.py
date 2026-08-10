@@ -36,6 +36,7 @@ def save_model(
     feature_importance_summary: Dict[str, Dict[str, float]],
     n_folds: int,
     preprocessing_stats: Dict[str, Dict[str, float]],
+    oos_predictions_uri: str,
     model_id: Optional[str] = None,
 ) -> ModelManifest:
     """
@@ -44,6 +45,14 @@ def save_model(
     refit, not any one walk-forward fold) — persisted so scoring.py can
     apply the identical winsorize/zscore transform to new data instead of
     refitting stats on whatever happens to be in the scoring universe.
+
+    oos_predictions_uri: where engine.py already persisted the
+    walk-forward out-of-sample fold predictions (date, entity, prediction)
+    — recorded here (not re-saved) so inspect_model can surface it and
+    modeling.bridge.oos_predictions_to_signal_panel can find it from just
+    a model_id, matching the "the model_id is the entry point to every
+    one of its artifacts" convention every other file in this directory
+    already follows.
     """
     model_id = model_id or new_model_id()
     directory = _artifacts.run_dir(model_id)
@@ -61,6 +70,7 @@ def save_model(
         oos_metrics=oos_metrics,
         feature_importance_summary=feature_importance_summary,
         n_folds=n_folds,
+        oos_predictions_uri=oos_predictions_uri,
         random_seed=model_spec.random_seed,
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         git_commit_sha=_git_sha(),
