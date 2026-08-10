@@ -502,6 +502,15 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 **Options pricing tools (2):** `get_option_pricing`, `get_implied_volatility`
 
+### Modeling Runtime (`standard_quant_tools.modeling`)
+
+A second, independent 5-tool registry — `list_features`, `build_model_dataset`,
+`run_model_experiment`, `score_model`, `inspect_model` — for building
+leakage-safe, walk-forward-validated statistical models from this
+library's own features (technical, market, risk, and PCA-derived
+factors), never merged into the 46-tool `get_agent_tools()`/`TOOL_CATEGORY`
+surface above. See [Documentation/15_modeling.md](Documentation/15_modeling.md).
+
 ---
 
 ## Performance

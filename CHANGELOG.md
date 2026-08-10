@@ -240,6 +240,95 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ### Fixed
 
+#### Modeling runtime reliability pass (14 findings)
+
+A follow-up correctness/reliability pass on the new
+`standard_quant_tools.modeling` package (see the Added entry below),
+prompted by "too basic when it comes to reliability and error handling."
+Suite after the pass: **99 modeling tests / 2063 total passed, 1
+skipped**, plus a repeated live end-to-end run against real Yahoo
+Finance data confirming the fixes are additive/defensive and don't
+change happy-path numerics.
+
+**Silent data corruption**
+
+- **Duplicate feature ids in `DatasetSpec.features` silently overwrote
+  columns.** Requesting `technical.rsi` twice (even with different
+  params) produced no error — `dataset.builder`'s `columns[fs.id] = ...`
+  assignment just let the second call clobber the first, so a caller
+  believing they'd requested two features silently got one. Fixed with a
+  `DatasetSpec` field validator rejecting duplicate feature ids.
+- **Duplicate universe symbols** were similarly unvalidated (harmless in
+  `build_dataset`, since a dict comprehension naturally deduplicates, but
+  an accident, not a guarantee). Fixed with the same validator pattern.
+- **`scoring.score_model` reconstructed its scoring-time `DatasetSpec`
+  via `original_spec.model_copy(update=...)`.** Pydantic v2's
+  `model_copy` does **not** re-run validators, so it silently bypassed
+  both checks above (and the start-before-end check below) for every
+  `score_model` call, even though the exact same `DatasetSpec` class
+  enforces them everywhere else. Fixed by reconstructing via
+  `DatasetSpec(**{...})` instead, which re-validates.
+
+**Crashes with unhelpful messages instead of clear errors**
+
+- **`DatasetSpec.start >= end`** was never checked; a caller error there
+  surfaced only much later as an opaque empty-panel or provider error.
+  Now rejected immediately with a clear message.
+- **Malformed date strings** (`DatasetSpec.start/end`, `ScoreModelInput.as_of`)
+  raised a raw `dateutil`/pandas parse error instead of this codebase's
+  `ValidationError`. Fixed via a shared `_parse_date` helper used both
+  inside Pydantic validators (where it needs to raise plain `ValueError`
+  for Pydantic to wrap) and directly from `scoring.py` (where the
+  `ValueError` is now caught and re-raised as `ValidationError`, matching
+  every other failure mode `score_model` raises).
+- **`features/factors.py`'s PCA features used `window`/`refit_every`
+  directly as a `range()` step with no validation** — `refit_every=0`
+  crashed with Python's cryptic `range() arg 3 must not be zero` instead
+  of a clear, attributable error, and `window<2` could feed
+  `pca_returns` an underdetermined single-observation slice. Both
+  parameters are now validated up front.
+- **`task="classification"` against the only target `TargetSpec`
+  currently builds (a continuous forward return) reached sklearn and
+  failed deep inside `.fit()` with "Unknown label type: continuous."**
+  `engine.run_experiment` now validates the target is binary `{0, 1}`
+  before attempting any fold, with a message explaining `TargetSpec`
+  doesn't yet build classification-ready targets directly.
+- **A walk-forward fold whose training window happened to land entirely
+  on one class of a binary target crashed the whole experiment** (a
+  classifier can't fit on one class). Now skipped, the same discipline
+  already used for an empty train/test slice, as long as at least one
+  fold ends up with both classes in train.
+- **Classification probability extraction assumed `predict_proba(...)[:, 1]`
+  is always the positive class.** `estimator.classes_` doesn't guarantee
+  that column ordering, and a fold whose estimator only ever saw one
+  class returns a single-column `predict_proba`, so `[:, 1]` could
+  silently score the wrong class or raise a raw `IndexError`. Fixed with
+  a shared `validation.metrics.positive_class_proba` helper (used by both
+  `engine.py` and `scoring.py`) that looks the class index up explicitly.
+- **A provider fetch failure for one symbol in a multi-symbol universe**
+  (network error, delisted ticker, rate limit) propagated with no
+  indication of *which* symbol caused it. `dataset.builder` now wraps
+  every fetch (universe symbols and the benchmark, which previously had
+  no empty-data check at all — only universe symbols did) in a
+  `ValidationError` naming the symbol, chaining the original exception.
+- **`estimators.registry.validate_params` raised a raw `KeyError`** for
+  an unregistered `(task, name)` if called independently of
+  `get_estimator_class` (which already reported the identical condition
+  as a clear `ValidationError`). Now consistent.
+
+**Silent partial failure**
+
+- **`dropna()` removes `NaN` but not `+/-inf`** — a degenerate feature
+  computation could feed `inf` straight into sklearn. `dataset.builder`
+  now runs `require_finite_array` over every feature/target column
+  before returning the panel, the same enforcement point this codebase
+  already uses pervasively elsewhere.
+- **`score_model` silently dropped universe entities with no scoreable
+  row** (e.g. insufficient history within `lookback_days`) from the
+  result with no indication anything was missing. `ScoreModelResult`
+  gained a `missing_entities` field, populated by comparing the
+  requested universe against what actually scored.
+
 #### C++-codebase audit pass (10 findings)
 
 A line-by-line correctness audit of the native tier (~5,000 lines across
