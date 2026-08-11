@@ -178,11 +178,23 @@ def classification_metrics(
     metrics: Dict[str, float] = {"accuracy": float(accuracy_score(y_true, y_pred))}
     # roc_auc_score needs both classes present in the fold — a short or
     # unlucky test fold can be single-class, which isn't a bug in the
-    # model, so report NaN rather than raising.
+    # model, so report NaN rather than raising. (sanitize_for_json turns
+    # that into null at the agent boundary; NaN is kept internally so
+    # nan-aware fold aggregation still works.)
     try:
         metrics["auc"] = float(roc_auc_score(y_true, y_proba))
     except ValueError:
         metrics["auc"] = float("nan")
+
+    # Class balance, reported rather than assumed. Accuracy is close to
+    # meaningless without it: a 95/5 split scores 0.95 by always predicting
+    # the majority class, and TargetSpec.threshold makes exactly that kind
+    # of imbalance easy to request (a 2% up-move threshold labels most bars
+    # 0). base_rate is the accuracy of always guessing the majority class —
+    # the number `accuracy` has to beat to mean anything.
+    positive_rate = float(np.mean(np.asarray(y_true, dtype=float) == 1.0))
+    metrics["positive_rate"] = positive_rate
+    metrics["majority_class_accuracy"] = max(positive_rate, 1.0 - positive_rate)
     return metrics
 
 

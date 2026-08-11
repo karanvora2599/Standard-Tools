@@ -27,13 +27,13 @@ from standard_quant_tools.modeling.specs import (
 )
 
 
-def _dataset_spec() -> DatasetSpec:
+def _dataset_spec(target: "TargetSpec | None" = None) -> DatasetSpec:
     return DatasetSpec(
         universe=["AAA", "BBB", "CCC"],
         start="2022-01-01",
         end="2023-12-31",
         features=[FeatureSpec(id="technical.rsi"), FeatureSpec(id="market.momentum")],
-        target=TargetSpec(horizon=5),
+        target=target or TargetSpec(horizon=5),
         benchmark="SPY",
     )
 
@@ -114,7 +114,10 @@ def _synthetic_binary_dataset(n: int = 300, n_features: int = 2) -> dict:
     return {
         "panel": panel,
         "feature_ids": feature_ids,
-        "target_id": "custom:1",
+        # forward_direction, so this synthetic dataset passes the
+        # task/target compatibility check and actually exercises the
+        # single-class-fold skipping it exists to test.
+        "target_id": "forward_direction:1",
         "data_hash": "h",
     }
 
@@ -132,28 +135,57 @@ class TestRunExperimentClassification:
     def test_every_allowlisted_classifier_runs_end_to_end(
         self, patched_multi_factory, estimator, params
     ):
-        built = build_dataset(_dataset_spec())
-        panel = built["panel"].copy()
-        panel["target"] = (panel["target"] > 0).astype(int)
-        built = {**built, "panel": panel}
+        """
+        Built through the ORDINARY pipeline via
+        TargetSpec(type='forward_direction'). These tests used to binarize
+        the panel by hand after build_dataset, because ModelSpec.task
+        accepted 'classification' while TargetSpec could only produce a
+        continuous return — an advertised capability with no way to
+        construct it through the five-tool surface.
+        """
+        built = build_dataset(
+            _dataset_spec(target=TargetSpec(type="forward_direction", horizon=5))
+        )
         model_spec = _model_spec(task="classification", estimator=estimator, **params)
         result = run_experiment(built, model_spec, dataset_id="ds_test")
         assert set(result["oos_metrics"]) >= {"accuracy", "auc"}
+        # Class balance is reported, so accuracy can be read against the
+        # majority-class baseline instead of in a vacuum.
+        assert set(result["oos_metrics"]) >= {
+            "positive_rate",
+            "majority_class_accuracy",
+        }
 
-    def test_non_binary_continuous_target_rejected_before_fitting(self, dataset):
-        """The default dataset fixture's target is a continuous forward
-        return -- task='classification' against it, unmodified, must be
-        rejected with a clear message before any fold is attempted, not
-        crash deep inside sklearn with 'Unknown label type: continuous'."""
+    def test_regression_task_against_direction_target_rejected(
+        self, patched_multi_factory
+    ):
+        """A 0/1 target fed to a regressor would fit happily and report
+        meaningless R2/IC — caught by task/target compatibility instead."""
+        built = build_dataset(
+            _dataset_spec(target=TargetSpec(type="forward_direction", horizon=5))
+        )
+        model_spec = _model_spec(task="regression", estimator="ridge")
+        with pytest.raises(ValidationError, match="expects a 'forward_return' target"):
+            run_experiment(built, model_spec, dataset_id="ds_test")
+
+    def test_classification_task_against_return_target_rejected(self, dataset):
+        """The mirror case: a continuous forward return under
+        task='classification' must be rejected before any fold is
+        attempted, not crash deep inside sklearn with 'Unknown label type:
+        continuous'."""
         model_spec = _model_spec(task="classification", estimator="logistic")
-        with pytest.raises(ValidationError, match="binary"):
+        with pytest.raises(
+            ValidationError, match="expects a 'forward_direction' target"
+        ):
             run_experiment(dataset, model_spec, dataset_id="ds_test")
 
     def test_single_class_overall_target_rejected(self, patched_multi_factory):
         built = build_dataset(_dataset_spec())
         panel = built["panel"].copy()
         panel["target"] = 0  # every row the same class
-        built = {**built, "panel": panel}
+        # target_id is set to the direction type so this exercises the
+        # BINARY check rather than the task/target compatibility check.
+        built = {**built, "panel": panel, "target_id": "forward_direction:5"}
         model_spec = _model_spec(task="classification", estimator="logistic")
         with pytest.raises(ValidationError, match="binary"):
             run_experiment(built, model_spec, dataset_id="ds_test")

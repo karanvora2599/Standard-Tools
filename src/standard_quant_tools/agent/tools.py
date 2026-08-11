@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools import audit
+from standard_quant_tools._jsonsafe import sanitize_for_json
 from standard_quant_tools.agent.models import (
     AdvancedIndicatorsInput,
     AdvancedIndicatorsResult,
@@ -4571,30 +4572,10 @@ def dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     return _sanitize_for_json(result)
 
 
-def _sanitize_for_json(obj: Any) -> Any:
-    """
-    Recursively replace float('inf')/float('-inf')/float('nan') with None.
-
-    A legitimately "infinite" metric (e.g. sortino_ratio/calmar_ratio when
-    there's no downside deviation or drawdown at all) is valid math but not
-    valid JSON per RFC 8259 — Python's json.dumps (the exact call this
-    module's own docstring recommends for sending dispatch()'s result to an
-    LLM) emits the non-standard tokens Infinity/-Infinity/NaN by default,
-    which many strict JSON parsers (including some LLM API backends) reject
-    outright. None is the JSON-safe way to say "this metric is undefined/
-    unbounded" without silently substituting a made-up finite number that
-    would misrepresent the actual result.
-    """
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    # Tuples/sets are JSON-encoded as arrays by json.dumps but were not walked
-    # here, so a non-finite value inside one survived to the encoder. np.float64
-    # subclasses float and was already covered; np.float32 and other numpy
-    # scalars/arrays are not, hence the explicit numeric check below.
-    if isinstance(obj, (list, tuple, set, frozenset)):
-        return [_sanitize_for_json(v) for v in obj]
-    if hasattr(obj, "tolist") and callable(obj.tolist):  # numpy array/scalar
-        return _sanitize_for_json(obj.tolist())
-    if isinstance(obj, numbers.Real) and not math.isfinite(float(obj)):
-        return None
-    return obj
+# Re-exported under its original private name so existing imports of
+# agent.tools._sanitize_for_json keep working. The implementation now lives
+# in standard_quant_tools._jsonsafe because BOTH agent surfaces need it and
+# neither should import the other — the modeling runtime is deliberately
+# independent of this 46-tool registry. See that module for why non-finite
+# metrics are real here and why None is the right JSON representation.
+_sanitize_for_json = sanitize_for_json

@@ -7,6 +7,7 @@ boundary, the same discipline `agent/models.py` uses for the analysis
 tool surface.
 """
 
+import math
 from typing import Dict, List, Literal
 
 import pandas as pd
@@ -36,12 +37,38 @@ class FeatureSpec(BaseModel):
 
 
 class TargetSpec(BaseModel):
-    type: Literal["forward_return"] = Field(
-        "forward_return", description="Target construction method."
+    type: Literal["forward_return", "forward_direction"] = Field(
+        "forward_return",
+        description=(
+            "'forward_return' (default) — continuous forward return, for "
+            "task='regression'. 'forward_direction' — 1.0 when that forward "
+            "return exceeds `threshold`, else 0.0, for task='classification'."
+        ),
     )
     horizon: int = Field(
         ..., gt=0, description="Bars ahead the target return is measured over."
     )
+    threshold: float = Field(
+        0.0,
+        description=(
+            "forward_direction only: the forward return a bar must EXCEED to "
+            "be labelled 1.0. Default 0.0 = plain up/down. A positive value "
+            "(e.g. 0.02) asks for a move of at least that size, which also "
+            "makes the classes deliberately imbalanced — check the resulting "
+            "class balance before reading accuracy."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _threshold_only_for_direction(self) -> "TargetSpec":
+        if self.type == "forward_return" and self.threshold != 0.0:
+            raise ValueError(
+                "threshold applies to type='forward_direction' only; "
+                "'forward_return' is the raw continuous return."
+            )
+        if not math.isfinite(self.threshold):
+            raise ValueError(f"threshold must be finite, got {self.threshold}")
+        return self
 
 
 class DatasetSpec(BaseModel):

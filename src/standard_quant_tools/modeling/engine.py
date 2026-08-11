@@ -76,10 +76,34 @@ def _validate_classification_target(panel: pd.DataFrame) -> None:
             "run_model_experiment: task='classification' requires a binary {0, 1} "
             f"target, but the dataset's target column has values {sample}"
             + ("..." if len(unique_values) > 10 else "")
-            + ". TargetSpec currently only builds a continuous forward_return "
-            "target -- binarize it yourself (e.g. sign of the forward return) "
-            "before calling build_model_dataset if you need a classification target."
+            + ". Build the dataset with TargetSpec(type='forward_direction', "
+            "horizon=..., threshold=...) — that is the target type that produces a "
+            "binary label through the normal pipeline."
         )
+
+
+def _check_task_target_compatibility(task: str, target_id: "str | None") -> None:
+    """
+    A classification model needs a binary target and a regression model a
+    continuous one. Both were previously accepted against either target,
+    so the mismatch only surfaced as a confusing sklearn error (or, for
+    regression on a 0/1 target, not at all — it would happily fit and
+    report meaningless R2/IC).
+    """
+    if not target_id or ":" not in target_id:
+        return
+    target_type = target_id.split(":", 1)[0]
+    expected = {
+        "regression": "forward_return",
+        "classification": "forward_direction",
+    }.get(task)
+    if expected is None or target_type == expected:
+        return
+    raise ValidationError(
+        f"run_model_experiment: task={task!r} expects a {expected!r} target, but this "
+        f"dataset was built with {target_type!r}. Rebuild the dataset with "
+        f"TargetSpec(type={expected!r}, ...), or change the model's task."
+    )
 
 
 def _predict_fold(
@@ -126,6 +150,7 @@ def run_experiment(
     )
 
     panel = dataset["panel"]
+    _check_task_target_compatibility(model_spec.task, dataset.get("target_id"))
     if model_spec.task == "classification":
         _validate_classification_target(panel)
     feature_ids = dataset["feature_ids"]

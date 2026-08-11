@@ -9,14 +9,33 @@ from ..specs import TargetSpec
 
 def build_target(close: pd.Series, spec: TargetSpec) -> pd.Series:
     """
-    Forward return over `spec.horizon` bars: value at date t is
-    (close[t+horizon] - close[t]) / close[t] — the return an entity earns
-    starting at t, not the trailing return ending at t. Implemented as
-    pct_change(periods=horizon).shift(-horizon): pct_change gives the
-    trailing return ending at t+horizon, and shift(-horizon) pulls that
-    value back to sit on row t, which is exactly the forward return.
+    Build the supervised target.
+
+    `forward_return` — the return an entity earns starting at t, not the
+    trailing return ending at t: (close[t+horizon] - close[t]) / close[t].
+    Implemented as pct_change(periods=horizon).shift(-horizon): pct_change
+    gives the trailing return ending at t+horizon, and shift(-horizon)
+    pulls that value back onto row t, which is exactly the forward return.
+
+    `forward_direction` — that same forward return binarized to 1.0/0.0
+    against `spec.threshold`. This exists so task='classification' is
+    reachable through the ordinary five-tool pipeline: ModelSpec.task has
+    always ACCEPTED 'classification', but TargetSpec could only build a
+    continuous return, so a binary target could only be obtained by
+    mutating the panel by hand outside the agent workflow — a documented
+    capability with no way to construct it.
+
+    NaN is preserved rather than being binarized. The final `horizon` rows
+    have no forward return at all, and `NaN > threshold` is False, so a
+    naive `.astype(float)` would silently label every one of them 0.0 —
+    manufacturing a "went down" observation for bars whose outcome simply
+    has not happened yet. Alignment drops NaN rows instead.
     """
-    return close.pct_change(periods=spec.horizon).shift(-spec.horizon)
+    forward_return = close.pct_change(periods=spec.horizon).shift(-spec.horizon)
+    if spec.type == "forward_return":
+        return forward_return
+    direction = (forward_return > spec.threshold).astype(float)
+    return direction.where(forward_return.notna())
 
 
 def build_label_end_dates(close: pd.Series, spec: TargetSpec) -> pd.Series:
