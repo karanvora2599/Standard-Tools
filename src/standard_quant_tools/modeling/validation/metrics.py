@@ -32,17 +32,144 @@ def positive_class_proba(estimator: Any, X: np.ndarray) -> np.ndarray:
     # this should be unreachable in practice.
 
 
-def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+def _safe_corr(true_s: pd.Series, pred_s: pd.Series, method: str) -> float:
+    value = float(true_s.corr(pred_s, method=method))
+    return 0.0 if np.isnan(value) else value
+
+
+def cross_sectional_ic(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    dates: np.ndarray,
+    method: str = "spearman",
+) -> pd.Series:
+    """
+    Information coefficient computed WITHIN each date's cross-section,
+    returned as a per-date series.
+
+    This is the quantity a cross-sectional model is actually judged on.
+    Pooling every (entity, date) row into one correlation — what
+    `regression_metrics` reported as `ic`/`rank_ic` — mixes two different
+    effects: whether the model ranks names correctly against each other on
+    a given day, and whether it times the market's overall level across
+    days. A model with no cross-sectional skill can still show a strong
+    pooled IC purely because it tracks the market factor, since on
+    up-market days both predictions and realized returns are high for
+    nearly every name.
+
+    Dates with fewer than 2 entities are dropped: a correlation over a
+    single point is undefined, not zero.
+    """
+    frame = pd.DataFrame({"date": dates, "y": y_true, "p": y_pred})
+    per_date = {}
+    for date, group in frame.groupby("date", sort=True):
+        if len(group) < 2:
+            continue
+        per_date[date] = _safe_corr(group["y"], group["p"], method)
+    return pd.Series(per_date, dtype=float)
+
+
+def summarize_cross_sectional_ic(ic_series: pd.Series, prefix: str) -> Dict[str, float]:
+    """
+    Time-series summary of a per-date IC series: mean, volatility, ICIR,
+    and the fraction of dates with positive IC.
+
+    ICIR (mean / std) is the metric that says whether an IC is dependable
+    rather than merely large on average — a 0.03 IC that is positive on 60%
+    of days is a very different model from a 0.03 IC driven by a handful of
+    extreme days, and a mean alone cannot distinguish them.
+    """
+    if ic_series.empty:
+        return {
+            f"{prefix}_mean": float("nan"),
+            f"{prefix}_std": float("nan"),
+            f"{prefix}_icir": float("nan"),
+            f"{prefix}_hit_rate": float("nan"),
+            f"{prefix}_n_dates": 0.0,
+        }
+    mean = float(ic_series.mean())
+    # ddof=1 needs >= 2 dates; a single date has no dispersion to measure.
+    std = float(ic_series.std(ddof=1)) if len(ic_series) > 1 else float("nan")
+    icir = mean / std if std and np.isfinite(std) and std > 0 else float("nan")
+    return {
+        f"{prefix}_mean": mean,
+        f"{prefix}_std": std,
+        f"{prefix}_icir": icir,
+        f"{prefix}_hit_rate": float((ic_series > 0).mean()),
+        f"{prefix}_n_dates": float(len(ic_series)),
+    }
+
+
+def effective_sample_size(n_obs: int, horizon: int, n_entities: int = 1) -> float:
+    """
+    Observation count discounted for target overlap.
+
+    A `horizon`-bar forward return generated every bar produces labels that
+    overlap on `horizon - 1` of their bars, so consecutive rows are far from
+    independent. Reporting a raw row count materially overstates how much
+    evidence a metric rests on: 2,000 daily rows of a 20-day forward return
+    carry roughly 100 independent observations per entity, not 2,000.
+
+    This is the standard first-order correction (divide by the overlap
+    factor), not a full Newey-West style adjustment — enough to stop the
+    headline count being misleading, and labelled as an estimate.
+    """
+    if horizon <= 0:
+        return float(n_obs)
+    per_entity = max(n_obs / max(n_entities, 1), 0.0)
+    return float(max(per_entity / horizon, 0.0) * max(n_entities, 1))
+
+
+def baseline_regression_metrics(y_true: np.ndarray) -> Dict[str, float]:
+    """
+    Metrics for the trivial "predict the mean" model, so a reported R2/MAE
+    has something to be compared against. Without this a result can look
+    informative while being no better than a constant.
+    """
+    if len(y_true) == 0:
+        return {"baseline_mae": float("nan"), "baseline_r2": 0.0}
+    constant = np.full_like(y_true, float(np.mean(y_true)), dtype=float)
+    return {
+        "baseline_mae": float(mean_absolute_error(y_true, constant)),
+        # R2 of the mean predictor is 0.0 by construction; stated
+        # explicitly so the comparison is legible in the output.
+        "baseline_r2": 0.0,
+    }
+
+
+def regression_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    dates: "np.ndarray | None" = None,
+) -> Dict[str, float]:
+    """
+    `ic`/`rank_ic` are POOLED across every (entity, date) row — kept for
+    continuity, but see cross_sectional_ic for why they conflate
+    cross-sectional skill with market timing. When `dates` is supplied the
+    per-date cross-sectional versions are added alongside them, and those
+    are the ones to judge a cross-sectional model on.
+    """
     true_s = pd.Series(y_true)
     pred_s = pd.Series(y_pred)
-    ic = float(true_s.corr(pred_s, method="pearson"))
-    rank_ic = float(true_s.corr(pred_s, method="spearman"))
-    return {
+    metrics = {
         "r2": float(r2_score(y_true, y_pred)),
         "mae": float(mean_absolute_error(y_true, y_pred)),
-        "ic": 0.0 if np.isnan(ic) else ic,
-        "rank_ic": 0.0 if np.isnan(rank_ic) else rank_ic,
+        "ic": _safe_corr(true_s, pred_s, "pearson"),
+        "rank_ic": _safe_corr(true_s, pred_s, "spearman"),
     }
+    metrics.update(baseline_regression_metrics(y_true))
+    if dates is not None:
+        metrics.update(
+            summarize_cross_sectional_ic(
+                cross_sectional_ic(y_true, y_pred, dates, "pearson"), "cs_ic"
+            )
+        )
+        metrics.update(
+            summarize_cross_sectional_ic(
+                cross_sectional_ic(y_true, y_pred, dates, "spearman"), "cs_rank_ic"
+            )
+        )
+    return metrics
 
 
 def classification_metrics(
@@ -59,18 +186,47 @@ def classification_metrics(
     return metrics
 
 
-def average_fold_metrics(fold_metrics: List[Dict[str, float]]) -> Dict[str, float]:
-    """Mean of each metric key across folds, ignoring NaN (e.g. a
-    single-class AUC fold) rather than propagating NaN into the summary."""
-    keys = fold_metrics[0].keys()
+def average_fold_metrics(
+    fold_metrics: List[Dict[str, float]],
+    fold_weights: "List[float] | None" = None,
+) -> Dict[str, float]:
+    """
+    Weighted mean of each metric across folds, ignoring NaN (e.g. a
+    single-class AUC fold) rather than propagating it into the summary.
+
+    `fold_weights` should be each fold's out-of-sample prediction count.
+    An equal-weighted mean — the previous behavior — gives a fold covering
+    30 predictions exactly as much influence on the headline number as one
+    covering 3,000, which is wrong whenever entity coverage varies across
+    the sample (a universe with mid-history IPOs, say). Falls back to equal
+    weights when none are supplied.
+
+    Metrics whose names end in `_n_dates` are SUMMED rather than averaged:
+    a count of dates observed is not a per-fold rate.
+    """
+    keys = list(fold_metrics[0].keys())
+    if fold_weights is None:
+        fold_weights = [1.0] * len(fold_metrics)
+    weights = np.asarray(fold_weights, dtype=float)
+
     result: Dict[str, float] = {}
     for k in keys:
-        values = np.array([fm[k] for fm in fold_metrics])
-        # np.nanmean warns "Mean of empty slice" on an all-NaN array
-        # (e.g. every surviving fold's test set happened to be
-        # single-class, so AUC was NaN everywhere) -- NaN is still the
-        # correct answer here, just without numpy's warning about it.
+        values = np.array([fm.get(k, np.nan) for fm in fold_metrics], dtype=float)
+        finite = ~np.isnan(values)
+        if not finite.any():
+            # NaN is still the correct answer (e.g. every surviving fold's
+            # test set was single-class, so AUC was NaN everywhere) --
+            # computed without numpy's "Mean of empty slice" warning.
+            result[k] = float("nan")
+            continue
+        if k.endswith("_n_dates"):
+            result[k] = float(values[finite].sum())
+            continue
+        w = weights[finite]
+        total = w.sum()
         result[k] = (
-            float(np.nanmean(values)) if not np.all(np.isnan(values)) else float("nan")
+            float(np.average(values[finite], weights=w))
+            if total > 0
+            else float(np.mean(values[finite]))
         )
     return result

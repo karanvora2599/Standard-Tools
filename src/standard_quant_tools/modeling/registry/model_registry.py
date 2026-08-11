@@ -46,6 +46,7 @@ def save_model(
     train_end_date: Optional[str] = None,
     dataset_spec: Optional[Dict[str, Any]] = None,
     dataset_spec_hash: Optional[str] = None,
+    validation_report: Optional[Dict[str, Any]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -116,6 +117,7 @@ def save_model(
         oos_metrics=oos_metrics,
         feature_importance_summary=feature_importance_summary,
         n_folds=n_folds,
+        validation_report=validation_report or {},
         oos_predictions_uri=oos_predictions_uri,
         random_seed=model_spec.random_seed,
         dataset_spec_hash=dataset_spec_hash,

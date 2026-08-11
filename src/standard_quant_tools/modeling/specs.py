@@ -106,7 +106,20 @@ class ValidationSpec(BaseModel):
         0,
         ge=0,
         description="Bars excluded between train and test folds to prevent "
-        "lookback leakage across the boundary.",
+        "lookback leakage across the boundary. Note this does NOT need to "
+        "cover the target horizon: training rows whose forward-return label "
+        "would resolve inside the test window are purged separately, using "
+        "each row's own label end date.",
+    )
+    min_folds: int = Field(
+        2,
+        ge=1,
+        description="Minimum walk-forward folds that must actually COMPLETE "
+        "before a model is registered. One surviving fold is a single "
+        "train/test split, not walk-forward validation — it cannot show "
+        "whether performance holds across time, which is the entire reason "
+        "for validating this way. Lower to 1 only for a deliberately short "
+        "exploratory run.",
     )
 
 

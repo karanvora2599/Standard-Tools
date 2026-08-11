@@ -72,7 +72,20 @@ class TestRunExperimentRegression:
         result = run_experiment(dataset, model_spec, dataset_id="ds_test")
         assert result["model_id"].startswith("mdl_")
         assert result["n_folds"] >= 1
-        assert set(result["oos_metrics"].keys()) == {"r2", "mae", "ic", "rank_ic"}
+        # Superset, not equality: asserting an exact key set makes every
+        # added metric a test failure, which is what happened when
+        # cross-sectional IC / baseline / sample-size fields were added.
+        assert set(result["oos_metrics"]) >= {"r2", "mae", "ic", "rank_ic"}
+        # The cross-sectional IC family is what a cross-sectional model is
+        # actually judged on -- see validation/metrics.py.
+        assert set(result["oos_metrics"]) >= {
+            "cs_ic_mean",
+            "cs_ic_icir",
+            "cs_rank_ic_mean",
+            "cs_rank_ic_icir",
+            "baseline_mae",
+            "effective_sample_size",
+        }
 
     def test_registered_model_is_loadable_and_predicts(self, dataset):
         result = run_experiment(dataset, _model_spec(), dataset_id="ds_test")
@@ -125,7 +138,7 @@ class TestRunExperimentClassification:
         built = {**built, "panel": panel}
         model_spec = _model_spec(task="classification", estimator=estimator, **params)
         result = run_experiment(built, model_spec, dataset_id="ds_test")
-        assert set(result["oos_metrics"].keys()) == {"accuracy", "auc"}
+        assert set(result["oos_metrics"]) >= {"accuracy", "auc"}
 
     def test_non_binary_continuous_target_rejected_before_fitting(self, dataset):
         """The default dataset fixture's target is a continuous forward

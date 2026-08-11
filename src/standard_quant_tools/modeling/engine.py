@@ -13,7 +13,7 @@ leakage discipline.
 """
 
 import inspect
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -30,10 +30,24 @@ from .validation.diagnostics import fold_feature_importance, summarize_importanc
 from .validation.metrics import (
     average_fold_metrics,
     classification_metrics,
+    effective_sample_size,
     positive_class_proba,
     regression_metrics,
 )
 from .validation.walk_forward import WalkForwardSplit
+
+
+def _target_horizon(target_id: "str | None") -> "int | None":
+    """`target_id` is built as "<type>:<horizon>" (dataset/builder.py), so
+    the horizon is recoverable without threading DatasetSpec through the
+    engine. Returns None for a malformed or absent id rather than raising —
+    a missing horizon only costs the overlap adjustment."""
+    if not target_id or ":" not in target_id:
+        return None
+    try:
+        return int(target_id.rsplit(":", 1)[1])
+    except ValueError:
+        return None
 
 
 def _instantiate(cls: Any, params: Dict[str, Any], random_seed: int) -> Any:
@@ -69,7 +83,11 @@ def _validate_classification_target(panel: pd.DataFrame) -> None:
 
 
 def _predict_fold(
-    task: str, estimator: Any, test_X: pd.DataFrame, test_y: Any
+    task: str,
+    estimator: Any,
+    test_X: pd.DataFrame,
+    test_y: Any,
+    test_dates: "np.ndarray | None" = None,
 ) -> "tuple[Dict[str, float], np.ndarray]":
     """
     Returns (metrics, prediction_values). `prediction_values` is always a
@@ -80,7 +98,7 @@ def _predict_fold(
     """
     preds = estimator.predict(test_X.to_numpy())
     if task == "regression":
-        return regression_metrics(test_y, preds), preds
+        return regression_metrics(test_y, preds, dates=test_dates), preds
     proba = positive_class_proba(estimator, test_X.to_numpy())
     return classification_metrics(test_y, preds, proba), proba
 
@@ -128,8 +146,15 @@ def run_experiment(
     has_label_end = LABEL_END_COL in panel.columns
     fold_metrics = []
     fold_importance = []
+    fold_records: List[Dict[str, Any]] = []
+    fold_weights: List[float] = []
     oos_prediction_frames = []
     n_purged_total = 0
+    # Skipped folds were previously invisible: the result reported only how
+    # many folds SURVIVED, so a run where 8 of 10 folds were dropped looked
+    # identical to a clean 2-fold run.
+    skipped: List[Dict[str, str]] = []
+    n_expected_folds = splitter.n_splits(dates)
     for train_pos, test_pos in splitter.split(dates):
         train_dates = dates[train_pos]
         test_dates = dates[test_pos]
@@ -155,6 +180,16 @@ def run_experiment(
             train_df = train_df[keep]
 
         if train_df.empty or test_df.empty:
+            skipped.append(
+                {
+                    "test_start": str(pd.Timestamp(test_dates[0]).date()),
+                    "reason": (
+                        "no training rows survived the target-overlap purge"
+                        if train_df.empty and n_purged_total > 0
+                        else "empty train or test slice"
+                    ),
+                }
+            )
             continue
 
         train_y = train_df["target"].to_numpy()
@@ -165,6 +200,12 @@ def run_experiment(
         # train/test slice above, rather than letting the whole
         # experiment crash over one unlucky window.
         if model_spec.task == "classification" and len(np.unique(train_y)) < 2:
+            skipped.append(
+                {
+                    "test_start": str(pd.Timestamp(test_dates[0]).date()),
+                    "reason": "training window contained only one class",
+                }
+            )
             continue
 
         stats = fit_preprocessing(train_df[feature_ids])
@@ -177,8 +218,28 @@ def run_experiment(
         estimator.fit(train_X.to_numpy(), train_y)
 
         metrics, prediction_values = _predict_fold(
-            model_spec.task, estimator, test_X, test_y
+            model_spec.task, estimator, test_X, test_y, test_df["date"].to_numpy()
         )
+        # Per-fold detail is retained, not only its contribution to the
+        # average: one averaged number cannot show performance decay over
+        # time, reveal which regime drove the result, or expose that a
+        # single fold carried everything.
+        fold_records.append(
+            {
+                "fold": len(fold_records),
+                "train_start": str(pd.Timestamp(train_dates[0]).date()),
+                "train_end": str(pd.Timestamp(train_dates[-1]).date()),
+                "test_start": str(pd.Timestamp(test_dates[0]).date()),
+                "test_end": str(pd.Timestamp(test_dates[-1]).date()),
+                "n_train_rows": int(len(train_df)),
+                "n_test_rows": int(len(test_df)),
+                "metrics": metrics,
+            }
+        )
+        # Weight by out-of-sample prediction count -- see
+        # average_fold_metrics for why equal weighting distorts the
+        # headline number when coverage varies across folds.
+        fold_weights.append(float(len(test_df)))
         fold_metrics.append(metrics)
         fold_importance.append(fold_feature_importance(estimator, feature_ids))
         oos_prediction_frames.append(
@@ -201,8 +262,51 @@ def run_experiment(
             "train_window, or lower the target horizon)."
         )
 
-    oos_metrics = average_fold_metrics(fold_metrics)
+    # A model used to be registered after a single surviving fold, which is
+    # one train/test split rather than walk-forward validation -- it cannot
+    # show whether performance holds across time. Enforced after the loop
+    # (not from n_splits) because it is COMPLETED folds that matter: folds
+    # skipped for a single-class window or an empty slice provide no
+    # evidence.
+    if len(fold_metrics) < model_spec.validation.min_folds:
+        raise ValidationError(
+            f"run_model_experiment: only {len(fold_metrics)} of {n_expected_folds} "
+            f"walk-forward fold(s) completed, below min_folds="
+            f"{model_spec.validation.min_folds}. "
+            + (f"Skipped: {skipped}. " if skipped else "")
+            + "Widen the date range, shorten train_window/test_window, or lower "
+            "min_folds if a single split is genuinely what you want."
+        )
+
+    oos_metrics = average_fold_metrics(fold_metrics, fold_weights)
     importance_summary = summarize_importance(fold_importance, feature_ids)
+
+    # Sample size discounted for target overlap. A `horizon`-bar forward
+    # return generated every bar produces labels sharing horizon-1 of their
+    # bars, so the raw OOS row count overstates the independent evidence
+    # behind every metric above -- often by an order of magnitude.
+    n_oos_rows = int(sum(fold_weights))
+    horizon = _target_horizon(dataset.get("target_id"))
+    n_entities = int(panel["entity"].nunique())
+    oos_metrics["n_oos_rows"] = float(n_oos_rows)
+    oos_metrics["effective_sample_size"] = (
+        effective_sample_size(n_oos_rows, horizon, n_entities)
+        if horizon is not None
+        else float(n_oos_rows)
+    )
+
+    validation_report = {
+        "n_folds_expected": int(n_expected_folds),
+        "n_folds_completed": len(fold_metrics),
+        "n_folds_skipped": len(skipped),
+        "fold_coverage": (
+            round(len(fold_metrics) / n_expected_folds, 4) if n_expected_folds else 0.0
+        ),
+        "skipped_folds": skipped,
+        "n_train_rows_purged_overlap": n_purged_total,
+        "target_horizon": horizon,
+        "folds": fold_records,
+    }
 
     # Walk-forward folds are for out-of-sample validation only; the
     # registered/deployed model is refit on the full panel so it uses
@@ -240,6 +344,7 @@ def run_experiment(
         oos_metrics=oos_metrics,
         feature_importance_summary=importance_summary,
         n_folds=len(fold_metrics),
+        validation_report=validation_report,
         preprocessing_stats=full_stats,
         oos_predictions_uri=oos_predictions_uri,
         model_id=model_id,
@@ -260,6 +365,7 @@ def run_experiment(
         "oos_metrics": oos_metrics,
         "feature_importance_summary": importance_summary,
         "n_folds": len(fold_metrics),
+        "validation_report": validation_report,
         "oos_predictions_uri": oos_predictions_uri,
         # Surfaced rather than silently applied: a large purge count means
         # the target horizon is consuming a real fraction of each training

@@ -209,6 +209,10 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             "validation_method": manifest.validation_method,
             "n_folds": manifest.n_folds,
             "oos_metrics": manifest.oos_metrics,
+            # Per-fold detail plus fold accounting. Averages alone cannot
+            # show performance decay across time, which window carried the
+            # result, or how many folds were skipped and why.
+            "validation_report": manifest.validation_report,
         }
     else:  # lineage
         data = {

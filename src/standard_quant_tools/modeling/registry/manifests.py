@@ -27,6 +27,11 @@ class ModelManifest(BaseModel):
     oos_metrics: Dict[str, float]
     feature_importance_summary: Dict[str, Dict[str, float]]
     n_folds: int
+    # Per-fold metrics/windows plus fold accounting (expected vs completed
+    # vs skipped, with reasons). Averaged metrics alone hide performance
+    # decay, single-fold dominance, and how much of the walk-forward
+    # schedule actually ran. Optional so older manifests still load.
+    validation_report: Dict[str, Any] = Field(default_factory=dict)
     oos_predictions_uri: str
     random_seed: int
     # SHA-256 of the DatasetSpec that produced the training data.

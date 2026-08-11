@@ -73,6 +73,22 @@ class RunModelExperimentResult(BaseModel):
     oos_metrics: Dict[str, float]
     feature_importance_summary: Dict[str, Dict[str, float]]
     n_folds: int
+    validation_report: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Per-fold metrics and windows, plus fold accounting "
+        "(expected/completed/skipped with reasons, rows purged for target "
+        "overlap, and the target horizon). Averaged oos_metrics alone cannot "
+        "show performance decay across folds, reveal that one fold carried "
+        "the result, or expose how much of the walk-forward schedule "
+        "actually ran.",
+    )
+    n_train_rows_purged_overlap: int = Field(
+        0,
+        description="Training rows dropped because their forward-return "
+        "label would have resolved inside the test window. A large count "
+        "means the target horizon consumes a real fraction of each training "
+        "window — relevant when reading the OOS metrics.",
+    )
     oos_predictions_uri: str = Field(
         ...,
         description="Walk-forward out-of-sample predictions (date, entity, prediction). "
