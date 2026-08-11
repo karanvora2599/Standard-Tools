@@ -14,6 +14,8 @@ score differently depending on which other tickers happened to be in the
 scoring call.
 """
 
+import hashlib
+import json
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -24,6 +26,7 @@ from . import artifacts as _artifacts
 from .dataset.builder import build_dataset
 from .features.transforms import apply_preprocessing
 from .registry.model_registry import (
+    load_dataset_spec,
     load_manifest,
     load_model,
     load_preprocessing_stats,
@@ -85,8 +88,13 @@ def score_model(
     stats = load_preprocessing_stats(model_id)
     estimator = load_model(model_id)
 
-    dataset_spec_path = _artifacts.run_dir(manifest.dataset_id) / "dataset_spec.json"
-    original_spec_dict = _artifacts.load_json(str(dataset_spec_path))
+    # The model's OWN bundled, content-verified copy -- not
+    # SQT_RUNS_DIR/<dataset_id>/dataset_spec.json. Reading the dataset
+    # directory made scoring depend on that directory surviving, and let an
+    # edit there (say RSI period 14 -> 100) silently redefine the features
+    # fed to an already-registered estimator, with no integrity check and
+    # no change in model_id.
+    original_spec_dict = load_dataset_spec(model_id)
 
     start = (as_of_ts - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     # Reconstruct through DatasetSpec(**...) rather than
@@ -122,7 +130,17 @@ def score_model(
             "prediction": predictions,
         }
     )
-    run_name = f"predictions_{as_of_ts.strftime('%Y%m%d')}"
+    # The artifact name includes a digest of the scored universe, not just
+    # the date. With `predictions_YYYYMMDD` alone, scoring [AAPL, MSFT] and
+    # then [AAPL, NVDA] for the same as_of overwrote the first file, so an
+    # audit record written by the earlier call pointed at contents produced
+    # by the later one -- a silently wrong provenance trail rather than a
+    # missing one. overwrite=True is kept so re-scoring the SAME universe
+    # on the same date is idempotent.
+    universe_digest = hashlib.sha256(
+        json.dumps(sorted(universe)).encode("utf-8")
+    ).hexdigest()[:8]
+    run_name = f"predictions_{as_of_ts.strftime('%Y%m%d')}_{universe_digest}"
     predictions_uri = _artifacts.save_artifact(
         predictions_df, run_id=model_id, name=run_name, overwrite=True
     )

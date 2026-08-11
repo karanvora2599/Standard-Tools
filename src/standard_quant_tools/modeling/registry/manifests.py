@@ -6,7 +6,7 @@ audit log."""
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelManifest(BaseModel):
@@ -29,6 +29,22 @@ class ModelManifest(BaseModel):
     n_folds: int
     oos_predictions_uri: str
     random_seed: int
+    # SHA-256 of the DatasetSpec that produced the training data.
+    # build_dataset already computed this and threw it away; recorded here
+    # so a model can be tied to the exact feature/target definition it was
+    # trained under, independently of the mutable dataset_spec.json file.
+    dataset_spec_hash: Optional[str] = None
+    # {filename: content hash} for every artifact in this model's own
+    # directory, plus its OOS predictions. Verified on load so an edited
+    # spec, tampered preprocessing stats or swapped estimator binary is
+    # rejected instead of silently changing predictions. Empty for models
+    # registered before content hashing existed -- verify_file skips a
+    # None expectation rather than failing every older model.
+    content_hashes: Dict[str, str] = Field(default_factory=dict)
+    # {feature_id: hash of that feature's implementation source}. A git
+    # SHA covers the repo, but says nothing about a custom feature
+    # registered at runtime from outside it.
+    feature_implementation_hashes: Dict[str, str] = Field(default_factory=dict)
     # Last date in the panel the deployed (full-refit) estimator saw.
     # score_model needs this to reject a historical as_of: the registered
     # estimator is refit on the ENTIRE training panel, so asking it to

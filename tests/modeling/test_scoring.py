@@ -66,6 +66,11 @@ def _train_a_model_with_spec(
         "feature_ids": built["feature_ids"],
         "target_id": built["target_id"],
         "data_hash": built["data_hash"],
+        # Mirrors what the run_model_experiment agent tool passes, so the
+        # registered model bundles (and content-verifies) its own copy of
+        # the training spec rather than reading the dataset directory's.
+        "spec_hash": built["spec_hash"],
+        "dataset_spec": spec.model_dump(),
     }
     result = run_experiment(dataset, model_spec, dataset_id=dataset_id)
     return result["model_id"]

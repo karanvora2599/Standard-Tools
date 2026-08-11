@@ -26,6 +26,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
+from standard_quant_tools.audit.hashing import hash_dataframe
+from standard_quant_tools.error import ValidationError
+
 from .. import artifacts as _artifacts
 from ..dataset.builder import build_dataset as _build_dataset
 from ..engine import run_experiment as _run_experiment
@@ -93,6 +96,10 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
     # dataset_meta: build_dataset's own lineage fields, so
     # run_model_experiment can reload them without recomputing anything
     # or re-deriving them from dataset_spec.
+    # Written LAST: every reader keys off dataset_meta.json, so a crash
+    # partway through leaves a directory that is simply not a dataset
+    # rather than a half-written one that looks loadable. Same write-order
+    # transaction boundary save_model uses for manifest.json.
     _artifacts.save_json(
         directory,
         "dataset_meta",
@@ -100,6 +107,10 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             "feature_ids": built["feature_ids"],
             "target_id": built["target_id"],
             "data_hash": built["data_hash"],
+            # spec_hash was computed by build_dataset and then discarded.
+            # Persisted so a model can be tied to the exact feature/target
+            # DEFINITION, not just to the resulting data.
+            "spec_hash": built["spec_hash"],
             "entities": built["entities"],
         },
     )
@@ -126,14 +137,41 @@ def run_model_experiment(
         input_data.spec.estimator.type,
     )
     directory = _artifacts.run_dir(input_data.dataset_id)
+    meta_path = directory / "dataset_meta.json"
+    if not meta_path.exists():
+        raise ValidationError(
+            f"no dataset with dataset_id={input_data.dataset_id!r} — "
+            "dataset_meta.json is written last, so its absence also means a "
+            "previous build_model_dataset call did not complete."
+        )
     panel = _artifacts.load_artifact(str(directory / "panel.parquet"))
-    meta = _artifacts.load_json(str(directory / "dataset_meta.json"))
+    meta = _artifacts.load_json(str(meta_path))
+
+    # The panel is reloaded from disk and its hash was recorded at build
+    # time, but nothing previously re-derived it -- so an edited
+    # panel.parquet trained a model whose manifest recorded the ORIGINAL
+    # panel's hash, making the lineage actively misleading rather than
+    # merely incomplete.
+    stored_hash = meta.get("data_hash")
+    if stored_hash is not None:
+        actual_hash = hash_dataframe(panel)
+        if actual_hash != stored_hash:
+            raise ValidationError(
+                f"dataset {input_data.dataset_id!r}: panel.parquet no longer matches the "
+                f"hash recorded when it was built (expected {stored_hash}, found "
+                f"{actual_hash}). Training on it would record a lineage hash that does "
+                "not describe the data actually used — rebuild the dataset instead."
+            )
 
     dataset = {
         "panel": panel,
         "feature_ids": meta["feature_ids"],
         "target_id": meta["target_id"],
         "data_hash": meta["data_hash"],
+        "spec_hash": meta.get("spec_hash"),
+        # Bundled into the model so it becomes self-contained -- see
+        # registry.model_registry.save_model.
+        "dataset_spec": _artifacts.load_json(str(directory / "dataset_spec.json")),
     }
     result = _run_experiment(dataset, input_data.spec, dataset_id=input_data.dataset_id)
     return RunModelExperimentResult(**result)

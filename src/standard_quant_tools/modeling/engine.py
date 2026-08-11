@@ -248,6 +248,11 @@ def run_experiment(
         # a historical as_of rather than returning a future-trained
         # prediction that looks like a point-in-time one.
         train_end_date=pd.Timestamp(panel["date"].max()).strftime("%Y-%m-%d"),
+        # Copied into the model directory so the model is self-contained:
+        # scoring must not depend on the dataset directory still existing,
+        # or on its spec file not having been edited since training.
+        dataset_spec=dataset.get("dataset_spec"),
+        dataset_spec_hash=dataset.get("spec_hash"),
     )
 
     return {

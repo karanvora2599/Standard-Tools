@@ -25,6 +25,7 @@ from typing import Any, Dict
 
 import pandas as pd
 
+from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
@@ -149,9 +150,13 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
             long_panel[col].to_numpy(dtype=float), col, "build_model_dataset"
         )
 
-    data_hash = hashlib.sha256(
-        pd.util.hash_pandas_object(long_panel, index=True).to_numpy().tobytes()
-    ).hexdigest()
+    # audit.hash_dataframe, not a local pd.util.hash_pandas_object call.
+    # hash_pandas_object is a per-ROW digest that never sees column labels,
+    # so two panels with identical numbers under entirely different feature
+    # columns hash the same. The audit package was explicitly fixed for
+    # exactly this collision; duplicating the pre-fix version here
+    # reintroduced it in the modeling lineage.
+    data_hash = hash_dataframe(long_panel)
 
     result: Dict[str, Any] = {
         "panel": long_panel,
