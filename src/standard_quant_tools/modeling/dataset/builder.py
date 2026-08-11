@@ -4,14 +4,15 @@ metadata (the FeatureFrame this phase actually returns — a dict, not a
 new class, since nothing yet needs FeatureFrame to be more than "panel +
 a few identifiers").
 
-Fetches each universe symbol's OHLCV once (provider dict-comprehension,
-mirrors run_pca_analysis in agent/tools.py — not fetch_returns_sync,
-which returns Close-only returns and features here need full OHLC),
-computes every requested feature (entity-scope per symbol, universe-scope
-once over the shared return panel — see features/base.py's docstring),
-optionally builds the forward-return target, runs the point-in-time
-safety check, and returns the panel with a content hash for the audit
-trail.
+Fetches each universe symbol's OHLCV once — concurrently, via
+dataset/fetch.py, from the provider and at the interval the DatasetSpec
+names (not fetch_returns_sync, which returns Close-only returns and
+features here need full OHLC) — computes every requested feature
+(entity-scope per symbol, universe-scope once over the shared return
+panel — see features/base.py's docstring), optionally builds the
+forward-return target, runs the point-in-time safety check, collects
+coverage/provenance warnings (dataset/coverage.py), and returns the panel
+with a content hash for the audit trail.
 
 `include_target=False` is scoring.py's path: score_model wants a
 prediction as of a date where the forward-return target hasn't happened
@@ -21,7 +22,8 @@ rows silently dropped by a target-based dropna.
 """
 
 import hashlib
-from typing import Any, Dict
+import logging
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -35,8 +37,17 @@ from ..features.params import resolve_params
 from ..features.registry import get_feature
 from ..specs import DatasetSpec
 from .alignment import build_returns_panel, stack_features_only, stack_long
+from .coverage import (
+    entity_coverage_warnings,
+    intersection_warnings,
+    interval_warnings,
+    provider_guarantee_warnings,
+)
+from .fetch import fetch_universe_ohlcv
 from .leakage import check_point_in_time_safety
 from .target import build_label_end_dates, build_target
+
+logger = logging.getLogger(__name__)
 
 
 def _check_required_columns(
@@ -65,24 +76,47 @@ def _check_required_columns(
         )
 
 
-def _fetch_ohlcv(provider: Any, symbol: str, start: str, end: str) -> pd.DataFrame:
-    """A raw provider exception (network error, unknown ticker, rate
-    limit, ...) would otherwise propagate with no indication of WHICH
-    symbol in a multi-symbol universe caused it -- wrap it in a
-    ValidationError that names the symbol, keeping the original exception
-    as the cause for anyone inspecting the traceback."""
+def _fetch_ohlcv(
+    provider: Any, symbol: str, start: str, end: str, interval: str = "1d"
+) -> pd.DataFrame:
+    """Single-symbol fetch (the benchmark). A raw provider exception
+    (network error, unknown ticker, rate limit, unsupported interval, ...)
+    would otherwise propagate with no indication of WHICH symbol in a
+    multi-symbol universe caused it -- wrap it in a ValidationError that
+    names the symbol, keeping the original exception as the cause for
+    anyone inspecting the traceback.
+
+    The universe itself goes through dataset/fetch.py, which fetches
+    concurrently and reports every failing symbol at once."""
     try:
-        df = provider.get_ohlcv(symbol, start, end)
+        df = provider.get_ohlcv(symbol, start, end, interval)
     except Exception as exc:
         raise ValidationError(
             f"build_model_dataset: failed to fetch OHLCV for {symbol!r} ({start} to "
-            f"{end}): {exc}"
+            f"{end}, interval={interval!r}): {exc}"
         ) from exc
     if df.empty:
         raise ValidationError(
             f"build_model_dataset: no OHLCV data returned for {symbol!r}"
         )
     return df
+
+
+def _provider_metadata(provider: Any, symbol: str, interval: str) -> Optional[Any]:
+    """The provider's own honest self-report about what it does and does not
+    guarantee. Best-effort: a custom or mocked provider need not implement
+    get_metadata, and failing the whole dataset build because a provenance
+    NOTE could not be read would be the wrong trade. Fetched once for a
+    representative symbol -- provider/adjusted/survivorship/point-in-time are
+    provider-level properties, and only `timezone` is symbol-dependent."""
+    getter = getattr(provider, "get_metadata", None)
+    if getter is None:
+        return None
+    try:
+        return getter(symbol, interval)
+    except Exception as exc:  # noqa: BLE001 — provenance is not worth failing over
+        logger.debug("[modeling] provider metadata unavailable: %s", exc)
+        return None
 
 
 def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, Any]:
@@ -108,17 +142,44 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         for fs, definition in zip(spec.features, feature_defs)
     ]
 
-    provider = DataFactory.get_provider()
-    ohlcv_by_entity = {
-        symbol: _fetch_ohlcv(provider, symbol, spec.start, spec.end)
-        for symbol in spec.universe
-    }
+    # Provider and interval come from the spec rather than DataFactory's
+    # defaults: the runtime previously could only ever build a dataset from
+    # yfinance daily bars, and -- worse -- the resulting model recorded
+    # neither, so its lineage could not say what it had been trained on.
+    # Both are part of DatasetSpec, so both are hashed into spec_hash,
+    # bundled into the model, and reused verbatim by scoring.
+    provider = DataFactory.get_provider(spec.provider)
+    ohlcv_by_entity = fetch_universe_ohlcv(
+        provider, list(spec.universe), spec.start, spec.end, spec.interval
+    )
 
-    benchmark_df = _fetch_ohlcv(provider, spec.benchmark, spec.start, spec.end)
+    benchmark_df = _fetch_ohlcv(
+        provider, spec.benchmark, spec.start, spec.end, spec.interval
+    )
     context = FeatureContext(benchmark_close=benchmark_df["Close"])
 
     close_by_entity = {symbol: df["Close"] for symbol, df in ohlcv_by_entity.items()}
     returns_panel = build_returns_panel(close_by_entity)
+
+    # ── Coverage / provenance diagnostics ─────────────────────────────────
+    # Collected here, once the data is in hand but before any of it is
+    # consumed, and returned to the caller rather than logged: these change
+    # how the OOS metrics should be read, and a log line is not part of the
+    # tool result an agent sees.
+    has_universe_scope = any(
+        definition.scope == FeatureScope.UNIVERSE for definition in feature_defs
+    )
+    warnings: List[str] = []
+    warnings.extend(interval_warnings(spec.interval))
+    warnings.extend(
+        provider_guarantee_warnings(
+            _provider_metadata(provider, spec.universe[0], spec.interval)
+        )
+    )
+    warnings.extend(entity_coverage_warnings(ohlcv_by_entity, spec.start, spec.end))
+    warnings.extend(
+        intersection_warnings(ohlcv_by_entity, returns_panel, has_universe_scope)
+    )
 
     # Universe-scope features are computed once, over the shared panel —
     # not once per entity, since PCA needs every entity's returns at once.
@@ -194,6 +255,9 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     result: Dict[str, Any] = {
         "panel": long_panel,
         "entities": sorted(ohlcv_by_entity.keys()),
+        # BuildModelDatasetResult.warnings has existed since the first
+        # version of the tool surface and was never populated by anything.
+        "warnings": warnings,
         # Panel column names (alias where given, id otherwise) -- these are
         # what the model is actually trained on and what the manifest must
         # record, not the underlying registry ids.

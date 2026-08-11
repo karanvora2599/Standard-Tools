@@ -383,6 +383,11 @@ def run_experiment(
         # or on its spec file not having been edited since training.
         dataset_spec=dataset.get("dataset_spec"),
         dataset_spec_hash=dataset.get("spec_hash"),
+        # Carried from the dataset build onto the model: survivorship,
+        # revised history, partial coverage and interval caveats belong
+        # next to the OOS metrics they qualify, not only in the
+        # build_model_dataset response the caller may never look at again.
+        dataset_warnings=dataset.get("warnings"),
     )
 
     return {

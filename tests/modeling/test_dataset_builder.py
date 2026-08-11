@@ -24,7 +24,7 @@ from standard_quant_tools.modeling.features.registry import (
 )
 from standard_quant_tools.modeling.specs import DatasetSpec, FeatureSpec, TargetSpec
 
-from .conftest import make_ohlcv
+from .conftest import make_ohlcv, make_provider_mock
 
 
 def _spec(**overrides) -> DatasetSpec:
@@ -149,56 +149,73 @@ class TestFetchFailureHandling:
     def test_universe_symbol_fetch_failure_wrapped_with_symbol_context(
         self, monkeypatch
     ):
-        provider = MagicMock()
-
-        def _get_ohlcv(symbol, start, end):
+        def _fetch(symbol):
             if symbol == "BBB":
                 raise ConnectionError("network blip")
             return make_ohlcv(symbol)
 
-        provider.get_ohlcv.side_effect = _get_ohlcv
+        provider = make_provider_mock(_fetch)
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
-        with pytest.raises(ValidationError, match="'BBB'"):
+        with pytest.raises(ValidationError, match="'BBB'") as excinfo:
             build_dataset(_spec())
+        # The originating exception type survives into the message: a
+        # ConnectionError and an unknown ticker are different problems with
+        # different fixes, and the wrapper must not flatten them together.
+        assert "ConnectionError" in str(excinfo.value)
+        assert "network blip" in str(excinfo.value)
 
     def test_universe_symbol_empty_data_raises_named_error(self, monkeypatch):
-        provider = MagicMock()
-
-        def _get_ohlcv(symbol, start, end):
+        def _fetch(symbol):
             if symbol == "CCC":
                 return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
             return make_ohlcv(symbol)
 
-        provider.get_ohlcv.side_effect = _get_ohlcv
+        provider = make_provider_mock(_fetch)
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
         with pytest.raises(ValidationError, match="'CCC'"):
             build_dataset(_spec())
 
-    def test_benchmark_fetch_failure_wrapped_with_context(self, monkeypatch):
-        provider = MagicMock()
+    def test_every_failing_symbol_is_reported_not_just_the_first(self, monkeypatch):
+        """asyncio.gather propagates only the FIRST exception and abandons
+        the remaining tasks, so a universe with several bad tickers would
+        surface one of them — in completion order, i.e. nondeterministically
+        — and the caller would fix their universe one symbol per run."""
 
-        def _get_ohlcv(symbol, start, end):
+        def _fetch(symbol):
+            if symbol in {"AAA", "CCC"}:
+                raise ConnectionError(f"{symbol} is down")
+            return make_ohlcv(symbol)
+
+        provider = make_provider_mock(_fetch)
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+
+        with pytest.raises(ValidationError) as excinfo:
+            build_dataset(_spec())
+        message = str(excinfo.value)
+        assert "'AAA'" in message and "'CCC'" in message
+        assert "2 of 3" in message
+
+    def test_benchmark_fetch_failure_wrapped_with_context(self, monkeypatch):
+        def _fetch(symbol):
             if symbol == "SPY":
                 raise ConnectionError("network blip")
             return make_ohlcv(symbol)
 
-        provider.get_ohlcv.side_effect = _get_ohlcv
+        provider = make_provider_mock(_fetch)
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
         with pytest.raises(ValidationError, match="'SPY'"):
             build_dataset(_spec())
 
     def test_benchmark_empty_data_raises(self, monkeypatch):
-        provider = MagicMock()
-
-        def _get_ohlcv(symbol, start, end):
+        def _fetch(symbol):
             if symbol == "SPY":
                 return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
             return make_ohlcv(symbol)
 
-        provider.get_ohlcv.side_effect = _get_ohlcv
+        provider = make_provider_mock(_fetch)
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
         with pytest.raises(ValidationError, match="'SPY'"):

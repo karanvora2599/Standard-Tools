@@ -57,6 +57,17 @@ class ModelManifest(BaseModel):
     # prediction dressed up as a historical one. Optional so manifests
     # written before this field existed still load.
     train_end_date: Optional[str] = None
+    # Coverage/provenance warnings raised when the training dataset was
+    # built: survivors-only universe, a provider that revises history, a
+    # symbol contributing a fraction of the window, a non-daily interval.
+    # Carried onto the model because the dataset's tool response is
+    # transient and these are exactly the caveats that must travel WITH the
+    # metrics -- inspect_model(view="lineage") is where someone reads the
+    # OOS numbers months later, and none of these conditions were visible
+    # there before. Empty for models registered before this existed, which
+    # is indistinguishable from "no warnings" by design: absence of a
+    # recorded warning is not evidence the condition did not hold.
+    dataset_warnings: List[str] = Field(default_factory=list)
     created_at_utc: str
     git_commit_sha: Optional[str] = None
     package_version: Optional[str] = None

@@ -13,7 +13,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 - **Agent-First Design** — All tools return Pydantic models; 46 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
-- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), followed by a separate review of the modeling runtime that found 7 more critical issues — including two leakage channels and a PCA start-vector degeneracy — none of which the suite as it stood could have caught. Every finding is pinned by a regression test. 2248 Python tests + 9 C++ suites, all green.
+- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), followed by a separate review of the modeling runtime that found 7 more critical issues — including two leakage channels and a PCA start-vector degeneracy — none of which the suite as it stood could have caught. Every finding is pinned by a regression test. 2290 Python tests + 9 C++ suites, all green.
 
 ---
 
@@ -519,10 +519,21 @@ close that channel. Registered models are content-addressed, verified on
 load, and self-contained; `score_model` refuses an `as_of` inside the
 training window, since the deployed estimator is refit on the full panel.
 
+The provider and bar interval are named on the `DatasetSpec` (they were
+previously implicit, so every dataset came from the default provider at its
+default interval and no model recorded which), the universe is fetched
+concurrently, and `build_model_dataset` returns the coverage and provenance
+conditions that qualify the resulting metrics — a survivors-only universe, a
+provider that revises history, a symbol covering part of the window, a
+complete-case intersection that truncated the panel. Those travel onto the
+trained model, so `inspect_model(view="lineage")` shows them next to the OOS
+numbers.
+
 See [Documentation/15_modeling.md](Documentation/15_modeling.md) for the
 full reference, including what is explicitly deferred (fundamentals need a
-point-in-time provider first; provider/interval selection, async universe
-fetching and time-varying universe membership are not built).
+point-in-time provider first; time-varying universe membership needs
+index-constituent history no shipped provider exposes, so survivorship bias
+is disclosed rather than corrected).
 
 ---
 
@@ -740,7 +751,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**2249 Python tests total** — 2248 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `test_cpp_*.py` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**2291 Python tests total** — 2290 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `test_cpp_*.py` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
 
 **9 C++ test executables** run via `ctest` (Hurst, indicators, cointegration, backtest, Monte Carlo, GARCH, signal state machines, rolling regression, plus a randomized-input cointegration fuzz harness) — ~61,300 assertion-level checks between them, ~50,000 of which come from the fuzz harness alone.
 

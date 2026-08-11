@@ -55,7 +55,20 @@ class BuildModelDatasetResult(BaseModel):
     entities: List[str]
     feature_ids: List[str]
     target_id: str
-    warnings: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Coverage and provenance conditions that change how this "
+            "dataset's models should be read, but are not grounds to refuse "
+            "to build it: a provider that makes no point-in-time or "
+            "survivorship guarantee, a symbol covering only part of the "
+            "requested window, a complete-case intersection that truncated "
+            "the cross-sectional features, or a non-daily interval against "
+            "daily-calibrated feature defaults. See "
+            "dataset/coverage.py. Carried onto any model trained from this "
+            "dataset as ModelManifest.dataset_warnings."
+        ),
+    )
 
 
 # ── run_model_experiment ───────────────────────────────────────────────

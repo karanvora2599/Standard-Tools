@@ -9,6 +9,78 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (modeling: data/runtime architecture)
+
+The modeling runtime was built against whatever `DataFactory.get_provider()`
+returned, at whatever interval that defaulted to, one symbol at a time —
+none of which was a decision anyone had made or recorded.
+
+- **`DatasetSpec.provider`** (`"yfinance"` | `"polygon"` | `"bloomberg"`)
+  and **`DatasetSpec.interval`** (default `"1d"`). Both were previously
+  implicit: the builder called `DataFactory.get_provider()` with no
+  arguments, so the runtime was a yfinance-daily system by accident and a
+  model's lineage could not say what it had been trained on. Because they
+  live on the spec they are covered by `spec_hash` and bundled into the
+  model, so scoring reuses the same source and interval rather than
+  silently substituting the default.
+
+  Credentials are deliberately not spec fields: the spec is written to
+  disk, hashed into model lineage and embedded in decision records, so an
+  `api_key` here would leak the key into all three. The interval VALUE is
+  validated by the selected provider, which owns the authoritative list —
+  they genuinely differ, and duplicating a union of them would only drift.
+
+- **Concurrent universe fetch** (`modeling/dataset/fetch.py`), replacing
+  the serial dict comprehension; every provider already exposed
+  `get_ohlcv_async` and the rest of the library already fetched universes
+  concurrently. Bounded by `SQT_MODELING_FETCH_CONCURRENCY` (default 8).
+  Three failure modes a bare `asyncio.gather` would have introduced are
+  handled: it propagates only the FIRST exception and abandons the rest
+  (so all failures are now collected and reported together, sorted, rather
+  than one bad ticker per run in nondeterministic order); `asyncio.run`
+  refuses to nest, which would have made `build_dataset` unusable from a
+  notebook or async agent runtime (falls back to sequential, as it does for
+  a duck-typed provider implementing only `get_ohlcv`); and both paths
+  report failures identically, so the error does not depend on which ran.
+
+- **Coverage and provenance diagnostics** (`modeling/dataset/coverage.py`),
+  finally populating `BuildModelDatasetResult.warnings` — a field that had
+  existed since the first version of the tool surface and was never written
+  to by anything. Reported: a provider that guarantees neither point-in-time
+  data nor a survivorship-free universe (`DataSetMetadata.point_in_time` /
+  `survivorship_free` were recorded honestly by every provider and read by
+  nothing); a symbol covering materially less of the window than its
+  presence in `universe` suggests; a requested window that came back
+  shorter than asked for; the complete-case intersection that universe-scope
+  PCA features require, which lets one short history truncate the panel for
+  every entity; and a non-daily interval against daily-calibrated feature
+  defaults.
+
+  These are warnings rather than errors because every provider this package
+  ships reports both guarantees as false — failing on that would make the
+  runtime unusable against its own default data source while teaching the
+  caller nothing. The distinction is now stated explicitly in the docs: a
+  `CURRENT_ONLY` feature is *rejected* because a PIT-safe alternative
+  exists, while a revising provider is *disclosed* because none does.
+
+- **`ModelManifest.dataset_warnings`**, surfaced by
+  `inspect_model(view="lineage")`. The caveats belong next to the metrics
+  they qualify, and the build-time tool response is transient — lineage
+  previously reported hashes and a commit sha while staying silent about a
+  survivors-only universe. An empty list on an older model is
+  indistinguishable from "no warnings" by design.
+
+Time-varying universe membership remains deferred: it needs
+index-constituent history no shipped provider exposes. What is built is the
+diagnosis, not a correction.
+
+Also fixed two tests that were passing for the wrong reason. They wired
+only `get_ohlcv` on an unspecced `MagicMock`, so `await`ing the
+auto-created `get_ohlcv_async` attribute raised `TypeError`, that
+`TypeError` was collected as a per-symbol fetch failure, and an assertion
+that the error named a symbol passed while exercising nothing it meant to.
+Provider mocks now drive both paths from one function.
+
 ### Fixed (modeling correctness review — P0 + P1)
 
 An external line-by-line review of the modeling runtime raised findings the

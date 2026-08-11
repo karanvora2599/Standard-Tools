@@ -47,6 +47,7 @@ def save_model(
     dataset_spec: Optional[Dict[str, Any]] = None,
     dataset_spec_hash: Optional[str] = None,
     validation_report: Optional[Dict[str, Any]] = None,
+    dataset_warnings: Optional[List[str]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -124,6 +125,7 @@ def save_model(
         content_hashes=content_hashes,
         feature_implementation_hashes=feature_implementation_hashes(feature_ids),
         train_end_date=train_end_date,
+        dataset_warnings=list(dataset_warnings or []),
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         git_commit_sha=_git_sha(),
         package_version=_package_version(),

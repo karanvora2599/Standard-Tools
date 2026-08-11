@@ -77,11 +77,13 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
     inline, the same "don't dump the full curve into the agent context"
     discipline BacktestResultV2's equity_curve_uri uses."""
     logger.debug(
-        "[build_model_dataset] universe=%s  %s -> %s  features=%d",
+        "[build_model_dataset] universe=%s  %s -> %s  features=%d  provider=%s  interval=%s",
         input_data.spec.universe,
         input_data.spec.start,
         input_data.spec.end,
         len(input_data.spec.features),
+        input_data.spec.provider,
+        input_data.spec.interval,
     )
     built = _build_dataset(input_data.spec)
 
@@ -112,6 +114,14 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             # DEFINITION, not just to the resulting data.
             "spec_hash": built["spec_hash"],
             "entities": built["entities"],
+            # Persisted so run_model_experiment can carry them into the
+            # manifest without re-reading dataset_spec.json, and so the
+            # conditions the caller was warned about at build time remain
+            # attached to the dataset rather than living only in the
+            # tool response they may not have kept.
+            "provider": input_data.spec.provider,
+            "interval": input_data.spec.interval,
+            "warnings": built["warnings"],
         },
     )
 
@@ -121,6 +131,7 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
         entities=built["entities"],
         feature_ids=built["feature_ids"],
         target_id=built["target_id"],
+        warnings=built["warnings"],
     )
 
 
@@ -172,6 +183,10 @@ def run_model_experiment(
         # Bundled into the model so it becomes self-contained -- see
         # registry.model_registry.save_model.
         "dataset_spec": _artifacts.load_json(str(directory / "dataset_spec.json")),
+        # .get, not [...]: datasets built before coverage diagnostics
+        # existed have no such key, and a missing warning list is not the
+        # same claim as an empty one -- see ModelManifest.dataset_warnings.
+        "warnings": meta.get("warnings", []),
     }
     result = _run_experiment(dataset, input_data.spec, dataset_id=input_data.dataset_id)
     return RunModelExperimentResult(**result)
@@ -223,6 +238,11 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             "git_commit_sha": manifest.git_commit_sha,
             "package_version": manifest.package_version,
             "created_at_utc": manifest.created_at_utc,
+            # What the data behind these metrics does not guarantee. This
+            # is the view someone opens months later to decide whether to
+            # trust a model, and it previously reported hashes and a commit
+            # sha while staying silent about a survivors-only universe.
+            "dataset_warnings": manifest.dataset_warnings,
         }
 
     return InspectModelResult(

@@ -116,6 +116,35 @@ class DatasetSpec(BaseModel):
         description="Benchmark symbol — only consumed by features that need one "
         "(e.g. risk.rolling_beta).",
     )
+    provider: Literal["yfinance", "polygon", "bloomberg"] = Field(
+        "yfinance",
+        description=(
+            "Data provider for this dataset. Previously hardcoded to the "
+            "DataFactory default, so a model could not be built on anything "
+            "else and its lineage never recorded which source it came from. "
+            "Credentials are deliberately NOT part of this spec — it is "
+            "persisted to disk, hashed into the model's lineage and written "
+            "into decision records, so an api_key field here would leak the "
+            "key into all three. Providers read their own credentials from "
+            "the environment (e.g. SQT_POLYGON_API_KEY)."
+        ),
+    )
+    interval: str = Field(
+        "1d",
+        min_length=1,
+        description=(
+            "Bar interval passed to the provider, e.g. '1d' (default), '1h', "
+            "'1wk'. The VALUE is validated by the selected provider, which "
+            "owns the authoritative list — they differ (BloombergProvider "
+            "rejects intraday outright). Note that `target.horizon` and every "
+            "feature's lookback count BARS of this interval, and that the "
+            "built-in features' default parameters and annualization "
+            "constants are calibrated for daily bars: window=252 means one "
+            "year at '1d' and about six weeks at '1h'. build_model_dataset "
+            "warns when this is not '1d' rather than silently reinterpreting "
+            "those defaults."
+        ),
+    )
 
     @field_validator("universe")
     @classmethod

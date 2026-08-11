@@ -21,7 +21,7 @@ from standard_quant_tools.modeling.specs import (
     ValidationSpec,
 )
 
-from .conftest import make_ohlcv
+from .conftest import make_ohlcv, make_provider_mock
 
 
 def _dataset_spec(**overrides) -> DatasetSpec:
@@ -88,13 +88,12 @@ class TestScoreModelReliability:
         must show up in missing_entities, not be silently absent from a
         result that otherwise looks like it succeeded for everyone."""
 
-        def _get_ohlcv(symbol, start, end):
+        def _fetch(symbol):
             if symbol == "CCC":
                 return make_ohlcv(symbol, n=8)
             return make_ohlcv(symbol)
 
-        provider = MagicMock()
-        provider.get_ohlcv.side_effect = _get_ohlcv
+        provider = make_provider_mock(_fetch)
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
         spec = _dataset_spec(

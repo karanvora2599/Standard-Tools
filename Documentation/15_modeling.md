@@ -262,6 +262,90 @@ register_feature(FeatureDefinition(
 
 ---
 
+## Where the data comes from
+
+`DatasetSpec` names the provider and the bar interval. Both were
+previously implicit — the builder called `DataFactory.get_provider()` with
+no arguments and fetched whatever that returned at whatever interval it
+defaulted to, so the runtime was a yfinance-daily system by accident and
+no model recorded which source it had been trained on.
+
+```python
+DatasetSpec(
+    universe=["AAPL", "MSFT", "NVDA"],
+    start="2015-01-01",
+    end="2024-12-31",
+    provider="polygon",     # "yfinance" (default) | "polygon" | "bloomberg"
+    interval="1d",          # default
+    features=[FeatureSpec(id="technical.rsi")],
+    target=TargetSpec(horizon=20),
+)
+```
+
+Both fields live on the spec, so both are covered by `spec_hash`, bundled
+into the model, and reused verbatim when scoring — a model trained on one
+provider will not silently score against another.
+
+**Credentials are deliberately not spec fields.** The spec is written to
+disk, hashed into model lineage and embedded in decision records, so an
+`api_key` field would leak the key into all three. Providers read their
+own credentials from the environment (`SQT_POLYGON_API_KEY`).
+
+**Interval is validated by the provider, not here.** The supported set
+genuinely differs — `BloombergProvider` rejects intraday outright — so
+duplicating a union of them in `DatasetSpec` would only drift. Note that
+`target.horizon` and every feature lookback count BARS of the chosen
+interval, and that the built-in defaults are calibrated for daily bars:
+`window=252` is one trading year at `1d` and about six weeks at `1h`.
+Non-daily intervals are fetched correctly and warned about, not rescaled.
+
+The universe is fetched **concurrently**, through each provider's
+`get_ohlcv_async`. Bounded by `SQT_MODELING_FETCH_CONCURRENCY` (default
+8) — high enough to matter for a large universe, low enough not to look
+like abuse to a public endpoint. Two details worth knowing:
+
+- Every symbol is awaited to completion and **all** failures are reported
+  in one message, sorted. `asyncio.gather`'s default propagates only the
+  first exception and abandons the rest, which would mean fixing a
+  universe one bad ticker per run, in nondeterministic order.
+- Called from inside a running event loop (a notebook, an async agent
+  runtime, a web handler), it falls back to a sequential fetch instead of
+  raising — `asyncio.run` refuses to nest. The same fallback covers a
+  duck-typed provider that implements only `get_ohlcv`. Both paths report
+  failures identically, so the error you see does not depend on which ran.
+
+### Coverage and provenance warnings
+
+`build_model_dataset` returns a `warnings` list — a field that had existed
+from the start and was never populated. These are conditions that change
+how the resulting OOS metrics should be read but are not grounds to refuse
+to build the dataset:
+
+| Warning | What it means |
+|---|---|
+| `point_in_time=False` | The provider does not guarantee historical values are never revised, so a feature computed today may differ from what was observable on its label date. The per-feature PIT gate checks the FORMULA; it cannot see revisions in the underlying series. |
+| `survivorship_free=False` | Delisted securities are not queryable, so any universe of currently-listed symbols is a survivors-only sample. Backtested returns are biased upward and walk-forward validation does not correct for it. |
+| partial history | A symbol covers materially less than the universe's date range — it listed inside the window, or stopped early. It is weighted far less than its presence in `universe` suggests. |
+| requested start/end unavailable | The window that came back is shorter than the one asked for, before any feature lookback is consumed. |
+| PCA intersection | Universe-scope features need a complete cross-section, so one short history truncates the panel *for every entity*. The warning names the latest-starting symbol, which is usually the whole explanation. |
+| non-daily interval | Feature defaults and annualization constants are daily-calibrated (above). |
+
+Every provider this package ships reports `point_in_time=False` and
+`survivorship_free=False` honestly, which is why these are warnings rather
+than errors: promoting them to a hard failure would make the runtime
+unusable against its own default data source while teaching the caller
+nothing. The list is empty for a provider making both guarantees over
+aligned daily histories, so a non-empty one means something.
+
+Warnings are persisted with the dataset and carried onto any model trained
+from it as `ModelManifest.dataset_warnings`, surfaced by
+`inspect_model(view="lineage")` — the caveats belong next to the metrics
+they qualify, and the build-time tool response is transient. An empty list
+on an older model is indistinguishable from "no warnings" by design:
+absence of a recorded warning is not evidence the condition did not hold.
+
+---
+
 ## Point-in-time safety
 
 Every built-in feature is `TemporalSupport.PIT_SAFE` — price/volume-derived
@@ -311,16 +395,28 @@ at fault.
 
 Two separate properties are involved, and only the first is checked:
 
-1. **The formula is causal** — `TemporalSupport`, enforced as above.
-2. **The underlying dataset is true point-in-time data** — *not* checked.
-   The data layer already records this: `DataSetMetadata.point_in_time` and
-   `survivorship_free`, both of which the default yfinance provider reports
-   as **false**. The modeling PIT gate never consults them.
+1. **The formula is causal** — `TemporalSupport`, *enforced* as above: a
+   `CURRENT_ONLY` feature is rejected outright.
+2. **The underlying dataset is true point-in-time data** — *reported, not
+   enforced.* The data layer records this as
+   `DataSetMetadata.point_in_time` and `survivorship_free`, both of which
+   every provider this package ships reports as **false**. Modeling now
+   reads them and emits a warning (see [Coverage and provenance
+   warnings](#coverage-and-provenance-warnings)), which is a genuinely
+   weaker guarantee than the gate applied to the formula — a warning you
+   can ignore, and building proceeds either way.
 
-So a model trained on the current ticker universe can still carry
-survivorship bias, and a provider that silently revises history would not be
-detected here. Treat `PIT_SAFE` as "this formula doesn't look forward", not
-"this dataset is point-in-time correct".
+The asymmetry is deliberate rather than an oversight: a `CURRENT_ONLY`
+feature has a PIT-safe alternative (compute it from prices instead), so
+refusing it is actionable. A provider that revises history does not — every
+shipped provider reports the same thing, so failing on it would leave no
+usable path at all. That is a limitation of the available data, not a
+policy choice worth encoding as an error.
+
+So a model trained on the current ticker universe still carries
+survivorship bias, and a provider that silently revises history is still
+not *detected* — only disclosed. Treat `PIT_SAFE` as "this formula doesn't
+look forward", not "this dataset is point-in-time correct".
 
 ---
 
@@ -734,22 +830,23 @@ Not built here, and not accidentally half-built either:
   on the "analyze fundamentals → turn them into model features → train"
   workflow: it needs a PIT fundamentals provider first, not a feature
   wrapper over today's reported ratios.
-- **Provider selection and interval** — `DatasetSpec` has no provider or
-  interval field; modeling calls `DataFactory.get_provider()` and is
-  effectively a daily-OHLCV system, even though the data layer supports
-  both. Provider identity is likewise not recorded in model lineage.
-- **Async / batched universe fetching** — the dataset builder loops
-  symbols one at a time, while the repo already has async full-OHLCV
-  portfolio fetching. This dominates runtime for large universes.
 - **Time-varying universe membership** — universes are static ticker
   lists, with no as-of membership, so historical models over a
   present-day universe carry survivorship bias (which the default
-  provider itself reports it cannot rule out).
-- **Dataset coverage diagnostics** — rows before/after alignment, rows per
-  entity, date coverage, missing-data rate, and which features caused
-  drops. `BuildModelDatasetResult.warnings` exists as the natural home for
-  these but is currently unused. Relatedly, `entities` reports the symbols
-  FETCHED, not necessarily those that survived into the training panel.
+  provider itself reports it cannot rule out). Still deferred, since it
+  needs index-constituent history no shipped provider exposes; what is
+  built is the *diagnosis* — see [Coverage and provenance
+  warnings](#coverage-and-provenance-warnings).
+- **Per-feature drop attribution** — the coverage warnings report which
+  ENTITIES lost rows and why, not which FEATURE's lookback caused a given
+  row to be dropped during alignment. Relatedly, `entities` reports the
+  symbols FETCHED, not necessarily those that survived into the training
+  panel.
+- **Non-daily feature calibration** — `interval` is threaded through to
+  the provider, but the built-in features' default parameters are stated
+  in trading days and the realized-volatility features annualize with a
+  daily constant. Nothing rescales them for a non-daily interval; you get
+  a warning and are expected to set parameters yourself.
 - **Universe-scope features under a changed scoring universe** —
   `factors.pca_loading` / `pca_factor_return` are computed from the whole
   current universe, so a model trained on `[AAPL, MSFT, NVDA]` and scored

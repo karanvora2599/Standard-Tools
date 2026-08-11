@@ -30,6 +30,8 @@ from standard_quant_tools.modeling.specs import (
     ValidationSpec,
 )
 
+from .conftest import make_provider_mock
+
 
 def _spec(features) -> DatasetSpec:
     return DatasetSpec(
@@ -153,8 +155,7 @@ class TestRequiresEnforcement:
 
     @pytest.fixture
     def provider_missing_volume(self, monkeypatch) -> MagicMock:
-        provider = MagicMock()
-        provider.get_ohlcv.side_effect = lambda s, start, end: _ohlcv_without("Volume")
+        provider = make_provider_mock(lambda symbol: _ohlcv_without("Volume"))
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
         return provider
 
