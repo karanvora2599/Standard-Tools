@@ -6,6 +6,7 @@ panel/PCA test (every entity would be perfectly correlated) — so this
 package gets its own per-symbol randomized provider fixture.
 """
 
+import hashlib
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -14,14 +15,23 @@ import pytest
 
 from standard_quant_tools.data.factory import DataFactory
 
-_N = 500  # bars per symbol; >= the largest Phase-1 feature lookback (252) with headroom.
+_N = (
+    500  # bars per symbol; >= the largest Phase-1 feature lookback (252) with headroom.
+)
 
 
 def make_ohlcv(symbol: str, n: int = _N) -> pd.DataFrame:
     """Deterministic per-symbol synthetic OHLCV (seeded from the symbol
     name), so different tickers get genuinely different, reproducible
-    price paths across test runs."""
-    seed = abs(hash(symbol)) % (2**32)
+    price paths across test runs.
+
+    Seeded from SHA-256 of the symbol, not the builtin `hash()`. Python
+    salts string hashing per interpreter process (PYTHONHASHSEED), so
+    `hash("AAPL")` differs between runs — the old seeding was reproducible
+    only WITHIN one process, which is exactly where a flaky
+    numerically-sensitive test would be hardest to reproduce afterwards.
+    """
+    seed = int.from_bytes(hashlib.sha256(symbol.encode()).digest()[:4], "big")
     rng = np.random.default_rng(seed)
     close = 100 * np.cumprod(1 + rng.normal(0.0004, 0.012, n))
     high = close * (1 + np.abs(rng.normal(0, 0.004, n)))
@@ -55,7 +65,9 @@ def patched_multi_factory(
 ) -> MagicMock:
     """Patches DataFactory.get_provider to the per-symbol randomized
     provider above, for the duration of one test."""
-    monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: multi_symbol_provider)
+    monkeypatch.setattr(
+        DataFactory, "get_provider", lambda *a, **kw: multi_symbol_provider
+    )
     return multi_symbol_provider
 
 

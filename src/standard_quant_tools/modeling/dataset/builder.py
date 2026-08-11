@@ -30,11 +30,12 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
 
 from ..features.base import FeatureContext, FeatureScope
+from ..features.params import resolve_params
 from ..features.registry import get_feature
 from ..specs import DatasetSpec
 from .alignment import build_returns_panel, stack_features_only, stack_long
 from .leakage import check_point_in_time_safety
-from .target import build_target
+from .target import build_label_end_dates, build_target
 
 
 def _fetch_ohlcv(provider: Any, symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -51,7 +52,9 @@ def _fetch_ohlcv(provider: Any, symbol: str, start: str, end: str) -> pd.DataFra
             f"{end}): {exc}"
         ) from exc
     if df.empty:
-        raise ValidationError(f"build_model_dataset: no OHLCV data returned for {symbol!r}")
+        raise ValidationError(
+            f"build_model_dataset: no OHLCV data returned for {symbol!r}"
+        )
     return df
 
 
@@ -67,9 +70,21 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     feature_defs = [get_feature(fs.id) for fs in spec.features]
     check_point_in_time_safety(feature_defs)
 
+    # Resolved ONCE, up front, before any data is fetched: a bad parameter
+    # should fail immediately rather than after a slow multi-symbol
+    # download. This is also the point-in-time gate for parameter VALUES --
+    # check_point_in_time_safety above only inspects each feature's static
+    # TemporalSupport label, which stays PIT_SAFE even when a negative
+    # lookback turns the formula into a forward-looking one.
+    resolved_params = [
+        resolve_params(definition, fs.params)
+        for fs, definition in zip(spec.features, feature_defs)
+    ]
+
     provider = DataFactory.get_provider()
     ohlcv_by_entity = {
-        symbol: _fetch_ohlcv(provider, symbol, spec.start, spec.end) for symbol in spec.universe
+        symbol: _fetch_ohlcv(provider, symbol, spec.start, spec.end)
+        for symbol in spec.universe
     }
 
     benchmark_df = _fetch_ohlcv(provider, spec.benchmark, spec.start, spec.end)
@@ -81,27 +96,34 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # Universe-scope features are computed once, over the shared panel —
     # not once per entity, since PCA needs every entity's returns at once.
     universe_outputs: Dict[str, pd.DataFrame] = {}
-    for fs, definition in zip(spec.features, feature_defs):
+    for fs, definition, params in zip(spec.features, feature_defs, resolved_params):
         if definition.scope == FeatureScope.UNIVERSE:
-            params = {**definition.default_params, **fs.params}
             universe_outputs[fs.id] = definition.fn(returns_panel, context, **params)
 
     per_entity_features: Dict[str, pd.DataFrame] = {}
     target_by_entity: Dict[str, pd.Series] = {}
+    label_end_by_entity: Dict[str, pd.Series] = {}
     for symbol, ohlcv in ohlcv_by_entity.items():
         columns: Dict[str, pd.Series] = {}
-        for fs, definition in zip(spec.features, feature_defs):
+        for fs, definition, params in zip(spec.features, feature_defs, resolved_params):
             if definition.scope == FeatureScope.ENTITY:
-                params = {**definition.default_params, **fs.params}
                 columns[fs.id] = definition.fn(ohlcv, context, **params)
             else:
                 columns[fs.id] = universe_outputs[fs.id][symbol]
         per_entity_features[symbol] = pd.DataFrame(columns)
         if include_target:
             target_by_entity[symbol] = build_target(ohlcv["Close"], spec.target)
+            # Recorded per row, per entity, from that entity's OWN bar
+            # index -- see build_label_end_dates for why an integer offset
+            # against the global date axis is not equivalent.
+            label_end_by_entity[symbol] = build_label_end_dates(
+                ohlcv["Close"], spec.target
+            )
 
     if include_target:
-        long_panel = stack_long(per_entity_features, target_by_entity)
+        long_panel = stack_long(
+            per_entity_features, target_by_entity, label_end_by_entity
+        )
     else:
         long_panel = stack_features_only(per_entity_features)
 
@@ -119,9 +141,13 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # straight into sklearn, which either raises a cryptic error or
     # silently produces garbage. Same enforcement point this codebase
     # already uses pervasively elsewhere (indicators, analysis, backtest).
-    numeric_cols = [fs.id for fs in spec.features] + (["target"] if include_target else [])
+    numeric_cols = [fs.id for fs in spec.features] + (
+        ["target"] if include_target else []
+    )
     for col in numeric_cols:
-        require_finite_array(long_panel[col].to_numpy(dtype=float), col, "build_model_dataset")
+        require_finite_array(
+            long_panel[col].to_numpy(dtype=float), col, "build_model_dataset"
+        )
 
     data_hash = hashlib.sha256(
         pd.util.hash_pandas_object(long_panel, index=True).to_numpy().tobytes()
@@ -134,5 +160,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         "data_hash": data_hash,
         "spec_hash": hashlib.sha256(spec.model_dump_json().encode()).hexdigest(),
     }
-    result["target_id"] = f"{spec.target.type}:{spec.target.horizon}" if include_target else None
+    result["target_id"] = (
+        f"{spec.target.type}:{spec.target.horizon}" if include_target else None
+    )
     return result

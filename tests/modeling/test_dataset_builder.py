@@ -18,7 +18,10 @@ from standard_quant_tools.modeling.features.base import (
     FeatureScope,
     TemporalSupport,
 )
-from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY, register_feature
+from standard_quant_tools.modeling.features.registry import (
+    FEATURE_REGISTRY,
+    register_feature,
+)
 from standard_quant_tools.modeling.specs import DatasetSpec, FeatureSpec, TargetSpec
 
 from .conftest import make_ohlcv
@@ -47,6 +50,12 @@ class TestBuildDatasetPanelShape:
             "technical.rsi",
             "market.momentum",
             "target",
+            # Per-row date the forward-return label finishes observing.
+            # Carried in the panel so walk-forward validation can purge
+            # training rows whose label overlaps the test window (see
+            # engine.py) -- an integer embargo cannot express this once
+            # entities sit on different calendars.
+            "label_end_date",
         ]
 
     def test_every_universe_entity_present(self, patched_multi_factory):
@@ -57,14 +66,18 @@ class TestBuildDatasetPanelShape:
     def test_no_nan_feature_or_target_rows(self, patched_multi_factory):
         built = build_dataset(_spec())
         panel = built["panel"]
-        assert not panel[["technical.rsi", "market.momentum", "target"]].isna().any().any()
+        assert (
+            not panel[["technical.rsi", "market.momentum", "target"]].isna().any().any()
+        )
 
     def test_data_hash_deterministic_for_same_inputs(self, patched_multi_factory):
         built_1 = build_dataset(_spec())
         built_2 = build_dataset(_spec())
         assert built_1["data_hash"] == built_2["data_hash"]
 
-    def test_include_target_false_has_no_target_column_and_more_rows(self, patched_multi_factory):
+    def test_include_target_false_has_no_target_column_and_more_rows(
+        self, patched_multi_factory
+    ):
         """Skipping target construction must not drop the most recent
         `horizon` bars the way training-mode's target-based dropna would."""
         with_target = build_dataset(_spec())
@@ -119,7 +132,10 @@ class TestBuildDatasetValidation:
         the shared panel and broadcast back into each entity's columns —
         not crash, not raise, not silently produce all-NaN columns."""
         spec = _spec(
-            features=[FeatureSpec(id="technical.rsi"), FeatureSpec(id="factors.pca_loading")]
+            features=[
+                FeatureSpec(id="technical.rsi"),
+                FeatureSpec(id="factors.pca_loading"),
+            ]
         )
         built = build_dataset(spec)
         assert "factors.pca_loading" in built["panel"].columns
@@ -130,7 +146,9 @@ class TestFetchFailureHandling:
     """A raw provider exception used to propagate uncaught, with no
     indication of which symbol in a multi-symbol universe caused it."""
 
-    def test_universe_symbol_fetch_failure_wrapped_with_symbol_context(self, monkeypatch):
+    def test_universe_symbol_fetch_failure_wrapped_with_symbol_context(
+        self, monkeypatch
+    ):
         provider = MagicMock()
 
         def _get_ohlcv(symbol, start, end):

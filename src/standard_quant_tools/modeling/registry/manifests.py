@@ -29,6 +29,13 @@ class ModelManifest(BaseModel):
     n_folds: int
     oos_predictions_uri: str
     random_seed: int
+    # Last date in the panel the deployed (full-refit) estimator saw.
+    # score_model needs this to reject a historical as_of: the registered
+    # estimator is refit on the ENTIRE training panel, so asking it to
+    # "predict" a date inside that panel produces a future-trained
+    # prediction dressed up as a historical one. Optional so manifests
+    # written before this field existed still load.
+    train_end_date: Optional[str] = None
     created_at_utc: str
     git_commit_sha: Optional[str] = None
     package_version: Optional[str] = None

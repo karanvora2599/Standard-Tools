@@ -38,6 +38,7 @@ def save_model(
     preprocessing_stats: Dict[str, Dict[str, float]],
     oos_predictions_uri: str,
     model_id: Optional[str] = None,
+    train_end_date: Optional[str] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -72,6 +73,7 @@ def save_model(
         n_folds=n_folds,
         oos_predictions_uri=oos_predictions_uri,
         random_seed=model_spec.random_seed,
+        train_end_date=train_end_date,
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         git_commit_sha=_git_sha(),
         package_version=_package_version(),

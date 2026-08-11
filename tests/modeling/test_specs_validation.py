@@ -66,4 +66,6 @@ class TestScoreModelInputValidation:
 
     def test_duplicate_universe_rejected(self):
         with pytest.raises(PydanticValidationError, match="duplicate symbols"):
-            ScoreModelInput(model_id="mdl_abc", as_of="2024-01-01", universe=["AAA", "AAA"])
+            ScoreModelInput(
+                model_id="mdl_abc", as_of="2024-01-01", universe=["AAA", "AAA"]
+            )

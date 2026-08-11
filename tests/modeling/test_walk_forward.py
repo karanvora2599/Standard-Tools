@@ -36,7 +36,9 @@ class TestWalkForwardSplit:
         splitter = WalkForwardSplit(train_window=50, test_window=10, embargo=0)
         folds = list(splitter.split(dates))
         assert len(folds) >= 2
-        assert folds[1][0][0] == folds[0][0][0] + 10  # second fold's train starts one test_window later
+        assert (
+            folds[1][0][0] == folds[0][0][0] + 10
+        )  # second fold's train starts one test_window later
 
     def test_no_train_test_overlap_across_all_folds(self, dates):
         splitter = WalkForwardSplit(train_window=30, test_window=10, embargo=2)

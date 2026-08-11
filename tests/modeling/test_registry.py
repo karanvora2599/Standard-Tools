@@ -51,7 +51,9 @@ class TestSaveLoadRoundTrip:
         # alpha near zero so the fitted line stays close to y=x, making
         # the post-round-trip prediction assertion below a meaningful
         # check rather than one sensitive to Ridge's shrinkage strength.
-        estimator = Ridge(alpha=1e-6).fit([[1.0], [2.0], [3.0], [4.0]], [1.0, 2.0, 3.0, 4.0])
+        estimator = Ridge(alpha=1e-6).fit(
+            [[1.0], [2.0], [3.0], [4.0]], [1.0, 2.0, 3.0, 4.0]
+        )
         manifest = save_model(
             estimator=estimator,
             model_spec=_model_spec(),

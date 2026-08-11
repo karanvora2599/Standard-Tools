@@ -14,10 +14,26 @@ registry:
 Uses `run_model_experiment`'s walk-forward out-of-sample predictions,
 never `score_model`'s single as-of snapshot: `score_model`'s model is the
 FINAL full-panel refit, and using it to "predict" historical dates it was
-trained on would be leakage, producing a falsely optimistic backtest. The
-OOS predictions are leakage-safe by construction — each fold's
-predictions come from a model that never saw that fold's dates during
-training — and already span the whole dataset's date range.
+trained on would be leakage, producing a falsely optimistic backtest. Each
+fold's predictions come from a model that never saw that fold's dates
+during training, and together they already span the whole dataset's date
+range.
+
+Two distinct leakage channels matter here, and only the first is closed by
+fold construction alone:
+
+  1. FEATURE overlap — a test-fold row's features coming from the training
+     window. Prevented by the split itself plus `embargo`.
+  2. LABEL overlap — a TRAINING row whose forward-return target is only
+     resolved by prices inside the test window. Prevented by the
+     target-overlap purge in engine.py, which drops any training row whose
+     recorded `label_end_date` reaches the first test date.
+
+Before that purge existed, a horizon larger than the embargo (e.g.
+horizon=20, embargo=0) left training labels built from test-period prices,
+so "leakage-safe by construction" was not accurate. Both channels are now
+handled, but the guarantee rests on that purge running — it is not a
+property of walk-forward splitting on its own.
 
 Converts predictions to DIRECTION-valid signal values (sign of the
 regression prediction, or a thresholded classifier probability), never
@@ -83,7 +99,9 @@ def oos_predictions_to_signal_panel(
     if deadband < 0:
         raise ValidationError(f"deadband must be >= 0, got {deadband}")
     if not (0.0 < proba_threshold < 1.0):
-        raise ValidationError(f"proba_threshold must be in (0, 1), got {proba_threshold}")
+        raise ValidationError(
+            f"proba_threshold must be in (0, 1), got {proba_threshold}"
+        )
     if not long_only and proba_threshold < 0.5:
         raise ValidationError(
             "proba_threshold must be >= 0.5 when long_only=False (a symmetric long/short "

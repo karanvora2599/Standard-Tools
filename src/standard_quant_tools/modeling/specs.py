@@ -84,13 +84,16 @@ class DatasetSpec(BaseModel):
         start_ts = _parse_date(self.start, "start")
         end_ts = _parse_date(self.end, "end")
         if start_ts >= end_ts:
-            raise ValueError(f"start ({self.start!r}) must be before end ({self.end!r})")
+            raise ValueError(
+                f"start ({self.start!r}) must be before end ({self.end!r})"
+            )
         return self
 
 
 class EstimatorSpec(BaseModel):
     type: str = Field(
-        ..., description="Estimator name — must be in estimators.registry.ESTIMATOR_REGISTRY."
+        ...,
+        description="Estimator name — must be in estimators.registry.ESTIMATOR_REGISTRY.",
     )
     params: Dict[str, object] = Field(default_factory=dict)
 
@@ -111,4 +114,6 @@ class ModelSpec(BaseModel):
     task: Literal["regression", "classification"]
     estimator: EstimatorSpec
     validation: ValidationSpec
-    random_seed: int = Field(42, description="Seed passed to the estimator's constructor.")
+    random_seed: int = Field(
+        42, description="Seed passed to the estimator's constructor."
+    )

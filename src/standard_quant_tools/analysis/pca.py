@@ -25,10 +25,26 @@ def _top_k_pc_power_iteration(
     `cov @ v` is instead computed as `arr.T @ (arr @ v) / (n_obs - 1)` --
     O(n_obs * n_assets) per iteration regardless of matrix shape.
 
-    Deterministic (fixed start vector, no random_state needed): starts
-    from a uniform vector every time, since power iteration converges to
-    the dominant eigenvector's direction (up to sign) from almost any
-    start, and the caller fixes sign afterward anyway.
+    Deterministic (fixed start vector, no random_state needed), but NOT a
+    uniform start. "Converges from almost any start" excludes starts
+    orthogonal to the dominant eigenvector, and the uniform vector
+    [1,...,1]/sqrt(n) is exactly orthogonal to one of the most common
+    structures in real return data: a spread/long-short factor with
+    loadings proportional to [1,-1,...]. There the very first matrix-
+    vector product is the zero vector, the loop breaks on `norm == 0`, and
+    the routine reports the ZERO-eigenvalue direction as PC1. On a
+    two-asset spread this returned an explained-variance ratio of ~0.0001
+    where SVD returned ~0.9999 -- silently the wrong component, not a less
+    precise one.
+
+    A fixed deterministic pseudo-random start has no such adversarial
+    alignment (the probability of exact orthogonality is zero, and the
+    vector is identical on every run and every machine because the seed is
+    hardcoded). Convergence is then verified rather than assumed: the
+    eigenpair residual ||Av - lambda*v|| is checked against the component's
+    own scale, and `converged=False` is returned so the caller can fall
+    back to SVD instead of trusting whatever state iteration happened to
+    stop in.
 
     Deflation happens in data space (`working -= outer(working @ v, v)`)
     rather than on a covariance matrix, the standard Hotelling-deflation
@@ -36,11 +52,12 @@ def _top_k_pc_power_iteration(
     `eigenvalue * outer(v, v)` when v is a true unit eigenvector, without
     ever forming cov.
 
-    Returns (eigenvectors, eigenvalues, total_variance): eigenvectors as
-    an (n_comp x n_assets) array (row i unit-norm), eigenvalues as a
-    length-n_comp array, and the FULL matrix's total variance (needed for
-    explained_variance_ratio, since power iteration never computes the
-    full spectrum the way SVD does).
+    Returns (eigenvectors, eigenvalues, total_variance, converged):
+    eigenvectors as an (n_comp x n_assets) array (row i unit-norm),
+    eigenvalues as a length-n_comp array, the FULL matrix's total variance
+    (needed for explained_variance_ratio, since power iteration never
+    computes the full spectrum the way SVD does), and a bool that is False
+    if ANY component failed its residual check.
     """
     n_obs, n_assets = arr.shape
     denom = n_obs - 1
@@ -48,29 +65,41 @@ def _top_k_pc_power_iteration(
     working = arr
     vecs = np.empty((n_comp, n_assets))
     vals = np.empty(n_comp)
+    converged = True
+    # Fixed seed: deterministic across runs/machines, but not aligned with
+    # any structure the data might have (unlike the uniform vector).
+    start = np.random.default_rng(0).standard_normal(n_assets)
+    start /= np.linalg.norm(start)
     for k in range(n_comp):
-        v = np.full(n_assets, 1.0 / np.sqrt(n_assets))
+        v = start.copy()
         for _ in range(max_iter):
             v_new = (working.T @ (working @ v)) / denom
             norm = np.linalg.norm(v_new)
             if norm == 0.0:
-                # No remaining variance in any direction (e.g. deflated
-                # down to a rank-deficient remainder) -- nothing left to
-                # converge to for this or any further component; leave v
-                # as an arbitrary unit vector and let its eigenvalue
-                # come out ~0 rather than dividing by zero.
+                # Genuinely no remaining variance in any direction (fully
+                # deflated / zero matrix) -- distinct from the old uniform-
+                # start bug, where this branch fired because the START was
+                # orthogonal to a component that very much existed.
                 break
             v_new /= norm
             if np.linalg.norm(v_new - v) < tol:
                 v = v_new
                 break
             v = v_new
-        eigenvalue = float(v @ (working.T @ (working @ v)) / denom)
+        av = (working.T @ (working @ v)) / denom
+        eigenvalue = float(v @ av)
+        # Residual check: v is only an eigenvector if Av == lambda*v.
+        # Scaled by the eigenvalue so the tolerance is relative, and
+        # skipped when the eigenvalue is ~0 (a genuinely null direction has
+        # nothing to converge to and no meaningful relative scale).
+        residual = float(np.linalg.norm(av - eigenvalue * v))
+        if abs(eigenvalue) > tol and residual > max(1e-6 * abs(eigenvalue), tol):
+            converged = False
         vecs[k] = v
         vals[k] = eigenvalue
         if k < n_comp - 1:
             working = working - np.outer(working @ v, v)
-    return vecs, vals, total_var
+    return vecs, vals, total_var, converged
 
 
 def pca_returns(
@@ -144,6 +173,13 @@ def pca_returns(
         raise ValueError(
             f"Need at least 2 observations and 1 asset; got ({n_obs}, {n_assets})."
         )
+    # `method` is only a type ANNOTATION -- nothing enforced it at runtime,
+    # so any unrecognized string silently fell through to the SVD branch
+    # and returned a result the caller never asked for.
+    if method not in ("svd", "power_iteration"):
+        raise ValueError(f"method must be 'svd' or 'power_iteration', got {method!r}.")
+    if n_components is not None and n_components < 1:
+        raise ValueError(f"n_components must be >= 1 when given, got {n_components}.")
 
     arr = data.to_numpy(dtype=float)
     arr = arr - arr.mean(axis=0)
@@ -160,10 +196,26 @@ def pca_returns(
     )
 
     if method == "power_iteration":
-        Vt, eigenvalues, total_var = _top_k_pc_power_iteration(
+        Vt, eigenvalues, total_var, converged = _top_k_pc_power_iteration(
             arr, n_comp, _POWER_ITERATION_TOL, _POWER_ITERATION_MAX_ITER
         )
-    else:
+        if not converged:
+            # Fall back rather than return an unconverged eigenpair. Power
+            # iteration is an optimization, not a different definition of
+            # PCA -- if it can't verify its own answer (weakly separated
+            # PC1/PC2, accumulated deflation error across many components),
+            # the correct result is still SVD's.
+            logger.warning(
+                "[pca] power_iteration failed its residual check after %d iterations "
+                "— falling back to SVD for a verified decomposition",
+                _POWER_ITERATION_MAX_ITER,
+            )
+            method = "svd"
+
+    # Not `else` on the branch above: `method` may have just been switched
+    # to "svd" by the convergence fallback, and that switch must actually
+    # take effect here.
+    if method == "svd":
         _, s, Vt_full = np.linalg.svd(arr, full_matrices=False)
         full_eigenvalues = s**2 / (n_obs - 1)
         Vt = Vt_full[:n_comp]

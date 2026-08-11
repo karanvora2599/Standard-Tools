@@ -21,6 +21,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
+from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import get_estimator_class, validate_params
 from .features.transforms import apply_preprocessing, fit_preprocessing
 from .registry.model_registry import new_model_id, save_model
@@ -102,7 +103,9 @@ def run_experiment(
         or the dataset has too few dates for even one walk-forward fold.
     """
     estimator_cls = get_estimator_class(model_spec.task, model_spec.estimator.type)
-    validate_params(model_spec.task, model_spec.estimator.type, model_spec.estimator.params)
+    validate_params(
+        model_spec.task, model_spec.estimator.type, model_spec.estimator.params
+    )
 
     panel = dataset["panel"]
     if model_spec.task == "classification":
@@ -122,14 +125,35 @@ def run_experiment(
             f"test_window={model_spec.validation.test_window}, embargo={model_spec.validation.embargo}."
         )
 
+    has_label_end = LABEL_END_COL in panel.columns
     fold_metrics = []
     fold_importance = []
     oos_prediction_frames = []
+    n_purged_total = 0
     for train_pos, test_pos in splitter.split(dates):
         train_dates = dates[train_pos]
         test_dates = dates[test_pos]
         train_df = panel[panel["date"].isin(train_dates)]
         test_df = panel[panel["date"].isin(test_dates)]
+
+        # ── Target-overlap purge ──────────────────────────────────────────
+        # A forward-return label on training row t is only finished once
+        # bar t+horizon prints. With embargo < horizon that bar lies inside
+        # the test window, so the row's LABEL is built from test-period
+        # prices even though its FEATURES are entirely in the past. The
+        # embargo alone never enforced this (WalkForwardSplit is not given
+        # the horizon at all), so horizon=20/embargo=0 trained on 20 labels
+        # that had already seen the test period.
+        #
+        # Purging on the row's own recorded label_end_date rather than on
+        # an integer offset also handles entities on different calendars,
+        # where t+horizon entity bars != t+horizon global panel dates.
+        if has_label_end and not train_df.empty and len(test_dates) > 0:
+            first_test_date = test_dates[0]
+            keep = train_df[LABEL_END_COL] < first_test_date
+            n_purged_total += int((~keep).sum())
+            train_df = train_df[keep]
+
         if train_df.empty or test_df.empty:
             continue
 
@@ -147,10 +171,14 @@ def run_experiment(
         train_X = apply_preprocessing(train_df[feature_ids], stats)
         test_X = apply_preprocessing(test_df[feature_ids], stats)
 
-        estimator = _instantiate(estimator_cls, model_spec.estimator.params, model_spec.random_seed)
+        estimator = _instantiate(
+            estimator_cls, model_spec.estimator.params, model_spec.random_seed
+        )
         estimator.fit(train_X.to_numpy(), train_y)
 
-        metrics, prediction_values = _predict_fold(model_spec.task, estimator, test_X, test_y)
+        metrics, prediction_values = _predict_fold(
+            model_spec.task, estimator, test_X, test_y
+        )
         fold_metrics.append(metrics)
         fold_importance.append(fold_feature_importance(estimator, feature_ids))
         oos_prediction_frames.append(
@@ -168,7 +196,9 @@ def run_experiment(
             "run_model_experiment: every walk-forward fold was skipped -- either an empty "
             "train/test slice (the requested universe/date range likely doesn't cover every "
             "entity on every date), or, for classification, a fold whose training window "
-            "landed entirely on one class of the binary target."
+            "landed entirely on one class of the binary target, or every training row was "
+            "purged because its forward-return label overlapped the test window (raise "
+            "train_window, or lower the target horizon)."
         )
 
     oos_metrics = average_fold_metrics(fold_metrics)
@@ -213,6 +243,11 @@ def run_experiment(
         preprocessing_stats=full_stats,
         oos_predictions_uri=oos_predictions_uri,
         model_id=model_id,
+        # The deployed estimator was refit on the whole panel, so this is
+        # the last date it has already seen. score_model uses it to reject
+        # a historical as_of rather than returning a future-trained
+        # prediction that looks like a point-in-time one.
+        train_end_date=pd.Timestamp(panel["date"].max()).strftime("%Y-%m-%d"),
     )
 
     return {
@@ -221,4 +256,9 @@ def run_experiment(
         "feature_importance_summary": importance_summary,
         "n_folds": len(fold_metrics),
         "oos_predictions_uri": oos_predictions_uri,
+        # Surfaced rather than silently applied: a large purge count means
+        # the target horizon is consuming a real fraction of each training
+        # window, which is information the caller needs when reading the
+        # OOS metrics.
+        "n_train_rows_purged_overlap": n_purged_total,
     }

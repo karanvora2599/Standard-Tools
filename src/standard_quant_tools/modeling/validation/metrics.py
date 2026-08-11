@@ -70,5 +70,7 @@ def average_fold_metrics(fold_metrics: List[Dict[str, float]]) -> Dict[str, floa
         # (e.g. every surviving fold's test set happened to be
         # single-class, so AUC was NaN everywhere) -- NaN is still the
         # correct answer here, just without numpy's warning about it.
-        result[k] = float(np.nanmean(values)) if not np.all(np.isnan(values)) else float("nan")
+        result[k] = (
+            float(np.nanmean(values)) if not np.all(np.isnan(values)) else float("nan")
+        )
     return result

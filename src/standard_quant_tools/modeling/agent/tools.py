@@ -26,12 +26,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .. import artifacts as _artifacts
 from ..dataset.builder import build_dataset as _build_dataset
 from ..engine import run_experiment as _run_experiment
 from ..features.registry import list_features as _list_features
 from ..registry.model_registry import load_manifest
 from ..scoring import score_model as _score_model
-from .. import artifacts as _artifacts
 from .models import (
     BuildModelDatasetInput,
     BuildModelDatasetResult,
@@ -83,7 +83,9 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
     built = _build_dataset(input_data.spec)
 
     dataset_id = f"ds_{uuid.uuid4().hex[:12]}"
-    panel_uri = _artifacts.save_artifact(built["panel"], run_id=dataset_id, name="panel")
+    panel_uri = _artifacts.save_artifact(
+        built["panel"], run_id=dataset_id, name="panel"
+    )
     directory = Path(panel_uri).parent
     # dataset_spec: the exact DatasetSpec used, so score_model can later
     # rebuild identical features (see scoring.py).
@@ -111,7 +113,9 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
     )
 
 
-def run_model_experiment(input_data: RunModelExperimentInput) -> RunModelExperimentResult:
+def run_model_experiment(
+    input_data: RunModelExperimentInput,
+) -> RunModelExperimentResult:
     """Load the persisted dataset panel + its lineage metadata,
     fit+walk-forward-validate+register a model — one call, no separate
     "just fit" path."""
@@ -179,7 +183,9 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             "created_at_utc": manifest.created_at_utc,
         }
 
-    return InspectModelResult(model_id=input_data.model_id, view=input_data.view, data=data)
+    return InspectModelResult(
+        model_id=input_data.model_id, view=input_data.view, data=data
+    )
 
 
 # ── Registration (mirrors agent.tools.get_agent_tools()/_TOOL_DISPATCH,
@@ -197,8 +203,16 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Fit + walk-forward validate + register a model from a persisted dataset.",
         RunModelExperimentInput,
     ),
-    ("score_model", "Score a registered model for a universe as of a date.", ScoreModelInput),
-    ("inspect_model", "Inspect a registered model's summary/importance/validation/lineage.", InspectModelInput),
+    (
+        "score_model",
+        "Score a registered model for a universe as of a date.",
+        ScoreModelInput,
+    ),
+    (
+        "inspect_model",
+        "Inspect a registered model's summary/importance/validation/lineage.",
+        InspectModelInput,
+    ),
 ]
 
 MODELING_TOOL_DISPATCH = {

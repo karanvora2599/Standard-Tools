@@ -16,7 +16,10 @@ from standard_quant_tools.modeling.estimators.registry import (
 
 class TestGetEstimatorClass:
     def test_known_pair_returns_class(self):
-        assert get_estimator_class("regression", "ridge") is ESTIMATOR_REGISTRY[("regression", "ridge")]
+        assert (
+            get_estimator_class("regression", "ridge")
+            is ESTIMATOR_REGISTRY[("regression", "ridge")]
+        )
 
     def test_unknown_name_raises_validation_error(self):
         with pytest.raises(ValidationError, match="unknown estimator"):

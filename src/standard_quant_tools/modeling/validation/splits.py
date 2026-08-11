@@ -11,7 +11,9 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 
-def holdout_split(dates: pd.Index, train_frac: float = 0.7) -> Tuple[np.ndarray, np.ndarray]:
+def holdout_split(
+    dates: pd.Index, train_frac: float = 0.7
+) -> Tuple[np.ndarray, np.ndarray]:
     if not (0.0 < train_frac < 1.0):
         raise ValidationError(f"train_frac must be in (0, 1), got {train_frac}")
     n = len(dates)

@@ -9,8 +9,14 @@ import pytest
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.dataset.builder import build_dataset
 from standard_quant_tools.modeling.engine import run_experiment
-from standard_quant_tools.modeling.features.transforms import apply_preprocessing, fit_preprocessing
-from standard_quant_tools.modeling.registry.model_registry import load_manifest, load_model
+from standard_quant_tools.modeling.features.transforms import (
+    apply_preprocessing,
+    fit_preprocessing,
+)
+from standard_quant_tools.modeling.registry.model_registry import (
+    load_manifest,
+    load_model,
+)
 from standard_quant_tools.modeling.specs import (
     DatasetSpec,
     EstimatorSpec,
@@ -59,7 +65,9 @@ class TestRunExperimentRegression:
             ("gradient_boosting", {"n_estimators": 10, "max_depth": 3}),
         ],
     )
-    def test_every_allowlisted_regressor_runs_end_to_end(self, dataset, estimator, params):
+    def test_every_allowlisted_regressor_runs_end_to_end(
+        self, dataset, estimator, params
+    ):
         model_spec = _model_spec(estimator=estimator, **params)
         result = run_experiment(dataset, model_spec, dataset_id="ds_test")
         assert result["model_id"].startswith("mdl_")
@@ -90,7 +98,12 @@ def _synthetic_binary_dataset(n: int = 300, n_features: int = 2) -> dict:
     for fid in feature_ids:
         data[fid] = rng.normal(0, 1, n)
     panel = pd.DataFrame(data)
-    return {"panel": panel, "feature_ids": feature_ids, "target_id": "custom:1", "data_hash": "h"}
+    return {
+        "panel": panel,
+        "feature_ids": feature_ids,
+        "target_id": "custom:1",
+        "data_hash": "h",
+    }
 
 
 class TestRunExperimentClassification:

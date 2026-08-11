@@ -3,7 +3,14 @@ FEATURE_REGISTRY as a side effect — the same registration-on-import
 pattern the individual technical.py/market.py/risk.py/statistical.py/
 factors.py modules rely on."""
 
-from . import factors, market, risk, statistical, technical, volume  # noqa: F401  (registration side effect)
+from . import (  # noqa: F401  (registration side effect)
+    factors,
+    market,
+    risk,
+    statistical,
+    technical,
+    volume,
+)
 from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSupport
 from .registry import FEATURE_REGISTRY, get_feature, list_features, register_feature
 

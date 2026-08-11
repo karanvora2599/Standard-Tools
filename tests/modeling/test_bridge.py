@@ -28,7 +28,9 @@ from standard_quant_tools.modeling.specs import (
 def _save_predictions(rows) -> str:
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
-    return _artifacts.save_artifact(df, run_id="mdl_bridge_test", name="oos_predictions")
+    return _artifacts.save_artifact(
+        df, run_id="mdl_bridge_test", name="oos_predictions"
+    )
 
 
 class TestRegressionSignConversion:
@@ -58,7 +60,9 @@ class TestRegressionSignConversion:
         assert panel["BBB"]["2024-01-01"] == 1.0
 
     def test_negative_deadband_rejected(self):
-        uri = _save_predictions([{"date": "2024-01-01", "entity": "AAA", "prediction": 0.0}])
+        uri = _save_predictions(
+            [{"date": "2024-01-01", "entity": "AAA", "prediction": 0.0}]
+        )
         with pytest.raises(ValidationError, match="deadband"):
             oos_predictions_to_signal_panel(uri, task="regression", deadband=-1.0)
 
@@ -105,12 +109,18 @@ class TestClassificationThreshold:
         assert panel["CCC"]["2024-01-01"] == 0.0
 
     def test_proba_threshold_out_of_range_rejected(self):
-        uri = _save_predictions([{"date": "2024-01-01", "entity": "AAA", "prediction": 0.5}])
+        uri = _save_predictions(
+            [{"date": "2024-01-01", "entity": "AAA", "prediction": 0.5}]
+        )
         with pytest.raises(ValidationError, match="proba_threshold"):
-            oos_predictions_to_signal_panel(uri, task="classification", proba_threshold=1.5)
+            oos_predictions_to_signal_panel(
+                uri, task="classification", proba_threshold=1.5
+            )
 
     def test_symmetric_mode_below_midpoint_threshold_rejected(self):
-        uri = _save_predictions([{"date": "2024-01-01", "entity": "AAA", "prediction": 0.5}])
+        uri = _save_predictions(
+            [{"date": "2024-01-01", "entity": "AAA", "prediction": 0.5}]
+        )
         with pytest.raises(ValidationError, match="0.5"):
             oos_predictions_to_signal_panel(
                 uri, task="classification", proba_threshold=0.3, long_only=False

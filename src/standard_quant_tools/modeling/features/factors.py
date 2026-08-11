@@ -50,7 +50,9 @@ def _validate_window_params(window: int, refit_every: int, feature_id: str) -> N
     if window < 2:
         raise ValidationError(f"{feature_id}: window must be >= 2, got {window}")
     if refit_every < 1:
-        raise ValidationError(f"{feature_id}: refit_every must be >= 1, got {refit_every}")
+        raise ValidationError(
+            f"{feature_id}: refit_every must be >= 1, got {refit_every}"
+        )
 
 
 def _pca_loading(
@@ -82,11 +84,17 @@ def _pca_factor_return(
     for i in range(n):
         if i + 1 >= window and (i + 1 - window) % refit_every == 0:
             window_slice = returns_panel.iloc[i + 1 - window : i + 1]
-            result = _pca_returns(window_slice, n_components=1, method="power_iteration")
+            result = _pca_returns(
+                window_slice, n_components=1, method="power_iteration"
+            )
             current_loadings = result["loadings"]["PC1"]
         if current_loadings is not None:
-            values.iloc[i] = float(returns_panel.iloc[i].to_numpy() @ current_loadings.to_numpy())
-    return pd.DataFrame({col: values for col in returns_panel.columns}, index=returns_panel.index)
+            values.iloc[i] = float(
+                returns_panel.iloc[i].to_numpy() @ current_loadings.to_numpy()
+            )
+    return pd.DataFrame(
+        {col: values for col in returns_panel.columns}, index=returns_panel.index
+    )
 
 
 register_feature(

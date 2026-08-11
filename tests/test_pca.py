@@ -285,7 +285,9 @@ class TestPowerIterationMethod:
 
     def test_pc1_loadings_match_svd_for_dominant_factor(self, one_factor_data):
         svd_result = pca_returns(one_factor_data, n_components=1, method="svd")
-        pi_result = pca_returns(one_factor_data, n_components=1, method="power_iteration")
+        pi_result = pca_returns(
+            one_factor_data, n_components=1, method="power_iteration"
+        )
         np.testing.assert_allclose(
             svd_result["loadings"].to_numpy(),
             pi_result["loadings"].to_numpy(),
@@ -294,7 +296,9 @@ class TestPowerIterationMethod:
 
     def test_pc1_explained_variance_ratio_matches_svd(self, one_factor_data):
         svd_result = pca_returns(one_factor_data, n_components=1, method="svd")
-        pi_result = pca_returns(one_factor_data, n_components=1, method="power_iteration")
+        pi_result = pca_returns(
+            one_factor_data, n_components=1, method="power_iteration"
+        )
         np.testing.assert_allclose(
             svd_result["explained_variance_ratio"].to_numpy(),
             pi_result["explained_variance_ratio"].to_numpy(),
@@ -303,7 +307,9 @@ class TestPowerIterationMethod:
 
     def test_pc1_factor_returns_match_svd(self, one_factor_data):
         svd_result = pca_returns(one_factor_data, n_components=1, method="svd")
-        pi_result = pca_returns(one_factor_data, n_components=1, method="power_iteration")
+        pi_result = pca_returns(
+            one_factor_data, n_components=1, method="power_iteration"
+        )
         np.testing.assert_allclose(
             svd_result["factor_returns"].to_numpy(),
             pi_result["factor_returns"].to_numpy(),
@@ -316,7 +322,9 @@ class TestPowerIterationMethod:
         above), well-separated enough from the noise floor for both
         components' eigenvectors to be stable."""
         svd_result = pca_returns(two_factor_data, n_components=2, method="svd")
-        pi_result = pca_returns(two_factor_data, n_components=2, method="power_iteration")
+        pi_result = pca_returns(
+            two_factor_data, n_components=2, method="power_iteration"
+        )
         np.testing.assert_allclose(
             svd_result["loadings"].to_numpy(),
             pi_result["loadings"].to_numpy(),
@@ -348,7 +356,9 @@ class TestPowerIterationMethod:
         true_loadings = rng.normal(1.0, 0.4, n_assets)
         idio = rng.normal(0, 0.004, (n_obs, n_assets))
         returns = pd.DataFrame(factor[:, None] * true_loadings[None, :] + idio)
-        svd_result = pca_returns(returns, n_components=1, standardize=False, method="svd")
+        svd_result = pca_returns(
+            returns, n_components=1, standardize=False, method="svd"
+        )
         pi_result = pca_returns(
             returns, n_components=1, standardize=False, method="power_iteration"
         )
@@ -366,4 +376,3 @@ class TestPowerIterationMethod:
             result = pca_returns(one_factor_data, n_components=1, method=method)
             pc1 = result["loadings"]["PC1"]
             assert pc1[pc1.abs().idxmax()] > 0
-

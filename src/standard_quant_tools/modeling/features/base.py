@@ -60,4 +60,6 @@ class FeatureDefinition(BaseModel):
     temporal_support: TemporalSupport
     scope: FeatureScope = FeatureScope.ENTITY
     requires: List[str] = Field(default_factory=list)
-    lookback: int = Field(..., ge=0, description="Bars of history consumed before the first valid output.")
+    lookback: int = Field(
+        ..., ge=0, description="Bars of history consumed before the first valid output."
+    )

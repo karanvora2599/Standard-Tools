@@ -62,7 +62,9 @@ def fit_preprocessing(train: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     return stats
 
 
-def apply_preprocessing(df: pd.DataFrame, stats: Dict[str, Dict[str, float]]) -> pd.DataFrame:
+def apply_preprocessing(
+    df: pd.DataFrame, stats: Dict[str, Dict[str, float]]
+) -> pd.DataFrame:
     """Apply stats produced by fit_preprocessing (fit on train) to any
     frame — train or test — sharing the same feature columns."""
     out = df.copy()

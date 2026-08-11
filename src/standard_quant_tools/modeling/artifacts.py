@@ -45,7 +45,8 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 def _runs_dir() -> Path:
     return Path(
         os.environ.get(
-            "SQT_RUNS_DIR", str(Path.home() / ".cache" / "standard_quant_tools" / "runs")
+            "SQT_RUNS_DIR",
+            str(Path.home() / ".cache" / "standard_quant_tools" / "runs"),
         )
     )
 
@@ -85,7 +86,9 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 def save_json(directory: Path, name: str, payload: Dict[str, Any]) -> str:
     _validate_identifier(name, "name")
     path = directory / f"{name}.json"
-    _atomic_write_bytes(path, json.dumps(payload, indent=2, default=str).encode("utf-8"))
+    _atomic_write_bytes(
+        path, json.dumps(payload, indent=2, default=str).encode("utf-8")
+    )
     return str(path)
 
 

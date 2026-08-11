@@ -37,7 +37,9 @@ def _dataset_spec(**overrides) -> DatasetSpec:
     return DatasetSpec(**defaults)
 
 
-def _train_a_model_with_spec(spec: DatasetSpec, dataset_id: str = "ds_scoring_test") -> str:
+def _train_a_model_with_spec(
+    spec: DatasetSpec, dataset_id: str = "ds_scoring_test"
+) -> str:
     """Builds+trains a model exactly the way build_model_dataset +
     run_model_experiment would, but persists dataset_spec.json by hand
     (the agent tool normally does this; scoring.py depends on it
@@ -47,7 +49,9 @@ def _train_a_model_with_spec(spec: DatasetSpec, dataset_id: str = "ds_scoring_te
     from standard_quant_tools.modeling import artifacts as _artifacts
 
     built = build_dataset(spec)
-    panel_uri = _artifacts.save_artifact(built["panel"], run_id=dataset_id, name="panel")
+    panel_uri = _artifacts.save_artifact(
+        built["panel"], run_id=dataset_id, name="panel"
+    )
     directory = Path(panel_uri).parent
     _artifacts.save_json(directory, "dataset_spec", spec.model_dump())
 
@@ -88,10 +92,14 @@ class TestScoreModelReliability:
         provider.get_ohlcv.side_effect = _get_ohlcv
         monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
 
-        spec = _dataset_spec(features=[FeatureSpec(id="technical.rsi")], universe=["AAA", "BBB"])
+        spec = _dataset_spec(
+            features=[FeatureSpec(id="technical.rsi")], universe=["AAA", "BBB"]
+        )
         model_id = _train_a_model_with_spec(spec)
 
-        result = score_model(model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"])
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"]
+        )
         assert result["missing_entities"] == ["CCC"]
         assert result["n_entities"] == 2
 
@@ -102,7 +110,9 @@ class TestScoreModelReliability:
         with pytest.raises(ValidationError, match="not a valid date"):
             score_model(model_id=model_id, as_of="not-a-date", universe=["AAA"])
 
-    def test_scoring_spec_reconstruction_is_actually_validated(self, patched_multi_factory):
+    def test_scoring_spec_reconstruction_is_actually_validated(
+        self, patched_multi_factory
+    ):
         """Regression test for the model_copy(update=...) bug: passing a
         universe with duplicate symbols to score_model must be rejected
         by DatasetSpec's validator (raised as a pydantic ValidationError,
@@ -114,6 +124,8 @@ class TestScoreModelReliability:
 
     def test_successful_score_has_no_missing_entities(self, patched_multi_factory):
         model_id = _train_a_model(patched_multi_factory)
-        result = score_model(model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"])
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"]
+        )
         assert result["missing_entities"] == []
         assert result["n_entities"] == 3

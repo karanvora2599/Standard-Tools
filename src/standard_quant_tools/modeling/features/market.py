@@ -11,7 +11,9 @@ from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSuppo
 from .registry import register_feature
 
 
-def _market_momentum(ohlcv: pd.DataFrame, context: FeatureContext, lookback: int = 20) -> pd.Series:
+def _market_momentum(
+    ohlcv: pd.DataFrame, context: FeatureContext, lookback: int = 20
+) -> pd.Series:
     return ohlcv["Close"].pct_change(periods=lookback)
 
 

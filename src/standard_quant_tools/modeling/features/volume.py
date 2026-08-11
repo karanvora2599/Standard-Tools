@@ -12,19 +12,43 @@ from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSuppo
 from .registry import register_feature
 
 
-def _volume_mfi(ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14) -> pd.Series:
-    return _mfi(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=period)
+def _volume_mfi(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14
+) -> pd.Series:
+    return _mfi(
+        ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=period
+    )
 
 
 def _volume_obv_roc(
     ohlcv: pd.DataFrame, context: FeatureContext, lookback: int = 20
 ) -> pd.Series:
-    """Raw OBV is unbounded and cumulative (grows without limit over a
-    long history), not stationary -- wrapped as a rate of change over
-    `lookback` bars, the same trailing-window convention market.momentum
-    already uses for Close."""
+    """
+    Raw OBV is unbounded and cumulative (grows without limit over a long
+    history), not stationary -- wrapped as a normalized change over
+    `lookback` bars.
+
+    NOT `obv.pct_change(lookback)`, which is unusable on real data: OBV is
+    a cumulative sum seeded at exactly 0.0 (the first bar has no prior
+    close, so its direction is 0), so the first `lookback` valid rows all
+    divide by OBV[0] == 0 and come out +/-inf. Dividing by a cumulative
+    total is wrong in general anyway -- OBV crosses zero freely, so the
+    denominator is arbitrarily near zero at any point in the series, not
+    just at the start, and the ratio explodes there too.
+
+    Normalized instead by the trailing volume actually transacted over the
+    same window, which is strictly positive whenever any trading occurred
+    and is the natural scale for a volume-flow delta: the result reads as
+    "what fraction of the last `lookback` bars' volume was net directional
+    flow", bounded in [-1, 1]. A window with zero total volume (a fully
+    halted symbol) has no defined flow ratio and yields NaN, which
+    alignment drops -- rather than an inf that would fail the dataset's
+    finite-value guard and reject the entire panel.
+    """
     obv_series = _obv(ohlcv["Close"], ohlcv["Volume"])
-    return obv_series.pct_change(periods=lookback)
+    obv_change = obv_series.diff(periods=lookback)
+    volume_traded = ohlcv["Volume"].rolling(lookback).sum()
+    return obv_change / volume_traded.where(volume_traded > 0)
 
 
 def _volume_vwap_deviation(

@@ -23,7 +23,8 @@ _NO_PROTECTED_NAMESPACES = ConfigDict(protected_namespaces=())
 
 class ListFeaturesInput(BaseModel):
     category: Optional[str] = Field(
-        None, description="Filter to one category, e.g. 'technical' or 'factors'. Omit for the full catalog."
+        None,
+        description="Filter to one category, e.g. 'technical' or 'factors'. Omit for the full catalog.",
     )
 
 
@@ -74,10 +75,13 @@ class RunModelExperimentResult(BaseModel):
     n_folds: int
     oos_predictions_uri: str = Field(
         ...,
-        description="Walk-forward out-of-sample predictions (date, entity, prediction) — "
-        "leakage-safe by construction, unlike score_model's single as-of snapshot. Feed "
-        "to modeling.bridge.oos_predictions_to_signal_panel to backtest this model as a "
-        "strategy via the existing run_signal_panel_backtest tool.",
+        description="Walk-forward out-of-sample predictions (date, entity, prediction). "
+        "Each fold's predictions come from a model that never saw that fold's dates in "
+        "training, and training rows whose forward-return label would have resolved "
+        "inside the test window are purged — so these are genuinely out-of-sample, "
+        "unlike score_model's single as-of snapshot (which uses the full-panel refit). "
+        "Feed to modeling.bridge.oos_predictions_to_signal_panel to backtest this model "
+        "as a strategy via the existing run_signal_panel_backtest tool.",
     )
 
 

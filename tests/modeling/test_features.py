@@ -89,7 +89,9 @@ class TestBuiltInFeaturesMatchUnderlyingPrimitives:
         result = definition.fn(ohlcv, context, window=60)
         asset_returns = ohlcv["Close"].pct_change().dropna()
         benchmark_returns = benchmark_close.pct_change().dropna()
-        expected = rolling_beta(asset_returns, benchmark_returns, window=60)["Rolling_Beta"]
+        expected = rolling_beta(asset_returns, benchmark_returns, window=60)[
+            "Rolling_Beta"
+        ]
         pd.testing.assert_series_equal(result, expected, check_names=False)
 
     def test_risk_rolling_beta_requires_benchmark_in_context(self, ohlcv):
@@ -139,14 +141,19 @@ class TestExpandedFeaturesMatchUnderlyingPrimitives:
     def test_risk_atr_pct(self, ohlcv):
         definition = get_feature("risk.atr_pct")
         result = definition.fn(ohlcv, _CONTEXT, period=14)
-        expected = wilder_atr(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=14) / ohlcv["Close"]
+        expected = (
+            wilder_atr(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=14)
+            / ohlcv["Close"]
+        )
         pd.testing.assert_series_equal(result, expected, check_names=False)
 
     def test_risk_bollinger_pct_b(self, ohlcv):
         definition = get_feature("risk.bollinger_pct_b")
         result = definition.fn(ohlcv, _CONTEXT, period=20, num_std=2.0)
         bands = bollinger_bands(ohlcv["Close"], period=20, num_std=2.0)
-        expected = (ohlcv["Close"] - bands["BB_Lower"]) / (bands["BB_Upper"] - bands["BB_Lower"])
+        expected = (ohlcv["Close"] - bands["BB_Lower"]) / (
+            bands["BB_Upper"] - bands["BB_Lower"]
+        )
         pd.testing.assert_series_equal(result, expected, check_names=False)
 
     def test_risk_parkinson_volatility(self, ohlcv):
@@ -169,24 +176,55 @@ class TestExpandedFeaturesMatchUnderlyingPrimitives:
         rolling_peak = ohlcv["Close"].rolling(252).max()
         expected = (ohlcv["Close"] - rolling_peak) / rolling_peak
         pd.testing.assert_series_equal(result, expected, check_names=False)
-        assert (result.dropna() <= 1e-9).all()  # never positive -- can't exceed its own trailing peak
+        assert (
+            result.dropna() <= 1e-9
+        ).all()  # never positive -- can't exceed its own trailing peak
 
     def test_volume_mfi(self, ohlcv):
         definition = get_feature("volume.mfi")
         result = definition.fn(ohlcv, _CONTEXT, period=14)
-        expected = mfi(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=14)
+        expected = mfi(
+            ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=14
+        )
         pd.testing.assert_series_equal(result, expected, check_names=False)
 
     def test_volume_obv_roc(self, ohlcv):
+        """
+        OBV change over the window, normalized by the volume actually
+        traded in that window.
+
+        Deliberately NOT asserted against `obv(...).pct_change(20)`, which
+        is what this test used to do. That assertion passed while the
+        feature was unusable: OBV is a cumulative sum seeded at exactly
+        0.0, so pct_change divides by zero at its first valid row and
+        emits +/-inf, and build_dataset's finite-value guard then rejected
+        the entire panel. Asserting a wrapper equals its own primitive
+        cannot catch that — the primitive was the problem.
+        """
         definition = get_feature("volume.obv_roc")
         result = definition.fn(ohlcv, _CONTEXT, lookback=20)
-        expected = obv(ohlcv["Close"], ohlcv["Volume"]).pct_change(periods=20)
+
+        obv_series = obv(ohlcv["Close"], ohlcv["Volume"])
+        volume_traded = ohlcv["Volume"].rolling(20).sum()
+        expected = obv_series.diff(periods=20) / volume_traded.where(volume_traded > 0)
         pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    def test_volume_obv_roc_is_finite_on_ordinary_data(self, ohlcv):
+        """Regression: every non-warm-up value must be finite, or the
+        dataset builder's finite guard rejects the whole panel."""
+        definition = get_feature("volume.obv_roc")
+        result = definition.fn(ohlcv, _CONTEXT, lookback=20).dropna()
+        assert len(result) > 0
+        assert np.isfinite(result.to_numpy(dtype=float)).all()
+        # Net directional flow can never exceed the volume that produced it.
+        assert result.abs().max() <= 1.0 + 1e-12
 
     def test_volume_vwap_deviation(self, ohlcv):
         definition = get_feature("volume.vwap_deviation")
         result = definition.fn(ohlcv, _CONTEXT, period=20)
-        vwap_series = vwap(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=20)
+        vwap_series = vwap(
+            ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=20
+        )
         expected = (ohlcv["Close"] - vwap_series) / vwap_series
         pd.testing.assert_series_equal(result, expected, check_names=False)
 
@@ -211,7 +249,9 @@ class TestUniverseScopePcaFeatures:
         valid = result.dropna()
         # Any two consecutive rows strictly inside one refit block are equal.
         mid_block = valid.iloc[102:105]
-        pd.testing.assert_series_equal(mid_block.iloc[0], mid_block.iloc[1], check_names=False)
+        pd.testing.assert_series_equal(
+            mid_block.iloc[0], mid_block.iloc[1], check_names=False
+        )
 
     def test_pca_factor_return_shared_across_entities(self, returns_panel):
         """The same macro factor return applies to every entity on a
@@ -229,9 +269,13 @@ class TestUniverseScopePcaFeatures:
         -- the exact projection the docstring describes."""
         definition = get_feature("factors.pca_factor_return")
         window, refit_every = 100, 10
-        result = definition.fn(returns_panel, _CONTEXT, window=window, refit_every=refit_every)
+        result = definition.fn(
+            returns_panel, _CONTEXT, window=window, refit_every=refit_every
+        )
 
-        refit_pos = window - 1  # first index where i+1 >= window and (i+1-window) % refit_every == 0
+        refit_pos = (
+            window - 1
+        )  # first index where i+1 >= window and (i+1-window) % refit_every == 0
         window_slice = returns_panel.iloc[refit_pos + 1 - window : refit_pos + 1]
         # method="power_iteration" matches what the feature itself calls
         # internally (see features/factors.py) -- comparing against the
@@ -260,15 +304,23 @@ class TestPcaFeatureUsesPowerIterationAccurately:
         idio = rng.normal(0, 0.003, (n, n_assets))
         dates = pd.date_range("2021-01-01", periods=n, freq="B")
         returns = factor[:, None] * true_loadings[None, :] + idio
-        return pd.DataFrame(returns, index=dates, columns=[f"S{i}" for i in range(n_assets)])
+        return pd.DataFrame(
+            returns, index=dates, columns=[f"S{i}" for i in range(n_assets)]
+        )
 
-    def test_pca_loading_matches_svd_reference_on_factor_data(self, factor_structured_panel):
+    def test_pca_loading_matches_svd_reference_on_factor_data(
+        self, factor_structured_panel
+    ):
         definition = get_feature("factors.pca_loading")
-        result = definition.fn(factor_structured_panel, _CONTEXT, window=200, refit_every=20)
+        result = definition.fn(
+            factor_structured_panel, _CONTEXT, window=200, refit_every=20
+        )
 
         refit_pos = 199
         window_slice = factor_structured_panel.iloc[refit_pos + 1 - 200 : refit_pos + 1]
-        svd_reference = pca_returns(window_slice, n_components=1, method="svd")["loadings"]["PC1"]
+        svd_reference = pca_returns(window_slice, n_components=1, method="svd")[
+            "loadings"
+        ]["PC1"]
 
         np.testing.assert_allclose(
             result.iloc[refit_pos].to_numpy(), svd_reference.to_numpy(), atol=1e-4
@@ -285,19 +337,27 @@ class TestPcaFeatureParamValidation:
         close_by_entity = {s: make_ohlcv(s)["Close"] for s in ("AAA", "BBB")}
         return build_returns_panel(close_by_entity)
 
-    @pytest.mark.parametrize("feature_id", ["factors.pca_loading", "factors.pca_factor_return"])
+    @pytest.mark.parametrize(
+        "feature_id", ["factors.pca_loading", "factors.pca_factor_return"]
+    )
     def test_zero_refit_every_raises_validation_error(self, returns_panel, feature_id):
         definition = get_feature(feature_id)
         with pytest.raises(ValidationError, match="refit_every"):
             definition.fn(returns_panel, _CONTEXT, window=100, refit_every=0)
 
-    @pytest.mark.parametrize("feature_id", ["factors.pca_loading", "factors.pca_factor_return"])
-    def test_negative_refit_every_raises_validation_error(self, returns_panel, feature_id):
+    @pytest.mark.parametrize(
+        "feature_id", ["factors.pca_loading", "factors.pca_factor_return"]
+    )
+    def test_negative_refit_every_raises_validation_error(
+        self, returns_panel, feature_id
+    ):
         definition = get_feature(feature_id)
         with pytest.raises(ValidationError, match="refit_every"):
             definition.fn(returns_panel, _CONTEXT, window=100, refit_every=-5)
 
-    @pytest.mark.parametrize("feature_id", ["factors.pca_loading", "factors.pca_factor_return"])
+    @pytest.mark.parametrize(
+        "feature_id", ["factors.pca_loading", "factors.pca_factor_return"]
+    )
     def test_window_below_two_raises_validation_error(self, returns_panel, feature_id):
         definition = get_feature(feature_id)
         with pytest.raises(ValidationError, match="window"):

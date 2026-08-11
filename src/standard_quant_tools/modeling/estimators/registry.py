@@ -14,7 +14,9 @@ ESTIMATOR_REGISTRY: Dict[Tuple[str, str], Type] = {}
 _ALLOWED_PARAMS: Dict[Tuple[str, str], Set[str]] = {}
 
 
-def register_estimator(task: str, name: str, cls: Type, allowed_params: Set[str]) -> None:
+def register_estimator(
+    task: str, name: str, cls: Type, allowed_params: Set[str]
+) -> None:
     ESTIMATOR_REGISTRY[(task, name)] = cls
     _ALLOWED_PARAMS[(task, name)] = allowed_params
 

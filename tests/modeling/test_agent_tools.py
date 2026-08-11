@@ -82,7 +82,9 @@ class TestFullPipeline:
 
         score_result = score_model(
             ScoreModelInput(
-                model_id=exp_result.model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"]
+                model_id=exp_result.model_id,
+                as_of="2023-12-29",
+                universe=["AAA", "BBB", "CCC"],
             )
         )
         assert score_result.n_entities == 3
@@ -98,7 +100,9 @@ class TestFullPipeline:
     def test_pipeline_via_modeling_dispatch(self, patched_multi_factory):
         """The same pipeline, routed through modeling_dispatch (as an LLM
         tool call would be) instead of calling the tool functions directly."""
-        ds_dict = modeling_dispatch("build_model_dataset", {"spec": _dataset_spec().model_dump()})
+        ds_dict = modeling_dispatch(
+            "build_model_dataset", {"spec": _dataset_spec().model_dump()}
+        )
         exp_dict = modeling_dispatch(
             "run_model_experiment",
             {"dataset_id": ds_dict["dataset_id"], "spec": _model_spec().model_dump()},

@@ -7,7 +7,9 @@ import pandas as pd
 
 from standard_quant_tools.analysis.regression import rolling_beta as _rolling_beta
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.indicators.volatility import bollinger_bands as _bollinger_bands
+from standard_quant_tools.indicators.volatility import (
+    bollinger_bands as _bollinger_bands,
+)
 from standard_quant_tools.indicators.volatility import wilder_atr as _wilder_atr
 from standard_quant_tools.metrics.volatility_estimators import (
     garman_klass_volatility as _garman_klass_volatility,
@@ -41,10 +43,14 @@ def _risk_rolling_beta(
         )
     asset_returns = ohlcv["Close"].pct_change().dropna()
     benchmark_returns = context.benchmark_close.pct_change().dropna()
-    return _rolling_beta(asset_returns, benchmark_returns, window=window)["Rolling_Beta"]
+    return _rolling_beta(asset_returns, benchmark_returns, window=window)[
+        "Rolling_Beta"
+    ]
 
 
-def _risk_atr_pct(ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14) -> pd.Series:
+def _risk_atr_pct(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14
+) -> pd.Series:
     """Raw ATR is a price level, not stationary across differently-priced
     stocks -- divide by Close, the same normalization idea
     risk.realized_volatility already gets for free by being return-scale."""

@@ -56,6 +56,32 @@ def score_model(
         # ValueError inconsistent with every other score_model failure.
         raise ValidationError(str(exc)) from exc
     manifest = load_manifest(model_id)
+
+    # ── Future-trained-model guard ────────────────────────────────────────
+    # The registered estimator is refit on the ENTIRE training panel, so it
+    # has already seen every date up to train_end_date. Scoring an as_of at
+    # or before that date produces a prediction that LOOKS point-in-time but
+    # was made by a model trained on the very future it is "predicting" --
+    # the exact mistake the walk-forward OOS predictions exist to avoid.
+    # Nothing previously compared as_of against the training window at all.
+    #
+    # For a genuine historical evaluation use the model's OOS predictions
+    # artifact (each fold predicted only dates outside its own training
+    # window); see modeling.bridge.oos_predictions_to_signal_panel.
+    if manifest.train_end_date is not None:
+        train_end_ts = _parse_date(manifest.train_end_date, "train_end_date")
+        if as_of_ts <= train_end_ts:
+            raise ValidationError(
+                f"score_model: as_of {as_of!r} is not after this model's training data, "
+                f"which ends {manifest.train_end_date}. The registered estimator is refit "
+                "on the full training panel, so scoring a date it was trained on returns a "
+                "future-trained prediction disguised as a historical one. For historical "
+                "evaluation use the model's walk-forward OOS predictions "
+                f"({manifest.oos_predictions_uri}) via "
+                "modeling.bridge.oos_predictions_to_signal_panel, which are genuinely "
+                "out-of-sample; use score_model only for dates after training."
+            )
+
     stats = load_preprocessing_stats(model_id)
     estimator = load_model(model_id)
 
@@ -109,7 +135,11 @@ def score_model(
         "missing_entities": missing_entities,
         "summary_stats": {
             "mean": float(predictions_df["prediction"].mean()),
-            "std": float(predictions_df["prediction"].std()) if len(predictions_df) > 1 else 0.0,
+            "std": (
+                float(predictions_df["prediction"].std())
+                if len(predictions_df) > 1
+                else 0.0
+            ),
             "min": float(predictions_df["prediction"].min()),
             "max": float(predictions_df["prediction"].max()),
         },

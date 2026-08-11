@@ -5,7 +5,9 @@ analysis/rally.py::detect_rally already reuses rather than reimplementing."""
 import pandas as pd
 
 from standard_quant_tools.indicators.momentum import rsi as _rsi
-from standard_quant_tools.indicators.momentum import stochastic_oscillator as _stochastic
+from standard_quant_tools.indicators.momentum import (
+    stochastic_oscillator as _stochastic,
+)
 from standard_quant_tools.indicators.trend import adx as _adx
 from standard_quant_tools.indicators.trend import macd as _macd
 from standard_quant_tools.indicators.trend import williams_r as _williams_r
@@ -14,16 +16,24 @@ from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSuppo
 from .registry import register_feature
 
 
-def _technical_rsi(ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14) -> pd.Series:
+def _technical_rsi(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14
+) -> pd.Series:
     return _rsi(ohlcv["Close"], period=period)
 
 
-def _technical_adx(ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14) -> pd.Series:
+def _technical_adx(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 14
+) -> pd.Series:
     return _adx(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=period)["ADX"]
 
 
 def _technical_macd_histogram(
-    ohlcv: pd.DataFrame, context: FeatureContext, fast: int = 12, slow: int = 26, signal: int = 9
+    ohlcv: pd.DataFrame,
+    context: FeatureContext,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
 ) -> pd.Series:
     return _macd(ohlcv["Close"], fast=fast, slow=slow, signal=signal)["Histogram"]
 
@@ -32,7 +42,11 @@ def _technical_stochastic_k(
     ohlcv: pd.DataFrame, context: FeatureContext, k_period: int = 14, d_period: int = 3
 ) -> pd.Series:
     return _stochastic(
-        ohlcv["High"], ohlcv["Low"], ohlcv["Close"], k_period=k_period, d_period=d_period
+        ohlcv["High"],
+        ohlcv["Low"],
+        ohlcv["Close"],
+        k_period=k_period,
+        d_period=d_period,
     )["Stoch_K"]
 
 
