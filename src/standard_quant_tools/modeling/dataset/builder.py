@@ -39,6 +39,32 @@ from .leakage import check_point_in_time_safety
 from .target import build_label_end_dates, build_target
 
 
+def _check_required_columns(
+    ohlcv: pd.DataFrame, symbol: str, feature_defs: list, feature_names: list
+) -> None:
+    """
+    Enforce each feature's declared `requires` against the fetched frame.
+
+    FeatureDefinition.requires was purely informational: a provider (or a
+    custom one) returning a frame without 'Volume' produced a raw KeyError
+    from inside whichever feature happened to touch it first, naming the
+    column but not the feature, the symbol, or the fact that the provider
+    was the problem.
+    """
+    available = set(ohlcv.columns)
+    problems = []
+    for definition, name in zip(feature_defs, feature_names):
+        missing = [c for c in definition.requires if c not in available]
+        if missing:
+            problems.append(f"{name!r} requires {missing}")
+    if problems:
+        raise ValidationError(
+            f"build_model_dataset: OHLCV for {symbol!r} is missing column(s) needed by "
+            f"the requested features — {'; '.join(problems)}. "
+            f"Provider returned columns: {sorted(available)}."
+        )
+
+
 def _fetch_ohlcv(provider: Any, symbol: str, start: str, end: str) -> pd.DataFrame:
     """A raw provider exception (network error, unknown ticker, rate
     limit, ...) would otherwise propagate with no indication of WHICH
@@ -96,21 +122,28 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
 
     # Universe-scope features are computed once, over the shared panel —
     # not once per entity, since PCA needs every entity's returns at once.
+    # Keyed on output_name, not id: the same feature can now appear more
+    # than once (at different parameters) under different aliases, so the
+    # id is no longer a unique key for its computed output.
     universe_outputs: Dict[str, pd.DataFrame] = {}
     for fs, definition, params in zip(spec.features, feature_defs, resolved_params):
         if definition.scope == FeatureScope.UNIVERSE:
-            universe_outputs[fs.id] = definition.fn(returns_panel, context, **params)
+            universe_outputs[fs.output_name] = definition.fn(
+                returns_panel, context, **params
+            )
 
     per_entity_features: Dict[str, pd.DataFrame] = {}
     target_by_entity: Dict[str, pd.Series] = {}
     label_end_by_entity: Dict[str, pd.Series] = {}
+    feature_names = [fs.output_name for fs in spec.features]
     for symbol, ohlcv in ohlcv_by_entity.items():
+        _check_required_columns(ohlcv, symbol, feature_defs, feature_names)
         columns: Dict[str, pd.Series] = {}
         for fs, definition, params in zip(spec.features, feature_defs, resolved_params):
             if definition.scope == FeatureScope.ENTITY:
-                columns[fs.id] = definition.fn(ohlcv, context, **params)
+                columns[fs.output_name] = definition.fn(ohlcv, context, **params)
             else:
-                columns[fs.id] = universe_outputs[fs.id][symbol]
+                columns[fs.output_name] = universe_outputs[fs.output_name][symbol]
         per_entity_features[symbol] = pd.DataFrame(columns)
         if include_target:
             target_by_entity[symbol] = build_target(ohlcv["Close"], spec.target)
@@ -142,7 +175,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # straight into sklearn, which either raises a cryptic error or
     # silently produces garbage. Same enforcement point this codebase
     # already uses pervasively elsewhere (indicators, analysis, backtest).
-    numeric_cols = [fs.id for fs in spec.features] + (
+    numeric_cols = [fs.output_name for fs in spec.features] + (
         ["target"] if include_target else []
     )
     for col in numeric_cols:
@@ -161,7 +194,10 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     result: Dict[str, Any] = {
         "panel": long_panel,
         "entities": sorted(ohlcv_by_entity.keys()),
-        "feature_ids": [fs.id for fs in spec.features],
+        # Panel column names (alias where given, id otherwise) -- these are
+        # what the model is actually trained on and what the manifest must
+        # record, not the underlying registry ids.
+        "feature_ids": [fs.output_name for fs in spec.features],
         "data_hash": data_hash,
         "spec_hash": hashlib.sha256(spec.model_dump_json().encode()).hexdigest(),
     }

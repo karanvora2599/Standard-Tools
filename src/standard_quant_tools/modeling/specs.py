@@ -8,7 +8,7 @@ tool surface.
 """
 
 import math
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional
 
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -34,6 +34,39 @@ class FeatureSpec(BaseModel):
         default_factory=dict,
         description="Overrides merged onto the feature's default_params.",
     )
+    alias: Optional[str] = Field(
+        None,
+        description=(
+            "Column name for this feature in the output panel. Defaults to "
+            "`id`. Supply one to request the SAME feature at more than one "
+            "parameter setting — e.g. market.momentum at lookback 20 and 252 "
+            "as 'mom_20' and 'mom_252', a completely standard multi-horizon "
+            "model spec that was previously impossible because the panel "
+            "keyed one column per feature id."
+        ),
+    )
+
+    @field_validator("alias")
+    @classmethod
+    def _alias_is_a_usable_column_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError("alias must be a non-empty string")
+        # These are reserved by the long panel's own schema; an alias
+        # colliding with one would overwrite the column rather than add to it.
+        if v in {"date", "entity", "target", "label_end_date"}:
+            raise ValueError(
+                f"alias={v!r} is reserved by the panel schema "
+                "(date/entity/target/label_end_date)"
+            )
+        return v
+
+    @property
+    def output_name(self) -> str:
+        """The panel column this feature produces. `id` when no alias is
+        given, so every existing spec keeps its current column name."""
+        return self.alias or self.id
 
 
 class TargetSpec(BaseModel):
@@ -94,17 +127,37 @@ class DatasetSpec(BaseModel):
 
     @field_validator("features")
     @classmethod
-    def _no_duplicate_feature_ids(cls, v: List["FeatureSpec"]) -> List["FeatureSpec"]:
-        ids = [f.id for f in v]
-        dupes = sorted({i for i in ids if ids.count(i) > 1})
-        if dupes:
+    def _no_duplicate_output_names(cls, v: List["FeatureSpec"]) -> List["FeatureSpec"]:
+        """
+        Uniqueness is enforced on the OUTPUT COLUMN, not the feature id.
+
+        Keying on the id meant momentum(20) + momentum(252) — an ordinary
+        multi-horizon spec — was rejected outright. What actually cannot
+        collide is the panel column name, so that is what is checked; an
+        `alias` distinguishes repeated uses of one feature.
+        """
+        names = [f.output_name for f in v]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if not dupes:
+            return v
+
+        # Distinguish the two causes: a genuine alias collision is a
+        # different mistake from repeating a feature without aliasing it.
+        repeated_ids = sorted(
+            {f.id for f in v if [s.id for s in v].count(f.id) > 1 and f.alias is None}
+        )
+        if repeated_ids:
             raise ValueError(
-                f"features contains duplicate ids: {dupes} — each feature id may be "
-                "requested at most once per dataset (the same underlying feature at two "
-                "different parameter settings isn't supported yet, since the output panel "
-                "keys one column per feature id)"
+                f"features would produce duplicate panel column(s): {dupes}. "
+                f"Feature id(s) {repeated_ids} are requested more than once without an "
+                "alias — give each use a distinct `alias` (e.g. "
+                "FeatureSpec(id='market.momentum', params={'lookback': 20}, "
+                "alias='mom_20') alongside alias='mom_252')."
             )
-        return v
+        raise ValueError(
+            f"features would produce duplicate panel column(s): {dupes} — two aliases "
+            "(or an alias and another feature's id) resolve to the same column name."
+        )
 
     @model_validator(mode="after")
     def _start_before_end(self) -> "DatasetSpec":
