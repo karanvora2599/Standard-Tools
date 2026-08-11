@@ -17,6 +17,14 @@ class DecisionRecord(BaseModel):
     n_workers: Optional[int] = None
     duration_ms: float
     output_hash: Optional[str] = None
+    # The same output hashed with run-specific dataset/model identifiers
+    # normalized away (see replay.normalize_identifiers). Modeling mints a
+    # fresh id per run and embeds it in artifact paths, so the literal
+    # output_hash above can never reproduce for those tools; this is what
+    # replay actually compares for them. None for records written before
+    # this field existed, which replay reports as "not comparable" rather
+    # than as a mismatch.
+    output_hash_normalized: Optional[str] = None
     status: str
     error_type: Optional[str] = None
     error_message: Optional[str] = None

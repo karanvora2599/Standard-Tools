@@ -73,9 +73,18 @@ def patched_multi_factory(
 
 @pytest.fixture(autouse=True)
 def _isolated_runs_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
-    """Every modeling test writes artifacts to a per-test temp directory,
-    never the real SQT_RUNS_DIR, with audit writes disabled (irrelevant
-    to what these tests check, and would otherwise pollute the real
-    audit log)."""
+    """
+    Every modeling test writes artifacts to a per-test temp directory,
+    never the real SQT_RUNS_DIR.
+
+    Audit is REDIRECTED to a temp directory rather than disabled. It used
+    to be switched off here (`SQT_AUDIT_ENABLED=0`) on the grounds that it
+    was irrelevant to these tests and would pollute the real log — but the
+    second concern is solved by redirection alone, and disabling it meant
+    the claimed modeling->audit integration was never exercised end to end
+    by the modeling suite at all. Tests that want to inspect the log can
+    read SQT_AUDIT_DIR; tests that don't care are unaffected.
+    """
     monkeypatch.setenv("SQT_RUNS_DIR", str(tmp_path / "runs"))
-    monkeypatch.setenv("SQT_AUDIT_ENABLED", "0")
+    monkeypatch.setenv("SQT_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("SQT_AUDIT_ENABLED", "1")

@@ -17,6 +17,7 @@ from .provenance import (
     _strategy_source_hash,
 )
 from .redaction import _redact, _redact_fields, redact_text
+from .replay import normalize_identifiers
 from .writer import AuditWriter
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,19 @@ def _run_and_record(
                     n_workers=getattr(model_instance, "n_workers", None),
                     duration_ms=round(duration_ms, 3),
                     output_hash=hash_payload(output) if output is not None else None,
+                    # A second hash with run-specific dataset/model ids
+                    # normalized away. Modeling mints a fresh id per run and
+                    # embeds it in artifact paths, so a byte-identical
+                    # re-run never matches the literal hash -- without this,
+                    # every modeling replay reports a false mismatch, which
+                    # is worse than no replay support because it looks like
+                    # evidence of drift. Both hashes are stored: the literal
+                    # one still detects any change for deterministic tools.
+                    output_hash_normalized=(
+                        hash_payload(normalize_identifiers(output))
+                        if output is not None
+                        else None
+                    ),
                     status=status,
                     error_type=error_type,
                     error_message=safe_error_message,
