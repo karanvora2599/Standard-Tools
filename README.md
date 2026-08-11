@@ -13,7 +13,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 - **Agent-First Design** — All tools return Pydantic models; 46 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
-- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), with every finding pinned by a regression test. 1964 Python tests + 9 C++ suites, all green.
+- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), followed by a separate review of the modeling runtime that found 7 more critical issues — including two leakage channels and a PCA start-vector degeneracy — none of which the suite as it stood could have caught. Every finding is pinned by a regression test. 2248 Python tests + 9 C++ suites, all green.
 
 ---
 
@@ -506,10 +506,23 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 A second, independent 5-tool registry — `list_features`, `build_model_dataset`,
 `run_model_experiment`, `score_model`, `inspect_model` — for building
-leakage-safe, walk-forward-validated statistical models from this
-library's own features (technical, market, risk, and PCA-derived
+walk-forward-validated statistical models from this library's own features
+(21 built-in: technical, market, risk, volume, statistical and PCA-derived
 factors), never merged into the 46-tool `get_agent_tools()`/`TOOL_CATEGORY`
-surface above. See [Documentation/15_modeling.md](Documentation/15_modeling.md).
+surface above.
+
+Regression and classification are both reachable through the same five
+tools (`TargetSpec(type="forward_return" | "forward_direction")`).
+Walk-forward validation purges training rows whose forward-return label
+would resolve inside the test window — feature-side embargo alone does not
+close that channel. Registered models are content-addressed, verified on
+load, and self-contained; `score_model` refuses an `as_of` inside the
+training window, since the deployed estimator is refit on the full panel.
+
+See [Documentation/15_modeling.md](Documentation/15_modeling.md) for the
+full reference, including what is explicitly deferred (fundamentals need a
+point-in-time provider first; provider/interval selection, async universe
+fetching and time-varying universe membership are not built).
 
 ---
 
@@ -648,6 +661,23 @@ Python tier, 10 in the C++ tier — full write-ups in
    plausible numbers instead of raising. Both are guarded, and all three
    execution tiers now agree on those inputs.
 
+4. **Leakage in the modeling runtime.** A separate review of
+   `standard_quant_tools.modeling` found seven critical issues the suite as
+   it stood could not have caught, two of them look-ahead channels. Walk-
+   forward validation was given only an integer `embargo`, never the target
+   horizon, so training labels built from test-period prices survived the
+   split — and the existing engine tests happened to pass
+   `embargo == horizon`, which accidentally satisfied the missing invariant
+   and hid it. Training rows are now purged by a per-row label end *date*:
+   `horizon` counts an entity's own bars, so on a sparse calendar an integer
+   offset under-purges exactly where it matters. Separately,
+   `FeatureSpec.params` was unvalidated, and pandas reads a negative
+   `pct_change` period as a *forward* window — so a negative lookback made a
+   feature read future prices while its `pit_safe` label, and the
+   point-in-time gate, stayed satisfied. Both are pinned by regression
+   tests; see [15_modeling.md](Documentation/15_modeling.md) and
+   [CHANGELOG.md](CHANGELOG.md) for the rest.
+
 If you have audit records written before this release, note that
 `content_hash` values are not comparable across the change — see the format
 note in [10_auditability.md](Documentation/10_auditability.md). The
@@ -710,7 +740,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**1965 Python tests total** — 1964 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `test_cpp_*.py` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**2249 Python tests total** — 2248 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `test_cpp_*.py` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
 
 **9 C++ test executables** run via `ctest` (Hurst, indicators, cointegration, backtest, Monte Carlo, GARCH, signal state machines, rolling regression, plus a randomized-input cointegration fuzz harness) — ~61,300 assertion-level checks between them, ~50,000 of which come from the fuzz harness alone.
 
@@ -740,11 +770,12 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/07_agent_tools.md` | Core 14 LLM tools, full 46-tool registry, Pydantic models, end-to-end agent loop |
 | `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
 | `Documentation/09_advanced_agent_tools.md` | 31 advanced/supplementary/custom-signal/analytics/options/diagnostic tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, portfolio optimization, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation, pair trade backtest, robustness diagnostics, capacity report, data quality report, compact backtest result, volatility estimators, correlation analysis, Monte Carlo simulation, stress test, liquidity metrics, GARCH volatility forecast, Kalman hedge ratio, EVT tail risk, option pricing/Greeks, implied volatility |
-| `Documentation/10_auditability.md` | Decision-record audit trail, replay verification, correlated logging, `sqt` CLI |
+| `Documentation/10_auditability.md` | Decision-record audit trail, replay verification (both tool registries), correlated logging, `sqt` CLI |
 | `Documentation/11_data_quality.md` | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
 | `Documentation/12_options.md` | Black-Scholes-Merton option pricing, Greeks, implied volatility (European options only) |
 | `Documentation/13_agent_orchestration.md` | Tool-category taxonomy, the lightweight router, and the multi-agent orchestrator-workers architecture |
 | `Documentation/14_polars_support.md` | Optional Polars interop (`pip install standard_quant_tools[polars]`): what's supported today, the conversion-boundary design, and the phased roadmap |
+| `Documentation/15_modeling.md` | The separate 5-tool modeling runtime: 21-feature catalog, regression/classification targets, leakage-purged walk-forward validation, the content-addressed model registry, the model→backtest bridge, and what's explicitly deferred |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
 

@@ -9,7 +9,7 @@ ambiguity problem TOOL_CATEGORY already exists to mitigate worse, not
 better.
 
     list_features        — the feature catalog, not semantic search
-                            (~9 entries doesn't need ranking).
+                            (21 entries doesn't need ranking).
     build_model_dataset  — DatasetSpec -> persisted panel + dataset_id.
     run_model_experiment — dataset_id + ModelSpec -> fit + walk-forward
                             validate + register, one call. Structurally

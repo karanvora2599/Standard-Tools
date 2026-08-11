@@ -9,6 +9,93 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (modeling correctness review — P0 + P1)
+
+An external line-by-line review of the modeling runtime raised findings the
+2,099-test suite did not exercise. Every P0 was reproduced against a live
+interpreter before being fixed, and each is pinned by a regression test.
+Suite across the pass: **2,099 → 2,248 passing**, 1 skipped.
+
+**Leakage (P0).** `target[t]` reads `Close[t+horizon]`, but `WalkForwardSplit`
+is never given the horizon — only an integer `embargo` — so with
+`horizon=20, embargo=0` the last 20 training labels were built from
+test-period prices. The existing engine tests happened to use
+`embargo == horizon`, which accidentally satisfied the missing invariant
+and hid it. Training rows are now purged by a per-row `label_end_date`
+recorded at build time rather than an integer offset: `horizon` counts an
+entity's OWN bars, so on a sparse or heterogeneous calendar `t+horizon`
+entity bars is a different date than `t+horizon` panel dates, and an
+integer embargo under-purges exactly there.
+
+Separately, `FeatureSpec.params` was unrestricted and splatted straight
+into the feature. `market.momentum`/`volume.obv_roc` pass `lookback` to
+`pct_change`, and pandas reads a negative period as a FORWARD window — so
+`lookback=-20` made the feature at *t* read `Close[t+20]` while its
+`PIT_SAFE` label, and therefore the point-in-time gate, stayed satisfied.
+`features/params.py` now validates resolved parameter values centrally.
+
+**Wrong answers (P0).** PCA power iteration started from the uniform
+vector, which is exactly orthogonal to a `[1,−1]` spread factor: the first
+matvec was zero and it returned the zero-eigenvalue direction as PC1 —
+explained variance 0.0001 where SVD gave 0.9999. Fixed with a fixed-seed
+non-degenerate start plus a residual check that falls back to SVD.
+`volume.obv_roc` divided by an OBV series seeded at exactly 0, producing
+`±inf` on ordinary data (25 of 60 rows) and causing the dataset builder to
+reject the whole panel; reformulated as OBV change normalized by traded
+volume. `score_model` never compared `as_of` against the training window,
+so it would return a future-trained prediction dressed as a historical one.
+
+**Provenance (P1).** The model directory was a collection of
+individually-atomic files, not a verifiable package: an edited
+`dataset_spec.json`, tampered `preprocessing_stats.json` or swapped
+`model.joblib` all went undetected. Every artifact now carries a content
+hash verified on load — `model.joblib` before `joblib.load`, since
+deserialization executes code from the file. Models bundle their own
+training spec (scoring no longer depends on the dataset directory
+surviving), `manifest.json`/`dataset_meta.json` are written last as commit
+points, and modeling stopped duplicating the column-blind
+`hash_pandas_object` hashing the audit package had already been fixed for.
+
+**Validation statistics (P1).** Pooled IC across every `(entity, date)` row
+conflates cross-sectional skill with market timing — a model with zero
+ranking ability can post a pooled IC above 0.9 by tracking the market
+factor (constructed and pinned in a test). Per-date cross-sectional IC,
+ICIR and hit rate were added alongside it, plus a predict-the-mean
+baseline, overlap-adjusted effective sample size, prediction-count-weighted
+fold averaging, per-fold metrics, skip accounting, and a `min_folds`
+default of 2 (one surviving fold is a single split, not walk-forward
+validation).
+
+**Agent safety (P1).** Estimator parameters were name-allowlisted but
+value-unbounded, so `n_estimators=10_000_000` in one tool call was a
+resource-exhaustion path; typed bounds now apply, generous enough that
+realistic requests pass. `penalty` was exposed without `solver`, so
+incompatible pairs failed inside sklearn; both are now validated together.
+`register_estimator` requires `overwrite=True`, matching `register_feature`.
+
+**Capability gaps (P1).** `ModelSpec.task` accepted `"classification"` while
+`TargetSpec` could only build a continuous return, so a binary target was
+reachable only by mutating the panel by hand — `forward_direction` makes
+classification constructible through the five-tool surface, with task/target
+compatibility enforced both ways. `FeatureSpec.alias` makes multi-horizon
+specs (`momentum(20)` + `momentum(252)`) expressible; uniqueness is enforced
+on the output column rather than the feature id. `FeatureDefinition.requires`
+is enforced instead of informational.
+
+**Audit replay (P1).** `verify_replay` hardcoded the 46-tool registry, so a
+modeling record could not be replayed at all. It now resolves against both
+surfaces and compares semantically: modeling mints a fresh id per run and
+embeds it in artifact paths, so a byte-identical re-run never matches
+literally, and reporting that as a mismatch would look like evidence of
+drift. The modeling test fixture also disabled audit entirely; it is now
+redirected to a temp directory so the integration is actually exercised.
+
+**Documentation.** `Documentation/15_modeling.md` rewritten against current
+behavior; README test counts and modeling summary updated; the
+"leakage-safe by construction" phrasing removed from `bridge.py` and the
+result model, since that guarantee rests on the target-overlap purge rather
+than on walk-forward splitting alone.
+
 ### Added (modeling: model→backtest bridge, feature/estimator expansion)
 
 - **`modeling.bridge.oos_predictions_to_signal_panel`** — a trained
@@ -46,10 +133,14 @@ bump, consistent with SemVer's pre-1.0 clause.
   function's whole-series `cummax()` gives a stale all-time peak inside a
   multi-year training window; the feature uses a bounded
   `.rolling(window).max()` peak instead.
-- **4 new estimators**: `random_forest` for regression (closing an
+- **3 new estimators**: `random_forest` for regression (closing an
   asymmetry — it already existed for classification only) and
   `gradient_boosting` for both tasks (the classic, non-histogram GBM).
-  Regression 5→7, classification 3→5. Still an explicit allowlist, still
+  Regression 5→7, classification 3→4 — 11 registry entries in total.
+  (An earlier revision of this entry said "4 new estimators" and
+  "classification 3→5"; the registry has four classification entries:
+  `logistic`, `hist_gradient_boosting`, `random_forest`,
+  `gradient_boosting`.) Still an explicit allowlist, still
   `scikit-learn>=1.3.0` only — no new dependency.
 
 28 new tests (modeling suite 99 → 127), full suite 2099 passed / 1

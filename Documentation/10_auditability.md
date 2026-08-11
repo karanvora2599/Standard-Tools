@@ -327,6 +327,41 @@ would have hidden exactly this case.
 
 Note that `verify_replay` re-executes the tool function directly (not
 through `dispatch()`), so it does not itself write a new decision record.
+x`
+### Replaying modeling records
+
+The modeling runtime is a second tool registry (`MODELING_TOOL_DISPATCH`, 5
+entries) deliberately kept separate from the 46-tool analysis surface — see
+[15_modeling.md](15_modeling.md). `verify_replay` resolves the record's
+`tool_name` against **both** registries, so a `run_model_experiment` or
+`build_model_dataset` record replays like any other. An earlier version
+looked only at the analysis registry, so every modeling record raised
+"unknown tool" and could not be replayed at all.
+
+Output comparison for those records falls back to a **semantic** compare.
+Each modeling run mints a fresh `dataset_id`/`model_id` and embeds it in
+the artifact URIs it returns, so a perfectly reproduced re-run still
+produces a different output payload byte-for-byte. The literal
+`output_hash` comparison runs first, exactly as for any other tool; only
+when it fails *and* the output actually carries a run-scoped identifier is
+the comparison redone against `output_hash_normalized` — the hash of the
+output with those ids (and the artifact paths containing them) rewritten to
+a placeholder:
+
+```python
+result = verify_replay(record)
+result.output_match   # True after normalization
+result.notes          # says the comparison was made with ids normalized away
+```
+
+Normalization is deliberately narrow: only the `ds_`/`mdl_` identifier
+pattern is rewritten, so a changed metric, feature list or fold count still
+reports as a mismatch. A record written before `output_hash_normalized`
+existed yields `output_match = None` with a note explaining that a literal
+mismatch on such a record is not evidence either way — not `False`.
+Reporting a freshly-minted id as a mismatch would look like evidence of
+drift when nothing had changed, which is the failure mode most likely to
+make someone distrust a replay result that was actually correct.
 
 ---
 

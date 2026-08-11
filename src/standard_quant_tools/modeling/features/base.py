@@ -25,8 +25,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class TemporalSupport(str, Enum):
-    # Price/volume-derived — safe to compute anywhere in a historical
-    # training window since the source data itself isn't revised.
+    # The FORMULA is causal: this feature at date t reads only data from t
+    # and earlier. Price/volume-derived features qualify.
+    #
+    # This is a property of the formula ONLY. It does not assert that the
+    # underlying dataset is true point-in-time data -- the data layer
+    # tracks that separately (DataSetMetadata.point_in_time /
+    # survivorship_free, both reported False by the default yfinance
+    # provider), and the modeling PIT gate does not currently consult it.
+    # Nor does the label alone constrain PARAMETERS: a negative lookback
+    # turns a "pit_safe" formula into a forward-looking one, which is why
+    # features/params.py validates resolved parameter values separately.
     PIT_SAFE = "pit_safe"
     # e.g. fundamentals as currently reported — no point-in-time-safe
     # historical provider wired up yet (see dataset/leakage.py). Nothing

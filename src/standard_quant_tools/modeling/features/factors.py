@@ -15,11 +15,21 @@ is held fixed until the next refit. Each refit calls pca_returns with
 method="power_iteration" rather than the default full SVD -- since only
 PC1 is ever needed here, power iteration is meaningfully cheaper (it
 solves for just the requested component instead of every singular
-triplet regardless of how many were asked for), with no accuracy cost
+triplet regardless of how many were asked for), and it agrees with SVD
 for a real, factor-structured universe where PC1's eigenvalue is
-well-separated from the rest (see pca_returns's `method` docstring for
-the one case -- near-degenerate eigenvalues -- where this wouldn't hold,
-which doesn't apply here since only the single dominant component is used):
+well-separated from the rest.
+
+That agreement is not automatic, and an earlier revision of this comment
+claimed it came at "no accuracy cost" without qualification. Two ways it
+can fail are handled inside pca_returns rather than here: a start vector
+orthogonal to the dominant eigenvector returns the ZERO-eigenvalue
+direction as PC1 (the uniform start hit this on a plain [1,-1] spread
+universe -- explained variance 0.0001 against SVD's 0.9999), and
+near-degenerate eigenvalues leave the corresponding eigenvectors
+numerically underdetermined. pca_returns now uses a non-degenerate fixed
+start and falls back to SVD when a residual check says the result did not
+converge, so a bad refit degrades to the slower method instead of
+silently producing a meaningless loading. See its `method` docstring:
 
   factors.pca_loading      — each entity's PC1 loading, forward-filled
                               between refits.
