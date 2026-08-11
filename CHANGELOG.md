@@ -9,6 +9,74 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (modeling: degenerate windows, warm-up, and signed importance)
+
+Four features answered confidently where they had no information, and the
+diagnostic meant to catch unstable features rated the least stable one
+perfectly stable.
+
+- **`market.new_high_breakout` fabricated its entire warm-up.**
+  `breakout_high` is NaN for the first `period` bars and `NaN > x` is
+  False, so `.astype(float)` emitted **0.0** — "no breakout occurred" —
+  for every bar before the comparison window existed. It was the only
+  feature in the catalog that never produced NaN, so it never let
+  alignment drop its own warm-up: a dataset built on it began `period`
+  bars early, with fabricated negatives in exactly the rows a breakout
+  model cares about most, and its declared `lookback=20` described nothing
+  observable. Verified against the old code: the panel started at bar 0
+  with 115 rows where it should have had 95.
+
+- **`risk.atr_pct` produced ±inf, which rejected the whole panel.** The
+  division by `Close` was unguarded, so a single price of exactly 0.0 (a
+  bad print, a delisted stub, a provider filling a gap with zero) gave an
+  inf — and `build_dataset`'s finite-value guard rejects the ENTIRE panel
+  on a non-finite value, so one bad bar in one symbol failed the whole
+  build with an error naming the feature rather than the data. Exactly the
+  failure mode `volume.obv_roc` was already fixed for. Verified: a
+  two-symbol build with one zero print raised instead of building; it now
+  drops the affected rows and keeps both symbols.
+
+- **`risk.bollinger_pct_b` dropped halted symbols instead of describing
+  them.** A flat window collapses both bands onto the mean, making %B a
+  0/0 that came out NaN and was silently dropped by alignment. When the
+  window is flat, Close equals that mean exactly, so 0.5 — the middle band
+  — is what %B is *defined* to be there, not a fallback. Warm-up stays
+  NaN: conflating "the bands collapsed" with "there are not yet `period`
+  bars" would repeat the breakout bug. Only the exactly-degenerate case
+  needed handling; a near-flat window followed by a jump is well behaved,
+  because the jump enters the standard deviation that scales it (%B peaks
+  near 1.56, not at infinity).
+
+- **`volume.vwap_deviation`** got the same denominator guard. Flagged
+  honestly as defensive rather than a reproduced failure: a zero-volume
+  window already yielded NaN here, because VWAP is itself 0/0 there.
+
+- **Feature importance discarded the sign, which silently inverted the
+  stability metric.** `fold_feature_importance` returned `|coef|`, so the
+  cross-fold `std` — whose stated purpose is showing "whether a feature's
+  importance is stable or an artifact of one fold" — was computed on
+  magnitudes. A feature alternating `+0.5, −0.5, +0.5, −0.5` across folds,
+  the maximally unstable case and a textbook sign of fitting noise, is
+  `|0.5|` every fold: **std exactly 0.0, reported as perfectly stable.**
+  Added `signed_mean`, `signed_std` and `sign_consistency`; `mean`/`std`
+  keep their meaning so existing manifests stay comparable. All three are
+  NaN for tree estimators, whose importances have no direction —
+  deliberately NaN rather than a plausible default. Exact-zero
+  coefficients (routine under L1) do not vote on direction.
+
+  Also fixed a latent misattribution: multiclass `coef_` is
+  `(n_classes, n_features)`, which ravels to `n_classes * n_features`
+  values, and `zip()` kept the first `n_features` — reporting class 0's
+  coefficients as THE importances and dropping every other class without a
+  word. Not reachable through the tool surface today (`forward_direction`
+  is binary), but `register_estimator` accepts custom estimators, and a
+  wrong attribution is worse than an absent one.
+
+One existing test was rewritten: it reproduced
+`market.new_high_breakout`'s implementation expression verbatim, warm-up
+included, so it pinned the bug rather than the look-ahead-safety claim it
+documented.
+
 ### Added (modeling: data/runtime architecture)
 
 The modeling runtime was built against whatever `DataFactory.get_provider()`

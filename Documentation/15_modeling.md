@@ -182,12 +182,12 @@ this codebase, not new indicator math:
 | `technical.stochastic_k` | `indicators.momentum.stochastic_oscillator` — `Stoch_K` column | entity |
 | `technical.williams_r` | `indicators.trend.williams_r` | entity |
 | `market.momentum` | trailing `pct_change` | entity |
-| `market.new_high_breakout` | look-ahead-safe Donchian breakout (same `.shift(1)` convention as `backtest.strategies`/`analysis.rally`) | entity |
+| `market.new_high_breakout` | look-ahead-safe Donchian breakout (same `.shift(1)` convention as `backtest.strategies`/`analysis.rally`). Warm-up bars are NaN, not 0.0 — `NaN > x` is False, so `.astype(float)` alone asserted "no breakout" for every bar before the window existed | entity |
 | `market.psar_trend` | `indicators.trend.parabolic_sar` — `Trend` column (±1; the raw `SAR` price level isn't cross-sectionally comparable) | entity |
 | `risk.realized_volatility` | `metrics.volatility_estimators.yang_zhang_volatility` | entity |
 | `risk.rolling_beta` | `analysis.regression.rolling_beta` against `DatasetSpec.benchmark` | entity |
-| `risk.atr_pct` | `indicators.volatility.wilder_atr` ÷ Close (normalized — raw ATR is a price level) | entity |
-| `risk.bollinger_pct_b` | `indicators.volatility.bollinger_bands` — %B, Close's position within the bands | entity |
+| `risk.atr_pct` | `indicators.volatility.wilder_atr` ÷ Close (normalized — raw ATR is a price level). A non-positive Close yields NaN rather than ±inf | entity |
+| `risk.bollinger_pct_b` | `indicators.volatility.bollinger_bands` — %B, Close's position within the bands. A flat window collapses both bands onto the mean, where %B is 0.5 (the middle band) rather than 0/0 | entity |
 | `risk.parkinson_volatility` | `metrics.volatility_estimators.parkinson_volatility` | entity |
 | `risk.garman_klass_volatility` | `metrics.volatility_estimators.garman_klass_volatility` | entity |
 | `risk.rolling_drawdown` | trailing `.rolling(window).max()` peak, **not** `metrics.risk_metrics.drawdown_series` (that function's whole-series `cummax()` gives a stale peak inside a multi-year training window) | entity |
@@ -563,6 +563,38 @@ folds. One surviving fold is a single train/test split, not walk-forward
 validation — it cannot show whether performance holds across time, which is
 the entire point. Lower it to 1 only for a deliberately short exploratory
 run.
+
+### Feature importance, with direction
+
+`inspect_model(view="feature_importance")` reports five numbers per
+feature, computed across folds:
+
+| Key | Meaning |
+|---|---|
+| `mean` | average \|value\| — the ranking quantity, unchanged, so older manifests stay comparable |
+| `std` | spread of \|value\| |
+| `signed_mean` | average coefficient **with its sign** |
+| `signed_std` | spread of the signed coefficient — the real stability metric |
+| `sign_consistency` | fraction of folds agreeing with the majority sign, in [0.5, 1.0] |
+
+The last three exist because taking the absolute value *first* broke the
+stability report this section is for. A feature whose coefficient
+alternates `+0.5, −0.5, +0.5, −0.5` across folds — the maximally unstable
+case, and a textbook sign of fitting noise — is `|0.5|` in every fold, so
+its `std` is exactly **0.0**: reported as perfectly stable by the very
+number whose job was catching it. `signed_std` reports 0.5 and
+`sign_consistency` 0.5 for that case.
+
+Direction also matters on its own: a stably negative coefficient is a
+working contrarian signal, and magnitude alone made it indistinguishable
+from a positive one of the same size.
+
+All three signed keys are **NaN for tree estimators**, whose
+`feature_importances_` are non-negative by construction and carry no
+direction — deliberately NaN rather than a plausible default, so "no sign
+information exists" cannot be misread as "the sign was stable". Exact-zero
+coefficients (routine under L1) are excluded from `sign_consistency` rather
+than counted as agreeing with either side.
 
 After validation, the registered model is refit on the **full** panel —
 folds are for validation, deployment uses every observation. The

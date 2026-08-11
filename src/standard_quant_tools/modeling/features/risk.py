@@ -53,9 +53,20 @@ def _risk_atr_pct(
 ) -> pd.Series:
     """Raw ATR is a price level, not stationary across differently-priced
     stocks -- divide by Close, the same normalization idea
-    risk.realized_volatility already gets for free by being return-scale."""
-    atr = _wilder_atr(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=period)
-    return atr / ohlcv["Close"]
+    risk.realized_volatility already gets for free by being return-scale.
+
+    The denominator is guarded because the division was unconditional: a
+    single Close of exactly 0.0 (a bad print, a delisted stub, a provider
+    filling a gap with zero) produced +/-inf, and inf does not merely
+    corrupt that one row -- build_dataset's finite-value guard rejects the
+    ENTIRE panel, so one bad bar in one symbol failed the whole build with
+    an error pointing at the feature rather than the data. Exactly the
+    failure mode volume.obv_roc was already fixed for. A non-positive price
+    has no meaningful volatility ratio, so NaN is the right answer, and
+    alignment drops it like any other missing value."""
+    close = ohlcv["Close"]
+    atr = _wilder_atr(ohlcv["High"], ohlcv["Low"], close, period=period)
+    return atr / close.where(close > 0)
 
 
 def _risk_bollinger_pct_b(
@@ -63,10 +74,28 @@ def _risk_bollinger_pct_b(
 ) -> pd.Series:
     """%B: where Close sits within the bands, 0=lower band, 1=upper band --
     the raw band levels themselves aren't cross-sectionally comparable,
-    same reasoning as risk.atr_pct."""
+    same reasoning as risk.atr_pct.
+
+    A window of perfectly flat prices (a halted symbol, a stale-quoted
+    illiquid name, a synthetic constant series) collapses both bands onto
+    the mean, making %B a 0/0 that came out NaN and was silently dropped by
+    alignment -- so a halt removed rows rather than describing one. When the
+    window IS flat, Close equals the moving average exactly, and 0.5 is the
+    middle band, not a fallback: it is the value %B is defined to take
+    there. Note this is the exactly-degenerate case only; a near-flat window
+    followed by a jump is well behaved, because the jump enters the standard
+    deviation that scales it (%B peaks around 1.56, not at infinity).
+
+    Warm-up stays NaN. `band_width.notna()` distinguishes "the bands
+    collapsed" from "there are not yet `period` bars to compute them" --
+    conflating the two would fabricate a 0.5 for rows with no window at all,
+    which is the mistake market.new_high_breakout was making with its own
+    warm-up. Same guarded-denominator shape as the degenerate-window
+    handling in stochastic_oscillator and spread_zscore."""
     bands = _bollinger_bands(ohlcv["Close"], period=period, num_std=num_std)
     band_width = bands["BB_Upper"] - bands["BB_Lower"]
-    return (ohlcv["Close"] - bands["BB_Lower"]) / band_width
+    pct_b = (ohlcv["Close"] - bands["BB_Lower"]) / band_width.where(band_width > 0)
+    return pct_b.where(band_width.isna() | (band_width > 0), 0.5)
 
 
 def _risk_parkinson_volatility(
@@ -136,7 +165,8 @@ register_feature(
 register_feature(
     FeatureDefinition(
         id="risk.bollinger_pct_b",
-        description="Position of Close within its Bollinger Bands: 0=lower band, 1=upper band.",
+        description="Position of Close within its Bollinger Bands: 0=lower band, "
+        "1=upper band, 0.5 when a flat window collapses the bands onto the mean.",
         fn=_risk_bollinger_pct_b,
         default_params={"period": 20, "num_std": 2.0},
         temporal_support=TemporalSupport.PIT_SAFE,

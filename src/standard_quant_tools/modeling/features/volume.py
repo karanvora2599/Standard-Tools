@@ -56,11 +56,19 @@ def _volume_vwap_deviation(
 ) -> pd.Series:
     """Raw VWAP is a price level, not comparable across differently-priced
     stocks -- normalized as (Close - VWAP) / VWAP, the same "divide by a
-    price level to make it stationary" convention risk.atr_pct uses."""
+    price level to make it stationary" convention risk.atr_pct uses.
+
+    The denominator guard is defensive rather than a reproduced failure:
+    a fully halted window (zero traded volume) already yields NaN here,
+    because VWAP is itself 0/0 there and NaN propagates -- so unlike
+    risk.atr_pct this was not producing inf on any input found. It is
+    guarded anyway because the difference between the two is one line of
+    the underlying VWAP implementation, and the consequence of being wrong
+    is not a bad row but a rejected panel."""
     vwap_series = _vwap(
         ohlcv["High"], ohlcv["Low"], ohlcv["Close"], ohlcv["Volume"], period=period
     )
-    return (ohlcv["Close"] - vwap_series) / vwap_series
+    return (ohlcv["Close"] - vwap_series) / vwap_series.where(vwap_series > 0)
 
 
 register_feature(

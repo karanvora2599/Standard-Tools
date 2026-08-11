@@ -20,8 +20,26 @@ def _market_momentum(
 def _market_new_high_breakout(
     ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
 ) -> pd.Series:
+    """
+    The `.where(...)` is the whole point, not defensive padding.
+
+    `breakout_high` is NaN for the first `period` bars, and `NaN > x`
+    evaluates to False, so `.astype(float)` turned every warm-up bar into a
+    confident 0.0 -- "no breakout occurred" asserted for rows where nothing
+    is known yet. Two consequences, both silent:
+
+      * The feature was the only one in the catalog that never produced NaN,
+        so it never let alignment drop its own warm-up rows. A dataset built
+        from it alone began `period` bars earlier than it should, with
+        fabricated negatives in exactly the rows a breakout model cares
+        about most.
+      * Its declared lookback=20 described nothing observable.
+
+    Restricting the output to rows with a real comparison window makes the
+    warm-up NaN, which alignment drops like every other feature's.
+    """
     breakout_high = ohlcv["High"].rolling(period).max().shift(1)
-    return (ohlcv["Close"] > breakout_high).astype(float)
+    return (ohlcv["Close"] > breakout_high).astype(float).where(breakout_high.notna())
 
 
 def _market_psar_trend(
@@ -56,7 +74,8 @@ register_feature(
     FeatureDefinition(
         id="market.new_high_breakout",
         description="1.0 if Close breaks above the prior `period`-bar High "
-        "(today's own bar excluded), else 0.0.",
+        "(today's own bar excluded), else 0.0. NaN until `period` bars of "
+        "history exist — the warm-up is unknown, not a confirmed non-breakout.",
         fn=_market_new_high_breakout,
         default_params={"period": 20},
         temporal_support=TemporalSupport.PIT_SAFE,

@@ -68,12 +68,22 @@ class TestBuiltInFeaturesMatchUnderlyingPrimitives:
 
     def test_market_new_high_breakout_excludes_own_bar(self, ohlcv):
         """Same look-ahead-safe convention as analysis/rally.py: today's
-        own bar must be excluded from its own breakout comparison."""
+        own bar must be excluded from its own breakout comparison.
+
+        Asserted over the rows where the comparison is defined. The earlier
+        version of this test reproduced the implementation expression
+        verbatim, warm-up included, so it pinned the bug that the warm-up
+        bars — where `breakout_high` is NaN and `NaN > x` is False — were
+        emitted as a confident 0.0.
+        """
         definition = get_feature("market.new_high_breakout")
         result = definition.fn(ohlcv, _CONTEXT, period=20)
         breakout_high = ohlcv["High"].rolling(20).max().shift(1)
+        defined = breakout_high.notna()
         expected = (ohlcv["Close"] > breakout_high).astype(float)
-        pd.testing.assert_series_equal(result, expected, check_names=False)
+        pd.testing.assert_series_equal(
+            result[defined], expected[defined], check_names=False
+        )
 
     def test_risk_realized_volatility(self, ohlcv):
         definition = get_feature("risk.realized_volatility")
