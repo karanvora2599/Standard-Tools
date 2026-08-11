@@ -122,6 +122,11 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             "provider": input_data.spec.provider,
             "interval": input_data.spec.interval,
             "warnings": built["warnings"],
+            # Per-column row loss from feature/target alignment. Kept with
+            # the dataset rather than only in the tool response, so "why is
+            # this panel so small" is answerable later without a rebuild.
+            "drop_attribution": built["drop_attribution"],
+            "entities_fetched": built["entities_fetched"],
         },
     )
 
@@ -132,6 +137,7 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
         feature_ids=built["feature_ids"],
         target_id=built["target_id"],
         warnings=built["warnings"],
+        drop_attribution=built["drop_attribution"],
     )
 
 

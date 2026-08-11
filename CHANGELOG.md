@@ -9,6 +9,55 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (modeling: per-feature drop attribution)
+
+Feature/target alignment drops rows — every feature consumes its lookback
+window and a forward-return target consumes its horizon — and that loss
+was reported as a final row count and nothing else. A count cannot
+separate "this is the warm-up I asked for" from "one feature is silently
+costing me two thirds of my panel", and it cannot say which feature.
+
+- **`BuildModelDatasetResult.drop_attribution`** — rows before and after
+  alignment, per-entity drop counts, and two counts per column:
+  `n_missing` (rows where that column was NaN) and `n_sole_missing` (rows
+  where it was the ONLY thing missing).
+
+  The pair matters. Warm-up windows overlap, so per-column `n_missing`
+  sums to far more than the rows actually lost, and a short-lookback
+  feature sitting entirely inside a longer one looks equally guilty. Only
+  `n_sole_missing` says what removing that one feature would give back —
+  in a measured example, `technical.rsi` was missing in 42 rows and
+  recoverable in none of them, because its 14-bar warm-up sits inside
+  `risk.rolling_drawdown`'s 252-bar one, which was solely responsible for
+  515.
+
+  The target is attributed separately from the features: its cause (the
+  forward horizon) and remedy (a shorter horizon, or more data) differ,
+  and unlike a feature it cannot be removed.
+
+- **Warnings** when alignment costs more than 30% of rows, or when a single
+  feature is solely responsible for more than 10% — not on every dataset,
+  since a warning that always fires trains the reader to skip the ones that
+  matter. When no column is ever the sole cause, the warning says so rather
+  than showing an empty breakdown, which would read as a bug.
+
+- **The empty-panel error now explains itself**, listing rows missing per
+  column. "No rows survive feature/target alignment" previously left the
+  caller to guess which feature was too long for their window.
+
+- **`entities` now reports what reached the panel**, not what was fetched.
+  The two differ whenever a symbol's history is shorter than the feature
+  lookbacks plus the target horizon, and reporting the fetched list made a
+  dataset look like it covered a universe the model never saw a single row
+  of. The fetched list remains available as `entities_fetched`, and any
+  symbol that dropped out is named in `warnings`.
+
+`stack_long`/`stack_features_only` now return `(panel, attribution)`. The
+tuple is deliberate: an external caller breaks loudly on unpacking rather
+than silently receiving un-dropped rows. The aligned panel itself is
+unchanged, which a test pins — attribution is additive, and any change
+there would move every downstream hash and metric.
+
 ### Fixed (modeling: degenerate windows, warm-up, and signed importance)
 
 Four features answered confidently where they had no information, and the

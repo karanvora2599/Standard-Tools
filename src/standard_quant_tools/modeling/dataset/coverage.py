@@ -39,6 +39,17 @@ _COVERAGE_WARN_FRACTION = 0.98
 _INTERSECTION_WARN_FRACTION = 0.95
 
 
+# Share of pre-alignment rows that must be lost before the drop breakdown
+# is reported. Warm-up loss is expected and universal -- warning about every
+# dataset would train the reader to skip the warnings that matter.
+_DROP_WARN_FRACTION = 0.30
+
+# A single feature costing more than this share of pre-alignment rows on its
+# own is named even when the overall drop rate is unremarkable, since it is
+# individually removable.
+_SOLE_CAUSE_WARN_FRACTION = 0.10
+
+
 def _fmt_date(value: Any) -> str:
     try:
         return pd.Timestamp(value).strftime("%Y-%m-%d")
@@ -178,6 +189,76 @@ def entity_coverage_warnings(
         warnings.append(
             f"requested end {_fmt_date(requested_end)} but the latest bar available "
             f"for any symbol is {_fmt_date(actual_end)}."
+        )
+    return warnings
+
+
+def alignment_warnings(
+    attribution: Dict[str, Any],
+    entities_fetched: List[str],
+    entities_surviving: List[str],
+) -> List[str]:
+    """
+    What the feature/target alignment cost, and who to blame.
+
+    Row loss during alignment is normal and was reported only as a final
+    row count, which cannot distinguish the warm-up you asked for from one
+    feature quietly consuming most of the panel. `n_sole_missing` is the
+    number that makes this actionable: it is exactly what removing that one
+    feature would give back, so a large-lookback feature sitting behind an
+    even larger one correctly scores zero rather than looking like the
+    culprit.
+    """
+    warnings: List[str] = []
+    before = attribution.get("rows_before_alignment", 0)
+    dropped = attribution.get("rows_dropped", 0)
+    per_feature: Dict[str, Dict[str, int]] = attribution.get("per_feature", {})
+
+    if before:
+        sole = {
+            name: counts.get("n_sole_missing", 0)
+            for name, counts in per_feature.items()
+            if counts.get("n_sole_missing", 0) > 0
+        }
+        heavy = {
+            name: count
+            for name, count in sole.items()
+            if count / before >= _SOLE_CAUSE_WARN_FRACTION
+        }
+
+        if dropped / before >= _DROP_WARN_FRACTION or heavy:
+            ranked = sorted(sole.items(), key=lambda kv: -kv[1])[:5]
+            if ranked:
+                breakdown = ", ".join(
+                    f"{name} {count} ({count / before:.0%})" for name, count in ranked
+                )
+                attributable = (
+                    f" Rows lost to a single column, i.e. recoverable by removing "
+                    f"just that one: {breakdown}."
+                )
+            else:
+                # Every dropped row was missing two or more columns, so no
+                # single removal recovers anything -- worth saying outright,
+                # since an empty breakdown otherwise reads as a bug.
+                attributable = (
+                    " No single column accounts for any dropped row on its own — "
+                    "every loss is a warm-up window overlapping another, so removing "
+                    "one feature recovers nothing. Shorten the longest lookback or "
+                    "start the dataset earlier."
+                )
+            warnings.append(
+                f"alignment dropped {dropped} of {before} row(s) "
+                f"({dropped / before:.0%}) — each feature consumes its lookback "
+                f"window and the target consumes its forward horizon." + attributable
+            )
+
+    missing_entities = sorted(set(entities_fetched) - set(entities_surviving))
+    if missing_entities:
+        warnings.append(
+            f"fetched but contributed no rows to the panel: {missing_entities} — "
+            "their history is shorter than the feature lookbacks plus the target "
+            "horizon, so they were counted in `universe` but the model never saw "
+            "them."
         )
     return warnings
 

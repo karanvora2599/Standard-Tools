@@ -337,6 +337,57 @@ unusable against its own default data source while teaching the caller
 nothing. The list is empty for a provider making both guarantees over
 aligned daily histories, so a non-empty one means something.
 
+### What alignment dropped, and why
+
+A row survives into the panel only when every feature and the target are
+present for it. That loss is normal — each feature consumes its lookback
+window, the forward-return target consumes its horizon — and it used to be
+reported as a final row count and nothing else, which cannot separate the
+warm-up you asked for from one feature quietly eating the panel.
+
+`build_model_dataset` returns `drop_attribution`: rows before and after,
+per-entity drop counts, and **two** counts per column.
+
+| Count | Meaning |
+|---|---|
+| `n_missing` | rows where that column was NaN |
+| `n_sole_missing` | rows where it was the **only** thing missing |
+
+The second is the actionable one. Warm-up windows overlap, so `n_missing`
+sums to far more than the rows actually lost, and a short-lookback feature
+sitting entirely inside a longer one looks just as guilty. Only
+`n_sole_missing` says what removing that one feature would give back:
+
+```
+rows 860 -> 288 (dropped 572)
+  risk.rolling_drawdown   n_missing=562   n_sole_missing=515
+  target                  n_missing= 15   n_sole_missing= 10
+  technical.rsi           n_missing= 42   n_sole_missing=  0
+```
+
+`technical.rsi` is missing in 42 rows and is worth removing in none of
+them — its 14-bar warm-up is entirely inside `rolling_drawdown`'s 252-bar
+one. The target is attributed separately because its cause (the forward
+horizon) and its remedy (a shorter horizon, or more data) are different,
+and unlike a feature it cannot simply be removed.
+
+A warning is raised when alignment costs more than 30% of the rows, or
+when any single feature is solely responsible for more than 10% — not on
+every dataset, since a warning that always fires trains the reader to skip
+the ones that matter. When no column is ever the sole cause, the warning
+says so explicitly rather than showing an empty breakdown.
+
+The same attribution appears in the error raised when *nothing* survives,
+which previously left the caller to guess which feature was too long for
+the window they asked for.
+
+**`entities` reports what reached the panel**, not what was fetched. The
+two differ whenever a symbol's history is shorter than the feature
+lookbacks plus the target horizon; reporting the fetched list made a
+dataset look like it covered a universe the model never saw a single row
+of. The fetched list is still available as `entities_fetched`, and any
+symbol that dropped out entirely is named in `warnings`.
+
 Warnings are persisted with the dataset and carried onto any model trained
 from it as `ModelManifest.dataset_warnings`, surfaced by
 `inspect_model(view="lineage")` — the caveats belong next to the metrics
@@ -869,11 +920,6 @@ Not built here, and not accidentally half-built either:
   needs index-constituent history no shipped provider exposes; what is
   built is the *diagnosis* — see [Coverage and provenance
   warnings](#coverage-and-provenance-warnings).
-- **Per-feature drop attribution** — the coverage warnings report which
-  ENTITIES lost rows and why, not which FEATURE's lookback caused a given
-  row to be dropped during alignment. Relatedly, `entities` reports the
-  symbols FETCHED, not necessarily those that survived into the training
-  panel.
 - **Non-daily feature calibration** — `interval` is threaded through to
   the provider, but the built-in features' default parameters are stated
   in trading days and the realized-volatility features annualize with a

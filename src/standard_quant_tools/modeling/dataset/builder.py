@@ -38,6 +38,7 @@ from ..features.registry import get_feature
 from ..specs import DatasetSpec
 from .alignment import build_returns_panel, stack_features_only, stack_long
 from .coverage import (
+    alignment_warnings,
     entity_coverage_warnings,
     intersection_warnings,
     interval_warnings,
@@ -216,19 +217,40 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
             )
 
     if include_target:
-        long_panel = stack_long(
+        long_panel, drop_attribution = stack_long(
             per_entity_features, target_by_entity, label_end_by_entity
         )
     else:
-        long_panel = stack_features_only(per_entity_features)
+        long_panel, drop_attribution = stack_features_only(per_entity_features)
 
     if long_panel.empty:
+        # The attribution turns a dead end into a diagnosis: "no rows
+        # survive" previously left the caller to guess which of their
+        # features was too long for the window they asked for.
         raise ValidationError(
             "build_model_dataset: no rows survive feature"
             + ("/target" if include_target else "")
             + " alignment — check that start/end covers enough history for the "
-            "requested features' lookback windows."
+            "requested features' lookback windows. Rows missing per column, out "
+            f"of {drop_attribution['rows_before_alignment']}: "
+            + ", ".join(
+                f"{name}={counts['n_missing']}"
+                for name, counts in sorted(
+                    drop_attribution["per_feature"].items(),
+                    key=lambda kv: -kv[1]["n_missing"],
+                )
+            )
         )
+
+    entities_fetched = sorted(ohlcv_by_entity.keys())
+    # Entities that actually reached the panel, not the ones fetched. The
+    # two differ whenever a symbol's history is shorter than the feature
+    # lookbacks plus the target horizon, and reporting the fetched list made
+    # a dataset look like it covered a universe the model never saw.
+    entities_surviving = sorted(long_panel["entity"].unique().tolist())
+    warnings.extend(
+        alignment_warnings(drop_attribution, entities_fetched, entities_surviving)
+    )
 
     # dropna() (inside stack_long/stack_features_only) removes NaN but
     # not +/-inf -- a degenerate feature computation (e.g. division by a
@@ -254,10 +276,17 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
 
     result: Dict[str, Any] = {
         "panel": long_panel,
-        "entities": sorted(ohlcv_by_entity.keys()),
+        # Entities in the PANEL. This used to be the fetched list, which
+        # silently overstated coverage for any symbol whose history did not
+        # survive alignment.
+        "entities": entities_surviving,
+        "entities_fetched": entities_fetched,
         # BuildModelDatasetResult.warnings has existed since the first
         # version of the tool surface and was never populated by anything.
         "warnings": warnings,
+        # Per-column row loss, so "3,000 rows" can be read as the warm-up
+        # that was asked for or as one feature eating the panel.
+        "drop_attribution": drop_attribution,
         # Panel column names (alias where given, id otherwise) -- these are
         # what the model is actually trained on and what the manifest must
         # record, not the underlying registry ids.

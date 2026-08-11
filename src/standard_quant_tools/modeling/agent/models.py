@@ -52,9 +52,31 @@ class BuildModelDatasetInput(BaseModel):
 class BuildModelDatasetResult(BaseModel):
     dataset_id: str
     rows: int
-    entities: List[str]
+    entities: List[str] = Field(
+        ...,
+        description=(
+            "Entities present in the built panel. This reports what the "
+            "model will actually be trained on, not the symbols fetched — "
+            "the two differ whenever a symbol's history is shorter than the "
+            "feature lookbacks plus the target horizon, and reporting the "
+            "fetched list overstated coverage. A symbol that dropped out "
+            "entirely is named in `warnings`."
+        ),
+    )
     feature_ids: List[str]
     target_id: str
+    drop_attribution: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "What feature/target alignment cost, per column: `n_missing` "
+            "(rows where that column was NaN) and `n_sole_missing` (rows "
+            "where it was the ONLY thing missing — what removing just that "
+            "feature would give back), plus rows before/after and per-entity "
+            "drop counts. Row loss here is normal, but a final row count "
+            "alone cannot separate the warm-up you asked for from one "
+            "feature quietly consuming the panel."
+        ),
+    )
     warnings: List[str] = Field(
         default_factory=list,
         description=(
