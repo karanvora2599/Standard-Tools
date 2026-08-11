@@ -15,7 +15,7 @@ looks like, so scope is never ambiguous.
 `analysis.hurst.hurst_exponent` accepts either a `pandas.Series` or a
 `polars.Series` — the proof-of-concept function for this initiative,
 verified to return numerically identical results for both backends
-(`tests/test_polars_compat.py`):
+(`tests/core/test_polars_compat.py`):
 
 ```python
 from standard_quant_tools.analysis.hurst import hurst_exponent

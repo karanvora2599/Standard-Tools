@@ -66,7 +66,7 @@ keeps working unchanged. An unknown category name is silently ignored
 rather than raising, since narrowing is a confidence optimization, not a
 strict validator.
 
-`tests/test_agent_tools.py::TestToolCategoryCoverage` is the drift-proofing
+`tests/modeling/test_agent_tools.py::TestToolCategoryCoverage` is the drift-proofing
 test: every `_TOOL_DISPATCH` key has exactly one `TOOL_CATEGORY` entry and
 vice versa. Add a tool without categorizing it and this test fails
 immediately — the same class of drift that used to leave README/comments
@@ -145,7 +145,7 @@ classification call is caught and logged, and the function falls through to
 
 ### Testing
 
-`tests/test_router.py`:
+`tests/agent/test_router.py`:
 - `parse_router_response`/`build_router_prompt` unit tests — no network,
   covers valid JSON, prose-wrapped JSON, the bare-token fallback,
   malformed/empty/all-unknown-key inputs (confirms fail-open fires exactly
@@ -154,7 +154,7 @@ classification call is caught and logged, and the function falls through to
   labeled representative requests, run through a real `route_request()`
   call, asserting ≥70% top-1 accuracy. Skipped by default (matches this
   repo's `-m "not integration"` CI convention) since it costs real API
-  calls; run manually with `pytest -m integration tests/test_router.py`
+  calls; run manually with `pytest -m integration tests/agent/test_router.py`
   (requires `ANTHROPIC_API_KEY`). This is the first actual measurement of
   routing *correctness* in this codebase — the multi-agent coverage test
   below only ever checked tool-set coverage/disjointness, never whether a
@@ -216,7 +216,7 @@ orchestrator explicitly copies that text into the delegate call. See
 
 ### Testing
 
-`tests/test_multi_agent_tool_coverage.py` — pure data validation, no API
+`tests/agent/test_multi_agent_tool_coverage.py` — pure data validation, no API
 key or network required:
 - every worker has tools, a system prompt, a label, a description
 - the union of every worker's tools equals the full library tool set,

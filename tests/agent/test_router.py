@@ -17,6 +17,8 @@ from standard_quant_tools.agent.router import (
 )
 from standard_quant_tools.agent.tools import TOOL_CATEGORY
 
+from .. import REPO_ROOT
+
 VALID_KEYS = list(TOOL_CATEGORIES)
 
 
@@ -148,12 +150,7 @@ class TestRoutingAccuracyEval:
         import sys
         from pathlib import Path
 
-        sys.path.insert(
-            0,
-            str(
-                Path(__file__).resolve().parent.parent / "Implementation" / "Anthropic"
-            ),
-        )
+        sys.path.insert(0, str(REPO_ROOT / "Implementation" / "Anthropic"))
         from _agent_utils import route_request  # type: ignore[import-not-found]
 
         correct = 0

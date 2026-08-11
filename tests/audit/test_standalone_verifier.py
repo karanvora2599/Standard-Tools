@@ -21,9 +21,9 @@ import pytest
 
 from standard_quant_tools import audit
 
-_SCRIPT_PATH = (
-    Path(__file__).resolve().parent.parent / "scripts" / "verify_audit_log.py"
-)
+from .. import REPO_ROOT
+
+_SCRIPT_PATH = REPO_ROOT / "scripts" / "verify_audit_log.py"
 
 
 def _load_standalone_module() -> ModuleType:

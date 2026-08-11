@@ -9,6 +9,41 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Changed (test suite layout)
+
+`tests/` now mirrors `src/standard_quant_tools/` — one directory per
+package — instead of 70 files in a flat root alongside the two that were
+already grouped (`cpp/`, `modeling/`):
+
+```
+tests/
+  conftest.py   shared fixtures, visible to every subdirectory
+  agent/ analysis/ audit/ backtest/ data/ indicators/
+  metrics/ modeling/ portfolio/ screener/
+  core/         cross-cutting: errors, compat shims, regression suites
+  cpp/          C++ gtest sources compiled by CMake — not collected by pytest
+  cpp_bindings/ Python-side parity tests for the compiled extension
+```
+
+Placement was decided by what each file actually imports, not by its name;
+`test_liquidity.py` and `test_stress_test.py` both live under `backtest/`
+despite reading like metrics, because that is where the code under test
+lives. `tests/cpp/` keeps its name and contents — CMake and
+`build-cpp.yml` reference that path — so the Python-side extension tests
+went to `cpp_bindings/` rather than colliding with it.
+
+All 70 moves are recorded as git renames, so history follows the files.
+`testpaths = ["tests"]` already recursed, and the suite reports the same
+2343 passed / 1 skipped before and after.
+
+Three tests reached outside the suite for non-importable files (the
+standalone audit verifier script, the reference agent implementations),
+each with its own `Path(__file__).parent.parent`, which encodes how deep
+that file happens to sit — moving them one level down broke all three at
+once. `REPO_ROOT` is now defined once in `tests/__init__.py` and imported,
+so a future move updates one line instead of N, where N is not
+discoverable until the tests fail.
+
 ### Added (modeling: per-feature drop attribution)
 
 Feature/target alignment drops rows — every feature consumes its lookback

@@ -41,7 +41,7 @@ print(greeks)
 
 Both are left raw rather than pre-scaled, so nothing is silently rescaled behind your back. `d1`/`d2` are included so a caller who also wants the price doesn't have to recompute them.
 
-Every Greek formula here is cross-validated in `tests/test_options.py` against a finite-difference derivative of `black_scholes_price` itself (e.g. `delta ≈ (price(S+h) - price(S-h)) / 2h`), not just trusted as textbook formulas typed in correctly.
+Every Greek formula here is cross-validated in `tests/analysis/test_options.py` against a finite-difference derivative of `black_scholes_price` itself (e.g. `delta ≈ (price(S+h) - price(S-h)) / 2h`), not just trusted as textbook formulas typed in correctly.
 
 ---
 

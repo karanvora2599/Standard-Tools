@@ -35,14 +35,41 @@ counts as one.
 ## Development Workflow
 
 1. **Implement → test → document**, in the same PR. Every feature in this
-   repo pairs a code change with a `tests/test_*.py` addition and a
+   repo pairs a code change with a `tests/<module>/test_*.py` addition and a
    `Documentation/*.md` (or `README.md`) update — see any recent commit for
    the pattern. A bug fix should add a regression test that would have
    caught it.
+   **Where the test goes.** `tests/` mirrors `src/standard_quant_tools/`,
+   one directory per package:
+
+   ```
+   tests/
+     conftest.py        shared fixtures (mock_provider, …) — visible to every subdirectory
+     agent/  analysis/  audit/  backtest/  data/  indicators/
+     metrics/  modeling/  portfolio/  screener/
+     core/              cross-cutting: errors, compat shims, regression suites
+     cpp/               C++ gtest sources, compiled by CMake — NOT collected by pytest
+     cpp_bindings/      Python-side parity tests for the compiled extension
+   ```
+
+   Two directories are easy to confuse: `tests/cpp/` holds `.cpp` gtest
+   sources that CMake builds (`.github/workflows/build-cpp.yml` watches that
+   path), while `tests/cpp_bindings/` holds the `test_cpp_*.py` files pytest
+   collects, which assert the C++ and Python backends against each other.
+
+   Every directory needs an `__init__.py` — the suite is a package, which is
+   what lets `tests/agent/test_agent_tools.py` and
+   `tests/modeling/test_agent_tools.py` coexist. A test needing a path
+   outside the suite (a script, a reference implementation) should import
+   `REPO_ROOT` from the `tests` package rather than chaining `__file__`
+   parents, which encodes how deep the file happens to sit.
+
 2. **Run the test suite** before opening a PR:
    ```bash
    pytest -m "not integration and not benchmark and not slow"
    ```
+   A single group runs with `pytest tests/backtest`, one file with
+   `pytest tests/backtest/test_costs.py`.
    `integration` tests hit live network (yfinance) and aren't required for
    most PRs; `benchmark`/parts of the C++ test files require `_sqt_core` to
    be built and are skipped automatically otherwise.
@@ -64,7 +91,7 @@ counts as one.
 - **Fallback chains**: performance-sensitive functions (indicators, OLS
   kernels, backtest loops) follow a C++ extension → Numba JIT → pure-Python
   fallback pattern. If you add one, all three paths must produce identical
-  output — see `tests/test_cpp_*.py` for the parity-test pattern, and note
+  output — see `tests/cpp_bindings/test_cpp_*.py` for the parity-test pattern, and note
   the `_sqt_core` C++ build isn't available in most dev environments, so
   your new C++ path should still be exercised via `tests/cpp/*.cpp` native
   tests plus a Python-side parity test that's skipped (not failed) when the
@@ -77,7 +104,7 @@ counts as one.
   backtest library. Any new signal/execution path must not use data that
   wouldn't have been available at decision time — see the walk-forward and
   portfolio-simulation tests for the pattern used to catch this
-  (`tests/test_backtest_walk_forward.py`, `tests/test_new_agent_tools.py`'s
+  (`tests/backtest/test_backtest_walk_forward.py`, `tests/agent/test_new_agent_tools.py`'s
   no-lookahead regression tests).
 - **Validate at boundaries, not internally**: match the existing style —
   raise `standard_quant_tools.error.ValidationError` for bad input at

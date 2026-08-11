@@ -166,7 +166,7 @@ print(result["risk_contributions"])   # fractional, sums to 1
 print(result["converged"])
 ```
 
-Solved via a damped multiplicative fixed-point iteration — a **documented heuristic**, not a globally-convergence-proven algorithm like the mean-variance closed form. It converges reliably in practice for well-conditioned covariance matrices (verified in `tests/test_portfolio_optimize.py`: a diagonal covariance converges exactly to the closed-form inverse-volatility weights), but `converged` reflects whether the iteration actually reached its tolerance within `max_iterations`, not an assumption — check it.
+Solved via a damped multiplicative fixed-point iteration — a **documented heuristic**, not a globally-convergence-proven algorithm like the mean-variance closed form. It converges reliably in practice for well-conditioned covariance matrices (verified in `tests/portfolio/test_portfolio_optimize.py`: a diagonal covariance converges exactly to the closed-form inverse-volatility weights), but `converged` reflects whether the iteration actually reached its tolerance within `max_iterations`, not an assumption — check it.
 
 ### Black-Litterman
 

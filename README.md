@@ -738,7 +738,7 @@ pytest tests/ -m "not integration"
 pytest tests/ -m integration
 
 # C++ vs Python benchmark tests — prints timing and speedup (requires _sqt_core)
-pytest tests/test_cpp_hurst.py -m benchmark -s -v
+pytest tests/cpp_bindings/test_cpp_hurst.py -m benchmark -s -v
 
 # C++ unit tests (requires _sqt_core built with SQT_BUILD_TESTS=ON)
 ctest --test-dir build --config Release -V
@@ -751,7 +751,9 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**2344 Python tests total** — 2343 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `test_cpp_*.py` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**2344 Python tests total** — 2343 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+
+`tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 
 **9 C++ test executables** run via `ctest` (Hurst, indicators, cointegration, backtest, Monte Carlo, GARCH, signal state machines, rolling regression, plus a randomized-input cointegration fuzz harness) — ~61,300 assertion-level checks between them, ~50,000 of which come from the fuzz harness alone.
 

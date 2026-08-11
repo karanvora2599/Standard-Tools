@@ -14,7 +14,9 @@ import pytest
 
 from standard_quant_tools.agent import get_agent_tools
 
-MULTI_AGENT_DIR = Path(__file__).resolve().parent.parent / "Multi_Agent_Implementation"
+from .. import REPO_ROOT
+
+MULTI_AGENT_DIR = REPO_ROOT / "Multi_Agent_Implementation"
 
 
 @pytest.fixture(scope="module")

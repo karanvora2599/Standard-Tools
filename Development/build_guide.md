@@ -234,23 +234,23 @@ Each C++ feature has a matching Python integration test file. Tests that require
 the compiled extension are automatically skipped when it is not built.
 
 ```
-pytest tests/test_cpp_hurst.py -v                  # Hurst + rolling Hurst
-pytest tests/test_cpp_indicators.py -v             # RSI, ADX, Parabolic SAR, Wilder's ATR
-pytest tests/test_cpp_new_indicators.py -v         # Bollinger Bands, Stochastic Oscillator, fused technical_indicators()
-pytest tests/test_cpp_cointegration.py -v          # Engle-Granger cointegration + OLS
-pytest tests/test_cpp_backtest.py -v               # run_strategy + batch_run_strategy kernels
-pytest tests/test_cpp_regression.py -v             # rolling_beta (incl. AVX2 dispatch), rolling_factor_loadings
-pytest tests/test_cpp_monte_carlo.py -v            # simulate_forward_paths
-pytest tests/test_cpp_garch.py -v                  # garch11_variance_recursion, fused NLL + analytic gradient
-pytest tests/test_cpp_signals.py -v                # kalman_filter_1state/2state, donchian/vwap-reversion state machines
-pytest tests/test_cpp_array1d_validation.py -v     # 1-D array validation across every Array1D binding
-pytest tests/test_cpp_gil_release.py -v            # GIL is actually released around every pure-C++ kernel call
+pytest tests/cpp_bindings/test_cpp_hurst.py -v                  # Hurst + rolling Hurst
+pytest tests/cpp_bindings/test_cpp_indicators.py -v             # RSI, ADX, Parabolic SAR, Wilder's ATR
+pytest tests/cpp_bindings/test_cpp_new_indicators.py -v         # Bollinger Bands, Stochastic Oscillator, fused technical_indicators()
+pytest tests/cpp_bindings/test_cpp_cointegration.py -v          # Engle-Granger cointegration + OLS
+pytest tests/cpp_bindings/test_cpp_backtest.py -v               # run_strategy + batch_run_strategy kernels
+pytest tests/cpp_bindings/test_cpp_regression.py -v             # rolling_beta (incl. AVX2 dispatch), rolling_factor_loadings
+pytest tests/cpp_bindings/test_cpp_monte_carlo.py -v            # simulate_forward_paths
+pytest tests/cpp_bindings/test_cpp_garch.py -v                  # garch11_variance_recursion, fused NLL + analytic gradient
+pytest tests/cpp_bindings/test_cpp_signals.py -v                # kalman_filter_1state/2state, donchian/vwap-reversion state machines
+pytest tests/cpp_bindings/test_cpp_array1d_validation.py -v     # 1-D array validation across every Array1D binding
+pytest tests/cpp_bindings/test_cpp_gil_release.py -v            # GIL is actually released around every pure-C++ kernel call
 ```
 
 Or run all eleven at once:
 
 ```
-pytest tests/test_cpp_hurst.py tests/test_cpp_indicators.py tests/test_cpp_new_indicators.py tests/test_cpp_cointegration.py tests/test_cpp_backtest.py tests/test_cpp_regression.py tests/test_cpp_monte_carlo.py tests/test_cpp_garch.py tests/test_cpp_signals.py tests/test_cpp_array1d_validation.py tests/test_cpp_gil_release.py -v
+pytest tests/cpp_bindings/test_cpp_hurst.py tests/cpp_bindings/test_cpp_indicators.py tests/cpp_bindings/test_cpp_new_indicators.py tests/cpp_bindings/test_cpp_cointegration.py tests/cpp_bindings/test_cpp_backtest.py tests/cpp_bindings/test_cpp_regression.py tests/cpp_bindings/test_cpp_monte_carlo.py tests/cpp_bindings/test_cpp_garch.py tests/cpp_bindings/test_cpp_signals.py tests/cpp_bindings/test_cpp_array1d_validation.py tests/cpp_bindings/test_cpp_gil_release.py -v
 ```
 
 Once the extension is built all skipped tests activate — run the suite to
@@ -258,7 +258,7 @@ see the current numbers rather than trusting a hardcoded count here; it
 grows as tests are added.
 
 A separate gated test class outside these files, `TestNativeTradeStatsCorrectness`
-in `tests/test_backtest.py`, verifies `run_strategy`'s and `batch_run_strategy`'s
+in `tests/backtest/test_backtest.py`, verifies `run_strategy`'s and `batch_run_strategy`'s
 native trade-log accounting against hand-computed values once `_sqt_core`
 is built — see `Development/performance_insights.md` for the trade-stat
 parity background.
@@ -445,7 +445,7 @@ seeding + `std::mt19937_64`) does **not** reproduce NumPy's PCG64 bit
 stream. `random_seed` is only reproducible *within* one backend — the same
 seed produces different concrete numbers depending on whether `_sqt_core`
 is built, though repeat calls on the same backend are bit-identical.
-`tests/test_cpp_monte_carlo.py` reflects this: same-backend reproducibility
+`tests/cpp_bindings/test_cpp_monte_carlo.py` reflects this: same-backend reproducibility
 is asserted exactly, but cross-backend comparisons use loose statistical
 tolerance instead of the usual `atol=1e-10`.
 
@@ -458,7 +458,7 @@ simulated path is fully independent — its own per-thread RNG state derived
 from the base seed and path index, no shared mutable state, no locking —
 so this is safe by construction, not by careful scheduling. Verified by
 `test_result_independent_of_thread_count` in both
-`tests/cpp/test_monte_carlo.cpp` and `tests/test_cpp_monte_carlo.py`
+`tests/cpp/test_monte_carlo.cpp` and `tests/cpp_bindings/test_cpp_monte_carlo.py`
 (same seed + inputs must give bit-identical output whether forced to 1
 thread or left unconstrained).
 
@@ -484,7 +484,7 @@ round trip). This applies to both `run_strategy` and `batch_run_strategy`,
 since they share the same trade-log code in `backtest.cpp`.
 
 **Status: confirmed correct.** `_sqt_core` has since been built for real and
-`tests/test_backtest.py::TestNativeTradeStatsCorrectness` plus the full native
+`tests/backtest/test_backtest.py::TestNativeTradeStatsCorrectness` plus the full native
 `ctest` suite were actually run — every native/Python parity check passed.
 (Along the way, 4 of `tests/cpp/test_backtest.cpp`'s own hand-written
 expectations turned out to be wrong, based on a mistaken `prices[i]`-vs-
@@ -532,7 +532,7 @@ There are two cases:
 4. `_cpp/CMakeLists.txt` — add `src/my_feature.cpp` to `SQT_SOURCES`
 5. `tests/cpp/CMakeLists.txt` — add static lib + test executable + `add_test`
 6. `tests/cpp/test_my_feature.cpp` — C++ unit tests (same `CHECK` / `CHECK_NEAR` pattern as existing files)
-7. `tests/test_cpp_my_feature.py` — Python integration tests (use `requires_cpp` skip marker)
+7. `tests/cpp_bindings/test_cpp_my_feature.py` — Python integration tests (use `requires_cpp` skip marker). Note the two directories: `tests/cpp/` holds the C++ gtest sources CMake compiles, `tests/cpp_bindings/` the Python-side parity tests pytest collects.
 8. The relevant Python module — add `_cpp_core: Any = None` guard and fast path
 
 ### Case B — Extending an existing module (e.g. adding a function to `indicators.cpp`)
@@ -545,7 +545,7 @@ the Kalman filter (1-state/2-state) was added to `cointegration.hpp`/
 2. `_cpp/src/indicators.cpp` — add implementation
 3. `_cpp/bindings/bindings.cpp` — add `m.def(...)` for the new function (no new `#include` needed)
 4. `tests/cpp/test_indicators.cpp` — add test functions and call them in `main()`
-5. `tests/test_cpp_indicators.py` — add `TestCppNew` + `TestNewWrapper` test classes
+5. `tests/cpp_bindings/test_cpp_indicators.py` — add `TestCppNew` + `TestNewWrapper` test classes
 6. The relevant Python module — add `_cpp_core` guard if not present and add fast path
 
 No changes to `CMakeLists.txt` are needed when extending an existing `.cpp` file.

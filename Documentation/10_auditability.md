@@ -515,7 +515,7 @@ This is a known duplication-by-design maintenance risk, called out in the
 script's own docstring: if `audit.hash_payload`'s canonicalization ever
 changes, this script must be updated to match or the two implementations
 will silently disagree about what counts as tampered.
-`tests/test_standalone_verifier.py` is the parity check that catches that
+`tests/audit/test_standalone_verifier.py` is the parity check that catches that
 drift — it fails if the two implementations' hash output ever diverges.
 
 ---
@@ -815,7 +815,7 @@ something this round's scope covers.
 A custom backend implements five methods (`acquire_lock`, `release_lock`,
 `read_lines`, `append_line`, `exists`, `list_day_stems` — see
 `AuditStorageBackend`'s docstring in `audit/storage.py` for exact
-semantics). `tests/test_audit_storage.py`'s fake in-memory backend is a
+semantics). `tests/audit/test_audit_storage.py`'s fake in-memory backend is a
 worked example: it proves the interface is a real seam `AuditWriter`
 delegates through — including cross-day chain bootstrapping — not just a
 passthrough wrapper that still assumes local disk somewhere.
