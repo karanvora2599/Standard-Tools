@@ -9,7 +9,22 @@ registry:
         -> RunModelExperimentResult.oos_predictions_uri
     oos_predictions_to_signal_panel(...)      # this module, plain Python
         -> {ticker: {date: value}}
-    run_signal_panel_backtest(...)            # agent.tools, the OTHER registry
+    run_signal_panel_backtest(..., fill_price="next_open")   # the OTHER registry
+
+**Use fill_price="next_open" when backtesting these signals.** Modeling
+features are computed from bar t's own OHLC (RSI, momentum, ATR and the
+rest all close on t), so a signal dated t is not knowable until t's close
+has printed. Filling it at that same close is look-ahead — the exact case
+`run_strategy`'s own `fill_price="close"` warning describes. The prediction
+target is close[t] -> close[t+h], so the forecast is defined from t onward
+and execution genuinely happens after t.
+
+Note also that the target horizon and the strategy's holding period are
+different objects. A 20-day forward-return prediction converted to a daily
+direction signal is re-evaluated every bar by `run_signal_panel_backtest`,
+which is a valid strategy but not the same thing as holding for 20 days.
+Nothing here enforces a relationship between the two — decide the holding
+period deliberately rather than inheriting it from the target.
 
 Uses `run_model_experiment`'s walk-forward out-of-sample predictions,
 never `score_model`'s single as-of snapshot: `score_model`'s model is the
@@ -51,18 +66,63 @@ SCORE.
 from typing import Dict, Literal
 
 import numpy as np
+import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
+from .registry.model_registry import load_manifest
+
+
+def _validate_predictions_frame(df: "pd.DataFrame", source: str) -> None:
+    """
+    Structural validation of an OOS predictions artifact.
+
+    Previously the frame was consumed on trust: a missing column raised a
+    bare KeyError, a non-finite prediction became a NaN signal value, a
+    wrong date dtype failed inside `.dt`, and — worst, because it was
+    silent — duplicate (entity, date) rows simply overwrote each other in
+    the output dict, so a malformed artifact produced a smaller but
+    perfectly valid-looking signal panel.
+    """
+    required = {"date", "entity", "prediction"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValidationError(
+            f"{source}: predictions artifact is missing column(s) {missing} — "
+            f"expected {sorted(required)}, found {sorted(df.columns)}."
+        )
+    if df.empty:
+        raise ValidationError(f"{source}: predictions artifact has no rows.")
+    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        raise ValidationError(
+            f"{source}: 'date' column must be datetime64, got {df['date'].dtype}."
+        )
+    predictions = df["prediction"].to_numpy(dtype=float)
+    if not np.isfinite(predictions).all():
+        n_bad = int((~np.isfinite(predictions)).sum())
+        raise ValidationError(
+            f"{source}: 'prediction' contains {n_bad} non-finite value(s). "
+            "A NaN/Inf prediction would become a NaN signal and silently "
+            "distort the backtest rather than failing."
+        )
+    duplicated = df.duplicated(subset=["entity", "date"])
+    if duplicated.any():
+        sample = df.loc[duplicated, ["entity", "date"]].head(3).to_dict("records")
+        raise ValidationError(
+            f"{source}: {int(duplicated.sum())} duplicate (entity, date) row(s), e.g. "
+            f"{sample}. Each pair must be unique — duplicates would silently overwrite "
+            "one another in the signal panel."
+        )
 
 
 def oos_predictions_to_signal_panel(
-    oos_predictions_uri: str,
-    task: Literal["regression", "classification"],
+    oos_predictions_uri: "str | None" = None,
+    task: "Literal['regression', 'classification'] | None" = None,
     proba_threshold: float = 0.5,
     deadband: float = 0.0,
     long_only: bool = True,
+    model_id: "str | None" = None,
 ) -> Dict[str, Dict[str, float]]:
     """
     Load a walk-forward out-of-sample predictions artifact (columns
@@ -72,7 +132,19 @@ def oos_predictions_to_signal_panel(
     SignalType.DIRECTION (each exactly -1.0, 0.0, or 1.0).
 
     Args:
+        model_id: PREFERRED entry point. Resolves both the predictions
+            artifact and the task from the model's own manifest, so they
+            cannot disagree. Passing `task` explicitly (the original
+            signature) meant a caller could hand regression predictions to
+            classification handling, which silently thresholds a raw
+            forward-return prediction against a probability cutoff and
+            produces a nonsensical but valid-looking signal panel — a wrong
+            answer rather than an error.
+        oos_predictions_uri: the artifact path directly. Requires `task`.
+            Kept for callers that already hold a URI; `model_id` is safer.
         task: must match the ModelSpec.task the model was trained with.
+            Ignored when `model_id` is given (read from the manifest, and
+            an explicit mismatch is rejected).
             regression -> sign(prediction), 0.0 inside +/-deadband.
             classification -> prediction is already a positive-class
             probability (see engine.py::_predict_fold): 1.0 if
@@ -96,6 +168,27 @@ def oos_predictions_to_signal_panel(
         ValidationError: deadband < 0, proba_threshold outside (0, 1), or
         proba_threshold < 0.5 with long_only=False.
     """
+    if (model_id is None) == (oos_predictions_uri is None):
+        raise ValidationError(
+            "pass exactly one of model_id (preferred — resolves the artifact and task "
+            "together from the manifest) or oos_predictions_uri."
+        )
+    if model_id is not None:
+        manifest = load_manifest(model_id)
+        if task is not None and task != manifest.task:
+            raise ValidationError(
+                f"task={task!r} does not match model {model_id!r}, which was trained "
+                f"for task={manifest.task!r}. Omit `task` and it is read from the "
+                "manifest."
+            )
+        task = manifest.task
+        oos_predictions_uri = manifest.oos_predictions_uri
+    elif task is None:
+        raise ValidationError(
+            "task is required when passing oos_predictions_uri directly — or pass "
+            "model_id instead and it is read from the manifest."
+        )
+
     if deadband < 0:
         raise ValidationError(f"deadband must be >= 0, got {deadband}")
     if not (0.0 < proba_threshold < 1.0):
@@ -108,7 +201,8 @@ def oos_predictions_to_signal_panel(
             f"decision boundary below the midpoint is ambiguous), got {proba_threshold}"
         )
 
-    predictions_df = _artifacts.load_artifact(oos_predictions_uri)
+    predictions_df = _artifacts.load_artifact(str(oos_predictions_uri))
+    _validate_predictions_frame(predictions_df, str(oos_predictions_uri))
     dates = predictions_df["date"].dt.strftime("%Y-%m-%d")
     raw = predictions_df["prediction"].to_numpy(dtype=float)
 

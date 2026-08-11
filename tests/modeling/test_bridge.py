@@ -164,9 +164,11 @@ class TestFullBridgeIntegration:
         assert exp_result["oos_predictions_uri"]
         assert Path(exp_result["oos_predictions_uri"]).exists()
 
-        signal_panel = oos_predictions_to_signal_panel(
-            exp_result["oos_predictions_uri"], task="regression"
-        )
+        # model_id, not (uri, task): the manifest resolves both together so
+        # they cannot disagree. Passing task by hand allows regression
+        # predictions to be thresholded as classification probabilities,
+        # which yields a nonsensical but valid-looking panel.
+        signal_panel = oos_predictions_to_signal_panel(model_id=exp_result["model_id"])
         assert set(signal_panel.keys()) <= {"AAA", "BBB", "CCC"}
         all_values = {v for dates in signal_panel.values() for v in dates.values()}
         assert all_values <= {-1.0, 0.0, 1.0}
@@ -180,6 +182,12 @@ class TestFullBridgeIntegration:
                 end_date=backtest_end,
                 signal_panel=signal_panel,
                 signal_type=SignalType.DIRECTION,
+                # next_open, not the "close" default. Modeling features are
+                # computed from bar t's own OHLC, so a signal dated t is not
+                # knowable until t's close has printed -- filling it at that
+                # same close is the look-ahead run_strategy's own fill_price
+                # warning describes.
+                fill_price="next_open",
             )
         )
         assert set(result.per_ticker.keys()) == set(signal_panel.keys())
