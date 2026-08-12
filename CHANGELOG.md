@@ -63,6 +63,16 @@ pinned by a regression test. Suite: 2452 → 2493 passed, 1 skipped.
   benchmark **passed** `beta_max=0.5`: "could not be estimated" read as
   "very low beta", backwards for the defensive screen that bound expresses.
   A minimum overlap is now required and a shortfall reported as an error.
+  The floor is a `min_beta_obs` parameter on `screen_stocks`,
+  `screen_stocks_async` and `ScreenerInput` (default
+  `DEFAULT_MIN_BETA_OBS` = 20) — a judgment call, not a mathematical bound,
+  so weekly bars or a deliberate recent-listing screen can lower it. It is
+  bounded below at 2, which is *not* a matter of taste: below two
+  overlapping points the sentinel and a real beta of 0.0 are the same
+  number. Threaded through the `ProcessPoolExecutor` worker tuple as well,
+  since a parameter missing from that tuple silently reverts to its default
+  in the child and would make the same request screen differently at
+  `n_workers=1` than at `n_workers=8`.
 - **Filter *values* went unvalidated while only keys were checked.**
   `rsi_max=float("nan")` made every comparison False, so an oversold screen
   silently became a no-op admitting RSI 100 — a filter that rejects nothing

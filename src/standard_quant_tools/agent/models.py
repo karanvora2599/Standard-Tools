@@ -339,6 +339,21 @@ class ScreenerInput(BaseModel):
     end_date: Optional[str] = Field(None, description="Historical end for technicals.")
     sort_by: Optional[str] = Field(None, description="Column to sort results by.")
     ascending: bool = Field(True, description="Sort direction.")
+    min_beta_obs: int = Field(
+        20,
+        ge=2,
+        le=10_000,
+        description=(
+            "Minimum bars a ticker must share with the benchmark before a "
+            "beta_max/beta_min filter acts on its estimate. Below it the "
+            "ticker is reported in failed_tickers rather than given a beta of "
+            "0.0 — which would PASS a beta_max screen, reading 'could not be "
+            "estimated' as 'very low beta'. Default 20 is a judgment call, not "
+            "a mathematical bound: lower it for weekly bars or a deliberate "
+            "recent-listing screen. Hard minimum 2, below which the underlying "
+            "beta routine returns a sentinel indistinguishable from a real 0.0."
+        ),
+    )
 
 
 class ScreenerResult(BaseModel):

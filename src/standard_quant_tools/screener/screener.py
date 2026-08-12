@@ -69,11 +69,49 @@ _VALID_FILTER_KEYS = frozenset(
 # must be positive integers, and are passed straight to an indicator.
 _WINDOW_FILTERS = frozenset(("price_above_sma", "price_below_sma"))
 
-# A beta estimated from a handful of overlapping bars is noise, and this
-# module does not merely REPORT beta -- it makes an include/exclude decision
-# from it. See _fetch_ticker_data's beta branch for why a too-short overlap
-# is an error rather than a value.
-_MIN_BETA_OBS = 20
+# Default minimum overlap with the benchmark before a beta filter will act on
+# an estimate. A beta from a handful of bars is noise, and this module does
+# not merely REPORT beta -- it makes an include/exclude decision from it. See
+# _fetch_ticker_data's beta branch for why a too-short overlap is an error
+# rather than a value.
+#
+# 20 is a judgment call, not a mathematical bound, so it is a DEFAULT rather
+# than a fixed rule: callers screening weekly bars, or deliberately hunting
+# recent listings, have a legitimate reason to lower it. Override per call via
+# the min_beta_obs argument on screen_stocks / screen_stocks_async.
+DEFAULT_MIN_BETA_OBS = 20
+
+# The one value that is NOT a matter of taste. calculate_beta returns its
+# all-zero sentinel below two overlapping points, and that sentinel is
+# indistinguishable from a real beta of 0.0 -- which is the bug this floor
+# exists to close. Allowing a floor under 2 would reopen it, so the override
+# is bounded rather than free.
+_ABSOLUTE_MIN_BETA_OBS = 2
+
+
+# Retained: this was the name the constant shipped under. Kept as an alias so
+# an existing import keeps resolving rather than failing at import time.
+_MIN_BETA_OBS = DEFAULT_MIN_BETA_OBS
+
+
+def _validate_min_beta_obs(min_beta_obs: int) -> int:
+    """Validate the beta-overlap floor with the same up-front, once-per-call
+    discipline the filter values get -- a bad floor should not surface as a
+    per-ticker error repeated across the universe."""
+    if isinstance(min_beta_obs, bool) or not isinstance(min_beta_obs, int):
+        raise ValidationError(
+            f"min_beta_obs must be an int, got {type(min_beta_obs).__name__} "
+            f"({min_beta_obs!r})"
+        )
+    if min_beta_obs < _ABSOLUTE_MIN_BETA_OBS:
+        raise ValidationError(
+            f"min_beta_obs must be >= {_ABSOLUTE_MIN_BETA_OBS}, got {min_beta_obs}. "
+            "Below two overlapping observations calculate_beta returns an "
+            "all-zero sentinel that is indistinguishable from a real beta of "
+            "0.0, so a lower floor would let an unestimable ticker pass a "
+            "beta_max screen — the exact failure this floor exists to prevent."
+        )
+    return min_beta_obs
 
 
 def _validate_filter_keys(filters: Dict[str, Any]) -> None:
@@ -138,6 +176,7 @@ async def _fetch_ticker_data(
     end_date: str,
     filters: Dict[str, Any],
     spy_df: Optional[pd.DataFrame] = None,
+    min_beta_obs: int = DEFAULT_MIN_BETA_OBS,
 ) -> Tuple[str, str, Any]:
     """
     Fetch all required data for one ticker and evaluate filters.
@@ -285,13 +324,13 @@ async def _fetch_ticker_data(
                 # returned value, since the sentinel and a real answer are the
                 # same number.
                 overlap = len(asset_ret.index.intersection(spy_ret.index))
-                if overlap < _MIN_BETA_OBS:
+                if overlap < min_beta_obs:
                     return (
                         "error",
                         ticker,
                         f"beta not estimable: only {overlap} bar(s) overlap the "
                         f"benchmark over {start_date}..{end_date} (need "
-                        f"{_MIN_BETA_OBS}). Reported as an error rather than a "
+                        f"{min_beta_obs}). Reported as an error rather than a "
                         "beta of 0.0, which would pass a beta_max screen.",
                     )
                 stats = calculate_beta(asset_ret, spy_ret)
@@ -318,6 +357,7 @@ async def screen_stocks_async(
     end_date: Optional[str] = None,
     sort_by: Optional[str] = None,
     ascending: bool = True,
+    min_beta_obs: int = DEFAULT_MIN_BETA_OBS,
 ) -> pd.DataFrame:
     """
     Async screener: evaluates all tickers concurrently via asyncio.gather.
@@ -329,6 +369,14 @@ async def screen_stocks_async(
         end_date:   Historical end (default: today).
         sort_by:    Optional column to sort results by.
         ascending:  Sort direction.
+        min_beta_obs: Minimum bars a ticker must share with the benchmark
+            before a beta_max/beta_min filter will act on its estimate;
+            below it the ticker is reported as an error rather than given a
+            beta of 0.0 that would pass a beta_max screen. Defaults to
+            DEFAULT_MIN_BETA_OBS (20), a judgment call rather than a
+            mathematical bound — lower it for weekly bars or a deliberate
+            recent-listing screen. Must be >= 2, below which calculate_beta
+            returns a sentinel indistinguishable from a real beta.
 
     Returns:
         pd.DataFrame with one row per passing ticker, sorted if requested.
@@ -339,10 +387,13 @@ async def screen_stocks_async(
         indistinguishable from a ticker that simply didn't meet the bar.
 
     Raises:
-        ValidationError: filters contains an unrecognized key.
+        ValidationError: filters contains an unrecognized key, a filter value
+            is non-numeric/non-finite/an invalid window, or min_beta_obs is
+            below 2.
     """
     _validate_filter_keys(filters)
     _validate_filter_values(filters)
+    min_beta_obs = _validate_min_beta_obs(min_beta_obs)
     end: str = end_date or datetime.date.today().isoformat()
     start: str = (
         start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
@@ -366,7 +417,7 @@ async def screen_stocks_async(
             spy_df = None
 
     tasks = [
-        _fetch_ticker_data(provider, ticker, start, end, filters, spy_df)
+        _fetch_ticker_data(provider, ticker, start, end, filters, spy_df, min_beta_obs)
         for ticker in tickers
     ]
     raw = await asyncio.gather(*tasks)
@@ -403,9 +454,20 @@ def _screen_batch(args: tuple) -> pd.DataFrame:
     """
     Worker: screen a batch of tickers in a child process.
     Each worker runs its own asyncio event loop so there is no shared state.
+
+    Every tunable the parent resolved has to travel in this tuple. A
+    parameter left out of it does not fail — it silently reverts to its
+    default inside the child, so the same call would screen differently at
+    n_workers=1 than at n_workers=8. Unpacked strictly (no defaults) so
+    adding a parameter without threading it here is an immediate TypeError
+    rather than a quiet divergence between the two paths.
     """
-    tickers, filters, start_date, end_date = args
-    return asyncio.run(screen_stocks_async(tickers, filters, start_date, end_date))
+    tickers, filters, start_date, end_date, min_beta_obs = args
+    return asyncio.run(
+        screen_stocks_async(
+            tickers, filters, start_date, end_date, min_beta_obs=min_beta_obs
+        )
+    )
 
 
 # ── Public sync entry point ───────────────────────────────────────────────────
@@ -419,6 +481,7 @@ def screen_stocks(
     sort_by: Optional[str] = None,
     ascending: bool = True,
     n_workers: Optional[int] = None,
+    min_beta_obs: int = DEFAULT_MIN_BETA_OBS,
 ) -> pd.DataFrame:
     """
     Screen a universe of tickers against fundamental and technical filters.
@@ -437,6 +500,10 @@ def screen_stocks(
         ascending: Sort direction.
         n_workers: Override process count. Pass 1 to force single-process mode.
                    Defaults to cpu_count for large universes, 1 for small ones.
+        min_beta_obs: Minimum bars a ticker must share with the benchmark
+                   before a beta filter acts on its estimate (default
+                   DEFAULT_MIN_BETA_OBS = 20, minimum 2). Applied identically
+                   in single- and multi-process mode.
 
     Returns:
         pd.DataFrame with one row per passing ticker, sorted if requested.
@@ -464,6 +531,7 @@ def screen_stocks(
     """
     _validate_filter_keys(filters)
     _validate_filter_values(filters)
+    min_beta_obs = _validate_min_beta_obs(min_beta_obs)
     end: str = end_date or datetime.date.today().isoformat()
     start: str = (
         start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
@@ -484,7 +552,9 @@ def screen_stocks(
 
     if n_workers <= 1:
         result = asyncio.run(
-            screen_stocks_async(tickers, filters, start, end, sort_by, ascending)
+            screen_stocks_async(
+                tickers, filters, start, end, sort_by, ascending, min_beta_obs
+            )
         )
         result.attrs.setdefault("failed_batches", [])
         return result
@@ -505,7 +575,9 @@ def screen_stocks(
         # for. The screener's whole contract is that a rejection, an error
         # and a pass are told apart.
         futures = {
-            executor.submit(_screen_batch, (batch, filters, start, end)): batch
+            executor.submit(
+                _screen_batch, (batch, filters, start, end, min_beta_obs)
+            ): batch
             for batch in batches
         }
         for future, batch in futures.items():
