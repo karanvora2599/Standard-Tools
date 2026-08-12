@@ -82,31 +82,51 @@ def _build_trade_log(
     decomposition already prices entries/exits at that bar's own reference
     price (no shift needed there).
 
-    return_pct is reduced by 2 * abs(position_size) * cost_per_unit (entry +
-    exit — matching the two separate pos_diff-triggered cost deductions
-    run_strategy applies to the equity curve for a completed round trip,
-    each of magnitude abs(pdiff) * cost_per_unit), or 1 * abs(position_size)
-    * cost_per_unit for a position still open at the final bar (a
-    synthesized mark-to-market "exit", not a real exit event — the equity
-    curve never deducted a second cost for it either). Scaling by
-    abs(position_size) matters as much as scaling raw_pnl by it: cost_per_unit
-    is a cost *per unit of notional exposure traded*, so a 5x-leveraged
-    trade must pay 5x the cost a 1x trade pays, not the same flat amount —
-    previously it did not, silently under-costing every leveraged (non-±1)
-    SCORE-style position. This does not attempt to reconcile exactly with
-    the equity curve for a same-sign *resize* (e.g. 1.0->2.5, a single
-    pos_diff event treated here as closing a 1.0-sized trade and opening a
-    fresh 2.5-sized one, each independently costed at 2x their own size
-    rather than the smaller abs(pdiff)=1.5 the equity curve actually
-    charges for that one event) — a known, documented approximation.
+    A "trade" is one LOT: from the moment exposure leaves zero until it
+    returns to zero. Same-sign resizes and partial reductions happen
+    *inside* a trade rather than ending one. This mirrors
+    backtest.cpp::apply_position_event exactly, and that shared definition
+    is the point — the two used to disagree. The C++ kernel counted a
+    resized lot as one trade while this function emitted two rows for it,
+    so a single run_strategy result could report num_trades=1 (read from
+    the native kernel) beside a two-row trade_log, with an
+    avg_trade_return_pct that matched neither reading. Verified before the
+    fix on a 1.0 -> 2.5 -> 0 sequence: native 1 trade / 17.4492% average,
+    Python log 2 trades / 8.5113% average, from the identical inputs.
 
-    position_size is the actual executed signal value held during the
-    trade (e.g. 2.5 for a SCORE signal sized at 2.5x leverage), not just
-    its sign — run_strategy's own return calculation multiplies the raw
-    price return by this same value (strategy_returns[i] = executed[i] *
-    returns[i]), so return_pct must scale with it too, not silently treat
-    every trade as if it were exactly 1x/-1x. direction ("long"/"short") is
-    still reported as a readable label derived from position_size's sign.
+    Cost accounting follows the same shared model. Each position-changing
+    event is charged abs(pdiff) * cost_per_unit — the amount actually
+    transacted at that event, which is what run_strategy deducts from the
+    equity curve. The old close-and-reopen reading of a resize charged
+    2*(1.0 + 2.5) = 7 units of cost where the equity curve charged
+    1.0 + 1.5 + 2.5 = 5, so trade-log P&L and equity P&L could not be
+    reconciled for any strategy that scales a position. cost_per_unit is a
+    cost per unit of *notional exposure traded*, so a 5x-leveraged trade
+    pays 5x what a 1x trade pays.
+
+    A lot still open at the final bar is flushed as a synthesized
+    mark-to-market exit at the final Close (equity is marked to Close
+    regardless of fill_price). No exit cost is charged for it, because no
+    exit event occurred and the equity curve never deducted one either.
+
+    entry_price/exit_price use ref_prices — the same reference price series
+    run_strategy's return calculation uses: Close[i-1] under
+    fill_price="close" (since executed[i] = signals[i-1], a position that
+    "appears" in `executed` at event date i actually earns its first
+    return over Close[i-1] -> Close[i], so i-1's close is its true economic
+    entry/exit point), or Open[i] / (High[i]+Low[i])/2 directly under
+    "next_open"/"hl2_exploratory", where the two-leg decomposition already
+    prices entries/exits at that bar's own reference price (no shift
+    needed there). For a lot that was resized, entry_price is the
+    weighted-average cost basis across the whole lot rather than the price
+    of its first leg — that is the price its reported return is actually
+    measured against.
+
+    position_size is the signed peak exposure the lot ever carried (2.5 for
+    a lot that went 1.0 -> 2.5), not just its sign: run_strategy's own
+    return calculation multiplies the raw price return by the executed
+    signal value, so return_pct scales with size too. direction
+    ("long"/"short") is a readable label derived from its sign.
 
     Vectorized detection of position changes; only iterates over trade
     events (orders-of-magnitude fewer than bars).
@@ -129,64 +149,89 @@ def _build_trade_log(
         )
 
     records: List[Dict[str, Any]] = []
-    open_trade: Dict[str, Any] = {}
+    # The open lot: None when flat. Mirrors backtest.cpp's PositionState,
+    # plus the reporting fields (entry_date / peak_size) the C++ side has
+    # no need for because it only accumulates scalar stats.
+    lot: Optional[Dict[str, Any]] = None
+
+    def _close_record(exit_date: Any, exit_price: float, extra_pnl: float) -> None:
+        """Emit the finished lot. extra_pnl is the P&L of the closing leg
+        for a real exit (already folded into realized_pnl by the caller,
+        so 0.0 there) or the mark-to-market P&L of the still-open remainder
+        for the final-bar flush."""
+        assert lot is not None
+        peak = lot["peak_size"]
+        net_pnl = lot["realized_pnl"] + extra_pnl - lot["cost_accrued"]
+        records.append(
+            {
+                "entry_date": lot["entry_date"],
+                "exit_date": exit_date,
+                "direction": "long" if peak > 0 else "short",
+                "entry_price": round(float(lot["cost_basis"]), 4),
+                "exit_price": round(float(exit_price), 4),
+                "position_size": round(float(peak), 4),
+                "return_pct": round(float(net_pnl) * 100, 4),
+            }
+        )
 
     for date in trade_event_idx:
         # .loc, not []: bare [] on a Series is positional for an integer
         # index and label-based otherwise, so it silently changed meaning
         # with the index type pandas happened to infer.
-        ref_price = ref_prices.loc[date]
-        new_pos = executed.loc[date]
+        ref_price = float(ref_prices.loc[date])
+        new_pos = float(executed.loc[date])
+        pdiff = float(pos_diff.loc[date])
 
-        if open_trade:
-            position_size = open_trade["position_size"]
-            entry_price = open_trade["entry_price"]
-            raw_pnl = (ref_price - entry_price) / entry_price * position_size
-            net_pnl = raw_pnl - 2 * abs(position_size) * cost_per_unit
-            records.append(
-                {
-                    "entry_date": open_trade["entry_date"],
-                    "exit_date": date,
-                    "direction": "long" if position_size > 0 else "short",
-                    "entry_price": round(entry_price, 4),
-                    "exit_price": round(ref_price, 4),
-                    "position_size": round(position_size, 4),
-                    "return_pct": round(net_pnl * 100, 4),
-                }
-            )
-            open_trade = {}
+        if lot is not None and (pdiff > 0) != (lot["size"] > 0):
+            # Opposite sign: reduce, fully close, or close-then-flip. Only
+            # the quantity that actually offsets existing exposure is
+            # closed here; a flip's fresh leg is opened by the block below.
+            pos_sign = 1.0 if lot["size"] > 0 else -1.0
+            closing_qty = min(abs(pdiff), abs(lot["size"]))
+            lot["cost_accrued"] += closing_qty * cost_per_unit
+            basis = lot["cost_basis"]
+            if basis != 0.0:
+                lot["realized_pnl"] += (
+                    (ref_price - basis) / basis * (closing_qty * pos_sign)
+                )
+            lot["size"] -= closing_qty * pos_sign
 
-        if new_pos != 0:
-            open_trade = {
+            if lot["size"] == 0.0:
+                _close_record(date, ref_price, 0.0)
+                lot = None
+        elif lot is not None:
+            # Same sign: a resize/add. Blend the cost basis and charge only
+            # the incremental amount transacted. This does NOT complete a
+            # trade — the lot lives on.
+            old_notional = lot["size"] * lot["cost_basis"]
+            lot["size"] += pdiff
+            lot["cost_basis"] = (old_notional + pdiff * ref_price) / lot["size"]
+            lot["cost_accrued"] += abs(pdiff) * cost_per_unit
+            if abs(lot["size"]) > abs(lot["peak_size"]):
+                lot["peak_size"] = lot["size"]
+            continue
+
+        if lot is None and new_pos != 0.0:
+            # Opening a fresh lot — either already flat, or the branch
+            # above just fully closed the prior one (a flip). Uses the raw
+            # target position, not a delta-derived value.
+            lot = {
                 "entry_date": date,
-                "entry_price": ref_price,
-                "position_size": float(new_pos),
+                "size": new_pos,
+                "peak_size": new_pos,
+                "cost_basis": ref_price,
+                "cost_accrued": abs(new_pos) * cost_per_unit,
+                "realized_pnl": 0.0,
             }
 
-    # Close any position still open at the last bar (e.g. buy-and-hold, trend strategies
-    # that never exit). Mark the exit date and price as the final bar in the series --
-    # equity is always marked to Close regardless of fill_price, so this synthesized
-    # "exit" uses Close too, not ref_prices.
-    if open_trade:
-        last_date = close_prices.index[-1]
-        last_price = close_prices.iloc[-1]
-        position_size = open_trade["position_size"]
-        entry_price = open_trade["entry_price"]
-        raw_pnl = (last_price - entry_price) / entry_price * position_size
-        net_pnl = (
-            raw_pnl - abs(position_size) * cost_per_unit
-        )  # entry cost only -- no real exit event occurred
-        records.append(
-            {
-                "entry_date": open_trade["entry_date"],
-                "exit_date": last_date,
-                "direction": "long" if position_size > 0 else "short",
-                "entry_price": round(entry_price, 4),
-                "exit_price": round(float(last_price), 4),
-                "position_size": round(position_size, 4),
-                "return_pct": round(net_pnl * 100, 4),
-            }
-        )
+    # Flush a lot still open at the last bar (buy-and-hold, trend
+    # strategies that never exit). Marked to the final Close, not
+    # ref_prices, and charged no exit cost.
+    if lot is not None:
+        last_price = float(close_prices.iloc[-1])
+        basis = lot["cost_basis"]
+        mtm = (last_price - basis) / basis * lot["size"] if basis != 0.0 else 0.0
+        _close_record(close_prices.index[-1], last_price, mtm)
 
     return pd.DataFrame(records)
 

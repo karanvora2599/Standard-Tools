@@ -385,3 +385,46 @@ class TestOosArtifactIntegrity:
 
         panel = oos_predictions_to_signal_panel(str(path), task="regression")
         assert panel
+
+
+class TestRuntimeArgumentValidation:
+    """
+    `task`'s Literal annotation is a static hint. This is public Python, so
+    nothing enforced it at runtime and the branch was effectively
+    `if task == "regression": ... else: classification`.
+    """
+
+    def _preds(self):
+        return _save_predictions(
+            [
+                {"date": "2024-01-01", "entity": "AAA", "prediction": 0.02},
+                {"date": "2024-01-01", "entity": "BBB", "prediction": -0.01},
+            ]
+        )
+
+    def test_unknown_task_rejected_instead_of_silently_classifying(self):
+        """
+        task="banana" fell through into classifier semantics, thresholding
+        raw forward-return predictions against a probability cutoff --
+        every prediction below 0.5 became a short.
+        """
+        uri = self._preds()
+        with pytest.raises(ValidationError, match="regression.*classification"):
+            oos_predictions_to_signal_panel(uri, task="banana")
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_deadband_rejected(self, bad):
+        """
+        NaN fails every comparison, so `deadband < 0` was False for it and
+        np.abs(raw) <= nan is all-False -- silently disabling the deadband.
+        inf is the mirror image: all-True, flattening every prediction to 0.
+        Both looked like success.
+        """
+        uri = self._preds()
+        with pytest.raises(ValidationError, match="finite"):
+            oos_predictions_to_signal_panel(uri, task="regression", deadband=bad)
+
+    def test_zero_deadband_still_accepted(self):
+        uri = self._preds()
+        panel = oos_predictions_to_signal_panel(uri, task="regression", deadband=0.0)
+        assert panel == {"AAA": {"2024-01-01": 1.0}, "BBB": {"2024-01-01": -1.0}}

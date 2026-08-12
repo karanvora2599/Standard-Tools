@@ -21,15 +21,58 @@ from standard_quant_tools.metrics.volatility_estimators import (
     yang_zhang_volatility as _yang_zhang_volatility,
 )
 
-from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSupport
+from .base import (
+    FeatureContext,
+    FeatureDefinition,
+    FeatureScope,
+    TemporalSupport,
+    periods_per_year_for_interval,
+)
 from .registry import register_feature
+
+
+def _annualization(context: FeatureContext, feature_id: str) -> int:
+    """
+    Bars per year for the dataset's interval.
+
+    An "annualized" volatility scaled by sqrt(252) is only annualized when
+    the bars ARE daily; at any other interval it is wrong by a fixed
+    multiplicative factor while still looking like a volatility. Rather
+    than emit that, features that annualize resolve the constant from the
+    dataset interval and REJECT the intervals where no constant exists
+    without an exchange calendar (every intraday one -- bars per year at
+    "1h" is 6.5 hours/day for US equities, 8 for many European venues,
+    ~24 for crypto).
+
+    A missing interval means the caller predates this field and is treated
+    as daily, which is what it was before.
+    """
+    if context is None or context.interval is None:
+        return 252
+    resolved = periods_per_year_for_interval(context.interval)
+    if resolved is None:
+        raise ValidationError(
+            f"{feature_id}: cannot annualize at interval={context.interval!r}. "
+            "Bars per year for an intraday interval depends on the venue's "
+            "session length, which this package has no exchange calendar to "
+            "resolve -- assuming one would make this 'annualized' volatility "
+            "wrong by a fixed factor for every other market while still "
+            "looking precise. Use a daily-or-coarser interval for this "
+            "feature, or compute an explicitly per-bar volatility instead."
+        )
+    return resolved
 
 
 def _risk_realized_volatility(
     ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
 ) -> pd.Series:
     return _yang_zhang_volatility(
-        ohlcv["Open"], ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=period
+        ohlcv["Open"],
+        ohlcv["High"],
+        ohlcv["Low"],
+        ohlcv["Close"],
+        period=period,
+        periods_per_year=_annualization(context, "risk.realized_volatility"),
     )
 
 
@@ -101,14 +144,24 @@ def _risk_bollinger_pct_b(
 def _risk_parkinson_volatility(
     ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
 ) -> pd.Series:
-    return _parkinson_volatility(ohlcv["High"], ohlcv["Low"], period=period)
+    return _parkinson_volatility(
+        ohlcv["High"],
+        ohlcv["Low"],
+        period=period,
+        periods_per_year=_annualization(context, "risk.parkinson_volatility"),
+    )
 
 
 def _risk_garman_klass_volatility(
     ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
 ) -> pd.Series:
     return _garman_klass_volatility(
-        ohlcv["Open"], ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=period
+        ohlcv["Open"],
+        ohlcv["High"],
+        ohlcv["Low"],
+        ohlcv["Close"],
+        period=period,
+        periods_per_year=_annualization(context, "risk.garman_klass_volatility"),
     )
 
 

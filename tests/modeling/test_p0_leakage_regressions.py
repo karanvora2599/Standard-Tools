@@ -379,3 +379,120 @@ class TestTrainingInformationCutoff:
                 as_of=inside.strftime("%Y-%m-%d"),
                 universe=["AAA", "BBB"],
             )
+
+
+class TestPowerIterationZeroMatvec:
+    """
+    The residual convergence check was skipped whenever the computed
+    eigenvalue was ~0, on the reasoning that a null direction has nothing
+    to converge to. But "we found a direction with no variance" is
+    ambiguous on its own: it is legitimate only when there is no variance
+    LEFT to find.
+
+    Because the start vector is fixed and deterministic, a matrix whose
+    true loading is exactly orthogonal to it can be constructed. Then
+    `working @ start == 0` despite genuine variance, the null direction was
+    accepted, and the SVD fallback never fired — rarer than the original
+    uniform-start bug, but the same silent failure.
+    """
+
+    @staticmethod
+    def _orthogonal_to_start_panel():
+        n_assets = 4
+        start = np.random.default_rng(0).standard_normal(n_assets)
+        start /= np.linalg.norm(start)
+        # Gram-Schmidt a basis vector against `start`.
+        w = np.array([1.0, 0.0, 0.0, 0.0]) - start * start[0]
+        w /= np.linalg.norm(w)
+        assert abs(float(w @ start)) < 1e-12, "fixture must be truly orthogonal"
+        z = np.random.default_rng(3).standard_normal(300)
+        return pd.DataFrame(np.outer(z, w), columns=[f"A{i}" for i in range(n_assets)])
+
+    def test_dominant_component_orthogonal_to_start_still_found(self):
+        R = self._orthogonal_to_start_panel()
+        svd = pca_returns(R, n_components=1, method="svd")
+        power = pca_returns(R, n_components=1, method="power_iteration")
+        np.testing.assert_allclose(
+            power["explained_variance_ratio"].to_numpy(),
+            svd["explained_variance_ratio"].to_numpy(),
+            atol=1e-6,
+        )
+
+    def test_genuine_null_space_is_not_treated_as_failure(self):
+        """A fully deflated / zero-variance matrix has no remaining
+        variance, so a zero eigenvalue there is correct, not a failure —
+        the guard must distinguish the two."""
+        R = pd.DataFrame({"A": np.ones(60), "B": np.ones(60)})
+        out = pca_returns(R, n_components=2, method="power_iteration")
+        assert np.isfinite(out["explained_variance_ratio"].to_numpy()).all()
+
+
+class TestIntervalAwareAnnualization:
+    """
+    The realized-volatility features annualized with sqrt(252) regardless
+    of DatasetSpec.interval, so an "annualized" volatility at a weekly bar
+    was wrong by a fixed multiplicative factor while still looking like a
+    volatility.
+    """
+
+    @staticmethod
+    def _ohlcv(n=300):
+        idx = pd.date_range("2024-01-01", periods=n, freq="B")
+        rng = np.random.default_rng(0)
+        close = 100 * np.cumprod(1 + rng.normal(0, 0.01, n))
+        return pd.DataFrame(
+            {
+                "Open": close * 1.001,
+                "High": close * 1.01,
+                "Low": close * 0.99,
+                "Close": close,
+                "Volume": 1e6,
+            },
+            index=idx,
+        )
+
+    def test_weekly_scales_by_its_own_constant(self):
+        from standard_quant_tools.modeling.features.base import FeatureContext
+
+        fn = get_feature("risk.realized_volatility").fn
+        df = self._ohlcv()
+        daily = fn(df, FeatureContext(interval="1d"), period=20).dropna()
+        weekly = fn(df, FeatureContext(interval="1wk"), period=20).dropna()
+        # Same per-bar series, different annualization: exactly sqrt(252/52).
+        np.testing.assert_allclose(
+            (daily / weekly).to_numpy(),
+            np.full(len(daily), (252 / 52) ** 0.5),
+            rtol=1e-9,
+        )
+
+    def test_missing_interval_stays_daily(self):
+        """Back-compat: a caller that predates the field must not silently
+        change scale."""
+        from standard_quant_tools.modeling.features.base import FeatureContext
+
+        fn = get_feature("risk.realized_volatility").fn
+        df = self._ohlcv()
+        np.testing.assert_allclose(
+            fn(df, FeatureContext(), period=20).dropna().to_numpy(),
+            fn(df, FeatureContext(interval="1d"), period=20).dropna().to_numpy(),
+        )
+
+    @pytest.mark.parametrize(
+        "feature_id",
+        [
+            "risk.realized_volatility",
+            "risk.parkinson_volatility",
+            "risk.garman_klass_volatility",
+        ],
+    )
+    def test_intraday_is_rejected_not_mis_scaled(self, feature_id):
+        """
+        Bars per year at "1h" depends on the venue's session length, which
+        this package has no calendar for. Guessing one would make the
+        number wrong for every other market while still looking precise.
+        """
+        from standard_quant_tools.modeling.features.base import FeatureContext
+
+        fn = get_feature(feature_id).fn
+        with pytest.raises(ValidationError, match="cannot annualize"):
+            fn(self._ohlcv(), FeatureContext(interval="1h"), period=20)

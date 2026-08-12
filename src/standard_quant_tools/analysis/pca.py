@@ -88,12 +88,29 @@ def _top_k_pc_power_iteration(
             v = v_new
         av = (working.T @ (working @ v)) / denom
         eigenvalue = float(v @ av)
-        # Residual check: v is only an eigenvector if Av == lambda*v.
-        # Scaled by the eigenvalue so the tolerance is relative, and
-        # skipped when the eigenvalue is ~0 (a genuinely null direction has
-        # nothing to converge to and no meaningful relative scale).
+        # Variance still present in the deflated matrix at this step. This
+        # is what makes a zero eigenvalue interpretable: on its own, "we
+        # found a direction with no variance" is ambiguous.
+        remaining_var = float(np.sum(working * working) / denom)
         residual = float(np.linalg.norm(av - eigenvalue * v))
-        if abs(eigenvalue) > tol and residual > max(1e-6 * abs(eigenvalue), tol):
+        if abs(eigenvalue) <= tol:
+            # A ~zero eigenvalue is legitimate ONLY when there is no
+            # remaining variance to find. Otherwise the iteration landed on
+            # a null direction while real structure was still there, which
+            # is a convergence failure, not a null space.
+            #
+            # This is the residual hole the fixed start vector left open:
+            # the check below was skipped whenever the eigenvalue was ~0, so
+            # a matrix whose true loading happens to be orthogonal to that
+            # specific (deterministic, and therefore constructible) start
+            # produced working @ start == 0, reported the null direction,
+            # and never triggered the SVD fallback. Rarer than the old
+            # uniform-start bug, but the same failure and equally silent.
+            if remaining_var > max(tol, 1e-9 * total_var):
+                converged = False
+        elif residual > max(1e-6 * abs(eigenvalue), tol):
+            # v is only an eigenvector if Av == lambda*v. Scaled by the
+            # eigenvalue so the tolerance is relative.
             converged = False
         vecs[k] = v
         vals[k] = eigenvalue

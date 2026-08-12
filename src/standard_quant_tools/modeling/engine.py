@@ -283,7 +283,16 @@ def run_experiment(
             {
                 "fold": len(fold_records),
                 "train_start": str(pd.Timestamp(train_dates[0]).date()),
-                "train_end": str(pd.Timestamp(train_dates[-1]).date()),
+                # The date range actually FIT, after label-overlap purging.
+                # This reported the scheduled window end, so a fold whose
+                # last two weeks were entirely purged still claimed to have
+                # trained through them -- lineage describing the split that
+                # was planned rather than the one that ran.
+                "train_end": str(pd.Timestamp(train_df["date"].max()).date()),
+                # Kept alongside it: the difference between the two is
+                # exactly how much the purge removed, which is worth being
+                # able to see rather than having to infer.
+                "scheduled_train_end": str(pd.Timestamp(train_dates[-1]).date()),
                 "test_start": str(pd.Timestamp(test_dates[0]).date()),
                 "test_end": str(pd.Timestamp(test_dates[-1]).date()),
                 "n_train_rows": int(len(train_df)),

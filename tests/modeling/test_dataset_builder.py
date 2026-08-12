@@ -243,3 +243,100 @@ class TestFiniteValueGuard:
                 build_dataset(spec)
         finally:
             del FEATURE_REGISTRY["test.inf_dummy"]
+
+
+class TestCustomFeatureOutputContract:
+    """
+    The ENTITY/UNIVERSE output contracts were documented for custom feature
+    authors but never enforced: the return value went straight into a
+    DataFrame constructor, so a wrong type or a foreign index surfaced as a
+    generic pandas error several frames away with no mention of which
+    feature produced it.
+    """
+
+    def _register(self, feature_id, fn, scope=FeatureScope.ENTITY):
+        register_feature(
+            FeatureDefinition(
+                id=feature_id,
+                description="d",
+                fn=fn,
+                temporal_support=TemporalSupport.PIT_SAFE,
+                scope=scope,
+                lookback=0,
+            )
+        )
+        return feature_id
+
+    def test_entity_feature_returning_ndarray_names_the_feature(
+        self, patched_multi_factory
+    ):
+        fid = self._register(
+            "test.bad_type_dummy",
+            lambda ohlcv, context, **p: ohlcv["Close"].to_numpy(),
+        )
+        try:
+            with pytest.raises(ValidationError, match=fid) as exc:
+                build_dataset(_spec(features=[FeatureSpec(id=fid)]))
+            assert "ndarray" in str(exc.value)
+        finally:
+            del FEATURE_REGISTRY[fid]
+
+    def test_entity_feature_with_foreign_index_rejected(self, patched_multi_factory):
+        """
+        Labels the entity does not have either invent rows or mean the
+        feature was computed against different data entirely.
+        """
+        fid = self._register(
+            "test.foreign_index_dummy",
+            lambda ohlcv, context, **p: pd.Series(
+                1.0, index=pd.date_range("1999-01-01", periods=len(ohlcv), freq="D")
+            ),
+        )
+        try:
+            with pytest.raises(ValidationError, match="not in"):
+                build_dataset(_spec(features=[FeatureSpec(id=fid)]))
+        finally:
+            del FEATURE_REGISTRY[fid]
+
+    def test_shorter_output_is_allowed(self, patched_multi_factory):
+        """
+        The contract is SUBSET, not equality. A feature legitimately
+        produces fewer rows than it consumes -- risk.rolling_beta works
+        from returns, which lose the first bar to pct_change. Panel
+        assembly is index-aligned, so the absent bars become NaN and the
+        existing alignment step handles them.
+        """
+        fid = self._register(
+            "test.short_output_dummy",
+            lambda ohlcv, context, **p: ohlcv["Close"].iloc[5:] * 0.0 + 1.0,
+        )
+        try:
+            result = build_dataset(_spec(features=[FeatureSpec(id=fid)]))
+            assert fid in result["panel"].columns
+        finally:
+            del FEATURE_REGISTRY[fid]
+
+    def test_universe_feature_missing_an_entity_names_it(self, patched_multi_factory):
+        """Previously a bare KeyError from the per-entity assembly loop."""
+        fid = self._register(
+            "test.partial_universe_dummy",
+            lambda returns, context, **p: returns.iloc[:, :1] * 0.0,
+            scope=FeatureScope.UNIVERSE,
+        )
+        try:
+            with pytest.raises(ValidationError, match="no values for"):
+                build_dataset(_spec(features=[FeatureSpec(id=fid)]))
+        finally:
+            del FEATURE_REGISTRY[fid]
+
+    def test_universe_feature_returning_series_rejected(self, patched_multi_factory):
+        fid = self._register(
+            "test.series_universe_dummy",
+            lambda returns, context, **p: returns.iloc[:, 0],
+            scope=FeatureScope.UNIVERSE,
+        )
+        try:
+            with pytest.raises(ValidationError, match="one column per entity"):
+                build_dataset(_spec(features=[FeatureSpec(id=fid)]))
+        finally:
+            del FEATURE_REGISTRY[fid]

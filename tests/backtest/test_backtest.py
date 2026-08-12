@@ -395,19 +395,24 @@ class TestTradeLog:
             5.0 * r1["avg_trade_return_pct"], abs=1e-9
         )
 
-    def test_trade_log_resize_cost_is_documented_approximation(self):
+    def test_trade_log_resize_is_one_trade_reconciling_with_equity_costs(self):
         """
-        A same-sign RESIZE (1.0 -> 2.5, a single pos_diff event) is a known,
-        documented approximation: the event is treated as closing a
+        A same-sign RESIZE (1.0 -> 2.5, a single pos_diff event) is a
+        partial ADD inside one lot, not a close-and-reopen. This used to be
+        a documented approximation: the event was treated as closing a
         1.0-sized trade AND opening a fresh 2.5-sized one, each
-        independently costed at 2x its own size, rather than the single
-        abs(pos_diff)=1.5 the equity curve actually charges for that one
-        event. This pins the resulting values down as a known quantity
-        rather than letting them silently drift.
+        independently costed at 2x its own size, so the trade log charged
+        2*(1.0+2.5) = 7 cost units where the equity curve charged
+        sum(abs(pdiff)) = 1.0+1.5+2.5 = 5. The two could not be reconciled
+        for any strategy that scales a position.
+
+        Worse, backtest.cpp had already moved to weighted-average cost
+        basis, so with the native kernel present one result dict reported
+        num_trades=1 (read from C++) beside a two-row Python trade_log.
+
         close=[100,105,110,108,108], signals=[1,2.5,2.5,0,0] ->
-        executed=[0,1,2.5,2.5,0]: event at bar 1 opens 1.0x, event at bar 2
-        (resize) closes the 1.0x trade and opens a 2.5x trade, event at
-        bar 4 closes the 2.5x trade.
+        executed=[0,1,2.5,2.5,0], ref_prices=close.shift(1). One lot:
+        open 1.0 @100, resize to 2.5 @105, close @108.
         """
         dates = pd.date_range("2023-01-02", periods=5, freq="B")
         close = [100.0, 105.0, 110.0, 108.0, 108.0]
@@ -426,26 +431,30 @@ class TestTradeLog:
             df, signals, commission_pct=0.01, slippage_pct=0.0, include_trade_log=True
         )
         trade_log = result["trade_log"]
-        assert len(trade_log) == 2
 
-        trade1_pnl = (105.0 - 100.0) / 100.0 * 1.0
-        trade1_pct = (trade1_pnl - 2.0 * 1.0 * 0.01) * 100.0
-        trade2_pnl = (108.0 - 105.0) / 105.0 * 2.5
-        trade2_pct = (trade2_pnl - 2.0 * 2.5 * 0.01) * 100.0
+        assert len(trade_log) == 1
+        assert result["num_trades"] == 1, (
+            "num_trades and the trade log must count the same events -- "
+            "they are two views of one run, not two independent estimates"
+        )
 
+        # Weighted-average cost basis across the lot's life.
+        basis = (1.0 * 100.0 + 1.5 * 105.0) / 2.5
+        assert basis == pytest.approx(103.0, abs=1e-12)
+        # Cost is charged per event on the amount actually transacted --
+        # the same 1.0 + 1.5 + 2.5 the equity curve charges.
+        total_cost = (1.0 + 1.5 + 2.5) * 0.01
+        expected_pct = ((108.0 - basis) / basis * 2.5 - total_cost) * 100.0
+
+        row = trade_log.iloc[0]
         # _build_trade_log rounds return_pct to 4 decimal places for display.
-        assert trade_log.iloc[0]["return_pct"] == pytest.approx(trade1_pct, abs=5e-5)
-        assert trade_log.iloc[1]["return_pct"] == pytest.approx(trade2_pct, abs=5e-5)
-
-        # The trade log's own total realized cost for this sequence is
-        # 2*(1.0+2.5)*cost_per_unit = 7*cost_per_unit, vs. the equity
-        # curve's own realized cost across the same 3 pos_diff events,
-        # sum(abs(pdiff))*cost_per_unit = (1.0+1.5+2.5)*0.01 = 5*0.01 --
-        # the two do not match for a resize; this is the documented
-        # approximation, not a bug to chase further here.
-        trade_log_total_cost = 2.0 * (1.0 + 2.5) * 0.01
-        equity_curve_total_cost = (1.0 + 1.5 + 2.5) * 0.01
-        assert trade_log_total_cost != pytest.approx(equity_curve_total_cost)
+        assert row["return_pct"] == pytest.approx(expected_pct, abs=5e-5)
+        assert row["entry_price"] == pytest.approx(basis, abs=1e-9)
+        assert row["exit_price"] == pytest.approx(108.0, abs=1e-9)
+        # Reported size is the lot's PEAK exposure, not its opening leg.
+        assert row["position_size"] == pytest.approx(2.5, abs=1e-9)
+        assert row["entry_date"] == dates[1]
+        assert row["exit_date"] == dates[4]
 
     def test_trade_log_reconciles_with_equity_curve_next_open_mode(self):
         """
@@ -641,19 +650,21 @@ class TestNativeTradeStatsCorrectness:
         Broader cross-check on a realistic random series (not just the
         hand-verified 6-bar case): the native kernel's own trade stats must
         agree with engine.py's independent Python recomputation
-        (_build_trade_log + _compute_trade_stats) for any signal set that
-        never produces a same-sign RESIZE event.
+        (_build_trade_log + _compute_trade_stats).
 
-        Deliberately excludes 2.0 from the signal choices (which, following
-        directly after a 1.0, would be a same-sign resize): backtest.cpp's
-        run_strategy now tracks a genuine weighted-average cost basis across
-        a position's whole life, treating a resize as a partial add to the
-        SAME lot rather than a close-then-reopen -- _build_trade_log (the
-        Python reference used here) has NOT been updated to match (out of
-        scope for this native-only fix; see CHANGELOG's "Known Issues" for
-        this gap), so the two are only guaranteed to agree when no resize
-        ever occurs. Open/close/reversal/leveraged-single-size scenarios are
-        still fully covered here and by the two hand-verified tests above.
+        The signal choices deliberately INCLUDE same-sign resizes (1.0 ->
+        2.0 and -1.0 -> -2.0). They used to be excluded: backtest.cpp
+        tracked a weighted-average cost basis and treated a resize as a
+        partial add to the same lot, while _build_trade_log still closed
+        and reopened, so the two only agreed when no resize ever occurred.
+        Both sides now share that lot definition, and this test is the
+        thing that would notice if they diverged again.
+
+        Since run_strategy's native path reads num_trades/win_rate/
+        profit_factor/avg_trade_return_pct straight from the kernel while
+        include_trade_log builds the DataFrame in Python, a divergence here
+        is not academic -- it surfaces as one result dict whose num_trades
+        does not match its own trade_log's row count.
         """
         from standard_quant_tools.backtest.engine import (
             _build_trade_log,
@@ -662,11 +673,21 @@ class TestNativeTradeStatsCorrectness:
 
         np.random.seed(7)
         signals = pd.Series(
-            np.random.choice([-1.0, 0.0, 1.0], len(simple_ohlcv)),
+            np.random.choice([-2.0, -1.0, 0.0, 1.0, 2.0], len(simple_ohlcv)),
             index=simple_ohlcv.index,
         )
         prices = simple_ohlcv["Close"]
         executed = signals.shift(1).fillna(0.0)
+
+        # The series must actually exercise the path this test exists for.
+        pos_diff = executed.diff()
+        pos_diff.iloc[0] = executed.iloc[0]
+        resizes = (
+            (pos_diff != 0)
+            & (executed.shift(1).fillna(0.0) != 0)
+            & (np.sign(pos_diff) == np.sign(executed.shift(1).fillna(0.0)))
+        ).sum()
+        assert resizes > 0, "fixture no longer produces same-sign resizes"
 
         close_arr = prices.to_numpy(dtype=np.float64)
         signals_arr = signals.to_numpy(dtype=np.float64)
@@ -675,21 +696,77 @@ class TestNativeTradeStatsCorrectness:
         trade_log = _build_trade_log(prices.shift(1), prices, executed, 0.001 + 0.0005)
         python_stats = _compute_trade_stats(trade_log)
 
-        # _compute_trade_stats intentionally round()s to 4 decimal places for
-        # display (see engine.py) -- the native kernel returns full
-        # precision, so an exact-tolerance comparison must account for that
-        # rounding step itself, not just floating-point noise. This is not
-        # a discrepancy a real caller ever sees: run_strategy()'s Python
-        # wrapper always overwrites these fields with the Python-computed,
-        # already-rounded values regardless of which backend ran.
+        # _compute_trade_stats intentionally round()s each trade's
+        # return_pct to 4 decimal places for display (see engine.py) before
+        # averaging, while the native kernel averages at full precision --
+        # so an exact comparison must absorb that rounding step itself, not
+        # just floating-point noise.
         assert native["num_trades"] == python_stats["num_trades"]
+        assert native["num_trades"] == len(trade_log)
         assert native["win_rate"] == pytest.approx(python_stats["win_rate"], abs=5e-5)
         assert native["avg_trade_return_pct"] == pytest.approx(
-            python_stats["avg_trade_return_pct"], abs=5e-5
+            python_stats["avg_trade_return_pct"], abs=5e-4
         )
         assert native["profit_factor"] == pytest.approx(
-            python_stats["profit_factor"], abs=5e-5
+            python_stats["profit_factor"], abs=5e-4
         )
+
+    @requires_cpp_ext
+    @pytest.mark.parametrize(
+        "signal_values",
+        [
+            pytest.param([0, 1, 1, 2.5, 2.5, 0, 0, 0], id="resize_up"),
+            pytest.param([0, 2.5, 2.5, 1, 1, 0, 0, 0], id="resize_down_partial"),
+            pytest.param([0, -1, -1, -2.5, -2.5, 0, 0, 0], id="short_resize"),
+            pytest.param([0, 1, 1, -1, -1, 0, 0, 0], id="flip"),
+            pytest.param([0, 1, 1, 1, 2, 2, 2, 2], id="resize_then_never_exits"),
+            pytest.param([0, 1, 0, -1, 0, 2, 2, 0], id="several_lots"),
+        ],
+    )
+    def test_native_and_python_agree_on_what_counts_as_one_trade(self, signal_values):
+        """
+        The bug this pins was a definitional disagreement, not a numeric
+        one: the two implementations did not agree on where a trade ends.
+        Measured before the fix on resize_up with cost 0.0015 -- native
+        1 trade averaging 17.4492%, Python log 2 trades averaging 8.5113%,
+        from identical inputs.
+
+        The "same-sign resize" framing this case list inherited from the
+        earlier C++ pass understated it. A partial REDUCE diverged
+        identically and was never named: the old code emitted a completed
+        trade for EVERY position-changing event, and a reduce (2.0 -> 1.0)
+        is opposite-sign without being a full close. Measured on
+        0 -> 2.0 -> 1.0 -> 0, which contains no same-sign resize at all:
+        native 1 trade @ 12.8078%, old log 2 rows averaging 6.1583%. Hence
+        resize_down_partial and several_lots below, not just the resizes.
+        """
+        from standard_quant_tools.backtest.engine import (
+            _build_trade_log,
+            _compute_trade_stats,
+        )
+
+        n = len(signal_values)
+        idx = pd.date_range("2024-01-01", periods=n, freq="B")
+        close = pd.Series(np.linspace(100.0, 100.0 + 2.0 * n, n), index=idx)
+        signals = pd.Series(signal_values, index=idx, dtype=float)
+        executed = signals.shift(1).fillna(0.0)
+
+        native = _cpp.run_strategy(
+            close.to_numpy(dtype=np.float64),
+            signals.to_numpy(dtype=np.float64),
+            10_000.0,
+            0.001,
+            0.0005,
+        )
+        trade_log = _build_trade_log(close.shift(1), close, executed, 0.0015)
+        python_stats = _compute_trade_stats(trade_log)
+
+        assert native["num_trades"] == len(trade_log)
+        assert native["num_trades"] == python_stats["num_trades"]
+        assert native["avg_trade_return_pct"] == pytest.approx(
+            python_stats["avg_trade_return_pct"], abs=5e-4
+        )
+        assert native["win_rate"] == pytest.approx(python_stats["win_rate"], abs=5e-5)
 
 
 class TestMetricBounds:

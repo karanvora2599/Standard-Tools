@@ -70,7 +70,19 @@ def provider_guarantee_warnings(metadata: Optional[Any]) -> List[str]:
     while being built entirely from a source that makes no such guarantee.
     """
     if metadata is None:
-        return []
+        # "metadata retrieval failed" and "the provider guarantees
+        # everything" both used to produce an empty warning list, so a
+        # transient get_metadata failure was indistinguishable from a clean
+        # bill of health -- silently suppressing exactly the caveat this
+        # function exists to surface. Absence of evidence is reported as
+        # absence of evidence.
+        return [
+            "provider temporal/survivorship guarantees could not be determined "
+            "(get_metadata was unavailable or failed), so the point-in-time and "
+            "survivorship caveats below could NOT be checked. This is not the "
+            "same as the provider guaranteeing them — treat this dataset's "
+            "provenance as unverified unless you know the source independently."
+        ]
 
     warnings: List[str] = []
     provider = getattr(metadata, "provider", "unknown")
@@ -106,11 +118,11 @@ def interval_warnings(interval: str) -> List[str]:
         f"interval={interval!r} is not daily. Every feature lookback and "
         "target.horizon counts BARS of this interval, and the built-in features' "
         "default parameters are calibrated for daily bars (window=252 means one "
-        "trading year at '1d', not at any other interval). The realized-volatility "
-        "features additionally annualize with a daily constant, so their absolute "
-        "scale is wrong here — harmless for a standardized model whose ranking is "
-        "unaffected by a constant factor, misleading if you read the values "
-        "directly. Set feature parameters explicitly for a non-daily interval."
+        "trading year at '1d', not at any other interval). Set feature parameters "
+        "explicitly for a non-daily interval. (Annualization is no longer part of "
+        "this caveat: the realized-volatility features now scale by this "
+        "interval's own constant, and reject intervals where no constant exists "
+        "without an exchange calendar.)"
     ]
 
 

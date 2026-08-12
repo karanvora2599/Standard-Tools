@@ -120,6 +120,77 @@ def _provider_metadata(provider: Any, symbol: str, interval: str) -> Optional[An
         return None
 
 
+def _check_entity_output(
+    result: Any, column: str, feature_id: str, ohlcv: pd.DataFrame, symbol: str
+) -> pd.Series:
+    """
+    Enforce the documented ENTITY feature contract: a pd.Series aligned to
+    the entity's own OHLCV index.
+
+    The contract was documented for custom features but never checked --
+    the result went straight into a DataFrame constructor, so a callable
+    returning the wrong type, length or index failed later as a generic
+    pandas error with no mention of which feature caused it. Making an
+    already-documented interface actually enforced, and naming the feature
+    when it isn't met.
+    """
+    if not isinstance(result, pd.Series):
+        raise ValidationError(
+            f"feature {feature_id!r} (column {column!r}) must return a pandas Series "
+            f"for an ENTITY-scope feature, got {type(result).__name__} for {symbol!r}."
+        )
+    # The contract is that the index is a SUBSET of the entity's bars --
+    # not that it is identical. A feature legitimately produces fewer rows
+    # than it consumes: risk.rolling_beta works from returns, which lose
+    # the first bar to pct_change, so it returns n-1 values for n bars.
+    # Panel assembly is index-aligned, so a subset lands on the right bars
+    # and the absent ones become NaN, which the alignment step then handles.
+    #
+    # What is NOT safe is an index carrying labels the entity does not
+    # have: those either silently introduce rows or, worse, indicate the
+    # feature computed against the wrong entity entirely.
+    extra = result.index.difference(ohlcv.index)
+    if len(extra) > 0:
+        raise ValidationError(
+            f"feature {feature_id!r} (column {column!r}) returned {len(extra)} "
+            f"index label(s) that are not in {symbol!r}'s OHLCV index, e.g. "
+            f"{[str(x) for x in extra[:3]]}. A feature's output must be indexed by "
+            "the bars it was given — anything else would either introduce rows the "
+            "entity does not have or indicate it was computed against different data."
+        )
+    return result
+
+
+def _check_universe_output(
+    result: Any, column: str, feature_id: str, returns_panel: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Enforce the documented UNIVERSE feature contract: a pd.DataFrame with
+    one column per entity, indexed like the shared returns panel. Same
+    rationale as _check_entity_output -- a missing column here surfaced as
+    a bare KeyError when the per-entity loop indexed into it.
+    """
+    if not isinstance(result, pd.DataFrame):
+        raise ValidationError(
+            f"feature {feature_id!r} (column {column!r}) must return a pandas DataFrame "
+            f"for a UNIVERSE-scope feature (one column per entity), got "
+            f"{type(result).__name__}."
+        )
+    missing = [c for c in returns_panel.columns if c not in result.columns]
+    if missing:
+        raise ValidationError(
+            f"feature {feature_id!r} (column {column!r}) returned no values for "
+            f"entities {missing}. A UNIVERSE feature must produce a column for every "
+            "entity in the panel."
+        )
+    if not result.index.equals(returns_panel.index):
+        raise ValidationError(
+            f"feature {feature_id!r} (column {column!r}) returned a DataFrame whose "
+            "index does not match the shared returns panel's."
+        )
+    return result
+
+
 def dataset_spec_hash(spec: DatasetSpec) -> str:
     """
     Canonical content hash of a DatasetSpec.
@@ -174,7 +245,12 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     benchmark_df = _fetch_ohlcv(
         provider, spec.benchmark, spec.start, spec.end, spec.interval
     )
-    context = FeatureContext(benchmark_close=benchmark_df["Close"])
+    # interval carried into the context so a feature that ANNUALIZES scales
+    # by the right constant instead of assuming daily bars -- see
+    # features/risk.py::_annualization.
+    context = FeatureContext(
+        benchmark_close=benchmark_df["Close"], interval=spec.interval
+    )
 
     close_by_entity = {symbol: df["Close"] for symbol, df in ohlcv_by_entity.items()}
     returns_panel = build_returns_panel(close_by_entity)
@@ -207,8 +283,11 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     universe_outputs: Dict[str, pd.DataFrame] = {}
     for fs, definition, params in zip(spec.features, feature_defs, resolved_params):
         if definition.scope == FeatureScope.UNIVERSE:
-            universe_outputs[fs.output_name] = definition.fn(
-                returns_panel, context, **params
+            universe_outputs[fs.output_name] = _check_universe_output(
+                definition.fn(returns_panel, context, **params),
+                fs.output_name,
+                definition.id,
+                returns_panel,
             )
 
     per_entity_features: Dict[str, pd.DataFrame] = {}
@@ -220,7 +299,13 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         columns: Dict[str, pd.Series] = {}
         for fs, definition, params in zip(spec.features, feature_defs, resolved_params):
             if definition.scope == FeatureScope.ENTITY:
-                columns[fs.output_name] = definition.fn(ohlcv, context, **params)
+                columns[fs.output_name] = _check_entity_output(
+                    definition.fn(ohlcv, context, **params),
+                    fs.output_name,
+                    definition.id,
+                    ohlcv,
+                    symbol,
+                )
             else:
                 columns[fs.output_name] = universe_outputs[fs.output_name][symbol]
         per_entity_features[symbol] = pd.DataFrame(columns)

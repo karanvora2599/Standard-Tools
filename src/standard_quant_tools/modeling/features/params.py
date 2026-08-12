@@ -39,6 +39,14 @@ _WINDOW_PARAM_NAMES = frozenset(
     {"lookback", "period", "window", "span", "fast", "slow", "signal", "horizon"}
 )
 
+# Upper bound on any bar-count parameter. Deliberately far above anything a
+# real model would use (100k daily bars is ~400 years) -- this exists to
+# stop an agent turning one valid-looking tool call into an unbounded
+# rolling computation, the same reason the estimator registry caps
+# n_estimators/max_depth, not to express an opinion about useful window
+# lengths.
+_MAX_WINDOW_BARS = 100_000
+
 
 def _is_window_param(name: str) -> bool:
     return name in _WINDOW_PARAM_NAMES or name.endswith(
@@ -100,6 +108,23 @@ def resolve_params(
                     f"feature {definition.id!r}: parameter {name!r} must be finite, "
                     f"got {value!r}."
                 )
+            # Integer-ness is derived from the DEFAULT's type, not from the
+            # parameter's name. The name-based rule below still applies the
+            # stricter >= 1 window semantics, but it only recognised a
+            # fixed vocabulary -- so `refit_every=1.5` sailed through as a
+            # generic finite number and later reached `range(window, n+1,
+            # refit_every)`, which raises a raw TypeError from inside
+            # numpy/Python rather than a modeling validation error naming
+            # the feature and parameter.
+            if isinstance(default, int) and not isinstance(default, bool):
+                if isinstance(value, float) and not float(value).is_integer():
+                    raise ValidationError(
+                        f"feature {definition.id!r}: parameter {name!r} must be a whole "
+                        f"number (its default {default!r} is an integer), got {value!r}."
+                    )
+                value = int(value)
+                resolved[name] = value
+
             if _is_window_param(name):
                 if isinstance(value, float) and not float(value).is_integer():
                     raise ValidationError(
@@ -113,6 +138,16 @@ def resolve_params(
                         f"pandas interprets a negative period as a FORWARD window, which "
                         f"would make this feature read future prices while still being "
                         f"declared point-in-time safe."
+                    )
+                if int(value) > _MAX_WINDOW_BARS:
+                    raise ValidationError(
+                        f"feature {definition.id!r}: parameter {name!r}={value!r} exceeds "
+                        f"the maximum supported window of {_MAX_WINDOW_BARS:,} bars. "
+                        "Estimator parameters already carry compute ceilings; feature "
+                        "windows need them for the same reason — one tool call should "
+                        "not be able to request an unbounded rolling computation. This "
+                        "is a bound on obviously pathological input, not a view on what "
+                        "window length is sensible."
                     )
                 resolved[name] = int(value)
             continue

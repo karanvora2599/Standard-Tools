@@ -279,6 +279,27 @@ def oos_predictions_to_signal_panel(
             "model_id instead and it is read from the manifest."
         )
 
+    # `task`'s Literal annotation is a static hint, not a runtime check, and
+    # this function is public Python. The branch below is effectively
+    # `if task == "regression": ... else: classification`, so task="banana"
+    # fell through into classifier semantics and thresholded raw
+    # forward-return predictions against a probability cutoff.
+    if task not in ("regression", "classification"):
+        raise ValidationError(
+            f"task must be 'regression' or 'classification', got {task!r}. "
+            "(The type annotation is not enforced at runtime; an unrecognized "
+            "value previously fell through into classification handling.)"
+        )
+    # NaN fails EVERY comparison, so `deadband < 0` was False for it and a
+    # NaN deadband reached np.abs(raw) <= nan -- all False, silently
+    # disabling the deadband. inf is the mirror image: all True, flattening
+    # every regression prediction to 0.0.
+    if not np.isfinite(deadband):
+        raise ValidationError(
+            f"deadband must be finite, got {deadband!r}. NaN compares False "
+            "against everything (silently disabling the deadband) and inf "
+            "compares True (silently flattening every prediction to 0)."
+        )
     if deadband < 0:
         raise ValidationError(f"deadband must be >= 0, got {deadband}")
     if not (0.0 < proba_threshold < 1.0):

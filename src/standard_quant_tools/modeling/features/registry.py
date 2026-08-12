@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 
 from standard_quant_tools.error import ValidationError
 
-from .base import FeatureDefinition
+from .base import RESERVED_PANEL_COLUMNS, FeatureDefinition
 
 FEATURE_REGISTRY: Dict[str, FeatureDefinition] = {}
 
@@ -25,6 +25,20 @@ def register_feature(definition: FeatureDefinition, *, overwrite: bool = False) 
         ValidationError: `definition.id` already registered and
         overwrite=False.
     """
+    # FeatureSpec.alias already rejects these, because an alias becomes the
+    # panel's column name. So does a feature id with no alias -- the id IS
+    # the output_name then -- but nothing checked it, so a custom feature
+    # registered as id="target" produced a column that collided with the
+    # panel's own supervised target. Validate the name wherever it comes
+    # from, not only on the path that happened to be noticed first.
+    if definition.id in RESERVED_PANEL_COLUMNS:
+        raise ValidationError(
+            f"feature id {definition.id!r} is reserved by the panel schema "
+            f"({sorted(RESERVED_PANEL_COLUMNS)}) — a feature with no alias uses "
+            "its id as the output column name, so this would collide with a "
+            "column the panel builds itself. Choose a different id, or set an "
+            "alias on the FeatureSpec."
+        )
     if definition.id in FEATURE_REGISTRY and not overwrite:
         raise ValidationError(
             f"feature id {definition.id!r} already registered — pass overwrite=True "

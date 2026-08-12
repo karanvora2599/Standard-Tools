@@ -13,6 +13,8 @@ from typing import Dict, List, Literal, Optional
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .features.base import RESERVED_PANEL_COLUMNS
+
 
 def _parse_date(value: str, field_name: str) -> pd.Timestamp:
     """Shared by DatasetSpec's start/end cross-check and
@@ -55,7 +57,7 @@ class FeatureSpec(BaseModel):
             raise ValueError("alias must be a non-empty string")
         # These are reserved by the long panel's own schema; an alias
         # colliding with one would overwrite the column rather than add to it.
-        if v in {"date", "entity", "target", "label_end_date"}:
+        if v in RESERVED_PANEL_COLUMNS:
             raise ValueError(
                 f"alias={v!r} is reserved by the panel schema "
                 "(date/entity/target/label_end_date)"
@@ -105,7 +107,16 @@ class TargetSpec(BaseModel):
 
 
 class DatasetSpec(BaseModel):
-    universe: List[str] = Field(..., min_length=1, description="Ticker symbols.")
+    # max_length alongside min_length: universe fetching creates a task per
+    # symbol, and while a semaphore bounds how many run at once it does not
+    # bound how many are created. One valid-looking tool call could
+    # therefore request an unbounded workload -- the same
+    # agent-triggerable resource-exhaustion path the estimator registry's
+    # parameter ceilings close. 1000 is far above any realistic modeling
+    # universe and is a budget, not a modeling opinion.
+    universe: List[str] = Field(
+        ..., min_length=1, max_length=1000, description="Ticker symbols."
+    )
     start: str = Field(..., description="Start date YYYY-MM-DD.")
     end: str = Field(..., description="End date YYYY-MM-DD.")
     features: List[FeatureSpec] = Field(..., min_length=1)
@@ -237,5 +248,12 @@ class ModelSpec(BaseModel):
     estimator: EstimatorSpec
     validation: ValidationSpec
     random_seed: int = Field(
-        42, description="Seed passed to the estimator's constructor."
+        42,
+        ge=0,
+        le=2**32 - 1,
+        description="Seed passed to the estimator's constructor. Bounded to "
+        "numpy/sklearn's accepted RandomState range [0, 2**32-1]: an arbitrary "
+        "Python int outside it (negative, or wider than 32 bits) is rejected "
+        "deep inside sklearn rather than at this boundary, where the message "
+        "can say which field was wrong.",
     )

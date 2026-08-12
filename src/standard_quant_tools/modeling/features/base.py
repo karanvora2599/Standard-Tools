@@ -50,6 +50,40 @@ class FeatureScope(str, Enum):
     UNIVERSE = "universe"
 
 
+# Column names the long panel builds itself. A feature's output column --
+# its alias, or its id when it has none -- must not collide with any of
+# them. Defined here rather than inline at each check so the alias path and
+# the feature-id path cannot drift apart: the alias path was validated and
+# the id path was not, which let a custom feature registered as id="target"
+# produce a column that shadowed the panel's supervised target.
+RESERVED_PANEL_COLUMNS = frozenset({"date", "entity", "target", "label_end_date"})
+
+
+# Bars per year, by interval, for annualizing a per-bar volatility.
+#
+# Only intervals whose constant is unambiguous are listed. Daily, weekly and
+# monthly are calendar-derived and need no assumption about session length.
+# INTRADAY IS DELIBERATELY ABSENT: bars-per-year at "1h" depends on how many
+# trading hours the venue is open (6.5 for US equities, 8 for many European
+# venues, ~24 for crypto), and this package has no exchange calendar to
+# resolve that from. Picking one silently would make an "annualized"
+# volatility wrong by a fixed multiplicative factor for every other market —
+# a number that looks precise and is not.
+_PERIODS_PER_YEAR = {
+    "1d": 252,
+    "5d": 52,
+    "1wk": 52,
+    "1mo": 12,
+    "3mo": 4,
+}
+
+
+def periods_per_year_for_interval(interval: str) -> Optional[int]:
+    """Bars per year for `interval`, or None when it cannot be determined
+    without an exchange calendar (every intraday interval)."""
+    return _PERIODS_PER_YEAR.get(str(interval).strip())
+
+
 class FeatureContext(BaseModel):
     """Auxiliary cross-entity data a feature function may need beyond its
     own symbol's OHLCV. Optional fields only — most features ignore this."""
@@ -57,6 +91,10 @@ class FeatureContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     benchmark_close: Optional[pd.Series] = None
+    # The dataset's bar interval, so a feature that annualizes can scale by
+    # the right constant instead of assuming daily bars. None means "not
+    # supplied", which callers treat as daily for backward compatibility.
+    interval: Optional[str] = None
 
 
 class FeatureDefinition(BaseModel):

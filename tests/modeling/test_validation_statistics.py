@@ -223,6 +223,42 @@ class TestFoldAccounting:
         )
         assert "r2" in first["metrics"]
 
+    def test_train_end_is_the_range_actually_fit_not_the_scheduled_one(
+        self, patched_multi_factory
+    ):
+        """
+        `train_end` reported the SCHEDULED window end. Label-overlap
+        purging removes the tail of the training window -- exactly
+        `horizon` bars of it -- so a fold whose last week was entirely
+        purged still claimed to have trained through it. Lineage described
+        the split that was planned rather than the one that ran.
+
+        Both are now recorded, and their difference is the purge extent.
+        """
+        # embargo=0 < horizon=5, so the last 5 training dates carry labels
+        # that finish inside the test window and are purged. With the
+        # default embargo=5 the gap already covers the horizon and nothing
+        # is purged -- the bug is invisible exactly when it does not matter.
+        result = run_experiment(
+            _dataset(_spec()),
+            _model_spec(embargo=0),
+            dataset_id="ds_vr_te",
+        )
+        folds = result["validation_report"]["folds"]
+        assert folds, "need at least one fold to assert on"
+        for fold in folds:
+            assert "scheduled_train_end" in fold
+            actual = pd.Timestamp(fold["train_end"])
+            scheduled = pd.Timestamp(fold["scheduled_train_end"])
+            # Purging can only ever move the end EARLIER.
+            assert actual <= scheduled
+        # With horizon=5 and daily bars, purging is not hypothetical: at
+        # least one fold must have lost training tail to it.
+        assert any(
+            pd.Timestamp(f["train_end"]) < pd.Timestamp(f["scheduled_train_end"])
+            for f in folds
+        ), "expected label-overlap purging to shorten at least one training window"
+
     def test_target_horizon_and_purge_count_reported(self, patched_multi_factory):
         result = run_experiment(_dataset(_spec()), _model_spec(), dataset_id="ds_vr3")
         report = result["validation_report"]

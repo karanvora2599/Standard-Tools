@@ -137,12 +137,25 @@ class TestInterval:
         assert interval_warnings("1d") == []
 
     def test_non_daily_interval_warns_about_daily_calibration(self):
+        """
+        The surviving caveat is that feature/target windows count BARS, so
+        a default calibrated for daily bars means something else at another
+        interval.
+
+        This test used to also require the word "annualize", because the
+        volatility features annualized with a daily constant regardless of
+        interval — a knowingly wrong absolute scale. That is now fixed at
+        the source (features/risk.py resolves the constant from the
+        interval, and rejects intervals where none exists without an
+        exchange calendar), so warning about it would be describing
+        behavior the code no longer has.
+        """
         (message,) = interval_warnings("1h")
         assert "1h" in message
         assert (
             "252" in message
         ), "the concrete default must be named, not just 'defaults'"
-        assert "annualize" in message
+        assert "BARS" in message
 
 
 # ── Concurrent fetch ───────────────────────────────────────────────────
@@ -306,7 +319,23 @@ class TestProviderGuaranteeWarnings:
         assert warnings == []
 
     def test_missing_metadata_is_not_an_error(self):
-        assert provider_guarantee_warnings(None) == []
+        """
+        Still not an error — it must not raise or fail the build. But it is
+        no longer SILENT.
+
+        This previously asserted `== []`, which made a failed metadata
+        lookup indistinguishable from a provider that guarantees everything
+        (the case asserted directly above). Both produced "no warnings", so
+        a transient get_metadata failure silently suppressed exactly the
+        provenance caveat this function exists to surface.
+        """
+        warnings = provider_guarantee_warnings(None)
+        assert len(warnings) == 1
+        assert "could not be determined" in warnings[0]
+        # And it must not be confusable with a clean bill of health.
+        assert provider_guarantee_warnings(None) != provider_guarantee_warnings(
+            mock_metadata(survivorship_free=True, point_in_time=True)
+        )
 
     def test_a_provider_without_get_metadata_still_builds(self, monkeypatch):
         """Provenance is a note, not a precondition: a provider that cannot
