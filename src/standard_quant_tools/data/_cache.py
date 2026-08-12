@@ -51,6 +51,20 @@ _BOUND_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{6})?$")
 # layer. This just needs to reject path-traversal/injection attempts.
 _INTERVAL_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 
+# Cache-format generation, embedded in every cache filename.
+#
+# Bumped when the MEANING of a cached frame changes, so files written under
+# the old meaning are simply never looked up again (they age out with the
+# directory) instead of being served as though they matched the new one.
+#
+# v2: end_date became an inclusive observation cutoff (see
+# inclusive_end_timestamp). Every v1 file was written under yfinance's
+# exclusive-`end` behavior and is therefore missing its final bar -- serving
+# one on a cache hit would answer the same request differently than a live
+# fetch, which is precisely the cache/live parity failure this layer exists
+# to avoid.
+_CACHE_FORMAT_VERSION = "v2"
+
 # ── In-process session cache (avoids repeated network calls in the same run) ──
 _session_cache = TTLCache(maxsize=100, ttl=3600)
 # cachetools' cache classes do no internal locking of their own (that's why
@@ -124,6 +138,53 @@ def is_intraday_interval(interval: str) -> bool:
     """True for sub-daily bar intervals ("1m", "15m", "1h"), False for
     daily and coarser ("1d", "5d", "1wk", "1mo", "3mo")."""
     return bool(_INTRADAY_INTERVAL_RE.match(str(interval).strip()))
+
+
+def inclusive_end_timestamp(
+    end_date: Union[str, datetime, _date], interval: str = "1d"
+) -> "pd.Timestamp":
+    """
+    The last observation timestamp an `end_date` is defined to include.
+
+    `DataProvider.get_ohlcv`'s `end_date` is an INCLUSIVE observation
+    cutoff (see data/base.py). Providers disagreed natively -- yfinance's
+    `ticker.history(end=...)` is exclusive, while Polygon's aggregates `to`
+    and Bloomberg's `endDate` are inclusive -- so the same call returned a
+    different window depending only on which provider served it, and
+    score_model(as_of=X) silently excluded X on the default provider while
+    still reporting X as the as-of date.
+
+    A bare date means "through the end of that day" at every interval; an
+    explicit intraday timestamp means exactly that instant.
+    """
+    ts = pd.Timestamp(end_date)
+    if pd.isna(ts):
+        raise ValidationError(
+            f"end_date must be parseable as a timestamp, got {end_date!r}"
+        )
+    if (ts.hour, ts.minute, ts.second, ts.microsecond) == (0, 0, 0, 0):
+        return ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    return ts
+
+
+def trim_to_inclusive_end(
+    df: pd.DataFrame, end_date: Union[str, datetime, _date], interval: str = "1d"
+) -> pd.DataFrame:
+    """
+    Enforce the inclusive-end contract on a provider's returned frame.
+
+    Applied to EVERY provider rather than trusting each vendor's documented
+    boundary: the contract then holds by construction, so a vendor changing
+    (or mis-documenting) its own semantics can't silently move the window.
+    Cheap -- one boolean mask on an already-materialized frame.
+    """
+    if df.empty:
+        return df
+    bound = inclusive_end_timestamp(end_date, interval)
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is not None:
+        bound = bound.tz_localize(idx.tz) if bound.tzinfo is None else bound
+    return df[idx <= bound]
 
 
 def _norm_cache_bound(d: Union[str, datetime, _date], interval: str = "1d") -> str:
@@ -241,7 +302,10 @@ def _parquet_path(
     # served the other's bars. Use a token that _SYMBOL_RE itself rejects, so
     # no real symbol can ever produce it by other means.
     safe = symbol.replace("/", "__SLASH__").upper()
-    path = _CACHE_ROOT / f"{provider}_{safe}_{start}_{end}_{interval}.parquet"
+    path = (
+        _CACHE_ROOT
+        / f"{_CACHE_FORMAT_VERSION}_{provider}_{safe}_{start}_{end}_{interval}.parquet"
+    )
     root = _CACHE_ROOT.resolve()
     resolved = path.resolve()
     # On Windows, Path.resolve() calls into GetFinalPathNameByHandle for a

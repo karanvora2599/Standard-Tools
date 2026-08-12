@@ -29,6 +29,8 @@ from ._cache import (
     _session_cache_get,
     _session_cache_set,
     _write_parquet_atomic,
+    inclusive_end_timestamp,
+    trim_to_inclusive_end,
 )
 from ._retry import retry
 from .base import DataProvider, FinancialRatios, TickerInfo
@@ -219,9 +221,25 @@ class YFinanceProvider(DataProvider):
         t0 = time.perf_counter()
         try:
             ticker = yf.Ticker(symbol)
+            # yfinance's `end` is EXCLUSIVE, but this package's get_ohlcv
+            # contract defines end_date as an INCLUSIVE observation cutoff
+            # (data/base.py) -- the semantics Polygon's aggregates `to` and
+            # Bloomberg's `endDate` already had natively. Passing end_date
+            # straight through silently dropped its final bar, so
+            # get_ohlcv(end="2023-01-01") stopped at Dec 31 here while the
+            # other two providers included Jan 1, and score_model(as_of=X)
+            # excluded X while still reporting X as the as-of date.
+            #
+            # Request an exclusive bound past the whole inclusive window,
+            # then trim below. Over-fetching at most one day is harmless;
+            # under-fetching silently changes the answer.
+            request_end = (
+                inclusive_end_timestamp(end_date, interval).normalize()
+                + pd.Timedelta(days=1)
+            ).to_pydatetime()
             df = ticker.history(
                 start=start_date,
-                end=end_date,
+                end=request_end,
                 interval=interval,
                 auto_adjust=True,
             )
@@ -241,7 +259,11 @@ class YFinanceProvider(DataProvider):
             if df["Close"].isnull().any():
                 raise APIError(f"Data for {symbol} contains NaNs in Close column.")
 
-            result = _normalize_ohlcv_index(df[required], interval)
+            # Trim AFTER normalization so the comparison happens in the same
+            # tz-naive space the index was just converted into.
+            result = trim_to_inclusive_end(
+                _normalize_ohlcv_index(df[required], interval), end_date, interval
+            )
 
         except (DataNotFoundError, InvalidSymbolError, APIError):
             raise

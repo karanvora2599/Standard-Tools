@@ -49,6 +49,7 @@ from standard_quant_tools.error import (
     ValidationError,
 )
 
+from ._cache import trim_to_inclusive_end
 from ._retry import retry
 from .base import DataProvider, FinancialRatios, TickerInfo
 from .metadata import DataSetMetadata
@@ -373,7 +374,12 @@ class BloombergProvider(DataProvider):
         if error is not None:
             raise error
 
-        result = _parse_historical_bars(bars, symbol)
+        # BDH's endDate is already inclusive -- same rationale as
+        # PolygonProvider: enforce the contract by construction rather than
+        # by trusting the vendor's documented boundary.
+        result = trim_to_inclusive_end(
+            _parse_historical_bars(bars, symbol), end_date, interval
+        )
         audit.record_data_access(
             symbol,
             start_str,

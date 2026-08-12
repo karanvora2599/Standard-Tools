@@ -80,6 +80,7 @@ from ._cache import (
     _session_cache_get,
     _session_cache_set,
     _write_parquet_atomic,
+    trim_to_inclusive_end,
 )
 from ._retry import retry
 from .base import DataProvider, FinancialRatios, TickerInfo
@@ -441,7 +442,15 @@ class PolygonProvider(DataProvider):
                 "(limit=50000) — truncating; pagination isn't implemented",
                 symbol,
             )
-        result = _parse_aggs(results, symbol, timespan)
+        # Polygon's aggregates `to` is already inclusive, so this is a
+        # no-op on a well-behaved response. Applied anyway so the
+        # inclusive-end contract holds by CONSTRUCTION for every provider
+        # rather than by trusting each vendor's documented boundary -- a
+        # vendor changing or mis-documenting its own semantics then cannot
+        # silently move the window.
+        result = trim_to_inclusive_end(
+            _parse_aggs(results, symbol, timespan), end_str, interval
+        )
         audit.record_data_access(
             symbol,
             start_str,

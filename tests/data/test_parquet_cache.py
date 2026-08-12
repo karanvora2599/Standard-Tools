@@ -703,3 +703,93 @@ class TestIntradayCacheIdentity:
     def test_widened_bound_format_still_rejects_traversal(self, bad):
         with pytest.raises(ValidationError):
             _parquet_path("AAPL", bad, "2026-08-12", "1h")
+
+
+class TestInclusiveEndContract:
+    """
+    `DataProvider.get_ohlcv`'s `end_date` is an INCLUSIVE observation cutoff
+    (data/base.py). The underlying vendors disagreed natively — Polygon's
+    aggregates `to` and Bloomberg's `endDate` are inclusive, yfinance's
+    `ticker.history(end=...)` is exclusive — and nothing reconciled them, so
+    the same call returned a different window depending only on which
+    provider served it. On the default provider it silently dropped the
+    final bar, which is why score_model(as_of=X) excluded X while still
+    reporting X as the as-of date.
+    """
+
+    def test_bare_date_covers_the_whole_day(self):
+        bound = cache_module.inclusive_end_timestamp("2023-01-01", "1d")
+        assert bound >= pd.Timestamp("2023-01-01 23:59:59")
+        assert bound < pd.Timestamp("2023-01-02")
+
+    def test_explicit_intraday_timestamp_is_exact(self):
+        bound = cache_module.inclusive_end_timestamp("2026-08-11 12:00:00", "1h")
+        assert bound == pd.Timestamp("2026-08-11 12:00:00")
+
+    def test_trim_keeps_the_boundary_bar_and_drops_beyond(self):
+        idx = pd.date_range("2022-12-30", "2023-01-03", freq="D")
+        df = pd.DataFrame({"Close": range(len(idx))}, index=idx)
+        out = cache_module.trim_to_inclusive_end(df, "2023-01-01", "1d")
+        assert out.index.max() == pd.Timestamp("2023-01-01")
+        assert pd.Timestamp("2023-01-02") not in out.index
+
+    def test_yfinance_requests_an_exclusive_bound_and_returns_inclusive(self):
+        """
+        The end-to-end regression: yfinance must be asked for a bound PAST
+        the inclusive window, and the caller must get the boundary bar back.
+        """
+        captured = {}
+
+        def fake_history(**kw):
+            captured.update(kw)
+            # Simulate yfinance's real, exclusive-`end` behavior.
+            idx = pd.date_range(
+                "2022-12-28", "2023-01-05", freq="D", tz="America/New_York"
+            )
+            end = pd.Timestamp(kw["end"])
+            if end.tzinfo is None:
+                end = end.tz_localize("America/New_York")
+            idx = idx[idx < end]
+            return pd.DataFrame(
+                {
+                    c: [1.0] * len(idx)
+                    for c in ["Open", "High", "Low", "Close", "Volume"]
+                },
+                index=idx,
+            )
+
+        cache_module._session_cache.clear()
+        with patch("yfinance.Ticker") as ticker_cls:
+            inst = MagicMock()
+            inst.history = lambda **kw: fake_history(**kw)
+            ticker_cls.return_value = inst
+            df = YFinanceProvider().get_ohlcv("AAPL", "2022-12-28", "2023-01-01")
+
+        assert pd.Timestamp(captured["end"]) > pd.Timestamp("2023-01-01")
+        assert df.index.max() == pd.Timestamp(
+            "2023-01-01"
+        ), "the caller's inclusive end date must be present in the result"
+        # And the over-fetch used to obtain it must not leak through.
+        assert df.index.max() <= cache_module.inclusive_end_timestamp(
+            "2023-01-01", "1d"
+        )
+
+
+class TestCacheFormatVersioning:
+    """
+    Cached frames written before the inclusive-end contract are missing
+    their final bar. Serving one on a cache hit would answer the same
+    request differently than a live fetch — the cache/live parity failure
+    this layer exists to prevent — so the filename carries a format
+    generation and old files are simply never looked up again.
+    """
+
+    def test_cache_filename_carries_a_format_version(self):
+        name = _parquet_path("AAPL", "2022-01-01", "2023-01-01", "1d").name
+        assert name.startswith(f"{cache_module._CACHE_FORMAT_VERSION}_")
+
+    def test_old_generation_files_are_not_addressed(self):
+        """A v1-era filename must not be what the current code looks up."""
+        current = _parquet_path("AAPL", "2022-01-01", "2023-01-01", "1d").name
+        legacy = "yfinance_AAPL_2022-01-01_2023-01-01_1d.parquet"
+        assert current != legacy
