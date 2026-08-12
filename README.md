@@ -716,6 +716,27 @@ Python tier, 10 in the C++ tier — full write-ups in
    Every item was reproduced against a live interpreter before being fixed
    and is pinned by a regression test.
 
+6. **The portfolio, screener and agent-tools audit — 10 more items.** The
+   three packages the earlier passes had only touched incidentally. The
+   sharpest two both produced a confident number that was not merely
+   imprecise but inverted or fictional:
+
+   - With observations ≤ assets a sample covariance is singular *by
+     construction*, and the constrained optimizer answered by finding a
+     direction in its null space — reporting a portfolio at ~0% volatility
+     that carried **23% annualized volatility out of sample**.
+   - `max_sharpe` returned the *minimum*-Sharpe portfolio whenever the
+     risk-free rate reached the minimum-variance return, because
+     normalizing the tangency solution by a negative sum flips it onto the
+     inefficient branch.
+   - A beta that could not be estimated was reported as `0.0`, so a ticker
+     with no overlapping history **passed** a `beta_max` screen.
+   - A NaN filter bound made an oversold screen a no-op that admitted
+     RSI 100, since NaN fails every comparison.
+
+   Both optimizer findings also split the two solver paths, which now share
+   one gate.
+
 If you have audit records written before this release, note that
 `content_hash` values are not comparable across the change — see the format
 note in [10_auditability.md](Documentation/10_auditability.md). The
@@ -778,7 +799,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**2452 Python tests total** — 2451 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**2494 Python tests total** — 2493 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 

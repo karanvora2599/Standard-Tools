@@ -9,6 +9,83 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (portfolio, screener and agent-tools audit — 10 items)
+
+A line-by-line pass over `portfolio/`, `screener/` and `agent/tools.py`, the
+three packages the earlier audits had only touched incidentally. Same method:
+every finding reproduced against a live interpreter before being fixed, each
+pinned by a regression test. Suite: 2452 → 2493 passed, 1 skipped.
+
+**Portfolio optimization**
+
+- **`max_sharpe` could return the *minimum*-Sharpe portfolio.** The
+  closed-form tangency solution normalizes `Σ⁻¹(μ − rf·1)` by its own sum,
+  `B − rf·A`. The resulting excess return is `(μ−rf)'Σ⁻¹(μ−rf)` over that
+  sum — a quadratic form in a positive-definite Σ, so the numerator is
+  *always* positive and the sign is entirely the denominator's. Once `rf`
+  reaches the global minimum-variance return `B/A` the normalization flips
+  onto the inefficient branch. Only `abs(denom) < 1e-14` was guarded, which
+  catches the un-normalizable case and misses the inverted one. Measured on
+  μ=[0.10,0.08], Σ=[[.04,.01],[.01,.05]], rf=0.20: Sharpe **−0.66** with
+  `converged=True`. It also split the backends — closed-form −3.0707 against
+  scipy +0.1423 on identical inputs. Now rejected with the threshold named;
+  bounded requests still solve, since bounds make the feasible set compact.
+- **A rank-deficient covariance produced a "zero-risk" portfolio.** With
+  observations ≤ assets the sample covariance is singular *by construction*
+  (rank ≤ n−1), handing the optimizer a null space of zero-variance
+  directions. The closed-form path caught it (its inverse fails); the SLSQP
+  path inverts nothing and did not. On 5 observations of 6 assets it
+  returned `expected_volatility` 1.19e-07, in-sample `w'Σw` = 1.4e-14, and
+  `converged=True` — for weights carrying **23.1% annualized volatility out
+  of sample**. Both paths now check the same condition before either solver
+  runs, so they cannot disagree about solvability, and perfect collinearity
+  is rejected on the same grounds. The gate also covers `risk_parity` and
+  `black_litterman`, which bypass `mean_variance_optimize` entirely.
+- **Infinite returns produced NaN weights reported as converged.**
+  `dropna()` removes NaN but not `±inf`.
+- **`max_weight` feasibility was only checked for long-only.** Shorting
+  lowers the per-asset floor, not the cap, so `sum(w) == 1` is equally
+  unreachable when `n × max_weight < 1`; `allow_short=True` with n=2 and
+  max_weight=0.3 returned weights summing to **0.6**.
+- **Small samples are now warned about.** Same process, 5 assets: 6
+  observations report an annualized volatility of 0.0039 where 250 report
+  0.1376 — a ~22× understatement, previously indistinguishable. A warning
+  rather than an error, since a short window is a legitimate request.
+- **`build_bl_views` raised a raw `KeyError`** on a malformed view dict.
+  These are agent-reachable, so the error is what an LLM self-corrects from.
+
+**Screener**
+
+- **A beta that could not be estimated was reported as `0.0`.**
+  `calculate_beta` returns all-zeros below two overlapping points — a
+  sentinel indistinguishable from a real answer, since 0.0 is a legitimate
+  beta. The screener *filtered* on it, so a ticker with no overlap with the
+  benchmark **passed** `beta_max=0.5`: "could not be estimated" read as
+  "very low beta", backwards for the defensive screen that bound expresses.
+  A minimum overlap is now required and a shortfall reported as an error.
+- **Filter *values* went unvalidated while only keys were checked.**
+  `rsi_max=float("nan")` made every comparison False, so an oversold screen
+  silently became a no-op admitting RSI 100 — a filter that rejects nothing
+  looks exactly like a filter nothing failed. Wrong types and out-of-range
+  windows raised inside the per-ticker handler, turning one malformed filter
+  into *N* identical per-ticker errors that never named the filter.
+- **A crashed worker batch lost its tickers.** `failed_batches` recorded the
+  exception but not which symbols went with it, so those tickers were absent
+  from the results, from `failed_filters` and from `failed_tickers` alike —
+  indistinguishable from never having been asked for. The batch's tickers
+  are now named, and each also appears individually in `failed_tickers`.
+
+**Agent tools**
+
+- **Duplicate tickers desynchronized a result's own fields.** The returns
+  frame is built as `{ticker: close}`, so a repeat collapses to one column;
+  `['AAA','BBB','AAA']` came back with `tickers` listing three symbols and
+  `weights` holding two. Rejected at the boundary rather than de-duplicated
+  (a repeat leaves the caller's intent genuinely ambiguous), and weights are
+  now labelled from the solved columns so the two cannot drift apart again.
+- The optimizer's `warnings` now reach the caller instead of being dropped
+  at the tool boundary.
+
 ### Fixed (second modeling audit — 20 items)
 
 A second full review of the modeling stack, the data layer beneath it and

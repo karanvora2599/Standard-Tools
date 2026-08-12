@@ -243,6 +243,8 @@ from standard_quant_tools.metrics.volatility_estimators import (
     yang_zhang_volatility,
 )
 from standard_quant_tools.portfolio.optimize import (
+    _check_covariance_estimable,
+    _small_sample_warnings,
     black_litterman,
     build_bl_views,
     mean_variance_optimize,
@@ -856,7 +858,22 @@ def run_portfolio_optimization(
     )
     warnings: List[str] = []
 
+    # Label weights from the columns the covariance was actually built from,
+    # not from the requested list. PortfolioOptimizationInput now rejects
+    # duplicates, which was the way the two could differ, but the invariant
+    # worth holding is that a weight is named by the series it was computed
+    # from -- so these stay coupled by construction rather than by a
+    # validator elsewhere continuing to hold.
+    solved_tickers = list(returns_df.columns)
+    warnings.extend(_small_sample_warnings(returns_df.shape[0], len(solved_tickers)))
+
     if input_data.method == "risk_parity":
+        # risk_parity and black_litterman bypass mean_variance_optimize, so
+        # they need the same gate it applies -- otherwise a covariance that
+        # is singular by construction reaches them too.
+        _check_covariance_estimable(
+            returns_df.shape[0], len(solved_tickers), returns_df.cov().to_numpy()
+        )
         mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
         budget = (
             np.array([input_data.risk_budget[t] for t in input_data.tickers])
@@ -878,19 +895,22 @@ def run_portfolio_optimization(
         return PortfolioOptimizationResult(
             tickers=input_data.tickers,
             method=input_data.method,
-            weights={t: round(float(wi), 6) for t, wi in zip(input_data.tickers, w)},
+            weights={t: round(float(wi), 6) for t, wi in zip(solved_tickers, w)},
             expected_return=round(exp_ret, 6),
             expected_volatility=round(exp_vol, 6),
             sharpe_ratio=round(sharpe, 4),
             converged=rp["converged"],
             risk_contributions={
                 t: round(float(c), 6)
-                for t, c in zip(input_data.tickers, rp["risk_contributions"])
+                for t, c in zip(solved_tickers, rp["risk_contributions"])
             },
             warnings=warnings,
         )
 
     if input_data.method == "black_litterman":
+        _check_covariance_estimable(
+            returns_df.shape[0], len(solved_tickers), returns_df.cov().to_numpy()
+        )
         mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
         n = len(input_data.tickers)
         mkt_w = (
@@ -923,7 +943,7 @@ def run_portfolio_optimization(
         return PortfolioOptimizationResult(
             tickers=input_data.tickers,
             method=input_data.method,
-            weights={t: round(float(wi), 6) for t, wi in zip(input_data.tickers, w)},
+            weights={t: round(float(wi), 6) for t, wi in zip(solved_tickers, w)},
             expected_return=round(exp_ret, 6),
             expected_volatility=round(exp_vol, 6),
             sharpe_ratio=round(sharpe, 4),
@@ -941,6 +961,11 @@ def run_portfolio_optimization(
         max_weight=input_data.max_weight,
         periods_per_year=input_data.periods_per_year,
     )
+    # The optimizer's own caveats (currently the small-sample covariance
+    # warning) travel with the result rather than being dropped at this
+    # boundary -- a 22x volatility understatement from too short a window is
+    # exactly what an agent consuming this needs told.
+    warnings.extend(result.get("warnings", []))
     if not result["converged"]:
         warnings.append(
             "optimizer did not converge — constraints may be infeasible; "

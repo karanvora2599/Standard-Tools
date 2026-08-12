@@ -152,6 +152,20 @@ print(result["converged"])
 
 `objective="target_return"`/`"target_volatility"` need the matching `target_return`/`target_volatility` argument (annualized). A `target_volatility` below the global minimum-variance portfolio's own volatility is infeasible and raises `ValidationError` immediately.
 
+`result["warnings"]` carries the optimizer's own caveats — currently the small-sample covariance warning, and empty when the window is long enough.
+
+#### What the optimizer refuses to answer
+
+Three conditions produce a `ValidationError` rather than a number, because in each case the number would look authoritative and be meaningless.
+
+**You need more observations than assets.** A sample covariance built from *n* observations has rank at most *n − 1*, so with observations ≤ assets it is singular *by construction*. That is not a numerical nuisance — it hands the optimizer a whole null space of directions with exactly zero in-sample variance. Measured on 5 observations of 6 assets, the SLSQP path reported `expected_volatility` of 1.19e-07 with `converged=True`, for weights whose actual out-of-sample volatility was **23.1%**. The closed-form path had always caught this (its matrix inverse fails); the constrained path inverts nothing and did not. Both now check the same condition before either solver runs, so they cannot disagree about whether an input is solvable. Perfect collinearity (a duplicated ticker, a share class tracking another exactly) is rejected on the same grounds even when there are plenty of rows.
+
+**`max_sharpe` needs a risk-free rate below the minimum-variance return.** The closed-form tangency portfolio normalizes `Σ⁻¹(μ − rf·1)` by its own sum, `B − rf·A`. The resulting excess return is `(μ−rf)'Σ⁻¹(μ−rf)` divided by that sum — and the numerator is a quadratic form in a positive-definite Σ, so it is *always positive*. The sign is therefore entirely the denominator's, and once `rf` reaches the global minimum-variance portfolio's expected return (`B/A`) the normalization flips you onto the **inefficient** branch. An objective named `max_sharpe` then returned the *minimum*-Sharpe portfolio with `converged=True`: on μ=[0.10, 0.08], Σ=[[.04,.01],[.01,.05]], rf=0.20, Sharpe **−0.66**. The supremum genuinely is not attained in that regime, so it is reported. Bounded requests (`allow_short=False` and/or `max_weight` set) still solve — bounds make the feasible set compact — so the restriction is specific to the unconstrained closed form.
+
+**Returns must be finite.** `dropna()` removes NaN but not `±inf`, so an infinite return propagated into the covariance and came back as `{ticker: nan}` weights flagged `converged=True`. A zero or negative price feeding `pct_change` is the usual cause.
+
+`max_weight` feasibility is checked whether or not shorting is allowed. Shorting lowers the per-asset *floor*, not the cap, so `sum(w) ≤ n × max_weight` either way and `sum(w) == 1` is still unreachable when `n × max_weight < 1` — that case used to return weights summing to 0.6 with only `converged=False` to indicate it.
+
 ### Risk Parity
 
 ```python

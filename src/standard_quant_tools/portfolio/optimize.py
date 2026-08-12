@@ -58,6 +58,76 @@ def _mean_cov(
     return mu, cov
 
 
+def _check_covariance_estimable(n_obs: int, n_assets: int, cov: np.ndarray) -> None:
+    """
+    Reject a sample covariance that cannot support an optimization, BEFORE
+    either solver runs.
+
+    A sample covariance built from `n_obs` observations of `n_assets` assets
+    has rank at most `n_obs - 1`, so with n_obs <= n_assets it is singular by
+    construction. The closed-form path noticed (np.linalg.inv raises), but
+    the scipy path inverts nothing and therefore did not: SLSQP simply found
+    a direction in the covariance's NULL SPACE and reported it as a
+    zero-variance portfolio. Measured on 5 observations of 6 assets:
+    expected_volatility 1.19e-07, in-sample w'Sigma w = 1.4e-14, and
+    converged=True -- for a portfolio whose actual out-of-sample volatility
+    was 23.1%. A risk-free-looking answer that is purely an artifact of not
+    having enough data to estimate risk at all.
+
+    Checked once here, for every objective and both solver paths, so the two
+    cannot disagree about whether an input is solvable.
+    """
+    if n_obs <= n_assets:
+        raise ValidationError(
+            f"{n_obs} observations for {n_assets} assets cannot estimate a "
+            f"covariance matrix: its rank is at most {n_obs - 1}, so it is "
+            f"singular by construction and an optimizer can find a "
+            f"zero-variance portfolio in its null space that carries real "
+            f"risk out of sample. Need strictly more observations than "
+            f"assets (>{n_assets}); prefer many more — see the small-sample "
+            "warning this function returns."
+        )
+    rank = int(np.linalg.matrix_rank(cov))
+    if rank < n_assets:
+        raise ValidationError(
+            f"covariance matrix is rank-deficient (rank {rank} < {n_assets} "
+            "assets) even though there are enough observations — two or more "
+            "assets are perfectly collinear over this window (e.g. a "
+            "duplicated ticker, or a share class that tracks another "
+            "exactly). Drop the redundant asset(s); an optimizer would "
+            "otherwise report a zero-variance portfolio built from the "
+            "collinear direction."
+        )
+
+
+def _small_sample_warnings(n_obs: int, n_assets: int) -> List[str]:
+    """
+    A covariance can be technically invertible and still be worthless.
+
+    Same generating process, min_volatility, 5 assets: 6 observations report
+    an annualized volatility of 0.0039 where 250 observations report 0.1376
+    -- a ~22x understatement, with converged=True and nothing to distinguish
+    the two. The usual rule of thumb is that a sample covariance needs on the
+    order of 10 observations per asset before its off-diagonal terms mean
+    much; below that the optimizer is fitting estimation noise, and
+    mean-variance is famously good at loading up on exactly that noise.
+
+    A warning, not an error: short windows are a legitimate thing to ask
+    for, and the caller may know something the estimator does not.
+    """
+    warnings: List[str] = []
+    if n_obs < 10 * n_assets:
+        warnings.append(
+            f"only {n_obs} observations for {n_assets} assets "
+            f"({n_obs / n_assets:.1f} per asset). A sample covariance needs "
+            "roughly 10 observations per asset before its off-diagonal terms "
+            "are meaningful; below that the optimizer largely fits estimation "
+            "noise and will concentrate in whichever asset pair happens to "
+            "look most diversifying. Treat these weights as indicative."
+        )
+    return warnings
+
+
 def _require_scipy(context: str) -> None:
     if not HAS_SCIPY:
         raise ValidationError(
@@ -129,11 +199,44 @@ def _solve_unconstrained(
     if objective == "max_sharpe":
         # Tangency portfolio: w ∝ Sigma^-1(mu - rf*1), normalized to sum 1.
         raw = sigma_inv @ (mu - risk_free_rate * ones)
-        denom = float(ones @ raw)
+        denom = float(ones @ raw)  # == B - rf*A
         if abs(denom) < 1e-14:
             raise ValidationError(
                 "tangency portfolio is degenerate (sum of raw weights ~ 0) — "
                 "try a different risk_free_rate"
+            )
+        # The sign matters, and only checking the magnitude was the bug.
+        #
+        # Normalizing by 1'w gives a portfolio whose excess return is
+        # (mu-rf)'Sigma^-1(mu-rf) / denom. The numerator is a quadratic form
+        # in a positive-definite Sigma, so it is ALWAYS positive -- meaning
+        # the sign of the excess return is entirely the sign of denom. With
+        # denom < 0 the normalization flips the tangency solution onto the
+        # INEFFICIENT branch of the frontier, and an objective named
+        # max_sharpe returned the minimum-Sharpe portfolio with
+        # converged=True. Measured on mu=[0.10,0.08],
+        # Sigma=[[.04,.01],[.01,.05]], rf=0.20: Sharpe -0.66.
+        #
+        # denom = B - rf*A, so this is exactly the condition rf >= B/A: a
+        # risk-free rate at or above the global minimum-variance portfolio's
+        # own expected return. There is then no tangency portfolio on the
+        # efficient branch at all -- the supremum of Sharpe over
+        # {w : 1'w = 1} is not attained -- so this is reported rather than
+        # approximated.
+        if denom < 0:
+            min_var_return = B / A
+            raise ValidationError(
+                f"no maximum-Sharpe portfolio exists for risk_free_rate="
+                f"{risk_free_rate:.6f}: it is at or above the global "
+                f"minimum-variance portfolio's expected return "
+                f"({min_var_return:.6f}), so every fully-invested portfolio on "
+                "the efficient branch has negative excess return and the "
+                "Sharpe supremum is not attained. Use a risk_free_rate below "
+                f"{min_var_return:.6f}, or objective='min_volatility'. "
+                "(Bounded requests — allow_short=False and/or max_weight set "
+                "— do have a solution here, since bounds make the feasible "
+                "set compact; this restriction is specific to the "
+                "unconstrained closed form.)"
             )
         return raw / denom
 
@@ -261,14 +364,21 @@ def mean_variance_optimize(
         Dict with tickers, weights (dict ticker->float), expected_return,
         expected_volatility, sharpe_ratio, objective, converged (bool —
         always True for the closed-form path; reflects the solver's own
-        success flag for the scipy path).
+        success flag for the scipy path), and warnings (list of str —
+        currently the small-sample caveat; empty when the window is long
+        enough relative to the asset count).
 
     Raises:
         ValidationError: unknown objective, fewer than 2 assets, fewer than
-            2 observations, a required target_return/target_volatility
-            missing, an infeasible max_weight for the given asset count, a
-            singular/degenerate covariance matrix, or (constrained path
-            only) scipy not installed.
+            2 observations, non-finite (inf) returns, observations not
+            exceeding the asset count (the covariance would be singular by
+            construction), a rank-deficient covariance from collinear
+            assets, a required target_return/target_volatility missing, an
+            infeasible max_weight for the given asset count, a
+            singular/degenerate covariance matrix, a risk_free_rate at or
+            above the minimum-variance return for the unconstrained
+            max_sharpe objective, or (constrained path only) scipy not
+            installed.
     """
     if objective not in _OBJECTIVES:
         raise ValidationError(
@@ -280,6 +390,25 @@ def mean_variance_optimize(
     if data.shape[0] < 2:
         raise ValidationError(
             "need at least 2 observations after dropping rows with NaN"
+        )
+    # dropna() removes NaN but NOT +/-inf, so an infinite return propagated
+    # straight through mean()/cov() into the solver and came back as
+    # {ticker: nan} weights with converged=True -- a success flag on a
+    # result containing no numbers.
+    values = data.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        n_bad = int((~np.isfinite(values)).sum())
+        bad_cols = [
+            str(c)
+            for c, ok in zip(data.columns, np.isfinite(values).all(axis=0))
+            if not ok
+        ]
+        raise ValidationError(
+            f"returns contain {n_bad} non-finite value(s) (inf/-inf) in "
+            f"column(s) {bad_cols}. dropna() removes NaN but not infinities, "
+            "so these would reach the optimizer and produce NaN weights "
+            "reported as a converged solution. A common cause is a zero or "
+            "negative price in the source series feeding pct_change."
         )
     if objective == "target_return" and target_return is None:
         raise ValidationError("objective='target_return' requires target_return")
@@ -297,11 +426,25 @@ def mean_variance_optimize(
     if max_weight is not None:
         if max_weight <= 0:
             raise ValidationError(f"max_weight must be > 0, got {max_weight}")
-        if not allow_short and max_weight * n < 1.0 - 1e-9:
+        # The upper bound is max_weight per asset whether or not shorting is
+        # allowed, so sum(w) <= n * max_weight either way and the constraint
+        # sum(w) == 1 is infeasible when n * max_weight < 1. Restricting this
+        # check to the long-only case let allow_short=True through: with
+        # n=2, max_weight=0.3 SLSQP returned weights summing to 0.6 --
+        # violating the one constraint the whole problem is defined by --
+        # flagged only by converged=False, while the identical infeasibility
+        # raised a clear error on the long-only path.
+        if max_weight * n < 1.0 - 1e-9:
+            side = "long-only" if not allow_short else "shorting-allowed"
             raise ValidationError(
-                f"max_weight={max_weight} is infeasible for {n} long-only assets "
-                f"summing to 1.0 (need max_weight >= {1.0 / n:.4f})"
+                f"max_weight={max_weight} is infeasible for {n} {side} assets "
+                f"summing to 1.0 (need max_weight >= {1.0 / n:.4f}). Shorting "
+                "does not help: it lowers the per-asset floor, not the cap, so "
+                "the weights still cannot reach a sum of 1."
             )
+
+    _check_covariance_estimable(data.shape[0], n, _mean_cov(data, 1)[1])
+    warnings = _small_sample_warnings(data.shape[0], n)
 
     mu, cov = _mean_cov(data, periods_per_year)
     tickers = list(data.columns)
@@ -359,6 +502,7 @@ def mean_variance_optimize(
         "sharpe_ratio": sharpe,
         "objective": objective,
         "converged": converged,
+        "warnings": warnings,
     }
 
 
@@ -614,8 +758,9 @@ def build_bl_views(
     contribute almost nothing to the posterior.
 
     Raises:
-        ValidationError: views is empty, a view references an unknown
-            ticker, or a confidence is outside (0, 1].
+        ValidationError: views is empty, a view is missing a required key,
+            a view references an unknown ticker, or a confidence is outside
+            (0, 1].
     """
     if not views:
         raise ValidationError("views must be non-empty")
@@ -626,7 +771,25 @@ def build_bl_views(
     Q = np.zeros(k)
     confidences = np.ones(k)
     for i, view in enumerate(views):
+        # Raw KeyError here named the missing key and nothing else -- not
+        # which view, not what the key is for, and not as the ValidationError
+        # every other boundary in this package raises. These view dicts are
+        # agent-reachable through run_portfolio_optimization, so the error is
+        # what an LLM has to self-correct from.
+        for required in ("assets", "view_return"):
+            if required not in view:
+                raise ValidationError(
+                    f"view {i} is missing required key {required!r}. Each view "
+                    'must be {"assets": {ticker: pick_coefficient, ...}, '
+                    '"view_return": float, "confidence": optional float in '
+                    f"(0, 1]}}. Got keys: {sorted(view)}"
+                )
         assets = view["assets"]
+        if not isinstance(assets, dict) or not assets:
+            raise ValidationError(
+                f"view {i}'s 'assets' must be a non-empty dict mapping ticker "
+                f"to pick coefficient, got {assets!r}"
+            )
         unknown = [t for t in assets if t not in ticker_idx]
         if unknown:
             raise ValidationError(f"view references unknown tickers: {unknown}")

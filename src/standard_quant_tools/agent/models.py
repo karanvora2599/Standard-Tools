@@ -261,6 +261,24 @@ class PortfolioOptimizationInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_method_requirements(self) -> "PortfolioOptimizationInput":
+        # A repeated ticker silently shrinks the problem: the returns frame
+        # is built as {ticker: close}, so duplicate keys collapse and the
+        # optimizer sees fewer assets than were asked for. The response then
+        # echoed the full requested list as `tickers` while `weights` had one
+        # entry per SURVIVING column -- ['AAA','BBB','AAA'] came back with
+        # two weights, so the two fields of one result disagreed about the
+        # size of the universe. Rejected rather than de-duplicated, since a
+        # duplicate means the caller's intent is unclear (double weight? a
+        # typo?) and guessing is how the two fields drifted apart to begin
+        # with.
+        duplicates = sorted({t for t in self.tickers if self.tickers.count(t) > 1})
+        if duplicates:
+            raise ValueError(
+                f"tickers contains duplicate symbols: {duplicates}. Each asset "
+                "must appear once — a repeated ticker collapses to a single "
+                "column and the returned weights would not line up with the "
+                "requested universe."
+            )
         if self.method == "target_return" and self.target_return is None:
             raise ValueError("method='target_return' requires target_return")
         if self.method == "target_volatility" and self.target_volatility is None:

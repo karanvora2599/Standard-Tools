@@ -31,6 +31,7 @@ Technical (computed over start_date → end_date):
 import asyncio
 import datetime
 import logging
+import math
 import os
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
@@ -64,6 +65,17 @@ _VALID_FILTER_KEYS = frozenset(
 )
 
 
+# Filters whose value is a window LENGTH in bars, not a threshold: these
+# must be positive integers, and are passed straight to an indicator.
+_WINDOW_FILTERS = frozenset(("price_above_sma", "price_below_sma"))
+
+# A beta estimated from a handful of overlapping bars is noise, and this
+# module does not merely REPORT beta -- it makes an include/exclude decision
+# from it. See _fetch_ticker_data's beta branch for why a too-short overlap
+# is an error rather than a value.
+_MIN_BETA_OBS = 20
+
+
 def _validate_filter_keys(filters: Dict[str, Any]) -> None:
     unknown = set(filters) - _VALID_FILTER_KEYS
     if unknown:
@@ -71,6 +83,49 @@ def _validate_filter_keys(filters: Dict[str, Any]) -> None:
             f"Unknown filter key(s): {sorted(unknown)}. Valid keys: "
             f"{sorted(_VALID_FILTER_KEYS)}"
         )
+
+
+def _validate_filter_values(filters: Dict[str, Any]) -> None:
+    """
+    Validate the filter VALUES, not just their names.
+
+    Only the keys used to be checked, and every consequence of a bad value
+    surfaced per ticker rather than once:
+
+      - NaN was the dangerous one. NaN fails every comparison, so
+        `last_rsi > filters["rsi_max"]` is False for every ticker and an
+        "oversold" screen silently became a no-op that admitted RSI 100.
+        A filter that rejects nothing looks exactly like a filter nothing
+        failed.
+      - A wrong type or an out-of-range window (rsi_max="fifty",
+        price_above_sma=-5) raised inside the per-ticker try/except, so one
+        malformed filter came back as N identical "error" entries across the
+        universe with no statement that the FILTER was the problem.
+
+    Checked once, up front, for both the async and process-pool entry points.
+    """
+    for key, value in filters.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValidationError(
+                f"filter {key!r} must be a number, got {type(value).__name__} "
+                f"({value!r}). A non-numeric bound cannot be compared against "
+                "the computed value and would fail once per ticker instead of "
+                "once here."
+            )
+        if not math.isfinite(float(value)):
+            raise ValidationError(
+                f"filter {key!r} must be finite, got {value!r}. NaN compares "
+                "False against everything, so it does not restrict the screen "
+                "— it silently disables it, and every ticker passes. An "
+                "infinite bound is accepted by no comparison that is "
+                "meaningful here either."
+            )
+        if key in _WINDOW_FILTERS:
+            if float(value) != int(value) or int(value) < 1:
+                raise ValidationError(
+                    f"filter {key!r} is a window length in bars and must be a "
+                    f"positive whole number, got {value!r}"
+                )
 
 
 # ── Per-ticker async evaluation ───────────────────────────────────────────────
@@ -216,6 +271,29 @@ async def _fetch_ticker_data(
                 )
                 asset_ret = close.pct_change().dropna()
                 spy_ret = _spy["Close"].pct_change().dropna()
+                # calculate_beta returns {"alpha": 0, "beta": 0, "r_squared": 0}
+                # when fewer than 2 points overlap -- a sentinel, but an
+                # indistinguishable one, because 0.0 is also a perfectly
+                # legitimate beta. This module then FILTERED on it: a ticker
+                # whose history did not overlap the benchmark at all reported
+                # beta 0.0 and PASSED beta_max=0.5, so "beta could not be
+                # estimated" was silently read as "this is a very low-beta
+                # stock" -- backwards for the defensive screen that bound
+                # exists to express.
+                #
+                # The overlap is checked here rather than inferred from the
+                # returned value, since the sentinel and a real answer are the
+                # same number.
+                overlap = len(asset_ret.index.intersection(spy_ret.index))
+                if overlap < _MIN_BETA_OBS:
+                    return (
+                        "error",
+                        ticker,
+                        f"beta not estimable: only {overlap} bar(s) overlap the "
+                        f"benchmark over {start_date}..{end_date} (need "
+                        f"{_MIN_BETA_OBS}). Reported as an error rather than a "
+                        "beta of 0.0, which would pass a beta_max screen.",
+                    )
                 stats = calculate_beta(asset_ret, spy_ret)
                 beta = stats["beta"]
                 row["beta"] = round(beta, 4)
@@ -264,6 +342,7 @@ async def screen_stocks_async(
         ValidationError: filters contains an unrecognized key.
     """
     _validate_filter_keys(filters)
+    _validate_filter_values(filters)
     end: str = end_date or datetime.date.today().isoformat()
     start: str = (
         start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
@@ -363,11 +442,13 @@ def screen_stocks(
         pd.DataFrame with one row per passing ticker, sorted if requested.
         df.attrs carries "failed_filters" (ticker -> filter key it failed),
         "failed_tickers" (ticker -> error message for a data-fetch/compute
-        exception), and "failed_batches" (list of error messages for a
-        whole worker-process batch that raised before returning any
-        per-ticker result — n_workers > 1 only). A ticker's exception is
-        never indistinguishable from a genuine filter rejection, and a
-        crashed batch is never silently discarded without a trace.
+        exception), and "failed_batches" (one message per worker-process
+        batch that raised before returning any per-ticker result, naming
+        the tickers it carried — n_workers > 1 only). Every ticker in a
+        crashed batch also appears individually in "failed_tickers", so no
+        symbol can go missing from all three without a trace. A ticker's
+        exception is never indistinguishable from a genuine filter
+        rejection.
 
     Raises:
         ValidationError: filters contains an unrecognized key.
@@ -382,6 +463,7 @@ def screen_stocks(
         )
     """
     _validate_filter_keys(filters)
+    _validate_filter_values(filters)
     end: str = end_date or datetime.date.today().isoformat()
     start: str = (
         start_date or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
@@ -413,22 +495,34 @@ def screen_stocks(
 
     batch_results: List[pd.DataFrame] = []
     failed_batches: List[str] = []
+    failed_tickers_from_batches: Dict[str, str] = {}
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = [
-            executor.submit(_screen_batch, (batch, filters, start, end))
+        # The batch each future came from is kept alongside it. Recording
+        # only the exception string said THAT a batch died but not WHICH
+        # tickers went with it, so those tickers were absent from the
+        # results, absent from failed_filters and absent from
+        # failed_tickers -- indistinguishable from never having been asked
+        # for. The screener's whole contract is that a rejection, an error
+        # and a pass are told apart.
+        futures = {
+            executor.submit(_screen_batch, (batch, filters, start, end)): batch
             for batch in batches
-        ]
-        for future in futures:
+        }
+        for future, batch in futures.items():
             try:
                 batch_results.append(future.result())
             except Exception as exc:
-                # A whole batch (one worker process) raised before returning
-                # any per-ticker result -- record it rather than silently
-                # discarding every ticker in that batch with no trace.
-                failed_batches.append(str(exc))
+                failed_batches.append(
+                    f"batch of {len(batch)} ticker(s) {batch} failed: {exc}"
+                )
+                # Also recorded per ticker, so a caller checking one symbol
+                # does not have to parse the batch list to find out what
+                # happened to it.
+                for t in batch:
+                    failed_tickers_from_batches[t] = f"worker batch failed: {exc}"
 
     failed_filters: Dict[str, str] = {}
-    failed_tickers: Dict[str, str] = {}
+    failed_tickers: Dict[str, str] = dict(failed_tickers_from_batches)
     for df in batch_results:
         failed_filters.update(df.attrs.get("failed_filters", {}))
         failed_tickers.update(df.attrs.get("failed_tickers", {}))
