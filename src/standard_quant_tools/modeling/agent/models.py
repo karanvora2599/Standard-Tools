@@ -172,6 +172,15 @@ class ScoreModelResult(BaseModel):
 
     model_id: str
     as_of: str
+    effective_score_date: str = Field(
+        "",
+        description="The single observation date every returned prediction was "
+        "actually computed from. Distinct from as_of, which is only the date "
+        "REQUESTED: the most recent bar available at or before as_of can be "
+        "earlier (a market holiday, a provider whose `end` excluded as_of, a "
+        "symbol that stopped trading). Reported so a caller never has to assume "
+        "as_of and the data behind the prediction are the same date.",
+    )
     predictions_uri: str
     n_entities: int
     summary_stats: Dict[str, float]
@@ -180,6 +189,16 @@ class ScoreModelResult(BaseModel):
         description="Requested universe symbols that had no scoreable row as of "
         "as_of (e.g. insufficient history within lookback_days) — silently absent "
         "from predictions_uri, listed here instead of being dropped without a trace.",
+    )
+    stale_entities: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Symbol -> its most recent available observation date, for "
+        "symbols whose latest bar predates effective_score_date. These are "
+        "EXCLUDED from predictions_uri rather than scored on an older bar: "
+        "scoring each entity on whatever date it last traded silently mixes "
+        "observation dates into one 'cross-section', which for a "
+        "cross-sectional model means the ranking no longer compares "
+        "contemporaneous information.",
     )
 
 

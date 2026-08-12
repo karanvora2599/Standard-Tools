@@ -140,7 +140,38 @@ def score_model(
             "try a larger lookback_days."
         )
 
-    missing_entities = sorted(set(universe) - set(latest["entity"]))
+    # ── One cross-section, one date ───────────────────────────────────────
+    # `latest` is each entity's OWN most recent surviving row, which is not
+    # necessarily the same date for every entity: a symbol that stopped
+    # trading, halted, or simply has a shorter history contributes an older
+    # bar. Returning those together silently mixed observation dates into
+    # something reported as a single as_of cross-section -- and for a
+    # cross-sectional model that is not a smaller cross-section, it is a
+    # ranking that no longer compares contemporaneous information.
+    #
+    # missing_entities never caught this: it only saw entities with NO row
+    # at all, so a stale one looked like a fully successful score.
+    #
+    # effective_score_date is the most recent date actually available, which
+    # is also (deliberately) not assumed equal to as_of -- a holiday, or a
+    # provider whose window ends earlier, legitimately moves it earlier.
+    effective_ts = pd.Timestamp(latest["date"].max())
+    stale_mask = pd.to_datetime(latest["date"]) < effective_ts
+    stale_entities = {
+        str(row_entity): pd.Timestamp(row_date).strftime("%Y-%m-%d")
+        for row_entity, row_date in zip(
+            latest.loc[stale_mask, "entity"], latest.loc[stale_mask, "date"]
+        )
+    }
+    latest = latest.loc[~stale_mask]
+
+    # Stale entities are reported separately rather than folded into
+    # missing_entities: "no data at all" and "data, but from an older bar"
+    # are different conditions with different fixes, and collapsing them
+    # would hide which one actually happened.
+    missing_entities = sorted(
+        set(universe) - set(latest["entity"]) - set(stale_entities)
+    )
 
     X = apply_preprocessing(latest[manifest.feature_ids], stats)
     if manifest.task == "regression":
@@ -173,9 +204,13 @@ def score_model(
     return {
         "model_id": model_id,
         "as_of": as_of,
+        # The date the predictions were actually computed from, which is not
+        # necessarily the date that was asked for.
+        "effective_score_date": effective_ts.strftime("%Y-%m-%d"),
         "predictions_uri": predictions_uri,
         "n_entities": int(len(predictions_df)),
         "missing_entities": missing_entities,
+        "stale_entities": stale_entities,
         "summary_stats": {
             "mean": float(predictions_df["prediction"].mean()),
             "std": (

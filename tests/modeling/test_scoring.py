@@ -4,6 +4,7 @@ actually re-validated (not silently bypassed via model_copy)."""
 
 from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
@@ -133,3 +134,89 @@ class TestScoreModelReliability:
         )
         assert result["missing_entities"] == []
         assert result["n_entities"] == 3
+
+
+class TestSingleEffectiveScoreDate:
+    """
+    score_model took each entity's OWN latest surviving row
+    (`groupby("entity").tail(1)`), so a symbol that stopped trading earlier
+    contributed an older bar and was returned inside what the response
+    called one `as_of` cross-section.
+
+    For a cross-sectional model that is not a smaller cross-section — it is
+    a ranking that no longer compares contemporaneous information.
+    `missing_entities` never caught it, because it only saw entities with NO
+    row at all, so a stale entity looked like a fully successful score.
+    """
+
+    def _provider_with_a_stale_symbol(self, monkeypatch, stale_bars: int = 5):
+        """CCC has plenty of history (so it is NOT missing) but its last bar
+        predates everyone else's by `stale_bars` sessions."""
+
+        def _fetch(symbol):
+            df = make_ohlcv(symbol)
+            if symbol == "CCC":
+                return df.iloc[:-stale_bars]
+            return df
+
+        provider = make_provider_mock(_fetch)
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+
+    def test_stale_entity_is_excluded_and_reported(self, monkeypatch):
+        self._provider_with_a_stale_symbol(monkeypatch)
+        spec = _dataset_spec(
+            features=[FeatureSpec(id="technical.rsi")], universe=["AAA", "BBB"]
+        )
+        model_id = _train_a_model_with_spec(spec, dataset_id="ds_stale")
+
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"]
+        )
+
+        assert "CCC" in result["stale_entities"], (
+            "a symbol scored from an older bar must be reported, not silently "
+            "folded into the cross-section"
+        )
+        # Reported with the date it actually had, so the caller can judge.
+        assert result["stale_entities"]["CCC"] < result["effective_score_date"]
+        # And excluded rather than scored on that older bar.
+        assert result["n_entities"] == 2
+        # "no data at all" and "older data" are different conditions.
+        assert "CCC" not in result["missing_entities"]
+
+    def test_all_returned_predictions_share_one_date(self, monkeypatch):
+        self._provider_with_a_stale_symbol(monkeypatch)
+        spec = _dataset_spec(
+            features=[FeatureSpec(id="technical.rsi")], universe=["AAA", "BBB"]
+        )
+        model_id = _train_a_model_with_spec(spec, dataset_id="ds_stale_uniform")
+
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"]
+        )
+
+        from standard_quant_tools.modeling import artifacts as _artifacts
+
+        preds = _artifacts.load_artifact(result["predictions_uri"])
+        assert preds["date"].nunique() == 1, "cross-section mixes observation dates"
+        assert (
+            pd.Timestamp(preds["date"].iloc[0]).strftime("%Y-%m-%d")
+            == result["effective_score_date"]
+        )
+
+    def test_effective_score_date_is_reported_separately_from_as_of(
+        self, patched_multi_factory
+    ):
+        """
+        as_of is what was REQUESTED; effective_score_date is what the data
+        actually supported. They differ whenever the most recent bar at or
+        before as_of is earlier — a holiday, a weekend, a provider window
+        ending earlier — and the caller must not have to assume they match.
+        """
+        model_id = _train_a_model(patched_multi_factory)
+        result = score_model(
+            model_id=model_id, as_of="2023-12-31", universe=["AAA", "BBB"]
+        )
+        assert result["as_of"] == "2023-12-31"
+        assert result["effective_score_date"] <= result["as_of"]
+        assert result["effective_score_date"]  # populated, not left blank
