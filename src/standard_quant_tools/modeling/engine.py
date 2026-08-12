@@ -373,11 +373,24 @@ def run_experiment(
         preprocessing_stats=full_stats,
         oos_predictions_uri=oos_predictions_uri,
         model_id=model_id,
-        # The deployed estimator was refit on the whole panel, so this is
-        # the last date it has already seen. score_model uses it to reject
-        # a historical as_of rather than returning a future-trained
-        # prediction that looks like a point-in-time one.
+        # The last FEATURE date in the training panel. Kept for lineage, but
+        # deliberately NOT the cutoff score_model gates on -- see below.
         train_end_date=pd.Timestamp(panel["date"].max()).strftime("%Y-%m-%d"),
+        # The last date whose PRICES the training data actually consumed.
+        #
+        # A row dated t with a horizon-h forward-return target reads
+        # Close[t+h] to build its label, so the deployed estimator (refit on
+        # the whole panel) has indirectly seen prices through
+        # max(label_end_date), not max(date). Those differ by the horizon --
+        # ~28 calendar days for h=20 -- and gating on max(date) left exactly
+        # that window open: score_model would accept an as_of the model had
+        # already consumed the future of, returning a future-trained
+        # prediction that looks point-in-time. Falls back to max(date) only
+        # for a panel with no label_end_date column (datasets built before it
+        # existed), which is the old, weaker guarantee rather than none.
+        training_information_cutoff=pd.Timestamp(
+            panel[LABEL_END_COL].max() if has_label_end else panel["date"].max()
+        ).strftime("%Y-%m-%d"),
         # Copied into the model directory so the model is self-contained:
         # scoring must not depend on the dataset directory still existing,
         # or on its spec file not having been edited since training.

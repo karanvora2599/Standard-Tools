@@ -62,27 +62,52 @@ def score_model(
 
     # ── Future-trained-model guard ────────────────────────────────────────
     # The registered estimator is refit on the ENTIRE training panel, so it
-    # has already seen every date up to train_end_date. Scoring an as_of at
-    # or before that date produces a prediction that LOOKS point-in-time but
-    # was made by a model trained on the very future it is "predicting" --
-    # the exact mistake the walk-forward OOS predictions exist to avoid.
-    # Nothing previously compared as_of against the training window at all.
+    # has already seen every date up to its information cutoff. Scoring an
+    # as_of at or before that produces a prediction that LOOKS
+    # point-in-time but was made by a model trained on the very future it is
+    # "predicting" -- the exact mistake the walk-forward OOS predictions
+    # exist to avoid.
     #
-    # For a genuine historical evaluation use the model's OOS predictions
-    # artifact (each fold predicted only dates outside its own training
-    # window); see modeling.bridge.oos_predictions_to_signal_panel.
-    if manifest.train_end_date is not None:
-        train_end_ts = _parse_date(manifest.train_end_date, "train_end_date")
-        if as_of_ts <= train_end_ts:
+    # The cutoff is training_information_cutoff (max label_end_date), NOT
+    # train_end_date (max feature date). A horizon-h forward-return target
+    # reads Close[t+h] to build the label for a row dated t, so the training
+    # data consumed prices h bars past its last feature date. Gating on the
+    # feature date left exactly that horizon-wide window -- ~28 calendar
+    # days at h=20 -- accepting an as_of whose future the model had already
+    # been shown.
+    #
+    # Falls back to train_end_date only for manifests written before
+    # training_information_cutoff existed: that is the older, weaker
+    # guarantee, which is still better than no guard, and the message says
+    # which one is in force so a stale manifest is not mistaken for a
+    # verified one.
+    cutoff_value = manifest.training_information_cutoff
+    cutoff_field = "training_information_cutoff"
+    if cutoff_value is None:
+        cutoff_value = manifest.train_end_date
+        cutoff_field = "train_end_date"
+    if cutoff_value is not None:
+        cutoff_ts = _parse_date(cutoff_value, cutoff_field)
+        if as_of_ts <= cutoff_ts:
+            weaker = (
+                ""
+                if cutoff_field == "training_information_cutoff"
+                else (
+                    " (This model predates the label-aware cutoff, so the check used its "
+                    "last FEATURE date; its labels consumed prices beyond that, meaning "
+                    "the true unsafe window extends further than this message states. "
+                    "Retrain to get the exact cutoff.)"
+                )
+            )
             raise ValidationError(
-                f"score_model: as_of {as_of!r} is not after this model's training data, "
-                f"which ends {manifest.train_end_date}. The registered estimator is refit "
-                "on the full training panel, so scoring a date it was trained on returns a "
-                "future-trained prediction disguised as a historical one. For historical "
-                "evaluation use the model's walk-forward OOS predictions "
-                f"({manifest.oos_predictions_uri}) via "
-                "modeling.bridge.oos_predictions_to_signal_panel, which are genuinely "
-                "out-of-sample; use score_model only for dates after training."
+                f"score_model: as_of {as_of!r} is not after this model's training "
+                f"information cutoff, {cutoff_value}. The registered estimator is refit on "
+                "the full training panel, and its forward-return labels consumed prices "
+                "through that date, so scoring at or before it returns a future-trained "
+                "prediction disguised as a historical one. For historical evaluation use "
+                f"the model's walk-forward OOS predictions ({manifest.oos_predictions_uri}) "
+                "via modeling.bridge.oos_predictions_to_signal_panel, which are genuinely "
+                f"out-of-sample; use score_model only for dates after training.{weaker}"
             )
 
     stats = load_preprocessing_stats(model_id)

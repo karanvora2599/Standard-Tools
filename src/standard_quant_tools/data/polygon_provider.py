@@ -73,6 +73,7 @@ from standard_quant_tools.error import (
 
 from ._cache import (
     _is_historical,
+    _norm_cache_bound,
     _norm_date,
     _normalize_ohlcv_index,
     _safe_parquet_path,
@@ -344,8 +345,10 @@ class PolygonProvider(DataProvider):
                 f"interval={interval!r} is not supported by the Polygon provider "
                 f"— only {sorted(_TIMESPAN_MAP)} (Aggregates/Bars endpoint)."
             )
-        start_str = _norm_date(start_date)
-        end_str = _norm_date(end_date)
+        # Interval-aware cache identity -- see YFinanceProvider for why a
+        # blanket date truncation collided two different intraday ranges.
+        start_str = _norm_cache_bound(start_date, interval)
+        end_str = _norm_cache_bound(end_date, interval)
 
         # "polygon" is included explicitly in the cache key so this can
         # never collide with another provider's entry for the "same"
@@ -385,7 +388,12 @@ class PolygonProvider(DataProvider):
         )
         if pq_path is not None and _is_historical(end_str) and pq_path.exists():
             try:
-                cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path))
+                # interval passed through: Polygon's live _parse_aggs already
+                # preserves intraday timestamps, so normalizing them to
+                # midnight here made cached and uncached reads of the SAME
+                # request disagree — a cache/non-cache parity bug, not just
+                # a formatting difference.
+                cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path), interval)
             except Exception as exc:
                 logger.warning(
                     "[cache] disk read failed for %s (%s) — evicting and "

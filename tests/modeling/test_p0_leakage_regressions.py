@@ -295,3 +295,87 @@ class TestPcaPowerIterationStartVector:
     def test_non_positive_n_components_rejected(self):
         with pytest.raises(ValueError, match="n_components must be"):
             pca_returns(self._spread_panel(), n_components=0)
+
+
+# ── Full-refit information cutoff (second-pass P0-1) ────────────────────────
+
+
+class TestTrainingInformationCutoff:
+    """
+    The full-refit estimator's information cutoff is max(label_end_date),
+    NOT max(date).
+
+    A row dated t with a horizon-h forward-return target reads Close[t+h]
+    to build its label, so the deployed model has indirectly seen prices h
+    bars past the last feature date. score_model gated on train_end_date
+    (the feature date), leaving a horizon-wide window -- ~28 calendar days
+    at h=20 -- in which it accepted an as_of whose future the model had
+    already consumed, and returned a future-trained prediction that looked
+    point-in-time.
+
+    The earlier P0 pass added label_end_date and used it for fold purging,
+    but the full-refit manifest cutoff kept using the feature date, so this
+    survived that pass.
+    """
+
+    def test_label_end_max_exceeds_feature_date_max(self):
+        """The gap the old guard left open, measured directly."""
+        dates = pd.date_range("2026-01-01", periods=120, freq="B")
+        close = pd.Series(np.linspace(100, 150, 120), index=dates)
+        ends = build_label_end_dates(close, TargetSpec(horizon=20))
+        panel = pd.DataFrame({"date": dates, "label_end_date": ends.values}).dropna()
+
+        feature_end = pd.Timestamp(panel["date"].max())
+        label_end = pd.Timestamp(panel["label_end_date"].max())
+        assert label_end > feature_end
+        # 20 business days of forward target -> ~28 calendar days unguarded.
+        assert (label_end - feature_end).days >= 20
+
+    def test_manifest_records_label_aware_cutoff(self, patched_multi_factory):
+        from standard_quant_tools.modeling.registry.model_registry import (
+            load_manifest,
+        )
+
+        from .test_scoring import _dataset_spec, _train_a_model_with_spec
+
+        horizon = 20
+        spec = _dataset_spec(target=TargetSpec(horizon=horizon))
+        model_id = _train_a_model_with_spec(spec, dataset_id="ds_cutoff")
+        manifest = load_manifest(model_id)
+
+        assert manifest.training_information_cutoff is not None
+        cutoff = pd.Timestamp(manifest.training_information_cutoff)
+        feature_end = pd.Timestamp(manifest.train_end_date)
+        # The cutoff must sit strictly beyond the last feature date --
+        # that difference IS the bug this pins.
+        assert cutoff > feature_end
+
+    def test_score_model_rejects_as_of_inside_the_horizon_window(
+        self, patched_multi_factory
+    ):
+        """
+        The regression proper: an as_of after the last FEATURE date but at
+        or before the label cutoff used to be accepted.
+        """
+        from standard_quant_tools.modeling.registry.model_registry import (
+            load_manifest,
+        )
+        from standard_quant_tools.modeling.scoring import score_model
+
+        from .test_scoring import _dataset_spec, _train_a_model_with_spec
+
+        spec = _dataset_spec(target=TargetSpec(horizon=20))
+        model_id = _train_a_model_with_spec(spec, dataset_id="ds_cutoff_reject")
+        manifest = load_manifest(model_id)
+
+        feature_end = pd.Timestamp(manifest.train_end_date)
+        cutoff = pd.Timestamp(manifest.training_information_cutoff)
+        inside = feature_end + pd.Timedelta(days=1)
+        assert inside <= cutoff, "fixture must exercise the previously-open window"
+
+        with pytest.raises(ValidationError, match="training information cutoff"):
+            score_model(
+                model_id=model_id,
+                as_of=inside.strftime("%Y-%m-%d"),
+                universe=["AAA", "BBB"],
+            )

@@ -120,6 +120,23 @@ def _provider_metadata(provider: Any, symbol: str, interval: str) -> Optional[An
         return None
 
 
+def dataset_spec_hash(spec: DatasetSpec) -> str:
+    """
+    Canonical content hash of a DatasetSpec.
+
+    Extracted so the build side and the verify side (agent/tools.py's
+    run_model_experiment, which re-derives this to detect an edited
+    dataset_spec.json) cannot drift apart — two independent inlined
+    expressions of "the spec hash" is precisely how an integrity check
+    quietly stops checking anything.
+
+    model_dump_json() is canonical enough here because pydantic serializes
+    a model's fields in declaration order, so the same spec always produces
+    the same JSON regardless of the order kwargs were passed in.
+    """
+    return hashlib.sha256(spec.model_dump_json().encode()).hexdigest()
+
+
 def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, Any]:
     """
     Raises:
@@ -292,7 +309,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         # record, not the underlying registry ids.
         "feature_ids": [fs.output_name for fs in spec.features],
         "data_hash": data_hash,
-        "spec_hash": hashlib.sha256(spec.model_dump_json().encode()).hexdigest(),
+        "spec_hash": dataset_spec_hash(spec),
     }
     result["target_id"] = (
         f"{spec.target.type}:{spec.target.horizon}" if include_target else None

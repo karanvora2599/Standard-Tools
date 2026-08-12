@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 # resolved-containment approach artifacts.py uses for run_id/name.
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9./\-^=]+$")
 _DATE_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Cache-path date bound: either a plain date (daily and coarser) or a
+# date-plus-time-of-day (intraday). Both forms are filesystem-safe by
+# construction -- digits, hyphens and a single 'T' -- so neither can carry
+# a path separator or '..' past _parquet_path's containment check.
+_BOUND_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{6})?$")
 # Bounded, generic allow-list for the interval token — deliberately NOT
 # tied to any one provider's specific interval vocabulary (yfinance's
 # "1m".."3mo", Bloomberg's DAILY/WEEKLY/MONTHLY, Polygon's "1m".."3mo" are
@@ -107,21 +112,78 @@ def _norm_date(d: Union[str, datetime, _date]) -> str:
     return norm
 
 
-def _normalize_ohlcv_index(df: pd.DataFrame) -> pd.DataFrame:
+# Sub-daily bar intervals, across every provider's own vocabulary
+# (yfinance "1m".."90m"/"1h"; Polygon "1m"/"5m"/"1h"; etc.). Anchored so
+# the daily-and-coarser tokens that merely START with a digit and 'm'
+# ("1mo", "3mo") do NOT match — misclassifying a monthly bar as intraday
+# would skip the date normalization every downstream consumer depends on.
+_INTRADAY_INTERVAL_RE = re.compile(r"^\d+\s*(m|min|minute|h|hour)s?$", re.IGNORECASE)
+
+
+def is_intraday_interval(interval: str) -> bool:
+    """True for sub-daily bar intervals ("1m", "15m", "1h"), False for
+    daily and coarser ("1d", "5d", "1wk", "1mo", "3mo")."""
+    return bool(_INTRADAY_INTERVAL_RE.match(str(interval).strip()))
+
+
+def _norm_cache_bound(d: Union[str, datetime, _date], interval: str = "1d") -> str:
     """
-    Strip any tz-awareness and drop any intraday time component from an
-    OHLCV DataFrame's index, once, at a single choke point every provider's
-    disk-cache-read path (and yfinance's live-fetch path, which attaches
-    tz-aware timestamps even for daily bars) goes through — every
-    downstream consumer builds or compares against tz-naive, midnight-
-    normalized timestamps, and mixing tz-aware/tz-naive indices either
-    raises or (via .reindex(), which doesn't raise) silently produces an
-    all-NaN result.
+    Normalise a start/end bound into a cache-path token.
+
+    Daily and coarser collapse to YYYY-MM-DD (unchanged — existing cache
+    files keep their names and stay valid). Intraday keeps time-of-day as
+    YYYY-MM-DDTHHMMSS, because _norm_date's blanket 10-character truncation
+    made two genuinely different intraday requests on the same day —
+    09:30→12:00 and 13:00→16:00 — resolve to the same cache file, so the
+    second silently served the first's bars.
+
+    A bare date under an intraday interval is left as a date rather than
+    padded to midnight: it means "the whole day", which is a different
+    request from "the day starting at 00:00:00", and conflating them would
+    reintroduce the same collision from the other direction.
+    """
+    if not is_intraday_interval(interval):
+        return _norm_date(d)
+    if isinstance(d, str) and _DATE_STR_RE.match(d):
+        return d
+    ts = pd.Timestamp(d)
+    if pd.isna(ts):
+        raise ValidationError(f"date must be parseable as a timestamp, got {d!r}")
+    if ts.tz is not None:
+        ts = ts.tz_convert(None) if ts.tzinfo is not None else ts
+    if (ts.hour, ts.minute, ts.second) == (0, 0, 0):
+        return ts.strftime("%Y-%m-%d")
+    return ts.strftime("%Y-%m-%dT%H%M%S")
+
+
+def _normalize_ohlcv_index(df: pd.DataFrame, interval: str = "1d") -> pd.DataFrame:
+    """
+    Strip tz-awareness from an OHLCV DataFrame's index, and — for daily and
+    coarser bars only — drop the time component, at a single choke point
+    every provider's disk-cache-read path (and yfinance's live-fetch path,
+    which attaches tz-aware timestamps even for daily bars) goes through.
+    Every downstream consumer builds or compares against tz-naive
+    timestamps, and mixing tz-aware/tz-naive indices either raises or (via
+    .reindex(), which doesn't raise) silently produces an all-NaN result.
+
+    `interval` is REQUIRED to be accurate for intraday data. This function
+    used to call .normalize() unconditionally, which set every timestamp to
+    midnight — so a 4-bar hourly series collapsed to four copies of the same
+    date and lost its time-series identity entirely. That ran on yfinance's
+    live fetch AND on both providers' Parquet cache reads, which also made
+    the same request answer differently depending on whether it was served
+    live or from cache (Polygon's live parser preserves intraday timestamps;
+    the cache read did not).
+
+    Defaults to "1d" so any caller not passing an interval keeps the exact
+    previous behavior rather than silently gaining time-of-day it isn't
+    prepared for; daily output is unchanged bit-for-bit.
     """
     idx = pd.DatetimeIndex(df.index)
     if idx.tz is not None:
         idx = idx.tz_localize(None)
-    idx = idx.normalize()
+    if not is_intraday_interval(interval):
+        idx = idx.normalize()
     df = df.copy()
     df.index = idx
     return df
@@ -159,10 +221,11 @@ def _parquet_path(
             "is never allowed."
         )
     for value, name in ((start, "start"), (end, "end")):
-        if not _DATE_STR_RE.match(value):
+        if not _BOUND_STR_RE.match(value):
             raise ValidationError(
                 f"{name}={value!r} must already be normalized to YYYY-MM-DD "
-                "before building a cache path (call _norm_date first)."
+                "(or YYYY-MM-DDTHHMMSS for an intraday interval) before "
+                "building a cache path (call _norm_cache_bound first)."
             )
     if not _INTERVAL_RE.match(interval):
         raise ValidationError(

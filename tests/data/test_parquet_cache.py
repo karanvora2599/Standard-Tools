@@ -5,6 +5,7 @@ the real user cache directory.
 """
 
 import os
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -587,3 +588,118 @@ class TestCacheInvalidSymbol:
             prov.get_ohlcv("AAPL US Equity", "2022-01-01", "2022-06-01")
 
         assert mock_ticker.call_count == 2
+
+
+class TestIntervalAwareNormalization:
+    """
+    `_normalize_ohlcv_index` called `.normalize()` unconditionally, setting
+    every timestamp to midnight. For intraday bars that destroyed the
+    series' time-series identity outright — four hourly bars became four
+    copies of the same date.
+
+    It ran on yfinance's live fetch AND on both providers' Parquet cache
+    reads, so it also made the same request answer differently depending on
+    whether it was served live or from cache: Polygon's live `_parse_aggs`
+    preserves intraday timestamps, the cache read did not.
+    """
+
+    @pytest.mark.parametrize(
+        "interval,expected",
+        [
+            ("1m", True),
+            ("2m", True),
+            ("5m", True),
+            ("15m", True),
+            ("30m", True),
+            ("60m", True),
+            ("90m", True),
+            ("1h", True),
+            # The tokens that merely start with a digit and 'm': classifying
+            # a monthly bar as intraday would skip the date normalization
+            # every downstream consumer depends on.
+            ("1d", False),
+            ("5d", False),
+            ("1wk", False),
+            ("1mo", False),
+            ("3mo", False),
+        ],
+    )
+    def test_interval_classification(self, interval, expected):
+        assert cache_module.is_intraday_interval(interval) is expected
+
+    def test_intraday_timestamps_preserved(self):
+        idx = pd.DatetimeIndex(
+            [
+                "2026-08-11 09:30",
+                "2026-08-11 10:30",
+                "2026-08-11 11:30",
+                "2026-08-11 12:30",
+            ]
+        )
+        df = pd.DataFrame({"Close": [1.0, 2.0, 3.0, 4.0]}, index=idx)
+        out = cache_module._normalize_ohlcv_index(df, "1h")
+        assert out.index.nunique() == 4, "intraday bars collapsed to one date"
+        assert list(out.index) == list(idx)
+
+    @pytest.mark.parametrize("interval", ["1d", "5d", "1wk", "1mo", "3mo"])
+    def test_daily_and_coarser_bit_identical_to_previous_behavior(self, interval):
+        """Daily output must not shift at all — this change is only about
+        intraday, and a silent daily change would move every existing
+        index by a timezone offset."""
+        idx = pd.date_range("2026-01-01", periods=5, tz="America/New_York")
+        df = pd.DataFrame({"Close": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=idx)
+
+        legacy_idx = pd.DatetimeIndex(df.index).tz_localize(None).normalize()
+        out = cache_module._normalize_ohlcv_index(df, interval)
+        assert out.index.equals(legacy_idx)
+
+    def test_default_interval_keeps_previous_behavior(self):
+        """A caller that doesn't pass an interval must not silently gain a
+        time component it isn't prepared for."""
+        idx = pd.DatetimeIndex(["2026-08-11 09:30", "2026-08-12 15:45"])
+        df = pd.DataFrame({"Close": [1.0, 2.0]}, index=idx)
+        out = cache_module._normalize_ohlcv_index(df)
+        assert (out.index == out.index.normalize()).all()
+
+
+class TestIntradayCacheIdentity:
+    """
+    `_norm_date` truncated every bound to 10 characters, so two genuinely
+    different intraday ranges on the same day resolved to one cache file and
+    the second silently served the first's bars.
+    """
+
+    def test_distinct_intraday_ranges_get_distinct_cache_files(self):
+        a = _parquet_path(
+            "AAPL",
+            cache_module._norm_cache_bound("2026-08-11 09:30:00", "1h"),
+            cache_module._norm_cache_bound("2026-08-11 12:00:00", "1h"),
+            "1h",
+        )
+        b = _parquet_path(
+            "AAPL",
+            cache_module._norm_cache_bound("2026-08-11 13:00:00", "1h"),
+            cache_module._norm_cache_bound("2026-08-11 16:00:00", "1h"),
+            "1h",
+        )
+        assert a != b
+
+    def test_daily_cache_keys_unchanged(self):
+        """Existing on-disk cache files must stay addressable."""
+        assert cache_module._norm_cache_bound("2022-01-01", "1d") == "2022-01-01"
+        assert (
+            cache_module._norm_cache_bound(datetime(2022, 1, 1, 15, 30), "1d")
+            == "2022-01-01"
+        )
+
+    def test_bare_date_under_intraday_stays_a_date(self):
+        """ "the whole day" is a different request from "the day starting at
+        00:00:00" — conflating them reintroduces the collision."""
+        assert cache_module._norm_cache_bound("2026-08-11", "1h") == "2026-08-11"
+
+    @pytest.mark.parametrize(
+        "bad", ["2026-08-11T../etc", "../../etc/passwd", "2026-08-11T09"]
+    )
+    def test_widened_bound_format_still_rejects_traversal(self, bad):
+        with pytest.raises(ValidationError):
+            _parquet_path("AAPL", bad, "2026-08-12", "1h")

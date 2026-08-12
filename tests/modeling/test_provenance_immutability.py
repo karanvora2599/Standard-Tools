@@ -242,3 +242,83 @@ class TestTransactionalCommit:
         (_artifacts.run_dir(trained_model) / "manifest.json").unlink()
         with pytest.raises(ValidationError, match="no registered model"):
             load_manifest(trained_model)
+
+
+class TestDatasetSpecIntegrity:
+    """
+    panel.parquet was hash-verified on reload but dataset_spec.json was not,
+    even though the spec is the more dangerous of the two to tamper with:
+    the panel is only READ during training, while the spec is COPIED INTO
+    THE MODEL and becomes the definition score_model rebuilds features from
+    for the rest of that model's life.
+
+    So an edited spec trained on the ORIGINAL panel (whose hash still
+    matched) and registered a model that would score every future
+    prediction with different feature definitions — exactly the mismatch
+    the self-contained-model work was meant to prevent.
+    """
+
+    def _build_dataset_dir(self, dataset_id="ds_spec_tamper"):
+        from pathlib import Path
+
+        from standard_quant_tools.modeling import artifacts as _artifacts
+
+        spec = _spec()
+        built = build_dataset(spec)
+        panel_uri = _artifacts.save_artifact(
+            built["panel"], run_id=dataset_id, name="panel"
+        )
+        directory = Path(panel_uri).parent
+        _artifacts.save_json(directory, "dataset_spec", spec.model_dump())
+        _artifacts.save_json(
+            directory,
+            "dataset_meta",
+            {
+                "feature_ids": built["feature_ids"],
+                "target_id": built["target_id"],
+                "data_hash": built["data_hash"],
+                "spec_hash": built["spec_hash"],
+                "warnings": built.get("warnings", []),
+            },
+        )
+        return directory, spec
+
+    def test_spec_hash_is_shared_between_build_and_verify(self, patched_multi_factory):
+        """Two inlined copies of "the spec hash" is how an integrity check
+        quietly stops checking anything — both sides call one helper."""
+        from standard_quant_tools.modeling.dataset.builder import dataset_spec_hash
+
+        spec = _spec()
+        built = build_dataset(spec)
+        assert built["spec_hash"] == dataset_spec_hash(spec)
+
+    def test_edited_dataset_spec_is_rejected_before_training(
+        self, patched_multi_factory, monkeypatch
+    ):
+        from standard_quant_tools.modeling import artifacts as _artifacts
+        from standard_quant_tools.modeling.agent.models import RunModelExperimentInput
+        from standard_quant_tools.modeling.agent.tools import run_model_experiment
+
+        directory, spec = self._build_dataset_dir("ds_spec_tamper_reject")
+
+        # Redefine a feature the way an editor (or a careless script) would:
+        # the panel still holds RSI(14) values and its hash still matches.
+        tampered = spec.model_dump()
+        tampered["features"][0]["params"] = {"period": 100}
+        _artifacts.save_json(directory, "dataset_spec", tampered)
+
+        model_spec = ModelSpec(
+            task="regression",
+            estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
+            validation=ValidationSpec(train_window=150, test_window=30, embargo=5),
+            random_seed=1,
+        )
+        with pytest.raises(
+            ValidationError, match="dataset_spec.json no longer matches"
+        ):
+            run_model_experiment(
+                RunModelExperimentInput(
+                    dataset_id="ds_spec_tamper_reject",
+                    spec=model_spec,
+                )
+            )

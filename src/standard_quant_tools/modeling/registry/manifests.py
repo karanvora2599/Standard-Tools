@@ -50,13 +50,27 @@ class ModelManifest(BaseModel):
     # SHA covers the repo, but says nothing about a custom feature
     # registered at runtime from outside it.
     feature_implementation_hashes: Dict[str, str] = Field(default_factory=dict)
-    # Last date in the panel the deployed (full-refit) estimator saw.
-    # score_model needs this to reject a historical as_of: the registered
-    # estimator is refit on the ENTIRE training panel, so asking it to
-    # "predict" a date inside that panel produces a future-trained
-    # prediction dressed up as a historical one. Optional so manifests
-    # written before this field existed still load.
+    # Last FEATURE date in the training panel. Lineage only -- this is NOT
+    # the cutoff score_model gates on; see training_information_cutoff.
+    # Optional so manifests written before this field existed still load.
     train_end_date: Optional[str] = None
+    # Last date whose PRICES the training data actually consumed, i.e.
+    # max(panel["label_end_date"]).
+    #
+    # This is the field score_model must gate on. A row dated t with a
+    # horizon-h forward-return target reads Close[t+h] to build its label,
+    # so a full-refit estimator has indirectly seen prices h bars past the
+    # last feature date. Gating on train_end_date (the feature date) left a
+    # horizon-wide window -- ~28 calendar days at h=20 -- in which
+    # score_model would accept an as_of the model had already consumed the
+    # future of, returning a future-trained prediction that looks
+    # point-in-time.
+    #
+    # Optional for the same back-compat reason as train_end_date: manifests
+    # written before this existed fall back to the older, weaker guarantee
+    # rather than failing to load or silently claiming a cutoff they never
+    # recorded.
+    training_information_cutoff: Optional[str] = None
     # Coverage/provenance warnings raised when the training dataset was
     # built: survivors-only universe, a provider that revises history, a
     # symbol contributing a fraction of the window, a non-daily interval.

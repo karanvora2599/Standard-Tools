@@ -31,10 +31,12 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..dataset.builder import build_dataset as _build_dataset
+from ..dataset.builder import dataset_spec_hash
 from ..engine import run_experiment as _run_experiment
 from ..features.registry import list_features as _list_features
 from ..registry.model_registry import load_manifest
 from ..scoring import score_model as _score_model
+from ..specs import DatasetSpec
 from .models import (
     BuildModelDatasetInput,
     BuildModelDatasetResult,
@@ -180,15 +182,37 @@ def run_model_experiment(
                 "not describe the data actually used — rebuild the dataset instead."
             )
 
+    # dataset_spec.json gets the same treatment panel.parquet just got, and
+    # for a sharper reason. The panel is only READ during training, but the
+    # spec is COPIED INTO THE MODEL and becomes the definition score_model
+    # rebuilds features from for the rest of that model's life. So an edited
+    # spec (say RSI period 14 -> 100) trains on the original RSI(14) panel --
+    # its hash still matches -- and then registers a model that will score
+    # every future prediction with RSI(100). Verifying the panel but not the
+    # spec left exactly the mismatch the self-contained-model work existed to
+    # prevent.
+    stored_spec_hash = meta.get("spec_hash")
+    spec_dict = _artifacts.load_json(str(directory / "dataset_spec.json"))
+    if stored_spec_hash is not None:
+        actual_spec_hash = dataset_spec_hash(DatasetSpec(**spec_dict))
+        if actual_spec_hash != stored_spec_hash:
+            raise ValidationError(
+                f"dataset {input_data.dataset_id!r}: dataset_spec.json no longer matches "
+                f"the hash recorded when it was built (expected {stored_spec_hash}, found "
+                f"{actual_spec_hash}). The panel was built from the original spec, so "
+                "training would register a model whose bundled feature definitions differ "
+                "from the data it learned on — rebuild the dataset instead."
+            )
+
     dataset = {
         "panel": panel,
         "feature_ids": meta["feature_ids"],
         "target_id": meta["target_id"],
         "data_hash": meta["data_hash"],
-        "spec_hash": meta.get("spec_hash"),
+        "spec_hash": stored_spec_hash,
         # Bundled into the model so it becomes self-contained -- see
         # registry.model_registry.save_model.
-        "dataset_spec": _artifacts.load_json(str(directory / "dataset_spec.json")),
+        "dataset_spec": spec_dict,
         # .get, not [...]: datasets built before coverage diagnostics
         # existed have no such key, and a missing warning list is not the
         # same claim as an empty one -- see ModelManifest.dataset_warnings.

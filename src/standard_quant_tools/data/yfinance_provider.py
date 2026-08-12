@@ -22,6 +22,7 @@ from standard_quant_tools.error import (
 
 from ._cache import (
     _is_historical,
+    _norm_cache_bound,
     _norm_date,
     _normalize_ohlcv_index,
     _safe_parquet_path,
@@ -115,8 +116,13 @@ class YFinanceProvider(DataProvider):
                 f"{sorted(_VALID_INTERVALS)}"
             )
 
-        start_str = _norm_date(start_date)
-        end_str = _norm_date(end_date)
+        # Interval-aware: an intraday request keeps time-of-day in its cache
+        # identity, so 09:30->12:00 and 13:00->16:00 on the same day no
+        # longer resolve to one file (the second silently serving the
+        # first's bars). Daily and coarser produce the same YYYY-MM-DD token
+        # as before, so existing cache files stay valid.
+        start_str = _norm_cache_bound(start_date, interval)
+        end_str = _norm_cache_bound(end_date, interval)
         # Keyed by self._instance_token (not just the call args) to match
         # the previous @cached(_session_cache) decorator's default hashkey,
         # which included self — a fresh provider instance must NOT
@@ -171,7 +177,10 @@ class YFinanceProvider(DataProvider):
         )
         if pq_path is not None and _is_historical(end_date) and pq_path.exists():
             try:
-                cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path))
+                # interval passed through: without it an intraday cache read
+                # normalized every bar to midnight, so the same request
+                # answered differently served from cache than served live.
+                cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path), interval)
             except Exception as exc:
                 logger.warning(
                     "[cache] disk read failed for %s (%s) — evicting and "
@@ -232,7 +241,7 @@ class YFinanceProvider(DataProvider):
             if df["Close"].isnull().any():
                 raise APIError(f"Data for {symbol} contains NaNs in Close column.")
 
-            result = _normalize_ohlcv_index(df[required])
+            result = _normalize_ohlcv_index(df[required], interval)
 
         except (DataNotFoundError, InvalidSymbolError, APIError):
             raise
