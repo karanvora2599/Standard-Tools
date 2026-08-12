@@ -116,6 +116,70 @@ def _validate_predictions_frame(df: "pd.DataFrame", source: str) -> None:
         )
 
 
+# A holiday cluster is a few days; a skipped walk-forward fold is a whole
+# test window (typically 20+ sessions). 10 business days sits well clear of
+# the former and well below the latter, so it separates "the market was
+# shut" from "this model produced nothing here" without needing a real
+# trading calendar the bridge does not have.
+_MAX_GAP_BUSINESS_DAYS = 10
+
+
+def _assert_continuous_calendar(
+    dates: "pd.DatetimeIndex", source: str, skipped_folds: "list | None" = None
+) -> None:
+    """
+    Reject an OOS artifact whose dates have a hole in them.
+
+    `run_strategy` intersects price data down to the supplied signal index
+    and then calls `.pct_change()` on that COMPRESSED price series, so a
+    missing span does not read as "no position" — it disappears from the
+    price axis entirely and the two bars either side become adjacent.
+    Measured on a 90-day series with February absent, the boundary bar
+    carried 26x a normal daily return: a month of price movement collapsed
+    into one bar, silently inflating per-bar volatility and distorting
+    Sharpe and drawdown.
+
+    The bridge cannot repair this. A skipped fold's dates are absent from
+    EVERY entity, so there is nothing to densify against — only the caller,
+    who has the price data, knows what the missing calendar was. So this
+    raises rather than guessing.
+    """
+    if skipped_folds:
+        raise ValidationError(
+            f"{source}: the model has {len(skipped_folds)} skipped walk-forward "
+            f"fold(s), so its OOS predictions do not cover a continuous calendar: "
+            f"{skipped_folds}. Backtesting them directly would not leave those dates "
+            "flat — run_strategy intersects prices to the signal index and takes "
+            "pct_change over what remains, so the missing span vanishes from the "
+            "price axis and the bars either side become adjacent, compressing that "
+            "whole period into a single return. Retrain so every fold completes "
+            "(see validation_report.skipped_folds for why each was skipped), or "
+            "build the signal panel yourself against the full trading calendar with "
+            "the uncovered dates explicitly flat."
+        )
+    if len(dates) < 2:
+        return
+    gaps = pd.Series(dates).diff().dropna()
+    business_gaps = [
+        (prev, curr)
+        for prev, curr, delta in zip(dates[:-1], dates[1:], gaps)
+        if len(pd.bdate_range(prev, curr)) - 1 > _MAX_GAP_BUSINESS_DAYS
+    ]
+    if business_gaps:
+        first_prev, first_curr = business_gaps[0]
+        raise ValidationError(
+            f"{source}: OOS prediction dates are discontinuous — "
+            f"{len(business_gaps)} gap(s) longer than {_MAX_GAP_BUSINESS_DAYS} "
+            f"business days, the first between "
+            f"{pd.Timestamp(first_prev).date()} and {pd.Timestamp(first_curr).date()}. "
+            "run_strategy intersects prices to the signal index before taking "
+            "pct_change, so that span would not be flat — it would disappear from "
+            "the price axis and compress into a single adjacent-bar return. Build "
+            "the signal panel against the full trading calendar with those dates "
+            "explicitly flat if that is what you intend."
+        )
+
+
 def oos_predictions_to_signal_panel(
     oos_predictions_uri: "str | None" = None,
     task: "Literal['regression', 'classification'] | None" = None,
@@ -173,6 +237,7 @@ def oos_predictions_to_signal_panel(
             "pass exactly one of model_id (preferred — resolves the artifact and task "
             "together from the manifest) or oos_predictions_uri."
         )
+    skipped_folds = None
     if model_id is not None:
         manifest = load_manifest(model_id)
         if task is not None and task != manifest.task:
@@ -183,6 +248,11 @@ def oos_predictions_to_signal_panel(
             )
         task = manifest.task
         oos_predictions_uri = manifest.oos_predictions_uri
+        # Authoritative, unlike inferring a hole from date spacing: the
+        # engine records exactly which folds were skipped and why. Only
+        # available in model_id mode, which is one more reason it's the
+        # preferred entry point.
+        skipped_folds = (manifest.validation_report or {}).get("skipped_folds") or None
     elif task is None:
         raise ValidationError(
             "task is required when passing oos_predictions_uri directly — or pass "
@@ -219,7 +289,29 @@ def oos_predictions_to_signal_panel(
                 np.where(raw < (1.0 - proba_threshold), -1.0, 0.0),
             )
 
+    all_dates = pd.DatetimeIndex(sorted(predictions_df["date"].unique()))
+    _assert_continuous_calendar(all_dates, str(oos_predictions_uri), skipped_folds)
+
     signal_panel: Dict[str, Dict[str, float]] = {}
     for entity, date, value in zip(predictions_df["entity"], dates, direction):
         signal_panel.setdefault(entity, {})[date] = float(value)
+
+    # Densify every entity onto the panel's shared calendar, flat (0.0)
+    # where that entity has no prediction.
+    #
+    # Unlike a skipped fold, THIS gap is repairable: the date exists in the
+    # artifact, just not for this entity (a symbol that IPO'd mid-window,
+    # or whose features were NaN on that bar). run_signal_panel_backtest
+    # runs run_strategy per ticker against that ticker's own signal series,
+    # so leaving the hole would compress that one symbol's price axis while
+    # its peers kept the full calendar -- the same distortion as a skipped
+    # fold, but per-entity and even easier to miss.
+    #
+    # 0.0 is the honest fill: the model expressed no view for that entity on
+    # that date, and DIRECTION's 0.0 means exactly "flat".
+    calendar = [d.strftime("%Y-%m-%d") for d in all_dates]
+    for entity, series in signal_panel.items():
+        for date_str in calendar:
+            series.setdefault(date_str, 0.0)
+        signal_panel[entity] = {d: series[d] for d in calendar}
     return signal_panel

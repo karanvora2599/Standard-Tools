@@ -67,6 +67,21 @@ class TestRegressionSignConversion:
             oos_predictions_to_signal_panel(uri, task="regression", deadband=-1.0)
 
     def test_multi_entity_multi_date_pivots_correctly(self):
+        """
+        Every entity is densified onto the panel's shared calendar, flat
+        (0.0) where it has no prediction of its own.
+
+        This assertion previously expected BBB to simply be ABSENT on
+        2024-01-02. That looked like a faithful pivot, but
+        run_signal_panel_backtest runs run_strategy per ticker against that
+        ticker's own signal series, and run_strategy intersects prices down
+        to the signal index before taking pct_change — so BBB's price axis
+        would have been compressed relative to AAA's, silently, for a
+        reason unrelated to BBB's prices.
+
+        0.0 is the honest fill: the model expressed no view for BBB that
+        day, and DIRECTION's 0.0 means exactly "flat".
+        """
         uri = _save_predictions(
             [
                 {"date": "2024-01-01", "entity": "AAA", "prediction": 0.01},
@@ -77,8 +92,11 @@ class TestRegressionSignConversion:
         panel = oos_predictions_to_signal_panel(uri, task="regression")
         assert panel == {
             "AAA": {"2024-01-01": 1.0, "2024-01-02": -1.0},
-            "BBB": {"2024-01-01": -1.0},
+            "BBB": {"2024-01-01": -1.0, "2024-01-02": 0.0},
         }
+        # Both entities must span the same calendar, or the per-ticker
+        # backtests are not run over the same date axis.
+        assert set(panel["AAA"]) == set(panel["BBB"])
 
 
 class TestClassificationThreshold:
@@ -192,3 +210,103 @@ class TestFullBridgeIntegration:
         )
         assert set(result.per_ticker.keys()) == set(signal_panel.keys())
         assert "sharpe_ratio" in result.portfolio_metrics
+
+
+class TestCalendarContinuity:
+    """
+    `run_strategy` intersects price data down to the supplied signal index
+    and then takes `.pct_change()` over what REMAINS. A span with no
+    predictions therefore does not read as "flat" — it disappears from the
+    price axis, and the bars either side become adjacent.
+
+    Measured directly below: with February absent from a 90-day series, the
+    Jan->Mar boundary bar carries ~26x a normal daily return, i.e. a month
+    of price movement compressed into a single bar. Total return can still
+    look right while volatility, Sharpe and drawdown are all distorted,
+    which is why this was easy to miss.
+    """
+
+    def test_run_strategy_really_does_compress_a_gap(self):
+        """The underlying behavior this guard exists for — pinned so the
+        guard isn't mistaken for excess caution."""
+        import numpy as np
+
+        from standard_quant_tools.backtest.engine import run_strategy
+
+        idx = pd.date_range("2024-01-01", periods=90, freq="D")
+        df = pd.DataFrame({"Close": np.linspace(100, 190, 90)}, index=idx)
+        kept = idx[(idx < "2024-02-01") | (idx >= "2024-03-01")]
+
+        prices = df.loc[df.index.intersection(kept), "Close"]
+        returns = prices.pct_change()
+        boundary = float(returns.loc["2024-03-01"])
+        normal = float(returns.loc["2024-01-15"])
+        assert boundary > 10 * normal, (
+            "a gap must compress adjacent bars — if this stops being true the "
+            "continuity guard can be revisited"
+        )
+        # And the compressed run really does see fewer bars.
+        assert len(run_strategy(df, pd.Series(1.0, index=kept))["equity_curve"]) < 90
+
+    def test_discontinuous_artifact_is_rejected(self):
+        """A month-long hole is far beyond any holiday cluster."""
+        rows = [
+            {"date": d.strftime("%Y-%m-%d"), "entity": "AAA", "prediction": 0.01}
+            for d in pd.bdate_range("2024-01-01", "2024-01-31")
+        ] + [
+            {"date": d.strftime("%Y-%m-%d"), "entity": "AAA", "prediction": 0.01}
+            for d in pd.bdate_range("2024-03-01", "2024-03-31")
+        ]
+        uri = _save_predictions(rows)
+        with pytest.raises(ValidationError, match="discontinuous"):
+            oos_predictions_to_signal_panel(uri, task="regression")
+
+    def test_ordinary_weekends_and_holidays_are_not_rejected(self):
+        """The guard must not fire on a normal business-day calendar —
+        weekends and a public holiday are gaps too, just small ones."""
+        rows = [
+            {"date": d.strftime("%Y-%m-%d"), "entity": "AAA", "prediction": 0.01}
+            for d in pd.bdate_range("2024-01-01", "2024-03-31")
+        ]
+        panel = oos_predictions_to_signal_panel(
+            _save_predictions(rows), task="regression"
+        )
+        assert len(panel["AAA"]) == len(pd.bdate_range("2024-01-01", "2024-03-31"))
+
+    def test_entity_level_gap_is_filled_flat_not_dropped(self):
+        """
+        Repairable, unlike a skipped fold: the date exists in the artifact,
+        just not for this entity. Leaving the hole would compress that one
+        symbol's price axis while its peers kept the full calendar.
+        """
+        rows = []
+        for d in pd.bdate_range("2024-01-01", "2024-01-31"):
+            rows.append(
+                {"date": d.strftime("%Y-%m-%d"), "entity": "AAA", "prediction": 0.01}
+            )
+            # BBB is missing every Wednesday.
+            if d.weekday() != 2:
+                rows.append(
+                    {
+                        "date": d.strftime("%Y-%m-%d"),
+                        "entity": "BBB",
+                        "prediction": 0.02,
+                    }
+                )
+        panel = oos_predictions_to_signal_panel(
+            _save_predictions(rows), task="regression"
+        )
+
+        assert set(panel["AAA"]) == set(
+            panel["BBB"]
+        ), "entities span different calendars"
+        wednesdays = [
+            d.strftime("%Y-%m-%d")
+            for d in pd.bdate_range("2024-01-01", "2024-01-31")
+            if d.weekday() == 2
+        ]
+        assert wednesdays, "fixture must actually contain the missing days"
+        for day in wednesdays:
+            assert (
+                panel["BBB"][day] == 0.0
+            ), "a missing prediction must be flat, not absent"
