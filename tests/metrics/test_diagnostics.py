@@ -170,6 +170,55 @@ class TestTradeExcursions:
 # ── exposure_stats ────────────────────────────────────────────────────────
 
 
+class TestExcursionReferencePrice:
+    """
+    MAE/MFE are measured from trade_log's `entry_price`, and since the
+    backtest engine's trade-log rewrite that is the WEIGHTED-AVERAGE COST
+    BASIS of the whole lot, not the price of its opening leg. A lot that
+    resizes therefore reports excursions against a level that never traded.
+
+    Pinned deliberately, because the intuitive "fix" -- measuring from the
+    opening fill -- would silently put MAE/MFE on a different scale from
+    the `return_pct` sitting in the same row, which IS measured from the
+    basis. They have to share a reference to be read together.
+    """
+
+    def test_excursions_measured_from_weighted_average_basis(self):
+        # Lot opened at 100 and doubled at 110 -> basis 105.
+        basis = (1.0 * 100.0 + 1.0 * 110.0) / 2.0
+        assert basis == 105.0
+
+        dates = pd.date_range("2024-01-01", periods=4, freq="B")
+        price_data = pd.DataFrame(
+            {
+                "Open": [100.0, 110.0, 99.0, 120.0],
+                "High": [100.0, 110.0, 99.0, 120.0],
+                "Low": [100.0, 110.0, 99.0, 120.0],
+                "Close": [100.0, 110.0, 99.0, 120.0],
+            },
+            index=dates,
+        )
+        trade_log = pd.DataFrame(
+            [
+                {
+                    "entry_date": dates[0],
+                    "exit_date": dates[3],
+                    "direction": "long",
+                    "entry_price": basis,
+                    "exit_price": 120.0,
+                    "position_size": 2.0,
+                    "return_pct": 0.0,
+                }
+            ]
+        )
+        row = trade_excursions(trade_log, price_data).iloc[0]
+
+        # The 99 low is 5.71% below the BASIS, not 1% below the opening leg.
+        assert row["mae_pct"] == pytest.approx(-5.7143, abs=1e-4)
+        assert row["mae_pct"] != pytest.approx(-1.0, abs=1e-2)
+        assert row["mfe_pct"] == pytest.approx(14.2857, abs=1e-4)
+
+
 class TestExposureStats:
     def test_all_flat(self):
         dates = pd.date_range("2022-01-01", periods=4, freq="B")

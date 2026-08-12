@@ -163,12 +163,25 @@ the analogous `Close[j-1]` for the closing event at bar *j*) — not
 equity curve actually used. Under `next_open`/`hl2_exploratory`, the
 two-leg decomposition already prices entries/exits at that bar's own
 reference price (`Open`/HL2), so no shift is needed there — `entry_price`/
-`exit_price` equal that bar's reference price directly. `return_pct` is
-also net of commission+slippage (2× `cost_per_unit`, for the entry and
-exit; 1× for a position still open at the final bar, since no real exit
-event/cost was ever applied to the equity curve in that case) — matching,
-up to a small second-order compounding residual, the equity curve's own
-return over the trade's span. A position still open at the final bar (no
+`exit_price` equal that bar's reference price directly.
+
+For a lot that changed size during its life, `entry_price` is the
+**weighted-average cost basis** across the whole lot rather than any single
+bar's reference price — see [What counts as one trade](#c-acceleration)
+above. That is the price its `return_pct` is actually measured against, but
+it is a computed basis, not a level that necessarily ever traded: a lot
+opened at 100 and doubled at 110 reports `entry_price` 105 even though no
+bar printed 105. Read it as a basis, not as a fill.
+
+`return_pct` is also net of commission+slippage: `cost_per_unit` is charged
+per position-changing event on `abs(pos_diff)`, the amount actually
+transacted, which is the same total the equity curve deducts. For a simple
+open-and-close lot that is the familiar 2× `abs(position_size)`; for a lot
+that resized or was partially trimmed it is the sum over its events, and
+for a position still open at the final bar the closing charge is absent
+entirely, since no real exit event/cost was ever applied to the equity
+curve either. The result matches, up to a small second-order compounding
+residual, the equity curve's own return over the trade's span. A position still open at the final bar (no
 exit signal) is marked at that bar's `Close` regardless of `fill_price`,
 matching how the equity curve itself is always marked to `Close`.
 

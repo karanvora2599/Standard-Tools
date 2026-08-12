@@ -169,11 +169,21 @@ def trade_excursions(trade_log: pd.DataFrame, price_data: pd.DataFrame) -> pd.Da
     """
     Add `mae_pct` (maximum adverse excursion) and `mfe_pct` (maximum
     favorable excursion) columns to a copy of `trade_log`, in percent,
-    relative to each trade's entry price.
+    relative to each trade's `entry_price`.
 
     Recovered without any engine change: re-walks `price_data`'s existing
     High/Low columns between each trade's own entry_date/exit_date (already
     present in `trade_log`) — the engine never needed to track this itself.
+
+    Note what `entry_price` means for a lot that changed size during its
+    life: it is the WEIGHTED-AVERAGE COST BASIS across the whole lot, not
+    the price of its opening leg, so these excursions are measured from a
+    computed basis rather than from a level that necessarily ever traded.
+    That is the intended reference — it is the same basis `return_pct` is
+    measured against, so MAE/MFE and the realized return stay on one scale —
+    but it means `mae_pct` is NOT directly comparable to a stop-loss placed
+    at a fill price. A lot opened at 100 and doubled at 110 carries a basis
+    of 105, and a dip to 99 reads as −5.7% here, not −1.0%.
     """
     if trade_log.empty:
         result = trade_log.copy()
