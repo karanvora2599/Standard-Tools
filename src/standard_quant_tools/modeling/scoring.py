@@ -16,7 +16,7 @@ scoring call.
 
 import hashlib
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -24,6 +24,8 @@ from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
 from .dataset.builder import build_dataset
+from .features.base import FeatureScope
+from .features.registry import get_feature
 from .features.transforms import apply_preprocessing
 from .registry.model_registry import (
     load_dataset_spec,
@@ -36,7 +38,11 @@ from .validation.metrics import positive_class_proba
 
 
 def score_model(
-    model_id: str, as_of: str, universe: List[str], lookback_days: int = 400
+    model_id: str,
+    as_of: str,
+    universe: List[str],
+    lookback_days: int = 400,
+    max_staleness_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Args:
@@ -121,6 +127,41 @@ def score_model(
     # no change in model_id.
     original_spec_dict = load_dataset_spec(model_id)
 
+    # ── Universe-scope features pin the universe ──────────────────────────
+    # Scoring a DIFFERENT universe than the model trained on is fine for
+    # entity-scope features -- AAPL's RSI doesn't change because MSFT was
+    # added to the request. It is NOT fine for a UNIVERSE-scope feature:
+    # factors.pca_loading / pca_factor_return are computed from the whole
+    # universe's return matrix, so [AAPL, MSFT, NVDA] and [AAPL, XOM, JPM]
+    # produce a completely different PCA basis. The estimator would receive
+    # a different variable under the same feature column, with nothing in
+    # the result indicating the input had been redefined.
+    trained_universe = list(original_spec_dict.get("universe") or [])
+    universe_scope_features = []
+    for feature_entry in original_spec_dict.get("features") or []:
+        feature_id = feature_entry.get("id")
+        try:
+            definition = get_feature(feature_id)
+        except Exception:
+            # An unresolvable feature is a separate failure that
+            # build_dataset below reports properly; don't mask it here.
+            continue
+        if definition.scope is FeatureScope.UNIVERSE:
+            universe_scope_features.append(feature_id)
+
+    if universe_scope_features and sorted(universe) != sorted(trained_universe):
+        raise ValidationError(
+            f"score_model: this model uses universe-scope feature(s) "
+            f"{sorted(set(universe_scope_features))}, which are computed from the "
+            f"ENTIRE universe's return matrix, so the scoring universe must match "
+            f"the training universe exactly. Trained on "
+            f"{sorted(trained_universe)}, asked to score {sorted(universe)}. "
+            "Scoring a different set would feed the estimator a different "
+            "factor basis under the same feature name — a silently different "
+            "variable, not a smaller sample. Score the training universe, or "
+            "train a new model on the universe you want to score."
+        )
+
     start = (as_of_ts - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     # Reconstruct through DatasetSpec(**...) rather than
     # original_spec.model_copy(update=...) -- model_copy does NOT re-run
@@ -165,6 +206,29 @@ def score_model(
     }
     latest = latest.loc[~stale_mask]
 
+    # ── How old is that shared date? ──────────────────────────────────────
+    # Enforcing ONE cross-section date makes every returned prediction
+    # internally consistent, but says nothing about how old that date is: a
+    # universe whose data stopped six months ago still yields a perfectly
+    # uniform -- and entirely stale -- cross-section, which previously came
+    # back looking like a completely successful score.
+    #
+    # Always reported, so the gap is visible whether or not a limit was
+    # requested; only enforced when the caller states one, because how much
+    # staleness is still decision-useful is a property of the strategy, not
+    # something this function can pick on their behalf.
+    staleness_days = int((as_of_ts - effective_ts).days)
+    if max_staleness_days is not None and staleness_days > max_staleness_days:
+        raise ValidationError(
+            f"score_model: the newest available observation is "
+            f"{effective_ts.strftime('%Y-%m-%d')}, {staleness_days} calendar days "
+            f"before as_of {as_of!r}, exceeding max_staleness_days="
+            f"{max_staleness_days}. Every entity agrees on that date, so this is "
+            "not a per-symbol gap — the whole universe's data ends there. Check "
+            "the provider window and that these symbols still trade, or raise "
+            "max_staleness_days if a prediction this old is still useful."
+        )
+
     # Stale entities are reported separately rather than folded into
     # missing_entities: "no data at all" and "data, but from an older bar"
     # are different conditions with different fixes, and collapsing them
@@ -207,6 +271,7 @@ def score_model(
         # The date the predictions were actually computed from, which is not
         # necessarily the date that was asked for.
         "effective_score_date": effective_ts.strftime("%Y-%m-%d"),
+        "staleness_days": staleness_days,
         "predictions_uri": predictions_uri,
         "n_entities": int(len(predictions_df)),
         "missing_entities": missing_entities,

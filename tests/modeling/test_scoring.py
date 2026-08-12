@@ -220,3 +220,125 @@ class TestSingleEffectiveScoreDate:
         assert result["as_of"] == "2023-12-31"
         assert result["effective_score_date"] <= result["as_of"]
         assert result["effective_score_date"]  # populated, not left blank
+
+
+class TestMaxStaleness:
+    """
+    A single cross-section date makes predictions internally consistent but
+    says nothing about how OLD that date is. A universe whose data stopped
+    months ago still produces a perfectly uniform — and entirely stale —
+    cross-section, which previously came back looking like a completely
+    successful score.
+    """
+
+    def test_staleness_days_is_always_reported(self, patched_multi_factory):
+        model_id = _train_a_model(patched_multi_factory)
+        result = score_model(
+            model_id=model_id, as_of="2023-12-31", universe=["AAA", "BBB"]
+        )
+        assert "staleness_days" in result
+        assert result["staleness_days"] >= 0
+        # It must actually agree with the two dates it sits between.
+        gap = (
+            pd.Timestamp(result["as_of"]) - pd.Timestamp(result["effective_score_date"])
+        ).days
+        assert result["staleness_days"] == gap
+
+    def test_stale_universe_rejected_when_a_limit_is_set(self, patched_multi_factory):
+        """The whole universe's data ends well before as_of — not a
+        per-symbol gap, which is why the message says so."""
+        model_id = _train_a_model(patched_multi_factory)
+        with pytest.raises(ValidationError, match="max_staleness_days"):
+            score_model(
+                model_id=model_id,
+                as_of="2023-12-31",
+                universe=["AAA", "BBB"],
+                lookback_days=800,
+                max_staleness_days=1,
+            )
+
+    def test_no_limit_means_no_check(self, patched_multi_factory):
+        """Default stays permissive: how much staleness is still
+        decision-useful is a property of the strategy, not something
+        score_model can pick on the caller's behalf."""
+        model_id = _train_a_model(patched_multi_factory)
+        result = score_model(
+            model_id=model_id, as_of="2023-12-31", universe=["AAA", "BBB"]
+        )
+        assert result["n_entities"] > 0
+
+    def test_generous_limit_passes(self, patched_multi_factory):
+        model_id = _train_a_model(patched_multi_factory)
+        result = score_model(
+            model_id=model_id,
+            as_of="2023-12-31",
+            universe=["AAA", "BBB"],
+            max_staleness_days=3650,
+        )
+        assert result["n_entities"] == 2
+
+
+class TestUniverseScopeFeatureLock:
+    """
+    score_model deliberately permits a different scoring universe, which is
+    correct for entity-scope features: AAPL's RSI does not change because
+    MSFT was added to the request.
+
+    It is wrong for a UNIVERSE-scope feature. factors.pca_loading and
+    pca_factor_return are computed from the entire universe's return matrix,
+    so a model trained on one set and scored on another receives a different
+    factor basis under the same feature column — a silently different
+    variable, not a smaller sample.
+    """
+
+    def test_different_universe_rejected_when_a_pca_feature_is_used(
+        self, patched_multi_factory
+    ):
+        spec = _dataset_spec(
+            universe=["AAA", "BBB", "CCC"],
+            features=[
+                FeatureSpec(id="technical.rsi"),
+                FeatureSpec(id="factors.pca_loading"),
+            ],
+        )
+        model_id = _train_a_model_with_spec(spec, dataset_id="ds_univ_lock")
+
+        with pytest.raises(ValidationError, match="universe-scope feature"):
+            score_model(
+                model_id=model_id,
+                as_of="2023-12-29",
+                universe=["AAA", "BBB"],  # a subset is still a different basis
+            )
+
+    def test_same_universe_still_scores(self, patched_multi_factory):
+        spec = _dataset_spec(
+            universe=["AAA", "BBB", "CCC"],
+            features=[
+                FeatureSpec(id="technical.rsi"),
+                FeatureSpec(id="factors.pca_loading"),
+            ],
+        )
+        model_id = _train_a_model_with_spec(spec, dataset_id="ds_univ_same")
+
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["CCC", "AAA", "BBB"]
+        )
+        # Order must not matter — it's a set, not a sequence.
+        assert result["n_entities"] == 3
+
+    def test_entity_scope_only_model_still_allows_a_new_universe(
+        self, patched_multi_factory
+    ):
+        """The permission this lock must NOT take away: with only
+        entity-scope features, each symbol's values are independent of which
+        other symbols were requested."""
+        spec = _dataset_spec(
+            universe=["AAA", "BBB"],
+            features=[FeatureSpec(id="technical.rsi")],
+        )
+        model_id = _train_a_model_with_spec(spec, dataset_id="ds_entity_only")
+
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"]
+        )
+        assert result["n_entities"] >= 2

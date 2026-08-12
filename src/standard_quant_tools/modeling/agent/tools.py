@@ -228,6 +228,7 @@ def score_model(input_data: ScoreModelInput) -> ScoreModelResult:
         as_of=input_data.as_of,
         universe=input_data.universe,
         lookback_days=input_data.lookback_days,
+        max_staleness_days=input_data.max_staleness_days,
     )
     return ScoreModelResult(**result)
 

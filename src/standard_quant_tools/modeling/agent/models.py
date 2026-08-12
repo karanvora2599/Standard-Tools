@@ -151,6 +151,19 @@ class ScoreModelInput(BaseModel):
         description="Calendar days of history fetched before as_of — widen for models "
         "using features with unusually large lookback windows.",
     )
+    max_staleness_days: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Reject the call if the newest available observation "
+        "(effective_score_date) is more than this many calendar days before "
+        "as_of. Enforcing a single cross-section date makes every returned "
+        "prediction internally consistent, but says nothing about how OLD that "
+        "shared date is — a universe whose data stopped six months ago still "
+        "produces a perfectly uniform, entirely stale cross-section. Set this "
+        "to state how far behind as_of a prediction is still decision-useful. "
+        "None (default) does not check; staleness_days is reported either way, "
+        "so the gap is never invisible.",
+    )
 
     @field_validator("as_of")
     @classmethod
@@ -180,6 +193,13 @@ class ScoreModelResult(BaseModel):
         "earlier (a market holiday, a provider whose `end` excluded as_of, a "
         "symbol that stopped trading). Reported so a caller never has to assume "
         "as_of and the data behind the prediction are the same date.",
+    )
+    staleness_days: int = Field(
+        0,
+        description="Calendar days between effective_score_date and as_of. "
+        "Always reported, whether or not max_staleness_days was set: a "
+        "uniform cross-section can still be an entirely stale one, and that "
+        "should never be something the caller has to go and derive.",
     )
     predictions_uri: str
     n_entities: int
