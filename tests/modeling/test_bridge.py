@@ -310,3 +310,78 @@ class TestCalendarContinuity:
             assert (
                 panel["BBB"][day] == 0.0
             ), "a missing prediction must be flat, not absent"
+
+
+class TestOosArtifactIntegrity:
+    """
+    The manifest recorded content_hashes["oos_predictions"] at registration,
+    but nothing checked it before backtesting. The structural validation
+    (columns, dtype, finiteness, duplicates) all passes on an edited file
+    that keeps the same shape — so a changed prediction column produced a
+    clean, plausible backtest of numbers the registered model never emitted.
+    """
+
+    def _train(self) -> str:
+        built = build_dataset(_dataset_spec())
+        model_spec = ModelSpec(
+            task="regression",
+            estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
+            validation=ValidationSpec(train_window=150, test_window=30, embargo=5),
+            random_seed=1,
+        )
+        dataset = {
+            "panel": built["panel"],
+            "feature_ids": built["feature_ids"],
+            "target_id": built["target_id"],
+            "data_hash": built["data_hash"],
+        }
+        return run_experiment(dataset, model_spec, dataset_id="ds_oos_tamper")[
+            "model_id"
+        ]
+
+    def test_untampered_artifact_still_loads(self, patched_multi_factory):
+        """The guard must not reject a clean package."""
+        model_id = self._train()
+        panel = oos_predictions_to_signal_panel(model_id=model_id)
+        assert panel
+
+    def test_edited_predictions_rejected_via_model_id(self, patched_multi_factory):
+        from standard_quant_tools.modeling.registry.model_registry import load_manifest
+
+        model_id = self._train()
+        manifest = load_manifest(model_id)
+        path = Path(manifest.oos_predictions_uri)
+
+        # A shape-preserving edit: same columns, same dtypes, same
+        # (entity, date) pairs, all finite. Only the values change.
+        df = pd.read_parquet(path)
+        df["prediction"] = df["prediction"] * -1.0
+        df.to_parquet(path)
+
+        # It would sail through the structural checks...
+        from standard_quant_tools.modeling.bridge import _validate_predictions_frame
+
+        _validate_predictions_frame(df, "tampered")
+
+        # ...but the recorded digest catches it.
+        with pytest.raises(
+            ValidationError, match="has changed since it was registered"
+        ):
+            oos_predictions_to_signal_panel(model_id=model_id)
+
+    def test_direct_uri_mode_is_explicitly_unverified(self, patched_multi_factory):
+        """
+        Documented, not an oversight: with no manifest there is no root of
+        trust to check against. The same tampered file loads fine here,
+        which is exactly why model_id is the preferred entry point.
+        """
+        from standard_quant_tools.modeling.registry.model_registry import load_manifest
+
+        model_id = self._train()
+        path = Path(load_manifest(model_id).oos_predictions_uri)
+        df = pd.read_parquet(path)
+        df["prediction"] = df["prediction"] * -1.0
+        df.to_parquet(path)
+
+        panel = oos_predictions_to_signal_panel(str(path), task="regression")
+        assert panel

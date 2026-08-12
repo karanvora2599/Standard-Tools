@@ -63,6 +63,7 @@ regardless of the model's prediction scale, the same reasoning
 SCORE.
 """
 
+from pathlib import Path
 from typing import Dict, Literal
 
 import numpy as np
@@ -206,6 +207,10 @@ def oos_predictions_to_signal_panel(
             answer rather than an error.
         oos_predictions_uri: the artifact path directly. Requires `task`.
             Kept for callers that already hold a URI; `model_id` is safer.
+            **Explicitly unverified**: with no manifest there is no root of
+            trust to check the file's content hash against, so this path
+            gets structural validation only. Prefer `model_id`, which
+            verifies the recorded digest before loading.
         task: must match the ModelSpec.task the model was trained with.
             Ignored when `model_id` is given (read from the manifest, and
             an explicit mismatch is rejected).
@@ -253,6 +258,21 @@ def oos_predictions_to_signal_panel(
         # available in model_id mode, which is one more reason it's the
         # preferred entry point.
         skipped_folds = (manifest.validation_report or {}).get("skipped_folds") or None
+        # The manifest already recorded this artifact's digest at
+        # registration, but nothing checked it before backtesting. The
+        # structural validation below (columns, dtype, finiteness,
+        # duplicates) all passes on an edited file that keeps the same
+        # shape -- so a changed prediction column produced a clean,
+        # plausible backtest of numbers the registered model never emitted.
+        #
+        # Verified here, BEFORE loading, for the same reason load_model
+        # verifies before joblib.load: checking after the fact tells you
+        # about a problem you have already acted on.
+        _artifacts.verify_file(
+            Path(str(oos_predictions_uri)),
+            manifest.content_hashes.get("oos_predictions"),
+            "oos_predictions",
+        )
     elif task is None:
         raise ValidationError(
             "task is required when passing oos_predictions_uri directly — or pass "
