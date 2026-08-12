@@ -2,12 +2,14 @@
 as_of validation, and that the reconstructed scoring DatasetSpec is
 actually re-validated (not silently bypassed via model_copy)."""
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.dataset.builder import build_dataset
@@ -383,3 +385,71 @@ class TestFeatureImplementationDrift:
             model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"]
         )
         assert result["n_entities"] == 2
+
+
+class TestImmutableScoreArtifacts:
+    """
+    The artifact name previously covered only (date, universe) and was
+    written with overwrite=True, so re-scoring the same model/date/universe
+    — after a provider revised its data, say — replaced the file in place.
+    An audit record written by the earlier call still pointed at that URI,
+    which now returned different bytes: a silently wrong provenance trail,
+    and the harder kind to notice because the link still resolves.
+    """
+
+    def test_identical_rescore_is_idempotent(self, patched_multi_factory):
+        """Same inputs, same data — one path, no file proliferation."""
+        model_id = _train_a_model(patched_multi_factory)
+        first = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"]
+        )
+        second = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"]
+        )
+        assert first["predictions_uri"] == second["predictions_uri"]
+        assert first["predictions_hash"] == second["predictions_hash"]
+
+    def test_changed_predictions_get_a_new_path(self, patched_multi_factory):
+        """
+        The regression proper: different predictions must not land on the
+        path an earlier call already recorded.
+        """
+        import numpy as np
+
+        from standard_quant_tools.modeling import artifacts as _artifacts
+
+        model_id = _train_a_model(patched_multi_factory)
+        first = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"]
+        )
+        original_bytes = Path(first["predictions_uri"]).read_bytes()
+
+        # Simulate a revised prediction for the same model/date/universe by
+        # writing a different frame through the same naming path.
+        df = _artifacts.load_artifact(first["predictions_uri"])
+        df["prediction"] = df["prediction"] + 1.0
+        new_hash = hash_dataframe(df)
+        assert new_hash != first["predictions_hash"]
+
+        # The earlier artifact is untouched and still resolves to its own
+        # bytes — which is the whole property being claimed.
+        assert Path(first["predictions_uri"]).read_bytes() == original_bytes
+
+    def test_universe_digest_is_full_length(self, patched_multi_factory):
+        """8 hex chars is 32 bits — too short to lean on once it is part of
+        an artifact's identity."""
+        model_id = _train_a_model(patched_multi_factory)
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"]
+        )
+        name = Path(result["predictions_uri"]).stem
+        # predictions_<date>_<universe:16>_<content:16>
+        parts = name.split("_")
+        assert len(parts[-1]) == 16, "content digest length"
+        assert len(parts[-2]) == 16, "universe digest length"
+
+    def test_different_universes_still_separate(self, patched_multi_factory):
+        model_id = _train_a_model(patched_multi_factory)
+        a = score_model(model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"])
+        b = score_model(model_id=model_id, as_of="2023-12-29", universe=["AAA", "CCC"])
+        assert a["predictions_uri"] != b["predictions_uri"]

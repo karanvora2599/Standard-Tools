@@ -243,3 +243,123 @@ class TestFoldAccounting:
         spec = _model_spec(train_window=400, test_window=60, embargo=5, min_folds=1)
         result = run_experiment(_dataset(_spec()), spec, dataset_id="ds_vr5")
         assert result["n_folds"] == 1
+
+
+class TestTrainingOnlyBaseline:
+    """
+    baseline_regression_metrics built its constant from the TEST fold's own
+    mean. That is an oracle: at prediction time nobody knows the future
+    window's average realized return, so `model MAE vs baseline MAE` was not
+    a valid comparison. It never contaminated the trained model, only the
+    number the model was judged against.
+    """
+
+    def test_constant_comes_from_training_not_test(self):
+        from standard_quant_tools.modeling.validation.metrics import (
+            baseline_regression_metrics,
+        )
+
+        train_y = np.array([1.0, 1.0, 1.0, 1.0])
+        test_y = np.array([5.0, 5.0, 5.0, 5.0])
+
+        oracle = baseline_regression_metrics(test_y)
+        honest = baseline_regression_metrics(test_y, train_y)
+
+        # The oracle predicts 5.0 and is perfect; the honest baseline
+        # predicts 1.0 and is off by 4.0 on every row.
+        assert oracle["baseline_mae"] == pytest.approx(0.0)
+        assert honest["baseline_mae"] == pytest.approx(4.0)
+        assert honest["baseline_is_oracle"] == 0.0
+        assert oracle["baseline_is_oracle"] == 1.0
+
+    def test_engine_uses_the_training_baseline(self, patched_multi_factory):
+        """End to end: a registered model's metrics must not be scored
+        against an oracle."""
+        from standard_quant_tools.modeling.registry.model_registry import load_manifest
+
+        from .test_scoring import _dataset_spec, _train_a_model_with_spec
+
+        model_id = _train_a_model_with_spec(_dataset_spec(), dataset_id="ds_baseline")
+        metrics = load_manifest(model_id).oos_metrics
+        assert metrics.get("baseline_is_oracle") == 0.0
+
+
+class TestPooledCrossSectionalIC:
+    """
+    average_fold_metrics computes a weighted mean across folds. That is
+    correct for cs_ic_mean but wrong for the statistics built on it:
+
+        mean(fold stds)   != std(all OOS daily ICs)
+        mean(fold ICIRs)  != mean(all ICs) / std(all ICs)
+
+    Averaging folds' stds discards the BETWEEN-fold variation entirely —
+    exactly the variation ICIR exists to measure — so a model whose IC was
+    stable inside each fold but swung between them scored as dependable.
+    """
+
+    def test_pooled_std_differs_from_averaged_fold_stds(self):
+        from standard_quant_tools.modeling.validation.metrics import (
+            aggregate_cross_sectional_ic,
+            summarize_cross_sectional_ic,
+        )
+
+        # Two folds, each internally tight, but centred far apart.
+        fold_a = pd.Series(
+            [0.20, 0.21, 0.19], index=pd.date_range("2024-01-01", periods=3)
+        )
+        fold_b = pd.Series(
+            [-0.20, -0.21, -0.19], index=pd.date_range("2024-02-01", periods=3)
+        )
+
+        per_fold = [
+            summarize_cross_sectional_ic(fold_a, "cs_ic"),
+            summarize_cross_sectional_ic(fold_b, "cs_ic"),
+        ]
+        averaged_std = np.mean([m["cs_ic_std"] for m in per_fold])
+        pooled = aggregate_cross_sectional_ic([fold_a, fold_b], "cs_ic")
+
+        # Each fold looks rock steady; pooled, the model is not.
+        assert averaged_std < 0.02
+        assert pooled["cs_ic_std"] > 0.15
+        assert pooled["cs_ic_std"] > 10 * averaged_std
+
+    def test_pooled_icir_is_not_the_average_of_fold_icirs(self):
+        from standard_quant_tools.modeling.validation.metrics import (
+            aggregate_cross_sectional_ic,
+            summarize_cross_sectional_ic,
+        )
+
+        fold_a = pd.Series(
+            [0.20, 0.21, 0.19], index=pd.date_range("2024-01-01", periods=3)
+        )
+        fold_b = pd.Series(
+            [-0.20, -0.21, -0.19], index=pd.date_range("2024-02-01", periods=3)
+        )
+
+        fold_icirs = [
+            summarize_cross_sectional_ic(f, "cs_ic")["cs_ic_icir"]
+            for f in (fold_a, fold_b)
+        ]
+        pooled = aggregate_cross_sectional_ic([fold_a, fold_b], "cs_ic")
+        # Mean IC is ~0 pooled, so ICIR must be ~0 -- not the average of two
+        # large-magnitude opposite-signed fold ICIRs.
+        assert abs(pooled["cs_ic_icir"]) < 0.5
+        assert max(abs(v) for v in fold_icirs) > 10
+
+    def test_n_dates_is_the_total_oos_dates(self):
+        from standard_quant_tools.modeling.validation.metrics import (
+            aggregate_cross_sectional_ic,
+        )
+
+        fold_a = pd.Series([0.1, 0.2], index=pd.date_range("2024-01-01", periods=2))
+        fold_b = pd.Series([0.3], index=pd.date_range("2024-02-01", periods=1))
+        pooled = aggregate_cross_sectional_ic([fold_a, fold_b], "cs_ic")
+        assert pooled["cs_ic_n_dates"] == 3.0
+
+    def test_empty_input_is_handled(self):
+        from standard_quant_tools.modeling.validation.metrics import (
+            aggregate_cross_sectional_ic,
+        )
+
+        out = aggregate_cross_sectional_ic([], "cs_ic")
+        assert out["cs_ic_n_dates"] == 0.0

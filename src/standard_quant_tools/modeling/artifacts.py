@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional
 
 import joblib
 
+from standard_quant_tools._jsonsafe import sanitize_for_json
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.error import ValidationError
 
@@ -87,10 +88,31 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 def save_json(directory: Path, name: str, payload: Dict[str, Any]) -> str:
+    """
+    Persist a JSON artifact under the same JSON-safety contract the agent
+    boundary already enforces.
+
+    Python's json.dumps defaults to allow_nan=True and writes bare `NaN` /
+    `Infinity` tokens, which are not valid JSON per RFC 8259 and are
+    rejected by strict parsers (including some LLM API backends). The
+    runtime legitimately produces NaN -- AUC on a single-class fold, ICIR
+    with no dispersion, unsupported feature importance -- so manifests were
+    being written that this package could read back but many other tools
+    could not.
+
+    sanitize_for_json is the same helper modeling_dispatch uses, so a
+    manifest on disk and the tool response describing it now agree on how a
+    non-finite value is represented (null). allow_nan=False then makes any
+    future path that sneaks one through fail loudly at the write rather
+    than producing a subtly unparseable file.
+    """
     _validate_identifier(name, "name")
     path = directory / f"{name}.json"
     _atomic_write_bytes(
-        path, json.dumps(payload, indent=2, default=str).encode("utf-8")
+        path,
+        json.dumps(
+            sanitize_for_json(payload), indent=2, default=str, allow_nan=False
+        ).encode("utf-8"),
     )
     return str(path)
 

@@ -120,20 +120,46 @@ def effective_sample_size(n_obs: int, horizon: int, n_entities: int = 1) -> floa
     return float(max(per_entity / horizon, 0.0) * max(n_entities, 1))
 
 
-def baseline_regression_metrics(y_true: np.ndarray) -> Dict[str, float]:
+def baseline_regression_metrics(
+    y_true: np.ndarray, train_y: "np.ndarray | None" = None
+) -> Dict[str, float]:
     """
     Metrics for the trivial "predict the mean" model, so a reported R2/MAE
     has something to be compared against. Without this a result can look
     informative while being no better than a constant.
+
+    The constant comes from `train_y` — the TRAINING fold's mean — not from
+    y_true. Using the test fold's own mean made this an ORACLE baseline: at
+    prediction time nobody knows the future window's average realized
+    return, so a model compared against it was being held to a standard no
+    real forecaster could meet, and `model MAE vs baseline MAE` was not a
+    valid comparison. It never contaminated the trained model itself, only
+    the number it was judged against.
+
+    `train_y=None` falls back to the old in-sample constant and is reported
+    as such via `baseline_is_oracle`, so a caller can tell which of the two
+    they are looking at rather than having to infer it.
     """
     if len(y_true) == 0:
-        return {"baseline_mae": float("nan"), "baseline_r2": 0.0}
-    constant = np.full_like(y_true, float(np.mean(y_true)), dtype=float)
+        return {
+            "baseline_mae": float("nan"),
+            "baseline_r2": 0.0,
+            "baseline_is_oracle": 0.0,
+        }
+    if train_y is not None and len(train_y) > 0:
+        constant_value = float(np.mean(np.asarray(train_y, dtype=float)))
+        is_oracle = 0.0
+    else:
+        constant_value = float(np.mean(y_true))
+        is_oracle = 1.0
+    constant = np.full_like(np.asarray(y_true, dtype=float), constant_value)
+    # R2 against a TRAINING-derived constant is no longer 0.0 by
+    # construction -- that identity only held for the in-sample mean -- so
+    # it is computed rather than asserted.
     return {
         "baseline_mae": float(mean_absolute_error(y_true, constant)),
-        # R2 of the mean predictor is 0.0 by construction; stated
-        # explicitly so the comparison is legible in the output.
-        "baseline_r2": 0.0,
+        "baseline_r2": float(r2_score(y_true, constant)) if len(y_true) > 1 else 0.0,
+        "baseline_is_oracle": is_oracle,
     }
 
 
@@ -141,6 +167,7 @@ def regression_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     dates: "np.ndarray | None" = None,
+    train_y: "np.ndarray | None" = None,
 ) -> Dict[str, float]:
     """
     `ic`/`rank_ic` are POOLED across every (entity, date) row — kept for
@@ -157,7 +184,7 @@ def regression_metrics(
         "ic": _safe_corr(true_s, pred_s, "pearson"),
         "rank_ic": _safe_corr(true_s, pred_s, "spearman"),
     }
-    metrics.update(baseline_regression_metrics(y_true))
+    metrics.update(baseline_regression_metrics(y_true, train_y))
     if dates is not None:
         metrics.update(
             summarize_cross_sectional_ic(
@@ -196,6 +223,35 @@ def classification_metrics(
     metrics["positive_rate"] = positive_rate
     metrics["majority_class_accuracy"] = max(positive_rate, 1.0 - positive_rate)
     return metrics
+
+
+def aggregate_cross_sectional_ic(
+    fold_ic_series: "List[pd.Series]", prefix: str
+) -> Dict[str, float]:
+    """
+    Dispersion statistics over the POOLED out-of-sample daily IC series.
+
+    average_fold_metrics computes a weighted mean across folds, which is
+    correct for a mean but not for the statistics built on top of one:
+
+        mean(fold standard deviations)  !=  std(all OOS daily ICs)
+        mean(fold ICIRs)                !=  mean(all ICs) / std(all ICs)
+
+    A fold's std measures dispersion WITHIN that fold's dates only, so
+    averaging folds' stds discards the between-fold variation entirely --
+    exactly the variation that says whether an IC is dependable across
+    regimes, which is the question ICIR exists to answer. Concatenating
+    every fold's dates and computing once gives the actual OOS quantity.
+
+    The per-fold versions are still reported in validation_report, where
+    they answer a different and also useful question ("did this fold work").
+    """
+    usable = [s for s in fold_ic_series if s is not None and not s.empty]
+    if not usable:
+        return summarize_cross_sectional_ic(pd.Series(dtype=float), prefix)
+    # Folds are disjoint in time by construction (walk-forward), so a plain
+    # concat is the full OOS date series with no double counting.
+    return summarize_cross_sectional_ic(pd.concat(usable).sort_index(), prefix)
 
 
 def average_fold_metrics(

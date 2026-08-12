@@ -28,8 +28,10 @@ from .registry.model_registry import new_model_id, save_model
 from .specs import ModelSpec
 from .validation.diagnostics import fold_feature_importance, summarize_importance
 from .validation.metrics import (
+    aggregate_cross_sectional_ic,
     average_fold_metrics,
     classification_metrics,
+    cross_sectional_ic,
     effective_sample_size,
     positive_class_proba,
     regression_metrics,
@@ -112,19 +114,34 @@ def _predict_fold(
     test_X: pd.DataFrame,
     test_y: Any,
     test_dates: "np.ndarray | None" = None,
-) -> "tuple[Dict[str, float], np.ndarray]":
+    train_y: "np.ndarray | None" = None,
+) -> "tuple[Dict[str, float], np.ndarray, Dict[str, pd.Series]]":
     """
-    Returns (metrics, prediction_values). `prediction_values` is always a
-    continuous score suitable for downstream signal construction (see
-    modeling.bridge) -- the raw regression prediction for a regression
+    Returns (metrics, prediction_values, ic_series). `prediction_values` is
+    always a continuous score suitable for downstream signal construction
+    (see modeling.bridge) -- the raw regression prediction for a regression
     task, or the positive-class probability (not the discrete 0/1
     predicted label) for a classification task.
+
+    `ic_series` carries this fold's PER-DATE cross-sectional IC series so
+    the caller can pool every fold's dates and compute the OOS dispersion
+    statistics once. Averaging each fold's own std/ICIR is a different
+    quantity -- see aggregate_cross_sectional_ic.
     """
     preds = estimator.predict(test_X.to_numpy())
     if task == "regression":
-        return regression_metrics(test_y, preds, dates=test_dates), preds
+        metrics = regression_metrics(test_y, preds, dates=test_dates, train_y=train_y)
+        ic_series: Dict[str, pd.Series] = {}
+        if test_dates is not None:
+            ic_series["cs_ic"] = cross_sectional_ic(
+                test_y, preds, test_dates, "pearson"
+            )
+            ic_series["cs_rank_ic"] = cross_sectional_ic(
+                test_y, preds, test_dates, "spearman"
+            )
+        return metrics, preds, ic_series
     proba = positive_class_proba(estimator, test_X.to_numpy())
-    return classification_metrics(test_y, preds, proba), proba
+    return classification_metrics(test_y, preds, proba), proba, {}
 
 
 def run_experiment(
@@ -173,6 +190,8 @@ def run_experiment(
     fold_importance = []
     fold_records: List[Dict[str, Any]] = []
     fold_weights: List[float] = []
+    # metric prefix -> list of each fold's per-date IC series.
+    pooled_ic: Dict[str, List[pd.Series]] = {}
     oos_prediction_frames = []
     n_purged_total = 0
     # Skipped folds were previously invisible: the result reported only how
@@ -242,9 +261,20 @@ def run_experiment(
         )
         estimator.fit(train_X.to_numpy(), train_y)
 
-        metrics, prediction_values = _predict_fold(
-            model_spec.task, estimator, test_X, test_y, test_df["date"].to_numpy()
+        metrics, prediction_values, fold_ic = _predict_fold(
+            model_spec.task,
+            estimator,
+            test_X,
+            test_y,
+            test_df["date"].to_numpy(),
+            train_y=train_y,
         )
+        # Every fold's per-date IC dates are kept so the OOS dispersion
+        # statistics can be computed once over the pooled series -- see
+        # aggregate_cross_sectional_ic for why averaging per-fold std/ICIR
+        # is a different quantity.
+        for ic_key, ic_values in fold_ic.items():
+            pooled_ic.setdefault(ic_key, []).append(ic_values)
         # Per-fold detail is retained, not only its contribution to the
         # average: one averaged number cannot show performance decay over
         # time, reveal which regime drove the result, or expose that a
@@ -304,6 +334,19 @@ def run_experiment(
         )
 
     oos_metrics = average_fold_metrics(fold_metrics, fold_weights)
+    # Recompute the cross-sectional IC dispersion statistics over the POOLED
+    # OOS daily IC series, overwriting the fold-averaged versions.
+    #
+    # A weighted mean across folds is right for cs_ic_mean but wrong for
+    # everything built on top of it: mean(fold stds) is not std(all OOS
+    # daily ICs), and mean(fold ICIRs) is not mean(all ICs)/std(all ICs).
+    # Averaging folds' stds throws away the BETWEEN-fold variation, which
+    # is precisely the variation ICIR exists to measure -- so a model whose
+    # IC was stable inside each fold but swung between them scored as
+    # dependable. The per-fold numbers remain in validation_report, where
+    # they answer the different question of how each fold did.
+    for prefix, series_list in pooled_ic.items():
+        oos_metrics.update(aggregate_cross_sectional_ic(series_list, prefix))
     importance_summary = summarize_importance(fold_importance, feature_ids)
 
     # Sample size discounted for target overlap. A `horizon`-bar forward

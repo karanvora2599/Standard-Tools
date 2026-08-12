@@ -417,3 +417,46 @@ class TestAliasProvenance:
         assert record["implementation_hash"] != feature_implementation_hash(
             "technical.rsi"
         )
+
+
+class TestPersistedJsonIsStrict:
+    """
+    Persisted artifacts used json.dumps(..., default=str) with Python's
+    default allow_nan=True, which writes bare `NaN` / `Infinity` tokens.
+    Those are not valid JSON per RFC 8259 and are rejected by strict
+    parsers. The runtime legitimately produces NaN — AUC on a single-class
+    fold, ICIR with no dispersion, unsupported feature importance — so
+    manifests were written that this package could read back and many other
+    tools could not.
+    """
+
+    def _load_strict(self, path: Path):
+        """json.loads accepts NaN by default too; parse_constant makes it
+        behave like a strict RFC 8259 parser."""
+
+        def _reject(token):
+            raise ValueError(f"non-standard JSON constant: {token}")
+
+        return json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject)
+
+    def test_manifest_parses_under_a_strict_parser(self, trained_model):
+        path = _artifacts.run_dir(trained_model) / "manifest.json"
+        self._load_strict(path)  # must not raise
+
+    def test_nan_is_written_as_null_not_nan(self, patched_multi_factory, tmp_path):
+        payload = {"auc": float("nan"), "icir": float("inf"), "ok": 1.5}
+        _artifacts.save_json(tmp_path, "probe", payload)
+        raw = (tmp_path / "probe.json").read_text(encoding="utf-8")
+
+        assert "NaN" not in raw and "Infinity" not in raw
+        parsed = self._load_strict(tmp_path / "probe.json")
+        assert parsed["auc"] is None
+        assert parsed["icir"] is None
+        assert parsed["ok"] == 1.5
+
+    def test_every_persisted_model_artifact_is_strict(self, trained_model):
+        directory = _artifacts.run_dir(trained_model)
+        json_files = sorted(directory.glob("*.json"))
+        assert json_files, "fixture must produce JSON artifacts"
+        for path in json_files:
+            self._load_strict(path)

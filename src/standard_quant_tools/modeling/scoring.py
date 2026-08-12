@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
@@ -303,10 +304,31 @@ def score_model(
     # by the later one -- a silently wrong provenance trail rather than a
     # missing one. overwrite=True is kept so re-scoring the SAME universe
     # on the same date is idempotent.
+    # 16 hex chars, matching the digest length used everywhere else in this
+    # package (audit/hashing.py, artifacts.hash_file). The previous 8 was
+    # only 32 bits -- fine for making a filename unique-ish, too short to
+    # lean on when it is part of an artifact's identity.
     universe_digest = hashlib.sha256(
         json.dumps(sorted(universe)).encode("utf-8")
-    ).hexdigest()[:8]
-    run_name = f"predictions_{as_of_ts.strftime('%Y%m%d')}_{universe_digest}"
+    ).hexdigest()[:16]
+    # Content-addressed, so a written artifact is IMMUTABLE.
+    #
+    # The name previously covered only (date, universe) and was written with
+    # overwrite=True, so re-scoring the same model/date/universe -- after a
+    # provider revised its data, say -- replaced the file in place. An audit
+    # record written by the earlier call still pointed at that URI, which
+    # now returned different bytes: a silently wrong provenance trail rather
+    # than a missing one, and the harder kind to notice because the link
+    # still resolves.
+    #
+    # Including the content digest means identical re-scores resolve to the
+    # same path (idempotent, no file proliferation) while any change in the
+    # predictions produces a new path, leaving the old one intact for
+    # whoever recorded it.
+    content_digest = hash_dataframe(predictions_df)
+    run_name = (
+        f"predictions_{as_of_ts.strftime('%Y%m%d')}_{universe_digest}_{content_digest}"
+    )
     predictions_uri = _artifacts.save_artifact(
         predictions_df, run_id=model_id, name=run_name, overwrite=True
     )
@@ -319,6 +341,10 @@ def score_model(
         "effective_score_date": effective_ts.strftime("%Y-%m-%d"),
         "staleness_days": staleness_days,
         "predictions_uri": predictions_uri,
+        # Returned so a caller (or an audit record) can assert later that
+        # the file at predictions_uri is still the one this call produced,
+        # without re-deriving it from the frame.
+        "predictions_hash": content_digest,
         "n_entities": int(len(predictions_df)),
         "missing_entities": missing_entities,
         "stale_entities": stale_entities,

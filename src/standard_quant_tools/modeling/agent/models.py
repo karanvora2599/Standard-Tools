@@ -202,6 +202,14 @@ class ScoreModelResult(BaseModel):
         "should never be something the caller has to go and derive.",
     )
     predictions_uri: str
+    predictions_hash: str = Field(
+        "",
+        description="Content digest of the written predictions artifact. The "
+        "artifact path is content-addressed, so a URI recorded by one call "
+        "always resolves to the bytes that call produced — re-scoring after a "
+        "data revision writes a NEW path rather than replacing an older one an "
+        "audit record still points at.",
+    )
     n_entities: int
     summary_stats: Dict[str, float]
     missing_entities: List[str] = Field(
