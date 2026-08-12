@@ -322,3 +322,98 @@ class TestDatasetSpecIntegrity:
                     spec=model_spec,
                 )
             )
+
+
+class TestAliasProvenance:
+    """
+    The panel's columns are FeatureSpec.output_name — the ALIAS when one is
+    set. save_model passed those column names to
+    feature_implementation_hashes, which looked them up in
+    FEATURE_REGISTRY. Two failures followed, the second worse than the
+    first:
+
+      - an alias is not a registry id, so `mom_20` recorded "unavailable"
+        and the feature's identity was simply lost;
+      - an alias is an arbitrary caller-supplied string, so aliasing
+        market.momentum to "technical.rsi" recorded RSI's implementation
+        hash for a momentum column — an actively wrong record, not a
+        missing one.
+    """
+
+    def _train_with(self, features, dataset_id):
+        spec = DatasetSpec(
+            universe=["AAA", "BBB"],
+            start="2022-01-01",
+            end="2023-12-31",
+            features=features,
+            target=TargetSpec(horizon=5),
+        )
+        built = build_dataset(spec)
+        panel_uri = _artifacts.save_artifact(
+            built["panel"], run_id=dataset_id, name="panel"
+        )
+        _artifacts.save_json(Path(panel_uri).parent, "dataset_spec", spec.model_dump())
+        model_spec = ModelSpec(
+            task="regression",
+            estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
+            validation=ValidationSpec(train_window=150, test_window=30, embargo=5),
+            random_seed=1,
+        )
+        dataset = {
+            "panel": built["panel"],
+            "feature_ids": built["feature_ids"],
+            "target_id": built["target_id"],
+            "data_hash": built["data_hash"],
+            "spec_hash": built["spec_hash"],
+            "dataset_spec": spec.model_dump(),
+        }
+        return run_experiment(dataset, model_spec, dataset_id=dataset_id)["model_id"]
+
+    def test_aliased_feature_records_its_real_implementation(
+        self, patched_multi_factory
+    ):
+        model_id = self._train_with(
+            [
+                FeatureSpec(
+                    id="market.momentum", alias="mom_20", params={"lookback": 20}
+                ),
+                FeatureSpec(
+                    id="market.momentum", alias="mom_60", params={"lookback": 60}
+                ),
+            ],
+            "ds_alias_prov",
+        )
+        manifest = load_manifest(model_id)
+
+        assert set(manifest.feature_provenance) == {"mom_20", "mom_60"}
+        for column in ("mom_20", "mom_60"):
+            record = manifest.feature_provenance[column]
+            assert record["feature_id"] == "market.momentum"
+            # The whole point: a real hash, not "unavailable".
+            assert record["implementation_hash"] == feature_implementation_hash(
+                "market.momentum"
+            )
+        # Params distinguish the two uses of one feature.
+        assert manifest.feature_provenance["mom_20"]["params"]["lookback"] == 20
+        assert manifest.feature_provenance["mom_60"]["params"]["lookback"] == 60
+
+    def test_alias_colliding_with_another_feature_name_is_not_confused(
+        self, patched_multi_factory
+    ):
+        """
+        The dangerous case: the alias names a DIFFERENT registered feature.
+        Looking the alias up as an id recorded that other feature's hash.
+        """
+        model_id = self._train_with(
+            [FeatureSpec(id="market.momentum", alias="technical.rsi")],
+            "ds_alias_collide",
+        )
+        record = load_manifest(model_id).feature_provenance["technical.rsi"]
+
+        assert record["feature_id"] == "market.momentum"
+        assert record["implementation_hash"] == feature_implementation_hash(
+            "market.momentum"
+        )
+        assert record["implementation_hash"] != feature_implementation_hash(
+            "technical.rsi"
+        )

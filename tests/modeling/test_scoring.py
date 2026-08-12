@@ -342,3 +342,44 @@ class TestUniverseScopeFeatureLock:
             model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB", "CCC"]
         )
         assert result["n_entities"] >= 2
+
+
+class TestFeatureImplementationDrift:
+    """
+    The manifest recorded each column's implementation hash at
+    registration, but score_model never compared it against today's code.
+    So editing a feature function and then scoring an existing model fed
+    the registered estimator a differently-defined input under the same
+    column name — the provenance recorded that something had changed, but
+    only after the fact, for anyone who went looking.
+    """
+
+    def test_changed_feature_implementation_blocks_scoring(
+        self, patched_multi_factory, monkeypatch
+    ):
+        from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY
+
+        model_id = _train_a_model(patched_multi_factory)
+
+        # Swap in a different implementation for a feature the model uses,
+        # exactly as editing its source would.
+        original = FEATURE_REGISTRY["technical.rsi"]
+
+        def _different_rsi(ohlcv, context, period: int = 14):
+            return ohlcv["Close"].pct_change(period) * 100.0
+
+        monkeypatch.setattr(
+            FEATURE_REGISTRY["technical.rsi"], "fn", _different_rsi, raising=True
+        )
+
+        with pytest.raises(ValidationError, match="implementation of"):
+            score_model(model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"])
+        assert FEATURE_REGISTRY["technical.rsi"] is original  # monkeypatch scope only
+
+    def test_unchanged_implementation_still_scores(self, patched_multi_factory):
+        """The guard must not fire on an untouched codebase."""
+        model_id = _train_a_model(patched_multi_factory)
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"]
+        )
+        assert result["n_entities"] == 2

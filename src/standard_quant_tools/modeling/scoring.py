@@ -27,6 +27,7 @@ from .dataset.builder import build_dataset
 from .features.base import FeatureScope
 from .features.registry import get_feature
 from .features.transforms import apply_preprocessing
+from .registry.feature_provenance import feature_provenance_from_spec
 from .registry.model_registry import (
     load_dataset_spec,
     load_manifest,
@@ -126,6 +127,51 @@ def score_model(
     # fed to an already-registered estimator, with no integrity check and
     # no change in model_id.
     original_spec_dict = load_dataset_spec(model_id)
+
+    # ── Feature implementations must still be the trained ones ────────────
+    # The manifest recorded each column's implementation hash at
+    # registration, but nothing compared it against today's code. So
+    # editing a feature function and then scoring an existing model fed the
+    # registered estimator a differently-defined input under the same
+    # column name, with the provenance only recording -- after the fact,
+    # for anyone who went looking -- that something had changed.
+    #
+    # Scoped honestly: this catches a change to the FEATURE FUNCTION
+    # itself, which is the case the field exists for (especially a custom
+    # feature registered at runtime from outside the repo). It does NOT
+    # catch a rewrite of a shared primitive the wrapper calls -- editing
+    # indicators.momentum.rsi leaves _technical_rsi's source, and therefore
+    # this hash, identical. git_commit_sha/package_version in the manifest
+    # are the coarser signal for that.
+    recorded_provenance = manifest.feature_provenance or {}
+    if recorded_provenance:
+        current = feature_provenance_from_spec(original_spec_dict.get("features"))
+        drifted = {
+            column: (
+                record.get("implementation_hash"),
+                current[column].get("implementation_hash"),
+            )
+            for column, record in recorded_provenance.items()
+            if column in current
+            and record.get("implementation_hash") not in (None, "unavailable")
+            and current[column].get("implementation_hash")
+            != record.get("implementation_hash")
+        }
+        if drifted:
+            detail = ", ".join(
+                f"{column} (trained {was}, now {now})"
+                for column, (was, now) in drifted.items()
+            )
+            raise ValidationError(
+                f"score_model: the implementation of {len(drifted)} feature(s) has "
+                f"changed since model {model_id!r} was trained: {detail}. The "
+                "registered estimator learned coefficients against the OLD "
+                "definition, so scoring now would feed it a differently-computed "
+                "input under the same column name and return a prediction that "
+                "looks valid but is not the model that was validated. Retrain "
+                "against the current feature code, or score with the code the "
+                f"model was trained on (git_commit_sha {manifest.git_commit_sha})."
+            )
 
     # ── Universe-scope features pin the universe ──────────────────────────
     # Scoring a DIFFERENT universe than the model trained on is fine for

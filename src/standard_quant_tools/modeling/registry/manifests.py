@@ -50,6 +50,17 @@ class ModelManifest(BaseModel):
     # SHA covers the repo, but says nothing about a custom feature
     # registered at runtime from outside it.
     feature_implementation_hashes: Dict[str, str] = Field(default_factory=dict)
+    # Full per-column provenance: panel column -> {feature_id, params,
+    # implementation_hash}. Keyed by the OUTPUT column (the alias when one
+    # is set), with the registry id carried as a value rather than being
+    # inferred from the key.
+    #
+    # feature_implementation_hashes alone could not express this. Its keys
+    # were the panel's column names, which it then looked up in the feature
+    # registry -- so an aliased column recorded "unavailable", and a column
+    # aliased to another feature's name recorded THAT feature's hash. Making
+    # the alias a key and never a lookup removes both failure modes.
+    feature_provenance: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     # Last FEATURE date in the training panel. Lineage only -- this is NOT
     # the cutoff score_model gates on; see training_information_cutoff.
     # Optional so manifests written before this field existed still load.

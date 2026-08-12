@@ -20,7 +20,10 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..specs import ModelSpec
-from .feature_provenance import feature_implementation_hashes
+from .feature_provenance import (
+    feature_implementation_hashes,
+    feature_provenance_from_spec,
+)
 from .manifests import ModelManifest
 
 logger = logging.getLogger(__name__)
@@ -83,6 +86,13 @@ def save_model(
         )
 
     # Written before the manifest so their digests can go INTO it.
+    # Resolved from the training DatasetSpec's feature entries, which carry
+    # the registry id, the requested params AND the alias -- everything the
+    # panel's column names alone had thrown away.
+    _provenance = feature_provenance_from_spec(
+        (dataset_spec or {}).get("features") if dataset_spec else None
+    )
+
     model_path = _artifacts.save_joblib(directory, "model", estimator)
     model_spec_path = _artifacts.save_json(
         directory, "model_spec", model_spec.model_dump()
@@ -124,7 +134,21 @@ def save_model(
         random_seed=model_spec.random_seed,
         dataset_spec_hash=dataset_spec_hash,
         content_hashes=content_hashes,
-        feature_implementation_hashes=feature_implementation_hashes(feature_ids),
+        # Derived from the DatasetSpec's own feature entries, so an aliased
+        # column resolves through its real registry id instead of having
+        # its alias looked up as one (which recorded "unavailable", or --
+        # when the alias happened to name another feature -- that other
+        # feature's hash). Falls back to the id-keyed form only when no
+        # spec was supplied, which is the pre-alias behavior.
+        feature_provenance=_provenance,
+        feature_implementation_hashes=(
+            {
+                column: record["implementation_hash"]
+                for column, record in _provenance.items()
+            }
+            if _provenance
+            else feature_implementation_hashes(feature_ids)
+        ),
         train_end_date=train_end_date,
         training_information_cutoff=training_information_cutoff,
         dataset_warnings=list(dataset_warnings or []),
