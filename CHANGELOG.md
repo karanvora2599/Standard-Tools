@@ -9,6 +9,209 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (second modeling audit — 20 items)
+
+A second full review of the modeling stack, the data layer beneath it and
+the numerics both rest on, worked in a fixed order from the findings most
+capable of producing a confidently wrong answer down to hardening. Every
+item was reproduced against a live interpreter before being fixed and is
+pinned by a regression test that records the *reason*, not just the
+behaviour. Suite: 2343 → 2451 passed, 1 skipped.
+
+The common thread is the failure class this library exists to remove: a
+result that is plausible, internally consistent, and wrong, with nothing in
+the output to say so.
+
+**Temporal correctness (items 1–5, 9)**
+
+- **Full-refit information cutoff used the feature date, not the label
+  date.** A row dated `t` with a horizon-`h` forward-return target reads
+  `Close[t+h]` to build its label, so the estimator has indirectly seen
+  prices through `max(label_end_date)`. Measured on a 120-bar / h=20 panel:
+  feature end 2026-05-20 vs label end 2026-06-17 — a 28-day window in which
+  `score_model` accepted an `as_of` whose future the model had already
+  consumed. Manifests now record `training_information_cutoff` and
+  `score_model` gates on it. Models registered earlier still score under the
+  old guard; they are detectable (`training_information_cutoff is None`) but
+  not retroactively safe.
+- **`end_date` meant different things per provider.** yfinance's `end=` is
+  exclusive, Polygon's and Bloomberg's are inclusive, and `data/base.py`
+  never stated which the ABC required — so the same call returned a
+  different window depending on who served it, and silently dropped the
+  final bar on the default provider. Resolved toward **inclusive** at the
+  ABC, with all three providers trimming through the shared
+  `trim_to_inclusive_end` so the contract holds by construction rather than
+  by trusting each vendor's documented boundary. Cache format bumped to
+  `v2`; v1 files were written under the exclusive behaviour and are never
+  looked up again.
+- **Intraday timestamps were destroyed by `_normalize_ohlcv_index`.** An
+  unconditional `idx.normalize()` collapsed four hourly bars into four
+  copies of one date. It ran on the live fetch *and* on both providers'
+  Parquet cache reads, so it also made the same request answer differently
+  live vs cached. Normalization is now interval-aware; daily and coarser are
+  bit-identical to before.
+- **A scored "cross-section" could mix dates.** `score_model` took each
+  entity's own most recent surviving row, so a halted or short-history
+  symbol contributed an older bar inside what the response called one
+  `as_of` cross-section — and `missing_entities` never caught it, because
+  the entity was present. `effective_score_date` is now enforced across the
+  cross-section, with excluded entities reported in `stale_entities` (kept
+  separate from `missing_entities`: "no data" and "older data" have
+  different causes and different fixes). `staleness_days` is always
+  reported; `max_staleness_days` is opt-in, since how much staleness is
+  decision-useful is a property of the strategy.
+- **Universe-scope features did not pin the universe.** `score_model`
+  permits a different scoring universe, which is right for entity-scope
+  features and wrong for `factors.pca_loading` /
+  `factors.pca_factor_return`: those are computed from the whole universe's
+  return matrix, so scoring [AAA, BBB] a model trained on [AAA, BBB, CCC]
+  feeds the estimator a different PCA basis under the same column name. Now
+  required to match exactly (as sets) — but only when a universe-scope
+  feature is actually present, so the permission survives where it is sound.
+- **Calendar gaps in OOS predictions compressed the price axis.**
+  `run_strategy` intersects prices down to the signal index and then takes
+  `pct_change()` over what remains, so an absent span does not read as
+  "flat" — the bars either side become adjacent. Measured on a 90-day
+  series with February missing: the boundary bar carried **26×** a normal
+  daily return. A skipped walk-forward fold is now rejected (its dates are
+  absent from every entity, so nothing can be densified against — only the
+  caller knows the missing calendar); an entity-level gap is filled with
+  0.0 on the panel's shared calendar, which is the honest fill.
+
+**Provenance and integrity (items 10–14)**
+
+- **Aliases destroyed feature provenance — and could forge it.** Panel
+  columns are `FeatureSpec.output_name`, i.e. the alias, and those names
+  were looked up in `FEATURE_REGISTRY`. An aliased feature recorded
+  `"unavailable"`; an alias that happened to name *another* registered
+  feature recorded that feature's hash. Verified: `alias="technical.rsi"` on
+  a momentum feature recorded RSI's hash `2f6444a367010516` rather than
+  momentum's `a3f025e590b1bbb3`. Not a missing record — an actively wrong
+  one, in the field whose whole job is answering what produced a column.
+  Provenance now resolves from the spec's own entries into
+  `feature_provenance`, with the alias as the KEY and never a lookup.
+- **The recorded hashes were never checked at scoring time.** Now compared
+  before scoring, with the mismatch named per column. Scoped honestly: the
+  hash covers the feature function's own source, not its transitive
+  dependencies.
+- **The OOS predictions artifact was loaded without verifying its digest.**
+  The bridge's structural validation is shape-based, so flipping the sign of
+  the prediction column passes all of it and produces a clean, entirely
+  plausible backtest of numbers the model never emitted. The digest was
+  already in the manifest, unused. Direct-URI mode stays explicitly
+  unverified — with no manifest there is no root of trust — and now says so.
+- **`dataset_spec.json` was never verified against its `spec_hash`**, even
+  though the spec is the more dangerous of the pair to tamper with: the
+  panel is only read during training, while the spec is copied into the
+  model and defines what `score_model` rebuilds features from for the rest
+  of that model's life.
+- **Score artifacts were mutable.** The name covered only (date, universe)
+  and was written with `overwrite=True`, so re-scoring after a provider
+  revised its data replaced the file in place — and an audit record written
+  earlier still pointed at that URI, which now returned different bytes. The
+  filename now carries a content digest, returned as `predictions_hash`.
+- **Persisted JSON was not valid JSON.** `save_json` used `allow_nan=True`,
+  writing bare `NaN`/`Infinity` tokens (the runtime legitimately produces
+  NaN: AUC on a single-class fold, ICIR with no dispersion). Now routed
+  through the same `sanitize_for_json` the agent boundary uses, with
+  `allow_nan=False` so any future path fails at the write.
+
+**Statistics (items 15–16)**
+
+- **The regression baseline cheated.** `baseline_regression_metrics` built
+  its constant from the *test* fold's own mean, so the model was judged
+  against a standard no real forecaster could meet. The constant now comes
+  from the training fold, and `baseline_is_oracle` reports which is in
+  force.
+- **Cross-sectional IC dispersion was averaged across folds, not pooled.**
+  `mean(fold stds) ≠ std(pooled ICs)` and `mean(fold ICIRs) ≠ mean(ICs) /
+  std(ICs)`. A fold's std measures dispersion *within* that fold's dates
+  only, discarding exactly the between-fold variation ICIR exists to
+  measure. Demonstrated in the tests: two folds each internally rock-steady
+  (std < 0.02) but centred at +0.20 and −0.20 averaged to a "dependable"
+  ICIR, while the pooled series has ~zero mean and std > 0.15.
+
+**Numerics (items 17–18)**
+
+- **Power iteration reported success on a null direction.** `pca.py` skipped
+  its convergence check whenever the eigenvalue came out ≈ 0, treating a
+  zero matvec as a legitimate zero eigenvalue. That is only legitimate when
+  no remaining variance exists to find; otherwise the iteration landed on a
+  null direction while real structure was still there, and the SVD fallback
+  never fired. The check now discriminates on remaining variance and on the
+  residual `‖Av − λv‖`. Verified against a rank-1 panel constructed
+  orthogonal to the fixed start vector, and confirmed to add **no** SVD
+  fallbacks (0 before, 0 after) across the modeling and analysis suites.
+- **Volatility features annualized with a hardcoded daily constant.**
+  Yang-Zhang, Parkinson and Garman-Klass all multiplied by `sqrt(252)`
+  regardless of interval, so weekly bars were reported at roughly 2.2× their
+  true annualized volatility. `FeatureContext` now carries the interval and
+  the features scale by its own constant; intraday raises rather than
+  guessing, because session length is venue-specific and not derivable
+  without an exchange calendar. A missing interval still means daily, so
+  existing callers are unaffected.
+
+**Boundaries and resource limits (item 19)**
+
+Estimator parameters already carried compute ceilings; the same reasoning
+had not reached feature parameters, request sizes, or the RNG seed.
+
+- Integer-valued feature params are enforced from the **default's type**
+  rather than a name vocabulary — `refit_every=1.5` previously reached
+  `range()` and raised a bare `TypeError` naming nothing.
+- `_MAX_WINDOW_BARS` ceiling on feature windows; `universe` capped at 1000
+  symbols; `random_seed` bounded to `[0, 2**32 - 1]`.
+- Reserved panel column names (`date`, `entity`, `target`,
+  `label_end_date`) are now rejected on `FeatureDefinition.id` as well as on
+  `FeatureSpec.alias`, from one shared `RESERVED_PANEL_COLUMNS` — two
+  independent copies is how the id path drifted from the alias path.
+- `oos_predictions_to_signal_panel` validates `task` at runtime (the
+  `Literal` is a static hint; `task="banana"` fell through into
+  classification handling) and rejects a non-finite `deadband` (NaN
+  compares False against everything, silently disabling it; inf compares
+  True, silently flattening every prediction to 0).
+- `provider_guarantee_warnings(None)` returns an explicit "could not be
+  determined" warning instead of `[]` — a failed metadata fetch and a clean
+  bill of health were indistinguishable.
+- Fold records report `train_end` as the range **actually fit** after
+  label-overlap purging, alongside `scheduled_train_end`; their difference
+  is the purge extent.
+- The documented ENTITY/UNIVERSE custom-feature output contracts are now
+  enforced and name the offending feature. The entity contract is
+  deliberately a **subset** of the entity's index, not equality: a feature
+  legitimately returns fewer rows than it consumes (`risk.rolling_beta`
+  loses the first bar to `pct_change`), and panel assembly is index-aligned.
+
+**Native/Python parity (item 20)**
+
+- **The two backtest implementations disagreed on where a trade ends.**
+  `backtest.cpp` defines a trade as one **lot** — exposure leaving zero
+  until it returns to zero — while `engine.py`'s `_build_trade_log` emitted
+  a completed trade for *every* position-changing event. With the native
+  kernel present, one result dict reported `num_trades=1` beside a two-row
+  `trade_log`. Measured on a 1.0 → 2.5 → 0 sequence: native 1 trade
+  averaging 17.4492%, Python log 2 trades averaging 8.5113%, from identical
+  inputs.
+
+  **The "same-sign resize" framing of the original Known Issues entry
+  understated this, and that framing is itself corrected here.** A partial
+  *reduce* diverged identically and was never named — `2.0 → 1.0` is
+  opposite-sign without being a full close, so the old code booked it as a
+  completed trade too. On `0 → 2.0 → 1.0 → 0`, which contains no same-sign
+  resize at all: native 1 trade at 12.8078%, old log 2 rows averaging
+  6.1583%. Nor was the cost one spurious row per event: on the 100-bar
+  random-signal fixture the cross-check test uses, the old log produced
+  **67 rows against the kernel's 50** (7 resizes + 10 partial reduces = 17
+  spurious completions) and an average trade return off by **0.087pp**
+  (−0.5384% vs −0.6254%). The error compounds across a realistic series.
+
+  `_build_trade_log` now mirrors `apply_position_event` exactly, so cost is
+  charged per event on the amount actually transacted — the same
+  `sum(abs(pdiff))` the equity curve charges — and trade-log P&L reconciles
+  with equity P&L for strategies that scale *or trim* a position. No C++
+  change was needed; the kernel was already correct. This closes the "Known
+  Issues" entry opened by the earlier C++ pass.
+
 ### Changed (test suite layout)
 
 `tests/` now mirrors `src/standard_quant_tools/` — one directory per
@@ -401,6 +604,16 @@ skipped, zero regressions.
   a C++ kernel now would be speculative, not evidence-driven.
 
 ### Known Issues
+
+> **RESOLVED** by the second modeling audit's item 20 (see the top of this
+> file). `engine.py`'s `_build_trade_log()` now mirrors `backtest.cpp`'s
+> weighted-average cost-basis accounting, so `len(trade_log)` and
+> `num_trades` agree and the native/Python cross-check test deliberately
+> *includes* the cases it used to exclude. Note that the entry below is
+> **narrower than the actual defect**: it names only the same-sign resize,
+> but a partial *reduce* diverged the same way and went unmentioned for as
+> long as this entry stood. Kept as the record of what was knowingly
+> shipped, and of what the record itself missed.
 
 - **Correctness/portability pass, item 14 of 20 (native/Python trade-log
   divergence for resize scenarios):** `backtest.cpp`'s `run_strategy()`/

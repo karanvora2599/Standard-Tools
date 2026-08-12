@@ -366,19 +366,37 @@ num_trades/avg_trade_return_pct in these two tools' output come from
 2026-07-24 to match `_build_trade_log` exactly — see Item 6 in Implementation
 Status and the Risk Factors table.
 
-**Status: verified against a real compiled `_sqt_core`.** All three tests in
-`tests/backtest/test_backtest.py::TestNativeTradeStatsCorrectness` pass with the
-extension built, covering the single-call path, the batch path, and a
+**Status: verified against a real compiled `_sqt_core`.** Every test in
+`tests/backtest/test_backtest.py::TestNativeTradeStatsCorrectness` passes with
+the extension built, covering the single-call path, the batch path, and a
 native-vs-Python cross-check, so a grid ranked or filtered on those fields
 can be treated as trustworthy. (Earlier revisions of this paragraph deferred
 that confirmation to CI because no local C++ toolchain was available; that is
 no longer the case, and the Risk Factors table below already reflected it.)
 
-The one documented exception is a same-sign **resize** (e.g. 1.0 → 2.5), which
-`backtest.cpp` accounts with a weighted-average cost basis while
-`engine.py`'s `_build_trade_log` still treats as a close-then-reopen — the
-cross-check test excludes resize scenarios for exactly this reason. See the
-"Known Issues" entry in `CHANGELOG.md`.
+The same-sign **resize** case (e.g. 1.0 → 2.5) used to be documented as the
+one exception, and it was a definitional disagreement rather than a numeric
+one: `backtest.cpp` treats a trade as one lot with a weighted-average cost
+basis, while `engine.py`'s `_build_trade_log` emitted a completed trade for
+every position-changing event, so the same run reported `num_trades=1`
+beside a two-row `trade_log` — native 1 trade averaging 17.4492% against a
+Python log of 2 trades averaging 8.5113%.
+
+The "resize" label was too narrow: a partial **reduce** (`2.0 → 1.0`,
+opposite-sign but not a full close) diverged the same way and was never
+named. On the 100-bar random-signal fixture the cross-check uses, the old
+log produced **67 rows against the kernel's 50** — 7 resizes plus 10 partial
+reduces — with the reported average trade return off by **0.087pp**.
+
+Closed by the second modeling audit's item 20: `_build_trade_log` now mirrors
+`apply_position_event` exactly, and the cross-check test *includes* both
+cases and asserts `num_trades == len(trade_log)`. This matters for the
+performance argument specifically — the native path reads those four scalar
+stats straight from the kernel and only builds the Python trade log when
+`include_trade_log=True`, so the two sides agreeing on what counts as a
+trade is what makes skipping the Python rebuild safe rather than merely
+fast. Had the divergence stayed, that optimization would have been trading
+correctness for speed without saying so.
 
 ---
 

@@ -13,7 +13,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 - **Agent-First Design** — All tools return Pydantic models; 46 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
-- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), followed by a separate review of the modeling runtime that found 7 more critical issues — including two leakage channels and a PCA start-vector degeneracy — none of which the suite as it stood could have caught. Every finding is pinned by a regression test. 2343 Python tests + 9 C++ suites, all green.
+- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), followed by two reviews of the modeling runtime: the first found 7 critical issues (two leakage channels, a PCA start-vector degeneracy), the second found 20 more across modeling, the data layer and the numerics — a full-refit model that had seen prices past its own recorded cutoff, an `end_date` that meant different things per provider, a "cross-section" that could mix dates, and aliases that could forge feature provenance. None of it was catchable by the suite as it stood. Every finding was reproduced against a live interpreter before being fixed, and each is pinned by a regression test. 2451 Python tests + 9 C++ suites, all green.
 
 ---
 
@@ -689,6 +689,33 @@ Python tier, 10 in the C++ tier — full write-ups in
    tests; see [15_modeling.md](Documentation/15_modeling.md) and
    [CHANGELOG.md](CHANGELOG.md) for the rest.
 
+5. **The second modeling audit — 20 more items.** A follow-up review swept
+   the modeling stack, the data layer beneath it, and the numerics both rest
+   on. The unifying failure mode is a result that is plausible, internally
+   consistent, and wrong:
+
+   - A horizon-`h` label reads `Close[t+h]`, so a full-refit model has seen
+     prices past its recorded `train_end_date`. Manifests now carry
+     `training_information_cutoff` and `score_model` gates on it.
+   - `end_date` was exclusive on yfinance and inclusive on Polygon and
+     Bloomberg, so the default provider silently dropped the final bar. The
+     ABC now specifies **inclusive** and all three providers trim to it.
+   - `score_model` returned a "cross-section" that could mix dates, because
+     each entity contributed its own latest surviving bar. Now one
+     `effective_score_date`, with `stale_entities` and `staleness_days`.
+   - A calendar gap in OOS predictions compressed the price axis: a
+     boundary bar carried **26×** a normal daily return.
+   - An alias could make a feature record *another* feature's implementation
+     hash — the field whose whole job is answering what produced a column.
+   - ICIR was computed as a mean of per-fold ICIRs, discarding exactly the
+     between-fold variation it exists to measure.
+   - Volatility features annualized with `sqrt(252)` at every interval.
+   - The Python and C++ backtests disagreed on where a trade ends, so a
+     resized position produced `num_trades=1` beside a two-row trade log.
+
+   Every item was reproduced against a live interpreter before being fixed
+   and is pinned by a regression test.
+
 If you have audit records written before this release, note that
 `content_hash` values are not comparable across the change — see the format
 note in [10_auditability.md](Documentation/10_auditability.md). The
@@ -751,7 +778,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**2344 Python tests total** — 2343 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**2452 Python tests total** — 2451 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 

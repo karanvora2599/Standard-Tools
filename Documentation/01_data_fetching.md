@@ -18,6 +18,61 @@ print(df.head())
 
 Supported intervals: `"1d"` (default), `"1wk"`, `"1mo"`, `"1h"`, `"15m"`, etc.
 
+### `end_date` is inclusive, on every provider
+
+`get_ohlcv("AAPL", "2023-01-01", "2024-01-01")` returns bars **through**
+2024-01-01, not up to it. A bare date means "through the end of that day" at
+every interval; an explicit intraday timestamp means exactly that instant.
+
+This is stated by the `DataProvider` ABC and is not optional for
+implementations. It had to be stated because the three shipped providers had
+already drifted apart on the answer:
+
+| Provider | Underlying call | Native semantics |
+|---|---|---|
+| yfinance | `ticker.history(end=...)` | **exclusive** |
+| Polygon | `/v2/aggs/.../range/{from}/{to}` | inclusive |
+| Bloomberg | `request.set("endDate", ...)` | inclusive |
+
+So the same call returned a different window depending only on who served
+it — and on the *default* provider it silently dropped the final bar. That
+is the mechanism behind `score_model(as_of=X)` excluding X's own data while
+still reporting X as the as-of date.
+
+Inclusive won because it matches two of the three, matches what a caller
+passing a date means, and is the only reading under which an as-of date can
+be reported honestly. `YFinanceProvider` requests an exclusive bound past
+the whole inclusive window (over-fetching at most one day, which is
+harmless — under-fetching silently changes the answer) and trims back.
+
+**All three trim through the shared `trim_to_inclusive_end`, including the
+two that were already inclusive.** Deliberate: the contract then holds by
+*construction* rather than by trusting each vendor's documented boundary, so
+a vendor changing or mis-documenting its own semantics cannot quietly move
+the window. It costs one boolean mask on an already-materialized frame.
+
+> **Cache format bumped to `v2`.** Every v1 file was written under the
+> exclusive-end behaviour and is therefore missing its final bar; serving
+> one on a cache hit would answer the same request differently than a live
+> fetch, which is exactly the cache/live parity failure this layer exists to
+> prevent. Old files are never looked up again rather than migrated — they
+> age out with the directory.
+
+### Intraday timestamps survive the round trip
+
+Index normalization is interval-aware. It used to call `idx.normalize()`
+unconditionally, setting every timestamp to midnight — four hourly bars
+became four copies of one date, losing time-series identity outright. It ran
+on yfinance's live fetch *and* on both providers' Parquet cache reads, so it
+also made the same request answer differently live vs cached (Polygon's live
+parse preserved intraday timestamps; the cache read did not).
+
+Cache identity gained the same awareness: cache-key date bounds used to be
+truncated to 10 characters, so `09:30→12:00` and `13:00→16:00` on the same
+day resolved to **one** file and the second silently served the first's
+bars. Intraday bounds now carry `HHMMSS`; daily tokens are unchanged, so
+existing daily cache files stay addressable.
+
 ---
 
 ## Async Batch Fetching

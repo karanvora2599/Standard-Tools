@@ -228,6 +228,19 @@ different definition of PCA, only a faster route to the same one. It also
 starts from a fixed pseudo-random vector rather than the uniform
 `[1,…,1]/√n`.
 
+That verification had a hole worth naming, because it is the same failure
+the fixed start vector was introduced to prevent. The residual check was
+*skipped entirely* whenever the eigenvalue came out ≈ 0 — a zero matvec was
+read as a legitimate zero eigenvalue, which sets `‖Av − λv‖ = 0` and passes
+trivially. A zero eigenvalue is only legitimate when there is no remaining
+variance to find; otherwise the iteration landed on a null direction while
+real structure was still there, and the fallback that exists for exactly
+that case never fired. The check now discriminates on **remaining
+variance**, so a null direction found in a matrix that still has variance is
+a convergence failure. Confirmed to add no SVD fallbacks across the existing
+suites (0 before, 0 after) — it closes a hole rather than trading speed for
+safety.
+
 That start vector matters more than it sounds. "Power iteration converges
 from almost any start" excludes starts orthogonal to the dominant
 eigenvector — and the uniform vector is exactly orthogonal to a
@@ -259,6 +272,31 @@ register_feature(FeatureDefinition(
     lookback=0,
 ))
 ```
+
+**The output contract is enforced, and names your feature when it isn't
+met.** An `ENTITY`-scope `fn` must return a `pd.Series` indexed by a
+**subset** of the bars it was given; a `UNIVERSE`-scope `fn` must return a
+`pd.DataFrame` with one column per entity, indexed like the shared returns
+panel. These were documented but unchecked — the return value went straight
+into a `DataFrame` constructor, so a wrong type or a foreign index surfaced
+as a generic pandas error several frames away with no mention of which
+feature caused it.
+
+Subset, not equality, is deliberate: a feature legitimately produces fewer
+rows than it consumes (`risk.rolling_beta` works from returns, which lose
+the first bar to `pct_change`). Panel assembly is index-aligned, so the
+absent bars become NaN and the existing alignment step handles them. What is
+rejected is an index carrying labels the entity does not have — those either
+invent rows or indicate the feature was computed against the wrong entity
+entirely.
+
+`id` may not be one of the reserved panel columns (`date`, `entity`,
+`target`, `label_end_date`). `FeatureSpec.alias` was already checked; the id
+is equally the output column name when no alias is set, so a feature
+registered as `id="target"` produced a column shadowing the panel's
+supervised target. Both now read the same `RESERVED_PANEL_COLUMNS` — two
+independent copies is how the id path drifted from the alias path in the
+first place.
 
 ---
 
@@ -299,6 +337,26 @@ interval, and that the built-in defaults are calibrated for daily bars:
 `window=252` is one trading year at `1d` and about six weeks at `1h`.
 Non-daily intervals are fetched correctly and warned about, not rescaled.
 
+#### Interval-aware annualization
+
+Annualization is the exception: it *is* rescaled. `risk.realized_volatility`
+(Yang-Zhang), `risk.parkinson_volatility` and `risk.garman_klass_volatility`
+all used to multiply by `sqrt(252)` regardless of interval, so weekly bars
+were reported at roughly 2.2× their true annualized volatility. Harmless for
+a standardized model whose ranking is unaffected by a constant factor,
+misleading the moment anyone reads the value.
+
+`FeatureContext` now carries the interval and each feature scales by its
+own constant: 252 for `1d`, 52 for `5d`/`1wk`, 12 for `1mo`, 4 for `3mo`.
+
+**Intraday intervals raise rather than guess.** There is no correct constant
+without knowing the session length, which is venue-specific — 6.5 hours on
+US equities, 23 on CME futures, 24 on crypto — and not derivable from the
+interval string. Inventing one would produce a number that looks
+authoritative and is wrong by whatever the venue mismatch happens to be. A
+missing interval still means daily, so callers that never passed one are
+unaffected.
+
 The universe is fetched **concurrently**, through each provider's
 `get_ohlcv_async`. Bounded by `SQT_MODELING_FETCH_CONCURRENCY` (default
 8) — high enough to matter for a large universe, low enough not to look
@@ -328,7 +386,8 @@ to build the dataset:
 | partial history | A symbol covers materially less than the universe's date range — it listed inside the window, or stopped early. It is weighted far less than its presence in `universe` suggests. |
 | requested start/end unavailable | The window that came back is shorter than the one asked for, before any feature lookback is consumed. |
 | PCA intersection | Universe-scope features need a complete cross-section, so one short history truncates the panel *for every entity*. The warning names the latest-starting symbol, which is usually the whole explanation. |
-| non-daily interval | Feature defaults and annualization constants are daily-calibrated (above). |
+| non-daily interval | Feature default *parameters* are stated in trading days and are not rescaled (above). Annualization is no longer part of this caveat — see below. |
+| provider guarantees undetermined | `get_metadata` was unavailable or failed, so the point-in-time and survivorship caveats could not be checked at all. Deliberately **not** the same as an empty warning list: absence of evidence is reported as absence of evidence. |
 
 Every provider this package ships reports `point_in_time=False` and
 `survivorship_free=False` honestly, which is why these are warnings rather
@@ -510,6 +569,22 @@ guard cannot quietly become an obstruction. Non-finite values, wrong types,
 fractional counts, and `True` passed as a count (bool subclasses int) are
 all rejected.
 
+The same reasoning now covers the rest of the request surface, which it did
+not originally reach:
+
+| Bound | Value |
+|---|---|
+| Feature window params | ≤ 100,000 bars |
+| `DatasetSpec.universe` | ≤ 1,000 symbols |
+| `ModelSpec.random_seed` | 0 – 2³²−1 (NumPy's RNG range) |
+
+Integer-valued **feature** params are enforced from the default's *type*
+rather than a vocabulary of parameter names. `refit_every` is not a
+window-name, so `refit_every=1.5` passed the generic finite-number check and
+reached `range(window, n+1, refit_every)`, raising a bare `TypeError` from
+inside Python that named neither the feature nor the parameter. An
+integer-valued float (`5.0`) is still accepted and coerced.
+
 ### Incompatible combinations are caught here, not inside sklearn
 
 `penalty` used to be exposed for logistic regression without `solver`, so
@@ -585,7 +660,11 @@ cross-sectional model on; the pooled values are kept for continuity.
   alone cannot.
 - `cs_ic_hit_rate` — fraction of dates with positive IC.
 - `baseline_mae` — the predict-the-mean model, so R²/MAE has something to
-  be judged against.
+  be judged against. The constant comes from the **training** fold, not the
+  test fold: at prediction time nobody knows the future window's average
+  realized return, so a test-derived constant holds the model against a
+  standard no real forecaster could meet. `baseline_is_oracle` reports
+  which is in force, so a caller never has to infer it.
 - `effective_sample_size` — `n_oos_rows` discounted for target overlap. A
   `horizon`-bar target generated every bar produces labels sharing
   `horizon−1` of their bars, so 2,000 daily rows of a 20-day target carry
@@ -599,6 +678,25 @@ Fold metrics are averaged **weighted by each fold's prediction count**, not
 equally: a fold covering 30 predictions shouldn't influence the headline
 number as much as one covering 3,000.
 
+**Except the IC dispersion statistics, which are pooled rather than
+averaged.** A weighted mean is right for `cs_ic_mean` and wrong for
+everything built on it:
+
+```
+mean(fold standard deviations)  !=  std(all OOS daily ICs)
+mean(fold ICIRs)                !=  mean(all ICs) / std(all ICs)
+```
+
+A fold's std measures dispersion *within* that fold's dates only, so
+averaging folds' stds discards the between-fold variation entirely — which
+is exactly the variation ICIR exists to measure. Two folds each internally
+rock-steady (std < 0.02) but centred at +0.20 and −0.20 average to a
+"dependable" ICIR, while the pooled series has ~zero mean and std > 0.15.
+Walk-forward folds are disjoint in time, so the per-date IC series are
+concatenated and the dispersion computed once over the whole OOS window.
+The per-fold versions stay in `validation_report`, where they answer the
+different question of how each individual fold did.
+
 ### Fold accounting
 
 `validation_report` (also surfaced by `inspect_model(view="validation")`)
@@ -608,6 +706,12 @@ metrics with train/test windows. A single averaged number cannot show
 performance decay over time, reveal which regime drove the result, or
 expose that one fold carried everything — and a run where 8 of 10 folds
 were skipped previously looked identical to a clean 2-fold run.
+
+Each fold records both `train_end` — the last date **actually fit**, after
+label-overlap purging — and `scheduled_train_end`, the window end the
+splitter planned. Their difference is exactly how much the purge removed.
+Only the scheduled value used to be reported, so a fold whose last two
+weeks were entirely purged still claimed to have trained through them.
 
 `ValidationSpec.min_folds` (default **2**) is enforced against *completed*
 folds. One surviving fold is a single train/test split, not walk-forward
@@ -699,6 +803,26 @@ merely a wrong-answer one.
 > close that, and is the right step before this registry is trusted across
 > a trust boundary.
 
+`dataset_spec.json` is verified against its recorded `spec_hash` too, not
+just `panel.parquet`. The spec is the more dangerous of the pair to tamper
+with: the panel is only *read* during training, while the spec is copied
+into the model and becomes the definition `score_model` rebuilds features
+from for the rest of that model's life. Editing `RSI(14)` → `RSI(100)`
+trained on the original panel — whose hash still matched — and registered a
+model that would score every future prediction with different feature
+definitions.
+
+**Persisted JSON is strict.** `save_json` used Python's default
+`allow_nan=True`, which writes bare `NaN` / `Infinity` tokens that are not
+valid JSON per RFC 8259. The runtime legitimately produces NaN — AUC on a
+single-class fold, ICIR with no dispersion, unsupported feature importance —
+so manifests were being written that this package could read back and
+stricter parsers could not. Non-finite values now go through the same
+`sanitize_for_json` the agent boundary uses, so a manifest on disk and the
+tool response describing it agree that a non-finite value is `null`, with
+`allow_nan=False` set so any future path that sneaks one through fails at
+the *write* rather than producing a subtly unparseable file.
+
 ### Models are self-contained
 
 The training `DatasetSpec` is **copied into the model's own directory** and
@@ -724,15 +848,85 @@ being silently absent.
 
 The registered estimator is refit on the entire training panel, so asking
 it to "predict" a date inside that panel returns a **future-trained
-prediction dressed as a historical one**. `train_end_date` is recorded in
-the manifest and an `as_of` at or before it is rejected. For genuine
-historical evaluation use the walk-forward OOS predictions (below), which
-are actually out-of-sample.
+prediction dressed as a historical one**.
 
-Score artifacts are named with a digest of the scored universe, not just
-the date — scoring `[AAPL, MSFT]` and then `[AAPL, NVDA]` for the same
-`as_of` used to overwrite the first file, leaving an earlier audit record
-pointing at contents produced by a later call.
+The gate is `training_information_cutoff`, not `train_end_date`. A row
+dated `t` with a horizon-`h` forward-return target reads `Close[t+h]` to
+build its label, so the estimator has indirectly seen prices through
+`max(label_end_date)` — later than the last feature date by roughly the
+horizon. On a 120-bar panel with `h=20` that gap was 28 calendar days, and
+every `as_of` inside it was accepted. `train_end_date` is still recorded,
+demoted to lineage.
+
+> Models registered before this field existed fall back to the old,
+> too-permissive guard, and the error says so. They are detectable
+> (`training_information_cutoff is None`) but not retroactively safe.
+> Retraining is the only way to get an exact cutoff.
+
+For genuine historical evaluation use the walk-forward OOS predictions
+(below), which are actually out-of-sample.
+
+**One cross-section means one date.** `score_model` used to take each
+entity's own most recent surviving row, so a halted symbol or one with a
+shorter history contributed an older bar inside what the response called a
+single `as_of` cross-section. For a cross-sectional model that is not a
+smaller cross-section — it is a ranking that no longer compares
+contemporaneous information. `missing_entities` never caught it, because
+the entity *was* present.
+
+- `effective_score_date` — the most recent date actually available,
+  returned alongside `as_of`. The two are deliberately separate: `as_of` is
+  what was **requested**, and the newest bar at or before it is legitimately
+  earlier on a holiday, a weekend, or when the provider's window ends
+  sooner.
+- `stale_entities` — `{symbol: its actual last observation date}` for
+  entities excluded because their latest bar predates
+  `effective_score_date`. Kept separate from `missing_entities`: "no data at
+  all" and "data, but older" have different causes and different fixes.
+- `staleness_days` — always reported, whether or not a limit was requested.
+  `max_staleness_days` rejects the call when the gap is too large; it is
+  opt-in, since how much staleness is still decision-useful is a property of
+  the strategy, not something `score_model` can pick for you.
+
+**A different scoring universe is allowed — unless a universe-scope feature
+says otherwise.** `factors.pca_loading` and `factors.pca_factor_return` are
+computed from the entire universe's return matrix, so a model trained on
+`[AAA, BBB, CCC]` and scored on `[AAA, BBB]` receives a different PCA basis
+under the same column name. The estimator gets a silently different
+variable, not a smaller sample. When any trained feature is universe-scope,
+the scoring universe must match training exactly (compared as sets, so
+ordering is irrelevant; a subset is rejected too — it is a different basis,
+not a narrower one). A model built purely from entity-scope features keeps
+the freedom to score a new universe, which is the whole point of the
+permission.
+
+**Feature implementations are checked before scoring.** The manifest's
+`feature_provenance` records, per output column, the feature id, its
+resolved params, and a hash of the feature function's own source. Editing a
+feature function and then scoring an existing model would otherwise feed the
+registered estimator a differently-defined input under the same column
+name — coefficients learned against the old definition, a prediction that
+looks valid, and not the model that was validated. Mismatches are named per
+column, with the model's `git_commit_sha` offered as the way to score
+against the code it was trained on.
+
+> Scoped honestly: the hash covers the **feature function's own source**,
+> not its transitive dependencies. Rewriting `indicators.momentum.rsi`
+> leaves `_technical_rsi`'s source identical, so that case is not caught
+> here — `git_commit_sha` / `package_version` are the coarser signal for it.
+> What this does catch is what those two cannot: a feature registered at
+> runtime from outside the repo.
+
+Score artifacts are **content-addressed**: the filename carries a digest of
+the predictions, returned as `predictions_hash`. An identical re-score
+resolves to the same path (idempotent, no proliferation), while any change
+in the predictions writes a new path and leaves the recorded one intact.
+The name used to cover only (date, universe) and was written with
+`overwrite=True`, so re-scoring after a provider revised its data replaced
+the file in place — and an audit record written by the earlier call still
+pointed at that URI, which now returned different bytes. A silently wrong
+provenance trail, and the harder kind to notice, because the link still
+resolves.
 
 ---
 
@@ -803,6 +997,57 @@ The predictions artifact is validated on load — columns, emptiness, date
 dtype, finiteness, and `(entity, date)` uniqueness. The last one mattered
 most because it was silent: duplicate rows previously overwrote each other
 in the output dict, producing a smaller but perfectly well-formed panel.
+
+**In `model_id` mode the artifact's content hash is verified before it is
+loaded.** All of the structural validation above is shape-based, so a
+shape-preserving edit passes every one of it: flipping the sign of the
+prediction column keeps the same columns, dtypes, pairs and finiteness, and
+produces a clean, entirely plausible backtest of numbers the registered
+model never emitted. Verified *before* loading, for the same reason
+`load_model` does — checking afterwards tells you about a problem you have
+already acted on.
+
+> Direct-URI mode is explicitly **unverified**. With no manifest there is no
+> root of trust to check a digest against, so that path gets structural
+> validation only. A documented boundary, not an oversight, and one more
+> reason `model_id` is the preferred entry point.
+
+**A gap in the prediction calendar is not "flat".** `run_strategy`
+intersects price data down to the supplied signal index and then takes
+`pct_change()` over what remains, so an absent span disappears from the
+price axis entirely and the bars either side become adjacent. Measured on a
+90-day series with February missing, the Jan→Mar boundary bar carried
+**26×** a normal daily return — a month of price movement collapsed into
+one bar. Total return can still look right (it did in that repro, because
+the position never changed) while per-bar volatility, Sharpe and drawdown
+are all distorted, which is why this was easy to miss.
+
+Two gaps, deliberately handled differently:
+
+- **A skipped walk-forward fold is rejected.** Its dates are absent from
+  every entity, so there is nothing to densify against — only the caller,
+  who has the price data, knows what the missing calendar was. In
+  `model_id` mode detection is authoritative: the engine already records
+  `validation_report.skipped_folds` with a reason per fold, so the bridge
+  reads that rather than inferring a hole from date spacing. Direct-URI mode
+  falls back to flagging any gap longer than 10 business days — comfortably
+  above any holiday cluster, well below a skipped test window.
+- **An entity-level gap is filled.** The date exists in the artifact, just
+  not for that entity (a symbol that IPO'd mid-window, or whose features
+  were NaN on that bar). `run_signal_panel_backtest` runs `run_strategy` per
+  ticker against that ticker's *own* signal series, so leaving the hole
+  compressed one symbol's price axis while its peers kept the full calendar.
+  Every entity is now densified onto the panel's shared calendar with
+  `0.0`, which is the honest fill: the model expressed no view, and
+  `DIRECTION`'s `0.0` means exactly "flat".
+
+`task` and `deadband` are validated at runtime. `task`'s `Literal`
+annotation is a static hint and this is public Python, so `task="banana"`
+used to fall through into classification handling and threshold raw
+forward-return predictions against a probability cutoff. A non-finite
+`deadband` is rejected for a subtler reason: NaN compares False against
+everything, silently *disabling* the deadband, while `inf` compares True and
+silently flattens every prediction to zero. Both looked like success.
 
 **Target horizon and holding period are different objects.** A 20-day
 forward-return prediction converted to a daily direction signal is
@@ -920,20 +1165,12 @@ Not built here, and not accidentally half-built either:
   needs index-constituent history no shipped provider exposes; what is
   built is the *diagnosis* — see [Coverage and provenance
   warnings](#coverage-and-provenance-warnings).
-- **Non-daily feature calibration** — `interval` is threaded through to
-  the provider, but the built-in features' default parameters are stated
-  in trading days and the realized-volatility features annualize with a
-  daily constant. Nothing rescales them for a non-daily interval; you get
-  a warning and are expected to set parameters yourself.
-- **Universe-scope features under a changed scoring universe** —
-  `factors.pca_loading` / `pca_factor_return` are computed from the whole
-  current universe, so a model trained on `[AAPL, MSFT, NVDA]` and scored
-  on `[AAPL, XOM, JPM]` receives a different variable under the same
-  feature id.
-- **Scoring staleness** — `score_model` uses each entity's latest
-  surviving feature row and reports the requested `as_of`, without
-  exposing the effective observation date per entity or enforcing a
-  maximum staleness.
+- **Non-daily feature *parameter* calibration** — the built-in features'
+  default parameters are stated in trading days (`window=252` is one
+  trading year at `1d`, about six weeks at `1h`) and nothing rescales them
+  for a non-daily interval; you get a warning and are expected to set them
+  yourself. *Annualization* is no longer part of this gap — see
+  [Interval-aware annualization](#interval-aware-annualization).
 - **Model lifecycle states** — registration means "persisted and
   validated enough to load", not "approved for production". There is no
   trained/validated/approved/production distinction.
