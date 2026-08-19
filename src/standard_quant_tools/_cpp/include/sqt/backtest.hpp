@@ -34,8 +34,11 @@ struct BacktestResult {
  *
  * Trade log state machine mirrors _build_trade_log in engine.py exactly:
  *   open a trade when pos_diff != 0 and executed != 0, recording entry_price
- *   = prices[i-1] (Close one bar before the trade-open event, since
- *   executed[i] = signals[i-1] earns its first return over that close) and
+ *   = the event's actual FILL price -- prices[i-1] when ref_prices is null
+ *   (Close one bar before the trade-open event, since executed[i] =
+ *   signals[i-1] earns its first return over that close), or ref_prices[i]
+ *   when a fill series was supplied, matching what _build_trade_log is handed
+ *   for fill_price="next_open"/"hl2_exploratory" -- and
  *   entry_size = exec_i (the raw signal value, not just its sign, so a
  *   leveraged/SCORE signal's trade return scales the same way strat_ret
  *   does); close it at the next trade event, deducting 2*cost_per_unit for

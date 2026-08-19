@@ -140,16 +140,49 @@ class TestAdfCancellationVersusFailure:
 
     def test_the_tolerance_is_relative_not_absolute(self):
         """RSS carries the units of y-squared, so an absolute threshold would
-        classify the same data differently merely rescaled."""
-        source = (
-            __import__("pathlib").Path(__file__).resolve().parents[2]
-            / "src"
-            / "standard_quant_tools"
-            / "_cpp"
-            / "src"
-            / "cointegration.cpp"
-        ).read_text(encoding="utf-8")
-        assert "rss_tol = 1e-8 * (yty" in source
+        classify the same data differently merely rescaled.
+
+        This used to grep cointegration.cpp for the literal `rss_tol = 1e-8 *
+        (yty` guard. That guard is gone, because the thing it guarded against
+        is gone: the ADF regressions now solve by Householder QR, where RSS is
+        the squared norm of the part of Q'y that no column of R can reach --
+        a sum of squares, non-negative by construction. There is no longer a
+        `yty - bXty` cancellation to detect and no threshold to tune.
+
+        Asserting on source text also could not fail for the reason it claimed
+        to test, so this asserts the actual property instead: the same pair of
+        series, rescaled over 24 orders of magnitude, must produce the same
+        statistic and the same lag."""
+        rng = np.random.default_rng(11)
+        x = np.cumsum(rng.normal(0, 1, 300)) + 100.0
+        y = 1.7 * x + rng.normal(0, 0.4, 300)
+
+        base = _cpp.engle_granger(y, x)
+        assert np.isfinite(base["adf_statistic"])
+
+        for scale in (1e-12, 1e-6, 1e-3, 1e3, 1e6, 1e12):
+            scaled = _cpp.engle_granger(y * scale, x * scale)
+            assert scaled["optimal_lag"] == base["optimal_lag"], scale
+            assert scaled["adf_statistic"] == pytest.approx(
+                base["adf_statistic"], rel=1e-9
+            ), scale
+            assert scaled["cointegrated"] == base["cointegrated"], scale
+
+    def test_rank_deficient_design_does_not_report_certainty(self):
+        """A rank-deficient regression must not be reported as evidence of
+        anything. The QR reports rank explicitly, so such a candidate is
+        skipped rather than mistaken for a perfect fit.
+
+        A constant y1 makes the STEP 1 regression singular (not just the ADF),
+        so there is no spread to test and NaN is the honest answer --
+        statsmodels refuses the same input outright with
+        `ValueError: Invalid input, x is constant`. What matters is that the
+        result is not a confident one: no finite statistic, and in particular
+        not the -inf that would read as maximal evidence of cointegration."""
+        const = np.full(200, 42.0)
+        out = _cpp.engle_granger(const, const)
+        assert np.isnan(out["adf_statistic"])
+        assert out["cointegrated"] is False
 
 
 class TestWalkForwardExecutionModelIsConsistent:

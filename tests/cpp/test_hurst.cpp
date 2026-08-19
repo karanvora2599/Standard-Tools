@@ -318,7 +318,7 @@ static void test_rolling_hurst_invalid_method_throws() {
 // ── rolling_hurst OpenMP + scratch-buffer path vs. direct hurst_exponent() ──
 //
 // rolling_hurst_into() internally uses a scratch-buffer sibling
-// (hurst_exponent_scratch/dfa_impl) and (when SQT_HAS_OPENMP) runs the
+// (hurst_exponent_scratch/dfa_impl) and (when _OPENMP) runs the
 // window loop in parallel -- neither of those internal implementation
 // details is exposed, but their combined effect must produce EXACTLY the
 // values the public, unchanged hurst_exponent() would produce for the same

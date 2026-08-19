@@ -67,13 +67,25 @@ jobs:
         run: ctest --test-dir build --output-on-failure -C Debug
 
       - name: Verify extension loaded
-        # Unlike ASan, a TSan-instrumented Python extension does not
-        # require LD_PRELOAD-ing the sanitizer runtime into the host
-        # interpreter first -- ThreadSanitizer's runtime is designed to be
-        # loaded as a normal shared-library dependency of the sanitized
-        # .so, since (unlike ASan's global allocator interception) it does
-        # not need to be the first thing the process loads.
-        run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
+        # libtsan MUST be preloaded, exactly as the ASan job preloads libasan.
+        #
+        # The previous comment here asserted the opposite -- that TSan, unlike
+        # ASan, can be loaded as an ordinary dependency of the sanitized .so
+        # because it does not intercept the global allocator. That reasoning
+        # does not survive contact with the dynamic loader: TSan's runtime
+        # allocates a large initial-exec TLS block, and glibc's static TLS
+        # surplus is far too small to satisfy that for a library arriving via
+        # dlopen(). Importing a TSan-instrumented extension into a
+        # non-instrumented interpreter therefore fails at import with
+        # "cannot allocate memory in static TLS block", before a single test
+        # runs -- so this step could not have been validating anything.
+        #
+        # This is the same failure the ASan job already hit and fixed for the
+        # same reason; that job's comment records it was silently failing the
+        # whole time it was missing the preload.
+        run: |
+          export LD_PRELOAD=$(gcc -print-file-name=libtsan.so)
+          python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
 
       - name: Run tests under ThreadSanitizer
         # Only the OpenMP-parallelized kernels (simulate_forward_paths,
@@ -86,4 +98,5 @@ jobs:
         env:
           TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
         run: |
+          export LD_PRELOAD=$(gcc -print-file-name=libtsan.so)
           pytest -m "not integration and not slow" --tb=short -q -s
