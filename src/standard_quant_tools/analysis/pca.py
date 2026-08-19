@@ -4,6 +4,12 @@ from typing import Any, Dict, Literal, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
+from standard_quant_tools.numeric_contract import (
+    require_finite_series_frame,
+    require_positive_int,
+)
+
 logger = logging.getLogger(__name__)
 
 _POWER_ITERATION_TOL = 1e-9
@@ -175,6 +181,28 @@ def pca_returns(
         n_components              : int
         n_obs                     : int
     """
+    # dropna() removes NaN but not infinities, and an inf reaches the
+    # centring step and then SVD -- which fails with a raw LinAlgError
+    # ("SVD did not converge") that says nothing about the input. Duplicate
+    # column names are rejected for a different reason: the loadings are
+    # returned keyed BY column name, so two columns called "A" silently
+    # collapse into one entry and the attribution stops corresponding to the
+    # matrix that produced it.
+    require_finite_series_frame(returns_df, "returns_df", "pca_returns")
+    duplicates = sorted(
+        {c for c in returns_df.columns if list(returns_df.columns).count(c) > 1}
+    )
+    if duplicates:
+        raise ValidationError(
+            f"pca_returns: returns_df has duplicate column name(s) {duplicates}. "
+            "Loadings are returned keyed by column name, so duplicates would "
+            "collapse into one entry and the attribution would no longer "
+            "correspond to the matrix it was computed from."
+        )
+    # None is the documented default and means "every component", so it must
+    # survive the check that exists to catch 2.5 and 0.
+    if n_components is not None:
+        n_components = require_positive_int(n_components, "n_components", "pca_returns")
     data = returns_df.dropna()
     n_obs, n_assets = data.shape
     logger.debug(
@@ -195,8 +223,10 @@ def pca_returns(
     # and returned a result the caller never asked for.
     if method not in ("svd", "power_iteration"):
         raise ValueError(f"method must be 'svd' or 'power_iteration', got {method!r}.")
-    if n_components is not None and n_components < 1:
-        raise ValueError(f"n_components must be >= 1 when given, got {n_components}.")
+    # (n_components' range and integrality are validated at the top of this
+    # function via require_positive_int, which also covers the non-integral
+    # case this check did not: 2.5 passed `< 1` and then failed inside a
+    # slice with "slice indices must be integers".)
 
     arr = data.to_numpy(dtype=float)
     arr = arr - arr.mean(axis=0)

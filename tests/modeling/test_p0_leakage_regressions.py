@@ -292,9 +292,21 @@ class TestPcaPowerIterationStartVector:
         with pytest.raises(ValueError, match="method must be"):
             pca_returns(self._spread_panel(), n_components=1, method="oops")
 
-    def test_non_positive_n_components_rejected(self):
-        with pytest.raises(ValueError, match="n_components must be"):
-            pca_returns(self._spread_panel(), n_components=0)
+    @pytest.mark.parametrize("bad", [0, -1, 2.5])
+    def test_invalid_n_components_rejected(self, bad):
+        """
+        The type moved from ValueError to this package's own
+        ValidationError, which is what every other input boundary here
+        raises — nothing in the codebase caught the old type.
+
+        2.5 is the case the previous check missed entirely: it passed `< 1`
+        and then failed deep inside a slice with "slice indices must be
+        integers", naming neither the parameter nor the function.
+        """
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="n_components"):
+            pca_returns(self._spread_panel(), n_components=bad)
 
 
 # ── Full-refit information cutoff (second-pass P0-1) ────────────────────────

@@ -1823,6 +1823,16 @@ def run_regime_adaptive_walkforward_backtest(
             param_grid = (
                 grid_overrides.get(strat_name) or _DEFAULT_PARAM_GRIDS[strat_name]
             )
+            # fill_price MUST match the out-of-sample leg below. Without
+            # it the grid defaulted to "close" while the OOS evaluation used
+            # the caller's mode, so a walk-forward run selected parameters
+            # under same-close execution and then scored them under next-open
+            # execution -- the two halves answering different questions.
+            #
+            # Not cosmetic: measured across 25 random series with a realistic
+            # overnight gap, the WINNING parameter pair differed between the
+            # two fill modes on 7 of them. The out-of-sample number was then
+            # not a fair test of the parameters that were actually chosen.
             grid_df = backtest_grid(
                 train_df,
                 strategy=strat_name,
@@ -1833,6 +1843,7 @@ def run_regime_adaptive_walkforward_backtest(
                 sort_by=input_data.sort_by,
                 ascending=False,
                 n_workers=1,
+                fill_price=input_data.fill_price,
             )
             best_row = grid_df.iloc[0]
             metric_val = float(best_row.get(input_data.sort_by, float("-inf")))
@@ -2126,6 +2137,16 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         test_df = df.iloc[cursor + train_bars : cursor + train_bars + test_bars]
         full_slice = df.iloc[cursor : cursor + train_bars + test_bars]
 
+        # fill_price MUST match the out-of-sample leg below. Without
+        # it the grid defaulted to "close" while the OOS evaluation used
+        # the caller's mode, so a walk-forward run selected parameters
+        # under same-close execution and then scored them under next-open
+        # execution -- the two halves answering different questions.
+        #
+        # Not cosmetic: measured across 25 random series with a realistic
+        # overnight gap, the WINNING parameter pair differed between the
+        # two fill modes on 7 of them. The out-of-sample number was then
+        # not a fair test of the parameters that were actually chosen.
         grid_df = backtest_grid(
             train_df,
             strategy=input_data.strategy,
@@ -2136,6 +2157,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             sort_by=input_data.sort_by,
             ascending=False,
             n_workers=1,
+            fill_price=input_data.fill_price,
         )
 
         best_row = grid_df.iloc[0]

@@ -46,6 +46,7 @@ from standard_quant_tools.error import ValidationError
 
 __all__ = [
     "require_finite_series",
+    "require_finite_series_frame",
     "require_positive_price_series",
     "require_positive_start_level",
     "require_aligned",
@@ -324,3 +325,42 @@ def require_finite_covariance(
             "downstream would silently use only one triangle."
         )
     return array
+
+
+def require_finite_series_frame(
+    frame: "pd.DataFrame", name: str, func: str, allow_nan: bool = True
+) -> "pd.DataFrame":
+    """
+    Frame-level counterpart to require_finite_series.
+
+    Matrix routines fail differently from scalar ones: an infinity reaching
+    numpy.linalg.svd raises a bare `LinAlgError: SVD did not converge`, which
+    names neither the input nor the offending column, and a caller reads it as
+    an algorithmic failure rather than as bad data. Checked at the boundary so
+    the message names the column instead.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise ValidationError(
+            f"{func}: {name} must be a pandas DataFrame, got {type(frame).__name__}"
+        )
+    if frame.empty:
+        raise ValidationError(f"{func}: {name} is empty")
+    values = frame.to_numpy(dtype=float)
+    infinite = np.isinf(values)
+    if infinite.any():
+        cols = [str(c) for c, flag in zip(frame.columns, infinite.any(axis=0)) if flag]
+        raise ValidationError(
+            f"{func}: {name} contains {int(infinite.sum())} non-finite (infinite) "
+            f"value(s) in column(s) {cols}. Reaching a matrix decomposition, this "
+            "surfaces as a bare LinAlgError that names neither the input nor the "
+            "column responsible."
+        )
+    isnan = np.isnan(values)
+    if isnan.all():
+        raise ValidationError(f"{func}: {name} contains no observations")
+    if not allow_nan and isnan.any():
+        raise ValidationError(
+            f"{func}: {name} contains {int(isnan.sum())} NaN value(s) and this "
+            "computation cannot tolerate gaps"
+        )
+    return frame

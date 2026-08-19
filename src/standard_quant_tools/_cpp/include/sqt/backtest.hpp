@@ -56,7 +56,15 @@ BacktestResult run_strategy(
     std::size_t   n,
     double initial_capital = 10'000.0,
     double commission_pct  = 0.001,
-    double slippage_pct    = 0.0005
+    double slippage_pct    = 0.0005,
+    // Bars per year for every annualized metric (volatility, Sharpe,
+    // Sortino, Calmar). Was a hard-coded 252 inside the kernel, which is
+    // correct only for daily equity bars -- the data and modeling layers
+    // now support 1h/5m/1m and 24/7 markets, so an hourly backtest was
+    // reporting a "Sharpe" annualized as though its bars were days.
+    // Python owns calendar semantics and passes the resolved number here;
+    // the kernel stays calendar-agnostic.
+    double periods_per_year = 252.0
 );
 
 /**
@@ -96,7 +104,15 @@ BacktestResult run_strategy_summary(
     std::size_t   n,
     double initial_capital = 10'000.0,
     double commission_pct  = 0.001,
-    double slippage_pct    = 0.0005
+    double slippage_pct    = 0.0005,
+    // Bars per year for every annualized metric (volatility, Sharpe,
+    // Sortino, Calmar). Was a hard-coded 252 inside the kernel, which is
+    // correct only for daily equity bars -- the data and modeling layers
+    // now support 1h/5m/1m and 24/7 markets, so an hourly backtest was
+    // reporting a "Sharpe" annualized as though its bars were days.
+    // Python owns calendar semantics and passes the resolved number here;
+    // the kernel stays calendar-agnostic.
+    double periods_per_year = 252.0
 );
 
 std::vector<BacktestResult> batch_run_strategy(
@@ -106,7 +122,8 @@ std::vector<BacktestResult> batch_run_strategy(
     std::size_t   num_tests,
     double initial_capital = 10'000.0,
     double commission_pct  = 0.001,
-    double slippage_pct    = 0.0005
+    double slippage_pct    = 0.0005,
+    double periods_per_year = 252.0
 );
 
 }  // namespace sqt

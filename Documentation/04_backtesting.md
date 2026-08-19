@@ -155,6 +155,44 @@ print(f"Profit Factor  : {result['profit_factor']:.2f}")
 print(f"Num Trades     : {result['num_trades']}")
 ```
 
+## Annualization is a parameter, not an assumption
+
+Every annualized metric — volatility, Sharpe, Sortino, Calmar — scales by a
+bars-per-year factor. The native kernel hard-coded `252`, which is right for
+daily equity bars and wrong for everything else the data layer now supports:
+1h, 5m, 1m and 24/7 markets. An hourly backtest reported a "Sharpe" annualized
+as though its bars were trading days.
+
+`periods_per_year` is now a parameter on `run_strategy`,
+`run_strategy_summary` and `batch_run_strategy`, defaulting to `252` so
+existing callers are unchanged. Python resolves the calendar; the kernel stays
+calendar-agnostic.
+
+**Calmar counts intervals, on both backends.** N level observations span N−1
+return intervals. Python was corrected first, which left the native kernel
+disagreeing about the same backtest by **4.01% on a 21-bar series** (1.79% at
+63, 0.51% at 252) — negligible on long histories, material on exactly the
+short windows a walk-forward fold uses. A wiped-out strategy now also reports
+−1.0 on both backends rather than `0.0` natively, which read as *neutral*
+rather than as a total loss.
+
+## Walk-forward optimizes and evaluates under the same execution model
+
+`backtest_grid` defaults to `fill_price="close"`, and the walk-forward tools
+did not pass the caller's mode into it — while the out-of-sample leg honoured
+it. A run requesting `next_open` therefore selected parameters under
+same-close execution and scored them under next-open execution.
+
+Measured across 25 random series with a realistic overnight gap, the **winning
+parameter pair differed between the two fill modes on 7 of them**, so the
+out-of-sample number was not a test of the parameters actually chosen. Both
+walk-forward tools now pass `fill_price` into the in-sample grid.
+
+> `next_open` and `hl2_exploratory` force the Python path, because the C++
+> batch kernel only knows Close prices — so the more realistic execution mode
+> is currently the slower one. A fill-aware native kernel is the natural next
+> step and would remove that trade-off.
+
 ## Strategy parameters are validated
 
 Every entry in `STRATEGY_REGISTRY` resolves its parameters through

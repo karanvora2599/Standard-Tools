@@ -327,7 +327,8 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "run_strategy",
         [](Array1D prices, Array1D signals,
-           double initial_capital, double commission_pct, double slippage_pct)
+           double initial_capital, double commission_pct, double slippage_pct,
+           double periods_per_year)
         -> py::dict {
             require_1d(prices, "prices");
             require_1d(signals, "signals");
@@ -341,7 +342,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 py::gil_scoped_release release;
                 r = sqt::run_strategy(
                     prices_ptr, signals_ptr, n,
-                    initial_capital, commission_pct, slippage_pct);
+                    initial_capital, commission_pct, slippage_pct, periods_per_year);
             }
 
             py::array_t<double> eq(static_cast<py::ssize_t>(r.equity_curve.size()));
@@ -367,6 +368,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("initial_capital") = 10'000.0,
         py::arg("commission_pct")  = 0.001,
         py::arg("slippage_pct")    = 0.0005,
+        // Bars per year for the annualized metrics. Python resolves the
+        // calendar and passes the number; the kernel stays
+        // calendar-agnostic. Defaults to 252 so existing callers are
+        // unchanged.
+        py::arg("periods_per_year") = 252.0,
         "Vectorized backtest kernel — identical algorithm to run_strategy in engine.py.\n\n"
         "One-bar lag execution: executed[i] = signals[i-1].\n"
         "Returns a dict with keys: final_equity, total_return, annualized_volatility,\n"
@@ -379,7 +385,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         "batch_run_strategy",
         [](Array1D prices,
            py::array_t<double, py::array::c_style | py::array::forcecast> signals_2d,
-           double initial_capital, double commission_pct, double slippage_pct)
+           double initial_capital, double commission_pct, double slippage_pct,
+           double periods_per_year)
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
@@ -413,7 +420,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 py::gil_scoped_release release;
                 const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
-                    initial_capital, commission_pct, slippage_pct);
+                    initial_capital, commission_pct, slippage_pct, periods_per_year);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -437,6 +444,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("initial_capital") = 10'000.0,
         py::arg("commission_pct")  = 0.001,
         py::arg("slippage_pct")    = 0.0005,
+        // Bars per year for the annualized metrics. Python resolves the
+        // calendar and passes the number; the kernel stays
+        // calendar-agnostic. Defaults to 252 so existing callers are
+        // unchanged.
+        py::arg("periods_per_year") = 252.0,
         "Batch vectorized backtest — run all parameter combinations in one C++ call.\n\n"
         "signals must be a 2-D float64 array of shape (num_tests, n_bars).\n"
         "Returns a 2-D float64 array of shape (num_tests, 11), one row per\n"
@@ -449,7 +461,8 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "batch_run_strategy_zerocopy",
         [](py::array prices_obj, py::array signals_obj,
-           double initial_capital, double commission_pct, double slippage_pct)
+           double initial_capital, double commission_pct, double slippage_pct,
+           double periods_per_year)
         -> py::array_t<double>
         {
             auto prices_arr  = require_strict_f64_1d(prices_obj, "prices");
@@ -474,7 +487,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 py::gil_scoped_release release;
                 const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
-                    initial_capital, commission_pct, slippage_pct);
+                    initial_capital, commission_pct, slippage_pct, periods_per_year);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -498,6 +511,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("initial_capital") = 10'000.0,
         py::arg("commission_pct")  = 0.001,
         py::arg("slippage_pct")    = 0.0005,
+        // Bars per year for the annualized metrics. Python resolves the
+        // calendar and passes the number; the kernel stays
+        // calendar-agnostic. Defaults to 252 so existing callers are
+        // unchanged.
+        py::arg("periods_per_year") = 252.0,
         "Strict/zero-copy variant of batch_run_strategy() -- `prices`/"
         "`signals` must already be C-contiguous float64 arrays (raises "
         "instead of implicitly copying on a mismatch). Same "

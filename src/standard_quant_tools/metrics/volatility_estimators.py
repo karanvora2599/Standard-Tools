@@ -4,9 +4,58 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.numeric_contract import (
+    require_periods_per_year,
+    require_positive_price_series,
+)
 from standard_quant_tools.validation import validate_series
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_ohlc(
+    func: str,
+    periods_per_year: int,
+    high=None,
+    low=None,
+    close=None,
+    open_=None,
+) -> None:
+    """
+    Shared OHLC contract for the range-based estimators.
+
+    Every one of these takes a logarithm of a price ratio, so a non-positive
+    price is not merely odd -- log(negative) is NaN, and the NaN then flows
+    through the rolling window into the annualisation and out as a silently
+    all-NaN volatility series. Measured before this guard: a single negative
+    Low turned the whole Parkinson/Garman-Klass/Yang-Zhang output to NaN with
+    nothing but a RuntimeWarning to say why.
+
+    periods_per_year is validated for the reason it is validated everywhere
+    else in this package: it is a bare multiplier under a square root, so a
+    negative value produced sqrt of a negative and, again, a silently all-NaN
+    series rather than an error.
+
+    high >= low is checked too -- an inverted bar makes log(high/low)
+    negative, and Parkinson's estimator squares it, so the result looks
+    perfectly ordinary while describing a bar that cannot exist.
+    """
+    require_periods_per_year(periods_per_year, func)
+    named = {"high": high, "low": low, "close": close, "open": open_}
+    for name, series in named.items():
+        if series is None:
+            continue
+        require_positive_price_series(series, name, func, allow_nan=True)
+    if high is not None and low is not None:
+        inverted = (high.notna() & low.notna()) & (high < low)
+        if inverted.any():
+            raise ValidationError(
+                f"{func}: high is below low on {int(inverted.sum())} bar(s) "
+                f"(first at {inverted[inverted].index[0]}). log(high/low) is "
+                "then negative, and squaring it hides the inversion behind a "
+                "perfectly ordinary-looking variance."
+            )
+
 
 _LOG_2 = float(np.log(2.0))
 
@@ -37,6 +86,7 @@ def parkinson_volatility(
 
     sigma^2 = mean(ln(H/L)^2) / (4 * ln 2), rolled over `period` bars.
     """
+    _validate_ohlc("parkinson_volatility", periods_per_year, high=high, low=low)
     _check_period(period)
     log_hl2 = np.log(high / low) ** 2
     variance = log_hl2.rolling(period).mean() / (4.0 * _LOG_2)
@@ -65,6 +115,14 @@ def garman_klass_volatility(
     per-bar term = 0.5*ln(H/L)^2 - (2*ln2 - 1)*ln(C/O)^2, rolled over
     `period` bars.
     """
+    _validate_ohlc(
+        "garman_klass_volatility",
+        periods_per_year,
+        high=high,
+        low=low,
+        close=close,
+        open_=open_,
+    )
     _check_period(period)
     log_hl2 = np.log(high / low) ** 2
     log_co2 = np.log(close / open_) ** 2
@@ -99,6 +157,14 @@ def yang_zhang_volatility(
     k = 0.34 / (1.34 + (period+1)/(period-1))
     sigma^2 = var(overnight) + k*var(open_close) + (1-k)*mean(rogers_satchell)
     """
+    _validate_ohlc(
+        "yang_zhang_volatility",
+        periods_per_year,
+        high=high,
+        low=low,
+        close=close,
+        open_=open_,
+    )
     _check_period(period)
     prev_close = close.shift(1)
     overnight = np.log(open_ / prev_close)

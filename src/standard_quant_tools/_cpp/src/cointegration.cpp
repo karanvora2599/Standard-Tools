@@ -366,7 +366,39 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic) {
         double bXty = 0;
         for (int i = 0; i < k; ++i)
             bXty += r.beta[static_cast<std::size_t>(i)] * Xty[static_cast<std::size_t>(i)];
-        const double rss = yty - bXty;
+        double rss = yty - bXty;
+
+        // RSS is mathematically non-negative, so a negative value is always a
+        // numerical artefact -- but there are TWO very different artefacts
+        // hiding behind that sign, and treating them alike made the worse one
+        // maximally persuasive.
+        //
+        // `yty - bXty` is a difference of two large, nearly equal quantities,
+        // which is the classic cancellation setup: a perfect or near-perfect
+        // fit legitimately lands at -1e-15 purely from rounding. That case is
+        // a genuine perfect fit and the -inf branch below is right for it.
+        //
+        // A MATERIALLY negative RSS is something else entirely: it means the
+        // normal-equations solve produced a beta that does not minimise the
+        // residual, i.e. the factorization failed on an ill-conditioned
+        // design. Normal equations square the condition number of X, so this
+        // is a realistic failure. Reporting it as adf_statistic = -inf turned
+        // a numerical breakdown into the STRONGEST POSSIBLE EVIDENCE of
+        // cointegration -- exactly backwards, and silent.
+        //
+        // Scaled against yty because RSS carries the units of y-squared; an
+        // absolute threshold would classify differently on the same data
+        // merely rescaled.
+        const double rss_tol = 1e-8 * (yty > 0.0 ? yty : 1.0);
+        if (rss < -rss_tol) {
+            // Numerical failure for this lag candidate. Skip it rather than
+            // let it win the selection: another lag may still solve cleanly,
+            // and if none do the caller gets NaN, which is honest.
+            continue;
+        }
+        if (rss < 0.0) {
+            rss = 0.0;  // negligible cancellation: a real perfect fit
+        }
         if (rss <= 0) {
             // Degenerate: the regression fits perfectly (residual variance
             // is identically zero) -- happens when y itself is constant

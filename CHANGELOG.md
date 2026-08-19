@@ -9,6 +9,80 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (native-layer audit — annualization, parity, and an execution-model mismatch)
+
+A follow-up review covering the C++ layer and the Python residuals the earlier
+passes left. Suite: 2722 → 2734 passed, 2 skipped; all 9 C++ suites green.
+
+**A walk-forward optimized under one execution model and scored under
+another.** `backtest_grid` defaults to `fill_price="close"`, and neither
+walk-forward tool passed the caller's mode into it — while the out-of-sample
+leg honoured it. So a run requesting `next_open` selected parameters under
+same-close execution and then evaluated them under next-open execution.
+
+Not cosmetic: measured across 25 random series with a realistic overnight gap,
+the **winning parameter pair differed between the two fill modes on 7 of
+them**. The out-of-sample number was therefore not a test of the parameters
+that had actually been chosen. Both `run_walk_forward_backtest` and
+`run_regime_adaptive_walkforward_backtest` now pass it through.
+(`get_robustness_diagnostics` and `run_regime_adaptive_backtest` carry no
+`fill_price` field at all, so they were never inconsistent.)
+
+**`252` is no longer hard-coded in the native backtester.** `constexpr double
+kPPY = 252.0` fed volatility, Sharpe, Sortino and Calmar — correct for daily
+equity bars and wrong for the 1h/5m/1m intervals and 24/7 markets the data and
+modeling layers now support. An hourly backtest reported a "Sharpe"
+annualized as though its bars were trading days. `periods_per_year` is a
+parameter on `run_strategy`, `run_strategy_summary` and `batch_run_strategy`,
+defaulting to 252 so existing callers are unchanged; Python owns calendar
+semantics and the kernel stays calendar-agnostic.
+
+**Native Calmar used `252/n` where Python uses `252/(n-1)`.** N level
+observations span N−1 return intervals, and Python was corrected in Pass 2 —
+leaving the two backends disagreeing about the same backtest:
+
+| bars | native | python | divergence |
+|---|---|---|---|
+| 21 | −4.398278 | −4.582008 | **4.01%** |
+| 63 | 4.136000 | 4.211419 | 1.79% |
+| 252 | 7.095421 | 7.131805 | 0.51% |
+
+Negligible on long histories, material on exactly the short windows a
+walk-forward fold uses. Now exact to 1e-9.
+
+**A wiped-out strategy scored 0.0 natively and −1.0 in Python.** The native
+Calmar branch was skipped entirely for a non-positive final equity, leaving
+the field at its `0.0` default — which reads as *neutral* rather than as total
+loss. It now reports −1.0, matching `cagr`'s documented wipeout handling.
+
+**ADF treated numerical breakdown as maximal evidence of cointegration.** RSS
+is mathematically non-negative, and `yty - bXty` is a difference of two large
+nearly-equal quantities — the classic cancellation setup. Every negative RSS
+was read as a perfect fit and produced `adf_statistic = -inf`, so:
+
+```
+rss = -2e-15   (rounding on a genuine perfect fit)
+rss = -0.3     (the normal-equations solve failed)
+```
+
+received the same interpretation: the *strongest possible* evidence of
+cointegration, silently. A negligible negative is now clamped to zero (the
+genuine perfect fit, which statsmodels also reports as −inf/0.0), while a
+materially negative RSS fails that lag candidate. The threshold is relative to
+`yty` because RSS carries the units of y-squared — an absolute one would
+classify the same data differently merely rescaled.
+
+**Python residuals from the earlier passes.** `pca_returns` rejects
+infinities (they reached SVD and surfaced as a bare `LinAlgError: SVD did not
+converge`, naming neither input nor column), non-integral `n_components`
+(`2.5` passed the old `< 1` check and failed inside a slice), and duplicate
+column names (loadings are keyed by column, so duplicates collapsed into one
+entry). The OHLC volatility estimators validate positive prices, `high >= low`
+and `periods_per_year` — each takes a logarithm of a price ratio, so a single
+negative Low turned the whole series to NaN behind a RuntimeWarning, and a
+negative `periods_per_year` produced sqrt of a negative for the same silent
+result.
+
 ### Changed (packaging — the native extension is part of the build)
 
 `pip install .` used a pure-Python backend (`flit_core`), so it produced a
