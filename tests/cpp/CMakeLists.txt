@@ -14,12 +14,11 @@ else()
 endif()
 # Optional, mirrors sqt_monte_carlo_impl/sqt_backtest_impl above:
 # rolling_hurst_into runs each window in parallel when an OpenMP runtime is
-# available; without one, SQT_HAS_OPENMP stays undefined and it just runs
-# its identical serial loop.
+# available; without one, the compiler leaves _OPENMP undefined and it just
+# runs its identical serial loop.
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(sqt_hurst_impl PUBLIC OpenMP::OpenMP_CXX)
-    target_compile_definitions(sqt_hurst_impl PUBLIC SQT_HAS_OPENMP)
 endif()
 
 add_library(sqt_indicators_impl STATIC
@@ -98,11 +97,10 @@ else()
 endif()
 # Optional, mirrors sqt_monte_carlo_impl above: batch_run_strategy runs each
 # test index in parallel when an OpenMP runtime is available; without one,
-# SQT_HAS_OPENMP stays undefined and it just runs its identical serial loop.
+# _OPENMP stays undefined and it just runs its identical serial loop.
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(sqt_backtest_impl PUBLIC OpenMP::OpenMP_CXX)
-    target_compile_definitions(sqt_backtest_impl PUBLIC SQT_HAS_OPENMP)
 endif()
 
 add_executable(test_backtest test_backtest.cpp)
@@ -129,12 +127,11 @@ else()
     target_compile_options(sqt_monte_carlo_impl PRIVATE -O2 -Wall -Wextra)
 endif()
 # Optional, mirrors src/standard_quant_tools/_cpp/CMakeLists.txt: without an
-# OpenMP runtime, SQT_HAS_OPENMP stays undefined and simulate_forward_paths
+# OpenMP runtime, _OPENMP stays undefined and simulate_forward_paths
 # just runs its identical serial fallback -- still correct either way.
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(sqt_monte_carlo_impl PUBLIC OpenMP::OpenMP_CXX)
-    target_compile_definitions(sqt_monte_carlo_impl PUBLIC SQT_HAS_OPENMP)
 endif()
 
 add_executable(test_monte_carlo test_monte_carlo.cpp)

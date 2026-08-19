@@ -225,12 +225,31 @@ def rolling_factor_loadings(
             )
 
     # ── Python fallback ───────────────────────────────────────────────────────
+    # Rank-deficiency policy, shared with the C++ kernel: a window whose design
+    # matrix is not full rank (duplicated factors, a factor that is a linear
+    # combination of the others, a constant factor) yields NaN, not numbers.
+    #
+    # lstsq's minimum-norm solution for such a window is one arbitrary member of
+    # an infinite solution set chosen by a norm criterion nobody asked for --
+    # it is not an estimated factor loading, and reporting it as one invites
+    # exactly the misreading the underdetermined-window guard above already
+    # rejects for the same reason. The backends used to differ here: the C++
+    # path returned NaN while this one returned the minimum-norm vector, so
+    # `rolling_factor_loadings(y, F, window)` on duplicated factors gave
+    # [nan, nan, nan, nan] or [0.0059, 1.0077, 1.0077, 0.0091] from the same
+    # inputs depending only on whether the extension had been compiled.
+    #
+    # np.linalg.lstsq already computes the rank (SVD-based) and returns it, so
+    # this costs nothing extra.
+    n_coef = 1 + k
     out = np.full((n, len(col_names)), np.nan)
     for i in range(window - 1, n):
         y_w = y_arr[i - window + 1 : i + 1]
         X_w = X_arr[i - window + 1 : i + 1]
         X_des = np.column_stack([np.ones(window), X_w])
-        beta, *_ = np.linalg.lstsq(X_des, y_w, rcond=None)
+        beta, _residuals, rank, _sv = np.linalg.lstsq(X_des, y_w, rcond=None)
+        if rank < n_coef:
+            continue  # leave the row NaN
         out[i] = beta
 
     return pd.DataFrame(out, index=common_idx, columns=col_names)

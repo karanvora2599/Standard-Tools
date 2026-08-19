@@ -4,7 +4,9 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
+#include <string>
 
 #include "sqt/hurst.hpp"
 #include "sqt/indicators.hpp"
@@ -14,6 +16,7 @@
 #include "sqt/monte_carlo.hpp"
 #include "sqt/garch.hpp"
 #include "sqt/signal_state_machines.hpp"
+#include "sqt/numerics.hpp"
 
 namespace py = pybind11;
 
@@ -85,6 +88,60 @@ static py::array_t<double, py::array::c_style> require_strict_f64_2d(
             std::string(name) + " must be a 2-D array, got ndim=" +
             std::to_string(typed.ndim()));
     return typed;
+}
+
+// ── Shared argument validators ──────────────────────────────────────────────
+//
+// Scope is deliberately narrow: SCALAR CONFIGURATION parameters only.
+//
+// These bindings validated shape (ndim, matching lengths) and nothing else, so
+// a direct native call could pass a configuration value with no meaning and get
+// a confident-looking number back. Measured on the pre-validation build:
+//
+//   run_strategy(..., initial_capital=0)    -> total_return=nan, sharpe=9.99
+//   run_strategy(..., initial_capital=-100) -> total_return=+1.7%
+//   run_strategy(..., periods_per_year=-1)  -> annualized_volatility=nan
+//   run_strategy(..., commission_pct=-0.1)  -> +23.2%, profitable from costs
+//
+// A wrong scalar here silently corrupts every number in the result, and there
+// is no sentinel convention covering it -- note the first case returned NaN for
+// total_return but a decisive-looking 9.99 Sharpe from the same call.
+//
+// What is deliberately NOT validated here: input DATA and per-indicator
+// window/period arguments. Those already have a documented contract in this
+// codebase -- degenerate arguments and bad bars yield NaN, not exceptions --
+// and it exists for a reason the tests state outright: build_dataset's
+// finite-value guard rejects an ENTIRE panel, so one zero print in one symbol
+// used to fail a whole multi-entity build and blame the feature rather than the
+// data (tests/modeling/test_feature_degenerate_windows.py::
+// test_one_bad_bar_no_longer_rejects_the_whole_panel, and the matching
+// all-NaN-not-raise tests in tests/cpp_bindings/). Adding finiteness, OHLC
+// invariant or positive-period throws at this layer reintroduces exactly that
+// failure mode. NaN propagation is the project's chosen answer for bad data;
+// these validators only cover the arguments it was never meant to cover.
+//
+// Everything here throws std::invalid_argument, which pybind11 surfaces as a
+// Python ValueError -- the same type the Python-side validators raise, so a
+// caller cannot tell which layer rejected the call.
+
+static void require_positive(double v, const char* name, const char* fn) {
+    if (!(v > 0.0) || !std::isfinite(v))
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be finite and > 0, got " +
+            std::to_string(v));
+}
+
+static void require_non_negative(double v, const char* name, const char* fn) {
+    if (!(v >= 0.0) || !std::isfinite(v))
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be finite and >= 0, got " +
+            std::to_string(v));
+}
+
+static void require_positive_int(int v, const char* name, const char* fn) {
+    if (v <= 0)
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be >= 1, got " + std::to_string(v));
 }
 
 static py::dict hurst_result_to_dict(const sqt::HurstResult& r) {
@@ -337,6 +394,10 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(signals, "signals");
             if (prices.size() != signals.size())
                 throw std::invalid_argument("prices and signals must have equal length");
+            require_positive(initial_capital, "initial_capital", "run_strategy");
+            require_non_negative(commission_pct, "commission_pct", "run_strategy");
+            require_non_negative(slippage_pct, "slippage_pct", "run_strategy");
+            require_positive(periods_per_year, "periods_per_year", "run_strategy");
             const double* prices_ptr  = prices.data();
             const double* signals_ptr = signals.data();
             const auto    n           = prices.size();
@@ -414,6 +475,10 @@ PYBIND11_MODULE(_sqt_core, m) {
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
+            require_positive(initial_capital, "initial_capital", "batch_backtest_crossover");
+            require_non_negative(commission_pct, "commission_pct", "batch_backtest_crossover");
+            require_non_negative(slippage_pct, "slippage_pct", "batch_backtest_crossover");
+            require_positive(periods_per_year, "periods_per_year", "batch_backtest_crossover");
             auto ind_buf  = indicators.request();
             auto pair_buf = pair_idx.request();
             if (ind_buf.ndim != 2)
@@ -504,6 +569,10 @@ PYBIND11_MODULE(_sqt_core, m) {
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
+            require_positive(initial_capital, "initial_capital", "batch_run_strategy");
+            require_non_negative(commission_pct, "commission_pct", "batch_run_strategy");
+            require_non_negative(slippage_pct, "slippage_pct", "batch_run_strategy");
+            require_positive(periods_per_year, "periods_per_year", "batch_run_strategy");
             auto prices_buf  = prices.request();
             auto signals_buf = signals_2d.request();
 
@@ -1127,6 +1196,10 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, py::object seed) -> py::array_t<double>
         {
             require_1d(values, "values");
+            require_positive_int(horizon_days, "horizon_days", "simulate_forward_paths");
+            require_positive_int(n_simulations, "n_simulations", "simulate_forward_paths");
+            require_positive_int(block_size, "block_size", "simulate_forward_paths");
+            require_positive(initial_capital, "initial_capital", "simulate_forward_paths");
             const bool has_seed = !seed.is_none();
             const unsigned long long seed_val =
                 has_seed ? seed.cast<unsigned long long>() : 0ULL;
@@ -1228,6 +1301,10 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, py::object seed) -> py::array_t<double>
         {
             require_1d(values, "values");
+            require_positive_int(horizon_days, "horizon_days", "simulate_forward_paths_terminal");
+            require_positive_int(n_simulations, "n_simulations", "simulate_forward_paths_terminal");
+            require_positive_int(block_size, "block_size", "simulate_forward_paths_terminal");
+            require_positive(initial_capital, "initial_capital", "simulate_forward_paths_terminal");
             const bool has_seed = !seed.is_none();
             const unsigned long long seed_val =
                 has_seed ? seed.cast<unsigned long long>() : 0ULL;

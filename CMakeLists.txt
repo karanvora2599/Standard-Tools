@@ -34,7 +34,23 @@ option(SQT_REQUIRE_NATIVE
 # enable_language(OPTIONAL) uses the real generator, so it agrees with the
 # build that follows it.
 enable_language(CXX OPTIONAL)
-if(NOT CMAKE_CXX_COMPILER_LOADED)
+
+# Guard on CMAKE_CXX_COMPILER_ID, not CMAKE_CXX_COMPILER_LOADED alone.
+#
+# OPTIONAL does suppress the hard FATAL_ERROR (verified against CMake 3.30.3:
+# plain enable_language(CXX) aborts configure with "Configuring incomplete",
+# OPTIONAL exits 0 and reports "The CXX compiler identification is unknown").
+# What it does NOT do is clear CMAKE_CXX_COMPILER_LOADED -- that stays 1 even
+# with no usable compiler, so this branch never fired and the "pure-Python
+# install" fallback below was unreachable. Configure then succeeded and the
+# BUILD failed instead, which is the failure mode the fallback exists to
+# prevent.
+#
+# CMAKE_CXX_COMPILER_ID is the variable that actually distinguishes the two:
+# empty when detection failed, "MSVC"/"GNU"/"Clang" when it worked -- including
+# under the Visual Studio generator, whose toolchain discovery is exactly what
+# check_language() misses (see the note above).
+if(NOT CMAKE_CXX_COMPILER_LOADED OR NOT CMAKE_CXX_COMPILER_ID)
     if(SQT_REQUIRE_NATIVE)
         message(FATAL_ERROR
             "No C++ compiler found and SQT_REQUIRE_NATIVE=ON.")

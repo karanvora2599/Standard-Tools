@@ -1,6 +1,7 @@
 #include "sqt/hurst.hpp"
 
 #include "sqt/numerics.hpp"
+#include "sqt/omp_policy.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +9,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
-#ifdef SQT_HAS_OPENMP
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 
@@ -571,7 +572,10 @@ void rolling_hurst_into(
     const std::size_t win_sz  = static_cast<std::size_t>(window);
     const std::size_t last_i  = n - 1;
     const std::size_t step_sz = static_cast<std::size_t>(step);
-    const long long count = static_cast<long long>((last_i - (win_sz - 1)) / step_sz + 1);
+    // Checked, not a bare cast: `count` drives the OpenMP loop bound below, so a
+    // wrapped (negative) value would silently skip every window instead of failing.
+    const long long count = numerics::checked_narrow_to_ll(
+        (last_i - (win_sz - 1)) / step_sz + 1, "rolling_hurst: window count");
 
     // Every call below passes the SAME n (win_sz), so hurst_exponent_scratch's
     // auto-max-window narrowing is loop-invariant -- performing it once here,
@@ -586,14 +590,28 @@ void rolling_hurst_into(
     // write stores the same value.
     bool sse_error = false;
 
-#ifdef SQT_HAS_OPENMP
-    #pragma omp parallel if(count > 1) reduction(||: sse_error)
+#ifdef _OPENMP
+    // Work-based, not count-based, and capped by SQT_NUM_THREADS -- the shared
+    // policy in omp_policy.hpp, which batch_run_strategy already used and these
+    // kernels bypassed with a bare `if(<count> > 1)`.
+    //
+    // That predicate is wrong twice over, which is exactly what omp_policy.hpp's
+    // own header comment says and why it exists: it is too eager (two tiny tasks
+    // cost more in thread startup than they save -- measured, a 2-path x 5-day
+    // simulation ran ~4x SLOWER than the serial path purely in region overhead),
+    // and too greedy (this library routinely runs inside a ProcessPoolExecutor
+    // screener or several agents, where every call grabbing every core
+    // oversubscribes the machine). SQT_NUM_THREADS=1 is the documented way to opt
+    // out, and it had no effect here at all before this change.
+    // Work per task is one Hurst fit over win_sz bars, so total work is
+    // count*win_sz -- not `count`, which says nothing about window size.
+    #pragma omp parallel reduction(||: sse_error) if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(count), win_sz)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     {
         RollingHurstScratch scratch;
         scratch.y.reserve(win_sz);
 
-#ifdef SQT_HAS_OPENMP
+#ifdef _OPENMP
         #pragma omp for schedule(static)
 #endif
         for (long long idx = 0; idx < count; ++idx) {

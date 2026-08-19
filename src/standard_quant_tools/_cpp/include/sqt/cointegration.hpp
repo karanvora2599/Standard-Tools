@@ -71,14 +71,27 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n);
  *
  * Regression: Δy_t = c + φ*y_{t-1} + Σ ψᵢ*Δy_{t-i} + ε_t
  *
+ * Lag selection follows statsmodels' adfuller() convention exactly: every
+ * candidate lag is scored on ONE common sample (holding back max_lag
+ * observations) so the information criteria are actually comparable, and only
+ * the selected lag is refitted on its own longer sample for the reported
+ * statistic. The criterion uses the MLE variance RSS/T, matching
+ * statsmodels' log-likelihood-based OLS.aic/.bic.
+ *
  * @param y       Level series (NOT differenced).
  * @param n       Length of y.
- * @param max_lag Maximum lags to test; -1 = auto (⌊12·(n/100)^(1/4)⌋).
+ * @param max_lag Maximum lags to test; -1 = auto, statsmodels' rule
+ *                min(ceil(12*(n/100)^(1/4)), n/2 - ntrend - 1).
  * @param use_aic true = AIC (default), false = BIC for lag selection.
+ * @param include_constant true (default) fits c + phi*y_{t-1} + ... , i.e.
+ *                statsmodels' regression="c". false drops the intercept
+ *                (regression="n") -- what engle_granger's step 2 needs, since
+ *                the residuals it tests are already mean-zero by construction.
  * @returns       AdfResult with t-statistic and optimal lag.
  */
 AdfResult adf_test(const double* y, std::size_t n,
-                   int max_lag = -1, bool use_aic = true);
+                   int max_lag = -1, bool use_aic = true,
+                   bool include_constant = true);
 
 /**
  * Engle-Granger two-step cointegration test.

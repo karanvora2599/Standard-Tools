@@ -504,7 +504,7 @@ static void test_run_strategy_summary_multi_trade_count() {
 
 // ── batch_run_strategy() vs a serial reference loop ─────────────────────────
 //
-// batch_run_strategy() parallelizes (when SQT_HAS_OPENMP) an embarrassingly
+// batch_run_strategy() parallelizes (when _OPENMP) an embarrassingly
 // independent loop over test indices, each a pure call to
 // run_strategy_summary() with no shared mutable state -- so its output must
 // be exactly reproducible regardless of how many threads actually ran it.

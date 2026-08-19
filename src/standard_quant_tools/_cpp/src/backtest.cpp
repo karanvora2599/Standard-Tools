@@ -8,7 +8,7 @@
 #include <limits>
 #include <vector>
 
-#ifdef SQT_HAS_OPENMP
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 
@@ -56,13 +56,19 @@ namespace {
     // Applies one bar's position-changing event (exec_i != prev_exec) to
     // `st`. exec_i/prev_exec are used directly wherever a raw *target*
     // position size is needed (never a delta-derived value), matching the
-    // original entry_size=exec_i convention. Returns a completed trade's
+    // original entry_size=exec_i convention.
+    //
+    // `event_price` is the price this event actually TRANSACTS at: the
+    // previous close under close-to-close fills, or that bar's own fill price
+    // (Open, or (High+Low)/2) when the caller supplied one. It is deliberately
+    // NOT named ref_price -- callers used to pass prices[i-1] here even when
+    // filling at the open, which is the bug this rename makes hard to repeat. Returns a completed trade's
     // return_pct only when this event fully closes the current lot (a
     // same-sign resize or a partial reduce never completes a trade by
     // itself) -- the caller decides what to do with a completion (push to a
     // vector, or fold into running scalar trade stats).
     TradeCompletion apply_position_event(
-        PositionState& st, double exec_i, double prev_exec, double ref_price,
+        PositionState& st, double exec_i, double prev_exec, double event_price,
         double cost_per_unit)
     {
         const double pdiff = exec_i - prev_exec;
@@ -76,7 +82,7 @@ namespace {
 
             st.cost_accrued += closing_qty * cost_per_unit;
             st.realized_pnl_accum += (st.cost_basis != 0.0)
-                ? (ref_price - st.cost_basis) / st.cost_basis * (closing_qty * pos_sign)
+                ? (event_price - st.cost_basis) / st.cost_basis * (closing_qty * pos_sign)
                 : 0.0;
             st.size -= closing_qty * pos_sign;
 
@@ -90,7 +96,7 @@ namespace {
             // for the incremental amount actually transacted this event.
             const double old_notional = st.size * st.cost_basis;
             st.size += pdiff;
-            st.cost_basis     = (old_notional + pdiff * ref_price) / st.size;
+            st.cost_basis     = (old_notional + pdiff * event_price) / st.size;
             st.cost_accrued  += std::abs(pdiff) * cost_per_unit;
             return result;  // a resize never completes a trade
         }
@@ -100,7 +106,7 @@ namespace {
             // above just fully closed the prior lot (a flip). Uses exec_i
             // directly (the raw target position), not a delta-derived
             // value.
-            st.cost_basis    = ref_price;
+            st.cost_basis    = event_price;
             st.size          = exec_i;
             st.cost_accrued += std::abs(exec_i) * cost_per_unit;
         }
@@ -197,7 +203,28 @@ BacktestResult run_strategy(
     double prev_exec = 0.0;
 
     for (std::size_t i = 1; i < n; ++i) {
-        const double ref_price = prices[i - 1];
+        const double prev_close = prices[i - 1];
+        // Trade accounting prices the event at the bar's actual FILL price
+        // whenever one was supplied, not at the previous close.
+        //
+        // The equity curve already used ref_prices[i]; only this side still
+        // used prices[i-1], so under fill_price="next_open" / "hl2_exploratory"
+        // the summary trade statistics described a trade that never happened.
+        // A lot entered at Open[1]=105 and exited at Open[3]=125 was booked as
+        // 100 -> 120, reporting +20.00% where the fill-to-fill return is
+        // +19.05%. It also crossed zero: a 104 -> 99 lot (-4.81%) was reported
+        // as a +2.00% WINNER, so a single result dict carried win_rate=1.0 and
+        // profit_factor=inf beside a trade_log row of -4.8077 -- and
+        // run_strategy_summary below, which feeds the parameter grid and
+        // walk-forward, ranked candidate strategies on the wrong number.
+        //
+        // prev_close stays the reference for the RETURN calculation, which is
+        // genuinely a close-to-close quantity in the close-fill case and the
+        // overnight leg's base in the two-leg decomposition. The two are
+        // different prices answering different questions, which is exactly why
+        // sharing one variable for both hid this for so long.
+        const double trade_price =
+            (ref_prices != nullptr) ? ref_prices[i] : prev_close;
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
@@ -205,8 +232,8 @@ BacktestResult run_strategy(
         double gross;
         if (ref_prices == nullptr) {
             // Close-to-close: the historical path, unchanged.
-            const double ret_i = (ref_price != 0.0)
-                ? (prices[i] - ref_price) / ref_price
+            const double ret_i = (prev_close != 0.0)
+                ? (prices[i] - prev_close) / prev_close
                 : 0.0;
             gross = exec_i * ret_i;
         } else {
@@ -216,17 +243,17 @@ BacktestResult run_strategy(
             // bar), while the move from the fill price to the close is
             // earned at TODAY's. exec_prev is signals[i-2], or 0.0 at i==1,
             // both directly index-derivable -- no extra state.
-            const double fill = ref_prices[i];
+            const double fill = trade_price;
             const double exec_prev = (i >= 2) ? signals[i - 2] : 0.0;
-            const double overnight = (ref_price != 0.0)
-                ? (fill - ref_price) / ref_price : 0.0;
+            const double overnight = (prev_close != 0.0)
+                ? (fill - prev_close) / prev_close : 0.0;
             const double intraday = (fill != 0.0)
                 ? (prices[i] - fill) / fill : 0.0;
             gross = exec_prev * overnight + exec_i * intraday;
         }
         strat_ret[i] = gross - tcost;
 
-        const auto tc = apply_position_event(pos, exec_i, prev_exec, ref_price, cost_per_unit);
+        const auto tc = apply_position_event(pos, exec_i, prev_exec, trade_price, cost_per_unit);
         if (tc.completed) trade_rets.push_back(tc.return_pct);
 
         prev_exec = exec_i;
@@ -427,7 +454,12 @@ BacktestResult run_strategy_summary(
     };
 
     for (std::size_t i = 1; i < n; ++i) {
-        const double ref_price = prices[i - 1];
+        // Same fill-price correction as run_strategy() above -- see the long
+        // note there. This kernel is what batch_run_strategy / the parameter
+        // grid / walk-forward call, so the wrong price here mis-RANKED
+        // strategies, not just mis-reported one.
+        const double trade_price =
+            (ref_prices != nullptr) ? ref_prices[i] : prices[i - 1];
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
@@ -444,7 +476,7 @@ BacktestResult run_strategy_summary(
 
         sum_r += strat_ret_i;
 
-        const auto tc = apply_position_event(pos, exec_i, prev_exec, ref_price, cost_per_unit);
+        const auto tc = apply_position_event(pos, exec_i, prev_exec, trade_price, cost_per_unit);
         if (tc.completed) fold_trade(tc.return_pct);
 
         prev_exec = exec_i;
@@ -655,7 +687,7 @@ std::vector<BacktestResult> batch_run_strategy(
     // requires a signed integer induction variable, not std::size_t.
     const long long num_tests_ll = static_cast<long long>(num_tests);
 
-#ifdef SQT_HAS_OPENMP
+#ifdef _OPENMP
     // Work-based, not count-based: two tiny backtests cost more in thread
     // startup than they save, and this library often runs inside something
     // already parallel. See sqt::omp_policy.

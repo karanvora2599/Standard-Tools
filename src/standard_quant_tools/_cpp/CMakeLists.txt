@@ -153,13 +153,18 @@ endif()
 # (no shared mutable state) so the loop can run on multiple threads with no
 # locking. Not REQUIRED: a build without an OpenMP runtime (e.g. default
 # Apple Clang, which ships no OpenMP support) must still succeed —
-# SQT_HAS_OPENMP simply won't be defined, and the affected loops fall back
-# to their identical serial code paths, each wrapped in
-# #ifdef SQT_HAS_OPENMP / #endif at the call site.
+# the compiler simply won't define _OPENMP, and the affected loops fall
+# back to their identical serial code paths, each wrapped in
+# #ifdef _OPENMP / #endif at the call site.
+#
+# There is deliberately no SQT_HAS_OPENMP definition here any more. It was
+# a second signal for a question the compiler already answers, and the two
+# drifted: backtest.cpp included <omp.h> under SQT_HAS_OPENMP but used
+# omp_get_max_threads() under _OPENMP, so compiling it with -fopenmp/
+# /openmp but without this definition failed to compile at all.
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(_sqt_core PRIVATE OpenMP::OpenMP_CXX)
-    target_compile_definitions(_sqt_core PRIVATE SQT_HAS_OPENMP)
     message(STATUS "OpenMP:   found — simulate_forward_paths/batch_run_strategy will run in parallel")
 else()
     message(STATUS "OpenMP:   not found — affected loops will run serially (still correct, just single-threaded)")

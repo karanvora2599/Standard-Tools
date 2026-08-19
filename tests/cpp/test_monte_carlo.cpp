@@ -17,7 +17,7 @@
 #include <cstdio>
 #include <vector>
 
-#ifdef SQT_HAS_OPENMP
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 
@@ -124,7 +124,7 @@ static void test_same_seed_reproducible() {
 }
 
 static void test_result_independent_of_thread_count() {
-#ifdef SQT_HAS_OPENMP
+#ifdef _OPENMP
     // A per-path buffer accidentally shared across threads (a data race)
     // would make the result depend on how many threads actually ran the
     // loop. Force 1 thread vs. several for the identical seed+inputs and
