@@ -51,12 +51,13 @@ two that were already inclusive.** Deliberate: the contract then holds by
 a vendor changing or mis-documenting its own semantics cannot quietly move
 the window. It costs one boolean mask on an already-materialized frame.
 
-> **Cache format bumped to `v2`.** Every v1 file was written under the
-> exclusive-end behaviour and is therefore missing its final bar; serving
-> one on a cache hit would answer the same request differently than a live
-> fetch, which is exactly the cache/live parity failure this layer exists to
-> prevent. Old files are never looked up again rather than migrated — they
-> age out with the directory.
+> **Cache format is `v3`.** Two bumps, both for the same reason — a stale
+> file would answer a request differently than a live fetch, which is exactly
+> the cache/live parity failure this layer exists to prevent. `v1` files were
+> written under the exclusive-end behaviour and are missing their final bar;
+> `v2` intraday files hold local wall-clock timestamps rather than the
+> canonical UTC described below. Superseded files are never looked up again
+> rather than migrated — they age out with the directory.
 
 ### Intraday timestamps survive the round trip
 
@@ -66,6 +67,28 @@ became four copies of one date, losing time-series identity outright. It ran
 on yfinance's live fetch *and* on both providers' Parquet cache reads, so it
 also made the same request answer differently live vs cached (Polygon's live
 parse preserved intraday timestamps; the cache read did not).
+
+**Intraday timestamps are canonical UTC.** Stripping the timezone without
+converting first keeps the *local wall clock*, which makes bars from different
+exchanges look simultaneous:
+
+| Venue | Local | True instant (UTC) | Old naive index |
+|---|---|---|---|
+| London | 15:00 BST | 14:00 UTC | `15:00` |
+| New York | 15:00 EDT | 19:00 UTC | `15:00` |
+
+Those two bars are **five hours apart**, and their normalized indexes were
+equal — so a join, a correlation, a PCA or a cross-sectional panel silently
+paired a London afternoon with a New York afternoon as one instant. Nothing
+raised; the numbers simply described a market state that never existed.
+Intraday data is now converted to UTC before the timezone is dropped, in the
+Polygon parser as well, which had been emitting naive New York time.
+
+**Daily and coarser deliberately do not convert.** A daily bar is identified
+by its *local trading date*, and converting first would shift it: Tokyo
+2024-06-03 00:00 JST is 2024-06-02 15:00 UTC, which normalizes to the wrong
+day. An intraday bar is an instant; a daily bar is a session. The two are
+handled differently on purpose.
 
 Cache identity gained the same awareness: cache-key date bounds used to be
 truncated to 10 characters, so `09:30→12:00` and `13:00→16:00` on the same

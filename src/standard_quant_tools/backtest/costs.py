@@ -94,14 +94,22 @@ def impact_cost(
 ) -> float:
     """
     Dollar impact cost for a trade, combining sqrt_impact_bps with the
-    trade's own notional. avg_dollar_volume <= 0 (e.g. no volume data for
-    an illiquid/synthetic ticker) returns 0.0 rather than dividing by zero
-    — no impact estimate is possible without a volume baseline, and zero
-    is the conservative "assume no impact model" fallback other cost
-    functions in this module default to.
+    trade's own notional.
+
+    Returns NaN — "not estimable" — when no usable volume baseline exists
+    (non-positive or non-finite avg_dollar_volume). It used to return 0.0
+    and describe that as conservative; it is the opposite:
+
+        impact_cost(1e9, adv=0,   vol=0.30) -> 0.0            (looked free)
+        impact_cost(1e9, adv=1e7, vol=0.30) -> 3,000,000,000  (honest)
+
+    So the ticker with NO liquidity data was scored as the cheapest in the
+    universe to trade, and a capacity report would happily route size into
+    exactly the names it knew least about. NaN cannot be mistaken for a
+    measurement; 0.0 can.
     """
-    if avg_dollar_volume <= 0:
-        return 0.0
+    if not math.isfinite(avg_dollar_volume) or avg_dollar_volume <= 0:
+        return float("nan")
     participation = abs(notional) / avg_dollar_volume
     bps = sqrt_impact_bps(participation, volatility, coefficient)
     return abs(notional) * (bps / 10_000.0)

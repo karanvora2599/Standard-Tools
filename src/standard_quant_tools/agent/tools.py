@@ -385,6 +385,13 @@ def _run_backtest(
         final_equity=results["final_equity"],
         equity_curve=results["equity_curve"].tolist(),
         trade_log=trades,
+        # run_strategy emits a look-ahead caveat for fill_price="close" (a
+        # signal derived from bar t's own Close cannot realistically be
+        # filled at that same Close). Rebuilding the result here without it
+        # meant the engine knew the simulation might contain look-ahead
+        # while the agent-facing output said nothing -- exactly the silent
+        # behaviour this library exists to prevent.
+        warnings=list(results.get("warnings", [])),
     )
     logger.debug(
         "[backtest] result  return=%.2f%%  sharpe=%.3f  maxdd=%.2f%%  trades=%d  win=%.0f%%",

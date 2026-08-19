@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from standard_quant_tools.error import AuditIntegrityError
+
 from .hashing import hash_payload
 from .models import DecisionRecord
 from .paths import _GENESIS_HASH, _INDEX_FILENAME, _audit_dir
@@ -42,29 +44,78 @@ class AuditWriter:
         return last_line
 
     def _last_record_hash_in_file(self, path: Path) -> Optional[str]:
-        """Hash of the last line in `path`, or None if the file doesn't
-        exist or has no valid lines. Must be called while the relevant write
-        lock is held, since it establishes a chain link a new record commits
-        to."""
+        """
+        Hash of the last line in `path`, or None if the file doesn't exist or
+        is empty. Must be called while the relevant write lock is held, since
+        it establishes a chain link a new record commits to.
+
+        An UNPARSABLE last line raises. It used to return None, which the
+        callers turned into the genesis hash — so a corrupted tail made the
+        writer silently START A NEW CHAIN and keep appending as though the
+        trail had just begun:
+
+            valid record
+            valid record
+            CORRUPTED LINE
+            next tool call -> prev_record_hash = GENESIS
+
+        Reproduced exactly that way before the fix. "The file does not exist
+        yet" and "the file exists and I cannot read its tail" are completely
+        different states: the first is a legitimate genesis, the second means
+        the trail is already damaged. Continuing to extend a damaged chain
+        produces a tamper-evident log that is no longer evidence of anything,
+        which is worse than refusing the write.
+        """
         last_line = self._last_line(path)
         if last_line is None:
             return None
         try:
-            return json.loads(last_line).get("record_hash")
-        except Exception:
-            return None
+            parsed = json.loads(last_line)
+        except Exception as exc:
+            raise AuditIntegrityError(
+                f"audit chain is corrupt: the last line of {path} is not valid "
+                f"JSON ({exc}). Refusing to append — extending a chain whose "
+                "tail cannot be read would silently restart it from genesis "
+                "and destroy the trail's evidential value. Repair or archive "
+                "this file before continuing."
+            ) from exc
+        record_hash = parsed.get("record_hash")
+        if not record_hash:
+            raise AuditIntegrityError(
+                f"audit chain is corrupt: the last record in {path} carries no "
+                "record_hash, so the next record has nothing to chain onto. "
+                "Refusing to append."
+            )
+        return record_hash
 
     def _last_index_hash(self, index_path: Path) -> str:
-        """Hash of the last line in the chain index, or the genesis hash if
-        it doesn't exist/is empty. Must be called while the index lock is
-        held."""
+        """
+        Hash of the last line in the chain index, or the genesis hash if it
+        doesn't exist/is empty. Must be called while the index lock is held.
+
+        Same fail-closed rule as _last_record_hash_in_file: an unreadable
+        index tail is corruption, not a fresh start. The index is the
+        independent witness that makes a deleted day file detectable, so
+        silently re-genesising it removes the second artifact an attacker
+        would otherwise have to forge.
+        """
         last_line = self._last_line(index_path)
         if last_line is None:
             return _GENESIS_HASH
         try:
-            return json.loads(last_line).get("index_hash") or _GENESIS_HASH
-        except Exception:
-            return _GENESIS_HASH
+            parsed = json.loads(last_line)
+        except Exception as exc:
+            raise AuditIntegrityError(
+                f"audit chain index is corrupt: the last line of {index_path} "
+                f"is not valid JSON ({exc}). Refusing to append."
+            ) from exc
+        index_hash = parsed.get("index_hash")
+        if not index_hash:
+            raise AuditIntegrityError(
+                f"audit chain index is corrupt: the last entry in {index_path} "
+                "carries no index_hash. Refusing to append."
+            )
+        return index_hash
 
     def _chain_head_before(self, day_path: Path) -> str:
         """The record_hash a NEW day file's first record should chain onto:
@@ -80,7 +131,27 @@ class AuditWriter:
         if not candidates:
             return _GENESIS_HASH
         last_path = self._dir / f"{candidates[-1]}.jsonl"
-        return self._last_record_hash_in_file(last_path) or _GENESIS_HASH
+        # The PREVIOUS day's lock is held while its tail is read. Without it
+        # there is a cross-midnight race:
+        #
+        #   23:59:59  writer A holds yesterday's lock, about to append
+        #   00:00:00  writer B creates today's file and reads yesterday's
+        #             tail — seeing the record BEFORE A's append
+        #   00:00:01  writer A appends
+        #
+        # Today's first record would then chain onto a record that is no
+        # longer yesterday's last one, forking the chain at the day boundary
+        # while every individual record still verified.
+        #
+        # Lock ordering is safe: write() already holds TODAY's day lock, and
+        # this only ever reaches BACKWARDS to a strictly earlier stem, so
+        # every holder acquires locks in the same (newest -> older)
+        # direction and no cycle can form.
+        prev_lock = self._backend.acquire_lock(last_path)
+        try:
+            return self._last_record_hash_in_file(last_path) or _GENESIS_HASH
+        finally:
+            self._backend.release_lock(prev_lock)
 
     def _bootstrap_new_day(self, day_path: Path) -> str:
         """

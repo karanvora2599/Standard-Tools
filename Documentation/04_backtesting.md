@@ -37,6 +37,63 @@ Both implementations now share that definition. They did not always: `backtest.c
 
 This was documented at the time as a *resize* problem. It was broader than that, and worth knowing if you read any trade log written by an older version: a partial **reduce** diverged identically. `2.0 → 1.0` is opposite-sign without being a full close, so the old code booked it as a completed trade — on `0 → 2.0 → 1.0 → 0`, containing no resize at all, native reported 1 trade at 12.8078% against an old log of 2 rows averaging 6.1583%. On a realistic 100-bar signal series the old log produced **67 rows against the kernel's 50**, with the average trade return off by **0.087pp**. Fixed in the second modeling audit's item 20; `TestNativeTradeStatsCorrectness` now *includes* resizes and partial reduces in its cross-check and asserts `num_trades == len(trade_log)`.
 
+## "Unknown" is never reported as the benign value
+
+Several places used a valid-looking number as a failure sentinel, and each
+biased toward the reassuring answer. They now return `NaN`, which cannot be
+mistaken for a measurement:
+
+| Function | Missing input used to give | Why that was backwards |
+|---|---|---|
+| `adv_participation` | `0.0` | 0.0 participation is the score of a trade so small it barely moves the market. A billion-dollar order in a name with **no volume data** ranked as the easiest trade in the universe — against `100.0` (100× ADV) for a name with real data |
+| `impact_cost` | `0.0` | `$0` impact against **$3bn** for the same order with a real ADV, so a capacity report routed size into exactly the names it knew least about |
+| `calculate_beta` | `beta: 0.0` | Indistinguishable from a genuinely market-neutral asset, so `treynor_ratio` turned "no overlapping benchmark data" into a plausible risk-adjusted return |
+
+Because every comparison against `NaN` is `False`, code that *gates* on these
+must test finiteness explicitly rather than relying on a comparison — a
+`max_adv_participation` limit would otherwise be silently satisfied by absent
+data. `run_portfolio_simulation` rejects an unestimable participation by name
+rather than letting it pass a constraint that a merely large trade fails.
+
+The same applies to guards written as comparisons: `days_to_liquidate` checked
+`avg_daily_volume <= 0`, which `NaN` does not satisfy, so a `NaN` volume
+produced a `NaN` answer that looked computed. It now checks finiteness first.
+
+## Signal panels keep the full trading calendar
+
+`run_strategy` intersects price dates with signal dates and then takes
+`pct_change()` over **what remains**. A signal series sparser than the price
+series therefore does not read as "hold" — the intervening trading days
+disappear from the price axis entirely and the bars either side become
+adjacent, so a monthly signal turns Jan 31 → Feb 28 into a single "bar"
+carrying a month of price movement.
+
+Measured on a 120-bar daily series driven by identical exposure, once with a
+daily signal and once with the same signal sampled monthly:
+
+| | bars used | annualized volatility |
+|---|---|---|
+| daily signal | 120 | 0.0241 |
+| monthly signal | 4 | 0.7735 |
+
+A **32× distortion of risk from the same prices**. Total return can still look
+correct, which is what made this easy to miss; per-bar volatility, Sharpe and
+drawdown are all wrong.
+
+`backtest.panel.run_signal_panel_backtest` now reindexes every ticker's signal
+onto that ticker's own full price calendar before running, controlled by
+`signal_calendar_policy`:
+
+- **`hold`** (default) — carry the last signal forward. This is what a
+  rebalance schedule means: a monthly signal is a position held *through* the
+  month, not one that exists on a single day.
+- **`flat`** — `0.0` between signal dates, i.e. in the market only on dates
+  that carry a signal.
+- **`error`** — refuse, naming how many bars lack a signal.
+
+`hold` deliberately does **not** back-fill before the first signal. No view
+had been expressed yet, and back-filling one would be look-ahead.
+
 **Cross-backend parity generally.** Both audit passes (see `CHANGELOG.md`) specifically hunted for cases where the same call returns a different answer depending on whether `_sqt_core` is built. Four were found and fixed — `stochastic_oscillator` on a zero-range window, `cointegration_test`'s `autolag` handling, `hurst_exponent`'s regime post-processing, and `rolling_factor_loadings` on an underdetermined window — plus `profit_factor`'s 0/0 case described under [Understanding the Output](#understanding-the-output) below. Each is now pinned by a test asserting the two backends against *each other* rather than against a constant, since a test pinning only one side cannot see a divergence.
 
 | Scenario | Python (pandas) | C++ single calls | C++ batch kernel | Speedup (batch) |
@@ -97,6 +154,59 @@ print(f"Win Rate       : {result['win_rate']:.1%}")
 print(f"Profit Factor  : {result['profit_factor']:.2f}")
 print(f"Num Trades     : {result['num_trades']}")
 ```
+
+## Strategy parameters are validated
+
+Every entry in `STRATEGY_REGISTRY` resolves its parameters through
+`backtest/strategy_params.py` before it computes a single signal. This is the
+same contract the modeling runtime applies to features, applied to the eight
+classic strategies — which previously validated **nothing**.
+
+The reason it matters is not tidiness:
+
+```python
+momentum_timeseries(lookback=-20)     # rejected now
+```
+
+reached `Close.pct_change(periods=-20)` unchecked, and pandas reads a
+*negative* period as a **forward** window. Standing at bar 25 it returns
+`close[25] / close[45] - 1` — so the signal for a bar was computed from a
+price twenty bars into its own future. An ordinary-looking integer produced a
+backtest with look-ahead built in, and it was reachable from the agent surface
+because `BacktestInput.parameters` was an unconstrained `Dict[str, Any]`.
+
+The contract:
+
+| Rule | Why |
+|---|---|
+| Windows are positive integers | A negative period is a forward window (above); zero is degenerate |
+| Thresholds must be finite | NaN fails every comparison, so it does not tighten a strategy — it silently makes it inert, which looks exactly like a strategy that honestly found no trades |
+| Values stay in declared ranges | A negative Bollinger `num_std` puts the "upper" band below the "lower" one, inverting every entry and exit while still producing plausible output |
+| Unknown parameter names are rejected | Every signature ends in `**_`, so a typo was swallowed and the strategy silently ran its default while the caller believed it had configured something |
+| Relations hold (`fast < slow`, `oversold < overbought`) | Each value can be individually valid while the pair is nonsense |
+
+Validation is attached to `STRATEGY_REGISTRY` itself, not to each call site,
+so it cannot be reached around — including from the `ProcessPoolExecutor`
+grid worker, which rebuilds its call in a child process.
+
+> **Cross-parameter relations are the one exception to "always on".** They are
+> enforced where a single configuration is deliberately requested (the agent
+> tools), and skipped inside the registry, because a parameter grid
+> legitimately sweeps a rectangle containing `fast >= slow` and
+> `backtest_grid` does not catch per-combination errors — enforcing them
+> there would abort a whole sweep over points a search should simply score
+> badly and move past.
+
+## Look-ahead warnings reach the caller
+
+`BacktestResult.warnings` carries the caveats `run_strategy` raises, most
+importantly the `fill_price="close"` one: a signal derived from bar *t*'s own
+close cannot realistically be filled at that same close. The engine has always
+emitted it, but the agent-facing model had no field for it and rebuilt the
+result without it — so the engine knew a simulation might contain look-ahead
+while the output an LLM reads said nothing. `fill_price` and `strategy_type`
+are `Literal`-typed, so an unsupported value is rejected at the boundary
+rather than deep inside dispatch.
 
 **Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
 isn't finite and `> 0`, or if `commission_pct`/`slippage_pct` isn't finite

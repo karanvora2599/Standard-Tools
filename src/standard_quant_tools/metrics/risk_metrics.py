@@ -175,8 +175,15 @@ def treynor_ratio(
     aligned_returns = returns.loc[common_idx]
     beta_stats = calculate_beta(aligned_returns, benchmark_returns.loc[common_idx])
     beta = beta_stats["beta"]
-    if beta == 0:
-        return 0.0
+    # Two distinct undefined cases, both previously collapsed to 0.0 — a
+    # number that reads as a real, unremarkable Treynor ratio:
+    #   * beta is NaN: it could not be estimated (too little overlap with
+    #     the benchmark), so there is no systematic-risk denominator at all.
+    #   * beta is exactly 0.0: a genuinely market-neutral asset. Treynor is
+    #     excess return PER UNIT of systematic risk, and that unit is zero,
+    #     so the ratio is undefined rather than zero.
+    if not np.isfinite(beta) or beta == 0:
+        return float("nan")
     # Use the SAME aligned window beta was estimated from -- the full,
     # unaligned `returns` series can cover a different date range (extra
     # dates the benchmark doesn't have), which would silently mix a mean

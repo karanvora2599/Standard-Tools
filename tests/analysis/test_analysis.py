@@ -61,12 +61,33 @@ class TestCalculateBeta:
         with pytest.raises(ValidationError, match="non-finite"):
             calculate_beta(bad, benchmark_returns)
 
-    def test_minimal_data_returns_zeros(self):
-        """With only 1 data point, should return safe zero dict."""
-        r1 = pd.Series([0.01])
-        r2 = pd.Series([0.01])
-        result = calculate_beta(r1, r2)
-        assert result == {"alpha": 0.0, "beta": 0.0, "r_squared": 0.0}
+    def test_minimal_data_is_not_estimable(self):
+        """
+        A single overlapping point cannot support an OLS fit, so all three
+        statistics are NaN — "not estimable".
+
+        This test previously asserted a "safe zero dict" and called that the
+        intended behaviour. Zero is not safe here: 0.0 is ALSO a legitimate
+        beta (a market-neutral asset), so nothing downstream could tell a
+        failed estimate from a real measurement. Two consumers read it the
+        wrong way — the screener passed an unestimable ticker through a
+        beta_max ceiling, and treynor_ratio turned "no overlapping benchmark
+        data" into a plausible-looking risk-adjusted return.
+        """
+        result = calculate_beta(pd.Series([0.01]), pd.Series([0.01]))
+        assert set(result) == {"alpha", "beta", "r_squared"}
+        assert all(np.isnan(v) for v in result.values())
+
+    def test_not_estimable_is_distinguishable_from_a_real_zero_beta(self):
+        """The property the zero sentinel destroyed: these two states must
+        not produce the same number."""
+        rng = np.random.default_rng(0)
+        idx = pd.date_range("2023-01-02", periods=300, freq="B")
+        mkt = pd.Series(rng.normal(0.0005, 0.01, 300), index=idx)
+        independent = pd.Series(rng.normal(0.0005, 0.01, 300), index=idx)
+        estimable = calculate_beta(independent, mkt)
+        assert np.isfinite(estimable["beta"]), "a real fit stays a number"
+        assert np.isnan(calculate_beta(pd.Series([0.01]), pd.Series([0.01]))["beta"])
 
 
 class TestRollingBeta:

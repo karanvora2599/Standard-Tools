@@ -63,7 +63,13 @@ _INTERVAL_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 # one on a cache hit would answer the same request differently than a live
 # fetch, which is precisely the cache/live parity failure this layer exists
 # to avoid.
-_CACHE_FORMAT_VERSION = "v2"
+# v3: intraday timestamps are canonicalized to UTC before tz-stripping (see
+# _normalize_ohlcv_index). Every v2 intraday file holds LOCAL wall-clock
+# times, so serving one on a cache hit would answer the same request with a
+# different instant than a live fetch — the cache/live parity failure this
+# layer exists to prevent. Old files are never looked up again rather than
+# migrated; they age out with the directory.
+_CACHE_FORMAT_VERSION = "v3"
 
 # ── In-process session cache (avoids repeated network calls in the same run) ──
 _session_cache = TTLCache(maxsize=100, ttl=3600)
@@ -239,9 +245,33 @@ def _normalize_ohlcv_index(df: pd.DataFrame, interval: str = "1d") -> pd.DataFra
     Defaults to "1d" so any caller not passing an interval keeps the exact
     previous behavior rather than silently gaining time-of-day it isn't
     prepared for; daily output is unchanged bit-for-bit.
+
+    INTRADAY TIMESTAMPS ARE CONVERTED TO UTC before the timezone is dropped.
+    Stripping tz-awareness without converting first keeps the LOCAL wall
+    clock, which silently makes bars from different exchanges look
+    simultaneous:
+
+        London  15:00 BST  (14:00 UTC) -> naive 15:00
+        New York 15:00 EDT (19:00 UTC) -> naive 15:00
+
+    Those two bars are five hours apart, and after normalization their
+    indexes are equal — so a join, a correlation, a PCA or a cross-sectional
+    panel silently pairs a London afternoon with a New York afternoon as one
+    instant. Nothing raises; the numbers are simply about a market state
+    that never existed. UTC is the canonical instant, so it is what survives
+    the strip.
+
+    DAILY AND COARSER DELIBERATELY DO NOT CONVERT. A daily bar is identified
+    by its LOCAL TRADING DATE, and converting first would shift it: Tokyo
+    2024-06-03 00:00 JST is 2024-06-02 15:00 UTC, which normalizes to the
+    WRONG DAY. The two cases genuinely differ — an intraday bar is an
+    instant, a daily bar is a session — so they are handled differently on
+    purpose rather than by oversight.
     """
     idx = pd.DatetimeIndex(df.index)
     if idx.tz is not None:
+        if is_intraday_interval(interval):
+            idx = idx.tz_convert("UTC")
         idx = idx.tz_localize(None)
     if not is_intraday_interval(interval):
         idx = idx.normalize()

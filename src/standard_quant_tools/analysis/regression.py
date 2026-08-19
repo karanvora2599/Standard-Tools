@@ -25,7 +25,28 @@ def calculate_beta(
     asset_returns: pd.Series, benchmark_returns: pd.Series
 ) -> Dict[str, float]:
     """
-    Calculate static Alpha and Beta using OLS.
+    Calculate static Alpha and Beta using OLS over the two series' shared
+    dates.
+
+    Returns NaN for all three statistics when fewer than two observations
+    overlap — "not estimable", which is a different statement from a
+    measured value.
+
+    This used to return {"alpha": 0.0, "beta": 0.0, "r_squared": 0.0}, and a
+    beta of exactly 0.0 is also a perfectly legitimate measurement (a
+    market-neutral asset), so nothing downstream could tell the two apart.
+    The consequences were real and pointed the wrong way:
+
+      - The screener filtered on it, so a ticker whose history did not
+        overlap the benchmark PASSED beta_max=0.5 — "could not be estimated"
+        read as "very low beta", exactly backwards for a defensive screen.
+        (It now checks the overlap itself; this removes the trap rather than
+        relying on every caller to remember it.)
+      - treynor_ratio saw beta == 0 and returned 0.0, turning "no overlapping
+        benchmark data" into a plausible-looking risk-adjusted return.
+
+    NaN propagates instead of masquerading, and callers that must branch on
+    it can test np.isfinite rather than comparing against a magic number.
     """
     common_index = asset_returns.index.intersection(benchmark_returns.index)
     y = asset_returns.loc[common_index].to_numpy(dtype=np.float64)
@@ -36,7 +57,8 @@ def calculate_beta(
     logger.debug("[beta] n_obs=%d  path=%s", len(y), path)
 
     if len(y) < 2:
-        return {"alpha": 0.0, "beta": 0.0, "r_squared": 0.0}
+        logger.debug("[beta] not estimable: %d overlapping observation(s)", len(y))
+        return {"alpha": float("nan"), "beta": float("nan"), "r_squared": float("nan")}
 
     if HAS_CPP and _cpp_core is not None:
         r = _cpp_core.ols2(y, x)

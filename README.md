@@ -737,6 +737,36 @@ Python tier, 10 in the C++ tier — full write-ups in
    Both optimizer findings also split the two solver paths, which now share
    one gate.
 
+7. **A full-codebase audit, Pass 1 — the older quant runtime.** A fresh
+   review found the modeling runtime is no longer the weak point; the
+   remaining risk sat in backtesting, metrics, data normalization and the
+   audit trail, which never gained the input/output contracts modeling now
+   enforces. The temporal and integrity findings are fixed:
+
+   - **Deleting a model's `manifest.json` bypassed every integrity check.**
+     It is the package's commit point, so removing it — strictly easier than
+     forging a hash inside it — made a tampered `model.joblib`
+     **deserialize** where it had previously been refused. `joblib.load`
+     executes code from the file it is handed.
+   - **A negative strategy lookback read future prices.** Pandas treats a
+     negative `pct_change` period as a *forward* window, so
+     `momentum_timeseries(lookback=-20)` computed bar 25's signal from bar
+     45's price. Not one of the eight strategies validated a parameter; all
+     now share one contract.
+   - **A sparse signal panel deleted trading days**, distorting annualized
+     volatility by **32×** on identical prices.
+   - **Intraday bars from different exchanges looked simultaneous** —
+     London 15:00 BST and New York 15:00 EDT are five hours apart and were
+     indexed identically. Intraday is canonical UTC now.
+   - **A corrupted audit trail silently restarted at genesis** instead of
+     refusing to extend a damaged chain.
+   - **"Unknown" stopped meaning free**: a ticker with no volume data used
+     to score `$0` market impact against `$3bn` for one with real data.
+
+   Remaining passes (shared numerical contracts across the older metrics and
+   indicator modules, solver-result verification, and the classic agent
+   schemas) are tracked in `CHANGELOG.md`.
+
 If you have audit records written before this release, note that
 `content_hash` values are not comparable across the change — see the format
 note in [10_auditability.md](Documentation/10_auditability.md). The
@@ -799,7 +829,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**2509 Python tests total** — 2508 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**2563 Python tests total** — 2562 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 

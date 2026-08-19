@@ -167,13 +167,33 @@ def save_model(
 
 
 def _expected_hash(model_id: str, filename: str) -> Optional[str]:
-    """The registered digest for one artifact, or None when this model
-    predates content hashing (or the manifest is unreadable — in which
-    case the caller's own missing-file check reports the real problem)."""
-    try:
-        return load_manifest(model_id).content_hashes.get(filename)
-    except ValidationError:
-        return None
+    """
+    The registered digest for one artifact, or None when this model predates
+    content hashing.
+
+    Only that second case may return None. This used to also swallow a
+    ValidationError from load_manifest() and return None, which quietly
+    turned "I cannot read the manifest" into "this artifact has no expected
+    hash" -- and verify_file() treats expected=None as "skip verification".
+
+    manifest.json is the commit point of the package: it is written last,
+    and every other artifact's digest lives in it. So deleting it downgraded
+    every integrity check at once. Measured on a registered model whose
+    model.joblib had been swapped:
+
+        manifest present  -> refused (hash mismatch)
+        manifest deleted  -> DESERIALIZED the tampered file
+
+    Removing the manifest is strictly easier than forging a hash inside it,
+    so the bypass was cheaper than the attack it was meant to stop -- and
+    joblib.load executes code from the file, making this an arbitrary-code-
+    execution path rather than merely a wrong-answer one.
+
+    load_manifest's error now propagates. A registered model always has a
+    manifest; if it is absent or unreadable, the package is not intact and
+    no loader should proceed on the assumption that it is.
+    """
+    return load_manifest(model_id).content_hashes.get(filename)
 
 
 def load_preprocessing_stats(model_id: str) -> Dict[str, Dict[str, float]]:

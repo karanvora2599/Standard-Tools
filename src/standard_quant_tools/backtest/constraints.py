@@ -8,6 +8,7 @@ into a max_adv_participation validation check (backtest/portfolio_engine.py).
 """
 
 import logging
+import math
 from typing import Any, Dict, List
 
 from standard_quant_tools.error import ValidationError
@@ -18,12 +19,26 @@ logger = logging.getLogger(__name__)
 def adv_participation(notional: float, avg_dollar_volume: float) -> float:
     """
     Fraction of average dollar volume a trade's notional represents.
-    Returns 0.0 when avg_dollar_volume <= 0 (no volume baseline available)
-    rather than dividing by zero — the conservative "can't estimate, assume
-    no constraint" fallback used elsewhere in this module.
+
+    Returns NaN — meaning "not estimable" — when no usable volume baseline
+    is available (non-positive or non-finite avg_dollar_volume).
+
+    This used to return 0.0 and call it "the conservative fallback". It is
+    the opposite of conservative. 0.0 participation is the score of a trade
+    so small it barely touches the market, so a ticker with NO liquidity
+    data ranked as the EASIEST thing in the universe to trade:
+
+        adv_participation(1e9, adv=0)    -> 0.0     (looked frictionless)
+        adv_participation(1e9, adv=1e7)  -> 100.0   (honest: 100x ADV)
+
+    A billion-dollar order in a name nobody has volume for is not a free
+    trade; it is a trade whose cost is unknown. NaN says that, and — unlike
+    0.0 — it cannot be mistaken for a measurement. Callers that gate on this
+    must test for finiteness explicitly rather than relying on a comparison,
+    since every comparison against NaN is False.
     """
-    if avg_dollar_volume <= 0:
-        return 0.0
+    if not math.isfinite(avg_dollar_volume) or avg_dollar_volume <= 0:
+        return float("nan")
     return abs(notional) / avg_dollar_volume
 
 
@@ -40,10 +55,17 @@ def days_to_liquidate(
         way that's more useful to surface as an error than silently return
         inf for).
     """
-    if avg_daily_volume <= 0:
-        raise ValidationError(f"avg_daily_volume must be > 0, got {avg_daily_volume}")
-    if max_participation <= 0:
-        raise ValidationError(f"max_participation must be > 0, got {max_participation}")
+    # isfinite first: NaN satisfies neither `<= 0` nor `> 0`, so a NaN volume
+    # sailed through the guard below and produced a NaN answer that looked
+    # like a computed number of days.
+    if not math.isfinite(avg_daily_volume) or avg_daily_volume <= 0:
+        raise ValidationError(
+            f"avg_daily_volume must be finite and > 0, got {avg_daily_volume}"
+        )
+    if not math.isfinite(max_participation) or max_participation <= 0:
+        raise ValidationError(
+            f"max_participation must be finite and > 0, got {max_participation}"
+        )
     tradeable_per_day = avg_daily_volume * max_participation
     return abs(shares) / tradeable_per_day
 

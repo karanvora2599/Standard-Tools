@@ -58,6 +58,31 @@ def _mean_cov(
     return mu, cov
 
 
+def _require_finite_scalar(name: str, value: Any) -> float:
+    """
+    Reject a non-finite or non-numeric scalar before it can reach a
+    comparison.
+
+    Order matters. Every domain guard in this module is written as a
+    comparison (`<= 0`, `< min_var`), and NaN makes all of them False — so a
+    NaN was never rejected by the check that existed to reject bad values;
+    it simply flowed through into the covariance algebra and out the other
+    side as NaN weights.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValidationError(
+            f"{name} must be a number, got {type(value).__name__} ({value!r})"
+        )
+    number = float(value)
+    if not np.isfinite(number):
+        raise ValidationError(
+            f"{name} must be finite, got {value!r}. NaN compares False against "
+            "every bound in this module, so it would pass each guard and "
+            "produce NaN weights reported as a converged solution."
+        )
+    return number
+
+
 def _check_covariance_estimable(n_obs: int, n_assets: int, cov: np.ndarray) -> None:
     """
     Reject a sample covariance that cannot support an optimization, BEFORE
@@ -383,6 +408,31 @@ def mean_variance_optimize(
     if objective not in _OBJECTIVES:
         raise ValidationError(
             f"objective must be one of {sorted(_OBJECTIVES)}, got {objective!r}"
+        )
+    # Every scalar is checked for finiteness BEFORE any comparison, because
+    # NaN satisfies no comparison at all: `if target_volatility <= 0` is
+    # False for NaN, so a NaN sailed past its own guard, poisoned mu/cov and
+    # came back as {ticker: nan} weights reported with converged=True — a
+    # success flag on a result containing no numbers. Verified for
+    # risk_free_rate, target_return and target_volatility alike.
+    _require_finite_scalar("risk_free_rate", risk_free_rate)
+    if target_return is not None:
+        _require_finite_scalar("target_return", target_return)
+    if target_volatility is not None:
+        _require_finite_scalar("target_volatility", target_volatility)
+    if max_weight is not None:
+        _require_finite_scalar("max_weight", max_weight)
+    if (
+        isinstance(periods_per_year, bool)
+        or not isinstance(periods_per_year, int)
+        or periods_per_year < 1
+    ):
+        raise ValidationError(
+            f"periods_per_year must be a positive integer, got "
+            f"{periods_per_year!r}. It is the annualization factor for this "
+            "return frequency (252 daily, 52 weekly, 12 monthly); zero or "
+            "negative makes every annualized quantity meaningless rather "
+            "than merely scaled."
         )
     if returns_df.shape[1] < 2:
         raise ValidationError(f"need at least 2 assets, got {returns_df.shape[1]}")

@@ -9,11 +9,13 @@ ProcessPoolExecutor (required for backtest_grid on Windows / spawn).
 """
 
 import logging
+from functools import wraps
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.backtest.strategy_params import resolve_strategy_params
 from standard_quant_tools.indicators.momentum import rsi
 from standard_quant_tools.indicators.trend import adx, macd, sma
 from standard_quant_tools.indicators.volatility import bollinger_bands
@@ -372,7 +374,7 @@ def _adx_trend_signals(
     return result
 
 
-STRATEGY_REGISTRY = {
+_RAW_STRATEGIES = {
     "sma_crossover": _sma_signals,
     "rsi_mean_reversion": _rsi_signals,
     "macd_crossover": _macd_signals,
@@ -381,4 +383,39 @@ STRATEGY_REGISTRY = {
     "momentum_timeseries": _momentum_signals,
     "vwap_reversion": _vwap_reversion_signals,
     "adx_trend": _adx_trend_signals,
+}
+
+
+def _validating(name: str, fn):
+    """
+    Wrap one signal function so its parameters are resolved before it runs.
+
+    Applied at the REGISTRY rather than at each call site deliberately.
+    STRATEGY_REGISTRY is indexed from roughly ten places (the four
+    strategy-specific agent tools, the generic backtest tool, grid search,
+    walk-forward, the regime-adaptive sweep, the optimizer), and a
+    validation added to each of those is a validation that the eleventh
+    call site will not have. Wrapping the callable itself means the check
+    cannot be reached around -- including from the ProcessPoolExecutor grid
+    worker, which rebuilds its call in a child process.
+
+    check_relations=False here: per-value checks (which is what stops the
+    negative-lookback look-ahead) apply everywhere, while cross-parameter
+    relations are enforced at the agent boundary instead. A parameter grid
+    legitimately enumerates fast >= slow pairs, and backtest_grid does not
+    catch per-combination errors, so rejecting them here would abort a
+    whole sweep over points a search should simply score and discard.
+    """
+
+    @wraps(fn)
+    def wrapper(df: pd.DataFrame, **params) -> pd.Series:
+        resolved = resolve_strategy_params(name, params, check_relations=False)
+        return fn(df, **resolved)
+
+    wrapper.strategy_name = name  # type: ignore[attr-defined]
+    return wrapper
+
+
+STRATEGY_REGISTRY = {
+    name: _validating(name, fn) for name, fn in _RAW_STRATEGIES.items()
 }

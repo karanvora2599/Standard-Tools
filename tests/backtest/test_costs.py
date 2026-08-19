@@ -1,5 +1,7 @@
 """Tests for backtest/costs.py — pluggable transaction-cost model building blocks."""
 
+import math
+
 import pytest
 
 from standard_quant_tools.backtest.costs import (
@@ -72,11 +74,23 @@ class TestSqrtImpactBps:
 
 
 class TestImpactCost:
-    def test_zero_adv_returns_zero(self):
-        assert impact_cost(10_000.0, avg_dollar_volume=0.0, volatility=0.02) == 0.0
+    @pytest.mark.parametrize("adv", [0.0, -1.0, float("nan"), float("inf")])
+    def test_unusable_adv_is_not_estimable_not_zero(self, adv):
+        """
+        Previously 0.0, described as the conservative fallback. Measured
+        against a real baseline it is the least conservative answer
+        available:
 
-    def test_negative_adv_returns_zero(self):
-        assert impact_cost(10_000.0, avg_dollar_volume=-1.0, volatility=0.02) == 0.0
+            impact_cost(1e9, adv=0,   vol=0.30) -> 0.0            (free)
+            impact_cost(1e9, adv=1e7, vol=0.30) -> 3,000,000,000
+
+        So a capacity report would route size into exactly the names it had
+        the least information about.
+        """
+        assert math.isnan(impact_cost(10_000.0, avg_dollar_volume=adv, volatility=0.02))
+
+    def test_a_real_baseline_still_costs(self):
+        assert impact_cost(1e9, avg_dollar_volume=1e7, volatility=0.30) > 0.0
 
     def test_basic_matches_manual_computation(self):
         notional = 10_000.0

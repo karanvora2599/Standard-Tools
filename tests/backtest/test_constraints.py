@@ -1,5 +1,7 @@
 """Tests for backtest/constraints.py — liquidity/capacity diagnostics."""
 
+import math
+
 import pytest
 
 from standard_quant_tools.backtest.constraints import (
@@ -15,11 +17,23 @@ class TestAdvParticipation:
     def test_basic(self):
         assert adv_participation(10_000.0, 100_000.0) == pytest.approx(0.1)
 
-    def test_zero_adv_returns_zero(self):
-        assert adv_participation(10_000.0, 0.0) == 0.0
+    @pytest.mark.parametrize("adv", [0.0, -5.0, float("nan"), float("inf")])
+    def test_unusable_adv_is_not_estimable_not_zero(self, adv):
+        """
+        These used to assert 0.0 and call it conservative. It is the
+        opposite: 0.0 participation is the score of a trade so small it
+        barely touches the market, so a ticker with NO volume data ranked as
+        the EASIEST in the universe to trade.
 
-    def test_negative_adv_returns_zero(self):
-        assert adv_participation(10_000.0, -5.0) == 0.0
+            adv_participation(1e9, adv=0)   -> 0.0    (looked frictionless)
+            adv_participation(1e9, adv=1e7) -> 100.0  (honest: 100x ADV)
+
+        NaN says "not estimable" and cannot be mistaken for a measurement.
+        """
+        assert math.isnan(adv_participation(10_000.0, adv))
+
+    def test_a_real_baseline_still_measures(self):
+        assert adv_participation(1e9, 1e7) == pytest.approx(100.0)
 
 
 class TestDaysToLiquidate:

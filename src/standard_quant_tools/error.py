@@ -61,3 +61,20 @@ class BacktestError(QuantError):
     """Raised when the backtesting engine encounters an error."""
 
     pass
+
+
+class AuditIntegrityError(QuantError):
+    """
+    The audit trail's own hash chain is damaged.
+
+    Distinct from ValidationError because it is not a statement about the
+    caller's input — it says the tamper-evident log on disk can no longer be
+    extended honestly. The writer raises this instead of silently restarting
+    the chain at genesis, which is what it used to do when a day file's last
+    line was unparsable: a corrupted tail became "no previous record", and
+    the trail carried on looking intact while having lost everything before
+    the damage.
+
+    Raised only for corruption of an EXISTING chain. A missing or empty file
+    is a legitimate genesis and is not an error.
+    """

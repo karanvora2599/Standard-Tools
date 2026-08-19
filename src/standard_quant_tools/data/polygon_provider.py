@@ -224,7 +224,13 @@ def _parse_aggs(
         if timespan in _DAY_OR_COARSER:
             index.append(ts.tz_localize(None).normalize())
         else:
-            index.append(ts.tz_convert("America/New_York").tz_localize(None))
+            # UTC, matching _normalize_ohlcv_index's canonical intraday zone.
+            # This used to emit naive America/New_York wall-clock times, so a
+            # Polygon intraday bar and a bar from any other venue could carry
+            # the same timestamp while being hours apart in reality — and the
+            # live path and the cache-read path disagreed with each other
+            # about which zone the index was even in.
+            index.append(ts.tz_convert("UTC").tz_localize(None))
     df = pd.DataFrame(rows, index=pd.DatetimeIndex(index))
     df.index.name = None
     return df[["Open", "High", "Low", "Close", "Volume"]]

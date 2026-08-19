@@ -12,10 +12,40 @@ class BacktestInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    strategy_type: str = Field(
+    strategy_type: Literal[
+        # The eight entries of STRATEGY_REGISTRY...
+        "sma_crossover",
+        "rsi_mean_reversion",
+        "macd_crossover",
+        "bollinger_reversion",
+        "donchian_breakout",
+        "momentum_timeseries",
+        "vwap_reversion",
+        "adx_trend",
+        # ...plus the two synthetic labels that reuse this same input model
+        # without going through the registry: buy_and_hold constructs an
+        # always-long series directly, and custom_signal carries a
+        # caller-supplied one. They are part of the accepted set, so the
+        # Literal has to name them or those tools become unreachable.
+        "buy_and_hold",
+        "custom_signal",
+    ] = Field(
+        # Was a bare `str` whose description listed only four of the eight
+        # registered strategies, so an agent could both pass an unregistered
+        # name (failing deep inside dispatch) and fail to discover half the
+        # registry from the schema.
         ...,
-        description="Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
-        "'macd_crossover', or 'bollinger_reversion'.",
+        description=(
+            "Strategy to run. One of: sma_crossover {fast_period, "
+            "slow_period}; rsi_mean_reversion {period, oversold, "
+            "overbought}; macd_crossover {fast, slow, signal}; "
+            "bollinger_reversion {period, num_std}; donchian_breakout "
+            "{entry_period, exit_period}; momentum_timeseries {lookback, "
+            "threshold}; vwap_reversion {period, entry_threshold}; "
+            "adx_trend {adx_period, adx_threshold}. The labels buy_and_hold "
+            "and custom_signal are also accepted by the tools that build "
+            "their signal series directly rather than from the registry."
+        ),
     )
     parameters: Dict[str, Any] = Field(
         {},
@@ -33,7 +63,7 @@ class BacktestInput(BaseModel):
     slippage_pct: float = Field(
         0.0005, description="Slippage per trade (fraction, default 0.05%)."
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description=(
             "'close' (default) — signal known at bar t-1's close is filled at that "
@@ -77,6 +107,17 @@ class BacktestResult(BaseModel):
     final_equity: float
     equity_curve: List[float]
     trade_log: Optional[List[Trade]] = None
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Caveats the engine raised about this simulation — most "
+            "importantly the fill_price='close' look-ahead warning, which "
+            "says the result may assume a fill at the very close that "
+            "produced the signal. run_strategy has always emitted these; "
+            "this model used to drop them, so the engine knew the backtest "
+            "might contain look-ahead while the agent-facing output did not."
+        ),
+    )
 
 
 # ──────────────────────────────────────────────

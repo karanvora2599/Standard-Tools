@@ -57,10 +57,31 @@ class TestStrategyRegistry:
             assert name in STRATEGY_REGISTRY
 
     def test_registered_functions_match_module_functions(self):
-        assert STRATEGY_REGISTRY["donchian_breakout"] is _donchian_signals
-        assert STRATEGY_REGISTRY["momentum_timeseries"] is _momentum_signals
-        assert STRATEGY_REGISTRY["vwap_reversion"] is _vwap_reversion_signals
-        assert STRATEGY_REGISTRY["adx_trend"] is _adx_trend_signals
+        """
+        Registry entries are now wrapped by strategy_params-validating
+        adapters, so they are no longer the bare module functions by
+        identity. The property this test exists for -- each NAME resolves to
+        the right IMPLEMENTATION -- is unchanged and is asserted through
+        functools.wraps' __wrapped__ link.
+
+        The wrapper is what makes a negative lookback (direct look-ahead)
+        unreachable from every call site rather than only the ones that
+        remembered to validate, so identity is the thing that had to give.
+        """
+        assert STRATEGY_REGISTRY["donchian_breakout"].__wrapped__ is _donchian_signals
+        assert STRATEGY_REGISTRY["momentum_timeseries"].__wrapped__ is _momentum_signals
+        assert (
+            STRATEGY_REGISTRY["vwap_reversion"].__wrapped__ is _vwap_reversion_signals
+        )
+        assert STRATEGY_REGISTRY["adx_trend"].__wrapped__ is _adx_trend_signals
+
+    def test_every_registry_entry_validates_its_parameters(self):
+        """The wrapper must be on ALL of them, not just the ones a test
+        happened to cover -- a single unwrapped entry is a call site with no
+        parameter contract."""
+        for name, fn in STRATEGY_REGISTRY.items():
+            assert hasattr(fn, "__wrapped__"), f"{name} is not validated"
+            assert getattr(fn, "strategy_name", None) == name
 
 
 class TestDonchianBreakout:

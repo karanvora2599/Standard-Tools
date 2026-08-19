@@ -21,6 +21,51 @@ from standard_quant_tools.portfolio.portfolio import build_portfolio, portfolio_
 logger = logging.getLogger(__name__)
 
 
+_CALENDAR_POLICIES = frozenset({"hold", "flat", "error"})
+
+
+def _align_signal_to_calendar(
+    signal: pd.Series,
+    price_index: pd.Index,
+    policy: str,
+    ticker: str,
+) -> pd.Series:
+    """
+    Reindex one ticker's signal onto its own full price calendar.
+
+    Without this, run_strategy's price/signal intersection silently DELETES
+    the trading days a sparse signal does not mention, compressing a month of
+    price movement into one "bar" — see run_signal_panel_backtest's own
+    docstring for the measured 32x volatility distortion.
+
+    "hold" carries the last signal forward, which is what a rebalance
+    schedule means: a monthly signal is a position held through the month,
+    not a position that exists on one day. Dates BEFORE the first signal are
+    filled flat rather than back-filled, since no view had been expressed
+    yet and back-filling would be look-ahead.
+    """
+    signal = signal.sort_index()
+    on_calendar = signal.reindex(price_index)
+    if not on_calendar.isna().any():
+        return on_calendar.astype(float)
+
+    if policy == "error":
+        n_missing = int(on_calendar.isna().sum())
+        raise ValidationError(
+            f"{ticker}: signal covers {len(signal.dropna())} of "
+            f"{len(price_index)} trading dates, leaving {n_missing} bars "
+            "without a signal. With signal_calendar_policy='error' this is "
+            "refused rather than guessed at. Use 'hold' to carry the last "
+            "signal forward (a rebalance schedule) or 'flat' to be out of "
+            "the market between signal dates."
+        )
+    if policy == "hold":
+        # ffill only: leading NaNs stay NaN here and become 0.0 below, so a
+        # position is never held before the model expressed a view.
+        on_calendar = on_calendar.ffill()
+    return on_calendar.fillna(0.0).astype(float)
+
+
 def run_signal_panel_backtest(
     price_data: Dict[str, pd.DataFrame],
     signal_panel: pd.DataFrame,
@@ -31,6 +76,7 @@ def run_signal_panel_backtest(
     benchmark_returns: Optional[pd.Series] = None,
     include_trade_log: bool = False,
     fill_price: str = "close",
+    signal_calendar_policy: str = "hold",
 ) -> Dict[str, Any]:
     """
     Backtest a pre-computed signal panel across a ticker universe.
@@ -51,6 +97,33 @@ def run_signal_panel_backtest(
         include_trade_log: passed through to run_strategy per ticker.
         fill_price:   "close" (default) or "next_open" — passed through to
                       run_strategy for every ticker; see its docstring.
+        signal_calendar_policy: what to do when a ticker's signal series is
+                      sparser than its price series — "hold" (default: carry
+                      the last signal forward, the natural reading of a
+                      rebalance schedule), "flat" (0.0 between signal dates,
+                      i.e. in the market only on dates that have a signal),
+                      or "error" (refuse). See the calendar note below.
+
+    Calendar preservation:
+        run_strategy intersects price dates with signal dates and then takes
+        pct_change() over WHAT REMAINS, so a signal series sparser than the
+        price series does not read as "hold" — the intervening trading days
+        disappear from the price axis entirely and the bars either side
+        become adjacent. A monthly signal against daily prices turns
+        Jan 31 -> Feb 28 into a single "bar" carrying a month of price
+        movement.
+
+        Measured on a 120-bar daily series driven by the same exposure, once
+        with a daily signal and once with the same signal sampled monthly:
+        annualized volatility 0.0241 against 0.7735 — a 32x distortion of
+        risk, from identical prices. Total return can still look right,
+        which is what made it easy to miss; per-bar volatility, Sharpe and
+        drawdown are all wrong.
+
+        Every ticker's signal is therefore reindexed onto that ticker's own
+        full price calendar before the backtest runs. The agent wrapper
+        already did this; the library function that it and every direct
+        caller sit on did not.
 
     Returns:
         {
@@ -69,6 +142,16 @@ def run_signal_panel_backtest(
     missing = [t for t in tickers if t not in price_data]
     if missing:
         raise ValidationError(f"price_data is missing OHLCV for: {missing}")
+    if not tickers:
+        raise ValidationError(
+            "signal_panel has no columns — there is no universe to backtest. "
+            "(The default equal weighting would otherwise divide by zero.)"
+        )
+    if signal_calendar_policy not in _CALENDAR_POLICIES:
+        raise ValidationError(
+            f"signal_calendar_policy must be one of {sorted(_CALENDAR_POLICIES)}, "
+            f"got {signal_calendar_policy!r}"
+        )
 
     logger.debug("[signal_panel] tickers=%d  bars=%d", len(tickers), len(signal_panel))
 
@@ -76,9 +159,15 @@ def run_signal_panel_backtest(
     returns_cols: Dict[str, pd.Series] = {}
 
     for ticker in tickers:
+        aligned_signal = _align_signal_to_calendar(
+            signal_panel[ticker],
+            price_data[ticker].index,
+            signal_calendar_policy,
+            ticker,
+        )
         result = run_strategy(
             price_data[ticker],
-            signal_panel[ticker],
+            aligned_signal,
             initial_capital=initial_capital,
             commission_pct=commission_pct,
             slippage_pct=slippage_pct,

@@ -466,6 +466,22 @@ def run_portfolio_simulation(
             if max_adv_participation is not None:
                 adv = _valid_dollar_volume(t, trigger_date, exec_date)
                 participation = adv_participation(trade_notional, adv)
+                # NaN means the participation could not be estimated at all
+                # (no usable volume baseline). It must be checked BEFORE the
+                # comparison, because `nan > limit` is False — so an
+                # unmeasurable trade would otherwise pass a liquidity
+                # constraint that a merely large trade fails. A constraint
+                # the caller explicitly asked for should not be silently
+                # satisfied by absent data.
+                if not math.isfinite(participation):
+                    raise ValidationError(
+                        f"rebalance {exec_date} ticker {t!r}: ADV participation "
+                        "could not be estimated (no usable dollar-volume "
+                        "baseline for this ticker/date), so "
+                        f"max_adv_participation={max_adv_participation} cannot "
+                        "be enforced. Supply volume data for this ticker or "
+                        "drop the constraint — it is not satisfied by default."
+                    )
                 if participation > max_adv_participation + 1e-9:
                     raise ValidationError(
                         f"rebalance {exec_date} ticker {t!r}: ADV participation "

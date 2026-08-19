@@ -9,6 +9,135 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (full-codebase audit, Pass 1 — temporal correctness and integrity)
+
+A fresh review of the whole repository, taken independently of the earlier
+passes. Its central finding was that the modeling runtime is no longer the
+weakest part of the codebase — the remaining risk had shifted to the older
+quant runtime, which never gained the deterministic input/output contracts
+the modeling layer now enforces.
+
+This pass fixes the subset that produces a temporally wrong answer, a
+security hole, or a silently benign reading of missing data. Every item was
+reproduced against a live interpreter before being fixed and is pinned by a
+regression test in `tests/core/test_pass1_temporal_integrity.py`. Suite:
+2516 → 2562 passed, 1 skipped.
+
+**Deleting a model's manifest bypassed every integrity check.**
+`_expected_hash()` caught a `ValidationError` from `load_manifest()` and
+returned `None`, and `verify_file()` treats `expected=None` as "skip
+verification". `manifest.json` is the package's commit point — written last,
+holding every other artifact's digest — so removing it downgraded all of them
+at once. Measured on a registered model whose `model.joblib` had been
+swapped: with the manifest present the load was refused; with the manifest
+deleted the tampered file was **deserialized**. Removing a file is strictly
+easier than forging a hash inside it, so the bypass was cheaper than the
+attack it existed to stop, and `joblib.load` executes code from the file it
+is handed. The manifest error now propagates. A *valid* manifest that simply
+predates content hashing still yields `expected=None`, so genuinely legacy
+models keep loading.
+
+**A negative strategy lookback read future prices.** Not one of the eight
+registered strategies validated a single parameter, and
+`momentum_timeseries(lookback=-20)` reached `Close.pct_change(periods=-20)`,
+where pandas reads *forward*. Standing at bar 25 it returns
+`close[25]/close[45] - 1`, so a bar's signal is computed from a price 20 bars
+into its own future. Reachable from the agent surface, since
+`BacktestInput.parameters` was an unconstrained `Dict[str, Any]`.
+
+New `backtest/strategy_params.py` gives the classic registry the contract the
+modeling runtime already had: positive-integer windows, finite thresholds,
+declared ranges, cross-parameter relations, and rejection of unknown names
+(every signature ends in `**_`, so a typo silently ran the default while the
+caller believed it had configured something). It is applied by wrapping
+`STRATEGY_REGISTRY` itself rather than at each of the ~10 call sites, so it
+cannot be reached around — including from the `ProcessPoolExecutor` grid
+worker, which rebuilds its call in a child process. Cross-parameter relations
+are enforced where a single configuration is deliberately requested but not
+inside the registry, because a parameter grid legitimately sweeps
+`fast >= slow` pairs and `backtest_grid` does not catch per-combination
+errors.
+
+**The engine's look-ahead warning never reached the agent.** `run_strategy`
+has always emitted a caveat for `fill_price="close"` (a signal derived from
+bar *t*'s own close cannot realistically be filled at that same close), but
+`BacktestResult` had no `warnings` field and `_run_backtest` rebuilt the
+result without it. The engine knew the simulation might contain look-ahead
+while the LLM-facing output said nothing. `fill_price` and `strategy_type`
+are `Literal`s now; the latter's description listed four of the eight
+registered strategies, so half the registry was undiscoverable from the
+schema.
+
+**A sparse signal panel deleted trading days.** `run_strategy` intersects
+price dates with signal dates and then takes `pct_change()` over what
+remains, so a monthly signal against daily prices does not read as "hold" —
+the intervening days vanish and the bars either side become adjacent.
+Measured on a 120-bar series driven by identical exposure: annualized
+volatility **0.0241 with a daily signal against 0.7735 with the same signal
+sampled monthly**, a 32× distortion of risk from the same prices. Total
+return can still look right, which is what made it easy to miss. The agent
+wrapper already applied a fill policy; the public
+`backtest.panel.run_signal_panel_backtest` beneath it did not, and now takes
+`signal_calendar_policy` (`hold` / `flat` / `error`). `hold` does not
+back-fill before the first signal, since no view had been expressed yet.
+
+**Intraday bars from different exchanges looked simultaneous.**
+`tz_localize(None)` was applied without converting first, which keeps the
+local wall clock: London 15:00 BST (14:00 UTC) and New York 15:00 EDT (19:00
+UTC) both became naive 15:00 and indexed identically, so any cross-market
+correlation, PCA or panel silently paired them as one instant. Intraday is
+now canonicalized to **UTC** before the timezone is dropped — Polygon's
+parser included, which had been emitting naive New York time. Daily and
+coarser deliberately do *not* convert: a daily bar is identified by its local
+session date, and converting first would shift Tokyo's 2024-06-03 to
+2024-06-02. Cache format bumped to `v3`, since every `v2` intraday file holds
+local wall-clock times.
+
+**A corrupted audit trail silently restarted itself.** An unparsable last
+line returned `None`, which the caller turned into the genesis hash — so the
+writer began a new chain and kept appending as though the trail had just
+started. Reproduced exactly that way. "The file does not exist" and "the file
+exists and I cannot read its tail" are different states: the first is a
+legitimate genesis, the second means the log is already damaged, and
+extending it destroys its evidential value. Now raises the new
+`AuditIntegrityError`. The cross-midnight race is closed too — the previous
+day's tail is read while holding *that day's* lock, so a writer appending at
+23:59:59 cannot be missed by one creating the new day's file at 00:00:00.
+
+**"Unknown" stopped meaning the benign case.** Three places used a
+valid-looking number as a failure sentinel, each biased toward the
+reassuring answer:
+
+- `calculate_beta` returned `beta: 0.0` when fewer than two observations
+  overlapped — indistinguishable from a genuinely market-neutral asset. It
+  returns NaN now, and `treynor_ratio` no longer turns "no overlapping
+  benchmark data" into a plausible risk-adjusted return.
+- `adv_participation` and `impact_cost` returned `0.0` for an unusable volume
+  baseline and called it conservative. It is the opposite:
+  `adv_participation(1e9, adv=0)` scored **0.0** where a real baseline scores
+  **100.0** (100× ADV), and `impact_cost` scored **$0** against **$3bn** — so
+  the ticker with no liquidity data ranked as the cheapest in the universe to
+  trade. Both return NaN. The `max_adv_participation` gate now rejects an
+  unestimable participation explicitly, since `nan > limit` is False and would
+  otherwise let an unmeasurable trade pass a constraint a merely large trade
+  fails.
+- `days_to_liquidate` guarded with `<= 0`, which NaN does not satisfy, so a
+  NaN volume produced a NaN answer that looked computed.
+
+**Optimizer scalars are finite-checked before any comparison.** Every domain
+guard in `mean_variance_optimize` is written as a comparison, and NaN makes
+all of them False — so `if target_volatility <= 0` never fired for NaN, and
+`risk_free_rate`, `target_return` and `target_volatility` each produced
+`{ticker: nan}` weights reported with `converged: True`. `periods_per_year`
+must now be a positive integer.
+
+### Added
+
+- **`standard_quant_tools.error.AuditIntegrityError`** — raised when the
+  audit trail's own hash chain is damaged. Distinct from `ValidationError`
+  because it is not a statement about the caller's input: it says the
+  tamper-evident log on disk can no longer be extended honestly.
+
 ### Fixed (portfolio, screener and agent-tools audit — 10 items)
 
 A line-by-line pass over `portfolio/`, `screener/` and `agent/tools.py`, the

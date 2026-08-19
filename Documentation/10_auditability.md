@@ -126,6 +126,35 @@ a record — `status: "error"` with `error_type` / `error_message` set, and
 > abbreviating `...` repr, so two large arrays differing only in the middle
 > hashed identically. That path is not reachable from any decision record.)
 
+## The chain fails closed on corruption
+
+The writer refuses to append when the tail of an existing day file — or of the
+chain index — cannot be read. It used to return `None` from that case, which
+the caller turned into the genesis hash, so a corrupted line made the writer
+**silently start a new chain** and carry on:
+
+```
+valid record
+valid record
+CORRUPTED LINE
+      ↓  next tool call
+prev_record_hash = GENESIS      ← the trail before the damage is orphaned
+```
+
+"The file does not exist yet" and "the file exists and I cannot read its tail"
+are completely different states. The first is a legitimate genesis; the second
+means the log is already damaged, and extending it produces a tamper-evident
+record that is no longer evidence of anything. The second now raises
+`standard_quant_tools.error.AuditIntegrityError`. A missing or empty file is
+still an ordinary genesis.
+
+**Cross-day linkage is locked.** The first record of a new day chains onto the
+previous day's last `record_hash`, and that tail is now read while holding the
+*previous day's* lock. Without it there was a midnight race — a writer
+appending to yesterday at 23:59:59 could be missed by one creating today's
+file at 00:00:00, forking the chain at the day boundary while every individual
+record still verified on its own.
+
 `git_commit_sha` and `package_version` are reproducibility provenance: the
 exact commit and library version that produced this record, so a replay
 months later can tell "the code changed since this ran" apart from "the
