@@ -1,3 +1,4 @@
+#include <optional>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -328,7 +329,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         "run_strategy",
         [](Array1D prices, Array1D signals,
            double initial_capital, double commission_pct, double slippage_pct,
-           double periods_per_year)
+           double periods_per_year,
+           std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
+               ref_prices)
         -> py::dict {
             require_1d(prices, "prices");
             require_1d(signals, "signals");
@@ -337,12 +340,24 @@ PYBIND11_MODULE(_sqt_core, m) {
             const double* prices_ptr  = prices.data();
             const double* signals_ptr = signals.data();
             const auto    n           = prices.size();
+            // Resolved BEFORE the GIL is released: request() touches the
+            // Python object, so doing it inside the released region would be
+            // a use of the interpreter without holding the GIL.
+            const double* ref_ptr = nullptr;
+            if (ref_prices.has_value()) {
+                require_1d(*ref_prices, "ref_prices");
+                if (ref_prices->size() != prices.size())
+                    throw std::invalid_argument(
+                        "ref_prices must have the same length as prices");
+                ref_ptr = ref_prices->data();
+            }
             sqt::BacktestResult r;
             {
                 py::gil_scoped_release release;
                 r = sqt::run_strategy(
                     prices_ptr, signals_ptr, n,
-                    initial_capital, commission_pct, slippage_pct, periods_per_year);
+                    initial_capital, commission_pct, slippage_pct, periods_per_year,
+                    ref_ptr);
             }
 
             py::array_t<double> eq(static_cast<py::ssize_t>(r.equity_curve.size()));
@@ -373,6 +388,12 @@ PYBIND11_MODULE(_sqt_core, m) {
         // calendar-agnostic. Defaults to 252 so existing callers are
         // unchanged.
         py::arg("periods_per_year") = 252.0,
+        // Optional per-bar fill price. None -> close-to-close (the
+        // historical behaviour); an array -> the two-leg
+        // overnight/intraday decomposition engine.py uses for
+        // next_open / hl2_exploratory, so the more realistic execution
+        // model is no longer confined to the Python path.
+        py::arg("ref_prices") = py::none(),
         "Vectorized backtest kernel — identical algorithm to run_strategy in engine.py.\n\n"
         "One-bar lag execution: executed[i] = signals[i-1].\n"
         "Returns a dict with keys: final_equity, total_return, annualized_volatility,\n"
@@ -382,11 +403,104 @@ PYBIND11_MODULE(_sqt_core, m) {
     // ── Batch backtest ────────────────────────────────────────────────────────
 
     m.def(
+        "batch_backtest_crossover",
+        [](Array1D prices,
+           py::array_t<double, py::array::c_style | py::array::forcecast> indicators,
+           py::array_t<int, py::array::c_style | py::array::forcecast> pair_idx,
+           double initial_capital, double commission_pct, double slippage_pct,
+           double periods_per_year,
+           std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
+               ref_prices)
+        -> py::array_t<double>
+        {
+            require_1d(prices, "prices");
+            auto ind_buf  = indicators.request();
+            auto pair_buf = pair_idx.request();
+            if (ind_buf.ndim != 2)
+                throw std::invalid_argument("indicators must be 2-D (n_unique, n_bars)");
+            if (pair_buf.ndim != 2 || pair_buf.shape[1] != 2)
+                throw std::invalid_argument("pair_idx must be 2-D (num_combos, 2)");
+
+            const auto n          = static_cast<std::size_t>(prices.size());
+            const auto n_unique   = static_cast<std::size_t>(ind_buf.shape[0]);
+            const auto num_combos = static_cast<std::size_t>(pair_buf.shape[0]);
+            if (static_cast<std::size_t>(ind_buf.shape[1]) != n)
+                throw std::invalid_argument("indicators.shape[1] must equal len(prices)");
+
+            // Bounds-checked HERE, where an out-of-range row is a caller
+            // error worth naming, rather than left to the kernel where it
+            // would be an out-of-bounds read.
+            const int* pair_ptr = static_cast<const int*>(pair_buf.ptr);
+            for (std::size_t i = 0; i < num_combos * 2; ++i) {
+                if (pair_ptr[i] < 0 ||
+                    static_cast<std::size_t>(pair_ptr[i]) >= n_unique) {
+                    throw std::invalid_argument(
+                        "pair_idx contains a row index outside indicators");
+                }
+            }
+
+            const double* ref_ptr = nullptr;
+            if (ref_prices.has_value()) {
+                require_1d(*ref_prices, "ref_prices");
+                if (static_cast<std::size_t>(ref_prices->size()) != n)
+                    throw std::invalid_argument(
+                        "ref_prices must have the same length as prices");
+                ref_ptr = ref_prices->data();
+            }
+
+            constexpr py::ssize_t kNumCols = 11;
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(num_combos), kNumCols});
+            double* out_ptr = out.mutable_data();
+            const double* p_ptr = prices.data();
+            const double* i_ptr = static_cast<const double*>(ind_buf.ptr);
+            {
+                py::gil_scoped_release release;
+                const auto results = sqt::batch_backtest_crossover(
+                    p_ptr, i_ptr, n, n_unique, pair_ptr, num_combos,
+                    initial_capital, commission_pct, slippage_pct,
+                    periods_per_year, ref_ptr);
+                for (std::size_t i = 0; i < results.size(); ++i) {
+                    const auto& r = results[i];
+                    double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
+                    row[0]  = r.final_equity;
+                    row[1]  = r.total_return;
+                    row[2]  = r.annualized_vol;
+                    row[3]  = r.sharpe_ratio;
+                    row[4]  = r.sortino_ratio;
+                    row[5]  = r.max_drawdown;
+                    row[6]  = r.calmar_ratio;
+                    row[7]  = r.win_rate;
+                    row[8]  = r.profit_factor;
+                    row[9]  = static_cast<double>(r.num_trades);
+                    row[10] = r.avg_trade_return_pct;
+                }
+            }
+            return out;
+        },
+        py::arg("prices"),
+        py::arg("indicators"),
+        py::arg("pair_idx"),
+        py::arg("initial_capital")  = 10000.0,
+        py::arg("commission_pct")   = 0.001,
+        py::arg("slippage_pct")     = 0.0005,
+        py::arg("periods_per_year") = 252.0,
+        py::arg("ref_prices")       = py::none(),
+        "Fused crossover grid: builds each combination's signal from two rows "
+        "of `indicators` and backtests it immediately, so no (num_combos x "
+        "n_bars) signal matrix is ever materialized. "
+        "Returns a flat (num_combos, 11) array in the same column order as "
+        "batch_run_strategy."
+    );
+
+    m.def(
         "batch_run_strategy",
         [](Array1D prices,
            py::array_t<double, py::array::c_style | py::array::forcecast> signals_2d,
            double initial_capital, double commission_pct, double slippage_pct,
-           double periods_per_year)
+           double periods_per_year,
+           std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
+               ref_prices)
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
@@ -416,11 +530,20 @@ PYBIND11_MODULE(_sqt_core, m) {
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(num_tests), kNumCols});
             double* out_ptr = out.mutable_data();
+            const double* ref_ptr = nullptr;
+            if (ref_prices.has_value()) {
+                require_1d(*ref_prices, "ref_prices");
+                if (static_cast<std::size_t>(ref_prices->size()) != n)
+                    throw std::invalid_argument(
+                        "ref_prices must have the same length as prices");
+                ref_ptr = ref_prices->data();
+            }
             {
                 py::gil_scoped_release release;
                 const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
-                    initial_capital, commission_pct, slippage_pct, periods_per_year);
+                    initial_capital, commission_pct, slippage_pct, periods_per_year,
+                    ref_ptr);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -449,6 +572,12 @@ PYBIND11_MODULE(_sqt_core, m) {
         // calendar-agnostic. Defaults to 252 so existing callers are
         // unchanged.
         py::arg("periods_per_year") = 252.0,
+        // Optional per-bar fill price. None -> close-to-close (the
+        // historical behaviour); an array -> the two-leg
+        // overnight/intraday decomposition engine.py uses for
+        // next_open / hl2_exploratory, so the more realistic execution
+        // model is no longer confined to the Python path.
+        py::arg("ref_prices") = py::none(),
         "Batch vectorized backtest — run all parameter combinations in one C++ call.\n\n"
         "signals must be a 2-D float64 array of shape (num_tests, n_bars).\n"
         "Returns a 2-D float64 array of shape (num_tests, 11), one row per\n"
@@ -462,7 +591,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         "batch_run_strategy_zerocopy",
         [](py::array prices_obj, py::array signals_obj,
            double initial_capital, double commission_pct, double slippage_pct,
-           double periods_per_year)
+           double periods_per_year,
+           std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
+               ref_prices)
         -> py::array_t<double>
         {
             auto prices_arr  = require_strict_f64_1d(prices_obj, "prices");
@@ -483,11 +614,20 @@ PYBIND11_MODULE(_sqt_core, m) {
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(num_tests), kNumCols});
             double* out_ptr = out.mutable_data();
+            const double* ref_ptr = nullptr;
+            if (ref_prices.has_value()) {
+                require_1d(*ref_prices, "ref_prices");
+                if (static_cast<std::size_t>(ref_prices->size()) != n)
+                    throw std::invalid_argument(
+                        "ref_prices must have the same length as prices");
+                ref_ptr = ref_prices->data();
+            }
             {
                 py::gil_scoped_release release;
                 const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
-                    initial_capital, commission_pct, slippage_pct, periods_per_year);
+                    initial_capital, commission_pct, slippage_pct, periods_per_year,
+                    ref_ptr);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -516,6 +656,12 @@ PYBIND11_MODULE(_sqt_core, m) {
         // calendar-agnostic. Defaults to 252 so existing callers are
         // unchanged.
         py::arg("periods_per_year") = 252.0,
+        // Optional per-bar fill price. None -> close-to-close (the
+        // historical behaviour); an array -> the two-leg
+        // overnight/intraday decomposition engine.py uses for
+        // next_open / hl2_exploratory, so the more realistic execution
+        // model is no longer confined to the Python path.
+        py::arg("ref_prices") = py::none(),
         "Strict/zero-copy variant of batch_run_strategy() -- `prices`/"
         "`signals` must already be C-contiguous float64 arrays (raises "
         "instead of implicitly copying on a mismatch). Same "

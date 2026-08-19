@@ -155,6 +155,64 @@ print(f"Profit Factor  : {result['profit_factor']:.2f}")
 print(f"Num Trades     : {result['num_trades']}")
 ```
 
+## Every fill mode runs natively
+
+`next_open` and `hl2_exploratory` used to force the Python path, because the
+compiled kernel only knew Close prices — so the **more realistic execution
+model was also the slow one**, and grid search could not use it at all. The
+kernel now takes an optional per-bar reference (fill) price and applies the
+same two-leg overnight/intraday decomposition, measured on 20,000 bars:
+
+| `fill_price` | native | Python fallback | speedup |
+|---|---|---|---|
+| `close` | 2.60 ms | 296.86 ms | **114×** |
+| `next_open` | 4.20 ms | 307.88 ms | **73×** |
+| `hl2_exploratory` | 6.39 ms | 321.08 ms | **50×** |
+
+A `next_open` grid now costs about what a `close` grid costs.
+
+## Crossover grids are fused, and never build a signal matrix
+
+Profiling a 300-combination × 5,000-bar SMA grid showed the batch kernel was
+solving the small half of the problem:
+
+```
+python signal generation   121.4 ms   92.1%
+vstack into (combos,bars)    3.2 ms    2.4%
+native batch backtest        7.2 ms    5.4%
+```
+
+It also computed 600 moving averages where only **35 unique periods** existed.
+
+`backtest_grid` now computes each unique indicator once — through the same
+`sma` the strategy itself uses, so there is no second definition to drift —
+and C++ builds each combination's signal into a single reusable buffer and
+backtests it immediately:
+
+| grid | before | after | speedup |
+|---|---|---|---|
+| 300 combos × 5,000 bars | 167.2 ms | 12.2 ms | **13.7×** |
+| 2,000 combos × 10,000 bars | 1,370.6 ms | 79.9 ms | **17.2×** |
+
+Results are bit-identical to the general path. Peak memory becomes
+`O(unique_periods × bars)` rather than `O(combos × bars)` — at the 50,000
+combination cap over 100,000 bars, **40 GB → 72 MB**.
+
+Grids that are not a plain fast/slow crossover fall back to the general path
+automatically.
+
+### Controlling parallelism
+
+Native kernels used to parallelize whenever there was more than one task,
+which oversubscribes badly when Standard Tools is itself running inside a
+`ProcessPoolExecutor`, several agents, or replicated containers. The decision
+is now based on total work, and two environment variables govern it:
+
+| variable | default | meaning |
+|---|---|---|
+| `SQT_NUM_THREADS` | unset | Ceiling on threads any kernel may use. **Set to `1` inside a process pool.** |
+| `SQT_OMP_MIN_WORK` | `50000` | Minimum tasks × elements before a region goes parallel at all. |
+
 ## Annualization is a parameter, not an assumption
 
 Every annualized metric — volatility, Sharpe, Sortino, Calmar — scales by a

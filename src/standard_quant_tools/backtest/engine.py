@@ -12,6 +12,7 @@ import pandas as pd
 
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators.trend import sma
 from standard_quant_tools.metrics.return_metrics import (
     annualized_volatility,
     cumulative_return,
@@ -446,14 +447,33 @@ def run_strategy(
     # ── C++ fast path ─────────────────────────────────────────────────────────
     # Pass raw signals — C++ applies the one-bar lag internally (executed[i] = signals[i-1]).
     # Do NOT pass `executed` here: it is already shifted, which would cause a 2-bar lag.
-    # The compiled kernel only knows Close prices, so it's scoped to the default
-    # fill_price="close" — "next_open" always routes to the Python path below.
-    if fill_price == "close" and HAS_CPP and _cpp_core is not None:
-        logger.debug("[run_strategy] using C++ kernel")
+    #
+    # EVERY fill mode runs here now. The kernel used to know only Close
+    # prices, so "next_open" and "hl2_exploratory" always fell back to
+    # Python -- which meant the MORE REALISTIC execution model was also the
+    # slow one, and the native grid could not be used for it at all. The
+    # kernel now takes an optional per-bar reference (fill) price and applies
+    # the same two-leg overnight/intraday decomposition this module's Python
+    # fallback does.
+    if HAS_CPP and _cpp_core is not None:
+        logger.debug("[run_strategy] using C++ kernel  fill_price=%s", fill_price)
+        ref_arr = None
+        if fill_price == "next_open":
+            ref_arr = price_data.loc[idx, "Open"].to_numpy(dtype=np.float64)
+        elif fill_price == "hl2_exploratory":
+            ref_arr = (
+                (price_data.loc[idx, "High"] + price_data.loc[idx, "Low"]) / 2.0
+            ).to_numpy(dtype=np.float64)
         # prices_arr/signals_arr were built and validated above, for every
         # path — not just this one.
         r = _cpp_core.run_strategy(
-            prices_arr, signals_arr, initial_capital, commission_pct, slippage_pct
+            prices_arr,
+            signals_arr,
+            initial_capital,
+            commission_pct,
+            slippage_pct,
+            252.0,
+            ref_arr,
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
         # win_rate/profit_factor/num_trades/avg_trade_return_pct: read
@@ -486,8 +506,21 @@ def run_strategy(
         }
         if include_trade_log:
             executed = signals.shift(1).fillna(0.0)
+            # Same reference-price convention the Python path uses: Close[i-1]
+            # under "close" (a position appearing at bar i earns its first
+            # return over Close[i-1] -> Close[i]), or that bar's own fill
+            # price under the fill-aware modes, where the two-leg
+            # decomposition already prices entries and exits there.
+            if fill_price == "next_open":
+                ref_for_log = price_data.loc[idx, "Open"]
+            elif fill_price == "hl2_exploratory":
+                ref_for_log = (
+                    price_data.loc[idx, "High"] + price_data.loc[idx, "Low"]
+                ) / 2.0
+            else:
+                ref_for_log = prices.shift(1)
             result["trade_log"] = _build_trade_log(
-                prices.shift(1),
+                ref_for_log,
                 prices,
                 executed,
                 commission_pct + slippage_pct,
@@ -590,6 +623,72 @@ def run_strategy(
 # ──────────────────────────────────────────────────────────────────────────────
 # Grid search — module-level worker (must be picklable for ProcessPoolExecutor)
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _fused_crossover_metrics(
+    price_data: pd.DataFrame,
+    keys: List[str],
+    combos: List[tuple],
+    initial_capital: float,
+    commission_pct: float,
+    slippage_pct: float,
+    ref_arr: Optional[np.ndarray],
+) -> Optional[np.ndarray]:
+    """
+    Fused path for two-moving-average crossover grids.
+
+    Profiling a 300-combination x 5,000-bar SMA grid showed the batch kernel
+    was solving the small half of the problem:
+
+        python signal generation   121.4 ms   92.1%
+        vstack into (combos,bars)    3.2 ms    2.4%
+        native batch backtest        7.2 ms    5.4%
+
+    and the grid computed 600 moving averages where only 35 UNIQUE periods
+    existed -- every combination recomputing an average another combination
+    had already produced.
+
+    So this computes each unique SMA ONCE (through the same `sma` the
+    strategy itself uses, so there is no second definition of the indicator
+    to drift), hands the resulting (n_unique x n_bars) matrix to C++ with a
+    (num_combos x 2) index pair per combination, and lets the kernel build
+    each signal into one reusable buffer and backtest it immediately.
+
+    Peak memory becomes O(n_unique * n_bars) instead of
+    O(num_combos * n_bars): the 50,000-combination cap over 100,000 bars was
+    a 40 GB signal matrix, and is now bounded by the number of distinct
+    periods.
+
+    Returns None when this grid is not a plain fast/slow crossover, in which
+    case the caller falls back to the general path.
+    """
+    if sorted(keys) != ["fast_period", "slow_period"]:
+        return None
+    fast_i, slow_i = keys.index("fast_period"), keys.index("slow_period")
+
+    periods = sorted(
+        {int(c[fast_i]) for c in combos} | {int(c[slow_i]) for c in combos}
+    )
+    row_of = {p: i for i, p in enumerate(periods)}
+    close = price_data["Close"]
+    indicators = np.empty((len(periods), len(close)), dtype=np.float64)
+    for period, row in row_of.items():
+        indicators[row, :] = sma(close, period).to_numpy(dtype=np.float64)
+
+    pair_idx = np.asarray(
+        [[row_of[int(c[fast_i])], row_of[int(c[slow_i])]] for c in combos],
+        dtype=np.int32,
+    )
+    return _cpp_core.batch_backtest_crossover(
+        close.to_numpy(dtype=np.float64),
+        indicators,
+        pair_idx,
+        initial_capital,
+        commission_pct,
+        slippage_pct,
+        252.0,
+        ref_arr,
+    )
 
 
 def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -759,7 +858,7 @@ def backtest_grid(
     # Generate all signal arrays in Python, then ship the entire batch to C++
     # in a single call — no subprocess overhead, no per-combo boundary crossing.
     # Scoped to fill_price="close" — the compiled kernel only knows Close prices.
-    if fill_price == "close" and HAS_CPP and _cpp_core is not None:
+    if HAS_CPP and _cpp_core is not None:
         # Checked before the try/except below -- that except catches
         # Exception broadly (to fall back to the Python grid loop on any
         # C++ failure), which would otherwise silently swallow a
@@ -777,17 +876,19 @@ def backtest_grid(
         )
         require_finite_array(prices_arr, "prices", "batch_run_strategy")
         try:
-            # Build (num_combos × n_bars) signal matrix
-            sig_rows = []
-            for combo in combos:
-                params = dict(zip(keys, combo))
-                sig_rows.append(
-                    signal_fn(price_data, **params).to_numpy(dtype=np.float64)
-                )
-            signals_mat = np.ascontiguousarray(
-                np.vstack(sig_rows), dtype=np.float64
-            )  # shape: (num_combos, n_bars)
-            require_finite_array(signals_mat, "signals", "batch_run_strategy")
+            # Reference (fill) prices, resolved BEFORE either branch below
+            # uses them. They were originally computed just above the batch
+            # call, which put them AFTER the fused branch that reads them --
+            # a NameError that the broad `except Exception` below caught and
+            # turned into a silent fallback to the Python grid loop. The
+            # fused path simply never ran, and nothing said so.
+            grid_ref_arr = None
+            if fill_price == "next_open":
+                grid_ref_arr = price_data["Open"].to_numpy(dtype=np.float64)
+            elif fill_price == "hl2_exploratory":
+                grid_ref_arr = (
+                    (price_data["High"] + price_data["Low"]) / 2.0
+                ).to_numpy(dtype=np.float64)
 
             logger.debug(
                 "[backtest_grid] strategy=%s  combos=%d  path=C++  sort_by=%s",
@@ -796,33 +897,63 @@ def backtest_grid(
                 sort_by,
             )
 
-            # win_rate/profit_factor/num_trades/avg_trade_return_pct here come
-            # straight from the native kernel's own trade-log logic, same as
-            # run_strategy's single-call C++ path above -- unlike that path,
-            # nothing overwrites them per-combo here (rebuilding a Python-side
-            # trade log for every parameter combination in the grid would
-            # defeat the point of the batch C++ path's speed). This used to
-            # be a real gap (native entry price one bar off, no commission/
-            # slippage in trade returns), but backtest.cpp's run_strategy
-            # (which batch_run_strategy calls per test) now uses the same
-            # fill-aware, cost-aware accounting as _build_trade_log directly,
-            # so these native stats should already agree with the Python
-            # recomputation without an override -- see
-            # tests/test_backtest.py's TestNativeTradeStatsCorrectness for
-            # the gated equivalence check.
-            # A flat (num_tests, 11) NumPy array instead of a Python list of
-            # dicts -- for a large grid (thousands of combos), building that
-            # many Python dict objects just to immediately feed them into
-            # pd.DataFrame(rows) was itself real, avoidable overhead. Column
-            # order is a fixed contract with bindings.cpp -- see
-            # _BATCH_METRIC_COLUMNS above.
-            metrics_arr = _cpp_core.batch_run_strategy(
-                prices_arr,
-                signals_mat,
-                initial_capital,
-                commission_pct,
-                slippage_pct,
-            )
+            # Fused path first: for a plain fast/slow crossover grid this
+            # skips signal generation and the (num_combos x n_bars) matrix
+            # entirely -- see _fused_crossover_metrics for the profile that
+            # motivated it.
+            metrics_arr = None
+            if not is_custom and strategy_label == "sma_crossover":
+                metrics_arr = _fused_crossover_metrics(
+                    price_data,
+                    keys,
+                    combos,
+                    initial_capital,
+                    commission_pct,
+                    slippage_pct,
+                    grid_ref_arr,
+                )
+
+            if metrics_arr is None:
+                sig_rows = []
+                for combo in combos:
+                    params = dict(zip(keys, combo))
+                    sig_rows.append(
+                        signal_fn(price_data, **params).to_numpy(dtype=np.float64)
+                    )
+                signals_mat = np.ascontiguousarray(
+                    np.vstack(sig_rows), dtype=np.float64
+                )  # shape: (num_combos, n_bars)
+                require_finite_array(signals_mat, "signals", "batch_run_strategy")
+
+                # win_rate/profit_factor/num_trades/avg_trade_return_pct here come
+                # straight from the native kernel's own trade-log logic, same as
+                # run_strategy's single-call C++ path above -- unlike that path,
+                # nothing overwrites them per-combo here (rebuilding a Python-side
+                # trade log for every parameter combination in the grid would
+                # defeat the point of the batch C++ path's speed). This used to
+                # be a real gap (native entry price one bar off, no commission/
+                # slippage in trade returns), but backtest.cpp's run_strategy
+                # (which batch_run_strategy calls per test) now uses the same
+                # fill-aware, cost-aware accounting as _build_trade_log directly,
+                # so these native stats should already agree with the Python
+                # recomputation without an override -- see
+                # tests/test_backtest.py's TestNativeTradeStatsCorrectness for
+                # the gated equivalence check.
+                # A flat (num_tests, 11) NumPy array instead of a Python list of
+                # dicts -- for a large grid (thousands of combos), building that
+                # many Python dict objects just to immediately feed them into
+                # pd.DataFrame(rows) was itself real, avoidable overhead. Column
+                # order is a fixed contract with bindings.cpp -- see
+                # _BATCH_METRIC_COLUMNS above.
+                metrics_arr = _cpp_core.batch_run_strategy(
+                    prices_arr,
+                    signals_mat,
+                    initial_capital,
+                    commission_pct,
+                    slippage_pct,
+                    252.0,
+                    grid_ref_arr,
+                )
             metrics_df = pd.DataFrame(metrics_arr, columns=_BATCH_METRIC_COLUMNS)
             metrics_df["num_trades"] = metrics_df["num_trades"].astype(int)
             metrics_df["final_equity"] = metrics_df["final_equity"].round(2)

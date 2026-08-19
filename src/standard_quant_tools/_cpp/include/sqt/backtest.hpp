@@ -43,6 +43,29 @@ struct BacktestResult {
  *   flushed at prices[n-1] with a single cost_per_unit deduction (entry
  *   only — no real exit event occurred).
  *
+ * @param ref_prices     Optional per-bar REFERENCE (fill) price, length n.
+ *                       nullptr  -> close-to-close returns, the historical
+ *                                   behaviour and fill_price="close".
+ *                       non-null -> the two-leg decomposition engine.py uses
+ *                                   for fill_price="next_open" (Open) and
+ *                                   "hl2_exploratory" ((High+Low)/2):
+ *
+ *                         overnight[i] = (ref[i] - close[i-1]) / close[i-1]
+ *                                        priced at YESTERDAY's position
+ *                         intraday[i]  = (close[i] - ref[i]) / ref[i]
+ *                                        priced at TODAY's position
+ *
+ *                       Adding the two legs (rather than compounding them)
+ *                       matches engine.py exactly; the product term is the
+ *                       only difference from pure close-to-close and is the
+ *                       standard overnight/intraday P&L attribution.
+ *
+ *                       Without this, fill_price != "close" had no native
+ *                       path at all, so the MORE REALISTIC execution model
+ *                       was also the slow one -- and a native grid could not
+ *                       be used for it, which is what let walk-forward
+ *                       optimize under one fill model and evaluate under
+ *                       another.
  * @param prices         Close prices, length n.
  * @param signals        Position signals: 1=long, 0=flat, -1=short, length n.
  * @param n              Number of bars.
@@ -64,7 +87,10 @@ BacktestResult run_strategy(
     // reporting a "Sharpe" annualized as though its bars were days.
     // Python owns calendar semantics and passes the resolved number here;
     // the kernel stays calendar-agnostic.
-    double periods_per_year = 252.0
+    double periods_per_year = 252.0,
+    // Last and defaulted so every existing positional call site -- the C++
+    // benchmarks and gtest suites among them -- keeps compiling unchanged.
+    const double* ref_prices = nullptr
 );
 
 /**
@@ -112,7 +138,60 @@ BacktestResult run_strategy_summary(
     // reporting a "Sharpe" annualized as though its bars were days.
     // Python owns calendar semantics and passes the resolved number here;
     // the kernel stays calendar-agnostic.
-    double periods_per_year = 252.0
+    double periods_per_year = 252.0,
+    // Last and defaulted so every existing positional call site -- the C++
+    // benchmarks and gtest suites among them -- keeps compiling unchanged.
+    const double* ref_prices = nullptr
+);
+
+/**
+ * Fused crossover grid: generate each combination's signal and consume it
+ * into the backtest immediately, without ever materializing a
+ * (num_combos x n) signal matrix.
+ *
+ * Profiling a 300-combination x 5,000-bar SMA grid showed where the cost
+ * actually sat:
+ *
+ *     python signal generation   121.4 ms   92.1%
+ *     vstack into (combos,bars)    3.2 ms    2.4%
+ *     native batch backtest        7.2 ms    5.4%
+ *
+ * So moving only the backtest into C++ left 92% of the work behind, and the
+ * grid computed 600 moving averages where 35 UNIQUE periods were needed --
+ * every combination recomputing an average another combination had already
+ * produced.
+ *
+ * The split here follows from that. Python computes each unique indicator
+ * ONCE (reusing its own already-verified implementations, so there is no
+ * second definition of an indicator to drift), and passes:
+ *
+ *   @param indicators  (n_unique x n) row-major matrix of precomputed
+ *                      indicator series, one row per UNIQUE parameter value.
+ *   @param pair_idx    (num_combos x 2) row-major indices into `indicators`:
+ *                      {fast_row, slow_row} for each combination.
+ *
+ * The kernel then writes one combination's signal into a single reusable
+ * scratch buffer and backtests it before moving on, so peak memory is
+ * O(n_unique * n + n) rather than O(num_combos * n). At the existing
+ * 50,000-combination cap over 100,000 bars the old shape was a 40 GB
+ * allocation; this never exceeds the indicator matrix.
+ *
+ * Signal convention matches _sma_signals in strategies.py: 1 when the fast
+ * series is strictly above the slow one, else 0. NaN on either side (a
+ * warm-up bar) yields 0, exactly as the pandas comparison does.
+ */
+std::vector<BacktestResult> batch_backtest_crossover(
+    const double* prices,
+    const double* indicators,
+    std::size_t   n,
+    std::size_t   n_unique,
+    const int*    pair_idx,
+    std::size_t   num_combos,
+    double initial_capital  = 10'000.0,
+    double commission_pct   = 0.001,
+    double slippage_pct     = 0.0005,
+    double periods_per_year = 252.0,
+    const double* ref_prices = nullptr
 );
 
 std::vector<BacktestResult> batch_run_strategy(
@@ -123,7 +202,10 @@ std::vector<BacktestResult> batch_run_strategy(
     double initial_capital = 10'000.0,
     double commission_pct  = 0.001,
     double slippage_pct    = 0.0005,
-    double periods_per_year = 252.0
+    double periods_per_year = 252.0,
+    // Last and defaulted so every existing positional call site -- the C++
+    // benchmarks and gtest suites among them -- keeps compiling unchanged.
+    const double* ref_prices = nullptr
 );
 
 }  // namespace sqt

@@ -9,6 +9,81 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Changed (performance — moving the boundary, not porting more formulas)
+
+The organizing question was not "can this function be C++" but "what is the
+largest deterministic numerical workflow we can cross into C++ once and not
+return from until the answer is finished". Suite: 2734 → 2749 passed, 2
+skipped; all 9 C++ suites green. Every path was checked for exact agreement
+with the one it replaces before any timing was taken.
+
+**The realistic execution mode is no longer the slow mode.** The kernel only
+knew Close prices, so `next_open` and `hl2_exploratory` always fell back to
+Python — and a native grid could not be used for them at all, which is what
+let a walk-forward optimize under one fill model and evaluate under another.
+`run_strategy` now takes an optional per-bar reference price and applies the
+same two-leg overnight/intraday decomposition:
+
+| fill mode | native | python | speedup |
+|---|---|---|---|
+| `close` | 2.60 ms | 296.86 ms | **114×** |
+| `next_open` | 4.20 ms | 307.88 ms | **73×** |
+| `hl2_exploratory` | 6.39 ms | 321.08 ms | **50×** |
+
+(20,000 bars.) A `next_open` grid now costs about what a `close` grid costs
+(150 ms vs 142 ms) where it previously ran entirely in Python.
+
+**The fused crossover grid removes the signal matrix.** Profiling a
+300-combination × 5,000-bar SMA grid showed the batch kernel was solving the
+small half of the problem:
+
+```
+python signal generation   121.4 ms   92.1%
+vstack into (combos,bars)    3.2 ms    2.4%
+native batch backtest        7.2 ms    5.4%
+```
+
+and it computed 600 moving averages where only **35 unique periods** existed —
+every combination recomputing an average another had already produced.
+
+Python now computes each unique indicator once (through the same `sma` the
+strategy itself uses, so there is no second definition to drift) and C++ builds
+each combination's signal into one reusable buffer and backtests it
+immediately:
+
+| grid | before | after | speedup |
+|---|---|---|---|
+| 300 combos × 5,000 bars | 167.2 ms | 12.2 ms | **13.7×** |
+| 2,000 combos × 10,000 bars | 1,370.6 ms | 79.9 ms | **17.2×** |
+
+Results are **bit-identical** to the general path (worst difference 0.000e+00
+across every metric).
+
+Peak memory changes shape too, from `O(combos × bars)` to
+`O(unique_periods × bars)`. At the existing 50,000-combination cap over
+100,000 bars that is **40 GB → 72 MB** — the allocation was a latent
+out-of-memory failure inside a nominally permitted request.
+
+**OpenMP is governed rather than assumed.** Kernels parallelized whenever
+there was more than one task, which asks the wrong question twice: two tiny
+backtests cost more in thread startup than they save, and a library that
+grabs every core oversubscribes badly when it is itself inside a
+`ProcessPoolExecutor`, several agents, or replicated containers. New
+`sqt::omp_policy` decides on **total work** (tasks × elements) and honours
+two environment variables:
+
+- `SQT_NUM_THREADS` — ceiling on threads any kernel may use. Set to `1`
+  inside a process pool.
+- `SQT_OMP_MIN_WORK` — minimum work before a region goes parallel at all
+  (default 50,000).
+
+**Monte Carlo runs are reproducible.** With `random_seed=None` the native
+kernel seeded itself from `steady_clock`, so the audit record faithfully
+stored `None` while the numbers came from a value nobody kept — the run could
+never be repeated, and nothing said so. The seed is now drawn *before*
+execution and returned on the result, so re-passing it repeats the run
+exactly.
+
 ### Fixed (native-layer audit — annualization, parity, and an execution-model mismatch)
 
 A follow-up review covering the C++ layer and the Python residuals the earlier

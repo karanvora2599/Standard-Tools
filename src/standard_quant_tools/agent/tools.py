@@ -3666,19 +3666,32 @@ def run_monte_carlo_simulation(
     )
     portfolio_returns = build_portfolio(returns_df, weights)
 
+    # Materialized BEFORE execution, not left to the kernel. With
+    # random_seed=None the native path seeded itself from steady_clock, so
+    # the audit record faithfully stored `None` while the numbers came from
+    # a value that was never captured anywhere — the run was unreproducible
+    # and nothing said so. Drawing it here means the seed is in both the
+    # result and the decision record, and re-passing it repeats the run.
+    resolved_seed = (
+        input_data.random_seed
+        if input_data.random_seed is not None
+        else int(np.random.SeedSequence().entropy % (2**32))
+    )
+
     result = simulate_forward_paths(
         portfolio_returns,
         horizon_days=input_data.horizon_days,
         n_simulations=input_data.n_simulations,
         block_size=input_data.block_size,
         initial_capital=input_data.initial_capital,
-        seed=input_data.random_seed,
+        seed=resolved_seed,
     )
 
     return MonteCarloSimulationResult(
         tickers=input_data.tickers,
         horizon_days=input_data.horizon_days,
         n_simulations=input_data.n_simulations,
+        random_seed=resolved_seed,
         terminal_median=round(result["terminal_median"], 2),
         terminal_p5=round(result["terminal_p5"], 2),
         terminal_p95=round(result["terminal_p95"], 2),

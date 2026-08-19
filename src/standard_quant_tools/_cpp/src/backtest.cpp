@@ -1,4 +1,5 @@
 #include "sqt/backtest.hpp"
+#include "sqt/omp_policy.hpp"
 
 #include "sqt/numerics.hpp"
 
@@ -110,6 +111,35 @@ namespace {
     // (mirrors the original "no real exit event occurred" flush -- entry/
     // resize costs only, already reflected in st.cost_accrued; no
     // additional cost charged here).
+
+    // Shared by both passes of the summary kernel and by run_strategy: the
+    // gross (pre-cost) strategy return for bar i. Factored out so the two
+    // passes cannot drift -- pass 1 accumulates the mean and pass 2
+    // recomputes the same value for the variance, and a divergence between
+    // them would produce a self-inconsistent Sharpe rather than an error.
+    inline double gross_return_at(
+        const double* prices,
+        const double* signals,
+        const double* ref_prices,
+        std::size_t   i)
+    {
+        const double prev_close = prices[i - 1];
+        const double exec_i     = signals[i - 1];
+        if (ref_prices == nullptr) {
+            const double ret_i = (prev_close != 0.0)
+                ? (prices[i] - prev_close) / prev_close : 0.0;
+            return exec_i * ret_i;
+        }
+        // Two-leg decomposition -- see run_strategy's ref_prices docs.
+        const double fill      = ref_prices[i];
+        const double exec_prev = (i >= 2) ? signals[i - 2] : 0.0;
+        const double overnight = (prev_close != 0.0)
+            ? (fill - prev_close) / prev_close : 0.0;
+        const double intraday  = (fill != 0.0)
+            ? (prices[i] - fill) / fill : 0.0;
+        return exec_prev * overnight + exec_i * intraday;
+    }
+
     TradeCompletion flush_open_lot(const PositionState& st, double final_price) {
         TradeCompletion result;
         if (st.size == 0.0) return result;
@@ -129,7 +159,8 @@ BacktestResult run_strategy(
     double initial_capital,
     double commission_pct,
     double slippage_pct,
-    double periods_per_year)
+    double periods_per_year,
+    const double* ref_prices)
 {
     BacktestResult r{};
     r.equity_curve.resize(n, initial_capital);
@@ -167,14 +198,33 @@ BacktestResult run_strategy(
 
     for (std::size_t i = 1; i < n; ++i) {
         const double ref_price = prices[i - 1];
-        const double ret_i     = (ref_price != 0.0)
-            ? (prices[i] - ref_price) / ref_price
-            : 0.0;
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
 
-        strat_ret[i] = exec_i * ret_i - tcost;
+        double gross;
+        if (ref_prices == nullptr) {
+            // Close-to-close: the historical path, unchanged.
+            const double ret_i = (ref_price != 0.0)
+                ? (prices[i] - ref_price) / ref_price
+                : 0.0;
+            gross = exec_i * ret_i;
+        } else {
+            // Two-leg decomposition, mirroring engine.py exactly. The
+            // overnight gap is earned at YESTERDAY's position (a position
+            // still held overnight is exposed to it, including on an exit
+            // bar), while the move from the fill price to the close is
+            // earned at TODAY's. exec_prev is signals[i-2], or 0.0 at i==1,
+            // both directly index-derivable -- no extra state.
+            const double fill = ref_prices[i];
+            const double exec_prev = (i >= 2) ? signals[i - 2] : 0.0;
+            const double overnight = (ref_price != 0.0)
+                ? (fill - ref_price) / ref_price : 0.0;
+            const double intraday = (fill != 0.0)
+                ? (prices[i] - fill) / fill : 0.0;
+            gross = exec_prev * overnight + exec_i * intraday;
+        }
+        strat_ret[i] = gross - tcost;
 
         const auto tc = apply_position_event(pos, exec_i, prev_exec, ref_price, cost_per_unit);
         if (tc.completed) trade_rets.push_back(tc.return_pct);
@@ -324,7 +374,8 @@ BacktestResult run_strategy_summary(
     double initial_capital,
     double commission_pct,
     double slippage_pct,
-    double periods_per_year)
+    double periods_per_year,
+    const double* ref_prices)
 {
     BacktestResult r{};
     r.final_equity         = initial_capital;
@@ -377,14 +428,12 @@ BacktestResult run_strategy_summary(
 
     for (std::size_t i = 1; i < n; ++i) {
         const double ref_price = prices[i - 1];
-        const double ret_i     = (ref_price != 0.0)
-            ? (prices[i] - ref_price) / ref_price
-            : 0.0;
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
 
-        const double strat_ret_i = exec_i * ret_i - tcost;
+        const double strat_ret_i =
+            gross_return_at(prices, signals, ref_prices, i) - tcost;
 
         equity *= (1.0 + strat_ret_i);
         if (equity > peak) peak = equity;
@@ -447,15 +496,12 @@ BacktestResult run_strategy_summary(
     double down_sq_sum = 0.0;
 
     for (std::size_t i = 1; i < n; ++i) {
-        const double ref_price = prices[i - 1];
-        const double ret_i     = (ref_price != 0.0)
-            ? (prices[i] - ref_price) / ref_price
-            : 0.0;
         const double exec_i      = signals[i - 1];
         const double prev_exec_i = (i >= 2) ? signals[i - 2] : 0.0;
         const double pdiff       = exec_i - prev_exec_i;
         const double tcost       = std::abs(pdiff) * cost_per_unit;
-        const double strat_ret_i = exec_i * ret_i - tcost;
+        const double strat_ret_i =
+            gross_return_at(prices, signals, ref_prices, i) - tcost;
 
         const double d = strat_ret_i - mean_r;
         sum_sq += d * d;
@@ -505,6 +551,83 @@ BacktestResult run_strategy_summary(
 // this loop has no equivalent need for). `results` must be pre-sized via
 // resize() and written through indexed assignment -- reserve()+push_back()
 // is not thread-safe across concurrent writers.
+std::vector<BacktestResult> batch_backtest_crossover(
+    const double* prices,
+    const double* indicators,
+    std::size_t   n,
+    std::size_t   n_unique,
+    const int*    pair_idx,
+    std::size_t   num_combos,
+    double initial_capital,
+    double commission_pct,
+    double slippage_pct,
+    double periods_per_year,
+    const double* ref_prices)
+{
+    std::vector<BacktestResult> results(num_combos);
+    if (n == 0 || num_combos == 0) return results;
+
+    const long long num_combos_ll = static_cast<long long>(num_combos);
+
+    // Each combination is independent, and each thread needs exactly one
+    // signal buffer for the whole run -- allocated ONCE outside the loop
+    // rather than per combination. A per-iteration allocation inside an
+    // OpenMP region is both a throughput cost and a correctness hazard,
+    // since a std::bad_alloc escaping a structured block is undefined.
+#ifdef _OPENMP
+#pragma omp parallel \
+    if(sqt::omp_policy::worth_parallel(num_combos, n)) \
+    num_threads(sqt::omp_policy::max_threads() > 0 \
+                ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    {
+        std::vector<double> signal(n, 0.0);
+#pragma omp for schedule(static)
+        for (long long t = 0; t < num_combos_ll; ++t) {
+            const std::size_t ti = static_cast<std::size_t>(t);
+            const int fast_row = pair_idx[ti * 2];
+            const int slow_row = pair_idx[ti * 2 + 1];
+            if (fast_row < 0 || slow_row < 0 ||
+                static_cast<std::size_t>(fast_row) >= n_unique ||
+                static_cast<std::size_t>(slow_row) >= n_unique) {
+                continue;  // validated at the binding; defensive only
+            }
+            const double* fast = indicators + static_cast<std::size_t>(fast_row) * n;
+            const double* slow = indicators + static_cast<std::size_t>(slow_row) * n;
+            for (std::size_t i = 0; i < n; ++i) {
+                // A NaN on either side (warm-up) makes the comparison false,
+                // which is exactly what the pandas `fast > slow` produces.
+                signal[i] = (fast[i] > slow[i]) ? 1.0 : 0.0;
+            }
+            results[ti] = run_strategy_summary(
+                prices, signal.data(), n,
+                initial_capital, commission_pct, slippage_pct,
+                periods_per_year, ref_prices);
+        }
+    }
+#else
+    std::vector<double> signal(n, 0.0);
+    for (long long t = 0; t < num_combos_ll; ++t) {
+        const std::size_t ti = static_cast<std::size_t>(t);
+        const int fast_row = pair_idx[ti * 2];
+        const int slow_row = pair_idx[ti * 2 + 1];
+        if (fast_row < 0 || slow_row < 0 ||
+            static_cast<std::size_t>(fast_row) >= n_unique ||
+            static_cast<std::size_t>(slow_row) >= n_unique) {
+            continue;
+        }
+        const double* fast = indicators + static_cast<std::size_t>(fast_row) * n;
+        const double* slow = indicators + static_cast<std::size_t>(slow_row) * n;
+        for (std::size_t i = 0; i < n; ++i)
+            signal[i] = (fast[i] > slow[i]) ? 1.0 : 0.0;
+        results[ti] = run_strategy_summary(
+            prices, signal.data(), n,
+            initial_capital, commission_pct, slippage_pct,
+            periods_per_year, ref_prices);
+    }
+#endif
+    return results;
+}
+
 std::vector<BacktestResult> batch_run_strategy(
     const double* prices,
     const double* signals_flat,
@@ -513,7 +636,8 @@ std::vector<BacktestResult> batch_run_strategy(
     double initial_capital,
     double commission_pct,
     double slippage_pct,
-    double periods_per_year)
+    double periods_per_year,
+    const double* ref_prices)
 {
     std::vector<BacktestResult> results(num_tests);
 
@@ -532,7 +656,13 @@ std::vector<BacktestResult> batch_run_strategy(
     const long long num_tests_ll = static_cast<long long>(num_tests);
 
 #ifdef SQT_HAS_OPENMP
-    #pragma omp parallel for schedule(static) if(num_tests > 1)
+    // Work-based, not count-based: two tiny backtests cost more in thread
+    // startup than they save, and this library often runs inside something
+    // already parallel. See sqt::omp_policy.
+    #pragma omp parallel for schedule(static) \
+        if(sqt::omp_policy::worth_parallel(num_tests, n)) \
+        num_threads(sqt::omp_policy::max_threads() > 0 \
+                    ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     for (long long t = 0; t < num_tests_ll; ++t) {
         results[static_cast<std::size_t>(t)] = run_strategy_summary(
@@ -542,7 +672,8 @@ std::vector<BacktestResult> batch_run_strategy(
             initial_capital,
             commission_pct,
             slippage_pct,
-            periods_per_year);
+            periods_per_year,
+            ref_prices);
     }
     return results;
 }

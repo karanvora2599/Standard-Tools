@@ -2504,6 +2504,17 @@ class MonteCarloSimulationResult(BaseModel):
     tickers: List[str]
     horizon_days: int
     n_simulations: int
+    random_seed: int = Field(
+        ...,
+        description=(
+            "The seed this run actually used. When the request omitted one, a "
+            "seed is drawn HERE and passed down, rather than letting the native "
+            "kernel derive one from the clock — otherwise the audit record "
+            "stored random_seed=None while the numbers came from a value "
+            "nobody kept, and the run could never be reproduced. Pass this "
+            "back as random_seed to repeat the simulation exactly."
+        ),
+    )
     terminal_median: float
     terminal_p5: float
     terminal_p95: float
