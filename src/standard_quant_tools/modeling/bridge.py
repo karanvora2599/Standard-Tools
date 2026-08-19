@@ -1,11 +1,12 @@
 """
 modeling.bridge: the model -> backtest bridge. Deliberately a plain
-Python function, not a 6th agent tool — the 5-tool modeling surface
-stays exactly 5. This is the "artifacts, not tool calls" boundary
-between the modeling registry and the existing 46-tool agent.tools
-registry:
+Python function and not a tool: it only RESHAPES an artifact the caller
+already holds and hands it to a tool in the other registry, which is
+argument-shaping rather than a decision. This is the "artifacts, not tool
+calls" boundary between the modeling registry and the existing 46-tool
+agent.tools registry:
 
-    run_model_experiment(...)                # modeling, 1 of 5 tools
+    run_model_experiment(...)                # modeling, 1 of 6 tools
         -> RunModelExperimentResult.oos_predictions_uri
     oos_predictions_to_signal_panel(...)      # this module, plain Python
         -> {ticker: {date: value}}

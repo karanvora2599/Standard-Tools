@@ -123,16 +123,28 @@ class TestModelingDispatch:
         with pytest.raises(ValueError, match="Unknown modeling tool"):
             modeling_dispatch("not_a_real_tool", {})
 
-    def test_get_modeling_tools_returns_exactly_five(self):
+    def test_get_modeling_tools_returns_exactly_six(self):
         tools = get_modeling_tools()
-        assert len(tools) == 5
+        assert len(tools) == 6
         assert {t["function"]["name"] for t in tools} == {
             "list_features",
             "build_model_dataset",
             "run_model_experiment",
             "score_model",
             "inspect_model",
+            "evaluate_model_portfolio",
         }
+
+    def test_every_registered_tool_is_dispatchable(self):
+        """The definition list and the dispatch table are maintained by
+        hand and had no test tying them together — a tool advertised in
+        the schema but absent from MODELING_TOOL_DISPATCH would be
+        callable by an LLM and then fail with 'Unknown modeling tool'."""
+        from standard_quant_tools.modeling.agent.tools import MODELING_TOOL_DISPATCH
+
+        assert {t["function"]["name"] for t in get_modeling_tools()} == set(
+            MODELING_TOOL_DISPATCH
+        )
 
     def test_tool_shape_matches_existing_agent_surface_envelope(self):
         """Same {"type": "function", "function": {...}} envelope as

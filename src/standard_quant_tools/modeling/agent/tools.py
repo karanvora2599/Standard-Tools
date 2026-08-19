@@ -1,5 +1,5 @@
 """
-The 5-tool modeling agent surface — kept structurally separate from
+The 6-tool modeling agent surface — kept structurally separate from
 standard_quant_tools.agent.get_agent_tools()/TOOL_CATEGORY (the existing
 46-tool analysis/backtest registry) per Documentation/15_modeling.md's
 architecture rationale: fitting/validating/registering a statistical
@@ -19,6 +19,19 @@ better.
                             artifact.
     inspect_model          — one tool, four views, instead of four
                             separate inspection tools.
+    evaluate_model_portfolio — model_id + transform/portfolio specs ->
+                            OOS predictions run through the shared-cash
+                            portfolio simulator as target weights.
+
+Why evaluate_model_portfolio is a TOOL while `bridge`'s signal-panel
+conversion deliberately is not: the bridge only RESHAPES an artifact the
+caller already has, and hands it to a tool in the other registry — there
+is no decision in it, so exposing it would have been a sixth name for an
+argument-shaping step. This one runs a simulation, produces new persisted
+artifacts, and answers the question an agent actually asks after training
+("is this model worth trading"), which is the same shape of operation
+score_model already occupies. The 5-tool count was never the invariant;
+"every tool is a decision the agent makes, not plumbing" was.
 """
 
 import logging
@@ -34,12 +47,15 @@ from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
 from ..engine import run_experiment as _run_experiment
 from ..features.registry import list_features as _list_features
+from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
 from ..registry.model_registry import load_manifest
 from ..scoring import score_model as _score_model
 from ..specs import DatasetSpec
 from .models import (
     BuildModelDatasetInput,
     BuildModelDatasetResult,
+    EvaluateModelPortfolioInput,
+    EvaluateModelPortfolioResult,
     FeatureCatalogEntry,
     InspectModelInput,
     InspectModelResult,
@@ -281,6 +297,32 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
     )
 
 
+def evaluate_model_portfolio(
+    input_data: EvaluateModelPortfolioInput,
+) -> EvaluateModelPortfolioResult:
+    """
+    Run a registered model's walk-forward out-of-sample predictions through
+    the shared-cash portfolio simulator and report what they were worth
+    after costs.
+
+    This is the economic counterpart to run_model_experiment's statistical
+    metrics. A model with a strong IC can still lose money once its ranking
+    is turned into position sizes, held for a realistic period, and charged
+    commission, spread and (if configured) borrow — and nothing in
+    oos_metrics can show that.
+
+    Uses OOS predictions only, never score_model: score_model's estimator is
+    the final full-panel refit, so scoring historical dates with it would be
+    in-sample and the equity curve would be fiction.
+    """
+    result = _evaluate_model_portfolio(
+        model_id=input_data.model_id,
+        transform=input_data.transform,
+        portfolio=input_data.portfolio,
+    )
+    return EvaluateModelPortfolioResult(**result)
+
+
 # ── Registration (mirrors agent.tools.get_agent_tools()/_TOOL_DISPATCH,
 # but a separate registry — never merged into that one) ────────────────
 
@@ -306,6 +348,13 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Inspect a registered model's summary/importance/validation/lineage.",
         InspectModelInput,
     ),
+    (
+        "evaluate_model_portfolio",
+        "Evaluate a model's out-of-sample predictions as a shared-cash "
+        "portfolio: transform predictions into target weights and simulate "
+        "them with costs, returning Sharpe, drawdown, turnover and exposure.",
+        EvaluateModelPortfolioInput,
+    ),
 ]
 
 MODELING_TOOL_DISPATCH = {
@@ -314,13 +363,17 @@ MODELING_TOOL_DISPATCH = {
     "run_model_experiment": (run_model_experiment, RunModelExperimentInput),
     "score_model": (score_model, ScoreModelInput),
     "inspect_model": (inspect_model, InspectModelInput),
+    "evaluate_model_portfolio": (
+        evaluate_model_portfolio,
+        EvaluateModelPortfolioInput,
+    ),
 }
 
 
 def get_modeling_tools() -> List[Dict[str, Any]]:
     """Tool definitions for the modeling runtime, in the exact same
     OpenAI-style {"type": "function", "function": {...}} envelope
-    agent.tools.get_agent_tools() returns — a separate 5-entry list,
+    agent.tools.get_agent_tools() returns — a separate 6-entry list,
     never merged into that 46-entry one, but shaped identically so the
     same LLM client code can consume either registry."""
     return [

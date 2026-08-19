@@ -9,6 +9,103 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (model-to-portfolio evaluation)
+
+A trained model could be *measured* (`run_model_experiment`'s R², IC,
+rank-IC) and it could be *traded one name at a time*
+(`bridge.oos_predictions_to_signal_panel` → `run_signal_panel_backtest`),
+but nothing connected it to the shared-cash portfolio simulator this
+repo already had. `evaluate_model_portfolio` — a 6th modeling tool —
+closes that:
+
+    OOS predictions → per-date cross-sectional weights → target-weight
+    artifact → run_portfolio_simulation → economic metrics
+
+**Why the bridge was not enough.** It maps every prediction to `-1/0/+1`,
+which is the only defensible conversion for an engine that multiplies a
+`SCORE` straight into `strategy_return` as a raw leverage multiplier —
+but it discards the ranking, and `run_signal_panel_backtest` then gives
+every ticker its *own* `initial_capital`. A cross-sectional model
+predicts an ordering over names competing for the same dollars; neither
+property survives. A strong `cs_rank_ic` alongside a negative portfolio
+Sharpe is a real and common outcome, and nothing in `oos_metrics` could
+show it.
+
+**New declarative specs** (`modeling.specs`), constructible by an agent:
+
+- `PredictionTransformSpec` — `sign` / `cross_sectional_rank` /
+  `cross_sectional_zscore` / `top_bottom_quantile`, with
+  `gross_exposure`, `net_exposure`, `max_position_weight`,
+  `volatility_scale` and a `daily`/`weekly`/`monthly` rebalance schedule.
+- `PortfolioSimSpec` — the evaluation-relevant subset of
+  `run_portfolio_simulation`'s parameters, defaulting to `next_open`
+  fills rather than the simulator's backward-compatible `close`.
+
+**The ranking math is reused, not reimplemented.** `backtest.sizing`
+(`rank_weighted`, `zscore_normalized`, `equal_weight_top_bottom`,
+`vol_scaled`) already builds gross-normalized weight panels and is called
+as-is. `modeling.portfolio_eval` contributes only what sizing.py has no
+concept of:
+
+- **Exact gross *and* net targets.** A single rescale controls one or the
+  other, never both. The signed vector is split into books sized to
+  `(gross + net)/2` and `(gross − net)/2`, giving `sum(|w|) = gross` and
+  `sum(w) = net` by construction for any `|net| ≤ gross`.
+- **A per-position cap that redistributes.** Excess above the cap is
+  pushed onto uncapped names in the same book, iteratively — one pass is
+  not enough, since redistribution can lift another name over the cap. A
+  cap that merely truncated would silently deliver less gross exposure
+  than requested.
+- **Honest infeasibility.** Two names cannot hold 0.5 gross at a 0.1 cap.
+  That reports a shortfall in `transform_diagnostics` and `warnings`
+  rather than breaching the cap or rescaling the *other* book (which
+  would break the net target instead).
+- **First-of-period rebalancing.** "Last date in the month" is only
+  knowable once the month has ended, so a schedule built that way cannot
+  be reproduced live. First-of-period can.
+- **Sparse cross-sections.** Dates sharing an availability pattern are
+  grouped and weighted together. A missing `(entity, date)` stays `NaN`
+  and gets zero *weight* — never a `0.0` *score*, which is the middle of
+  a centered cross-section and would rank a name the model said nothing
+  about above every name it was bearish on. A date with fewer than two
+  entities is left flat: one name is not a cross-section.
+
+**Classification predictions are recentred to `proba − 0.5`.** Ranking is
+unaffected (a monotone shift), but a raw probability lives in `[0, 1]`,
+so `sign()` is `+1` for every name on every date — a "long everything"
+book that looks like a signal.
+
+**Same leakage and integrity discipline as the bridge.** OOS predictions
+only, never `score_model` (whose estimator is the final full-panel refit,
+so scoring historical dates would be in-sample); no parameter selects
+that path. The predictions artifact's recorded content hash is verified
+*before* loading, because structural validation passes on an edited file
+that kept its shape. The target-weight and equity-curve artifacts are
+content-addressed, so changing the transform writes a new artifact rather
+than replacing one an audit record still points at.
+
+`estimated_cost_drag_pct` is labelled **derived, not measured**: the
+simulator deducts costs from cash without reporting a total, so this
+reconstructs the commission + spread component from realized turnover and
+excludes borrow, margin interest and impact. It is a floor.
+
+Corrected alongside: the modeling surface's own documentation claimed
+"the 5-tool surface stays exactly 5". The invariant was never the count —
+it was that every tool is a decision the agent makes rather than
+plumbing. The bridge still is not a tool (it reshapes an artifact);
+`evaluate_model_portfolio` is one (it runs a simulation and produces
+persisted artifacts). README, `15_modeling.md` and `10_auditability.md`
+updated to 6.
+
+50 new tests in `tests/modeling/test_portfolio_eval.py`, covering the
+exposure/cap invariants as exact arithmetic and the full
+`build_model_dataset → run_model_experiment → evaluate_model_portfolio`
+chain end to end, plus one tying `get_modeling_tools()` to
+`MODELING_TOOL_DISPATCH` (a tool advertised in the schema but missing
+from the dispatch table would have been callable and then failed with
+"unknown modeling tool"). Suite: 2794 → 2845 passed, 2 skipped.
+
+
 ### Changed (performance — the portfolio simulator addresses its data once)
 
 `run_portfolio_simulation` was the last major workflow still reading its

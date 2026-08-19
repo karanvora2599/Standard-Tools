@@ -504,7 +504,7 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 ### Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent 5-tool registry — `list_features`, `build_model_dataset`,
+A second, independent 6-tool registry — `list_features`, `build_model_dataset`,
 `run_model_experiment`, `score_model`, `inspect_model` — for building
 walk-forward-validated statistical models from this library's own features
 (21 built-in: technical, market, risk, volume, statistical and PCA-derived
@@ -891,7 +891,7 @@ pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 | `Documentation/12_options.md` | Black-Scholes-Merton option pricing, Greeks, implied volatility (European options only) |
 | `Documentation/13_agent_orchestration.md` | Tool-category taxonomy, the lightweight router, and the multi-agent orchestrator-workers architecture |
 | `Documentation/14_polars_support.md` | Optional Polars interop (`pip install standard_quant_tools[polars]`): what's supported today, the conversion-boundary design, and the phased roadmap |
-| `Documentation/15_modeling.md` | The separate 5-tool modeling runtime: 21-feature catalog, regression/classification targets, leakage-purged walk-forward validation, the content-addressed model registry, the model→backtest bridge, and what's explicitly deferred |
+| `Documentation/15_modeling.md` | The separate 6-tool modeling runtime: 21-feature catalog, regression/classification targets, leakage-purged walk-forward validation, the content-addressed model registry, the model→backtest bridge, portfolio evaluation of OOS predictions, and what's explicitly deferred |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
 

@@ -257,3 +257,221 @@ class ModelSpec(BaseModel):
         "deep inside sklearn rather than at this boundary, where the message "
         "can say which field was wrong.",
     )
+
+
+class PredictionTransformSpec(BaseModel):
+    """
+    How a model's out-of-sample predictions become portfolio target
+    weights.
+
+    This is the piece `bridge.oos_predictions_to_signal_panel` cannot
+    express. That function collapses every prediction to -1/0/+1 because
+    its consumer (`run_signal_panel_backtest`) treats a SCORE value as a
+    raw leverage multiplier, so passing a 0.02 forward-return prediction
+    through would size a 2%-leveraged position. Sign is the correct answer
+    for THAT engine, but it throws away both the ranking and the magnitude
+    — which is most of what a cross-sectional model actually predicts.
+
+    `run_portfolio_simulation` takes target WEIGHTS (fractions of account
+    equity) rather than direction signals, so the rank survives all the
+    way to position size. The score -> weight step itself is not
+    reimplemented here: `backtest.sizing` already builds exactly these
+    panels and is reused as-is (see portfolio_eval._SIZERS). What this
+    spec adds is the declarative selection an agent can construct, plus
+    the three pieces sizing.py does not have — a per-position cap, an
+    explicit net-exposure target, and a rebalance schedule.
+    """
+
+    method: Literal[
+        "sign",
+        "cross_sectional_rank",
+        "cross_sectional_zscore",
+        "top_bottom_quantile",
+    ] = Field(
+        "cross_sectional_rank",
+        description=(
+            "'cross_sectional_rank' (default) — weight proportional to the "
+            "prediction's rank within each date's cross-section, centered on "
+            "the mean rank. Robust to the prediction scale being wrong, which "
+            "for a return-forecasting model it usually is. "
+            "'cross_sectional_zscore' — proportional to the standardized "
+            "prediction, so magnitude carries through and an outlier gets a "
+            "bigger position. 'top_bottom_quantile' — equal weight in the top "
+            "`long_quantile` and bottom `short_quantile` of each cross-section, "
+            "flat in between; the classic quantile-portfolio construction. "
+            "'sign' — equal weight on the sign of the (centered) prediction. "
+            "Reproduces the bridge's information content, but sized as a "
+            "portfolio rather than as per-ticker direction signals."
+        ),
+    )
+    long_quantile: float = Field(
+        0.2,
+        gt=0.0,
+        le=1.0,
+        description="top_bottom_quantile only: fraction of each cross-section "
+        "held long. 0.2 = top quintile.",
+    )
+    short_quantile: float = Field(
+        0.2,
+        ge=0.0,
+        le=1.0,
+        description="top_bottom_quantile only: fraction of each cross-section "
+        "held short. Set 0.0 for a long-only quantile portfolio (which also "
+        "requires net_exposure == gross_exposure).",
+    )
+    gross_exposure: float = Field(
+        1.0,
+        gt=0.0,
+        le=10.0,
+        description="Target sum(|weight|) per rebalance date. 1.0 = fully "
+        "invested, unlevered. Must be <= the portfolio spec's "
+        "max_gross_leverage, which is what the simulator actually enforces.",
+    )
+    net_exposure: float = Field(
+        0.0,
+        description=(
+            "Target sum(weight) per rebalance date. 0.0 (default) = dollar "
+            "neutral; set equal to gross_exposure for long-only. |net| must "
+            "be <= gross. The two targets are hit exactly by sizing the long "
+            "book to (gross + net)/2 and the short book to (gross - net)/2, "
+            "which is why they compose rather than fighting each other — a "
+            "single rescale cannot control both."
+        ),
+    )
+    max_position_weight: float = Field(
+        0.05,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Cap on any single |weight|. Excess above the cap is redistributed "
+            "to the uncapped names in the same book (repeatedly, since "
+            "redistribution can push another name over), so the cap does not "
+            "quietly reduce gross exposure. A book with too few names to "
+            "absorb its target gross at this cap is reported as a shortfall "
+            "rather than silently levered past the cap."
+        ),
+    )
+    volatility_scale: bool = Field(
+        False,
+        description=(
+            "Divide each raw prediction by that entity's trailing realized "
+            "volatility before weighting (backtest.sizing.vol_scaled), so an "
+            "equally-ranked high-vol name takes a smaller position. Default "
+            "False keeps the transform a pure function of the predictions; "
+            "True makes it depend on price history too, and therefore on "
+            "`volatility_lookback`. Ignored by method='top_bottom_quantile' "
+            "and 'sign', whose weights are membership-based — scaling a score "
+            "cannot change an equal weight."
+        ),
+    )
+    volatility_lookback: int = Field(
+        20,
+        gt=1,
+        le=500,
+        description="Bars of trailing returns used for volatility_scale. "
+        "Counted in BARS of the dataset's own interval, not calendar days.",
+    )
+    rebalance_frequency: Literal["daily", "weekly", "monthly"] = Field(
+        "weekly",
+        description=(
+            "Which of the OOS prediction dates actually become rebalance "
+            "dates. 'weekly'/'monthly' take the FIRST prediction date in each "
+            "calendar week/month — first, not last, so the choice never "
+            "depends on a date later than the one being traded. Between "
+            "rebalances the simulator holds share counts constant and lets "
+            "weights drift, which is the whole reason to rebalance less than "
+            "daily: it is the turnover, not the prediction, that costs money."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _coherent_exposures(self) -> "PredictionTransformSpec":
+        if not math.isfinite(self.net_exposure):
+            raise ValueError(f"net_exposure must be finite, got {self.net_exposure}")
+        if abs(self.net_exposure) > self.gross_exposure + 1e-12:
+            raise ValueError(
+                f"|net_exposure| ({abs(self.net_exposure)}) cannot exceed "
+                f"gross_exposure ({self.gross_exposure}) — the long book would "
+                "have to be larger than the whole portfolio."
+            )
+        if self.method == "top_bottom_quantile":
+            if self.long_quantile + self.short_quantile > 1.0 + 1e-12:
+                raise ValueError(
+                    f"long_quantile + short_quantile ({self.long_quantile} + "
+                    f"{self.short_quantile}) exceeds 1.0 — the two books would "
+                    "have to overlap, putting the same name long and short."
+                )
+            long_only = abs(self.net_exposure - self.gross_exposure) <= 1e-12
+            if self.short_quantile == 0.0 and not long_only:
+                raise ValueError(
+                    "short_quantile=0.0 selects no short names, so the short "
+                    "book cannot be filled to (gross - net)/2 = "
+                    f"{(self.gross_exposure - self.net_exposure) / 2}. Set "
+                    "net_exposure == gross_exposure for a long-only portfolio."
+                )
+        return self
+
+
+class PortfolioSimSpec(BaseModel):
+    """
+    The subset of `run_portfolio_simulation`'s parameters an agent may set
+    when evaluating a model, with defaults chosen for evaluation rather
+    than for backward compatibility.
+
+    Deliberately narrower than the simulator's own signature. The omitted
+    parameters (per-share commissions, the impact model, hl2 fills) either
+    need calibration this layer cannot supply, or exist for exploratory use
+    that would make a model-selection number misleading.
+    `run_portfolio_simulation` is still importable directly for those.
+    """
+
+    initial_capital: float = Field(100_000.0, gt=0.0)
+    commission_pct: float = Field(
+        0.001, ge=0.0, le=0.1, description="Commission per trade notional."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0.0, le=0.1, description="Spread cost per trade notional."
+    )
+    fill_price: Literal["close", "next_open"] = Field(
+        "next_open",
+        description=(
+            "'next_open' (default) — a weight dated t executes at t+1's open. "
+            "This is the only lookahead-free choice: modeling features close "
+            "on bar t's own OHLC, so a prediction dated t is not knowable "
+            "until t's close has printed, and filling it AT that close is the "
+            "look-ahead run_strategy's own fill_price warning describes. "
+            "'close' is accepted for like-for-like comparison against an "
+            "existing close-filled backtest, and is reported in `warnings` "
+            "because a model evaluated that way will look better than it is."
+        ),
+    )
+    max_gross_leverage: float = Field(
+        1.0,
+        gt=0.0,
+        le=10.0,
+        description="Hard limit the simulator enforces on each date's target "
+        "gross. Must be >= the transform's gross_exposure, or every rebalance "
+        "is rejected.",
+    )
+    max_position_pct: float = Field(1.0, gt=0.0, le=1.0)
+    borrow_fee_bps: float = Field(
+        0.0,
+        ge=0.0,
+        description="Annualized bps accrued daily on short notional. A "
+        "long/short model evaluated at 0.0 is being credited with free "
+        "shorting.",
+    )
+    margin_interest_rate: float = Field(0.0, ge=0.0)
+    max_adv_participation: Optional[float] = Field(
+        None,
+        gt=0.0,
+        le=1.0,
+        description="Reject any rebalance trade exceeding this fraction of the "
+        "ticker's rolling average dollar volume. None = unconstrained, which "
+        "for a large-universe model means capacity is untested.",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        description="Annualized rate used for the reported Sharpe/Sortino "
+        "only — it does not enter the simulation itself.",
+    )
