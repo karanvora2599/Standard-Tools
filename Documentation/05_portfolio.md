@@ -162,9 +162,44 @@ Three conditions produce a `ValidationError` rather than a number, because in ea
 
 **`max_sharpe` needs a risk-free rate below the minimum-variance return.** The closed-form tangency portfolio normalizes `Σ⁻¹(μ − rf·1)` by its own sum, `B − rf·A`. The resulting excess return is `(μ−rf)'Σ⁻¹(μ−rf)` divided by that sum — and the numerator is a quadratic form in a positive-definite Σ, so it is *always positive*. The sign is therefore entirely the denominator's, and once `rf` reaches the global minimum-variance portfolio's expected return (`B/A`) the normalization flips you onto the **inefficient** branch. An objective named `max_sharpe` then returned the *minimum*-Sharpe portfolio with `converged=True`: on μ=[0.10, 0.08], Σ=[[.04,.01],[.01,.05]], rf=0.20, Sharpe **−0.66**. The supremum genuinely is not attained in that regime, so it is reported. Bounded requests (`allow_short=False` and/or `max_weight` set) still solve — bounds make the feasible set compact — so the restriction is specific to the unconstrained closed form.
 
+**A solver reporting success is not a valid answer.** `result.success` is the
+solver's opinion of its own run, not a statement that the returned vector
+satisfies the constraints it was given, so the weights are now checked
+independently — sum to 1, inside their bounds, and actually meeting a requested
+`target_return` / `target_volatility`. A long-only `target_return=99.0`
+previously returned weights that looked entirely well-formed: `sum(w)=1.0000`
+with an achieved return of **0.2443**. A violation sets `converged=False` and
+names what was missed in `warnings`.
+
+**Ill-conditioning is reported even at full rank.** The rank check catches an
+exactly-degenerate covariance; it does not catch two assets that are merely
+*almost* identical, which is the far more common real case — a share class
+pair, an ETF and its largest holding. Measured on three assets where two differ
+by 1e-9 of noise: rank 3/3, condition number **3.827e+14**, and a maximum
+weight of **197,838× capital** reported as converged. Mean-variance inverts the
+covariance, so that amplification lands directly in the weights. This is a
+warning rather than an error — an ill-conditioned covariance is still the
+caller's data — but nothing about the returned weights said so on their own.
+
 **Returns must be finite.** `dropna()` removes NaN but not `±inf`, so an infinite return propagated into the covariance and came back as `{ticker: nan}` weights flagged `converged=True`. A zero or negative price feeding `pct_change` is the usual cause.
 
 `max_weight` feasibility is checked whether or not shorting is allowed. Shorting lowers the per-asset *floor*, not the cap, so `sum(w) ≤ n × max_weight` either way and `sum(w) == 1` is still unreachable when `n × max_weight < 1` — that case used to return weights summing to 0.6 with only `converged=False` to indicate it.
+
+### Input contracts for every optimizer
+
+`risk_parity_weights` and `black_litterman` validate their matrices and scalars
+before iterating. This matters more than usual here because the natural guard
+is a comparison and **NaN satisfies no comparison**: a NaN covariance did not
+trip risk parity's `portfolio_variance <= 0` degeneracy check, so it flowed
+through every iteration and emerged as `{nan, nan}` weights with no error. The
+same held for Black-Litterman, where one non-finite entry in any of
+`cov_matrix`, `market_weights`, `P`, `Q`, `omega`, `tau` or `risk_aversion`
+made the entire posterior NaN.
+
+Covariances must also be **symmetric** — an asymmetric matrix was accepted and
+silently used as though it were a covariance — and `build_bl_views` rejects
+duplicate tickers, since the ticker→column map keeps the *last* index and a
+view on a repeated name would silently attach to the wrong slot.
 
 ### Risk Parity
 

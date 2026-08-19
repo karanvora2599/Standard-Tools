@@ -2,9 +2,13 @@
 a tool call and -- unless disabled -- write its DecisionRecord."""
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
+
+from standard_quant_tools.config import load_env
+from standard_quant_tools.error import AuditIntegrityError
 
 from .context import _data_sources_var, _request_id_var, new_request_id
 from .hashing import hash_payload
@@ -21,6 +25,30 @@ from .replay import normalize_identifiers
 from .writer import AuditWriter
 
 logger = logging.getLogger(__name__)
+
+
+def _audit_fail_closed() -> bool:
+    """
+    Whether a failure to WRITE an audit record should fail the tool call.
+
+    Defaults to False — fail-open — because for an open-source analytics
+    library a full disk should not destroy a legitimate result the caller
+    already paid to compute. That default is a judgement about the common
+    case, not a claim that it is always right: under a governance or
+    compliance regime, an action taken without a record of it is precisely
+    the thing the audit trail exists to prevent, and the result should not be
+    returned at all. `SQT_AUDIT_FAIL_CLOSED=1` selects that behaviour.
+
+    Note this governs only WRITE failures. A corrupted existing chain
+    (AuditIntegrityError) always propagates — see _run_and_record — because
+    it is a statement about the whole log rather than about one record.
+    """
+    load_env()
+    return os.environ.get("SQT_AUDIT_FAIL_CLOSED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _run_and_record(
@@ -98,9 +126,28 @@ def _run_and_record(
                     strategy_source_hash=_strategy_source_hash(model_instance),
                 )
                 AuditWriter().write(record)
+            except AuditIntegrityError:
+                # NEVER swallowed, regardless of the fail-open policy below.
+                #
+                # This is the interaction that matters: the writer now refuses
+                # to extend a chain whose tail it cannot read, and a bare
+                # `except Exception` here would have caught that refusal and
+                # logged it as an ordinary write failure — leaving the tool
+                # result returned and the corruption invisible, which is
+                # exactly the state the writer's check exists to prevent.
+                #
+                # A transient write failure (disk full, permissions) and a
+                # CORRUPTED CHAIN are different events. The first is about
+                # this one record; the second says the log as a whole is no
+                # longer trustworthy.
+                raise
             except Exception:
+                if _audit_fail_closed():
+                    raise
                 logger.warning(
-                    "[audit] failed to write decision record for %s",
+                    "[audit] failed to write decision record for %s "
+                    "(fail-open: the tool result is still returned; set "
+                    "SQT_AUDIT_FAIL_CLOSED=1 to make this fatal)",
                     tool_name,
                     exc_info=True,
                 )

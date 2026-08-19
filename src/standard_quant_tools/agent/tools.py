@@ -7,6 +7,7 @@ import datetime
 import logging
 import math
 import numbers
+import re
 import time
 import uuid
 from collections import Counter
@@ -276,18 +277,44 @@ except ImportError:
 _FUSABLE_INDICATORS = {"rsi", "adx", "bollinger", "stochastic"}
 
 
+_PERIOD_PATTERN = re.compile(r"^(\d+)(d|w|mo|y)$")
+_PERIOD_DAYS = {"d": 1, "w": 7, "mo": 30, "y": 365}
+
+
 def _parse_period(period: str) -> datetime.datetime:
-    """Convert period string ('1y', '6mo', '2y') to a start datetime."""
-    now = datetime.datetime.now()
-    unit = period[-2:] if period.endswith("mo") else period[-1]
-    num = int(period[: -2 if unit == "mo" else -1])
-    if unit == "mo":
-        return now - datetime.timedelta(days=num * 30)
-    if unit == "y":
-        return now - datetime.timedelta(days=num * 365)
-    if unit == "d":
-        return now - datetime.timedelta(days=num)
-    return now - datetime.timedelta(days=365)
+    """
+    Convert a period string ('1y', '6mo', '2y', '30d', '4w') to a start
+    datetime.
+
+    An unrecognized unit used to fall through to `now - 365 days`, so a
+    malformed request did not fail — it silently became a DIFFERENT valid
+    request. '6m' (a plausible typo for '6mo'), '1yr', 'ytd' and '' all
+    quietly returned one year of data, and every downstream number was then
+    computed over a window the caller never asked for. A wrong window is not
+    detectable from the result, which is what makes the silent fallback worse
+    than an error.
+
+    Parsed strictly, with the accepted forms named in the message.
+    """
+    if not isinstance(period, str):
+        raise ValidationError(
+            f"period must be a string like '1y', '6mo', '30d', got "
+            f"{type(period).__name__}"
+        )
+    match = _PERIOD_PATTERN.match(period.strip().lower())
+    if match is None:
+        raise ValidationError(
+            f"period={period!r} is not a recognized window. Use <number><unit> "
+            "where unit is d (days), w (weeks), mo (months) or y (years) — for "
+            "example '30d', '4w', '6mo', '2y'. An unrecognized value used to "
+            "fall back to one year silently, turning a malformed request into a "
+            "different valid one."
+        )
+    amount = int(match.group(1))
+    if amount < 1:
+        raise ValidationError(f"period={period!r} must cover at least one unit")
+    days = amount * _PERIOD_DAYS[match.group(2)]
+    return datetime.datetime.now() - datetime.timedelta(days=days)
 
 
 def _apply_signal_fill_policy(

@@ -8,6 +8,38 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # ──────────────────────────────────────────────
 
 
+# A parameter grid is evaluated as the CARTESIAN PRODUCT of its axes, so its
+# cost is multiplicative in the number of axes and an agent writing a
+# reasonable-looking request can ask for an unreasonable amount of work:
+# four axes of ten values each is 10,000 full backtests from a dict that fits
+# on one line. Estimator complexity was already bounded; the NUMBER of
+# estimator invocations was not.
+_MAX_GRID_COMBINATIONS = 50_000
+
+
+def _validate_param_grid(grid: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+    """Reject an empty axis and a combinatorially oversized grid."""
+    if not grid:
+        raise ValueError("param_grid must contain at least one parameter")
+    combinations = 1
+    for name, values in grid.items():
+        if not isinstance(values, list) or not values:
+            raise ValueError(
+                f"param_grid['{name}'] must be a non-empty list of values to try"
+            )
+        combinations *= len(values)
+    if combinations > _MAX_GRID_COMBINATIONS:
+        axes = ", ".join(f"{k}({len(v)})" for k, v in grid.items())
+        raise ValueError(
+            f"param_grid expands to {combinations:,} combinations "
+            f"[{axes}], above the {_MAX_GRID_COMBINATIONS:,} limit. A grid is "
+            "evaluated as the cartesian product of its axes, so the cost is "
+            "multiplicative — this is a full backtest per combination. Narrow "
+            "an axis or search in stages."
+        )
+    return grid
+
+
 class BacktestInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -56,12 +88,14 @@ class BacktestInput(BaseModel):
             "bollinger_reversion: {period, num_std}."
         ),
     )
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
     commission_pct: float = Field(
-        0.001, description="Commission per trade (fraction, default 0.1%)."
+        0.001, ge=0, le=1, description="Commission per trade (fraction, default 0.1%)."
     )
     slippage_pct: float = Field(
-        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction, default 0.05%)."
     )
     fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
@@ -154,8 +188,24 @@ class TechnicalInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    indicators: List[str] = Field(
+    indicators: List[
+        Literal[
+            "sma",
+            "ema",
+            "macd",
+            "rsi",
+            "stochastic",
+            "bollinger",
+            "atr",
+            "obv",
+            "vwap",
+            "adx",
+            "williams_r",
+        ]
+    ] = Field(
         ["rsi", "macd", "bollinger", "atr"],
+        min_length=1,
+        max_length=11,
         description=(
             "List of indicators to compute. Options: "
             "'sma', 'ema', 'macd', 'rsi', 'stochastic', "
@@ -297,7 +347,10 @@ class PortfolioOptimizationInput(BaseModel):
         description="black_litterman only: confidence in the equilibrium prior (smaller = more confident).",
     )
     periods_per_year: int = Field(
-        252, description="Annualization factor for the fetched return series."
+        252,
+        gt=0,
+        le=31_536_000,
+        description="Annualization factor for the fetched return series.",
     )
 
     @model_validator(mode="after")
@@ -481,6 +534,8 @@ class CointegrationInput(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     zscore_window: int = Field(
         30,
+        gt=0,
+        le=100_000,
         description="Rolling window (bars) for the spread z-score used to generate a signal.",
     )
 
@@ -523,6 +578,7 @@ class KalmanHedgeRatioInput(BaseModel):
     )
     zscore_window: int = Field(
         20,
+        le=100_000,
         gt=1,
         description="Rolling window (bars) for the spread z-score used to generate a signal.",
     )
@@ -669,10 +725,13 @@ class RallyDetectionInput(BaseModel):
     )
     zscore_window: int = Field(
         252,
+        le=100_000,
         gt=0,
         description="Historical window the return z-score is measured against (default ~1 trading year).",
     )
-    adx_period: int = Field(14, gt=0, description="ADX lookback (default 14).")
+    adx_period: int = Field(
+        14, le=100_000, gt=0, description="ADX lookback (default 14)."
+    )
     adx_threshold: float = Field(
         25.0, gt=0, description="ADX level considered a 'strong' trend."
     )
@@ -788,9 +847,15 @@ class RegimeAdaptiveInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="Commission per trade (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction)."
+    )
     hurst_method: Literal["dfa", "rs"] = Field(
         "dfa", description="Hurst method: 'dfa' or 'rs'."
     )
@@ -811,7 +876,10 @@ class RegimeAdaptiveInput(BaseModel):
         description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
     )
     n_workers: int = Field(
-        1, description="Worker processes for grid search (default 1 for agent use)."
+        1,
+        ge=1,
+        le=256,
+        description="Worker processes for grid search (default 1 for agent use).",
     )
 
 
@@ -837,16 +905,20 @@ class PairScannerInput(BaseModel):
     )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    max_pairs: int = Field(10, description="Maximum number of top pairs to return.")
+    max_pairs: int = Field(
+        10, gt=0, le=10_000, description="Maximum number of top pairs to return."
+    )
     min_half_life: float = Field(
-        5.0, description="Minimum mean-reversion half-life in bars."
+        5.0, gt=0, le=100_000, description="Minimum mean-reversion half-life in bars."
     )
     max_half_life: float = Field(
-        126.0, description="Maximum half-life in bars (~6 months)."
+        126.0, gt=0, le=100_000, description="Maximum half-life in bars (~6 months)."
     )
-    p_value_threshold: float = Field(0.05, description="Maximum cointegration p-value.")
+    p_value_threshold: float = Field(
+        0.05, gt=0, le=1, description="Maximum cointegration p-value."
+    )
     zscore_window: int = Field(
-        30, description="Rolling window for spread z-score signal."
+        30, gt=0, le=100_000, description="Rolling window for spread z-score signal."
     )
 
 
@@ -887,7 +959,16 @@ class WalkForwardInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    strategy: str = Field(
+    strategy: Literal[
+        "sma_crossover",
+        "rsi_mean_reversion",
+        "macd_crossover",
+        "bollinger_reversion",
+        "donchian_breakout",
+        "momentum_timeseries",
+        "vwap_reversion",
+        "adx_trend",
+    ] = Field(
         ...,
         description=(
             "Strategy name: 'sma_crossover', 'rsi_mean_reversion', "
@@ -904,25 +985,49 @@ class WalkForwardInput(BaseModel):
     )
     train_bars: int = Field(
         252,
+        gt=0,
+        le=100_000,
         description="In-sample window length in bars (default 252 = ~1 year daily).",
     )
     test_bars: int = Field(
         63,
+        gt=0,
+        le=100_000,
         description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).",
     )
     initial_capital: float = Field(
-        10_000.0, description="Starting capital for each window."
+        10_000.0, gt=0, le=1e15, description="Starting capital for each window."
     )
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    sort_by: str = Field(
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="Commission per trade (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction)."
+    )
+    sort_by: Literal[
+        "sharpe_ratio",
+        "sortino_ratio",
+        "calmar_ratio",
+        "total_return",
+        "profit_factor",
+        "win_rate",
+        "max_drawdown",
+        "annualized_volatility",
+        "avg_trade_return_pct",
+        "num_trades",
+    ] = Field(
         "sharpe_ratio",
         description="Metric to optimise in-sample (default: 'sharpe_ratio').",
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default), 'next_open', or 'hl2_exploratory' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
     )
+
+    @field_validator("param_grid")
+    @classmethod
+    def _check_param_grid(cls, v: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        return _validate_param_grid(v)
 
 
 class WalkForwardWindow(BaseModel):
@@ -979,17 +1084,25 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     train_bars: int = Field(
         252,
+        gt=0,
+        le=100_000,
         description="In-sample window length in bars (default 252 = ~1 year daily).",
     )
     test_bars: int = Field(
         63,
+        gt=0,
+        le=100_000,
         description="Out-of-sample window length in bars (default 63 = ~1 quarter daily).",
     )
     initial_capital: float = Field(
-        10_000.0, description="Starting capital for each window."
+        10_000.0, gt=0, le=1e15, description="Starting capital for each window."
     )
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="Commission per trade (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction)."
+    )
     hurst_method: Literal["dfa", "rs"] = Field(
         "dfa",
         description="Hurst method: 'dfa' or 'rs' — reported as diagnostic context per window, not used to hard-select a strategy family.",
@@ -1010,11 +1123,22 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
         None,
         description="Custom param grid for Bollinger reversion. Default: period=[15,20,25], num_std=[1.5,2.0].",
     )
-    sort_by: str = Field(
+    sort_by: Literal[
+        "sharpe_ratio",
+        "sortino_ratio",
+        "calmar_ratio",
+        "total_return",
+        "profit_factor",
+        "win_rate",
+        "max_drawdown",
+        "annualized_volatility",
+        "avg_trade_return_pct",
+        "num_trades",
+    ] = Field(
         "sharpe_ratio",
         description="Metric to optimise in-sample, across all four strategies (default: 'sharpe_ratio').",
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default), 'next_open', or 'hl2_exploratory' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
     )
@@ -1191,7 +1315,9 @@ class PositionSizerInput(BaseModel):
         0.01,
         description="Fraction of account to risk per trade (default 0.01 = 1%). Must be in (0, 1].",
     )
-    atr_period: int = Field(14, description="ATR lookback period (default 14).")
+    atr_period: int = Field(
+        14, gt=0, le=100_000, description="ATR lookback period (default 14)."
+    )
     atr_multiplier: float = Field(
         2.0, description="Stop distance = atr_multiplier × ATR (default 2.0)."
     )
@@ -1267,14 +1393,22 @@ class BuyAndHoldInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
     commission_pct: float = Field(
-        0.001, description="One-time buy commission (fraction, default 0.1%)."
+        0.001,
+        ge=0,
+        le=1,
+        description="One-time buy commission (fraction, default 0.1%).",
     )
     slippage_pct: float = Field(
-        0.0005, description="One-time buy slippage (fraction, default 0.05%)."
+        0.0005,
+        ge=0,
+        le=1,
+        description="One-time buy slippage (fraction, default 0.05%).",
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
@@ -1302,10 +1436,27 @@ class CompareStrategiesInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    sort_by: str = Field(
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="Commission per trade (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction)."
+    )
+    sort_by: Literal[
+        "sharpe_ratio",
+        "sortino_ratio",
+        "calmar_ratio",
+        "total_return",
+        "profit_factor",
+        "win_rate",
+        "max_drawdown",
+        "annualized_volatility",
+        "avg_trade_return_pct",
+        "num_trades",
+    ] = Field(
         "sharpe_ratio",
         description=(
             "Metric to rank strategies by. "
@@ -1328,7 +1479,7 @@ class CompareStrategiesInput(BaseModel):
         None,
         description="Custom Bollinger reversion params. Default: {period: 20, num_std: 2.0}.",
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
@@ -1375,7 +1526,16 @@ class FundamentalsResult(BaseModel):
 
 class BacktestOptInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
-    strategy: str = Field(
+    strategy: Literal[
+        "sma_crossover",
+        "rsi_mean_reversion",
+        "macd_crossover",
+        "bollinger_reversion",
+        "donchian_breakout",
+        "momentum_timeseries",
+        "vwap_reversion",
+        "adx_trend",
+    ] = Field(
         ...,
         description=(
             "Strategy to optimise: 'sma_crossover', 'rsi_mean_reversion', "
@@ -1395,14 +1555,27 @@ class BacktestOptInput(BaseModel):
             "bollinger_reversion: {'period': [15,20,25], 'num_std': [1.5,2.0,2.5]}."
         ),
     )
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
     commission_pct: float = Field(
-        0.001, description="Commission per trade (fraction, default 0.1%)."
+        0.001, ge=0, le=1, description="Commission per trade (fraction, default 0.1%)."
     )
     slippage_pct: float = Field(
-        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction, default 0.05%)."
     )
-    sort_by: str = Field(
+    sort_by: Literal[
+        "sharpe_ratio",
+        "sortino_ratio",
+        "calmar_ratio",
+        "total_return",
+        "profit_factor",
+        "win_rate",
+        "max_drawdown",
+        "annualized_volatility",
+        "avg_trade_return_pct",
+        "num_trades",
+    ] = Field(
         "sharpe_ratio",
         description=(
             "Metric to optimise. "
@@ -1414,12 +1587,17 @@ class BacktestOptInput(BaseModel):
         description="Number of top parameter combinations to return (default 5, max 20).",
     )
     n_workers: int = Field(
-        1, description="CPU workers for parallel grid search (default 1)."
+        1, ge=1, le=256, description="CPU workers for parallel grid search (default 1)."
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
+
+    @field_validator("param_grid")
+    @classmethod
+    def _check_param_grid(cls, v: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        return _validate_param_grid(v)
 
 
 class OptimizationRun(BaseModel):
@@ -1454,7 +1632,9 @@ class AdvancedIndicatorsInput(BaseModel):
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     mfi_period: int = Field(14, description="Money Flow Index period (default 14).")
-    atr_period: int = Field(14, description="Wilder ATR period (default 14).")
+    atr_period: int = Field(
+        14, gt=0, le=100_000, description="Wilder ATR period (default 14)."
+    )
     sar_af_start: float = Field(
         0.02, description="Parabolic SAR initial acceleration factor (default 0.02)."
     )
@@ -1667,14 +1847,16 @@ class CustomSignalBacktestInput(BaseModel):
             "'error' requires every price date to have an explicit signal entry."
         ),
     )
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
     commission_pct: float = Field(
-        0.001, description="Commission per trade (fraction, default 0.1%)."
+        0.001, ge=0, le=1, description="Commission per trade (fraction, default 0.1%)."
     )
     slippage_pct: float = Field(
-        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction, default 0.05%)."
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
@@ -1720,10 +1902,14 @@ class SignalPanelBacktestInput(BaseModel):
         ),
     )
     initial_capital: float = Field(
-        10_000.0, description="Starting capital applied per ticker."
+        10_000.0, gt=0, le=1e15, description="Starting capital applied per ticker."
     )
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="Commission per trade (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction)."
+    )
     benchmark: Optional[str] = Field(
         None,
         description="Optional benchmark ticker — adds information_ratio to portfolio_metrics.",
@@ -1731,7 +1917,7 @@ class SignalPanelBacktestInput(BaseModel):
     include_trade_log: bool = Field(
         False, description="If True, include a per-trade log for each ticker."
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
@@ -1853,13 +2039,13 @@ class PortfolioSimulationInput(BaseModel):
         ),
     )
     initial_capital: float = Field(
-        10_000.0, gt=0, description="Starting cash for the whole account."
+        10_000.0, le=1e15, gt=0, description="Starting cash for the whole account."
     )
     commission_pct: float = Field(
-        0.001, ge=0, description="Commission per trade notional (fraction)."
+        0.001, le=1, ge=0, description="Commission per trade notional (fraction)."
     )
     slippage_pct: float = Field(
-        0.0005, ge=0, description="Slippage per trade notional (fraction)."
+        0.0005, le=1, ge=0, description="Slippage per trade notional (fraction)."
     )
     max_gross_leverage: float = Field(
         1.0,
@@ -1881,7 +2067,7 @@ class PortfolioSimulationInput(BaseModel):
             "sizing-basis scope as max_gross_leverage — see its description."
         ),
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default), 'next_open', or 'hl2_exploratory' — see run_strategy's fill_price / the True Portfolio Simulation docs.",
     )
@@ -2035,20 +2221,20 @@ class PairTradeBacktestInput(BaseModel):
         ),
     )
     initial_capital: float = Field(
-        10_000.0, gt=0, description="Starting cash for the whole account."
+        10_000.0, le=1e15, gt=0, description="Starting cash for the whole account."
     )
     commission_pct: float = Field(
-        0.001, ge=0, description="Commission per trade notional (fraction)."
+        0.001, le=1, ge=0, description="Commission per trade notional (fraction)."
     )
     slippage_pct: float = Field(
-        0.0005, ge=0, description="Slippage per trade notional (fraction)."
+        0.0005, le=1, ge=0, description="Slippage per trade notional (fraction)."
     )
     gross_leverage: float = Field(
         1.0,
         gt=0,
         description="sum(|weight|) while in a position, split between the two legs to match hedge_ratio.",
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "next_open",
         description=(
             "'next_open' (default), 'close', or 'hl2_exploratory'. Defaults to 'next_open' "
@@ -2102,17 +2288,19 @@ class BacktestDiagnosticsInput(BaseModel):
         {},
         description="Strategy parameters — same shape as run_sma_backtest / run_rsi_backtest / etc.",
     )
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
     commission_pct: float = Field(
-        0.001, description="Commission per trade (fraction, default 0.1%)."
+        0.001, ge=0, le=1, description="Commission per trade (fraction, default 0.1%)."
     )
     slippage_pct: float = Field(
-        0.0005, description="Slippage per trade (fraction, default 0.05%)."
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction, default 0.05%)."
     )
     top_n_drawdowns: int = Field(
         5, description="Number of worst drawdown episodes to return."
     )
-    fill_price: str = Field(
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
@@ -2172,7 +2360,16 @@ class RobustnessDiagnosticsInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    strategy: str = Field(
+    strategy: Literal[
+        "sma_crossover",
+        "rsi_mean_reversion",
+        "macd_crossover",
+        "bollinger_reversion",
+        "donchian_breakout",
+        "momentum_timeseries",
+        "vwap_reversion",
+        "adx_trend",
+    ] = Field(
         ...,
         description=(
             "Strategy name: 'sma_crossover', 'rsi_mean_reversion', "
@@ -2184,10 +2381,27 @@ class RobustnessDiagnosticsInput(BaseModel):
         ...,
         description="Parameter grid to search — same shape as run_backtest_optimization.",
     )
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    sort_by: str = Field(
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="Commission per trade (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction)."
+    )
+    sort_by: Literal[
+        "sharpe_ratio",
+        "sortino_ratio",
+        "calmar_ratio",
+        "total_return",
+        "profit_factor",
+        "win_rate",
+        "max_drawdown",
+        "annualized_volatility",
+        "avg_trade_return_pct",
+        "num_trades",
+    ] = Field(
         "sharpe_ratio", description="Metric used to pick the best trial from the grid."
     )
     n_bootstrap_iterations: int = Field(
@@ -2211,6 +2425,11 @@ class RobustnessDiagnosticsInput(BaseModel):
         3.0,
         description="Return-distribution kurtosis for the Deflated Sharpe Ratio's standard-error formula (3.0 = normal).",
     )
+
+    @field_validator("param_grid")
+    @classmethod
+    def _check_param_grid(cls, v: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        return _validate_param_grid(v)
 
 
 class RobustnessDiagnosticsResult(BaseModel):
@@ -2260,7 +2479,9 @@ class MonteCarloSimulationInput(BaseModel):
         gt=0,
         description="Block length (bars) for the moving-block bootstrap resample.",
     )
-    initial_capital: float = Field(10_000.0, gt=0, description="Starting capital.")
+    initial_capital: float = Field(
+        10_000.0, le=1e15, gt=0, description="Starting capital."
+    )
     random_seed: Optional[int] = Field(
         None,
         description="Seed for the resampling RNG — set for reproducible results (recorded in the audit trail).",
@@ -2478,10 +2699,16 @@ class BacktestCompactInput(BaseModel):
     parameters: Dict[str, Any] = Field(
         {}, description="Strategy parameters — same shape as BacktestInput."
     )
-    initial_capital: float = Field(10_000.0, description="Starting capital.")
-    commission_pct: float = Field(0.001, description="Commission per trade (fraction).")
-    slippage_pct: float = Field(0.0005, description="Slippage per trade (fraction).")
-    fill_price: str = Field(
+    initial_capital: float = Field(
+        10_000.0, gt=0, le=1e15, description="Starting capital."
+    )
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="Commission per trade (fraction)."
+    )
+    slippage_pct: float = Field(
+        0.0005, ge=0, le=1, description="Slippage per trade (fraction)."
+    )
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default), 'next_open', or 'hl2_exploratory' — see BacktestInput.fill_price.",
     )

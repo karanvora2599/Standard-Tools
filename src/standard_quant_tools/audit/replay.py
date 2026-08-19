@@ -12,6 +12,8 @@ against each in turn rather than either importing the other.
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from standard_quant_tools.error import ValidationError
+
 from .context import _data_sources_var
 from .hashing import hash_payload
 from .models import ReplayResult
@@ -84,6 +86,28 @@ def normalize_identifiers(obj: Any) -> Any:
 _normalize_identifiers = normalize_identifiers
 
 
+def _redacted_input_fields(node: Any, prefix: str = "") -> List[str]:
+    """
+    Names of input fields holding a redaction placeholder.
+
+    Matches the `<redacted:...>` form redaction.py's _placeholder_for emits;
+    the two are coupled by that format, which is why this looks for the
+    marker rather than trying to re-derive which fields the configured policy
+    would have scrubbed (that policy can change between the write and the
+    replay, so the RECORD is the authority, not the current configuration).
+    """
+    found: List[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.extend(_redacted_input_fields(value, f"{prefix}{key}."))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_redacted_input_fields(item, prefix))
+    elif isinstance(node, str) and node.startswith("<redacted:"):
+        found.append(prefix.rstrip("."))
+    return sorted(set(found))
+
+
 def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     """
     Re-run a recorded tool call and compare data + output hashes against
@@ -95,13 +119,72 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     fn, model_cls, surface = _resolve_tool(record["tool_name"])
     tool_name = record["tool_name"]
 
+    # A REDACTED input cannot be replayed. The record stores
+    # _redact(raw_input, fields), so a redacted field holds a placeholder
+    # rather than the original value — reconstructing the call from it would
+    # re-run a DIFFERENT call and then compare its output against the
+    # original's hash. That comparison is guaranteed to mismatch, and the
+    # mismatch would read as evidence of drift rather than as the artefact of
+    # redaction that it is. Refused explicitly instead.
+    redacted_fields = _redacted_input_fields(record.get("input", {}))
+    if redacted_fields:
+        raise ValidationError(
+            f"decision record {record.get('request_id')} is not replayable: "
+            f"input field(s) {redacted_fields} were redacted, so the original "
+            "call cannot be reconstructed. Replaying with the placeholder "
+            "would run a different call and report the inevitable hash "
+            "mismatch as drift. Redaction and exact replay are in tension by "
+            "construction; a record needs one or the other."
+        )
+
+    # A call that FAILED originally is a first-class outcome, not an absence
+    # of one. Replaying it and letting the exception escape reports an error
+    # in the replay machinery, when what actually reproduced is the original
+    # failure — which is the correct result.
+    original_status = record.get("status", "ok")
+    original_error = record.get("error_type")
+
     token_data = _data_sources_var.set([])
     try:
         result_obj = fn(model_cls(**record["input"]))
         new_output = result_obj.model_dump()
         new_sources = list(_data_sources_var.get() or [])
+    except Exception as exc:
+        if original_status == "error":
+            reproduced = type(exc).__name__ == original_error
+            return ReplayResult(
+                request_id=record.get("request_id", ""),
+                tool_name=tool_name,
+                output_match=reproduced,
+                notes=[
+                    "The original call FAILED, and the replay failed too. "
+                    f"Original error: {original_error}; replay error: "
+                    f"{type(exc).__name__}. "
+                    + (
+                        "The same failure reproduced, which is a successful "
+                        "replay of a failed call."
+                        if reproduced
+                        else "A DIFFERENT failure occurred, so something has "
+                        "changed since the record was written."
+                    )
+                ],
+            )
+        raise
     finally:
         _data_sources_var.reset(token_data)
+
+    if original_status == "error":
+        return ReplayResult(
+            request_id=record.get("request_id", ""),
+            tool_name=tool_name,
+            output_match=False,
+            data_sources_match=None,
+            notes=[
+                f"The original call failed with {original_error}, but the "
+                "replay SUCCEEDED. The failure no longer reproduces — the "
+                "code, the data or the environment has changed since."
+            ],
+        )
 
     stored_output_hash = record.get("output_hash")
     new_output_hash = hash_payload(new_output)

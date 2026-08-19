@@ -731,17 +731,42 @@ class TestWalkForwardBacktest:
             assert 0.0 <= info["frequency"] <= 1.0
 
     def test_invalid_strategy_raises(self, patched_long):
-        inp = WalkForwardInput(
-            symbol="AAPL",
-            start_date=START,
-            end_date=END,
-            strategy="nonexistent_strategy",
-            param_grid={"fast_period": [5]},
-            train_bars=252,
-            test_bars=63,
-        )
-        with pytest.raises(ValueError, match="Unknown strategy"):
-            run_walk_forward_backtest(inp)
+        """
+        `strategy` is a Literal over STRATEGY_REGISTRY now, so an
+        unregistered name is refused when the INPUT is constructed rather
+        than part-way through the tool. That is strictly earlier: the old
+        path fetched data and began a walk-forward before discovering the
+        strategy did not exist.
+
+        Pydantic's ValidationError subclasses ValueError, so the type this
+        test always asserted is unchanged; only the message and the moment
+        moved.
+        """
+        with pytest.raises(ValueError, match="strategy"):
+            WalkForwardInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy="nonexistent_strategy",
+                param_grid={"fast_period": [5]},
+                train_bars=252,
+                test_bars=63,
+            )
+
+    def test_every_registered_strategy_is_accepted(self):
+        """The Literal must not be narrower than the registry it mirrors."""
+        from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+
+        for name in STRATEGY_REGISTRY:
+            WalkForwardInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy=name,
+                param_grid={"fast_period": [5]},
+                train_bars=252,
+                test_bars=63,
+            )
 
     def test_insufficient_data_raises(self, patched_long, long_ohlcv, monkeypatch):
         from unittest.mock import MagicMock
@@ -2317,15 +2342,16 @@ class TestRobustnessDiagnostics:
         assert len(result.warnings) == 1
 
     def test_invalid_strategy_raises(self, patched_long):
-        inp = RobustnessDiagnosticsInput(
-            symbol="AAPL",
-            start_date=START,
-            end_date=END,
-            strategy="nonexistent_strategy",
-            param_grid={"fast_period": [5]},
-        )
-        with pytest.raises(ValueError, match="Unknown strategy"):
-            get_robustness_diagnostics(inp)
+        """Rejected at construction now — see the walk-forward equivalent for
+        why that is the better boundary."""
+        with pytest.raises(ValueError, match="strategy"):
+            RobustnessDiagnosticsInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy="nonexistent_strategy",
+                param_grid={"fast_period": [5]},
+            )
 
     def test_dispatched_through_dispatch(self, patched_long):
         result = dispatch(

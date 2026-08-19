@@ -9,6 +9,89 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (full-codebase audit, Passes 3-5 — solvers, schemas, audit policy)
+
+Suite: 2613 → 2695 passed, 2 skipped.
+
+#### Pass 3 — a solver reporting success is not a valid answer
+
+`result.success` is the solver's opinion of its own run, not a statement that
+the returned vector satisfies the constraints it was given.
+
+- **Ill-conditioning is now reported.** The rank check added earlier catches an
+  exactly-degenerate covariance; it does not catch two assets that are merely
+  *almost* identical — the far more common real case (a share class pair, an
+  ETF and its largest holding). Measured on three assets where two differ by
+  1e-9 of noise: **rank 3/3**, condition number **3.827e+14**, and a maximum
+  weight of **197,838× capital**, reported `converged: True` with no warning.
+- **The returned weights are checked against their own constraints.** A
+  long-only `target_return=99.0` returned weights that looked entirely
+  well-formed — `sum(w)=1.0000` with an achieved return of **0.2443**. The
+  independent check also caught something new: the ill-conditioned case above
+  returns weights summing to **0.997433**, which the closed-form path had been
+  reporting as converged.
+- **Risk parity** validates its covariance (finite and symmetric — an
+  asymmetric matrix was silently accepted), `max_iterations` and `tol`. A NaN
+  covariance does not trip the `port_var <= 0` guard, so it flowed through
+  every iteration and emerged as `{nan, nan}` weights.
+- **Black-Litterman** validates every matrix and vector. One non-finite entry
+  in *any* of `cov_matrix`, `market_weights`, `P`, `Q`, `omega`, `tau` or
+  `risk_aversion` made the whole posterior NaN with no error raised.
+- **`build_bl_views`** rejects non-finite view returns, pick coefficients and
+  confidences (NaN satisfies neither `<= 0` nor `> 1`, so it passed both
+  halves of the range guard), and rejects duplicate tickers — the
+  ticker→column map keeps the *last* index, so a view on a repeated name
+  silently attached to the wrong slot.
+- **`build_portfolio`** rejects an empty frame, non-finite weights (previously
+  caught only incidentally, and reported as a *sum* problem) and infinite
+  returns.
+
+#### Pass 4 — the classic agent schemas
+
+The modeling schemas had Literals, bounds and caps; the classic quant schemas
+kept bare `str` / `float` / `int` / `Dict` on exactly the surface an agent
+drives most, so a bad value was discovered part-way through a tool, after data
+had been fetched.
+
+- `strategy`, `sort_by`, `fill_price` and `indicators` are `Literal`s. `sort_by`
+  mattered most: the code did `if sort_by and sort_by in df.columns`, so an
+  unrecognized metric was **silently ignored** and the caller received unsorted
+  results with nothing indicating the request had not been honoured.
+- `initial_capital` (> 0), `commission_pct` / `slippage_pct` (0–1; above 1.0
+  means paying more than the whole notional), window and worker counts, and
+  the pair-scanner controls are all bounded.
+- **`param_grid` has a combinatorial budget.** A grid is the cartesian product
+  of its axes, so cost is multiplicative: four axes of ten values is 10,000
+  full backtests from a dict that fits on one line. Estimator complexity was
+  already bounded; the *number* of estimator invocations was not.
+- **`_parse_period` is strict.** An unrecognized unit fell through to
+  `now - 365 days`, so `6m`, `1yr`, `ytd` and `""` all silently became one year
+  — a malformed request turning into a *different valid* request, which is not
+  detectable from the result.
+
+#### Pass 5 — audit write policy and replay honesty
+
+- **`SQT_AUDIT_FAIL_CLOSED=1`** makes a failed audit write fail the tool call.
+  Fail-open stays the default — for an analytics library a full disk should not
+  destroy a result the caller already paid to compute — but under a governance
+  regime an action taken without a record of it is exactly what the trail
+  exists to prevent.
+- **`AuditIntegrityError` is never swallowed.** This is the interaction that
+  mattered: Pass 1 made the writer refuse to extend a corrupted chain, and the
+  dispatch wrapper catches `Exception` broadly around the write — so without an
+  explicit passthrough that refusal would have been logged as an ordinary write
+  failure and the corruption would have stayed invisible.
+- **A redacted record is not replayable, and says so.** The record stores a
+  placeholder rather than the original value, so reconstructing the call would
+  run a *different* call and then report the inevitable hash mismatch as drift.
+  Redaction and exact replay are in tension by construction; a record needs one
+  or the other.
+- **A failed call replays as a first-class outcome.** Letting the exception
+  escape reported an error in the replay machinery, when what actually
+  reproduced was the original failure — which is a *successful* replay. The
+  same failure reproducing, a different failure, and a previously-failing call
+  now succeeding are three distinct reported results.
+
 ### Fixed (full-codebase audit, Pass 2 — one shared numerical contract)
 
 The audit's own diagnosis was that roughly 40 of its findings were a single

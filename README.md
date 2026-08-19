@@ -776,8 +776,18 @@ Python tier, 10 in the C++ tier — full write-ups in
    is validated wherever it multiplies. Cost primitives no longer accept
    negative rates, which returned negative costs — a backtest paid to trade.
 
-   Remaining passes (solver-result verification and the classic agent
-   schemas) are tracked in `CHANGELOG.md`.
+9. **Passes 3–5 — solvers, schemas and audit policy.** A solver reporting
+   success is not a valid answer: a covariance with condition number
+   **3.8e+14** (full rank, so the rank check passed) produced a maximum
+   weight of **197,838× capital** with `converged: True`, and a long-only
+   `target_return=99.0` returned tidy weights achieving **0.2443**. Returned
+   weights are now checked against their own constraints. The classic agent
+   schemas gained the Literals and bounds the modeling schemas already had —
+   including `sort_by`, where an unrecognized metric had been **silently
+   ignored**, and a combinatorial budget on `param_grid`. The audit trail
+   gained a fail-closed mode, refuses to replay a redacted record (redaction
+   and exact replay are in tension by construction), and treats a
+   previously-failed call as a first-class replay outcome.
 
 If you have audit records written before this release, note that
 `content_hash` values are not comparable across the change — see the format
@@ -841,7 +851,7 @@ ctest --test-dir build --config Release -V
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**2614 Python tests total** — 2613 passing, 1 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**2697 Python tests total** — 2695 passing, 2 skipped, with `_sqt_core` built. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 

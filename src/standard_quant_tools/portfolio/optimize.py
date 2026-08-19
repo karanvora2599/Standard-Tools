@@ -34,6 +34,10 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.numeric_contract import (
+    require_finite_covariance,
+    require_finite_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +127,111 @@ def _check_covariance_estimable(n_obs: int, n_assets: int, cov: np.ndarray) -> N
             "otherwise report a zero-variance portfolio built from the "
             "collinear direction."
         )
+
+
+# Above this, the covariance is numerically singular for practical purposes
+# even at full rank. cond = sigma_max / sigma_min, so 1e10 means the inverse
+# amplifies the smallest direction ten billion times — and mean-variance
+# inverts the covariance, so that amplification lands directly in the weights.
+_MAX_CONDITION_NUMBER = 1e10
+
+
+def _conditioning_warnings(cov: np.ndarray, tickers: List[str]) -> List[str]:
+    """
+    Rank alone does not detect a covariance that is *effectively* singular.
+
+    The rank check added earlier catches an exactly-degenerate matrix. It does
+    not catch two assets that are merely almost identical, which is the far
+    more common case in a real universe (a share class pair, an ETF and its
+    largest holding, a hedged and unhedged version of the same fund). Measured
+    on three assets where two differ by 1e-9 of noise:
+
+        rank              3 / 3          (passes the rank check)
+        condition number  3.827e+14
+        max |weight|      197838.4       converged=True, no warning
+
+    A portfolio holding ~198,000x capital in one leg is not a solution; it is
+    the optimizer resolving a difference that is indistinguishable from noise
+    and levering into it. Reported rather than rejected: an ill-conditioned
+    covariance is still the caller's data, and there are legitimate reasons to
+    optimize over near-duplicates, but nothing about the returned weights says
+    so on its own.
+    """
+    warnings: List[str] = []
+    condition = float(np.linalg.cond(cov))
+    if not np.isfinite(condition) or condition > _MAX_CONDITION_NUMBER:
+        warnings.append(
+            f"covariance is ill-conditioned (condition number {condition:.3e}, "
+            f"above {_MAX_CONDITION_NUMBER:.0e}). Two or more of {tickers} are "
+            "nearly collinear over this window, so the inverse amplifies a "
+            "difference that is close to noise — mean-variance inverts this "
+            "matrix, and the amplification lands directly in the weights, "
+            "which can reach thousands of times capital while still reporting "
+            "convergence. Drop a near-duplicate asset, shrink the covariance, "
+            "or impose max_weight."
+        )
+    return warnings
+
+
+def _verify_solution(
+    weights: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    objective: str,
+    target_return: Optional[float],
+    target_volatility: Optional[float],
+    allow_short: bool,
+    max_weight: Optional[float],
+) -> List[str]:
+    """
+    Check the returned weights against the constraints they were supposed to
+    satisfy, independently of what the solver reported about itself.
+
+    `result.success` is the solver's opinion of its own run, not a statement
+    that the answer is feasible. SLSQP can report success on a solution that
+    misses an equality constraint, and the failure mode is quiet: the weights
+    look like weights. This recomputes the constraints from the returned
+    vector, so a violation is named in the output rather than inferred by the
+    caller from a boolean.
+    """
+    issues: List[str] = []
+    if not np.all(np.isfinite(weights)):
+        issues.append(
+            f"{int(np.sum(~np.isfinite(weights)))} of {len(weights)} weights are "
+            "non-finite"
+        )
+        return issues  # nothing below is meaningful once weights are NaN
+
+    total = float(np.sum(weights))
+    if abs(total - 1.0) > 1e-6:
+        issues.append(f"weights sum to {total:.6f}, not 1.0")
+
+    bound = max_weight if max_weight is not None else (None if allow_short else 1.0)
+    if bound is not None:
+        lower = -bound if allow_short else 0.0
+        if np.any(weights > bound + 1e-6) or np.any(weights < lower - 1e-6):
+            issues.append(
+                f"weights fall outside [{lower}, {bound}] "
+                f"(min {weights.min():.6f}, max {weights.max():.6f})"
+            )
+    elif not allow_short and np.any(weights < -1e-6):
+        issues.append(f"long-only requested but minimum weight is {weights.min():.6f}")
+
+    if objective == "target_return" and target_return is not None:
+        achieved = float(weights @ mu)
+        if abs(achieved - target_return) > max(1e-4, abs(target_return) * 1e-3):
+            issues.append(
+                f"target_return={target_return:.6f} requested but the returned "
+                f"weights achieve {achieved:.6f}"
+            )
+    if objective == "target_volatility" and target_volatility is not None:
+        achieved = float(np.sqrt(max(weights @ cov @ weights, 0.0)))
+        if abs(achieved - target_volatility) > max(1e-4, abs(target_volatility) * 1e-3):
+            issues.append(
+                f"target_volatility={target_volatility:.6f} requested but the "
+                f"returned weights achieve {achieved:.6f}"
+            )
+    return issues
 
 
 def _small_sample_warnings(n_obs: int, n_assets: int) -> List[str]:
@@ -498,6 +607,8 @@ def mean_variance_optimize(
 
     mu, cov = _mean_cov(data, periods_per_year)
     tickers = list(data.columns)
+    require_finite_covariance(cov, "covariance", "mean_variance_optimize")
+    warnings.extend(_conditioning_warnings(cov, tickers))
 
     logger.debug(
         "[portfolio_optimize] objective=%s  assets=%d  allow_short=%s  max_weight=%s",
@@ -525,6 +636,23 @@ def mean_variance_optimize(
             target_volatility,
             allow_short,
             max_weight,
+        )
+
+    # Independent of what the solver said about itself. A reported success is
+    # the solver's opinion of its own run, not a guarantee the answer is
+    # feasible — and an infeasible request (a long-only target_return no
+    # portfolio can reach) returns weights that look entirely well-formed:
+    # measured on target_return=99.0, sum(w)=1.0000 with an achieved return of
+    # 0.2443, i.e. the constraint missed by two orders of magnitude.
+    violations = _verify_solution(
+        w, mu, cov, objective, target_return, target_volatility, allow_short, max_weight
+    )
+    if violations:
+        converged = False
+        warnings.append(
+            "returned weights do not satisfy the requested constraints: "
+            + "; ".join(violations)
+            + ". Treat them as a solver iterate, not a solution."
         )
 
     if not converged:
@@ -597,10 +725,32 @@ def risk_parity_weights(
             portfolio variance is non-positive at any iteration (cov_matrix
             not positive definite).
     """
+    # Finiteness and symmetry BEFORE the iteration. A NaN covariance does not
+    # trip the `port_var <= 0` degeneracy guard below — NaN satisfies no
+    # comparison — so it flowed through every iteration and emerged as
+    # {nan, nan} weights with no error. An asymmetric matrix was accepted
+    # outright and silently used as though it were a covariance.
+    cov_matrix = require_finite_covariance(
+        cov_matrix, "cov_matrix", "risk_parity_weights"
+    )
     n = cov_matrix.shape[0]
-    if cov_matrix.shape != (n, n):
+    if (
+        not isinstance(max_iterations, int)
+        or isinstance(max_iterations, bool)
+        or max_iterations < 1
+    ):
         raise ValidationError(
-            f"cov_matrix must be square, got shape {cov_matrix.shape}"
+            f"max_iterations must be a positive integer, got {max_iterations!r}. "
+            "Zero or negative silently skipped the loop entirely and returned "
+            "the equal-weight starting vector reported as unconverged, which is "
+            "indistinguishable from a genuine convergence failure."
+        )
+    tol_value = _require_finite_scalar("tol", tol)
+    if tol_value <= 0:
+        raise ValidationError(
+            f"tol must be > 0, got {tol_value}. A non-positive tolerance can "
+            "never be met, so the iteration always runs to max_iterations and "
+            "always reports converged=False."
         )
     budget = (
         np.full(n, 1.0 / n)
@@ -610,6 +760,13 @@ def risk_parity_weights(
     if len(budget) != n:
         raise ValidationError(
             f"risk_budget length ({len(budget)}) must match cov_matrix size ({n})"
+        )
+    if not np.all(np.isfinite(budget)):
+        raise ValidationError(
+            "risk_budget contains non-finite entries. Checked before the "
+            "positivity test below, since NaN satisfies neither `<= 0` nor "
+            "`> 0` and would otherwise reach the sum-to-1.0 check and be "
+            "reported as a sum problem rather than as the NaN it is."
         )
     if np.any(budget <= 0):
         raise ValidationError("risk_budget entries must all be > 0")
@@ -705,18 +862,29 @@ def black_litterman(
         ValidationError: shape mismatches, non-positive tau/risk_aversion,
             or a singular cov_matrix/omega.
     """
+    # Every matrix and vector here is inverted or multiplied into the
+    # posterior, so one non-finite entry anywhere makes the whole result NaN
+    # with no error raised. Measured before this: NaN in ANY of cov_matrix,
+    # market_weights, Q, tau or risk_aversion returned implied_weights of
+    # [nan, nan]. The scalar guards were comparisons (`tau <= 0`), which NaN
+    # passes.
+    cov_matrix = require_finite_covariance(cov_matrix, "cov_matrix", "black_litterman")
+    _require_finite_scalar("tau", tau)
+    _require_finite_scalar("risk_aversion", risk_aversion)
     n = cov_matrix.shape[0]
-    if cov_matrix.shape != (n, n):
-        raise ValidationError(
-            f"cov_matrix must be square, got shape {cov_matrix.shape}"
-        )
     market_weights = np.asarray(market_weights, dtype=float)
+    if not np.all(np.isfinite(market_weights)):
+        raise ValidationError("market_weights contains non-finite entries")
     if len(market_weights) != n:
         raise ValidationError(
             f"market_weights length ({len(market_weights)}) must match cov_matrix size ({n})"
         )
     P = np.atleast_2d(np.asarray(P, dtype=float))
     Q = np.asarray(Q, dtype=float).reshape(-1)
+    if not np.all(np.isfinite(P)):
+        raise ValidationError("P (pick matrix) contains non-finite entries")
+    if not np.all(np.isfinite(Q)):
+        raise ValidationError("Q (view returns) contains non-finite entries")
     k = P.shape[0]
     if P.shape[1] != n:
         raise ValidationError(
@@ -740,6 +908,10 @@ def black_litterman(
         omega = np.diag(np.diag(tau * P @ cov_matrix @ P.T))
     else:
         omega = np.asarray(omega, dtype=float)
+        if not np.all(np.isfinite(omega)):
+            raise ValidationError(
+                "omega (view uncertainty) contains non-finite entries"
+            )
         if omega.shape != (k, k):
             raise ValidationError(f"omega must be shape ({k}, {k}), got {omega.shape}")
 
@@ -814,6 +986,19 @@ def build_bl_views(
     """
     if not views:
         raise ValidationError("views must be non-empty")
+    # A duplicate ticker makes this mapping lossy: {t: i for i, t in ...}
+    # keeps the LAST index, so a view on the repeated name silently lands on
+    # the wrong column and the pick matrix stops corresponding to the caller's
+    # own ordering. Measured on tickers=["A", "A"]: a view on "A" produced the
+    # row [0, 1] — the coefficient on the second slot, with no indication.
+    duplicates = sorted({t for t in tickers if tickers.count(t) > 1})
+    if duplicates:
+        raise ValidationError(
+            f"tickers contains duplicates {duplicates}. The pick matrix is "
+            "positional, so a repeated name makes the ticker-to-column mapping "
+            "ambiguous and a view would silently attach to whichever slot came "
+            "last."
+        )
     ticker_idx = {t: i for i, t in enumerate(tickers)}
     n = len(tickers)
     k = len(views)
@@ -844,9 +1029,16 @@ def build_bl_views(
         if unknown:
             raise ValidationError(f"view references unknown tickers: {unknown}")
         for t, coef in assets.items():
-            P[i, ticker_idx[t]] = coef
-        Q[i] = view["view_return"]
+            P[i, ticker_idx[t]] = _require_finite_scalar(
+                f"view {i} pick coefficient for {t!r}", coef
+            )
+        Q[i] = _require_finite_scalar(f"view {i} view_return", view["view_return"])
         confidence = view.get("confidence", 1.0)
+        # Finiteness first. NaN satisfies neither `<= 0` nor `> 1`, so it
+        # passed both halves of this guard and then divided the omega diagonal
+        # by NaN — making the view's uncertainty NaN and, through the
+        # posterior, every weight NaN.
+        confidence = _require_finite_scalar(f"view {i} confidence", confidence)
         if confidence <= 0 or confidence > 1:
             raise ValidationError(f"confidence must be in (0, 1], got {confidence}")
         confidences[i] = confidence

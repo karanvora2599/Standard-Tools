@@ -39,9 +39,35 @@ def build_portfolio(
         [round(float(x), 4) for x in w],
         float(w.sum()),
     )
+    if returns_df.empty:
+        # Everything downstream assumes at least one row; portfolio_metrics
+        # reaches for equity_curve.iloc[-1] and failed far from this cause.
+        raise ValidationError(
+            "returns_df is empty — there are no observations to weight. This is "
+            "commonly the result of an inner join over tickers with no shared "
+            "dates rather than a genuinely empty request."
+        )
     if len(w) != returns_df.shape[1]:
         raise ValidationError(
             f"weights length ({len(w)}) must match number of tickers ({returns_df.shape[1]})"
+        )
+    # Finiteness before the sum check. A NaN weight was caught only
+    # incidentally (the sum became NaN, so the message blamed the sum), and an
+    # infinite one would have been reported the same misleading way. Naming
+    # the real problem matters more here than usual, because the caller's next
+    # move is to go looking at their weights, not their arithmetic.
+    if not np.all(np.isfinite(w)):
+        raise ValidationError(
+            f"weights contains {int(np.sum(~np.isfinite(w)))} non-finite value(s); "
+            "every weight must be a finite number"
+        )
+    values = returns_df.to_numpy(dtype=np.float64)
+    if not np.all(np.isfinite(values[~np.isnan(values)])):
+        n_inf = int(np.sum(np.isinf(values)))
+        raise ValidationError(
+            f"returns_df contains {n_inf} infinite value(s). An infinity passes "
+            "straight through the weighted matrix multiply below and poisons "
+            "every portfolio-level metric derived from it."
         )
     if not np.isclose(w.sum(), 1.0, atol=1e-4):
         raise ValidationError(f"weights must sum to 1.0, got {w.sum():.4f}")

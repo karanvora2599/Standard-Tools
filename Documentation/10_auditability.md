@@ -126,6 +126,29 @@ a record — `status: "error"` with `error_type` / `error_message` set, and
 > abbreviating `...` repr, so two large arrays differing only in the middle
 > hashed identically. That path is not reachable from any decision record.)
 
+## What replay can and cannot reproduce
+
+**A redacted record is not replayable.** The record stores
+`_redact(raw_input, fields)`, so a redacted field holds a placeholder rather
+than the original value. Reconstructing the call from it would run a
+*different* call and then compare the result against the original's hash — a
+guaranteed mismatch that reads as evidence of drift rather than as the artefact
+of redaction it actually is. `verify_replay` refuses such a record explicitly
+and names the fields. Redaction and exact replay are in tension by
+construction: a record can support one or the other, and which matters more is
+a policy decision rather than something the code should paper over.
+
+**A call that failed originally is a first-class outcome.** Letting the replay
+exception escape reported an error in the replay *machinery*, when what
+actually reproduced was the original failure — which is a successful replay.
+Three results are now distinguished:
+
+| Original | Replay | Reported |
+|---|---|---|
+| failed | same error | `output_match=True` — the failure reproduced |
+| failed | different error | `output_match=False` — something changed |
+| failed | succeeded | `output_match=False` — the failure no longer reproduces |
+
 ## The chain fails closed on corruption
 
 The writer refuses to append when the tail of an existing day file — or of the
@@ -182,6 +205,7 @@ for what they cover and how to verify them.
 | Variable | Default | Purpose |
 |---|---|---|
 | `SQT_AUDIT_ENABLED` | `1` | Set to `0` to disable decision-record writes entirely |
+| `SQT_AUDIT_FAIL_CLOSED` | `0` | Set to `1` to make a failed audit *write* fail the tool call. The default is fail-open: for an analytics library, a full disk should not destroy a result the caller already paid to compute. Under a governance regime that trade is wrong — an action taken without a record of it is exactly what the trail exists to prevent — so the policy is selectable. This governs write failures only; a corrupted existing chain (`AuditIntegrityError`) always propagates, because it is a statement about the whole log rather than about one record. |
 | `SQT_AUDIT_DIR` | `~/.cache/standard_quant_tools/audit/` | Where JSONL files are written |
 | `SQT_AUDIT_RETENTION_DAYS` | unset (never delete) | Default retention window for `gc()`/`sqt gc` — see [Retention / garbage collection](#retention--garbage-collection) |
 | `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` (and, best-effort, `error_message`) to redact — see [Field redaction](#field-redaction) |
