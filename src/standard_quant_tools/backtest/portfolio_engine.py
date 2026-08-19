@@ -20,6 +20,7 @@ import pandas as pd
 
 from standard_quant_tools.backtest.constraints import adv_participation
 from standard_quant_tools.backtest.costs import (
+    _cost_rate,
     impact_cost,
     margin_interest,
     per_share_commission,
@@ -177,7 +178,18 @@ def run_portfolio_simulation(
             f"initial_capital must be a positive finite number, got {initial_capital!r}"
         )
 
-    _non_negative_params = {
+    # Validated through costs.py's own _cost_rate so the engine and the
+    # cost primitives agree on what a valid rate IS, and so every rate is
+    # checked once here rather than re-checked per trade inside the cost
+    # functions. This is strictly stricter than the hand-rolled
+    # `math.isfinite(value) or value < 0` loop it replaces: that accepted
+    # `True` (isfinite(True) is True and True < 0 is False, so a boolean
+    # became a 100% commission rate) and raised a bare TypeError rather
+    # than a ValidationError on a string. It also checks EVERY rate,
+    # including the ones the currently-selected commission model does not
+    # read -- a typo in per_share_rate should not go unmentioned just
+    # because this run happens to use the pct model.
+    _cost_params = {
         "commission_pct": commission_pct,
         "slippage_pct": slippage_pct,
         "per_share_rate": per_share_rate,
@@ -186,11 +198,8 @@ def run_portfolio_simulation(
         "margin_interest_rate": margin_interest_rate,
         "impact_coefficient": impact_coefficient,
     }
-    for name, value in _non_negative_params.items():
-        if not math.isfinite(value) or value < 0:
-            raise ValidationError(
-                f"{name} must be a non-negative finite number, got {value!r}"
-            )
+    for name, value in _cost_params.items():
+        _cost_rate(name, value)
     if impact_lookback <= 0:
         raise ValidationError(f"impact_lookback must be > 0, got {impact_lookback}")
 
@@ -281,17 +290,57 @@ def run_portfolio_simulation(
             "trading calendar, nothing to simulate"
         )
 
-    for t in tickers:
-        for col in required_cols[fill_price]:
-            series = price_data[t].loc[master_index, col]
-            arr = series.to_numpy(dtype=float)
-            if not np.isfinite(arr).all() or (arr <= 0).any():
-                bad = series[(~np.isfinite(arr)) | (arr <= 0)]
-                raise ValidationError(
-                    f"price_data[{t!r}][{col!r}] has nonpositive or non-finite "
-                    f"value(s) on the trading calendar, e.g. at: "
-                    f"{[str(d) for d in bad.index[:5]]}"
-                )
+    # ── Dense price matrices, materialized ONCE ──────────────────────────
+    # The per-bar loop below used to read every price through
+    # `price_data[t].loc[date, "Close"]`, i.e. one pandas label lookup per
+    # ticker per bar. Profiling 100 tickers x 2,000 bars showed 200,000 such
+    # calls accounting for essentially the entire runtime, while the rebalance
+    # state machine -- the part that actually does the simulating -- is only
+    # 96 x 100 = 9,600 operations.
+    #
+    # So the bottleneck was never the accounting; it was addressing the data.
+    # Each required column becomes one (n_bars x n_tickers) float64 matrix
+    # aligned to master_index, and the loop indexes it positionally. The
+    # arithmetic below is unchanged -- this moves where the numbers are READ
+    # FROM, not how they are computed.
+    #
+    # Built HERE, before validation, because the validation below needs the
+    # same master_index-aligned view of every price. Reindexing once and
+    # validating the matrix does the alignment work a single time instead of
+    # once for the check and again for the simulation.
+    n_bars = len(master_index)
+    n_tickers = len(tickers)
+    ticker_pos = {t: i for i, t in enumerate(tickers)}
+
+    def _matrix(column: str) -> np.ndarray:
+        out = np.empty((n_bars, n_tickers), dtype=np.float64)
+        for t, i in ticker_pos.items():
+            out[:, i] = (
+                price_data[t].loc[master_index, column].to_numpy(dtype=np.float64)
+            )
+        return out
+
+    price_matrices = {col: _matrix(col) for col in required_cols[fill_price]}
+
+    # Screen each column with one whole-matrix pass. Only when something is
+    # actually wrong do we walk ticker-by-ticker, and that walk reproduces
+    # the original ticker-major/column-inner search order so the offender
+    # named in the message is the same one as before -- with several bad
+    # tickers, WHICH one gets reported is observable.
+    if any(
+        not np.isfinite(mat).all() or (mat <= 0).any()
+        for mat in price_matrices.values()
+    ):
+        for t in tickers:
+            for col in required_cols[fill_price]:
+                arr = price_matrices[col][:, ticker_pos[t]]
+                bad = (~np.isfinite(arr)) | (arr <= 0)
+                if bad.any():
+                    raise ValidationError(
+                        f"price_data[{t!r}][{col!r}] has nonpositive or non-finite "
+                        f"value(s) on the trading calendar, e.g. at: "
+                        f"{[str(d) for d in master_index[bad][:5]]}"
+                    )
 
     missing_dates = [d for d in target_weights.index if d not in master_index]
     if missing_dates:
@@ -314,21 +363,46 @@ def run_portfolio_simulation(
             f"every rebalance date (see: {dict(list(bad.items())[:5])})"
         )
 
-    for date, row in target_weights.iterrows():
-        gross = float(row.abs().sum())
+    # ── Dense weight matrix, materialized ONCE ───────────────────────────
+    # `tickers` is literally list(target_weights.columns), so the columns are
+    # already in position order and no realignment is needed — the frame IS
+    # the matrix. Both the validation below and every rebalance read rows of
+    # it positionally, which removes the per-rebalance-date pandas row
+    # extraction and Series construction (2,000 of each, and the single
+    # largest remaining cost, on a daily-rebalanced backtest).
+    weights_mat = target_weights.to_numpy(dtype=np.float64)
+    abs_weights = np.abs(weights_mat)
+    gross_by_date = abs_weights.sum(axis=1)
+
+    # Screen every date at once, then reconstruct the message only for the
+    # first offender. Checking gross before position size WITHIN that date
+    # preserves which of the two errors a doubly-invalid row reports, and
+    # taking the first offending row in index order preserves which date is
+    # named when several are invalid — both observable in the raised message.
+    offending = np.flatnonzero(
+        (gross_by_date > max_gross_leverage + 1e-9)
+        | (abs_weights > max_position_pct + 1e-9).any(axis=1)
+    )
+    if offending.size:
+        i = int(offending[0])
+        date = target_weights.index[i]
+        gross = float(gross_by_date[i])
         if gross > max_gross_leverage + 1e-9:
             raise ValidationError(
                 f"rebalance date {date}: gross leverage {gross:.4f} exceeds "
                 f"max_gross_leverage={max_gross_leverage}"
             )
+        row = target_weights.iloc[i]
         over = row[row.abs() > max_position_pct + 1e-9]
-        if not over.empty:
-            raise ValidationError(
-                f"rebalance date {date}: position(s) exceed "
-                f"max_position_pct={max_position_pct}: {over.to_dict()}"
-            )
+        raise ValidationError(
+            f"rebalance date {date}: position(s) exceed "
+            f"max_position_pct={max_position_pct}: {over.to_dict()}"
+        )
 
     rebalance_dates = set(target_weights.index)
+    # Rebalance date -> row of weights_mat, so the per-bar loop resolves a
+    # rebalance with a dict lookup instead of target_weights.loc[date].
+    rebalance_rows = {date: i for i, date in enumerate(target_weights.index)}
 
     if fill_price == "next_open" and rebalance_dates:
         last_rebalance = max(rebalance_dates)
@@ -343,23 +417,48 @@ def run_portfolio_simulation(
     # Rolling average dollar volume / volatility per ticker, needed only
     # for the impact model and/or the ADV participation check — computed
     # once upfront rather than per-trade.
-    dollar_volume: Dict[str, pd.Series] = {}
-    volatility: Dict[str, pd.Series] = {}
+    # Stored as (n_bars x n_tickers) matrices for the same reason the prices
+    # are: the liquidity-aware modes consult them once per ticker per trade,
+    # which is a pandas scalar label lookup on a daily-rebalanced backtest
+    # for every one of those. Positional indexing by (bar, ticker position)
+    # instead.
+    dollar_volume_mat: Optional[np.ndarray] = None
+    volatility_mat: Optional[np.ndarray] = None
     if needs_volume:
-        for t in tickers:
+        dollar_volume_mat = np.empty((n_bars, n_tickers), dtype=np.float64)
+        for t, i in ticker_pos.items():
             dv = (price_data[t]["Volume"] * price_data[t]["Close"]).reindex(
                 master_index
             )
-            dollar_volume[t] = dv.rolling(impact_lookback, min_periods=1).mean()
+            dollar_volume_mat[:, i] = (
+                dv.rolling(impact_lookback, min_periods=1)
+                .mean()
+                .to_numpy(dtype=np.float64)
+            )
     if use_impact_model:
-        for t in tickers:
+        volatility_mat = np.empty((n_bars, n_tickers), dtype=np.float64)
+        for t, i in ticker_pos.items():
             ret = price_data[t]["Close"].pct_change().reindex(master_index)
-            volatility[t] = (
-                ret.rolling(impact_lookback, min_periods=1).std().fillna(0.0)
+            volatility_mat[:, i] = (
+                ret.rolling(impact_lookback, min_periods=1)
+                .std()
+                .fillna(0.0)
+                .to_numpy(dtype=np.float64)
             )
 
+    close_mat = price_matrices["Close"]
+    open_mat = price_matrices["Open"] if fill_price == "next_open" else None
+    hl2_mat = (
+        (price_matrices["High"] + price_matrices["Low"]) / 2.0
+        if fill_price == "hl2_exploratory"
+        else None
+    )
+
     cash = initial_capital
-    shares: Dict[str, float] = {t: 0.0 for t in tickers}
+    # shares as a dense vector rather than a dict: the hot loop computes
+    # dot products over it every bar, and a dict comprehension there was
+    # rebuilding Python floats for work NumPy does in one call.
+    shares_vec = np.zeros(n_tickers, dtype=np.float64)
 
     equity_records: List[float] = []
     cash_records: List[float] = []
@@ -367,7 +466,9 @@ def run_portfolio_simulation(
     net_records: List[float] = []
     rebalance_log: List[Dict[str, Any]] = []
 
-    def _valid_dollar_volume(t: str, trigger_date: Any, exec_date: Any) -> float:
+    def _valid_dollar_volume(
+        t: str, pos: int, trigger_bar: int, exec_date: Any
+    ) -> float:
         # Fail closed: a caller who explicitly enabled max_adv_participation
         # or use_impact_model asked for a liquidity-aware check — a missing
         # or invalid volume baseline means that check can't be performed,
@@ -376,15 +477,15 @@ def run_portfolio_simulation(
         # permissive (return 0.0) for callers who use them directly without
         # opting into this engine's safety feature.
         #
-        # Look up at trigger_date, not exec_date: for fill_price="close"/
-        # "hl2_exploratory" the two are always equal (a no-op here), but for
-        # "next_open" they differ -- exec_date is the bar actually being
-        # filled, whose own full-day Volume/Close isn't knowable yet at that
-        # bar's Open. trigger_date is the last bar that was fully complete
-        # when the rebalance decision was made, so it's the correct,
-        # actually-known-in-advance baseline for a mode whose entire
-        # documented purpose is being lookahead-free.
-        dv = float(dollar_volume[t].loc[trigger_date])
+        # Look up at the TRIGGER bar, not the execution bar: for
+        # fill_price="close"/"hl2_exploratory" the two are always equal (a
+        # no-op here), but for "next_open" they differ -- the execution bar
+        # is the one actually being filled, whose own full-day Volume/Close
+        # isn't knowable yet at that bar's Open. The trigger bar is the last
+        # bar that was fully complete when the rebalance decision was made,
+        # so it's the correct, actually-known-in-advance baseline for a mode
+        # whose entire documented purpose is being lookahead-free.
+        dv = float(dollar_volume_mat[trigger_bar, pos])
         if not math.isfinite(dv) or dv <= 0:
             raise ValidationError(
                 f"rebalance {exec_date} ticker {t!r}: average dollar volume is "
@@ -395,9 +496,10 @@ def run_portfolio_simulation(
 
     def _trade_cost(
         t: str,
+        pos: int,
         delta_shares: float,
         trade_notional: float,
-        trigger_date: Any,
+        trigger_bar: int,
         exec_date: Any,
     ) -> float:
         if commission_model == "per_share":
@@ -405,95 +507,169 @@ def run_portfolio_simulation(
                 delta_shares, per_share_rate, min_commission
             )
         else:
-            commission = percentage_commission(trade_notional, commission_pct)
-        spread = trade_notional * slippage_pct
+            # Inlined rather than calling percentage_commission(): its
+            # validation is the expensive part, and the RATE was already
+            # validated once per rebalance by the caller. Same arithmetic --
+            # abs(notional) * rate -- so a change to that formula must be
+            # mirrored here, which is why the formula is spelled out rather
+            # than paraphrased.
+            #
+            # Deliberately dropped with it: percentage_commission's check
+            # that the NOTIONAL is a finite number. Unlike the rate, that is
+            # not caller input -- it is abs(delta) * price, built from a
+            # price the upfront validation already proved finite and
+            # positive on every bar of the master calendar, and a delta
+            # derived from an equity the insolvency check already proved
+            # positive. There is no path by which it arrives non-finite.
+            commission = abs(trade_notional) * commission_pct
+        spread = abs(trade_notional) * slippage_pct
         impact = 0.0
         if use_impact_model:
-            adv = _valid_dollar_volume(t, trigger_date, exec_date)
-            # Same trigger_date-not-exec_date lookup as _valid_dollar_volume,
+            adv = _valid_dollar_volume(t, pos, trigger_bar, exec_date)
+            # Same trigger-bar-not-exec-bar lookup as _valid_dollar_volume,
             # and for the same reason.
             impact = impact_cost(
                 trade_notional,
                 adv,
-                float(volatility[t].loc[trigger_date]),
+                float(volatility_mat[trigger_bar, pos]),
                 impact_coefficient,
             )
         return commission + spread + impact
 
     def _apply_rebalance(
         trigger_date: Any,
+        trigger_bar: int,
         exec_date: Any,
-        weights_row: pd.Series,
-        exec_prices: Dict[str, float],
+        weights_arr: np.ndarray,
+        exec_prices: np.ndarray,
     ) -> None:
+        """`weights_arr` and `exec_prices` are both (n_tickers,) rows —
+        of weights_mat and of the relevant price matrix respectively —
+        positionally aligned with `tickers` / `shares_vec`."""
         nonlocal cash
-        equity_now = cash + sum(shares[t] * exec_prices[t] for t in tickers)
+        equity_now = cash + float(shares_vec @ exec_prices)
+
+        # No cost-rate validation here. The rates are function parameters --
+        # they cannot change between rebalances -- and every one of them is
+        # validated once at entry. Re-checking them per trade (399,800
+        # _cost_rate calls, 0.28 s, on a daily-rebalanced 100-name backtest)
+        # revalidated the same three numbers over and over and could never
+        # have reported anything the entry check had not already rejected.
         turnover_notional = 0.0
-        for t in tickers:
-            price = exec_prices[t]
-            weight = float(weights_row[t])
-            if not math.isfinite(price) or price <= 0:
-                # Upfront validation already rejects nonpositive/non-finite
-                # prices anywhere on the master trading calendar, so this
-                # should be structurally unreachable -- kept as a defensive
-                # invariant, same pattern as the sizing self-consistency
-                # check below. A zero target weight needs no valid price to
-                # size (there's nothing to buy), so only raise when this
-                # ticker was actually being sized to a nonzero position.
-                if abs(weight) > 1e-12:
-                    raise ValidationError(
-                        f"rebalance {exec_date} ticker {t!r}: execution price "
-                        f"{price!r} is nonpositive or non-finite — cannot size "
-                        "a nonzero target weight from it."
-                    )
-                target_shares = 0.0
-            else:
-                target_shares = equity_now * weight / price
-            delta = target_shares - shares[t]
+        # ── Vectorized fast path ─────────────────────────────────────────
+        # Engages only for the default cost configuration. per_share
+        # commission has a per-ORDER minimum, the impact model needs a
+        # per-ticker volatility lookup, and the ADV constraint must raise
+        # naming one ticker -- each is a genuinely per-element decision, so
+        # they keep the explicit loop below rather than being bent into a
+        # vector form that would have to restate their semantics.
+        #
+        # The arithmetic is identical to the loop: target = equity * w / p,
+        # delta = target - held, notional = |delta| * p, cost = |notional| *
+        # (commission + slippage). Cash accumulates as a sum, which is the
+        # only cross-element dependency and is exactly what np.sum does.
+        if (
+            commission_model == "pct"
+            and not use_impact_model
+            and max_adv_participation is None
+        ):
+            prices_v = np.asarray(exec_prices, dtype=np.float64)
+            bad = ~np.isfinite(prices_v) | (prices_v <= 0)
+            if np.any(bad & (np.abs(weights_arr) > 1e-12)):
+                first = int(np.flatnonzero(bad & (np.abs(weights_arr) > 1e-12))[0])
+                raise ValidationError(
+                    f"rebalance {exec_date} ticker {tickers[first]!r}: execution "
+                    f"price {float(prices_v[first])!r} is nonpositive or "
+                    "non-finite — cannot size a nonzero target weight from it."
+                )
+            safe_prices = np.where(bad, 1.0, prices_v)
+            target = np.where(bad, 0.0, equity_now * weights_arr / safe_prices)
+            delta = target - shares_vec
+            # Same zero-size-trade rule as the loop: an unchanged target
+            # costs nothing and generates no turnover.
+            traded = np.abs(delta) > 1e-9
+            notional = np.abs(delta) * prices_v
+            turnover_notional = float(np.sum(np.where(traded, notional, 0.0)))
+            costs = np.where(traded, notional * (commission_pct + slippage_pct), 0.0)
+            cash -= float(np.sum(np.where(traded, delta * prices_v, 0.0)))
+            cash -= float(np.sum(costs))
+            shares_vec[:] = target
+        else:
+            for pos, t in enumerate(tickers):
+                price = float(exec_prices[pos])
+                weight = float(weights_arr[pos])
+                if not math.isfinite(price) or price <= 0:
+                    # Upfront validation already rejects nonpositive/non-finite
+                    # prices anywhere on the master trading calendar, so this
+                    # should be structurally unreachable -- kept as a defensive
+                    # invariant, same pattern as the sizing self-consistency
+                    # check below. A zero target weight needs no valid price to
+                    # size (there's nothing to buy), so only raise when this
+                    # ticker was actually being sized to a nonzero position.
+                    if abs(weight) > 1e-12:
+                        raise ValidationError(
+                            f"rebalance {exec_date} ticker {t!r}: execution price "
+                            f"{price!r} is nonpositive or non-finite — cannot size "
+                            "a nonzero target weight from it."
+                        )
+                    target_shares = 0.0
+                else:
+                    target_shares = equity_now * weight / price
+                delta = target_shares - shares_vec[pos]
 
-            # Zero-size trade: target didn't change since the last
-            # rebalance. Skip entirely — no cost, no turnover, no ADV
-            # check — so a per_share_commission minimum floor (or any
-            # future per-order minimum) can't charge a ticker that isn't
-            # actually trading.
-            if abs(delta) <= 1e-9:
-                shares[t] = target_shares
-                continue
+                # Zero-size trade: target didn't change since the last
+                # rebalance. Skip entirely — no cost, no turnover, no ADV
+                # check — so a per_share_commission minimum floor (or any
+                # future per-order minimum) can't charge a ticker that isn't
+                # actually trading.
+                if abs(delta) <= 1e-9:
+                    shares_vec[pos] = target_shares
+                    continue
 
-            trade_notional = abs(delta) * price
-            turnover_notional += trade_notional
+                trade_notional = abs(delta) * price
+                turnover_notional += trade_notional
 
-            if max_adv_participation is not None:
-                adv = _valid_dollar_volume(t, trigger_date, exec_date)
-                participation = adv_participation(trade_notional, adv)
-                # NaN means the participation could not be estimated at all
-                # (no usable volume baseline). It must be checked BEFORE the
-                # comparison, because `nan > limit` is False — so an
-                # unmeasurable trade would otherwise pass a liquidity
-                # constraint that a merely large trade fails. A constraint
-                # the caller explicitly asked for should not be silently
-                # satisfied by absent data.
-                if not math.isfinite(participation):
-                    raise ValidationError(
-                        f"rebalance {exec_date} ticker {t!r}: ADV participation "
-                        "could not be estimated (no usable dollar-volume "
-                        "baseline for this ticker/date), so "
-                        f"max_adv_participation={max_adv_participation} cannot "
-                        "be enforced. Supply volume data for this ticker or "
-                        "drop the constraint — it is not satisfied by default."
-                    )
-                if participation > max_adv_participation + 1e-9:
-                    raise ValidationError(
-                        f"rebalance {exec_date} ticker {t!r}: ADV participation "
-                        f"{participation:.4f} exceeds max_adv_participation={max_adv_participation}"
-                    )
+                if max_adv_participation is not None:
+                    adv = _valid_dollar_volume(t, pos, trigger_bar, exec_date)
+                    participation = adv_participation(trade_notional, adv)
+                    # NaN means the participation could not be estimated at all
+                    # (no usable volume baseline). It must be checked BEFORE the
+                    # comparison, because `nan > limit` is False — so an
+                    # unmeasurable trade would otherwise pass a liquidity
+                    # constraint that a merely large trade fails. A constraint
+                    # the caller explicitly asked for should not be silently
+                    # satisfied by absent data.
+                    if not math.isfinite(participation):
+                        raise ValidationError(
+                            f"rebalance {exec_date} ticker {t!r}: ADV participation "
+                            "could not be estimated (no usable dollar-volume "
+                            "baseline for this ticker/date), so "
+                            f"max_adv_participation={max_adv_participation} cannot "
+                            "be enforced. Supply volume data for this ticker or "
+                            "drop the constraint — it is not satisfied by default."
+                        )
+                    if participation > max_adv_participation + 1e-9:
+                        raise ValidationError(
+                            f"rebalance {exec_date} ticker {t!r}: ADV participation "
+                            f"{participation:.4f} exceeds max_adv_participation={max_adv_participation}"
+                        )
 
-            cash -= delta * price
-            cash -= _trade_cost(t, delta, trade_notional, trigger_date, exec_date)
-            shares[t] = target_shares
+                cash -= delta * price
+                cash -= _trade_cost(
+                    t, pos, delta, trade_notional, trigger_bar, exec_date
+                )
+                shares_vec[pos] = target_shares
 
-        equity_after = cash + sum(shares[t] * exec_prices[t] for t in tickers)
-        gross_after = sum(abs(shares[t] * exec_prices[t]) for t in tickers)
+        # The three post-trade invariant checks below all interrogate the
+        # same quantity -- the signed market value of each position -- so it
+        # is formed once here rather than rebuilt by three separate
+        # per-ticker generators (201,899 evaluations each on a
+        # daily-rebalanced 100-name backtest, purely to re-multiply numbers
+        # already computed).
+        position_values = shares_vec * exec_prices
+        abs_position_values = np.abs(position_values)
+        equity_after = cash + float(position_values.sum())
+        gross_after = float(abs_position_values.sum())
 
         # Insolvency: this engine models a cash-settled account with no
         # forced-liquidation/margin-call machinery, so zero or negative
@@ -535,9 +711,13 @@ def run_portfolio_simulation(
                     f"{max_gross_leverage} (shares sized from this rebalance's "
                     "equity do not match the requested weights)"
                 )
-            realized_max_position = max(
-                (abs(shares[t] * exec_prices[t]) / equity_now for t in tickers),
-                default=0.0,
+            # Dividing every element by the same positive equity_now is
+            # monotonic, so taking the max first and dividing once selects
+            # the identical element and yields the identical float. The
+            # explicit empty-portfolio guard preserves the `default=0.0`
+            # this replaced -- ndarray.max() raises on an empty array.
+            realized_max_position = (
+                float(abs_position_values.max()) / equity_now if n_tickers else 0.0
             )
             if realized_max_position > max_position_pct + 1e-9:
                 raise ValidationError(
@@ -560,17 +740,18 @@ def run_portfolio_simulation(
                 "gross_leverage_after": (
                     round(gross_after / equity_after, 6) if equity_after > 0 else 0.0
                 ),
-                "n_positions": int(sum(1 for t in tickers if abs(shares[t]) > 1e-9)),
+                "n_positions": int(np.count_nonzero(np.abs(shares_vec) > 1e-9)),
             }
         )
 
-    # (trigger_date, weights_row) awaiting execution at the *next* bar's Open
+    # (trigger_date, trigger_bar, weights_arr) awaiting execution at the
+    # *next* bar's Open
     # — only used when fill_price == "next_open".
     pending_rebalance: Any = None
     prev_date: Any = None
 
-    for date in master_index:
-        close_prices = {t: float(price_data[t].loc[date, "Close"]) for t in tickers}
+    for bar, date in enumerate(master_index):
+        close_prices = close_mat[bar]
 
         # Daily-accrued financing costs (borrow fee on shorts, margin
         # interest on negative cash), based on the position/cash carried
@@ -582,39 +763,50 @@ def run_portfolio_simulation(
         if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
             days = float((date - prev_date).days) if prev_date is not None else 1.0
             daily_cost = margin_interest(cash, margin_interest_rate, days=days)
-            for t in tickers:
-                if shares[t] < 0:
+            if borrow_fee_bps > 0.0:
+                # The borrow fee is LINEAR in notional, so the per-ticker
+                # loop this replaces was scaling each short's notional by
+                # the same rate and adding them up. Summing the short book's
+                # notional first and scaling once is the same quantity (to
+                # within floating-point associativity) and avoids 200,000
+                # short_borrow_cost calls on a 100-name, 2,000-bar backtest,
+                # each re-validating the same two scalars.
+                short_notional = float(
+                    np.abs(
+                        np.where(shares_vec < 0, shares_vec * close_prices, 0.0)
+                    ).sum()
+                )
+                if short_notional > 0.0:
                     daily_cost += short_borrow_cost(
-                        abs(shares[t]) * close_prices[t], borrow_fee_bps, days=days
+                        short_notional, borrow_fee_bps, days=days
                     )
             cash -= daily_cost
 
         if fill_price == "next_open" and pending_rebalance is not None:
-            trigger_date, weights_row = pending_rebalance
-            open_prices = {t: float(price_data[t].loc[date, "Open"]) for t in tickers}
-            _apply_rebalance(trigger_date, date, weights_row, open_prices)
+            trigger_date, trigger_bar, pending_weights = pending_rebalance
+            _apply_rebalance(
+                trigger_date, trigger_bar, date, pending_weights, open_mat[bar]
+            )
             pending_rebalance = None
 
-        if date in rebalance_dates:
-            weights_row = target_weights.loc[date]
+        rebalance_row = rebalance_rows.get(date)
+        if rebalance_row is not None:
+            weights_arr = weights_mat[rebalance_row]
             if fill_price == "close":
-                _apply_rebalance(date, date, weights_row, close_prices)
+                _apply_rebalance(date, bar, date, weights_arr, close_prices)
             elif fill_price == "hl2_exploratory":
-                mid_prices = {
-                    t: (
-                        float(price_data[t].loc[date, "High"])
-                        + float(price_data[t].loc[date, "Low"])
-                    )
-                    / 2.0
-                    for t in tickers
-                }
-                _apply_rebalance(date, date, weights_row, mid_prices)
+                _apply_rebalance(date, bar, date, weights_arr, hl2_mat[bar])
             else:  # next_open — defer execution to the following bar's Open
-                pending_rebalance = (date, weights_row)
+                pending_rebalance = (date, bar, weights_arr)
 
         # Equity is always marked to Close, regardless of fill_price — only
         # the rebalance trade's own execution price changes.
-        equity = cash + sum(shares[t] * close_prices[t] for t in tickers)
+        # One elementwise product per bar instead of a per-ticker Python
+        # sum. Net and gross exposure are both reductions over this same
+        # vector, so it is formed once and reduced twice.
+        position_values = shares_vec * close_prices
+        position_value = float(position_values.sum())
+        equity = cash + position_value
 
         # Insolvency (see the identical check in _apply_rebalance): a
         # position that drifts to zero/negative equity purely from price
@@ -630,8 +822,8 @@ def run_portfolio_simulation(
 
         equity_records.append(equity)
         cash_records.append(cash)
-        gross_records.append(sum(abs(shares[t] * close_prices[t]) for t in tickers))
-        net_records.append(sum(shares[t] * close_prices[t] for t in tickers))
+        gross_records.append(float(np.abs(position_values).sum()))
+        net_records.append(position_value)
         prev_date = date
 
     warnings: List[str] = []

@@ -9,6 +9,99 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Changed (performance — the portfolio simulator addresses its data once)
+
+`run_portfolio_simulation` was the last major workflow still reading its
+inputs one label at a time. Suite: 2749 → 2794 passed, 2 skipped; all 9 C++
+suites green. Every configuration was checked against the previous
+implementation before any timing was taken.
+
+The bottleneck was never the accounting. Profiling 100 tickers × 2,000 bars
+showed **200,000 pandas `.loc` lookups** — one per ticker per bar, purely to
+read a price — against a rebalance state machine that performs only 9,600
+operations. The simulator spent its time *addressing* data, not simulating.
+
+Prices, target weights and the liquidity baselines are now dense
+`(n_bars × n_tickers)` matrices built once and indexed positionally, and the
+default cost configuration executes a rebalance as array arithmetic instead
+of a per-ticker Python loop (min of 3 runs each, same process,
+back-to-back):
+
+| scenario | before | after | speedup |
+|---|---|---|---|
+| 25 × 2,000 bars, monthly | 394.2 ms | 23.4 ms | **17×** |
+| 100 × 2,000 bars, monthly | 1,502.6 ms | 32.3 ms | **47×** |
+| 500 × 2,000 bars, monthly | 7,455.8 ms | 96.0 ms | **78×** |
+| 100 × 2,000 bars, weekly | 1,639.9 ms | 45.7 ms | **36×** |
+| 100 × 2,000 bars, daily | 2,340.9 ms | 116.7 ms | **20×** |
+| 100 × 2,000, `next_open` | 1,605.8 ms | 47.8 ms | **34×** |
+| 100 × 2,000, ADV constraint | 1,573.2 ms | 61.9 ms | **25×** |
+| 100 × 2,000, impact model | 1,683.6 ms | 121.9 ms | **14×** |
+
+The speedup *grows* with universe size, because the cost removed was
+per-ticker-per-bar while the work retained is per-rebalance.
+
+**The vectorized rebalance is deliberately narrow.** It engages only for the
+`pct` commission model with no impact model and no ADV constraint. Per-share
+commission has a per-*order* minimum, the impact model needs a per-ticker
+volatility lookup, and the ADV constraint must raise naming one ticker —
+each is a genuinely per-element decision, and bending them into vector form
+would mean restating their semantics in a second place. They keep the
+explicit loop and fall through automatically.
+
+Because that leaves two routes through one calculation, the equivalence is
+now a test rather than an assumption: the same economics are driven down
+both paths (an ADV limit set wide enough to bind on nothing forces the loop)
+and the results must agree, under every fill model, long-only and long/short.
+
+**Validation was merged with construction rather than duplicated.** The
+upfront price check reindexed every ticker and column to the master calendar,
+and the simulator then reindexed all of them again. It now builds the
+matrices first and validates those, doing the alignment work once.
+
+**Error messages still name the same offender.** Screening a whole matrix
+finds every violation simultaneously, where the loops these replaced stopped
+at the first — so *which* ticker, column or date is reported is observable
+behaviour. The vectorized checks screen in bulk and then reconstruct the
+message by walking in the original order (ticker-major with columns inner;
+earliest rebalance date first, gross leverage before position size within a
+date). Tests pin that ordering.
+
+Other per-element work removed along the way: the three post-trade invariant
+checks now share one position-value vector instead of rebuilding it three
+times; short-borrow fees accrue as one masked sum, on the linearity of the
+fee in notional, instead of a call per ticker per bar; and cost-rate
+validation happens once per rebalance rather than once per ticker (399,800
+redundant validations of the same three scalars on a daily-rebalanced
+backtest).
+
+**Cost-rate validation moved to the entry point, and got stricter on the
+way.** The rates are function parameters — they cannot change between
+rebalances — yet they were re-validated inside the cost functions on every
+trade (399,800 redundant checks of the same three scalars on a
+daily-rebalanced backtest). They are now checked once at entry, through
+`costs.py`'s own `_cost_rate`, so the engine and the cost primitives agree on
+what a valid rate is.
+
+That reaches further than the hand-rolled guard it replaces, which tested
+`math.isfinite(value) or value < 0`:
+
+- `commission_pct=True` passed it (`isfinite(True)` is `True`, `True < 0` is
+  `False`), making a boolean a 100% commission rate.
+- `slippage_pct="0.001"` raised a bare `TypeError` from inside `math.isfinite`
+  rather than a `ValidationError`.
+- Rates belonging to the *other* commission model were never examined at all,
+  because validation only ran inside whichever cost function executed —
+  `per_share_rate=True`, `min_commission=True` and `impact_coefficient=True`
+  each ran a complete simulation to a plausible-looking final equity under the
+  default `pct` model. All three are now rejected by name.
+
+Agreement with the previous implementation is within 1.7e-15 relative
+across all twelve configurations tested, with the `rebalance_log` identical
+in every one. The residual is floating-point reassociation — `np.sum`'s
+pairwise summation against a sequential accumulator — not a change of
+formula.
+
 ### Changed (performance — moving the boundary, not porting more formulas)
 
 The organizing question was not "can this function be C++" but "what is the

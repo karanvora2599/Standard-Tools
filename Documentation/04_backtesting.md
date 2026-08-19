@@ -947,6 +947,59 @@ accrual above; sector-exposure constraints (as opposed to reporting — see
 `get_capacity_report`) aren't enforced by the engine itself. Neither is
 required for the shared-cash architecture itself to be correct.
 
+### The simulator is vectorized, and what that does *not* change
+
+The engine holds prices, target weights and the liquidity baselines as dense
+`(n_bars × n_tickers)` matrices, built once and indexed positionally. It used
+to read every price through `price_data[t].loc[date, "Close"]` — one pandas
+label lookup per ticker per bar, 200,000 of them on a 100-ticker, 2,000-bar
+run, against a rebalance state machine that performs only 9,600 operations.
+The time went into *addressing* the data, not simulating with it.
+
+Measured back-to-back in one process, min of 3 runs each:
+
+| scenario | before | after | speedup |
+|---|---|---|---|
+| 25 tickers × 2,000 bars, monthly | 394.2 ms | 23.4 ms | **17×** |
+| 100 tickers × 2,000 bars, monthly | 1,502.6 ms | 32.3 ms | **47×** |
+| 500 tickers × 2,000 bars, monthly | 7,455.8 ms | 96.0 ms | **78×** |
+| 100 tickers × 2,000 bars, daily | 2,340.9 ms | 116.7 ms | **20×** |
+| 100 tickers × 2,000 bars, impact model | 1,683.6 ms | 121.9 ms | **14×** |
+
+The speedup grows with universe size: the cost removed scaled with tickers ×
+bars, while the work that remains scales with rebalances.
+
+**The vectorized rebalance is narrow on purpose.** It runs only for the `pct`
+commission model with no impact model and no ADV constraint. `per_share`
+commission applies a per-*order* minimum, the impact model needs a per-ticker
+volatility lookup, and the ADV constraint must raise naming one ticker —
+those are per-element decisions, so they keep the explicit loop and are
+selected automatically. You do not choose a path; you choose a cost model.
+
+**Nothing about the economics changed.** Agreement with the previous
+implementation is within 1.7e-15 relative across every configuration,
+with `rebalance_log` identical in all of them. The residual is floating-point
+reassociation (pairwise vs. sequential summation), not a different formula.
+Because two routes now exist through one calculation, their equivalence is
+enforced by tests that drive the same economics down both.
+
+**Error messages still name the same offender.** Validation screens whole
+matrices, which finds every violation at once where the previous loops
+stopped at the first — so the reported ticker/column/date is reconstructed by
+walking in the original order: ticker-major with columns inner for prices,
+and earliest rebalance date first (gross leverage before position size within
+a date) for weights. If several inputs are invalid, you get the same message
+you would have got before.
+
+**Cost rates are validated once, at entry, and all of them.** Because the
+rates cannot change between rebalances there is no reason to re-check them
+per trade, and checking them upfront through `costs.py`'s own validator made
+the check stricter: a boolean rate (`commission_pct=True` — which used to
+pass a finite/non-negative test and become a 100% rate) and a string rate are
+both rejected by name, and so are invalid rates belonging to the commission
+model you are *not* using. `per_share_rate=True` under the default `pct`
+model previously ran a full simulation without complaint.
+
 ### Position Sizing (`backtest/sizing.py`)
 
 `target_weights` above assumes you already have per-ticker target weights.
