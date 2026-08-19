@@ -9,6 +9,112 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (full-codebase audit, Pass 2 — one shared numerical contract)
+
+The audit's own diagnosis was that roughly 40 of its findings were a single
+problem wearing different clothes. `@validate_series` checked emptiness and
+nothing else — its all-NaN check sat in the body as commented-out code, and
+there was no infinity check at all — so every metric wearing that decorator
+had its own accidental behaviour for the same invalid input:
+
+```
+sharpe_ratio(all-NaN)       -> nan
+sortino_ratio(all-NaN)      -> +inf        (reads as "no losing bars")
+var_historical(all-NaN)     -> IndexError
+max_drawdown(contains inf)  -> -1.703437775179145
+```
+
+That last one is why the fix belongs in the shared decorator rather than in
+each function: an infinity does not stay visibly wrong. It came back as a
+drawdown that looks measured. Suite: 2562 → 2613 passed, 1 skipped.
+
+**New `standard_quant_tools.numeric_contract`** — one set of helpers for
+every public numerical boundary: `require_finite_series`,
+`require_positive_price_series`, `require_positive_start_level`,
+`require_aligned`, `require_positive_int`, `require_finite_scalar`,
+`require_periods_per_year`, `require_finite_covariance`.
+
+Three rules, each drawn deliberately:
+
+- **Non-finite input is never information.** `±inf` in a price or return
+  series has no economic reading — it is a division that should not have
+  happened upstream. Rejected everywhere.
+- **All-NaN is not a series.** It carries no observation at all. Rejected.
+- **Partial NaN is allowed by default.** This is the contract's deliberate
+  limit. Warm-up windows, a ticker that lists mid-sample, a benchmark on a
+  different holiday calendar all produce legitimate gaps, and many callers
+  drop them internally on purpose. Making them fatal would break correct code
+  to catch a problem it has already handled. Pass `allow_nan=False` where a
+  gap genuinely cannot be tolerated.
+
+**Prices must be strictly positive, not merely finite.** `0.0` and `-5.0` are
+perfectly finite and are not prices. `run_strategy` checked finiteness only,
+so a single `Close` of **-5.0 produced a total return of +0.397914** — a
+plausible profit computed through a negative price — while a `0.0` close
+produced a silent total wipeout. It also now rejects a price/signal pair that
+share no dates, which previously surfaced as an empty-slice error far from
+the cause.
+
+**Level series get a weaker, correct rule.** `require_positive_start_level`
+constrains only the OPENING value, because a leveraged position can genuinely
+be wiped out and an equity curve legitimately reaches zero or goes negative at
+its tail. What must hold is that the *denominator* is positive: cumulative
+return divides by the first value, and the drawdown ratio divides by a running
+maximum seeded from it. A non-positive open made `max_drawdown` return
+**-1.0048519736842105** — a drawdown deeper than total loss.
+
+**Sortino no longer conflates two opposite states.** `+inf` meant both "the
+strategy never had a losing bar" and "the deviation could not be computed" —
+the single most flattering possible misreading of unusable data. The genuine
+no-downside case still returns `+inf`; an incomputable one does not.
+
+**CAGR counts intervals, not observations.** N levels contain N-1 returns, so
+`len(series) / periods_per_year` overstated the elapsed time and understated
+the growth rate. Negligible over a decade of daily bars; over 21 observations
+it is a 5% error in the exponent's denominator, growing as the window shortens
+— exactly where a CAGR is already least reliable.
+
+**`periods_per_year` is validated wherever it is used.** It is a bare
+multiplier, so an invalid value produced a confidently wrong number rather
+than an error: `-252` returned a CAGR of **-0.5350151890419428**, which reads
+as an ordinary annual loss. Zero raised a bare `ZeroDivisionError` from inside
+the arithmetic.
+
+**Cost primitives reject credits.** Every function in `backtest/costs.py` is a
+bare arithmetic expression, so a negative rate returned a *negative cost* —
+indistinguishable downstream from a rebate:
+
+```
+percentage_commission(1e6, rate=-0.001)  -> -1000.0
+fixed_bps_spread(1e6, bps=-10)           -> -1000.0
+short_borrow_cost(1e6, annual_bps=-500)  -> -4109.59
+```
+
+A backtest charging negative commission earns money by trading, flattering
+exactly the strategies that turn over most. NaN is checked before the sign,
+since `value < 0` is False for NaN. `pct_of_range_spread` also rejects an
+inverted bar (`high < low`).
+
+**Sizing hygiene.** The score panel rejected NaN but not infinity — and
+infinity is worse here, because it makes a column's mean and standard
+deviation NaN, so *every* weight in that cross-section becomes NaN rather than
+just the offending one. `gross_leverage` is now validated too: it scales the
+whole vector, so a negative value flips every position — turning the strategy
+into its own opposite — while each individual weight still looks well-formed.
+
+**Diagnostics semantics.**
+
+- A trade returning exactly `0.0` is neither a win nor a loss. It used to fall
+  into `losses` via `~is_win`, dragging `avg_loser` toward zero and extending
+  `max_consecutive_losses` through trades that were actually flat. On a
+  win/breakeven/loss triple it reported `avg_loser -0.5` and **2** consecutive
+  losses; it now reports `-1.0` and **1**.
+- A NaN position satisfies `!= 0`, so a missing position counted as time *in*
+  the market while making every exposure average NaN.
+- An unmeasurable excursion (empty price window, unusable entry price) is NaN
+  rather than `0.0` — which reads as "this trade never moved against me",
+  the most flattering answer available for a trade whose prices are missing.
+
 ### Fixed (full-codebase audit, Pass 1 — temporal correctness and integrity)
 
 A fresh review of the whole repository, taken independently of the earlier

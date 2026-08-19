@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import drawdown_series
 
 logger = logging.getLogger(__name__)
@@ -132,9 +133,18 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
         }
 
     returns = trade_log["return_pct"].to_numpy(dtype=float)
+    # A trade that returns exactly 0.0 is neither a win nor a loss. It used
+    # to fall into `losses` (via ~is_win), which dragged avg_loser toward
+    # zero, inflated the loss count, and — worst — extended
+    # max_consecutive_losses through what were actually flat trades. On a
+    # win/breakeven/loss triple it reported 2 consecutive losses.
+    #
+    # Breakevens are excluded from BOTH sides rather than reassigned, since
+    # counting them as wins would flatter the win rate just as wrongly.
     is_win = returns > 0
+    is_loss = returns < 0
     wins = returns[is_win]
-    losses = returns[~is_win]
+    losses = returns[is_loss]
 
     win_rate = len(wins) / len(returns)
     avg_winner = float(wins.mean()) if len(wins) else 0.0
@@ -142,16 +152,22 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
     expectancy = win_rate * avg_winner + (1 - win_rate) * avg_loser
     payoff_ratio = abs(avg_winner / avg_loser) if avg_loser != 0 else float("inf")
 
+    # Three states, not two. Iterating `is_win` alone made every non-win a
+    # loss, so a breakeven trade extended a LOSING STREAK — the one statistic
+    # here a reader is most likely to treat as a risk signal. A flat trade
+    # breaks both streaks instead of continuing either.
     max_w = cur_w = max_l = cur_l = 0
-    for won in is_win:
-        if won:
+    for r in returns:
+        if r > 0:
             cur_w += 1
             cur_l = 0
             max_w = max(max_w, cur_w)
-        else:
+        elif r < 0:
             cur_l += 1
             cur_w = 0
             max_l = max(max_l, cur_l)
+        else:
+            cur_w = cur_l = 0
 
     return {
         "expectancy_pct": round(expectancy, 4),
@@ -196,9 +212,15 @@ def trade_excursions(trade_log: pd.DataFrame, price_data: pd.DataFrame) -> pd.Da
     for _, row in trade_log.iterrows():
         window = price_data.loc[row["entry_date"] : row["exit_date"]]
         entry_price = float(row["entry_price"])
-        if window.empty or entry_price == 0:
-            mae_list.append(0.0)
-            mfe_list.append(0.0)
+        # NaN, not 0.0. An empty price window or an unusable entry price means
+        # the excursion could not be measured — and 0.0 is the single most
+        # flattering answer available, reading as "this trade never moved
+        # against me at all". A trade whose prices are missing is not a
+        # risk-free trade. Averages built on these (avg_mae_pct) would
+        # otherwise be pulled toward zero by exactly the trades with no data.
+        if window.empty or not np.isfinite(entry_price) or entry_price <= 0:
+            mae_list.append(float("nan"))
+            mfe_list.append(float("nan"))
             continue
 
         is_long = row["direction"] == "long"
@@ -235,6 +257,17 @@ def exposure_stats(
     index, when a trade log is supplied.
     """
     values = executed_signal.to_numpy(dtype=float)
+    # A NaN position satisfies `!= 0`, so a missing position counted as time
+    # IN the market and then made avg_gross/net_exposure NaN. Measured on a
+    # 3-bar series with one NaN: time_in_market 0.6667 with both exposure
+    # averages NaN. Missing exposure is not exposure.
+    if len(values) and not np.isfinite(values).all():
+        n_bad = int((~np.isfinite(values)).sum())
+        raise ValidationError(
+            f"executed_signal contains {n_bad} non-finite value(s). A NaN "
+            "position satisfies `!= 0`, so it would be counted as time in the "
+            "market while making every exposure average NaN."
+        )
     if len(values) == 0:
         return {
             "time_in_market": 0.0,

@@ -1,6 +1,6 @@
 import logging
 from functools import wraps
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -68,13 +68,34 @@ def validate_dataframe(required_columns: Optional[list[str]] = None):
     return decorator
 
 
-def validate_series(allow_empty: bool = False):
+def validate_series(allow_empty: bool = False, allow_nan: bool = True):
     """
     Decorator to validate input Series.
 
     Accepts a pandas or (when polars is installed) a polars Series — see
     validate_dataframe's docstring for why `is_series_like` (not a bare
     `isinstance(arg, pd.Series)`) matters here.
+
+    This used to check emptiness ONLY. The all-NaN check sat in the body as
+    commented-out code, and there was no infinity check at all, so every
+    metric wearing this decorator had its own accidental behaviour for the
+    same invalid input:
+
+        sharpe_ratio(all-NaN)       -> nan
+        sortino_ratio(all-NaN)      -> +inf   (reads as "no losing bars")
+        var_historical(all-NaN)     -> IndexError
+        max_drawdown(contains inf)  -> -1.703437775179145
+
+    That last one is the reason this belongs in the shared decorator rather
+    than in each function: an infinity does not stay visibly wrong. It came
+    back as a drawdown that looks measured.
+
+    `allow_nan=True` is the deliberate default. Indicator warm-up windows, a
+    ticker that lists mid-sample, and a benchmark on a different holiday
+    calendar all produce legitimate gaps, and many callers drop them
+    internally on purpose — making partial NaN fatal would break correct code
+    to catch a problem it has already handled. All-NaN and infinities are
+    rejected regardless, since neither is data.
     """
 
     def decorator(func: Callable) -> Callable:
@@ -82,21 +103,56 @@ def validate_series(allow_empty: bool = False):
         def wrapper(*args, **kwargs):
             for arg in args:
                 if is_series_like(arg):
-                    if not allow_empty and is_empty(arg):
+                    if is_empty(arg):
+                        if allow_empty:
+                            continue
                         logger.warning(
                             "[validate_series] %s rejected: empty Series", func.__name__
                         )
                         raise ValidationError(
                             f"Input Series for {func.__name__} is empty."
                         )
-                    # Check for all NaNs if needed?
-                    # if arg.isna().all():
-                    #     raise ValidationError(f"Input Series for {func.__name__} contains only NaNs.")
+                    _check_series_values(arg, func.__name__, allow_nan)
             return func(*args, **kwargs)
 
         return wrapper
 
     return decorator
+
+
+def _check_series_values(arg: Any, func_name: str, allow_nan: bool) -> None:
+    """Numerical half of validate_series. Tolerates a non-pandas Series-like
+    (polars) by falling back to a plain conversion, and skips anything
+    non-numeric rather than guessing at it."""
+    try:
+        values = np.asarray(arg, dtype=float)
+    except (TypeError, ValueError):
+        return  # not a numeric series; the shape checks above still applied
+    if values.size == 0:
+        return
+
+    isnan = np.isnan(values)
+    isinf = np.isinf(values)
+    if isinf.any():
+        raise ValidationError(
+            f"Input Series for {func_name} contains {int(isinf.sum())} non-finite "
+            "(infinite) value(s). An infinity is not a measurement — it is a division that "
+            "should not have happened upstream — and it does not stay visible: "
+            "max_drawdown on a series containing one inf returned a "
+            "plausible-looking -1.70."
+        )
+    if isnan.all():
+        raise ValidationError(
+            f"Input Series for {func_name} contains no observations (every value "
+            "is NaN). This is the absence of data rather than data with gaps, and "
+            "different metrics here would otherwise answer it with NaN, with "
+            "+inf, or with an IndexError."
+        )
+    if not allow_nan and isnan.any():
+        raise ValidationError(
+            f"Input Series for {func_name} contains {int(isnan.sum())} non-finite "
+            "(NaN) value(s), which this computation cannot tolerate."
+        )
 
 
 def require_finite_array(arr: np.ndarray, name: str, func: str) -> None:

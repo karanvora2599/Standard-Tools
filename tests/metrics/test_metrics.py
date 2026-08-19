@@ -49,10 +49,26 @@ class TestCumulativeReturn:
 
 class TestCAGR:
     def test_consistent_with_cumulative_return(self, sample_equity):
+        """
+        The elapsed span of a LEVEL series is N-1 intervals, not N: a series
+        of N prices contains N-1 returns. This test previously recomputed
+        with `len(series) / 252`, which overstates the elapsed time and so
+        understates the growth rate.
+
+        Negligible over a decade of daily bars, material on short windows —
+        over 21 observations (one month) it is a 5% error in the exponent's
+        denominator, and it grows as the window shortens, which is exactly
+        where a CAGR is already least reliable.
+        """
         total = cumulative_return(sample_equity)
-        n_years = len(sample_equity) / 252
+        n_years = (len(sample_equity) - 1) / 252
         expected = (1 + total) ** (1 / n_years) - 1
         assert cagr(sample_equity) == pytest.approx(expected, rel=1e-10)
+
+    def test_a_single_observation_spans_no_time(self):
+        """One level is not a growth rate. Previously len(series)/252 gave a
+        non-zero span for a series containing no return at all."""
+        assert cagr(pd.Series([100.0])) == 0.0
 
     def test_positive_for_growing_equity(self, sample_equity):
         if sample_equity.iloc[-1] > sample_equity.iloc[0]:

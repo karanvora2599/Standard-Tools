@@ -22,6 +22,7 @@ from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio,
     sortino_ratio,
 )
+from standard_quant_tools.numeric_contract import require_positive_price_series
 from standard_quant_tools.validation import require_finite_array
 
 _VALID_FILL_PRICES = ("close", "next_open", "hl2_exploratory")
@@ -372,26 +373,36 @@ def run_strategy(
     # skipna=True, so the NaN bar's return is silently DROPPED from the
     # compounded equity curve and total_return is computed over a quietly
     # shortened series that still looks like a complete one.
+    if len(idx) == 0:
+        # After intersecting price dates with signal dates there may be
+        # nothing left. Everything below assumes at least one bar, and the
+        # failure surfaced far from here as an empty-slice error.
+        raise ValidationError(
+            "price_data and signal_series share no dates, so there is nothing "
+            "to backtest. Check that the two are on the same calendar and "
+            "cover overlapping ranges."
+        )
     prices_arr = prices.to_numpy(dtype=np.float64)
     signals_arr = signals.to_numpy(dtype=np.float64)
-    require_finite_array(prices_arr, "prices", "run_strategy")
+    # STRICTLY POSITIVE, not merely finite. Every price column here feeds a
+    # ratio -- pct_change for Close, open/prev_close and close/open for the
+    # fill-aware paths -- so 0.0 divides by zero and a negative price flips
+    # the sign of the return it produces. Both are perfectly finite, so the
+    # finite check alone passed them: a single Close of -5.0 produced a
+    # total_return of +0.397914 (a plausible profit computed through a
+    # negative price), and a Close of 0.0 produced a silent -1.0 wipeout.
+    require_positive_price_series(prices, "Close", "run_strategy", allow_nan=False)
     require_finite_array(signals_arr, "signals", "run_strategy")
     if fill_price == "next_open":
-        require_finite_array(
-            price_data.loc[idx, "Open"].to_numpy(dtype=np.float64),
-            "Open",
-            "run_strategy",
+        require_positive_price_series(
+            price_data.loc[idx, "Open"], "Open", "run_strategy", allow_nan=False
         )
     elif fill_price == "hl2_exploratory":
-        require_finite_array(
-            price_data.loc[idx, "High"].to_numpy(dtype=np.float64),
-            "High",
-            "run_strategy",
+        require_positive_price_series(
+            price_data.loc[idx, "High"], "High", "run_strategy", allow_nan=False
         )
-        require_finite_array(
-            price_data.loc[idx, "Low"].to_numpy(dtype=np.float64),
-            "Low",
-            "run_strategy",
+        require_positive_price_series(
+            price_data.loc[idx, "Low"], "Low", "run_strategy", allow_nan=False
         )
 
     n_bars = len(prices)

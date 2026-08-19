@@ -35,6 +35,46 @@ def _check_scores(scores: pd.DataFrame) -> None:
         raise ValidationError(
             "scores panel contains NaN — every ticker must have a value at every date"
         )
+    # NaN was rejected; infinity was not, and it is worse here. An inf score
+    # survives ranking (it simply sorts first), then poisons a z-score — the
+    # mean and standard deviation of a column containing inf are both NaN, so
+    # EVERY weight in that cross-section becomes NaN, not just the offending
+    # one. Verified: dollar_neutral on a panel with a single inf returned an
+    # all-NaN row.
+    infinite = np.isinf(scores.to_numpy(dtype=float))
+    if infinite.any():
+        raise ValidationError(
+            f"scores panel contains {int(infinite.sum())} non-finite (infinite) "
+            "value(s). An infinite score does not merely rank first — it makes "
+            "the column's mean and standard deviation NaN, so every weight in "
+            "that cross-section becomes NaN rather than just the one."
+        )
+
+
+def _check_gross_leverage(gross_leverage: float) -> float:
+    """
+    Gross leverage scales the whole weight vector, so it was the one number
+    here that could invert or erase a book without any individual weight
+    looking wrong: a negative value flips every position (turning the
+    strategy into its own opposite), zero erases the book, and NaN makes
+    every weight NaN. None of the three were checked, and a NaN would have
+    passed a `< 0` guard anyway.
+    """
+    if isinstance(gross_leverage, bool) or not isinstance(gross_leverage, (int, float)):
+        raise ValidationError(
+            f"gross_leverage must be a number, got {type(gross_leverage).__name__}"
+        )
+    value = float(gross_leverage)
+    if not np.isfinite(value):
+        raise ValidationError(f"gross_leverage must be finite, got {gross_leverage!r}")
+    if value <= 0:
+        raise ValidationError(
+            f"gross_leverage must be > 0, got {value}. Zero erases the book and "
+            "a negative value flips every position, turning the strategy into "
+            "its own opposite while each individual weight still looks "
+            "well-formed."
+        )
+    return value
 
 
 def rank_weighted(scores: pd.DataFrame, gross_leverage: float = 1.0) -> pd.DataFrame:
@@ -45,6 +85,7 @@ def rank_weighted(scores: pd.DataFrame, gross_leverage: float = 1.0) -> pd.DataF
     Centering on the mean rank makes sum(weight) == 0 automatically.
     """
     _check_scores(scores)
+    _check_gross_leverage(gross_leverage)
     ranks = scores.rank(axis=1, method="average")
     centered = ranks.sub(ranks.mean(axis=1), axis=0)
     gross = centered.abs().sum(axis=1)
@@ -63,6 +104,7 @@ def equal_weight_top_bottom(
     equal-weighted within each side so sum(|weight|) == gross_leverage.
     """
     _check_scores(scores)
+    _check_gross_leverage(gross_leverage)
     if n_long <= 0 and n_short <= 0:
         raise ValidationError("at least one of n_long/n_short must be > 0")
     n_tickers = scores.shape[1]
@@ -106,6 +148,7 @@ def zscore_normalized(
     division-by-zero blowup — there is no cross-sectional signal to act on.
     """
     _check_scores(scores)
+    _check_gross_leverage(gross_leverage)
     mean = scores.mean(axis=1)
     std = scores.std(axis=1)
     degenerate = std <= 1e-12
@@ -132,6 +175,7 @@ def vol_scaled(
     get zero weight for that name on that date, not a division blowup.
     """
     _check_scores(scores)
+    _check_gross_leverage(gross_leverage)
     missing = [c for c in scores.columns if c not in returns_df.columns]
     if missing:
         raise ValidationError(f"returns_df is missing columns for: {missing}")

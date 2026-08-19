@@ -6,6 +6,11 @@ import pandas as pd
 
 from standard_quant_tools.analysis.regression import calculate_beta
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.numeric_contract import (
+    require_finite_scalar,
+    require_periods_per_year,
+    require_positive_start_level,
+)
 from standard_quant_tools.validation import validate_series
 
 from .return_metrics import cagr
@@ -38,6 +43,8 @@ _Z_TABLE = {0.90: 1.282, 0.95: 1.645, 0.99: 2.326, 0.999: 3.090}
 def sharpe_ratio(
     returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252
 ) -> float:
+    require_periods_per_year(periods_per_year, "sharpe_ratio")
+    require_finite_scalar(risk_free_rate, "risk_free_rate", "sharpe_ratio")
     excess_returns = returns - risk_free_rate / periods_per_year
     std = returns.std()
     if std == 0:
@@ -54,15 +61,39 @@ def sortino_ratio(
     # Semi-deviation: RMS of clipped returns across ALL periods (zero contribution for
     # profitable bars). Dividing by N (not just n_negative) is the Sortino & Price (1994)
     # definition and gives a larger, more conservative denominator than std of negatives only.
+    require_periods_per_year(periods_per_year, "sortino_ratio")
+    require_finite_scalar(risk_free_rate, "risk_free_rate", "sortino_ratio")
     downside_sq = np.minimum(excess_returns.to_numpy(dtype=np.float64), 0.0) ** 2
     downside_dev = float(np.sqrt(downside_sq.mean())) * np.sqrt(periods_per_year)
-    if downside_dev == 0 or np.isnan(downside_dev):
+    # These two used to share a return value, and they mean opposite things:
+    #
+    #   downside_dev == 0   the strategy genuinely never lost -> +inf is the
+    #                       correct, meaningful answer (infinite Sortino).
+    #   downside_dev NaN    the deviation could not be computed at all.
+    #
+    # Returning +inf for both made "my inputs were unusable" read as "my
+    # strategy has no downside whatsoever" — the single most flattering
+    # possible misreading. The all-NaN input that produced it is now rejected
+    # by validate_series upstream, but the branch is kept honest here too,
+    # since a NaN can still arrive from a partially-NaN series.
+    if np.isnan(downside_dev):
+        return float("nan")
+    if downside_dev == 0:
         return np.inf
     return (excess_returns.mean() * periods_per_year) / downside_dev
 
 
 @validate_series()
 def max_drawdown(series: pd.Series) -> float:
+    # The START must be positive, not every level. (series - cum_max) /
+    # cum_max divides by the running peak, which is seeded from the first
+    # value and never decreases — so a positive open keeps the denominator
+    # positive even for a curve that is later wiped out, which is a real
+    # outcome this must keep supporting. A non-positive OPEN divided by zero
+    # or flipped the sign: measured on a curve whose first value was replaced
+    # with a negative, max_drawdown returned -1.0048519736842105, a drawdown
+    # deeper than total loss.
+    require_positive_start_level(series, "series", "max_drawdown")
     cum_max = series.cummax()
     drawdown = (series - cum_max) / cum_max
     return drawdown.min()
@@ -195,7 +226,12 @@ def treynor_ratio(
 
 
 def drawdown_series(series: pd.Series) -> pd.Series:
-    """Returns the full drawdown series (fraction from peak), useful for plotting."""
+    """Returns the full drawdown series (fraction from peak), useful for plotting.
+
+    Requires a positive OPENING level for the same reason max_drawdown does:
+    the ratio divides by a running peak seeded from it. A curve that is later
+    wiped out remains supported."""
+    require_positive_start_level(series, "series", "drawdown_series")
     cum_max = series.cummax()
     return (series - cum_max) / cum_max
 
