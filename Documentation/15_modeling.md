@@ -22,7 +22,7 @@ tool #47 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 5 tools, never merged into `agent.get_agent_tools()` /
+with exactly 6 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-     (46 tools, 7 categories)     (5 tools, one pipeline)
+     (46 tools, 7 categories)     (6 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 5 tools
+## The 6 tools
 
 | Tool | Input → Output |
 |---|---|
@@ -53,13 +53,14 @@ core stays one thing; only the agent-facing vocabulary is separate.
 | `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
+| `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
 
 `run_model_experiment` doing fit+validate+register in one call is
 deliberate: there is no separate "just fit" tool, so it's structurally
 impossible to register a model that was never walk-forward validated.
 `inspect_model` is one tool with four views instead of four separate
 inspection tools, for the same reason `get_rally_signal` returns five
-signal fields in one call instead of five tools.
+signal fields in one call instead of six tools.
 
 ### End-to-end example
 
@@ -119,7 +120,7 @@ print(score_result.predictions_uri)
 print(inspect_model(InspectModelInput(model_id=exp_result.model_id, view="feature_importance")).data)
 ```
 
-**Classification** works through the same five tools — build the dataset
+**Classification** works through the same tools — build the dataset
 with a `forward_direction` target rather than binarizing the panel yourself:
 
 ```python
@@ -937,9 +938,16 @@ It doesn't answer "does this work as a trading strategy" — that requires
 an actual backtest, and this codebase already has one
 (`run_signal_panel_backtest`, in the *other* 46-tool registry).
 `modeling.bridge.oos_predictions_to_signal_panel` connects the two —
-a plain Python function, **not a 6th agent tool** (the 5-tool surface
-stays exactly 5; this is the "artifacts, not tool calls" boundary between
-the two registries).
+a plain Python function, deliberately **not** a tool, because it only
+reshapes an artifact the caller already holds and hands it to a tool in
+the other registry. That is argument-shaping, not a decision, and it is
+the "artifacts, not tool calls" boundary between the two registries.
+
+For the *portfolio* question — one shared cash balance, weights rather
+than direction signals — see [Evaluating a model as a
+portfolio](#evaluating-a-model-as-a-portfolio) below, which **is** a tool
+(`evaluate_model_portfolio`). The distinction is not the count but the
+kind: that one runs a simulation and produces new persisted artifacts.
 
 **Why the bridge reads `run_model_experiment`'s output, not
 `score_model`'s**: `score_model` produces a single as-of snapshot for
@@ -1055,6 +1063,148 @@ re-evaluated every bar by `run_signal_panel_backtest`. That's a valid
 strategy, but it is not "hold for 20 days", and nothing here enforces a
 relationship between the two — choose the holding period deliberately
 rather than inheriting it from the target.
+
+---
+
+## Evaluating a model as a portfolio
+
+The bridge answers "what if I traded each name independently on the sign
+of this model's forecast". `evaluate_model_portfolio` answers the
+question an agent actually has after training: **would this model have
+made money in an account?**
+
+The two differ in more than presentation:
+
+| | `bridge` → `run_signal_panel_backtest` | `evaluate_model_portfolio` → `run_portfolio_simulation` |
+|---|---|---|
+| Signal | `-1 / 0 / +1` per ticker | target weight per ticker per rebalance date |
+| Capital | each ticker gets its **own** `initial_capital`; per-ticker return streams blended afterwards | **one shared cash balance**, positions sized against current account equity |
+| Ranking | discarded | drives position size |
+| Between rebalances | signal re-evaluated every bar | share counts held, weights drift (as a real account does) |
+| Costs | per-ticker | commission, spread, borrow, margin interest, ADV limits on one book |
+
+Reducing a cross-sectional model's ordering to three values, and then
+giving every name its own capital, throws away both the rank and the
+fact that the names compete for the same dollars. That is why a strong
+`cs_rank_ic` can sit alongside a negative portfolio Sharpe — and why
+`run_model_experiment`'s statistical metrics are not a substitute for
+this one.
+
+```python
+from standard_quant_tools.modeling.agent import (
+    EvaluateModelPortfolioInput, evaluate_model_portfolio,
+)
+from standard_quant_tools.modeling.specs import (
+    PredictionTransformSpec, PortfolioSimSpec,
+)
+
+result = evaluate_model_portfolio(EvaluateModelPortfolioInput(
+    model_id=exp.model_id,
+    transform=PredictionTransformSpec(
+        method="cross_sectional_rank",   # or zscore / top_bottom_quantile / sign
+        gross_exposure=1.0,
+        net_exposure=0.0,                # dollar neutral
+        max_position_weight=0.05,
+        rebalance_frequency="weekly",
+    ),
+    portfolio=PortfolioSimSpec(
+        fill_price="next_open",          # default, and the only lookahead-free choice
+        commission_pct=0.001,
+        slippage_pct=0.0005,
+        borrow_fee_bps=50.0,             # a long/short book shorts for free at 0.0
+    ),
+))
+print(result.metrics["sharpe_ratio"], result.metrics["annualized_turnover"])
+print(result.target_weights_uri)
+```
+
+### Same leakage discipline as the bridge
+
+This reads `run_model_experiment`'s walk-forward OOS predictions and
+**never** `score_model` — no parameter can select that path.
+`score_model`'s estimator is the final full-panel refit, so scoring
+historical dates with it would be in-sample and the equity curve would be
+fiction. The predictions artifact's recorded content hash is verified
+*before* loading, for the same reason the bridge verifies it: structural
+validation passes on an edited file that kept its shape, so a rewritten
+prediction column would otherwise produce a clean and entirely fictional
+track record.
+
+The OOS calendar-continuity check applies here too, though the failure it
+prevents is different in kind. A hole does *not* compress the price axis
+(the simulator runs on its own master trading calendar, not on the signal
+index) — but the portfolio would hold a stale position across the gap
+while equity keeps marking to market, which is not the model's
+out-of-sample performance either.
+
+### The score → weight step reuses `backtest.sizing`
+
+The ranking math is not reimplemented. `rank_weighted`,
+`zscore_normalized`, `equal_weight_top_bottom` and `vol_scaled` in
+[`backtest/sizing.py`](../src/standard_quant_tools/backtest/sizing.py)
+already build gross-normalized weight panels and are called as-is. What
+`portfolio_eval` adds is what sizing.py has no concept of:
+
+- **An exact gross *and* net target.** A single rescale can control one
+  or the other, never both. The signed vector is split into books sized
+  to `(gross + net) / 2` and `(gross − net) / 2`, which gives
+  `sum(|w|) = gross` and `sum(w) = net` by construction for any
+  `|net| ≤ gross`.
+- **A per-position cap that redistributes.** Excess above
+  `max_position_weight` is pushed onto the uncapped names in the same
+  book, repeatedly — redistribution can lift another name over the cap,
+  which must then be capped in turn. A cap that merely truncated would
+  quietly deliver less gross exposure than requested.
+- **Honest infeasibility.** A book with too few names to hold its target
+  gross under the cap (2 names × 0.1 cap cannot reach 0.5) reports the
+  shortfall in `transform_diagnostics` and `warnings`. It does not breach
+  the cap, and it does not rescale the *other* book — that would break
+  the net target instead.
+- **A rebalance schedule.** `daily` / `weekly` / `monthly`, taking the
+  **first** prediction date in each period. First, not last: "last date
+  in the month" is only knowable once the month has ended, so a schedule
+  built that way cannot be reproduced live.
+- **Sparse cross-sections.** Dates sharing the same set of available
+  entities are grouped and weighted together. A missing `(entity, date)`
+  stays `NaN` through the score panel and receives zero *weight* — never
+  a `0.0` *score*, which is the middle of a centered cross-section and
+  would rank a name the model said nothing about above every name it was
+  bearish on. A date with fewer than two entities is left flat: one name
+  is not a cross-section, and allocating to it would be acting on a
+  comparison that was never made.
+
+Classification predictions are recentred to `proba − 0.5` when the panel
+is built. Ranking is unaffected (a constant shift is monotone), but it
+makes `method="sign"` mean the same thing for both tasks — a raw
+probability lives in `[0, 1]`, so its sign is `+1` for every name on
+every date, a "long everything" book dressed up as a signal.
+
+### What the result carries
+
+`metrics` is the economic answer: cumulative return, CAGR, annualized
+volatility, Sharpe, Sortino, max drawdown, Calmar, mean and annualized
+turnover, mean gross/net exposure, position count.
+`estimated_cost_drag_pct` is explicitly **derived, not measured** — the
+simulator deducts costs from cash without reporting a total, so this
+reconstructs the commission + spread component from realized turnover and
+therefore *excludes* borrow, margin interest and any impact model. It is
+a floor on cost drag, not the whole of it.
+
+`transform_diagnostics` reports what the weighting actually produced
+(names per date, book sizes, realized gross/net, dates below target
+gross, dates with no position). `provenance` records the prediction,
+weight and equity-curve hashes alongside the dataset/estimator lineage
+and both specs, so a reported Sharpe traces back to the exact bytes that
+produced it. The target-weight artifact is content-addressed, so changing
+the transform writes a *new* artifact rather than replacing one an audit
+record still points at.
+
+`warnings` carries anything that changes how the number should be read:
+a `close` fill convention (look-ahead, and the metrics will look better
+than they are), dropped rebalance dates, books that could not reach
+target gross, an interval with no defined annualization factor, the
+dataset coverage warnings carried from the model manifest, and any the
+simulator itself raised (insolvency, negative cash).
 
 ---
 
@@ -1174,11 +1324,21 @@ Not built here, and not accidentally half-built either:
 - **Model lifecycle states** — registration means "persisted and
   validated enough to load", not "approved for production". There is no
   trained/validated/approved/production distinction.
-- **Prediction transforms beyond sign** — the bridge is sign-only; rank,
-  quantile, normalized-score, neutralized and volatility-scaled
-  transformations are not built.
+- **Prediction transforms beyond sign** — *closed for the portfolio
+  path.* `PredictionTransformSpec` (see [Evaluating a model as a
+  portfolio](#evaluating-a-model-as-a-portfolio)) provides sign, rank,
+  z-score, quantile and volatility-scaled transforms with gross/net
+  exposure targets and a position cap. The **bridge** remains sign-only
+  by design — `DIRECTION` is the only units-invariant signal for an
+  engine that treats a `SCORE` as a raw leverage multiplier. Still not
+  built: beta- and sector-neutralization, which need per-ticker
+  beta/sector metadata this repo does not carry (the same blocker
+  `backtest.sizing` documents for its own deferred list).
 - **Hyperparameter tuning, custom estimator import, multi-model
-  comparison tooling.**
+  comparison tooling.** Note that selecting among candidates on
+  `evaluate_model_portfolio`'s reported Sharpe would turn those OOS folds
+  into tuning data — a nested inner-fold selection is what that needs,
+  and it is not built.
 - **Declarative preprocessing** — winsorize 1/99 + pooled z-score is
   hardwired for every estimator, though trees, linear and cross-sectional
   models want different treatment.

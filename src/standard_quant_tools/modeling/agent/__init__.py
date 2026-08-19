@@ -2,6 +2,8 @@ from .dispatch import modeling_dispatch
 from .models import (
     BuildModelDatasetInput,
     BuildModelDatasetResult,
+    EvaluateModelPortfolioInput,
+    EvaluateModelPortfolioResult,
     FeatureCatalogEntry,
     InspectModelInput,
     InspectModelResult,
@@ -15,6 +17,7 @@ from .models import (
 from .tools import (
     MODELING_TOOL_DISPATCH,
     build_model_dataset,
+    evaluate_model_portfolio,
     get_modeling_tools,
     inspect_model,
     list_features,
@@ -26,6 +29,8 @@ __all__ = [
     "MODELING_TOOL_DISPATCH",
     "BuildModelDatasetInput",
     "BuildModelDatasetResult",
+    "EvaluateModelPortfolioInput",
+    "EvaluateModelPortfolioResult",
     "FeatureCatalogEntry",
     "InspectModelInput",
     "InspectModelResult",
@@ -36,6 +41,7 @@ __all__ = [
     "ScoreModelInput",
     "ScoreModelResult",
     "build_model_dataset",
+    "evaluate_model_portfolio",
     "get_modeling_tools",
     "inspect_model",
     "list_features",

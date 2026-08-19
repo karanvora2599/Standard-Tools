@@ -1,5 +1,5 @@
 """
-Pydantic Input/Result models for the 5-tool modeling agent surface.
+Pydantic Input/Result models for the 6-tool modeling agent surface.
 DatasetSpec/ModelSpec (modeling.specs) are embedded directly as nested
 fields rather than flattened — an LLM constructs one declarative spec
 object per call, the same ModelSpec-not-exec() contract described in
@@ -11,7 +11,13 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..specs import DatasetSpec, ModelSpec, _parse_date
+from ..specs import (
+    DatasetSpec,
+    ModelSpec,
+    PortfolioSimSpec,
+    PredictionTransformSpec,
+    _parse_date,
+)
 
 # Every Input/Result model below with a model_id field sets this to
 # silence pydantic's "model_" protected-namespace warning (the same fix
@@ -248,3 +254,79 @@ class InspectModelResult(BaseModel):
     model_id: str
     view: str
     data: Dict[str, Any]
+
+
+# ── evaluate_model_portfolio ────────────────────────────────────────────
+
+
+class EvaluateModelPortfolioInput(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str = Field(
+        ..., description="A model_id returned by run_model_experiment."
+    )
+    transform: PredictionTransformSpec = Field(
+        default_factory=PredictionTransformSpec,
+        description="How the model's out-of-sample predictions become target "
+        "weights. Defaults to a dollar-neutral, weekly-rebalanced, "
+        "rank-weighted portfolio capped at 5% per name.",
+    )
+    portfolio: PortfolioSimSpec = Field(
+        default_factory=PortfolioSimSpec,
+        description="Simulation parameters (capital, costs, fill convention, "
+        "leverage limits). Defaults to next-open fills, 10bps commission and "
+        "5bps slippage, unlevered.",
+    )
+
+
+class EvaluateModelPortfolioResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    metrics: Dict[str, float] = Field(
+        ...,
+        description=(
+            "Economic performance of the simulated account: cumulative "
+            "return, CAGR, annualized volatility, Sharpe, Sortino, max "
+            "drawdown, Calmar, turnover, mean gross/net exposure, position "
+            "count, and estimated_cost_drag_pct. These are what the model is "
+            "worth AFTER costs and position sizing — a different question "
+            "from run_model_experiment's oos_metrics (R2, IC), which measure "
+            "predictive accuracy and can be strong while these are negative."
+        ),
+    )
+    transform_diagnostics: Dict[str, Any] = Field(
+        ...,
+        description="What the prediction -> weight step actually produced: "
+        "names per date, book sizes, realized gross/net exposure, dates that "
+        "could not reach the target gross under the position cap, and dates "
+        "with no position at all.",
+    )
+    coverage: Dict[str, Any] = Field(
+        ...,
+        description="Entities, prediction dates, rebalance dates actually "
+        "traded, and simulated bars — how much of a track record this number "
+        "rests on.",
+    )
+    target_weights_uri: str = Field(
+        ...,
+        description="Persisted (date x entity) target-weight panel that drove "
+        "the simulation. Content-addressed, so re-running with different "
+        "transform settings writes a new artifact rather than replacing one an "
+        "audit record still points at.",
+    )
+    equity_curve_uri: str
+    provenance: Dict[str, Any] = Field(
+        ...,
+        description="Prediction, weight and equity-curve hashes plus the "
+        "dataset/estimator lineage and both specs — everything needed to "
+        "reproduce the reported metrics.",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Conditions that change how these metrics should be read: "
+        "a look-ahead fill convention, rebalance dates dropped, books that "
+        "could not reach target gross, an ambiguous annualization factor, plus "
+        "the dataset coverage warnings carried from the model manifest and any "
+        "raised by the simulator itself (insolvency, negative cash).",
+    )
