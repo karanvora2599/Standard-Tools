@@ -1,6 +1,15 @@
 [build-system]
-requires = ["flit_core >=3.2,<4"]
-build-backend = "flit_core.buildapi"
+# scikit-build-core, not flit_core: flit is a pure-Python backend, so
+# `pip install .` produced a package WITHOUT _sqt_core no matter what the
+# machine could compile. Building the extension was a separate manual CMake
+# step, which meant "installed Standard Tools" could mean two materially
+# different runtimes -- and nothing in the install output said which one you
+# had. The extension is now built as part of a normal install when a C++
+# toolchain is present, and skipped gracefully when it is not (see
+# CMakeLists.txt); pass -C cmake.define.SQT_REQUIRE_NATIVE=ON to make a
+# missing toolchain a hard error instead.
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "standard_quant_tools"
@@ -18,7 +27,8 @@ classifiers = [
     "Topic :: Office/Business :: Financial :: Investment",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dynamic = ["version", "description"]
+version = "0.1.0"
+description = "Standard quantitative finance tools for backtesting, analysis, and agent-based trading."
 dependencies = [
     "pandas>=2.0.0",
     "numpy>=1.24.0",
@@ -75,6 +85,19 @@ signing = [
 polars = [
     "polars>=0.20.0"
 ]
+
+[tool.scikit-build]
+# The package lives under src/; without this the backend would look for a
+# top-level standard_quant_tools/ directory and build an empty wheel.
+wheel.packages = ["src/standard_quant_tools"]
+cmake.version = ">=3.19"
+# Release, not the CMake default: a debug build of this extension is several
+# times slower, which would silently undo the entire reason it exists.
+cmake.build-type = "Release"
+# The compiled artifact is the only thing CMake needs to contribute to the
+# wheel; everything else is the pure-Python tree copied by wheel.packages.
+build.verbose = false
+sdist.exclude = ["build/", "build_*/", "*.pyd", "*.so"]
 
 [tool.black]
 line-length = 88

@@ -374,6 +374,17 @@ def _adx_trend_signals(
     return result
 
 
+# INTERNAL ONLY -- never call these directly.
+#
+# These are the UNVALIDATED signal functions. STRATEGY_REGISTRY wraps each one
+# with resolve_strategy_params (below), and that wrapper is what makes a
+# negative lookback -- direct look-ahead, since pandas reads a negative
+# pct_change period as a FORWARD window -- unreachable. Calling a function out
+# of this dict skips that entirely and will happily compute a signal from
+# future prices.
+#
+# It exists only as the input to the wrapping step. Every consumer, inside
+# this package and outside it, must go through STRATEGY_REGISTRY.
 _RAW_STRATEGIES = {
     "sma_crossover": _sma_signals,
     "rsi_mean_reversion": _rsi_signals,

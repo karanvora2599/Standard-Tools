@@ -63,6 +63,7 @@ import pandas as pd
 
 from standard_quant_tools import audit
 from standard_quant_tools.config import load_env
+from standard_quant_tools.data.ratios import implausible_value_warnings
 from standard_quant_tools.error import (
     APIError,
     DataNotFoundError,
@@ -304,7 +305,31 @@ def _parse_financial_ratios(
     if net_income is not None and revenues:
         profit_margins = net_income / revenues
 
-    return FinancialRatios(
+    # Every value above is computed as a plain ratio or a decimal fraction
+    # already, so no unit conversion is needed here — Polygon's units happen
+    # to be the canonical ones.
+    #
+    # The DEFINITION of debt_to_equity is not canonical, though, and that
+    # cannot be fixed by scaling. Polygon's balance sheet exposes total
+    # `liabilities` but no total-debt line, so the ratio below is
+    # liabilities/equity: it includes payables, deferred revenue and lease
+    # obligations, which are liabilities but not debt. That makes it
+    # systematically higher than Bloomberg's TOT_DEBT_TO_TOT_EQY for the same
+    # company, for reasons unrelated to leverage.
+    #
+    # Reported with a note rather than discarded — a liabilities-to-equity
+    # ratio is a useful number when you know that is what it is, and silently
+    # shipping it under a debt-based name was the actual problem.
+    notes = {}
+    if debt_to_equity is not None:
+        notes["debt_to_equity"] = (
+            "Computed as total LIABILITIES / equity, not total DEBT / equity: "
+            "Polygon's financials expose no total-debt line. Includes "
+            "payables, deferred revenue and lease obligations, so it reads "
+            "higher than a debt-based ratio and is not directly comparable "
+            "to one from another provider."
+        )
+    ratios = FinancialRatios(
         forward_pe=None,
         trailing_pe=trailing_pe,
         price_to_book=price_to_book,
@@ -313,7 +338,11 @@ def _parse_financial_ratios(
         profit_margins=profit_margins,
         dividend_yield=None,
         market_cap=int(market_cap) if market_cap else None,
+        definition_notes=notes,
     )
+    for warning in implausible_value_warnings(ratios):
+        logger.warning("[polygon] %s", warning)
+    return ratios
 
 
 class PolygonProvider(DataProvider):

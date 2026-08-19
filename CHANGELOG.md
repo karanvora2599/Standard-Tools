@@ -9,6 +9,102 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Changed (packaging — the native extension is part of the build)
+
+`pip install .` used a pure-Python backend (`flit_core`), so it produced a
+package **without `_sqt_core`** no matter what the machine could compile.
+Building the extension was a separate manual CMake step, which meant
+"installed Standard Tools" could mean two materially different runtimes with
+nothing in the install output saying which one you had.
+
+The backend is now `scikit-build-core`, and a normal install builds the
+extension when a C++ toolchain is present. Verified by building a wheel:
+`standard_quant_tools-0.1.0-cp312-cp312-win_amd64.whl` containing
+`standard_quant_tools/_sqt_core.cp312-win_amd64.pyd`.
+
+**A missing toolchain degrades rather than fails.** `_sqt_core` is an optional
+fast path — every function it accelerates has a Python fallback — so demanding
+a compiler to install would turn an accelerator into a hard dependency, the
+opposite of what shipping it in the build was for. CMake declares
+`LANGUAGES NONE` and enables C++ only once a compiler is actually found;
+without one it warns and installs the pure-Python package. `SQT_REQUIRE_NATIVE=ON`
+inverts that for CI, where a silent skip would mean a green build that quietly
+tested only the fallback path.
+
+> The first attempt used `check_language(CXX)` and **broke the ordinary
+> developer configure**: that runs a separate try-compile which does not
+> inherit the Visual Studio generator's toolchain discovery, so it reported
+> "no compiler" on a machine with a working MSVC install. Caught by testing
+> the previous revision in the same shell — it found MSVC 19.44.35228.0 where
+> `check_language` did not. `enable_language(CXX OPTIONAL)` uses the real
+> generator and agrees with the build that follows it.
+
+### Fixed (financial ratios — one canonical unit and definition per field)
+
+`FinancialRatios` is populated by three providers, and the shared field names
+implied an interchangeability that did not exist. Two separate problems hid
+behind them, and they need different answers.
+
+**Units differ, and are converted.** yfinance reports `debtToEquity` as a
+**percentage** (150.5) while Polygon computes a plain **ratio** (1.505), so a
+screen written as `debt_equity_max=2.0` admitted nearly every company on one
+provider and nearly none on the other, with nothing in either result
+indicating which convention was in force. Every field now has one canonical
+unit — plain ratios for `forward_pe` / `trailing_pe` / `price_to_book` /
+`debt_to_equity`, decimal fractions for `return_on_equity` / `profit_margins`
+/ `dividend_yield`, absolute currency for `market_cap` — and each provider
+converts to it.
+
+**Definitions differ, and are declared.** Bloomberg's `TOT_DEBT_TO_TOT_EQY`
+is total *debt* over equity; Polygon's is derived from total *liabilities*,
+which include payables, deferred revenue and lease obligations. The Polygon
+figure is systematically higher for the same company — not by a scale factor
+that could be corrected, but because it answers a different question. New
+`FinancialRatios.definition_notes` names any field whose basis departs from
+the canonical one, and the value is still returned: a liabilities-to-equity
+ratio is useful when you know that is what it is. Silently shipping it under a
+debt-based name was the actual problem.
+
+**No plausibility-based auto-correction.** Inferring "15.0 must be a
+percentage" would silently rewrite a genuine 1500% return on equity, which
+small-equity companies really do post. Providers declare their own vendor's
+units, and `implausible_value_warnings` *reports* a value that looks like an
+unconverted percentage instead of changing it — so a vendor changing
+convention (as yfinance did with `dividendYield`, between releases) surfaces
+as a warning rather than as a silently wrong number.
+
+### Fixed (slip audit — fixes reachable around through a sibling path)
+
+A pass over the audit's own fixes, asking whether each one actually holds
+everywhere or can be reached around. Four slips; two were defects in code
+written *during* this audit, which is the point — a fix is not finished when
+the function it targets is correct, only when no sibling path does the same
+job unguarded.
+
+- **`backtest_grid`'s C++ batch path never got the positive-price contract.**
+  It kept only the finiteness check, so a `Close` of **-5.0 ran through an
+  entire parameter sweep** and returned a full results table — because -5.0 is
+  perfectly finite.
+- **A NaN trade return became a "breakeven".** A hole the breakeven fix itself
+  opened: moving from `~is_win` to explicit `> 0` / `< 0` tests made NaN
+  satisfy *neither*, so an unmeasurable trade was bucketed with the flat ones —
+  counted in the win-rate denominator, excluded from both averages, and
+  treated as a streak-breaker. The earlier two-way split had at least called
+  it a loss. Neither is right.
+- **`_RAW_STRATEGIES`** must exist as the input to the validation wrapper, but
+  calling out of it skips the check that makes a negative lookback
+  unreachable. Now prominently marked internal-only, and pinned by a test.
+- **A forgotten `interval`** on `_normalize_ohlcv_index` re-enabled the
+  intraday-collapsing behaviour by omission rather than intent. The back-compat
+  default is deliberate and tested, so it stays — but it now logs a warning
+  naming how many timestamps are about to be flattened.
+
+> Also checked and found **not** to be slips: Bloomberg's unconditional
+> `.normalize()` (it rejects intraday intervals outright, so it only ever sees
+> daily-or-coarser bars), `run_signal_panel_backtest`, and `portfolio_metrics`
+> — the last two already inherit their contracts from the functions beneath
+> them.
+
 ### Fixed (full-codebase audit, Passes 3-5 — solvers, schemas, audit policy)
 
 Suite: 2613 → 2695 passed, 2 skipped.

@@ -200,6 +200,16 @@ endif()
 
 set(_pkg_dir "${CMAKE_SOURCE_DIR}/src/standard_quant_tools")
 
+# The output above lands in the SOURCE tree, which is what the in-place
+# developer workflow (`cmake --build build`, then run pytest against src/)
+# depends on. A wheel is built in an isolated staging directory and copies
+# only what CMake INSTALLS, so without this rule scikit-build-core produced a
+# wheel with no extension in it -- a silent pure-Python package that looked
+# like a successful native build.
+install(TARGETS _sqt_core
+        LIBRARY DESTINATION standard_quant_tools   # Unix/macOS .so
+        RUNTIME DESTINATION standard_quant_tools)  # Windows .pyd
+
 set_target_properties(_sqt_core PROPERTIES
     CXX_VISIBILITY_PRESET     hidden
     VISIBILITY_INLINES_HIDDEN ON

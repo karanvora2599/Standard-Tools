@@ -149,6 +149,54 @@ print(f"Profit Margin: {ratios.profit_margins:.1%}")
 
 All ratio fields are `Optional[float]` — missing data returns `None` rather than crashing.
 
+### One canonical unit and definition, whichever provider served it
+
+The shared field names used to imply an interchangeability that did not exist:
+
+| Field | yfinance | Polygon |
+|---|---|---|
+| `debt_to_equity` | `150.5` (a **percentage**) | `1.505` (a plain **ratio**) |
+
+A screen written as `debt_equity_max=2.0` therefore admitted nearly every
+company on one provider and nearly none on the other, with nothing in either
+result saying which convention was in force. Every field now has one canonical
+unit, and each provider converts to it:
+
+| Field | Canonical unit |
+|---|---|
+| `forward_pe`, `trailing_pe`, `price_to_book`, `debt_to_equity` | plain ratio |
+| `return_on_equity`, `profit_margins`, `dividend_yield` | decimal fraction (`0.15` == 15%) |
+| `market_cap` | absolute units of the reporting currency |
+
+The screener's filters (`roe_min`, `debt_equity_max`, …) are stated in these
+same units, so a filter now means the same thing on every provider.
+
+**Units are converted; definitions are declared.** These are different
+problems. Bloomberg's `TOT_DEBT_TO_TOT_EQY` is total *debt* over equity, while
+Polygon derives its ratio from total *liabilities* — which include payables,
+deferred revenue and lease obligations. That figure is systematically higher
+for the same company, not by a scale factor that could be corrected but
+because it answers a different question. `FinancialRatios.definition_notes`
+names any field whose basis departs from the canonical one:
+
+```python
+ratios = polygon.get_financial_ratios("AAPL")
+ratios.definition_notes.get("debt_to_equity")
+# 'Computed as total LIABILITIES / equity, not total DEBT / equity: ...'
+```
+
+The value is still returned rather than discarded — a liabilities-to-equity
+ratio is useful when you know that is what it is. Shipping it silently under a
+debt-based name was the actual problem.
+
+**Suspicious values are reported, not auto-corrected.** Inferring "15.0 must
+be a percentage" would silently rewrite a genuine 1500% return on equity,
+which small-equity companies really do post. Providers declare their own
+vendor's units, and a value that looks like an unconverted percentage produces
+a logged warning instead — so a vendor changing convention (as yfinance did
+with `dividendYield` between releases) surfaces as a warning rather than as a
+wrong number that every downstream screen silently inherits.
+
 ---
 
 ## Caching & Retry

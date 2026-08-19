@@ -133,6 +133,22 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
         }
 
     returns = trade_log["return_pct"].to_numpy(dtype=float)
+    # Checked BEFORE the three-way split below, and this is a hole the split
+    # itself opened. Moving from `~is_win` to explicit `> 0` / `< 0` tests
+    # made NaN satisfy NEITHER, so a NaN trade return was silently bucketed
+    # with the breakevens -- counted in the denominator of win_rate, excluded
+    # from both averages, and treated as a streak-breaker. The previous
+    # two-way split had at least counted it as a loss. Neither is right: an
+    # unmeasurable trade is not a flat trade.
+    if not np.all(np.isfinite(returns)):
+        n_bad = int(np.sum(~np.isfinite(returns)))
+        raise ValidationError(
+            f"trade_log['return_pct'] contains {n_bad} non-finite value(s). A "
+            "NaN trade return is neither a win, a loss, nor a breakeven — it "
+            "is a trade whose outcome is unknown, and bucketing it with the "
+            "flat trades would understate both the win rate and the loss "
+            "streak."
+        )
     # A trade that returns exactly 0.0 is neither a win nor a loss. It used
     # to fall into `losses` (via ~is_win), which dragged avg_loser toward
     # zero, inflated the loss count, and — worst — extended

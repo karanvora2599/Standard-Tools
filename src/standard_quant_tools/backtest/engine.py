@@ -766,6 +766,15 @@ def backtest_grid(
         # ValidationError and mask bad input behind a confusing fallback
         # instead of rejecting it.
         prices_arr = price_data["Close"].to_numpy(dtype=np.float64)
+        # STRICTLY POSITIVE, matching run_strategy. This path had only the
+        # finiteness check, so the positive-price contract added for the
+        # single-call path did not cover the grid: a Close of -5.0 ran through
+        # an entire parameter sweep and returned a full results table, because
+        # -5.0 is perfectly finite. Found by auditing the fixes themselves for
+        # parallel paths rather than by a new symptom.
+        require_positive_price_series(
+            price_data["Close"], "Close", "batch_run_strategy", allow_nan=False
+        )
         require_finite_array(prices_arr, "prices", "batch_run_strategy")
         try:
             # Build (num_combos × n_bars) signal matrix

@@ -42,6 +42,10 @@ import pandas as pd
 
 from standard_quant_tools import audit
 from standard_quant_tools.config import load_env
+from standard_quant_tools.data.ratios import (
+    implausible_value_warnings,
+    percent_to_fraction,
+)
 from standard_quant_tools.error import (
     APIError,
     DataNotFoundError,
@@ -254,16 +258,36 @@ def _parse_ticker_info(symbol: str, fields: Dict[str, Any]) -> TickerInfo:
 def _parse_financial_ratios(fields: Dict[str, Any]) -> FinancialRatios:
     """Map raw ReferenceDataRequest field values to FinancialRatios. Pure
     function — see _extract_reference_fields for the blpapi-consuming step."""
-    return FinancialRatios(
+    # Bloomberg reports every rate-like field as a PERCENTAGE
+    # (RETURN_COM_EQY of 15.0 means 15%), and TOT_DEBT_TO_TOT_EQY as a
+    # percentage too, so all four are converted to this package's canonical
+    # decimal fraction / plain ratio.
+    ratios = FinancialRatios(
         forward_pe=fields.get("BEST_PE_RATIO"),
         trailing_pe=fields.get("PE_RATIO"),
         price_to_book=fields.get("PX_TO_BOOK_RATIO"),
-        debt_to_equity=fields.get("TOT_DEBT_TO_TOT_EQY"),
-        return_on_equity=fields.get("RETURN_COM_EQY"),
-        profit_margins=fields.get("PROF_MARGIN"),
-        dividend_yield=fields.get("EQY_DVD_YLD_IND"),
+        debt_to_equity=percent_to_fraction(fields.get("TOT_DEBT_TO_TOT_EQY")),
+        return_on_equity=percent_to_fraction(fields.get("RETURN_COM_EQY")),
+        profit_margins=percent_to_fraction(fields.get("PROF_MARGIN")),
+        dividend_yield=percent_to_fraction(fields.get("EQY_DVD_YLD_IND")),
         market_cap=fields.get("CUR_MKT_CAP"),
+        definition_notes={
+            # CUR_MKT_CAP's scale depends on the terminal's own field
+            # overrides, so it cannot be normalized here without guessing.
+            # Declared rather than silently multiplied: a wrong factor of a
+            # million is worse than a stated uncertainty, and a caller with
+            # the terminal in front of them can settle it in seconds.
+            "market_cap": (
+                "CUR_MKT_CAP is returned in whatever scale the terminal's "
+                "field overrides specify (commonly millions). Confirm the "
+                "scale for your terminal before comparing against an "
+                "absolute-currency threshold."
+            )
+        },
     )
+    for warning in implausible_value_warnings(ratios):
+        logger.warning("[bloomberg] %s", warning)
+    return ratios
 
 
 class BloombergProvider(DataProvider):

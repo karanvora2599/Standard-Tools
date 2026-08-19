@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from standard_quant_tools.data.metadata import DataSetMetadata
 
@@ -20,6 +20,38 @@ class TickerInfo(BaseModel):
 
 
 class FinancialRatios(BaseModel):
+    """
+    Fundamental ratios in ONE canonical unit and definition, whichever
+    provider served them.
+
+    The shared field names used to imply an interchangeability that did not
+    exist. yfinance reports `debtToEquity` as a PERCENTAGE (150.5) while
+    Polygon computes a plain RATIO (1.505), so a screen written as
+    `debt_equity_max=2.0` admitted nearly every company on one provider and
+    nearly none on the other — with nothing in either result saying which
+    convention was in force.
+
+    The canonical units:
+
+    | field | unit |
+    |---|---|
+    | `forward_pe`, `trailing_pe`, `price_to_book`, `debt_to_equity` | plain ratio |
+    | `return_on_equity`, `profit_margins`, `dividend_yield` | decimal fraction (0.15 == 15%) |
+    | `market_cap` | absolute units of the reporting currency |
+
+    See `standard_quant_tools.data.ratios` for the per-field formula and the
+    per-provider conversions.
+
+    `definition_notes` carries any field whose FORMULA (not merely its unit)
+    departs from the canonical one — a unit difference is mechanical and is
+    converted, a definition difference is not and is declared. The clearest
+    case is `debt_to_equity`: Polygon derives it from total LIABILITIES,
+    which include payables and deferred revenue, so it is systematically
+    higher than a debt-based ratio for reasons unrelated to leverage. The
+    value is still returned, because a liabilities-to-equity ratio is useful
+    when you know that is what it is.
+    """
+
     forward_pe: Optional[float] = None
     trailing_pe: Optional[float] = None
     price_to_book: Optional[float] = None
@@ -28,6 +60,13 @@ class FinancialRatios(BaseModel):
     profit_margins: Optional[float] = None
     dividend_yield: Optional[float] = None
     market_cap: Optional[int] = None
+    definition_notes: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "field -> how this provider's definition departs from the "
+            "canonical one. Empty when every populated field is canonical."
+        ),
+    )
 
 
 class DataProvider(ABC):

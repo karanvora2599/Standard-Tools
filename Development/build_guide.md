@@ -1,5 +1,37 @@
 # C++ Extension Build Guide
 
+## `pip install .` builds the extension
+
+The build backend is **scikit-build-core**, which drives this project's CMake
+build as part of a normal install. `pip install .` produces a platform wheel
+containing `_sqt_core` when a C++ toolchain is present.
+
+It used to be `flit_core`, a pure-Python backend, so an install produced a
+package *without* the extension no matter what the machine could compile —
+"installed Standard Tools" could mean two materially different runtimes and
+nothing said which one you had.
+
+**Without a compiler the install still succeeds** and you get the pure-Python
+package (`HAS_CPP` is `False`; every function works through its Numba/NumPy
+fallback). That is deliberate: the extension is an optional accelerator, so
+requiring a compiler would turn it into a hard dependency.
+
+```bash
+pip install .                                      # builds it if it can
+pip install . -C cmake.define.SQT_REQUIRE_NATIVE=ON # fail if it cannot
+```
+
+Use `SQT_REQUIRE_NATIVE=ON` in CI — a silent skip there means a green build
+that quietly tested only the fallback path.
+
+> The in-place developer build below is unchanged: `cmake -B build` still
+> writes the compiled module directly into `src/standard_quant_tools/` so
+> pytest picks it up without an install step. The wheel path adds a CMake
+> `install()` rule, because a wheel is staged in an isolated directory and
+> carries only what CMake *installs* — without that rule the build succeeded
+> and produced a wheel with no extension in it.
+
+
 ## How it works
 
 The C++ extension (`_sqt_core`) is compiled with **CMake + pybind11**.  

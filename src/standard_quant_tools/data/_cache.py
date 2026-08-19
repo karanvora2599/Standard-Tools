@@ -274,6 +274,23 @@ def _normalize_ohlcv_index(df: pd.DataFrame, interval: str = "1d") -> pd.DataFra
             idx = idx.tz_convert("UTC")
         idx = idx.tz_localize(None)
     if not is_intraday_interval(interval):
+        # The `interval` default is "1d" for back-compat, which means a caller
+        # who simply FORGETS to pass it gets the old collapsing behaviour on
+        # intraday data -- the exact bug this function was rewritten to fix,
+        # reachable again by omission rather than by intent. Every call site in
+        # this package passes it; this warning is here so a future one that
+        # does not fails loudly in the log instead of silently flattening a
+        # time series to a single date.
+        if len(idx) and (idx != idx.normalize()).any():
+            logger.warning(
+                "[_normalize_ohlcv_index] interval=%r is daily-or-coarser but "
+                "the index carries a time component, so %d timestamp(s) are "
+                "about to be flattened to midnight. If this is intraday data, "
+                "pass the real interval — otherwise the series loses its "
+                "time-series identity and several bars collapse onto one date.",
+                interval,
+                int((idx != idx.normalize()).sum()),
+            )
         idx = idx.normalize()
     df = df.copy()
     df.index = idx

@@ -7,6 +7,11 @@ import uuid
 from datetime import datetime
 from typing import Union
 
+from standard_quant_tools.data.ratios import (
+    implausible_value_warnings,
+    percent_to_fraction,
+)
+
 logger = logging.getLogger(__name__)
 
 import pandas as pd
@@ -369,16 +374,35 @@ class YFinanceProvider(DataProvider):
             info = ticker.info
             if not info:
                 raise DataNotFoundError(f"No financial data found for '{symbol}'.")
-            return FinancialRatios(
+            # yfinance's units, field by field. debtToEquity is the one
+            # that differs from this package's canonical unit: yfinance
+            # reports it as a PERCENTAGE (150.5 meaning debt is 1.505x
+            # equity), while every other provider and every consumer here
+            # expects a plain ratio. Left unconverted it made a
+            # `debt_equity_max=2.0` screen admit essentially the entire
+            # universe.
+            #
+            # returnOnEquity and profitMargins are already decimal fractions
+            # in yfinance and are passed through unchanged.
+            ratios = FinancialRatios(
                 forward_pe=info.get("forwardPE"),
                 trailing_pe=info.get("trailingPE"),
                 price_to_book=info.get("priceToBook"),
-                debt_to_equity=info.get("debtToEquity"),
+                debt_to_equity=percent_to_fraction(info.get("debtToEquity")),
                 return_on_equity=info.get("returnOnEquity"),
                 profit_margins=info.get("profitMargins"),
                 dividend_yield=info.get("dividendYield"),
                 market_cap=info.get("marketCap"),
             )
+            # yfinance changed dividendYield from a fraction to a percentage
+            # between releases, so which one arrives depends on the installed
+            # version rather than on anything this package controls. Reported
+            # rather than auto-corrected: silently rescaling would rewrite a
+            # genuine outlier, and a warning names the problem where a wrong
+            # number would not.
+            for warning in implausible_value_warnings(ratios):
+                logger.warning("[yfinance:%s] %s", symbol, warning)
+            return ratios
         except (DataNotFoundError, InvalidSymbolError):
             raise
         except Exception as e:
