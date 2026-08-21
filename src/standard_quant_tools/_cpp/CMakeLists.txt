@@ -42,6 +42,15 @@ pybind11_add_module(_sqt_core MODULE ${SQT_SOURCES})
 # other CMAKE_SYSTEM_PROCESSOR, rolling_beta_avx2.cpp's own source-level
 # #if guard already compiles it down to a portable (unreachable) stub, so no
 # special flags -- and no source-file exclusion -- are needed here.
+#
+# NOTE: a per-source compile flag confines CODEGEN to this file, not
+# INLINING. LTO/IPO is enabled for Release below (and pybind11_add_module
+# turns on its own, so /GL appears twice), and inlining across translation
+# units is what LTO is for -- so nothing here prevents an AVX2 body being
+# inlined into a caller compiled without /arch:AVX2 and reached with no
+# CPUID check in front of it. Measured on MSVC 19.44, that does not happen;
+# the guarantee is enforced in source rather than left to the optimizer, by
+# marking rolling_beta_reduce_avx2 SQT_NOINLINE. See that file's header.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i686|X86|i386)$")
     if(MSVC)
         set_source_files_properties(src/rolling_beta_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
@@ -108,7 +117,12 @@ if(MSVC)
     target_compile_options(_sqt_core PRIVATE
         # Optimisation — config-specific
         $<$<CONFIG:Release,RelWithDebInfo>:/O2>
-        $<$<AND:$<CONFIG:Release>,$<BOOL:${SQT_NATIVE_ARCH}>>:/arch:AVX2>
+        # Release,RelWithDebInfo -- matching the non-MSVC branch below, which
+        # applies -march=native to both. This was Release-only, so a
+        # RelWithDebInfo build got native codegen on GCC/Clang and portable
+        # codegen on MSVC from the same flag: a benchmark comparing the two
+        # compilers in that configuration was not comparing the same build.
+        $<$<AND:$<CONFIG:Release,RelWithDebInfo>,$<BOOL:${SQT_NATIVE_ARCH}>>:/arch:AVX2>
         $<$<CONFIG:Debug>:/Od /Zi>
         # Warnings
         /W3
@@ -177,6 +191,12 @@ endif()
 # time. Applied automatically whenever the toolchain supports it (no opt-in
 # flag needed), scoped to Release only -- Debug/RelWithDebInfo stay fast to
 # build and easy to debug, matching the existing /O2-vs-/Od split above.
+#
+# One caveat, handled in source rather than here: LTO inlines across
+# translation-unit boundaries, which is what makes the per-source
+# /arch:AVX2 above a codegen boundary and not an inlining one.
+# rolling_beta_reduce_avx2 is marked SQT_NOINLINE so its AVX2 body cannot be
+# hoisted into a caller that no CPUID check guards.
 include(CheckIPOSupported)
 check_ipo_supported(RESULT SQT_IPO_SUPPORTED OUTPUT SQT_IPO_ERROR)
 if(SQT_IPO_SUPPORTED)

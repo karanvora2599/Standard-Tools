@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 // ── Tiny assertion helpers ────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ static int g_tests_failed = 0;
 #define CHECK_NEAR(a, b, tol) \
     CHECK(std::abs((a) - (b)) <= (tol))
 
+#define CHECK_EQ_SZ(a, b)       CHECK((a) == (b))
 #define CHECK_TRUE(cond)        CHECK(cond)
 #define CHECK_FALSE(cond)       CHECK(!(cond))
 #define CHECK_INF(val)          CHECK(std::isinf(val))
@@ -555,6 +557,250 @@ static void test_batch_run_strategy_single_test() {
     check_all_fields_match(ref, batch[0]);
 }
 
+// ── ref_prices: the two-leg fill model ───────────────────────────────────────
+//
+// run_strategy's `ref_prices` parameter -- the whole fill_price="next_open" /
+// "hl2_exploratory" execution model -- had NO C++ test. grep for "ref_prices"
+// across tests/cpp/ returned nothing before this block. It is also the
+// parameter whose mishandling produced the fill-price defect recorded in this
+// file's own history (a lot booked 100 -> 120 against a fill-to-fill
+// +19.05%), so leaving it uncovered here was the gap that let that happen.
+
+static void test_ref_prices_null_equals_close_to_close() {
+    // Passing ref_prices == prices is NOT the same as passing nullptr in
+    // general, but passing nullptr must reproduce the historical
+    // close-to-close path exactly -- the default-argument contract.
+    std::vector<double> prices  = {100.0, 102.0, 101.0, 105.0, 103.0, 108.0};
+    std::vector<double> signals = {1.0, 1.0, 0.0, 1.0, 1.0, 0.0};
+    const std::size_t n = prices.size();
+
+    auto explicit_null = sqt::run_strategy(prices.data(), signals.data(), n,
+                                            10000.0, 0.001, 0.0005, 252.0, nullptr);
+    auto defaulted = sqt::run_strategy(prices.data(), signals.data(), n,
+                                        10000.0, 0.001, 0.0005, 252.0);
+    CHECK(explicit_null.final_equity == defaulted.final_equity);
+    CHECK(explicit_null.num_trades == defaulted.num_trades);
+}
+
+static void test_ref_prices_two_leg_decomposition_hand_computed() {
+    // The decomposition, restated from backtest.hpp rather than copied from
+    // the implementation:
+    //     overnight[i] = (ref[i] - close[i-1]) / close[i-1]  at exec[i-1]
+    //     intraday[i]  = (close[i] - ref[i])   / ref[i]      at exec[i]
+    //     gross[i]     = exec[i-1]*overnight[i] + exec[i]*intraday[i]
+    // with exec[i] = signals[i-1] and exec[i-1] = signals[i-2] (0.0 at i==1).
+    //
+    // Note what this makes true and a naive reading would not expect:
+    // setting ref[i] = close[i] does NOT reduce this to the close-to-close
+    // path. It zeroes the intraday leg and moves the entire bar onto the
+    // overnight leg, which is priced at YESTERDAY's position -- and at i==1
+    // yesterday's position is 0 by construction, so bar 1 earns nothing. An
+    // earlier version of this test asserted the equality and failed, which
+    // is the decomposition behaving exactly as documented.
+    std::vector<double> prices  = {100.0, 110.0, 121.0};
+    std::vector<double> refs    = {100.0, 105.0, 115.0};
+    std::vector<double> signals = {1.0, 1.0, 0.0};
+    const std::size_t n = prices.size();
+
+    const double g1 = 0.0 * ((105.0 - 100.0) / 100.0)
+                    + 1.0 * ((110.0 - 105.0) / 105.0);
+    const double g2 = 1.0 * ((115.0 - 110.0) / 110.0)
+                    + 1.0 * ((121.0 - 115.0) / 115.0);
+    const double expected_equity = 10000.0 * (1.0 + g1) * (1.0 + g2);
+
+    auto r = sqt::run_strategy(prices.data(), signals.data(), n,
+                               10000.0, 0.0, 0.0, 252.0, refs.data());
+    CHECK_NEAR(r.final_equity, expected_equity, 1e-9);
+
+    // And it is genuinely different from the close-fill path on this input,
+    // so the assertion above is not vacuously satisfiable by ignoring refs.
+    auto close_fill = sqt::run_strategy(prices.data(), signals.data(), n,
+                                         10000.0, 0.0, 0.0, 252.0, nullptr);
+    CHECK(std::abs(close_fill.final_equity - r.final_equity) > 1.0);
+}
+
+static void test_ref_prices_trade_log_uses_the_fill_price() {
+    // The defect this parameter's doc comment describes: the equity curve
+    // used ref_prices[i] while trade accounting still used prices[i-1], so a
+    // lot entered at Open=105 and exited at Open=125 was booked 100 -> 120.
+    //
+    // Enter at bar 1, exit at bar 3. executed[i] = signals[i-1], so
+    // signals = {1,0,...} opens at i=1 and closes at i=2.
+    std::vector<double> prices = {100.0, 110.0, 120.0, 130.0, 140.0};
+    std::vector<double> refs   = {100.0, 105.0, 115.0, 125.0, 135.0};
+    std::vector<double> signals = {1.0, 0.0, 0.0, 0.0, 0.0};
+    const std::size_t n = prices.size();
+
+    auto r = sqt::run_strategy(prices.data(), signals.data(), n,
+                               10000.0, 0.0, 0.0, 252.0, refs.data());
+    CHECK(r.num_trades == 1);
+    // Entry fills at refs[1] = 105, exit at refs[2] = 115: +9.5238%.
+    // Booking it against prices[0]=100 -> prices[1]=110 would give +10.00%.
+    CHECK_NEAR(r.avg_trade_return_pct, (115.0 - 105.0) / 105.0 * 100.0, 1e-9);
+}
+
+static void test_ref_prices_summary_matches_full_random() {
+    // run_strategy_summary is what batch_run_strategy / the parameter grid /
+    // walk-forward call. It must agree with run_strategy under the fill
+    // model too, not only under close-to-close -- the previously tested half.
+    std::uint64_t state = 4242;
+    for (int trial = 0; trial < 40; ++trial) {
+        const std::size_t n = 20 + static_cast<std::size_t>(
+            (pseudo_random(state) + 1.0) * 60.0);
+        std::vector<double> prices(n), refs(n), signals(n);
+        double p = 100.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            p *= 1.0 + pseudo_random(state) * 0.03;
+            prices[i] = p;
+            refs[i]   = p * (1.0 + pseudo_random(state) * 0.01);
+            const double u = pseudo_random(state);
+            signals[i] = (u < -0.33) ? -1.0 : (u > 0.33 ? 1.0 : 0.0);
+        }
+        const double commission = (pseudo_random(state) + 1.0) * 0.001;
+        const double slippage   = (pseudo_random(state) + 1.0) * 0.0005;
+
+        auto full = sqt::run_strategy(prices.data(), signals.data(), n,
+                                       10000.0, commission, slippage, 252.0,
+                                       refs.data());
+        auto summ = sqt::run_strategy_summary(prices.data(), signals.data(), n,
+                                               10000.0, commission, slippage,
+                                               252.0, refs.data());
+        check_all_fields_match(full, summ);
+    }
+}
+
+
+// ── batch_backtest_crossover ─────────────────────────────────────────────────
+//
+// Also entirely uncovered here before this block: the fused grid kernel that
+// generates each combination's signal and backtests it without materialising
+// a (num_combos x n) matrix.
+
+// Independent reference: build the crossover signal the obvious way and call
+// the already-tested run_strategy_summary on it.
+static sqt::BacktestResult crossover_reference(
+    const std::vector<double>& prices,
+    const std::vector<double>& indicators,
+    std::size_t n, int fast_row, int slow_row,
+    double commission, double slippage, const double* refs)
+{
+    std::vector<double> signal(n, 0.0);
+    const double* fast = indicators.data() + static_cast<std::size_t>(fast_row) * n;
+    const double* slow = indicators.data() + static_cast<std::size_t>(slow_row) * n;
+    for (std::size_t i = 0; i < n; ++i)
+        signal[i] = (fast[i] > slow[i]) ? 1.0 : 0.0;
+    return sqt::run_strategy_summary(prices.data(), signal.data(), n,
+                                      10000.0, commission, slippage, 252.0, refs);
+}
+
+static void test_crossover_matches_per_combination_reference() {
+    std::uint64_t state = 31337;
+    const std::size_t n = 200;
+    const std::size_t n_unique = 5;
+
+    std::vector<double> prices(n);
+    double p = 100.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        p *= 1.0 + pseudo_random(state) * 0.02;
+        prices[i] = p;
+    }
+    // Simple moving averages of several periods, plus a deliberate NaN
+    // warm-up prefix on each row -- the pandas comparison yields 0 there and
+    // the kernel documents that it matches.
+    const int periods[n_unique] = {2, 5, 10, 20, 50};
+    std::vector<double> indicators(n_unique * n,
+                                    std::numeric_limits<double>::quiet_NaN());
+    for (std::size_t r = 0; r < n_unique; ++r) {
+        const std::size_t w = static_cast<std::size_t>(periods[r]);
+        for (std::size_t i = w - 1; i < n; ++i) {
+            double s = 0.0;
+            for (std::size_t j = i + 1 - w; j <= i; ++j) s += prices[j];
+            indicators[r * n + i] = s / static_cast<double>(w);
+        }
+    }
+
+    std::vector<int> pairs;
+    for (int a = 0; a < static_cast<int>(n_unique); ++a)
+        for (int b = 0; b < static_cast<int>(n_unique); ++b)
+            if (a != b) { pairs.push_back(a); pairs.push_back(b); }
+    const std::size_t num_combos = pairs.size() / 2;
+
+    auto results = sqt::batch_backtest_crossover(
+        prices.data(), indicators.data(), n, n_unique,
+        pairs.data(), num_combos, 10000.0, 0.001, 0.0005, 252.0, nullptr);
+
+    CHECK_EQ_SZ(results.size(), num_combos);
+    for (std::size_t c = 0; c < num_combos; ++c) {
+        auto expected = crossover_reference(prices, indicators, n,
+                                             pairs[c * 2], pairs[c * 2 + 1],
+                                             0.001, 0.0005, nullptr);
+        check_all_fields_match(expected, results[c]);
+    }
+}
+
+static void test_crossover_honours_ref_prices() {
+    std::uint64_t state = 5150;
+    const std::size_t n = 120;
+    const std::size_t n_unique = 2;
+    std::vector<double> prices(n), refs(n);
+    double p = 100.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        p *= 1.0 + pseudo_random(state) * 0.02;
+        prices[i] = p;
+        refs[i]   = p * (1.0 + pseudo_random(state) * 0.01);
+    }
+    std::vector<double> indicators(n_unique * n);
+    for (std::size_t i = 0; i < n; ++i) {
+        indicators[i]     = prices[i];
+        indicators[n + i] = 100.0;
+    }
+    const std::vector<int> pairs = {0, 1};
+
+    auto results = sqt::batch_backtest_crossover(
+        prices.data(), indicators.data(), n, n_unique,
+        pairs.data(), 1, 10000.0, 0.001, 0.0005, 252.0, refs.data());
+    auto expected = crossover_reference(prices, indicators, n, 0, 1,
+                                         0.001, 0.0005, refs.data());
+    CHECK_EQ_SZ(results.size(), static_cast<std::size_t>(1));
+    check_all_fields_match(expected, results[0]);
+}
+
+static void test_crossover_rejects_out_of_range_pair_index() {
+    // Previously this was skipped inside the parallel loop with `continue`,
+    // leaving that row value-initialised -- which is NOT a neutral result:
+    // every real result reports sortino_ratio and profit_factor as +inf when
+    // there is no downside and no losing trade, while a default-constructed
+    // BacktestResult reports 0.0 for both. A zeroed row is indistinguishable
+    // from a genuinely flat strategy. It is a caller error, so it is named
+    // as one -- and named BEFORE the region starts, where throwing is safe.
+    const std::size_t n = 40;
+    std::vector<double> prices(n, 100.0);
+    std::vector<double> indicators(2 * n, 1.0);
+    for (const std::vector<int>& bad : {std::vector<int>{0, 2},
+                                        std::vector<int>{2, 0},
+                                        std::vector<int>{-1, 0}}) {
+        bool threw = false;
+        try {
+            sqt::batch_backtest_crossover(prices.data(), indicators.data(), n, 2,
+                                           bad.data(), 1, 10000.0, 0.001, 0.0005,
+                                           252.0, nullptr);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK_TRUE(threw);
+    }
+}
+
+static void test_crossover_empty_inputs() {
+    std::vector<double> prices(10, 100.0);
+    std::vector<double> indicators(20, 1.0);
+    const std::vector<int> pairs = {0, 1};
+    CHECK(sqt::batch_backtest_crossover(prices.data(), indicators.data(), 10, 2,
+                                         pairs.data(), 0).empty());
+    CHECK(sqt::batch_backtest_crossover(nullptr, nullptr, 0, 0,
+                                         nullptr, 0).empty());
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -584,6 +830,18 @@ int main() {
     test_run_strategy_summary_multi_trade_count();
     test_batch_run_strategy_matches_serial_reference();
     test_batch_run_strategy_single_test();
+
+    // ref_prices (fill_price="next_open" / "hl2_exploratory")
+    test_ref_prices_null_equals_close_to_close();
+    test_ref_prices_two_leg_decomposition_hand_computed();
+    test_ref_prices_trade_log_uses_the_fill_price();
+    test_ref_prices_summary_matches_full_random();
+
+    // batch_backtest_crossover
+    test_crossover_matches_per_combination_reference();
+    test_crossover_honours_ref_prices();
+    test_crossover_rejects_out_of_range_pair_index();
+    test_crossover_empty_inputs();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

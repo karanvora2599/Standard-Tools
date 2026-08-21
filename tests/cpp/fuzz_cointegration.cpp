@@ -2,13 +2,21 @@
  * Randomized-input stress test for the cointegration/regression numerics
  * (correctness/portability pass item 20a).
  *
- * gauss_elim and cholesky_solve are anonymous-namespace internals of
- * cointegration.cpp/rolling_regression.cpp -- not directly linkable from
- * an external test binary -- so this fuzzes them indirectly through the
- * public functions that call them: sqt::ols2 and sqt::adf_test/
- * sqt::engle_granger (both use gauss_elim internally), and
- * sqt::rolling_factor_loadings (uses cholesky_solve internally, once per
- * bar). Asserts two things across many randomized inputs, including
+ * The target is sqt::qr::lstsq, the shared rank-revealing least-squares
+ * backend every solve in these files now goes through. It is exercised
+ * indirectly through the public functions that call it: sqt::ols2 and
+ * sqt::adf_test/sqt::engle_granger, and sqt::rolling_factor_loadings (once
+ * per bar).
+ *
+ * This header used to name gauss_elim and cholesky_solve. Both were deleted
+ * when qr::lstsq replaced them -- normal equations squared the condition
+ * number of every design and needed a bespoke "RSS went materially
+ * negative" guard that a QR cannot trigger -- so the harness has been
+ * fuzzing something else than it claimed for some time. What it actually
+ * covers is unchanged and still worth having; only the description was
+ * stale.
+ *
+ * Asserts two things across many randomized inputs, including
  * deliberately adversarial ones (huge baseline, near-constant series,
  * huge dynamic range, all-zero, single-element):
  *
@@ -23,6 +31,12 @@
  *      cv_1pct < cv_5pct < cv_10pct, rolling_factor_loadings never produces
  *      a non-NaN row whose reconstructed fit is wildly inconsistent with
  *      the input.
+ *
+ * Note what it does NOT generate: non-finite inputs. Every shape below is
+ * finite, which is why a NaN-handling defect in the indicator kernels
+ * survived this harness alongside every other suite. The NaN/Inf data
+ * contract is covered instead by
+ * tests/cpp_bindings/test_cpp_nan_data_contract.py.
  *
  * Deliberately a lightweight in-repo randomized harness (reusing this
  * project's own pseudo_random-style PRNG convention, already used

@@ -47,7 +47,14 @@ namespace sqt::qr {
 
 struct LstsqResult {
     std::vector<double> beta;  // length k, ORIGINAL column order; all-NaN when rank < k
-    double rss  = 0.0;         // residual sum of squares (>= 0 by construction)
+    // Residual sum of squares, >= 0 by construction. NaN when rank < k: the
+    // tail of Q'b past column k is the correct RSS only for a full-rank
+    // solve, and for a rank-deficient one it silently OMITS the components
+    // in [rank, k) that no column of R can reach -- an underestimate that
+    // looks like an ordinary number. Nothing reads it in that state today
+    // (every caller checks full_rank first), which is precisely why a wrong
+    // value here would have gone unnoticed by the next caller that doesn't.
+    double rss  = 0.0;
     int    rank = 0;           // numerical rank of X
     int    nobs = 0;           // rows T
     int    ncoef = 0;          // columns k
@@ -210,14 +217,20 @@ inline LstsqResult lstsq(double* A, double* b, int T, int k, int* perm,
     // The components of Q'b that no column of R can reach. Non-negative by
     // construction: no cancellation, no clamping, no "went unexpectedly
     // negative" branch needed.
+    //
+    // Valid ONLY at full rank -- see LstsqResult::rss. Below full rank the
+    // sum from k omits the [rank, k) components, so it understates the true
+    // residual; report NaN rather than a plausible smaller number.
+    if (!res.full_rank) {
+        res.rss = std::numeric_limits<double>::quiet_NaN();
+        return res;  // beta stays all-NaN
+    }
     double rss = 0.0;
     for (int i = k; i < T; ++i) {
         const double bi = b[static_cast<std::size_t>(i)];
         rss += bi * bi;
     }
     res.rss = rss;
-
-    if (!res.full_rank) return res;  // beta stays all-NaN
 
     // ── Back-substitution, then un-pivot ────────────────────────────────
     std::vector<double> x(k_sz);

@@ -97,21 +97,6 @@ BacktestResult run_strategy(
 );
 
 /**
- * Batch backtest: run `num_tests` signal arrays against the same price series.
- *
- * Avoids the Python/C++ boundary crossing overhead that accumulates when
- * calling run_strategy once per parameter combination from Python.
- *
- * @param prices         Close prices, length n.
- * @param signals_flat   Flattened 2-D array, shape (num_tests × n) row-major.
- *                         signals_flat[t*n + i] = signal for test t at bar i.
- * @param n              Number of bars.
- * @param num_tests      Number of signal arrays.
- * @param initial_capital / commission_pct / slippage_pct — same for all tests.
- * @return               Vector of BacktestResult, one per test in input order.
- *                       equity_curve is empty in every result to save memory.
- */
-/**
  * Same algorithm and output as run_strategy(), but computes only the 11
  * scalar metrics with zero equity_curve/strat_ret/trade_rets array
  * allocation -- a two-pass design exploiting the fact that strat_ret[i] has
@@ -197,6 +182,29 @@ std::vector<BacktestResult> batch_backtest_crossover(
     const double* ref_prices = nullptr
 );
 
+/**
+ * Batch backtest: run `num_tests` signal arrays against the same price series.
+ *
+ * Avoids the Python/C++ boundary-crossing overhead that accumulates when
+ * calling run_strategy once per parameter combination from Python. Each test
+ * index is independent, so the loop is OpenMP-parallel under the
+ * sqt::omp_policy work threshold.
+ *
+ * (This comment used to sit two declarations higher up, immediately above
+ * run_strategy_summary's own doc block -- so the function it describes had
+ * none and the function it appeared to describe had two.)
+ *
+ * @param prices         Close prices, length n.
+ * @param signals_flat   Flattened 2-D array, shape (num_tests × n) row-major.
+ *                         signals_flat[t*n + i] = signal for test t at bar i.
+ * @param n              Number of bars.
+ * @param num_tests      Number of signal arrays.
+ * @param initial_capital / commission_pct / slippage_pct / periods_per_year /
+ *                       ref_prices — same for all tests, same meaning as
+ *                       run_strategy().
+ * @return               Vector of BacktestResult, one per test in input order.
+ *                       equity_curve is empty in every result to save memory.
+ */
 std::vector<BacktestResult> batch_run_strategy(
     const double* prices,
     const double* signals_flat,

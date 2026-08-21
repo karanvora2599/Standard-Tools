@@ -73,18 +73,10 @@ bool simulate_forward_paths_into(
     // no intermediate heap buffer, no second pass reading it back. With
     // 200,000 paths, this is 200,000 fewer heap allocations and frees.
 #ifdef _OPENMP
-    // Work-based, not count-based, and capped by SQT_NUM_THREADS -- the shared
-    // policy in omp_policy.hpp, which batch_run_strategy already used and these
-    // kernels bypassed with a bare `if(<count> > 1)`.
-    //
-    // That predicate is wrong twice over, which is exactly what omp_policy.hpp's
-    // own header comment says and why it exists: it is too eager (two tiny tasks
-    // cost more in thread startup than they save -- measured, a 2-path x 5-day
-    // simulation ran ~4x SLOWER than the serial path purely in region overhead),
-    // and too greedy (this library routinely runs inside a ProcessPoolExecutor
-    // screener or several agents, where every call grabbing every core
-    // oversubscribes the machine). SQT_NUM_THREADS=1 is the documented way to opt
-    // out, and it had no effect here at all before this change.
+    // Work-based, not count-based, and capped by SQT_NUM_THREADS. The
+    // reasoning -- why `if(<count> > 1)` is both too eager and too greedy,
+    // with the measurements -- lives once in omp_policy.hpp's header
+    // comment rather than being restated at each call site.
     #pragma omp parallel if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(n_simulations), horizon)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     {
@@ -102,6 +94,16 @@ bool simulate_forward_paths_into(
             std::uint64_t mix_state = base_seed ^ (static_cast<std::uint64_t>(i) * 0x9E3779B97F4A7C15ULL + 1);
             const std::uint64_t path_seed = splitmix64(mix_state);
             gen.seed(path_seed);
+            // dist is reused across paths (constructed once per thread), so
+            // reseeding `gen` alone is not enough to guarantee the documented
+            // "same seed and inputs give bit-identical output". The standard
+            // permits uniform_int_distribution to carry state between calls;
+            // no major implementation does for this case, which is why the
+            // thread-count-independence test passes -- but that makes the
+            // guarantee an accident of the standard library rather than a
+            // property of this code. reset() costs nothing per path and makes
+            // it a property.
+            dist.reset();
 
             double equity = initial_capital;
             double* row = out + static_cast<std::size_t>(i) * horizon;
@@ -190,18 +192,10 @@ bool simulate_forward_paths_terminal_into(
               std::chrono::steady_clock::now().time_since_epoch().count());
 
 #ifdef _OPENMP
-    // Work-based, not count-based, and capped by SQT_NUM_THREADS -- the shared
-    // policy in omp_policy.hpp, which batch_run_strategy already used and these
-    // kernels bypassed with a bare `if(<count> > 1)`.
-    //
-    // That predicate is wrong twice over, which is exactly what omp_policy.hpp's
-    // own header comment says and why it exists: it is too eager (two tiny tasks
-    // cost more in thread startup than they save -- measured, a 2-path x 5-day
-    // simulation ran ~4x SLOWER than the serial path purely in region overhead),
-    // and too greedy (this library routinely runs inside a ProcessPoolExecutor
-    // screener or several agents, where every call grabbing every core
-    // oversubscribes the machine). SQT_NUM_THREADS=1 is the documented way to opt
-    // out, and it had no effect here at all before this change.
+    // Work-based, not count-based, and capped by SQT_NUM_THREADS. The
+    // reasoning -- why `if(<count> > 1)` is both too eager and too greedy,
+    // with the measurements -- lives once in omp_policy.hpp's header
+    // comment rather than being restated at each call site.
     #pragma omp parallel if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(n_simulations), horizon)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     {
@@ -215,6 +209,7 @@ bool simulate_forward_paths_terminal_into(
             std::uint64_t mix_state = base_seed ^ (static_cast<std::uint64_t>(i) * 0x9E3779B97F4A7C15ULL + 1);
             const std::uint64_t path_seed = splitmix64(mix_state);
             gen.seed(path_seed);
+            dist.reset();  // see simulate_forward_paths_into's matching note
 
             double equity = initial_capital;
             std::size_t t = 0;

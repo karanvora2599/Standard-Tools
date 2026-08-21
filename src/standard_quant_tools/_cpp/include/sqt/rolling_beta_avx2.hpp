@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sqt/platform.hpp"
+
 #include <cstddef>
 
 namespace sqt {
@@ -29,7 +31,21 @@ namespace sqt {
 //                 as the scalar path -- large-baseline catastrophic
 //                 cancellation protection carries over unchanged.
 // @param Sx, Sy, Sxy, Sxx  Output accumulators (overwritten, not added to).
-void rolling_beta_reduce_avx2(
+//
+// SQT_NOINLINE is not a tuning hint. Release builds enable link-time
+// optimization, which inlines across translation units, so nothing in the
+// BUILD stops this AVX2 body being hoisted into rolling_beta_into -- which
+// is compiled without /arch:AVX2 and is reached with no CPUID check in front
+// of it. That would turn the runtime dispatch into decoration and the
+// "graceful fallback on an older CPU" into an illegal-instruction crash.
+//
+// Measured on MSVC 19.44 with SQT_NATIVE_ARCH=OFF, that hoist does NOT
+// happen: the linked module contains exactly the 2 vfmadd instructions this
+// kernel issues, with or without the qualifier. So this is insurance against
+// something the toolchain is permitted to do and currently does not, kept
+// because the cost is one out-of-line call per window and the alternative is
+// relying on an optimizer's present-day choice for a memory-safety property.
+SQT_NOINLINE void rolling_beta_reduce_avx2(
     const double* x,
     const double* y,
     std::size_t   start,

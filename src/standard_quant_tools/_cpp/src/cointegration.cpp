@@ -36,21 +36,48 @@ struct AdfLagFit {
 
 
 // ── MacKinnon (2010) critical values ──────────────────────────────────────────
-// Response surface: cv(T) = c_inf + c1/T + c2/T²
+// Response surface: cv(T) = c_inf + c1/T + c2/T² + c3/T³
 // For 2-variable cointegration, constant (trend="c").
-
+//
+// These are now genuinely the 2010 coefficients. The previous set --
+// (-3.9001, -10.534, -30.030) / (-3.3377, -5.967, -8.982) /
+// (-3.0462, -4.069, -5.730) -- is MacKinnon (1991) Table 1, under a comment
+// claiming MacKinnon (2010) Table 2, in a file whose stated goal is
+// statsmodels parity. statsmodels' coint() calls mackinnoncrit(), which
+// reads tau_2010s["c"][1]; transcribed here verbatim from statsmodels
+// 0.14.3, including the cubic term (exactly 0.0 for N=2, kept so the
+// transcription is checkable line-for-line against the source table rather
+// than silently truncated).
+//
+// The disagreement was small but systematic, and always in the same
+// direction on a given sample size -- measured against
+// statsmodels.tsa.adfvalues.mackinnoncrit(N=2, regression="c"):
+//
+//     T      1%        5%       10%
+//     50   +0.0061   +0.0004   +0.0005
+//    100   +0.0009   -0.0004   -0.0003
+//    250   -0.0019   -0.0010   -0.0011
+//   1000   -0.0032   -0.0014   -0.0016
+//
+// Nothing caught it because the only assertions on these values, in both
+// tests/cpp/test_cointegration.cpp and tests/cpp_bindings/, check ORDERING
+// (cv_1pct < cv_5pct < cv_10pct < 0) and never a number.
+//
+// Sample size is nobs-1, not nobs -- see the call site.
 static double mackinnon_cv(double level_pct, std::size_t n) {
-    // Coefficients from MacKinnon (2010), Table 2, N=2, c.
-    double c_inf, c1, c2;
+    // statsmodels 0.14.3, tau_2010s["c"][N-1] with N=2, rows [1%, 5%, 10%].
+    double c_inf, c1, c2, c3;
     if (level_pct <= 1.0) {
-        c_inf = -3.9001; c1 = -10.534; c2 = -30.030;
+        c_inf = -3.89644; c1 = -10.9519; c2 = -33.527; c3 = 0.0;
     } else if (level_pct <= 5.0) {
-        c_inf = -3.3377; c1 = -5.967;  c2 = -8.982;
+        c_inf = -3.33613; c1 = -6.1101;  c2 = -6.823;  c3 = 0.0;
     } else {
-        c_inf = -3.0462; c1 = -4.069;  c2 = -5.730;
+        c_inf = -3.04445; c1 = -4.2412;  c2 = -2.72;   c3 = 0.0;
     }
-    const double T = static_cast<double>(n);
-    return c_inf + c1 / T + c2 / (T * T);
+    if (n == 0) return c_inf;  // no sample: the asymptotic value is all there is
+    const double invT = 1.0 / static_cast<double>(n);
+    // Horner in 1/T, matching numpy.polyval's evaluation in mackinnoncrit.
+    return c_inf + invT * (c1 + invT * (c2 + invT * c3));
 }
 
 
@@ -116,7 +143,9 @@ static double ar1_halflife(const double* y, std::size_t n) {
     const double beta = res.slope;
     // beta>=0.0 is false for NaN under IEEE754 (all NaN comparisons are
     // false), so a degenerate zero-variance lag series -- ols2's own
-    // det<1e-14 guard returns slope=NaN for that case -- would otherwise
+    // relative-epsilon singularity guard (numerics::is_negligible_pivot,
+    // not the fixed 1e-14 threshold this comment used to name) returns
+    // slope=NaN for that case -- would otherwise
     // fall through to -log(2)/NaN = NaN instead of the same "not mean-
     // reverting" +inf sentinel a non-negative beta already gets. A
     // zero-variance predictor carries no information about mean
@@ -146,11 +175,15 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n) {
     // (x[0]/y[0]) suffices -- no periodic re-centering is needed the way
     // the rolling kernels require to bound drift over many windows.
     const double cx = x[0], cy = y[0];
-    double s1 = 0, sxd = 0, syd = 0, sxxd = 0, sxyd = 0;
+    // The observation count, not an accumulated one. `s1 += 1.0` in the loop
+    // below produced exactly this value for any n below 2^53 -- so the
+    // arithmetic is bit-identical -- while spending an O(n) floating-point
+    // add per bar to recompute something the caller already passed in.
+    const double s1 = static_cast<double>(n);
+    double sxd = 0, syd = 0, sxxd = 0, sxyd = 0;
     for (std::size_t i = 0; i < n; ++i) {
         const double xd = x[i] - cx;
         const double yd = y[i] - cy;
-        s1   += 1.0;
         sxd  += xd;
         syd  += yd;
         sxxd += xd * xd;
@@ -183,6 +216,13 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n) {
         ss_res += r.residuals[i] * r.residuals[i];
         ss_tot += (y[i] - y_mean) * (y[i] - y_mean);
     }
+    // ss_tot == 0 (a constant response) makes R^2 a 0/0. Reporting 0.0 is a
+    // convention, not a derivation -- and it is deliberately the SAME
+    // convention the NumPy fallback in analysis/regression.py uses
+    // (`1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0`), so calculate_beta
+    // returns the same number whether or not the extension was built. Do not
+    // "correct" this to NaN on one side alone; ss_tot is a sum of squares, so
+    // `> 0` and `!= 0` select the same branch.
     r.r_squared = (ss_tot > 0) ? 1.0 - ss_res / ss_tot : 0.0;
     return r;
 }
@@ -216,7 +256,16 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
         // searched different lags before the selection logic even ran.
         max_lag = static_cast<int>(
             std::ceil(12.0 * std::pow(static_cast<double>(n) / 100.0, 0.25)));
-        max_lag = std::min(max_lag, static_cast<int>(n / 2) - ntrend - 1);
+        // The cap is compared in long long space. `n/2` was narrowed to int
+        // first, which wraps for a series longer than 2*INT_MAX bars and
+        // would silently produce a NEGATIVE cap -- an early return reporting
+        // "no lag solved" for a series large enough that lag selection is
+        // the least of the problems, but wrong in the direction that is
+        // hardest to notice.
+        const long long half =
+            numerics::checked_narrow_to_ll(n / 2, "adf_test: max-lag cap");
+        const long long cap = half - ntrend - 1;
+        max_lag = static_cast<int>(std::min<long long>(max_lag, cap));
         if (max_lag < 0) return out;
     }
 
@@ -406,9 +455,17 @@ CointResult engle_granger(
     r.optimal_lag   = adf.optimal_lag;
 
     // ── Step 3: MacKinnon (2010) critical values and p-value ─────────────────
-    r.cv_1pct  = mackinnon_cv(1.0,  n);
-    r.cv_5pct  = mackinnon_cv(5.0,  n);
-    r.cv_10pct = mackinnon_cv(10.0, n);
+    // nobs-1, not nobs. statsmodels' coint() calls
+    // mackinnoncrit(..., nobs=nobs-1) with its own comment on the line --
+    // "the -1 is to match egranger in Stata, I do not know why". This
+    // kernel passed the full n, so even with correct coefficients it would
+    // have evaluated the response surface at the wrong sample size. Both
+    // halves are needed to agree with the Python fallback, which IS
+    // statsmodels.
+    const std::size_t cv_nobs = n - 1;  // n >= 8 is guaranteed above
+    r.cv_1pct  = mackinnon_cv(1.0,  cv_nobs);
+    r.cv_5pct  = mackinnon_cv(5.0,  cv_nobs);
+    r.cv_10pct = mackinnon_cv(10.0, cv_nobs);
 
     if (!std::isnan(adf.statistic)) {
         r.p_value     = mackinnon_pvalue(adf.statistic);

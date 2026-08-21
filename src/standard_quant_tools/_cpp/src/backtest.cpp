@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifdef _OPENMP
@@ -229,29 +231,15 @@ BacktestResult run_strategy(
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
 
-        double gross;
-        if (ref_prices == nullptr) {
-            // Close-to-close: the historical path, unchanged.
-            const double ret_i = (prev_close != 0.0)
-                ? (prices[i] - prev_close) / prev_close
-                : 0.0;
-            gross = exec_i * ret_i;
-        } else {
-            // Two-leg decomposition, mirroring engine.py exactly. The
-            // overnight gap is earned at YESTERDAY's position (a position
-            // still held overnight is exposed to it, including on an exit
-            // bar), while the move from the fill price to the close is
-            // earned at TODAY's. exec_prev is signals[i-2], or 0.0 at i==1,
-            // both directly index-derivable -- no extra state.
-            const double fill = trade_price;
-            const double exec_prev = (i >= 2) ? signals[i - 2] : 0.0;
-            const double overnight = (prev_close != 0.0)
-                ? (fill - prev_close) / prev_close : 0.0;
-            const double intraday = (fill != 0.0)
-                ? (prices[i] - fill) / fill : 0.0;
-            gross = exec_prev * overnight + exec_i * intraday;
-        }
-        strat_ret[i] = gross - tcost;
+        // gross_return_at, not a second copy of its body. That helper's own
+        // comment says it was factored out "so the two passes cannot drift"
+        // -- but only run_strategy_summary's two passes ever called it, and
+        // this function kept a hand-written duplicate of the same two-leg
+        // decomposition. Two implementations of one formula, one of them
+        // documented as the reason the other exists. They did agree (a
+        // 500-bar differential check across all 11 metrics is bit-identical
+        // with and without ref_prices); nothing was keeping them that way.
+        strat_ret[i] = gross_return_at(prices, signals, ref_prices, i) - tcost;
 
         const auto tc = apply_position_event(pos, exec_i, prev_exec, trade_price, cost_per_unit);
         if (tc.completed) trade_rets.push_back(tc.return_pct);
@@ -599,56 +587,96 @@ std::vector<BacktestResult> batch_backtest_crossover(
     std::vector<BacktestResult> results(num_combos);
     if (n == 0 || num_combos == 0) return results;
 
+    // ── Everything that can throw happens HERE, before the region ──────────
+    //
+    // batch_run_strategy hoists exactly this check with a comment explaining
+    // why: run_strategy_summary calls numerics::checked_narrow_to_int, which
+    // throws, and an exception escaping an OpenMP structured block is
+    // undefined behaviour (in practice, process termination). This function
+    // calls the same kernel from its own parallel region and did not hoist
+    // anything -- the precedent was set and then not followed.
+    (void)numerics::checked_narrow_to_int(n, "batch_backtest_crossover: bars per test");
+
+    // Row indices are validated here too, rather than skipped inside the
+    // loop. The old in-loop `continue` left that combination's result
+    // default-constructed, which is NOT a neutral result: every real result
+    // reports sortino_ratio and profit_factor as +inf when there is no
+    // downside and no losing trade, while a value-initialised BacktestResult
+    // reports 0.0 for both. A silently zeroed row is indistinguishable from
+    // a genuinely flat strategy. An out-of-range row is a caller error, so
+    // it is now named as one, before any thread has started.
+    for (std::size_t i = 0; i < num_combos; ++i) {
+        const int fast_row = pair_idx[i * 2];
+        const int slow_row = pair_idx[i * 2 + 1];
+        if (fast_row < 0 || slow_row < 0 ||
+            static_cast<std::size_t>(fast_row) >= n_unique ||
+            static_cast<std::size_t>(slow_row) >= n_unique) {
+            throw std::invalid_argument(
+                "batch_backtest_crossover: pair_idx row " + std::to_string(i) +
+                " references an indicator row outside [0, " +
+                std::to_string(n_unique) + ").");
+        }
+    }
+
     const long long num_combos_ll = static_cast<long long>(num_combos);
 
     // Each combination is independent, and each thread needs exactly one
-    // signal buffer for the whole run -- allocated ONCE outside the loop
-    // rather than per combination. A per-iteration allocation inside an
-    // OpenMP region is both a throughput cost and a correctness hazard,
-    // since a std::bad_alloc escaping a structured block is undefined.
+    // signal buffer for the whole run -- allocated ONCE per thread rather
+    // than per combination.
+    //
+    // That allocation is still INSIDE the structured block, which the
+    // previous comment here claimed to have avoided ("a per-iteration
+    // allocation inside an OpenMP region is [...] a correctness hazard,
+    // since a std::bad_alloc escaping a structured block is undefined") --
+    // moving it from the loop body to the region prologue changed when it
+    // happens, not whether an escape is possible. With `n` up to 100,000
+    // bars this is a real ~800 KB allocation per thread, so the flag below
+    // makes the guarantee true instead of merely asserted: nothing
+    // propagates out of the region, and the failure is rethrown outside it.
+    bool region_error = false;
 #ifdef _OPENMP
-#pragma omp parallel \
+#pragma omp parallel reduction(||: region_error) \
     if(sqt::omp_policy::worth_parallel(num_combos, n)) \
     num_threads(sqt::omp_policy::max_threads() > 0 \
                 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     {
-        std::vector<double> signal(n, 0.0);
+        std::vector<double> signal;
+        try {
+            signal.assign(n, 0.0);
+        } catch (...) {
+            region_error = true;
+        }
 #pragma omp for schedule(static)
         for (long long t = 0; t < num_combos_ll; ++t) {
-            const std::size_t ti = static_cast<std::size_t>(t);
-            const int fast_row = pair_idx[ti * 2];
-            const int slow_row = pair_idx[ti * 2 + 1];
-            if (fast_row < 0 || slow_row < 0 ||
-                static_cast<std::size_t>(fast_row) >= n_unique ||
-                static_cast<std::size_t>(slow_row) >= n_unique) {
-                continue;  // validated at the binding; defensive only
+            if (region_error) continue;  // this thread's buffer never allocated
+            try {
+                const std::size_t ti = static_cast<std::size_t>(t);
+                const double* fast =
+                    indicators + static_cast<std::size_t>(pair_idx[ti * 2]) * n;
+                const double* slow =
+                    indicators + static_cast<std::size_t>(pair_idx[ti * 2 + 1]) * n;
+                for (std::size_t i = 0; i < n; ++i) {
+                    // A NaN on either side (warm-up) makes the comparison false,
+                    // which is exactly what the pandas `fast > slow` produces.
+                    signal[i] = (fast[i] > slow[i]) ? 1.0 : 0.0;
+                }
+                results[ti] = run_strategy_summary(
+                    prices, signal.data(), n,
+                    initial_capital, commission_pct, slippage_pct,
+                    periods_per_year, ref_prices);
+            } catch (...) {
+                region_error = true;
             }
-            const double* fast = indicators + static_cast<std::size_t>(fast_row) * n;
-            const double* slow = indicators + static_cast<std::size_t>(slow_row) * n;
-            for (std::size_t i = 0; i < n; ++i) {
-                // A NaN on either side (warm-up) makes the comparison false,
-                // which is exactly what the pandas `fast > slow` produces.
-                signal[i] = (fast[i] > slow[i]) ? 1.0 : 0.0;
-            }
-            results[ti] = run_strategy_summary(
-                prices, signal.data(), n,
-                initial_capital, commission_pct, slippage_pct,
-                periods_per_year, ref_prices);
         }
     }
 #else
     std::vector<double> signal(n, 0.0);
     for (long long t = 0; t < num_combos_ll; ++t) {
         const std::size_t ti = static_cast<std::size_t>(t);
-        const int fast_row = pair_idx[ti * 2];
-        const int slow_row = pair_idx[ti * 2 + 1];
-        if (fast_row < 0 || slow_row < 0 ||
-            static_cast<std::size_t>(fast_row) >= n_unique ||
-            static_cast<std::size_t>(slow_row) >= n_unique) {
-            continue;
-        }
-        const double* fast = indicators + static_cast<std::size_t>(fast_row) * n;
-        const double* slow = indicators + static_cast<std::size_t>(slow_row) * n;
+        const double* fast =
+            indicators + static_cast<std::size_t>(pair_idx[ti * 2]) * n;
+        const double* slow =
+            indicators + static_cast<std::size_t>(pair_idx[ti * 2 + 1]) * n;
         for (std::size_t i = 0; i < n; ++i)
             signal[i] = (fast[i] > slow[i]) ? 1.0 : 0.0;
         results[ti] = run_strategy_summary(
@@ -657,6 +685,13 @@ std::vector<BacktestResult> batch_backtest_crossover(
             periods_per_year, ref_prices);
     }
 #endif
+    if (region_error) {
+        throw std::runtime_error(
+            "batch_backtest_crossover: a worker thread failed (most likely "
+            "std::bad_alloc on its per-thread signal buffer); rethrown here, "
+            "outside the parallel region, because letting it escape the "
+            "structured block is undefined behaviour.");
+    }
     return results;
 }
 

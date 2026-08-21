@@ -55,8 +55,22 @@ inline bool is_negligible_pivot(double value, double scale, double rel_eps = 1e-
 // floor made the tolerance ABSOLUTE for small-magnitude inputs, which quietly
 // clamped away drift far larger than real noise on exactly the data where a
 // genuine bug is hardest to see.
+//
+// A NON-FINITE value or scale is returned unchanged rather than thrown on.
+// NaN/Inf here is not evidence of a bug in the kernel: it is the ordinary
+// consequence of a NaN or Inf bar in the caller's input data, and this
+// project's contract for bad data is NaN propagation, not an exception (see
+// the validator note in bindings.cpp -- build_dataset's finite-value guard
+// already rejects an entire panel over one bad print, which is exactly the
+// failure mode a raise from this layer would reintroduce).
+// Without this branch, control fell straight through to the throw, because
+// `NaN >= 0.0` and `|NaN| < rel_eps*|NaN|` are BOTH false: measured, a
+// single NaN price made bollinger_bands raise std::runtime_error for the
+// whole series where every other indicator returned NaN for the affected
+// bars and kept going.
 inline double clamp_near_zero_sumsq(double value, double scale, const char* context,
                                      double rel_eps = 1e-9) {
+    if (!std::isfinite(value) || !std::isfinite(scale)) return value;
     if (value >= 0.0) return value;
     if (std::abs(value) < rel_eps * std::abs(scale)) return 0.0;
     throw std::runtime_error(
@@ -96,13 +110,6 @@ inline long long checked_narrow_to_ll(std::size_t value, const char* context) {
                                    " exceeds LLONG_MAX.");
     }
     return static_cast<long long>(value);
-}
-
-inline bool all_finite(const double* arr, std::size_t n) {
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!std::isfinite(arr[i])) return false;
-    }
-    return true;
 }
 
 }  // namespace sqt::numerics
