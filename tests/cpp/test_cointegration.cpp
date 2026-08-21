@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 // ── Tiny assertion helpers ────────────────────────────────────────────────────
@@ -512,6 +513,13 @@ static void test_kalman_2state_tracks_true_alpha_beta() {
 }
 
 
+// Column-major cell accessor for the nested-RSS designs below.
+// lstsq_nested_rss takes A column-major -- see its layout note in qr.hpp.
+static inline double& cm(std::vector<double>& A, int T, int r, int c) {
+    return A[static_cast<std::size_t>(c) * static_cast<std::size_t>(T) +
+             static_cast<std::size_t>(r)];
+}
+
 // ── qr::lstsq_nested_rss ─────────────────────────────────────────────────────
 //
 // The primitive behind adf_test's lag sweep. It claims that ONE unpivoted
@@ -543,8 +551,17 @@ static void check_nested_matches_per_prefix(
         if (sol.full_rank) ref_rss[static_cast<std::size_t>(j)] = sol.rss;
     }
 
-    // Under test: one factorization for all of them.
-    std::vector<double> A2 = design;
+    // Under test: one factorization for all of them. lstsq_nested_rss wants
+    // COLUMN-major, so transpose -- which also means this test feeds it a
+    // differently-laid-out copy of the same matrix the reference used, and
+    // agreement is not an artifact of shared storage.
+    std::vector<double> A2(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
+    for (int r = 0; r < T; ++r)
+        for (int cc = 0; cc < k; ++cc)
+            A2[static_cast<std::size_t>(cc) * static_cast<std::size_t>(T) +
+               static_cast<std::size_t>(r)] =
+                design[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
+                       static_cast<std::size_t>(cc)];
     std::vector<double> b2 = rhs;
     std::vector<double> got_rss(static_cast<std::size_t>(k) + 1);
     std::vector<unsigned char> got_ok(static_cast<std::size_t>(k) + 1);
@@ -588,8 +605,7 @@ static void test_nested_rss_is_monotone_nonincreasing_in_k() {
     std::vector<double> b(static_cast<std::size_t>(T));
     for (int r = 0; r < T; ++r) {
         for (int c = 0; c < k; ++c)
-            A[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
-              static_cast<std::size_t>(c)] = (c == 0) ? 1.0 : pseudo_random(state);
+            cm(A, T, r, c) = (c == 0) ? 1.0 : pseudo_random(state);
         b[static_cast<std::size_t>(r)] = pseudo_random(state);
     }
     std::vector<double> rss(static_cast<std::size_t>(k) + 1);
@@ -608,12 +624,11 @@ static void test_nested_rss_flags_a_duplicated_column() {
     std::vector<double> A(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
     std::vector<double> b(static_cast<std::size_t>(T));
     for (int r = 0; r < T; ++r) {
-        double* rp = A.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(k);
-        rp[0] = 1.0;
-        rp[1] = pseudo_random(state);
-        rp[2] = pseudo_random(state);
-        rp[3] = rp[1];               // exact duplicate
-        rp[4] = pseudo_random(state);
+        cm(A, T, r, 0) = 1.0;
+        cm(A, T, r, 1) = pseudo_random(state);
+        cm(A, T, r, 2) = pseudo_random(state);
+        cm(A, T, r, 3) = cm(A, T, r, 1);   // exact duplicate
+        cm(A, T, r, 4) = pseudo_random(state);
         b[static_cast<std::size_t>(r)] = pseudo_random(state);
     }
     std::vector<double> rss(static_cast<std::size_t>(k) + 1);
@@ -636,8 +651,7 @@ static void test_nested_rss_handles_prefixes_beyond_T() {
     std::vector<double> b(static_cast<std::size_t>(T));
     for (int r = 0; r < T; ++r) {
         for (int c = 0; c < k; ++c)
-            A[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
-              static_cast<std::size_t>(c)] = (c == 0) ? 1.0 : pseudo_random(state);
+            cm(A, T, r, c) = (c == 0) ? 1.0 : pseudo_random(state);
         b[static_cast<std::size_t>(r)] = pseudo_random(state);
     }
     std::vector<double> rss(static_cast<std::size_t>(k) + 1);
@@ -660,9 +674,8 @@ static void test_nested_rss_scale_invariant() {
     std::vector<double> A(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
     std::vector<double> b(static_cast<std::size_t>(T));
     for (int r = 0; r < T; ++r) {
-        double* rp = A.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(k);
-        rp[0] = 1.0;
-        for (int c = 1; c < k; ++c) rp[c] = pseudo_random(state);
+        cm(A, T, r, 0) = 1.0;
+        for (int c = 1; c < k; ++c) cm(A, T, r, c) = pseudo_random(state);
         b[static_cast<std::size_t>(r)] = pseudo_random(state);
     }
     std::vector<double> A1 = A, b1 = b;
@@ -674,8 +687,7 @@ static void test_nested_rss_scale_invariant() {
     std::vector<double> A2 = A, b2 = b;
     for (int r = 0; r < T; ++r)
         for (int c = 1; c < k; ++c)
-            A2[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
-               static_cast<std::size_t>(c)] *= (c % 2 == 0) ? 1e13 : 1e-13;
+            cm(A2, T, r, c) *= (c % 2 == 0) ? 1e13 : 1e-13;
     std::vector<double> rss2(static_cast<std::size_t>(k) + 1);
     std::vector<unsigned char> ok2(static_cast<std::size_t>(k) + 1);
     sqt::qr::lstsq_nested_rss(A2.data(), b2.data(), T, k, rss2.data(), ok2.data());
@@ -686,6 +698,138 @@ static void test_nested_rss_scale_invariant() {
         CHECK_NEAR(rss1[static_cast<std::size_t>(j)] / s,
                    rss2[static_cast<std::size_t>(j)] / s, 1e-8);
     }
+}
+
+// ── batch_engle_granger ──────────────────────────────────────────────────────
+//
+// The batch kernel must be indistinguishable from a loop of engle_granger()
+// calls -- BIT-identical, not merely close. There is no accumulation across
+// pairs, so there is no floating-point reason for any difference, and a
+// tolerance here would hide a real indexing bug.
+
+static void check_batch_matches_serial(int n_tickers, int n_bars,
+                                        int max_lag, bool use_aic)
+{
+    std::vector<double> panel(static_cast<std::size_t>(n_tickers) *
+                              static_cast<std::size_t>(n_bars));
+    for (int t = 0; t < n_tickers; ++t) {
+        auto s = random_walk(n_bars, static_cast<unsigned>(17 + 7 * t));
+        for (int i = 0; i < n_bars; ++i)
+            panel[static_cast<std::size_t>(t) * static_cast<std::size_t>(n_bars) +
+                  static_cast<std::size_t>(i)] = s[static_cast<std::size_t>(i)] + 100.0;
+    }
+
+    std::vector<int> pairs;
+    for (int a = 0; a < n_tickers; ++a)
+        for (int b = a + 1; b < n_tickers; ++b) { pairs.push_back(a); pairs.push_back(b); }
+    const std::size_t n_pairs = pairs.size() / 2;
+
+    std::vector<double> out(n_pairs * static_cast<std::size_t>(sqt::kBatchCointCols));
+    sqt::batch_engle_granger(panel.data(), static_cast<std::size_t>(n_tickers),
+                              static_cast<std::size_t>(n_bars), pairs.data(),
+                              n_pairs, max_lag, use_aic, out.data());
+
+    for (std::size_t i = 0; i < n_pairs; ++i) {
+        const double* y0 = panel.data() +
+            static_cast<std::size_t>(pairs[i * 2]) * static_cast<std::size_t>(n_bars);
+        const double* y1 = panel.data() +
+            static_cast<std::size_t>(pairs[i * 2 + 1]) * static_cast<std::size_t>(n_bars);
+        const auto r = sqt::engle_granger(y0, y1, static_cast<std::size_t>(n_bars),
+                                           max_lag, use_aic);
+        const double* row = out.data() + i * static_cast<std::size_t>(sqt::kBatchCointCols);
+
+        // Exact equality, with the two IEEE special cases spelled out: NaN is
+        // never equal to itself, and half_life is legitimately +inf for a
+        // spread that is not mean-reverting.
+        auto same = [](double a, double b) {
+            if (std::isnan(a) && std::isnan(b)) return true;
+            return a == b;
+        };
+        CHECK(same(row[0], r.intercept));
+        CHECK(same(row[1], r.hedge_ratio));
+        CHECK(same(row[2], r.adf_statistic));
+        CHECK(row[3] == static_cast<double>(r.optimal_lag));
+        CHECK(same(row[4], r.p_value));
+        CHECK(same(row[5], r.cv_1pct));
+        CHECK(same(row[6], r.cv_5pct));
+        CHECK(same(row[7], r.cv_10pct));
+        CHECK(same(row[8], r.half_life));
+        CHECK(row[9] == static_cast<double>(r.n_obs));
+        CHECK(row[10] == (r.cointegrated ? 1.0 : 0.0));
+    }
+}
+
+static void test_batch_coint_matches_serial_auto_lag() {
+    check_batch_matches_serial(/*n_tickers=*/8, /*n_bars=*/300, /*max_lag=*/-1, true);
+}
+
+static void test_batch_coint_matches_serial_fixed_lag_and_bic() {
+    check_batch_matches_serial(8, 300, /*max_lag=*/4, /*use_aic=*/false);
+}
+
+static void test_batch_coint_matches_serial_short_series() {
+    // Short enough that the automatic max-lag cap binds and some candidate
+    // lags have no usable degrees of freedom.
+    check_batch_matches_serial(6, 40, -1, true);
+}
+
+static void test_batch_coint_respects_pair_order() {
+    // Row i of the output must correspond to row i of `pairs`, including when
+    // the pairs are not in any sorted order and repeat.
+    const int n_bars = 200;
+    std::vector<double> panel(3 * static_cast<std::size_t>(n_bars));
+    for (int t = 0; t < 3; ++t) {
+        auto s = random_walk(n_bars, static_cast<unsigned>(101 + t));
+        for (int i = 0; i < n_bars; ++i)
+            panel[static_cast<std::size_t>(t) * static_cast<std::size_t>(n_bars) +
+                  static_cast<std::size_t>(i)] = s[static_cast<std::size_t>(i)] + 100.0;
+    }
+    const std::vector<int> pairs = {2, 0,  1, 2,  0, 1,  2, 0};
+    const std::size_t n_pairs = 4;
+    std::vector<double> out(n_pairs * static_cast<std::size_t>(sqt::kBatchCointCols));
+    sqt::batch_engle_granger(panel.data(), 3, static_cast<std::size_t>(n_bars),
+                              pairs.data(), n_pairs, -1, true, out.data());
+
+    for (std::size_t i = 0; i < n_pairs; ++i) {
+        const auto r = sqt::engle_granger(
+            panel.data() + static_cast<std::size_t>(pairs[i * 2]) * static_cast<std::size_t>(n_bars),
+            panel.data() + static_cast<std::size_t>(pairs[i * 2 + 1]) * static_cast<std::size_t>(n_bars),
+            static_cast<std::size_t>(n_bars), -1, true);
+        CHECK(out[i * static_cast<std::size_t>(sqt::kBatchCointCols) + 1] == r.hedge_ratio);
+    }
+    // Rows 0 and 3 are the same pair, so they must be the same numbers.
+    for (int col = 0; col < sqt::kBatchCointCols; ++col) {
+        const double a = out[0 * static_cast<std::size_t>(sqt::kBatchCointCols) +
+                             static_cast<std::size_t>(col)];
+        const double d = out[3 * static_cast<std::size_t>(sqt::kBatchCointCols) +
+                             static_cast<std::size_t>(col)];
+        CHECK(a == d || (std::isnan(a) && std::isnan(d)));
+    }
+}
+
+static void test_batch_coint_rejects_out_of_range_pair() {
+    const int n_bars = 100;
+    std::vector<double> panel(2 * static_cast<std::size_t>(n_bars), 1.0);
+    std::vector<double> out(static_cast<std::size_t>(sqt::kBatchCointCols));
+    for (const std::vector<int>& bad : {std::vector<int>{0, 2},
+                                        std::vector<int>{2, 0},
+                                        std::vector<int>{-1, 1}}) {
+        bool threw = false;
+        try {
+            sqt::batch_engle_granger(panel.data(), 2, static_cast<std::size_t>(n_bars),
+                                      bad.data(), 1, -1, true, out.data());
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK_TRUE(threw);
+    }
+}
+
+static void test_batch_coint_empty_is_a_noop() {
+    std::vector<double> panel(200, 1.0);
+    // n_pairs == 0 must return without touching `out` or dereferencing pairs.
+    sqt::batch_engle_granger(panel.data(), 2, 100, nullptr, 0, -1, true, nullptr);
+    CHECK_TRUE(true);  // reaching here without a crash is the assertion
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -712,6 +856,14 @@ int main() {
     test_eg_large_baseline_hedge_ratio_recovered();
     test_eg_independent_random_walks();
     test_eg_hedge_ratio_sign();
+    // batch_engle_granger
+    test_batch_coint_matches_serial_auto_lag();
+    test_batch_coint_matches_serial_fixed_lag_and_bic();
+    test_batch_coint_matches_serial_short_series();
+    test_batch_coint_respects_pair_order();
+    test_batch_coint_rejects_out_of_range_pair();
+    test_batch_coint_empty_is_a_noop();
+
     // qr::lstsq_nested_rss (the primitive behind the lag sweep)
     test_nested_rss_matches_independent_fits_random();
     test_nested_rss_is_monotone_nonincreasing_in_k();

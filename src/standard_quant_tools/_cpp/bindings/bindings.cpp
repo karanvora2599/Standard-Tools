@@ -1237,6 +1237,54 @@ PYBIND11_MODULE(_sqt_core, m) {
         "optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct, half_life,\n"
         "n_obs, cointegrated.");
 
+    m.def(
+        "batch_engle_granger",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> prices,
+           py::array_t<int, py::array::c_style | py::array::forcecast> pairs,
+           int max_lag, bool use_aic) -> py::array_t<double>
+        {
+            auto p_buf = prices.request();
+            auto q_buf = pairs.request();
+            if (p_buf.ndim != 2)
+                throw std::invalid_argument(
+                    "prices must be a 2-D array (n_tickers, n_bars)");
+            if (q_buf.ndim != 2 || q_buf.shape[1] != 2)
+                throw std::invalid_argument("pairs must be a 2-D array (n_pairs, 2)");
+
+            const auto n_tickers = static_cast<std::size_t>(p_buf.shape[0]);
+            const auto n_bars    = static_cast<std::size_t>(p_buf.shape[1]);
+            const auto n_pairs   = static_cast<std::size_t>(q_buf.shape[0]);
+
+            constexpr py::ssize_t kCols = sqt::kBatchCointCols;
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n_pairs), kCols});
+            double* out_ptr = out.mutable_data();
+            const double* p_ptr = static_cast<const double*>(p_buf.ptr);
+            const int*    q_ptr = static_cast<const int*>(q_buf.ptr);
+            {
+                py::gil_scoped_release release;
+                sqt::batch_engle_granger(p_ptr, n_tickers, n_bars, q_ptr, n_pairs,
+                                          max_lag, use_aic, out_ptr);
+            }
+            return out;
+        },
+        py::arg("prices"),
+        py::arg("pairs"),
+        py::arg("max_lag") = -1,
+        py::arg("use_aic") = true,
+        "Engle-Granger over many pairs in one native call.\\n\\n"
+        "prices : 2-D float64 (n_tickers, n_bars), already aligned onto a\\n"
+        "         common index by the caller -- this kernel never sees an\\n"
+        "         index and does no date alignment.\\n"
+        "pairs  : 2-D int32 (n_pairs, 2), row indices into `prices`.\\n\\n"
+        "Returns a 2-D float64 array of shape (n_pairs, 11), one row per pair\\n"
+        "in input order. Columns (fixed order): intercept, hedge_ratio,\\n"
+        "adf_statistic, optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct,\\n"
+        "half_life, n_obs, cointegrated (0.0/1.0).\\n\\n"
+        "Bit-identical to calling engle_granger() once per pair, and\\n"
+        "independent of thread count. Raises ValueError if a pairs row\\n"
+        "references a ticker outside the panel.");
+
     // ── Monte Carlo (moving-block bootstrap) ──────────────────────────────────
 
     m.def(

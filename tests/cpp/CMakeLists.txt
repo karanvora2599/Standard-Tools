@@ -72,6 +72,16 @@ else()
     target_compile_options(sqt_cointegration_impl PRIVATE -O2 -Wall -Wextra)
 endif()
 
+# Optional, mirrors sqt_backtest_impl/sqt_monte_carlo_impl: batch_engle_granger
+# runs each pair in parallel when an OpenMP runtime is available. Without one
+# _OPENMP stays undefined and it runs the identical serial loop -- but linking
+# it here is what makes the C++ suite actually exercise the parallel path,
+# including the bit-identical-to-serial gate.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(sqt_cointegration_impl PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
 add_executable(test_cointegration test_cointegration.cpp)
 target_link_libraries(test_cointegration PRIVATE sqt_cointegration_impl)
 target_compile_features(test_cointegration PRIVATE cxx_std_17)

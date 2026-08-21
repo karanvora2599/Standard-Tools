@@ -284,7 +284,18 @@ inline LstsqResult lstsq(double* A, double* b, int T, int k, int* perm,
 // that the R diagonal is no longer ordered, so the rank test cannot stop at
 // the first small entry the way lstsq's does -- see below.
 //
-// @param A     T x k design, ROW-MAJOR. Overwritten with the factorization.
+// LAYOUT: A is COLUMN-MAJOR here, unlike lstsq above. That is not gratuitous
+// inconsistency -- a Householder factorization walks one column at a time, and
+// with row-major storage each such walk strides by k*8 bytes. At k=27 that is
+// 216 bytes, so every element access pulls a fresh 64-byte cache line and uses
+// 8 bytes of it. Measured before the change: cost per flop nearly tripled
+// (0.99 -> 2.69 ms/Mflop) as the design grew from 2.4 MB to 9.4 MB, and
+// batch_engle_granger stopped scaling past ~6 threads no matter how much
+// compute each pair was given -- both symptoms of streaming 8x more memory
+// than the arithmetic needs. Column-major makes every inner loop unit-stride.
+//
+// @param A     T x k design, COLUMN-MAJOR (A[j*T + i] is row i, column j).
+//              Overwritten with the factorization.
 // @param b     Length-T response. Overwritten with Q'b.
 // @param out_rss        Length k+1. out_rss[j] = RSS of the first-j-columns
 //                       model; NaN where j exceeds min(k, T).
@@ -299,9 +310,13 @@ inline void lstsq_nested_rss(double* A, double* b, int T, int k,
     for (int j = 0; j <= (k < 0 ? 0 : k); ++j) { out_rss[j] = kNaN; out_full_rank[j] = 0; }
     if (k < 1 || T < 1) return;
 
-    const std::size_t k_sz = static_cast<std::size_t>(k);
-    auto at = [A, k_sz](int i, int j) -> double& {
-        return A[static_cast<std::size_t>(i) * k_sz + static_cast<std::size_t>(j)];
+    const std::size_t T_sz = static_cast<std::size_t>(T);
+    auto at = [A, T_sz](int i, int j) -> double& {
+        return A[static_cast<std::size_t>(j) * T_sz + static_cast<std::size_t>(i)];
+    };
+    // Unit-stride handle on column j, for the inner loops below.
+    auto col = [A, T_sz](int j) -> double* {
+        return A + static_cast<std::size_t>(j) * T_sz;
     };
 
     // Column equilibration, for the same reason lstsq does it: the rank test
@@ -314,12 +329,13 @@ inline void lstsq_nested_rss(double* A, double* b, int T, int k,
     // residual -- untouched, so the equilibration affects the rank decision
     // only, which is exactly what it is here for.
     for (int j = 0; j < k; ++j) {
+        double* cj = col(j);
         double nrm = 0.0;
-        for (int i = 0; i < T; ++i) { const double a = at(i, j); nrm += a * a; }
+        for (int i = 0; i < T; ++i) { const double a = cj[i]; nrm += a * a; }
         nrm = std::sqrt(nrm);
         if (nrm > 0.0 && std::isfinite(nrm)) {
             const double inv = 1.0 / nrm;
-            for (int i = 0; i < T; ++i) at(i, j) *= inv;
+            for (int i = 0; i < T; ++i) cj[i] *= inv;
         }
     }
 
@@ -328,40 +344,40 @@ inline void lstsq_nested_rss(double* A, double* b, int T, int k,
     // over-parameterized, so this is a supported case, not an error.
     const int kk = (k < T) ? k : T;
 
-    std::vector<double> v(static_cast<std::size_t>(T));
+    std::vector<double> vbuf(static_cast<std::size_t>(T));
+    double* v = vbuf.data();
     for (int j = 0; j < kk; ++j) {
+        double* cj = col(j);
         double normx = 0.0;
-        for (int i = j; i < T; ++i) { const double a = at(i, j); normx += a * a; }
+        for (int i = j; i < T; ++i) { const double a = cj[i]; normx += a * a; }
         normx = std::sqrt(normx);
         if (!(normx > 0.0)) continue;  // exactly-zero column: R_jj stays 0
 
-        const double ajj = at(j, j);
+        const double ajj = cj[j];
         // Sign away from ajj, so v[j] is formed by addition rather than by
         // subtracting two nearly-equal numbers.
         const double alpha = (ajj > 0.0) ? -normx : normx;
 
-        v[static_cast<std::size_t>(j)] = ajj - alpha;
-        for (int i = j + 1; i < T; ++i) v[static_cast<std::size_t>(i)] = at(i, j);
+        v[j] = ajj - alpha;
+        for (int i = j + 1; i < T; ++i) v[i] = cj[i];
 
         double vtv = 0.0;
-        for (int i = j; i < T; ++i) {
-            const double vi = v[static_cast<std::size_t>(i)];
-            vtv += vi * vi;
-        }
+        for (int i = j; i < T; ++i) { const double vi = v[i]; vtv += vi * vi; }
         if (!(vtv > 0.0)) continue;
 
+        // Both loops are now unit-stride in the column being updated, which
+        // is the whole point of the layout.
         for (int c = j; c < k; ++c) {
+            double* cc = col(c);
             double s = 0.0;
-            for (int i = j; i < T; ++i) s += v[static_cast<std::size_t>(i)] * at(i, c);
+            for (int i = j; i < T; ++i) s += v[i] * cc[i];
             s = 2.0 * s / vtv;
-            for (int i = j; i < T; ++i) at(i, c) -= s * v[static_cast<std::size_t>(i)];
+            for (int i = j; i < T; ++i) cc[i] -= s * v[i];
         }
         double sb = 0.0;
-        for (int i = j; i < T; ++i)
-            sb += v[static_cast<std::size_t>(i)] * b[static_cast<std::size_t>(i)];
+        for (int i = j; i < T; ++i) sb += v[i] * b[static_cast<std::size_t>(i)];
         sb = 2.0 * sb / vtv;
-        for (int i = j; i < T; ++i)
-            b[static_cast<std::size_t>(i)] -= sb * v[static_cast<std::size_t>(i)];
+        for (int i = j; i < T; ++i) b[static_cast<std::size_t>(i)] -= sb * v[i];
     }
 
     // ── Rank, per prefix ────────────────────────────────────────────────

@@ -622,12 +622,26 @@ class TestScanPairs:
     def test_pair_test_failure_is_reported_not_swallowed(
         self, patched_long, monkeypatch
     ):
+        """The per-pair fallback path reports failures rather than hiding them.
+
+        scan_pairs has two paths: a batch native call when every series shares
+        an index, and this per-pair loop otherwise. Disabling the batch entry
+        point is what puts the loop under test -- without it this monkeypatch
+        no longer reaches the code it is trying to exercise, because the batch
+        path never calls cointegration_test.
+        """
         import standard_quant_tools.analysis.cointegration as cointegration_module
 
         def failing_coint(*args, **kwargs):
             raise RuntimeError("degenerate series")
 
+        def unavailable_batch(*args, **kwargs):
+            raise RuntimeError("batch path disabled for this test")
+
         monkeypatch.setattr(cointegration_module, "cointegration_test", failing_coint)
+        monkeypatch.setattr(
+            cointegration_module, "scan_cointegrated_pairs", unavailable_batch
+        )
 
         inp = PairScannerInput(
             tickers=["AAPL", "MSFT", "GOOGL"],
@@ -645,6 +659,79 @@ class TestScanPairs:
             ("AAPL", "GOOGL"),
             ("MSFT", "GOOGL"),
         }
+
+    def test_batch_path_produces_the_same_answer_as_the_loop(
+        self, patched_long, monkeypatch
+    ):
+        """The two paths must agree; the batch one exists only to be faster.
+
+        Runs the same universe twice -- once with the batch entry point
+        available, once with it disabled so the per-pair loop runs -- and
+        requires identical output.
+        """
+        import standard_quant_tools.analysis.cointegration as cointegration_module
+
+        inp = PairScannerInput(
+            tickers=["AAPL", "MSFT", "GOOGL"],
+            start_date=START,
+            end_date=END,
+        )
+        batched = scan_pairs(inp)
+
+        real_batch = cointegration_module.scan_cointegrated_pairs
+
+        def unavailable_batch(*args, **kwargs):
+            raise RuntimeError("batch path disabled for this test")
+
+        monkeypatch.setattr(
+            cointegration_module, "scan_cointegrated_pairs", unavailable_batch
+        )
+        looped = scan_pairs(inp)
+        monkeypatch.setattr(cointegration_module, "scan_cointegrated_pairs", real_batch)
+
+        assert batched.n_pairs_tested == looped.n_pairs_tested
+        assert batched.n_pairs_cointegrated == looped.n_pairs_cointegrated
+        assert [
+            (p.symbol_a, p.symbol_b, p.p_value, p.hedge_ratio, p.half_life_days)
+            for p in batched.pairs
+        ] == [
+            (p.symbol_a, p.symbol_b, p.p_value, p.hedge_ratio, p.half_life_days)
+            for p in looped.pairs
+        ]
+
+    def test_batch_path_falls_back_when_indexes_differ(self, patched_long, monkeypatch):
+        """A ragged universe must not silently change which bars a pair sees.
+
+        The batch path aligns the whole universe onto one common sample; the
+        loop aligns each pair against only its partner. Those differ when the
+        indexes differ, so scan_pairs is required to take the loop instead of
+        quietly re-testing every pair on a shorter sample.
+        """
+        import standard_quant_tools.agent.tools as tools_module
+
+        provider = tools_module.DataFactory.get_provider()
+        original = provider.get_ohlcv
+        calls = {"n": 0}
+
+        def ragged(symbol, start, end, *args, **kwargs):
+            df = original(symbol, start, end, *args, **kwargs)
+            calls["n"] += 1
+            # Drop a leading bar from one symbol so the indexes disagree.
+            return df.iloc[1:] if symbol == "GOOGL" else df
+
+        monkeypatch.setattr(provider, "get_ohlcv", ragged)
+
+        inp = PairScannerInput(
+            tickers=["AAPL", "MSFT", "GOOGL"],
+            start_date=START,
+            end_date=END,
+        )
+        result = scan_pairs(inp)
+
+        # The point is that it completes correctly on the loop path, testing
+        # every pair on its own pairwise-aligned sample.
+        assert calls["n"] == 3
+        assert result.n_pairs_tested == 3
 
 
 # ── Feature 3: Walk-Forward Backtest ──────────────────────────────────────────

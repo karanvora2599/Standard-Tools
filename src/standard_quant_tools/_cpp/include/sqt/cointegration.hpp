@@ -109,6 +109,58 @@ CointResult engle_granger(
     const double* y0, const double* y1, std::size_t n,
     int max_lag = -1, bool use_aic = true);
 
+// Column count and layout of batch_engle_granger's output row. Kept in the
+// header because the Python side has to agree with it exactly.
+enum : int { kBatchCointCols = 11 };
+// 0 intercept      3 optimal_lag   6 cv_5pct     9  n_obs
+// 1 hedge_ratio    4 p_value       7 cv_10pct    10 cointegrated (0.0/1.0)
+// 2 adf_statistic  5 cv_1pct       8 half_life
+
+/**
+ * Engle-Granger over many pairs drawn from one aligned price panel, in a
+ * single call.
+ *
+ * A pair screen is O(N^2) in the universe: 2,000 tickers is 1,999,000 pairs.
+ * Driving that from Python -- `for a, b in combinations(tickers, 2)` calling
+ * cointegration_test per pair -- pays the pandas/binding round trip two
+ * million times and cannot use more than one core. Measured at 2,000 bars
+ * that is 9.8 hours serially.
+ *
+ * Every pair is an independent computation over its own two rows: no shared
+ * state, no RNG, nothing carried between them. Same shape as
+ * batch_run_strategy, and parallelized the same way.
+ *
+ * @param prices     (n_tickers x n_bars) row-major. Row i is ticker i's
+ *                   series, already aligned onto a common index by the
+ *                   caller -- this kernel does no date alignment and cannot,
+ *                   since it never sees an index.
+ * @param n_tickers  Rows of `prices`.
+ * @param n_bars     Columns of `prices`; the length of every series.
+ * @param pairs      (n_pairs x 2) row-major indices into `prices`' rows.
+ *                   Validated up front: an out-of-range index throws
+ *                   std::invalid_argument naming the offending row, before
+ *                   any thread starts.
+ * @param n_pairs    Rows of `pairs`.
+ * @param max_lag    ADF max lag, -1 for the automatic Schwert rule. Applied
+ *                   identically to every pair.
+ * @param use_aic    AIC (true) or BIC (false) for lag selection.
+ * @param out        (n_pairs x kBatchCointCols) row-major, written in input
+ *                   order. See the column map above.
+ *
+ * Results are bit-identical to calling engle_granger() once per pair, and
+ * independent of thread count -- there is no accumulation across pairs for a
+ * scheduling order to perturb.
+ */
+void batch_engle_granger(
+    const double* prices,
+    std::size_t   n_tickers,
+    std::size_t   n_bars,
+    const int*    pairs,
+    std::size_t   n_pairs,
+    int           max_lag,
+    bool          use_aic,
+    double*       out);
+
 /**
  * 1-state (slope-only) Kalman filter for a time-varying hedge ratio.
  *

@@ -1,12 +1,19 @@
 #include "sqt/cointegration.hpp"
 
 #include "sqt/numerics.hpp"
+#include "sqt/omp_policy.hpp"
 #include "sqt/qr.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace sqt {
 
@@ -407,19 +414,31 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
         const int T =
             numerics::checked_narrow_to_int(T_sz, "adf_test: regression rows");
 
+        // COLUMN-major, matching qr::lstsq_nested_rss -- see its layout note.
+        // Building it this way is also the natural direction here: each
+        // column is one contiguous run rather than a strided scatter.
         std::vector<double> A(numerics::checked_mul(T_sz, kf_sz,
             "adf_test: design matrix size"));
         std::vector<double> b(T_sz);
-        for (std::size_t row = 0; row < T_sz; ++row) {
-            const std::size_t t = sel_start + row;
-            double* rp = A.data() + row * kf_sz;
+        {
             int c = 0;
-            if (include_constant) rp[c++] = 1.0;
-            rp[c++] = y[t - 1];
-            // Δy_{t-j} = y[t-j] - y[t-j-1] = dy[t-j-1]
-            for (int j = 1; j <= max_lag; ++j)
-                rp[c++] = dy[t - 1 - static_cast<std::size_t>(j)];
-            b[row] = dy[t - 1];  // Δy_t
+            if (include_constant) {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                for (std::size_t row = 0; row < T_sz; ++row) col[row] = 1.0;
+            }
+            {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                for (std::size_t row = 0; row < T_sz; ++row)
+                    col[row] = y[sel_start + row - 1];
+            }
+            for (int j = 1; j <= max_lag; ++j) {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                // Δy_{t-j} = y[t-j] - y[t-j-1] = dy[t-j-1]
+                for (std::size_t row = 0; row < T_sz; ++row)
+                    col[row] = dy[sel_start + row - 1 - static_cast<std::size_t>(j)];
+            }
+            for (std::size_t row = 0; row < T_sz; ++row)
+                b[row] = dy[sel_start + row - 1];  // Δy_t
         }
 
         std::vector<double>        rss(kf_sz + 1);
@@ -535,6 +554,95 @@ CointResult engle_granger(
 
     return r;
 }
+
+// ── Public: batch_engle_granger ──────────────────────────────────────────────
+
+void batch_engle_granger(
+    const double* prices,
+    std::size_t   n_tickers,
+    std::size_t   n_bars,
+    const int*    pairs,
+    std::size_t   n_pairs,
+    int           max_lag,
+    bool          use_aic,
+    double*       out)
+{
+    if (n_pairs == 0) return;
+
+    // ── Validate before the region, where throwing is safe ─────────────────
+    // An exception escaping an OpenMP structured block is undefined
+    // behaviour, so every check that can fail on the caller's arguments
+    // happens here, once, single-threaded.
+    if (prices == nullptr || pairs == nullptr || out == nullptr)
+        throw std::invalid_argument("batch_engle_granger: null pointer argument.");
+    for (std::size_t i = 0; i < n_pairs; ++i) {
+        const int a = pairs[i * 2];
+        const int b = pairs[i * 2 + 1];
+        if (a < 0 || b < 0 ||
+            static_cast<std::size_t>(a) >= n_tickers ||
+            static_cast<std::size_t>(b) >= n_tickers) {
+            throw std::invalid_argument(
+                "batch_engle_granger: pairs row " + std::to_string(i) +
+                " references a ticker outside [0, " + std::to_string(n_tickers) + ").");
+        }
+    }
+    // engle_granger narrows n to int for its own n_obs field. Hoisted here so
+    // that throw is unreachable from inside the region.
+    (void)numerics::checked_narrow_to_int(n_bars, "batch_engle_granger: bars per series");
+
+    const long long n_pairs_ll = static_cast<long long>(n_pairs);
+    bool region_error = false;
+
+#ifdef _OPENMP
+    // schedule(guided), not static. Per-pair cost is not uniform -- the
+    // automatic max-lag rule and the rank-deficiency early-outs mean some
+    // pairs do materially less work than others -- and static assigns equal
+    // iteration COUNTS up front with no rebalancing, so the region finishes
+    // when its unluckiest thread does. guided hands out shrinking chunks on
+    // demand, which also absorbs unequal threads (SMT siblings, hybrid
+    // P/E cores, a cgroup CPU quota, another process on the box) without
+    // assuming anything about the machine.
+    #pragma omp parallel for schedule(guided) reduction(||: region_error) \
+        if(sqt::omp_policy::worth_parallel(n_pairs, n_bars)) \
+        num_threads(sqt::omp_policy::max_threads() > 0 \
+                    ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+#endif
+    for (long long i = 0; i < n_pairs_ll; ++i) {
+        try {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            const double* y0 = prices + static_cast<std::size_t>(pairs[ii * 2]) * n_bars;
+            const double* y1 = prices + static_cast<std::size_t>(pairs[ii * 2 + 1]) * n_bars;
+
+            const CointResult r = engle_granger(y0, y1, n_bars, max_lag, use_aic);
+
+            double* row = out + ii * static_cast<std::size_t>(kBatchCointCols);
+            row[0]  = r.intercept;
+            row[1]  = r.hedge_ratio;
+            row[2]  = r.adf_statistic;
+            row[3]  = static_cast<double>(r.optimal_lag);
+            row[4]  = r.p_value;
+            row[5]  = r.cv_1pct;
+            row[6]  = r.cv_5pct;
+            row[7]  = r.cv_10pct;
+            row[8]  = r.half_life;
+            row[9]  = static_cast<double>(r.n_obs);
+            row[10] = r.cointegrated ? 1.0 : 0.0;
+        } catch (...) {
+            // Most likely std::bad_alloc on a per-pair design matrix.
+            // Contained here and rethrown outside the region.
+            region_error = true;
+        }
+    }
+
+    if (region_error) {
+        throw std::runtime_error(
+            "batch_engle_granger: a worker thread failed (most likely "
+            "std::bad_alloc on a per-pair design matrix); rethrown here, "
+            "outside the parallel region, because letting it escape the "
+            "structured block is undefined behaviour.");
+    }
+}
+
 
 // ── Kalman filters (time-varying hedge ratio) ─────────────────────────────────
 //
