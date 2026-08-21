@@ -175,11 +175,15 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n) {
     // (x[0]/y[0]) suffices -- no periodic re-centering is needed the way
     // the rolling kernels require to bound drift over many windows.
     const double cx = x[0], cy = y[0];
-    double s1 = 0, sxd = 0, syd = 0, sxxd = 0, sxyd = 0;
+    // The observation count, not an accumulated one. `s1 += 1.0` in the loop
+    // below produced exactly this value for any n below 2^53 -- so the
+    // arithmetic is bit-identical -- while spending an O(n) floating-point
+    // add per bar to recompute something the caller already passed in.
+    const double s1 = static_cast<double>(n);
+    double sxd = 0, syd = 0, sxxd = 0, sxyd = 0;
     for (std::size_t i = 0; i < n; ++i) {
         const double xd = x[i] - cx;
         const double yd = y[i] - cy;
-        s1   += 1.0;
         sxd  += xd;
         syd  += yd;
         sxxd += xd * xd;
@@ -212,6 +216,13 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n) {
         ss_res += r.residuals[i] * r.residuals[i];
         ss_tot += (y[i] - y_mean) * (y[i] - y_mean);
     }
+    // ss_tot == 0 (a constant response) makes R^2 a 0/0. Reporting 0.0 is a
+    // convention, not a derivation -- and it is deliberately the SAME
+    // convention the NumPy fallback in analysis/regression.py uses
+    // (`1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0`), so calculate_beta
+    // returns the same number whether or not the extension was built. Do not
+    // "correct" this to NaN on one side alone; ss_tot is a sum of squares, so
+    // `> 0` and `!= 0` select the same branch.
     r.r_squared = (ss_tot > 0) ? 1.0 - ss_res / ss_tot : 0.0;
     return r;
 }
