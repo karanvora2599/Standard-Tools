@@ -306,6 +306,49 @@ df['mfi_overbought'] = df['MFI'] > 80
 
 ---
 
+## Whole-Universe (Panel) Computation *(C++ extension)*
+
+Every indicator above takes one `Series` and returns one `Series`/`DataFrame`. That is the
+right shape for a single ticker and the wrong shape for a universe: measured at 2 000
+tickers × 2 000 bars, the per-ticker call costs **318 µs of Python wrapper against 19 µs of
+actual kernel**.
+
+The C++ call boundary is not the problem — pybind11 dispatch is 2.7 µs, 14% of the
+per-ticker cost. The pandas round trip is: `Series` → NumPy, validation, logging, and
+`Series` reconstruction. So `indicators.panel` converts the universe once, hands the
+native side one matrix, and gets one matrix back, with tickers computed in parallel.
+
+```python
+from standard_quant_tools.indicators.panel import technical_indicators_panel
+
+# ohlcv_by_ticker: dict of ticker -> OHLCV DataFrame (needs High/Low/Close)
+out = technical_indicators_panel(
+    ohlcv_by_ticker,
+    ["rsi", "adx", "atr", "bollinger_bands", "stochastic_oscillator"],
+)
+
+out["rsi"]                      # (dates × tickers)
+out["bollinger_bands"]["AAPL"]  # (dates × [BB_Upper, BB_Middle, BB_Lower])
+```
+
+Single-valued indicators (`rsi`, `atr`) come back as one column per ticker. Multi-column
+ones (`adx`, `bollinger_bands`, `stochastic_oscillator`) use a `(ticker, field)` MultiIndex
+on the columns, with **the same field names the per-ticker functions use** — `BB_Upper`,
+`DI_Plus`, `Stoch_K` — so there is no second vocabulary to learn.
+
+**Measured**, 500 tickers × 1 000 bars, all five indicators: **144.7 ms**, against 1 727.6
+ms for the per-ticker wrapper loop (11.9×).
+
+Parameters (`rsi_period`, `bollinger_num_std`, …) are keyword-only and apply to every
+ticker. Arithmetic is identical: each row is handed to the same kernel the single-series
+path uses, so output is bit-identical to calling the per-ticker function in a loop.
+
+**The index is the intersection** of every ticker's bars — the only shape a dense panel can
+have. A ticker with a shorter history therefore truncates the panel for everyone, which is
+a real difference from computing each ticker on its own full history.
+
+---
+
 ## Multi-Indicator Example: Full Technical Dashboard
 
 ```python

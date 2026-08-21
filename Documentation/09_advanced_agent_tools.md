@@ -266,7 +266,20 @@ else:
 
 `scan_pairs` tests all O(n²/2) ticker combinations for cointegration, filters by p-value and half-life bounds, and returns the top N pairs sorted by half-life (shortest first = fastest mean reversion = most tradeable). Each ticker's prices are fetched **once** before testing begins.
 
-> **Performance:** Each pair test calls `cointegration_test`, which uses the C++ extension (`_sqt_core`) when available — measured **24× faster** than the statsmodels fallback (n=500). For a universe of 10 tickers (45 pairs), the C++ path reduces total scan time from ~15–20 s to well under 2 s.
+> **Performance:** When every ticker shares an index — the usual case for one date range
+> from one provider — `scan_pairs` sends the whole pair set to the native
+> `scan_cointegrated_pairs` in a single call, parallel across pairs, instead of looping
+> `cointegration_test` per pair. Measured per pair at 500 bars: 23.4 µs, against 1.85 ms
+> for the Python loop.
+>
+> That matters because the work is `O(n²)` in the universe. A 2 000-ticker screen is
+> 1 999 000 pairs: **~5.3 min at 2 000 bars, where the per-pair loop took ~9.8 h.** For a
+> universe of 10 tickers (45 pairs) it is well under a second either way.
+>
+> A universe whose tickers have *different* index lengths falls back to the per-pair loop.
+> The batch path aligns the whole universe onto one common sample while the loop aligns
+> each pair against only its own partner — the same thing when the indexes match, and not
+> the same thing when they do not, so it is not taken silently.
 
 ```python
 from standard_quant_tools.agent.tools import scan_pairs
