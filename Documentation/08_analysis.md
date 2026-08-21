@@ -3,10 +3,11 @@
 The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
 
 - **Hurst exponent** — measured 83–131× faster (DFA, n=500/n=2 000); measured 274× for rolling Hurst (n=2 000, window=200). Pure-Python fallback is automatic when the extension is not built.
-- **Cointegration** — measured 24× faster (Engle-Granger OLS + ADF + MacKinnon 2010, n=500 vs. statsmodels); bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
+- **Cointegration** — measured 23× faster at n=500 and **86× at n=2 000** (Engle-Granger OLS + ADF + MacKinnon 2010, vs. statsmodels). The ratio grows with sample size rather than shrinking, because the ADF lag sweep is no longer quadratic: it used to run one column-pivoted QR per candidate lag, `O(T·L³)` in total, and now reads every candidate's residual off a single nested factorization, `O(T·L²)`. Bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
+- **`scan_cointegrated_pairs`** — every pair of a universe in one native call, parallel across pairs. A 2 000-ticker screen at 2 000 bars takes ~5 min instead of ~9.8 h looping `cointegration_test`.
 - **`calculate_beta`, `half_life`, `compute_spread`** — measured 1.1–1.4× faster (2-variable OLS via closed-form normal equations, avoids LAPACK `lstsq` overhead) — a real but modest win; `lstsq` on a 2-variable system turned out not to carry as much LAPACK-call overhead as originally estimated. (An earlier, unmeasured 10–20× projection appeared in this doc before `_sqt_core` was actually built and benchmarked — see `Development/performance_insights.md` for the full before/after story.)
 - **`rolling_beta`** — measured 4.7× faster (incremental O(1)-per-bar sum updates replace two sequential pandas `.rolling().cov()/.var()` passes, n=2 000, window=60), plus a further ~1.1–1.5× from an optional runtime AVX2+FMA dispatch path on capable CPUs (falls back to the same scalar kernel elsewhere). (An earlier, unmeasured 10–40× projection appeared in this doc before real measurement — see `Development/performance_insights.md`.)
-- **`rolling_factor_loadings`** — measured 26× faster (incremental rank-1 XtX/Xty updates with periodic Cholesky re-solve to prevent drift; each bar costs O(k²) instead of a full O(n·k²) `lstsq`), plus a further ~1.1–1.8× (larger at smaller k) from later allocation-elimination work on the Cholesky solve itself. (An earlier, unmeasured 50–200× projection appeared in this doc before real measurement — see `Development/performance_insights.md`.)
+- **`rolling_factor_loadings`** — measured 2.3–10× faster than a per-window `np.linalg.lstsq` loop (10.0× at n=2 000/window=60, 5.5× at n=500/window=60, 2.3× at window=252 — the gap narrows as the window grows, since cost is `O(n·window·p²)`). This is **slower than the 26× this document used to claim, on purpose**: that figure belonged to an incremental rank-1 Cholesky path that returned all-NaN for small-magnitude factors. See "C++ acceleration" below.
 
 `scipy` is used for precise p-values in `multi_factor_regression` when available and falls back gracefully to a `math.erf`-based normal approximation otherwise.
 
@@ -163,13 +164,37 @@ A `pd.DataFrame` with the same index as `asset_returns` (after alignment) and co
 
 ### C++ acceleration
 
-When `_sqt_core` is built, `rolling_factor_loadings` uses an incremental rank-1 update algorithm:
+When `_sqt_core` is built, each window is solved by **Householder QR with column
+pivoting** (`sqt::qr::lstsq`), not by normal equations.
 
-- **Seed** the first `window` bars by building the full `XtX` (k×k) and `Xty` (k) matrices from scratch and solving via Cholesky decomposition.
-- **Slide** each subsequent bar: add the new row to `XtX`/`Xty` (rank-1 update, O(k²)) and subtract the leaving row, then re-solve the updated system.
-- **Refresh** every `window` steps with a full rebuild to prevent floating-point drift from accumulating in the incremental updates.
+That is a deliberate trade of speed for correctness, and it is worth knowing about
+because this document previously advertised the faster, wrong version.
 
-This replaces the Python fallback's O(n · n·k²) per-window `np.linalg.lstsq` loop, giving a **measured 26× speedup** on typical inputs (n=500, window=60, k=3 factors, vs. `lstsq`). A later optimization pass (eliminating dead upper-triangle work in the normal-equations build and reusing scratch buffers across the whole rolling loop instead of reallocating per bar) added a further **~1.1–1.8× on top of that** — larger at smaller `k`, where allocator overhead turns out to matter more than the O(k²)/O(k³) math itself; see `Development/performance_insights.md` for the full breakdown across `k`.
+The old path maintained `XtX`/`Xty` incrementally with rank-1 updates, solved by Cholesky,
+and refreshed periodically to bound drift. It measured 26×. It was also wrong twice:
+
+1. **Its rank test was not scale-invariant.** The pivot test compared every column against
+   the single largest diagonal of `XtX` — which belongs to the intercept column and equals
+   the window length — so with factor values around 1e-6 the threshold landed on top of the
+   factor columns' own magnitudes and the whole window was declared singular. Measured:
+   all-NaN from the C++ path where the NumPy fallback returned 1.516061 for the same input.
+2. **Forming `XtX` squares the condition number.** A design a QR handles to full double
+   precision can be numerically singular by the time Cholesky sees it — which is also why
+   the incremental path needed a periodic full recompute to paper over accumulated drift.
+
+Column-pivoted QR ranks each column by its *own* remaining norm, so the answer is invariant
+to the factors' scale (verified from 1e-12 through 1e12), and no drift-refresh is needed
+because nothing is accumulated across bars.
+
+**Cost, measured:** 2.3–10× faster than the per-window `lstsq` loop, against the old path's
+26×. A rank-deficient window now yields a NaN row rather than a minimum-norm solution — one
+rank policy, shared with the NumPy fallback, so both backends agree on whether a window has
+an answer.
+
+Recovering the speed via QR update/downdate across the sliding window (which would restore
+`O(p²)` per bar without giving back the conditioning or the rank policy) is planned and not
+yet attempted — see `Development/optimization_plan.md` §5.2, including why the analogous
+Cholesky update/downdate was implemented, gated and reverted.
 
 ```python
 from standard_quant_tools.analysis.multi_factor import HAS_CPP
@@ -430,6 +455,56 @@ print(pairs_df)
 ```
 
 ---
+
+---
+
+## Universe Pair Scan *(C++ extension)*
+
+`scan_cointegrated_pairs` runs Engle-Granger over many pairs in one native call.
+
+A pair screen is `O(N²)` in the universe: 2 000 tickers is 1 999 000 pairs. Driving that
+from Python — `for a, b in combinations(tickers, 2)` calling `cointegration_test` per pair —
+pays a pandas round trip two million times and uses one core.
+
+```python
+from standard_quant_tools.analysis.cointegration import scan_cointegrated_pairs
+
+# prices: wide DataFrame (columns = tickers), or dict of ticker -> Series
+result = scan_cointegrated_pairs(prices)
+
+# MultiIndex (symbol_a, symbol_b); one row per pair
+result.columns
+# ['intercept', 'hedge_ratio', 'adf_statistic', 'optimal_lag', 'p_value',
+#  'cv_1pct', 'cv_5pct', 'cv_10pct', 'half_life_days', 'n_obs', 'cointegrated']
+
+tradeable = result[result["cointegrated"] & result["half_life_days"].between(5, 60)]
+```
+
+**Arguments**
+
+| Argument | Meaning |
+|---|---|
+| `prices` | Wide `DataFrame` (columns = tickers) or `dict[str, Series]`. |
+| `pairs` | Which pairs to test. Defaults to every unordered combination. |
+| `autolag` | `"aic"` (default) or `"bic"`. |
+| `max_lag` | ADF max lag; `-1` for the automatic Schwert rule. |
+
+**Measured**, 2 000 tickers × 2 000 bars: **5.31 min**, against 9.81 h for the per-pair
+loop. At 500 bars: 46.7 s against 61.7 min.
+
+### The one semantic difference
+
+Every series is aligned onto **one common index** before the panel is built.
+`cointegration_test` in a loop aligns each pair against only its own partner.
+
+When every series already shares an index — the usual case for same-exchange equities over
+one date range — the two are identical, and the per-pair agreement is exact. When they do
+not, a common sample is arguably the better basis for a *screen* anyway, because p-values
+across pairs are then comparable. Either way it is stated rather than discovered.
+
+`agent.tools.scan_pairs` takes this path only when the indexes are already identical, and
+falls back to the per-pair loop otherwise, so it never silently re-tests a pair on a
+shorter sample.
 
 ---
 

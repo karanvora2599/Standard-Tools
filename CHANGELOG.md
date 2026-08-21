@@ -9,6 +9,117 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Fixed (C++ audit: the NaN/Inf data contract, and undefined behaviour)
+
+`bindings.cpp` states a contract in writing — "degenerate arguments and bad
+bars yield NaN, not exceptions" — and nothing tested it. Every "returns all
+NaN" test in `tests/cpp_bindings/` covered a degenerate *parameter*
+(`period <= 0`, `window > n`), never a non-finite *value*. Four kernels were
+breaking it.
+
+- **`bollinger_bands` raised `RuntimeError` for the whole series on one NaN
+  bar.** `numerics::clamp_near_zero_sumsq` fell through to its throw because
+  `NaN >= 0.0` and `|NaN| < eps*|NaN|` are both false. Fixed at source. The
+  second half was subtler: an O(1) sliding sum cannot un-add a NaN
+  (`NaN - NaN` is NaN), so the sums stayed poisoned until the next periodic
+  refresh and the kernel reported NaN for a run of windows containing no bad
+  data. Output now matches `pandas.rolling(min_periods=period)` exactly,
+  including where the NaN starts and stops.
+- **`stochastic_oscillator` returned %K of 250** — worse than raising,
+  because it looks like data. A NaN was pushed into the monotonic
+  sliding-extremum deque; every comparison against NaN is false, so it was
+  never popped and it blocked eviction of the stale indices behind it. The
+  deque front stopped being the window maximum. NaN indices are no longer
+  pushed, and a missing-observation count reports the window as unevaluable.
+  %D had the same accumulator problem and is fixed the same way.
+- **`rolling_hurst(method="dfa")` raised where `hurst_exponent()` returned
+  NaN** on the same series — three entry points to one estimator disagreeing
+  about whether a bad bar is an error. `dfa_onepass`'s negative-SSE guard
+  treated a non-finite residual as "indicates a real bug"; non-finite values
+  now pass through as data.
+- **`_zerocopy` bindings accepted arguments their siblings reject.**
+  `batch_run_strategy_zerocopy` skipped all four scalar validators, so
+  `initial_capital=0` returned `[0.0, nan, 0.0129, 6.595]` — a NaN total
+  return beside a decisive-looking Sharpe — where `batch_run_strategy`
+  correctly raised. The validators are now one grouped call per binding.
+
+Also fixed, from the same audit:
+
+- **MacKinnon critical values were the 1991 table** under a comment naming
+  MacKinnon (2010), and were evaluated at `nobs` where statsmodels' `coint()`
+  uses `nobs-1`. Both corrected; now bit-identical to `mackinnoncrit` across
+  25 random pairs. Nothing caught it because the only assertions on these
+  numbers checked *ordering*, and the 1991 values are also monotonic.
+- **Exceptions could escape OpenMP structured blocks** (undefined behaviour)
+  in `batch_backtest_crossover` and `rolling_hurst_into` — `std::bad_alloc`
+  on a per-thread buffer in both cases. Contained and rethrown outside the
+  region, matching the pattern `batch_run_strategy` already used.
+- **`qr::lstsq`'s `rss` was silently wrong below full rank** — the tail sum
+  from column `k` omits the `[rank, k)` components. NaN now.
+- Unchecked `size_t -> int` narrowing in `rolling_factor_loadings` (both
+  kernel and bindings) and in `adf_test`'s max-lag cap.
+- `run_strategy` carried a hand-written duplicate of `gross_return_at`, the
+  helper whose own comment says it exists so the two cannot drift.
+
+**Tests:** `bollinger_bands` had no direct C++ coverage at all before this —
+only an indirect check against itself inside the fused-indicator test. It now
+has nine, including an independent brute-force reference. Added
+`tests/cpp_bindings/test_cpp_nan_data_contract.py` (29 tests pushing one NaN
+and one ±Inf through every kernel that takes a price series), plus C++
+coverage for `batch_backtest_crossover` and the `ref_prices` fill model,
+neither of which had any.
+
+### Added (universe-scale performance)
+
+Measured baseline first, in `Development/optimization_plan.md`, with the two
+harnesses that produced it committed under `tests/bench/`.
+
+- **`engle_granger` was the only kernel in the extension that was not linear
+  in n** — `O(n^1.99)`, 246 ms at n=8000, of which forcing `max_lag=0` showed
+  **1953×** was the ADF lag sweep. The candidates are *nested* and already
+  share a common sample, so `qr::lstsq_nested_rss` reads every candidate's
+  residual off one unpivoted factorization instead of factorizing per lag.
+  9.6–17.9×, then 42.8× at n=8000 once the design was stored column-major.
+- **`batch_engle_granger` / `scan_cointegrated_pairs`** — the whole pair set
+  in one native call, parallel across pairs. A 2 000-ticker screen at 2 000
+  bars: **9.81 h → 5.31 min (111×)**. `agent.tools.scan_pairs` takes this
+  path only when every ticker shares an index, and falls back to the per-pair
+  loop otherwise, because the batch path aligns the universe onto one common
+  sample and the loop aligns each pair against only its partner.
+- **`technical_indicators_panel` / `indicators.panel`** — a whole universe in
+  one call, parallel across tickers. 500 tickers × 1 000 bars, five
+  indicators: **1 727.6 → 144.7 ms (11.9×)**. Worth recording *why*: the
+  pybind11 boundary was never the cost (2.7 µs/call, 14%); the per-ticker
+  pandas round trip was, at 318 µs against 19 µs of kernel.
+- **`run_portfolio_simulation`** — a native bar loop for the configuration
+  the Python already treats as its vectorized fast path. 1 000 tickers ×
+  2 000 bars: **188.7 → 35.8 ms**. Most of that was *not* the loop: profiling
+  put 92% in building the dense price matrices, one pandas `.loc` per
+  (ticker, column). Anything outside the fast path — per-share commission,
+  the impact model, an ADV constraint — still runs the unchanged Python loop.
+- **`schedule(guided)` on every parallel loop.** `schedule(static)` splits
+  iterations evenly and never rebalances, which is only right when the work
+  per iteration *and* the speed of each thread are uniform. Neither is
+  something a library can assume. Scaling was running backwards —
+  `batch_run_strategy` took 44.5 ms on 6 threads and 60.4 ms on 8. It is
+  monotonic now. Deliberately *not* a tuned thread count: that would be
+  tuning the library to whichever machine profiled it.
+
+### Changed (numerics)
+
+- `qr::lstsq_nested_rss` stores its design **column-major**, unlike
+  `qr::lstsq`. A Householder factorization walks columns; row-major storage
+  strides by `k*8` bytes, so at `k=27` every element access pulled a fresh
+  64-byte cache line and used 8 of it. Cost per flop was nearly tripling as
+  the design outgrew cache (0.99 → 2.69 ms/Mflop) and is now nearly flat.
+  This also fixed `batch_engle_granger`'s thread scaling by itself — the
+  ceiling there was memory bandwidth, not scheduling.
+- `SQT_NOINLINE` (`platform.hpp`) keeps the AVX2 kernel from being inlined
+  across its translation-unit boundary under LTO. Measured: MSVC 19.44 does
+  not currently do that, with or without the qualifier — this is insurance
+  against something the toolchain is permitted to do, kept because the
+  property at stake is "does this crash on a pre-Haswell CPU".
+
 ### Added (model-to-portfolio evaluation)
 
 A trained model could be *measured* (`run_model_experiment`'s R², IC,

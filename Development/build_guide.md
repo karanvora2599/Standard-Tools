@@ -432,14 +432,14 @@ Standard Tools/
     ├── test_cpp_gil_release.py              ← Python integration tests (GIL actually released around pure-C++ calls)
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
-        ├── test_hurst.cpp                   ← 23 C++ unit tests (no framework needed)
-        ├── test_indicators.cpp              ← 35 C++ unit tests
-        ├── test_cointegration.cpp           ← 26 C++ unit tests (incl. Kalman 1-state/2-state)
-        ├── test_backtest.cpp                ← 24 C++ unit tests (incl. run_strategy_summary/batch OpenMP reproducibility)
-        ├── test_monte_carlo.cpp             ← 10 C++ unit tests (incl. thread-count independence)
+        ├── test_hurst.cpp                   ← 26 C++ unit tests (no framework needed)
+        ├── test_indicators.cpp              ← 49 C++ unit tests (incl. Bollinger vs. an independent brute-force reference, and the NaN-bar regressions)
+        ├── test_cointegration.cpp           ← 40 C++ unit tests (incl. Kalman 1-state/2-state, batch_engle_granger vs. serial, nested-RSS vs. per-prefix lstsq)
+        ├── test_backtest.cpp                ← 34 C++ unit tests (incl. run_strategy_summary/batch OpenMP reproducibility, ref_prices fill model, crossover grid)
+        ├── test_monte_carlo.cpp             ← 12 C++ unit tests (incl. thread-count independence)
         ├── test_garch.cpp                   ← 13 C++ unit tests (incl. analytic-gradient vs. numerical central differences)
         ├── test_signals.cpp                 ← 12 C++ unit tests
-        ├── test_rolling_regression.cpp      ← 9 C++ unit tests (incl. AVX2-vs-scalar tolerance gate, forced-scalar-path test)
+        ├── test_rolling_regression.cpp      ← 12 C++ unit tests (incl. AVX2-vs-scalar tolerance gate, forced-scalar-path test)
         ├── bench_hurst.cpp                  ← Hurst timing benchmark (run manually)
         └── bench_backtest.cpp               ← Backtest kernel timing benchmark (run manually)
 ```
@@ -464,7 +464,13 @@ Standard Tools/
 | Allocation-free summary kernel (`run_strategy_summary` — same 11 metrics, zero heap allocation, no equity curve) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` (internal — used by `batch_run_strategy`, not exposed to Python directly) |
 | Batch backtest grid kernel (`batch_run_strategy` — `(num_tests, 11)` NumPy array, OpenMP across parameter combinations) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
 | Rolling beta (incremental sum updates + optional runtime AVX2+FMA dispatch) | `rolling_regression.hpp` | `rolling_regression.cpp`, `rolling_beta_avx2.cpp` | `analysis/regression.py` |
-| Rolling factor loadings (incremental Cholesky, dead-triangle elimination, scratch-buffer reuse) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
+| Rolling factor loadings (per-window rank-revealing QR with column pivoting) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
+| Shared least-squares backend (`qr::lstsq` column-pivoted QR; `qr::lstsq_nested_rss` for nested-model sweeps) | `qr.hpp` (header-only) | — | used by `cointegration.cpp`, `rolling_regression.cpp` |
+| Shared numerical conventions (relative-epsilon pivot tests, checked narrowing) | `numerics.hpp` (header-only) | — | used across every kernel |
+| OpenMP policy (work threshold, thread cap, scheduling rationale) | `omp_policy.hpp` (header-only) | — | used by every parallel kernel |
+| Batch pair cointegration (`batch_engle_granger` — `(n_pairs, 11)` array, parallel across pairs) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py`'s `scan_cointegrated_pairs`, used by `agent/tools.py`'s `scan_pairs` |
+| Panel indicators (`technical_indicators_panel` — whole universe in one call, parallel across tickers) | `indicators.hpp` | `indicators.cpp` | `indicators/panel.py` |
+| Portfolio simulation (`run_portfolio_simulation` — shared-cash multi-asset account; percentage-commission fast path only) | `backtest.hpp` | `backtest.cpp` | `backtest/portfolio_engine.py` (falls back to the Python loop for per-share commission, the impact model, or an ADV constraint) |
 | Monte Carlo forward simulation (moving-block bootstrap, optional OpenMP) | `monte_carlo.hpp` | `monte_carlo.cpp` | `backtest/monte_carlo.py` |
 | GARCH(1,1) conditional variance recursion + fused NLL/analytic gradient | `garch.hpp` | `garch.cpp` | `analysis/garch.py` |
 | Kalman filter, 1-state and 2-state (time-varying hedge ratio) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |

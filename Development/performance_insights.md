@@ -1,7 +1,35 @@
 # C++ Porting Performance Insights
 
-**Date:** 2026-06-06  
+**Date:** 2026-06-06 (with later update passes, marked inline)  
 **Scope:** `standard_quant_tools` — analysis of which components benefit from a C++/pybind11 rewrite and by how much.
+
+> ### ⚠️ Status: historical record, partly superseded
+>
+> This is the log of the porting effort: what was ported, what it measured, and
+> which projections turned out wrong. It is kept as written — the measurements
+> are dated and were real at the time — but **two things in it no longer
+> describe the code**:
+>
+> 1. **`rolling_factor_loadings` is no longer an incremental Cholesky solve.**
+>    It is a per-window rank-revealing QR with column pivoting. The Cholesky
+>    path was removed because it was *wrong*, not slow: its pivot test judged
+>    every factor column against the intercept column's diagonal, so factors
+>    around 1e-6 made every window read as singular and it returned all-NaN
+>    where NumPy returned correct coefficients. The 26× and 50–200× figures
+>    below belong to that removed path; the replacement measures 2.3–10×.
+>    Item J's "still-pending rank-1 Cholesky factor update" is therefore dead
+>    as written — the successor idea is QR update/downdate.
+>
+> 2. **`engle_granger` is no longer quadratic in n.** Its ADF lag sweep ran one
+>    column-pivoted QR per candidate lag; it now reads every candidate off a
+>    single nested factorization. The 24×-vs-statsmodels figure below was
+>    measured at n=500 and still roughly holds there (23×); at n=2 000 it is
+>    now 86×, because the ratio grows with n rather than shrinking.
+>
+> **For current numbers and the live plan, see
+> [`optimization_plan.md`](optimization_plan.md)**, which carries a measured
+> baseline for every kernel, the universe-scale figures, and the three
+> predictions it made that turned out wrong.
 
 ---
 
@@ -353,7 +381,7 @@ ported:
 | `run_screener` (S&P 500) | RSI + beta per ticker × 500 | RSI ✅; OLS ✅ | **5–15×** (compute path only; I/O still dominates) |
 | `run_sma_backtest` | `run_strategy` kernel | ✅ Realized | **3–8×** |
 | `run_backtest_optimization` | `backtest_grid` parameter sweep | ✅ Realized (batch kernel)* | **10–50×** |
-| `run_factor_regression` (rolling) | `rolling_factor_loadings` window loop | ✅ Realized (Cholesky) | **50–200×** |
+| `run_factor_regression` (rolling) | `rolling_factor_loadings` window loop | ✅ Realized — but the Cholesky path this row measured was later removed as incorrect | **50–200× projected; 26× measured for Cholesky; 2.3–10× for the QR that replaced it** |
 | `get_rolling_beta` | `rolling_beta` two rolling passes | ✅ Realized (incremental) | **10–40×** |
 | `run_monte_carlo_simulation` (n_simulations=20,000) | `simulate_forward_paths` per-path Python loop | ✅ Realized (serial + OpenMP) | **10–20× serial; multiplicatively higher with OpenMP on multi-core builds** |
 | `run_garch_volatility_forecast` | `garch11_variance_recursion` cold-start | ✅ Realized | Eliminates ~300–500ms JIT warmup per fresh process; negligible once numba is warm |
@@ -428,7 +456,7 @@ src/standard_quant_tools/
     │   ├── indicators.hpp                ← RSI, ADX, PSAR, Wilder's ATR, Bollinger, Stochastic
     │   ├── cointegration.hpp             ← ols2, adf_test, engle_granger
     │   ├── backtest.hpp                  ← run_strategy, batch_run_strategy kernels
-    │   └── rolling_regression.hpp        ← rolling_beta, rolling_factor_loadings (Cholesky)
+    │   └── rolling_regression.hpp        ← rolling_beta, rolling_factor_loadings (per-window QR; was Cholesky, see the banner at the top)
     ├── src/
     │   ├── hurst.cpp
     │   ├── indicators.cpp
@@ -470,7 +498,7 @@ different/older CPU, see `build_guide.md` Section 9) and links the extension.
 4. ✅ **2-variable OLS** — `sqt::ols2` was already in `cointegration.cpp`; added `m.def("ols2", ...)` in `bindings.cpp` and wired `calculate_beta`, `half_life`, `compute_spread` to the fast path. **Done.**
 5. ✅ **`run_strategy` backtest kernel** — single C++ pass computes equity curve + all 6 metrics; replaces 6 pandas intermediate Series and 6 separate metric function calls per combo. **Done.** The kernel's own trade stats (win_rate/profit_factor/num_trades/avg_trade_return_pct) had a real accounting bug found 2026-07-24 (wrong entry bar, no commission/slippage); `backtest/engine.py` overwrites them with a Python-computed `_build_trade_log`/`_compute_trade_stats` pass as an interim fix, and `backtest.cpp`'s native trade-log logic was separately rewritten the same day to fix the bug at the source (see Item 6) — the Python override is kept in place as a safety net pending CI verification of the native fix.
 6. ✅ **`batch_run_strategy` grid kernel** — all parameter-combination signal arrays stacked into one 2D matrix and passed to C++ in a single call; eliminates Python re-entry overhead between combinations. Yields 10–50× on grid searches. **Done and verified.** Unlike `run_strategy`, this path has no Python-side override, so it depends entirely on the native kernel's own trade-log accounting — that accounting was rewritten 2026-07-24 (commit `2242d63`) to match `_build_trade_log` exactly (entry_size = signal magnitude, `prices[i-1]` reference price, commission/slippage deducted), and is now **confirmed correct** against a real compiled `_sqt_core` via `TestNativeTradeStatsCorrectness` and the native `ctest` suite (see Executive Summary).
-7. ✅ **`rolling_factor_loadings`** — incremental rank-1 XtX/Xty updates with Cholesky re-solve; periodic full recompute every `window` steps prevents floating-point drift. Replaces per-window `lstsq` loop; 50–200×. **Done.**
+7. ✅ **`rolling_factor_loadings`** — *as built in this pass:* incremental rank-1 XtX/Xty updates with Cholesky re-solve and a periodic full recompute. Superseded: that path returned all-NaN for small-magnitude factors and was replaced by a per-window rank-revealing QR. See the banner at the top. **Done, then redone.**
 8. ✅ **`rolling_beta`** — incremental O(1)-per-bar sum updates (Sxy, Sxx, Sx, Sy); beta = (W·Sxy − Sx·Sy)/(W·Sxx − Sx²); NaN when denominator ≤ 1e-14. Replaces two sequential pandas rolling passes; 10–40×. **Done.**
 9. ✅ **`bollinger_bands`** — fused single-pass Σx / Σx² sliding window; mean = Σx/W, var = (Σx² − Σx²/W)/(W−1); computes upper/middle/lower in one pass. Replaces two pandas rolling calls; 3–8×. **Done.**
 10. ✅ **`stochastic_oscillator`** — O(n × k_period) fused sliding min+max pass, then SMA pass for %D; replaces two pandas rolling min+max calls. 5–15×. **Done.**
