@@ -12,6 +12,15 @@ arguments" message on a mismatch -- then casts without `forcecast`, so a
 correctly-typed input is used in place with zero copy. Existing default
 bindings (with `forcecast`) are unchanged; these are purely additive.
 
+"Same semantics otherwise" was the premise of this file and it was not true.
+Every test here compared a sibling pair on VALID input, which is the one
+place they already agreed. On INVALID scalar arguments they did not:
+batch_run_strategy_zerocopy skipped all four of the scalar validators its
+sibling applies, so `initial_capital=0` returned
+`[0.0, nan, 0.0129, 6.595]` -- a NaN total return beside a decisive-looking
+Sharpe -- where batch_run_strategy correctly raised ValueError.
+TestScalarValidationParity below is the check that was missing.
+
 Run:
     pytest tests/test_cpp_zerocopy_bindings.py -v
 """
@@ -148,3 +157,97 @@ class TestRollingHurstZerocopy:
         arr = rng.standard_normal(400).cumsum().astype(np.float64)[::2]
         with pytest.raises(ValueError, match="C-contiguous float64"):
             _cpp.rolling_hurst_zerocopy(arr, 60, 5, "dfa", 10)
+
+
+# ── Scalar-argument validation parity ────────────────────────────────────────
+
+
+@requires_cpp
+class TestScalarValidationParity:
+    """A _zerocopy sibling must REJECT exactly what its sibling rejects.
+
+    The dtype/layout strictness is the only intended difference between the
+    two. Anything a caller can get past one and not the other is a bug in
+    whichever one is more permissive -- and it was always the _zerocopy one,
+    because its validators were simply never written.
+    """
+
+    @staticmethod
+    def _raises(fn, *args, **kwargs) -> bool:
+        try:
+            fn(*args, **kwargs)
+            return False
+        except ValueError:
+            return True
+
+    @pytest.mark.parametrize(
+        "bad_kwargs",
+        [
+            {"initial_capital": 0.0},
+            {"initial_capital": -100.0},
+            {"initial_capital": float("nan")},
+            {"commission_pct": -0.1},
+            {"slippage_pct": -0.1},
+            {"slippage_pct": float("inf")},
+            {"periods_per_year": 0.0},
+            {"periods_per_year": -1.0},
+        ],
+    )
+    def test_batch_run_strategy_pair_agrees(self, rng, bad_kwargs):
+        prices = rng.standard_normal(60).cumsum() + 100.0
+        signals = rng.choice([-1.0, 0.0, 1.0], (3, 60))
+        strict = self._raises(
+            _cpp.batch_run_strategy_zerocopy, prices, signals, **bad_kwargs
+        )
+        loose = self._raises(_cpp.batch_run_strategy, prices, signals, **bad_kwargs)
+        assert strict == loose, (
+            f"batch_run_strategy{'' if loose else '_zerocopy'} accepted "
+            f"{bad_kwargs} that the other rejected"
+        )
+        assert loose, "the non-strict sibling must reject this in the first place"
+
+    @pytest.mark.parametrize(
+        "horizon,sims,block,capital",
+        [
+            (0, 5, 10, 1000.0),
+            (-1, 5, 10, 1000.0),
+            (10, 0, 10, 1000.0),
+            (10, 5, 0, 1000.0),
+            (10, 5, -3, 1000.0),
+            (10, 5, 10, 0.0),
+            (10, 5, 10, -50.0),
+            (10, 5, 10, float("nan")),
+        ],
+    )
+    def test_simulate_forward_paths_pair_agrees(
+        self, rng, horizon, sims, block, capital
+    ):
+        values = rng.standard_normal(100) * 0.01
+        strict = self._raises(
+            _cpp.simulate_forward_paths_zerocopy,
+            values,
+            horizon,
+            sims,
+            block,
+            capital,
+            7,
+        )
+        loose = self._raises(
+            _cpp.simulate_forward_paths, values, horizon, sims, block, capital, 7
+        )
+        assert strict == loose
+        assert loose
+
+    def test_valid_scalars_still_pass_both(self, rng):
+        """The parity check must not be satisfied by rejecting everything."""
+        prices = rng.standard_normal(60).cumsum() + 100.0
+        signals = rng.choice([-1.0, 0.0, 1.0], (3, 60))
+        np.testing.assert_array_equal(
+            _cpp.batch_run_strategy_zerocopy(prices, signals, 5_000.0, 0.0, 0.0, 365.0),
+            _cpp.batch_run_strategy(prices, signals, 5_000.0, 0.0, 0.0, 365.0),
+        )
+        values = rng.standard_normal(100) * 0.01
+        np.testing.assert_array_equal(
+            _cpp.simulate_forward_paths_zerocopy(values, 10, 5, 10, 1000.0, 7),
+            _cpp.simulate_forward_paths(values, 10, 5, 10, 1000.0, 7),
+        )

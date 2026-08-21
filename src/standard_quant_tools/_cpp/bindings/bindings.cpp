@@ -144,6 +144,44 @@ static void require_positive_int(int v, const char* name, const char* fn) {
             std::string(fn) + ": " + name + " must be >= 1, got " + std::to_string(v));
 }
 
+// Grouped, because listing the individual require_* calls at each binding
+// is what let two of them ship with none at all.
+//
+// batch_run_strategy validated all four; batch_run_strategy_zerocopy -- same
+// kernel, same arguments, added later as a "strict/zero-copy variant [...]
+// same semantics otherwise" -- validated none. Measured on the shipped
+// build, the exact failure the block above was written to prevent:
+//
+//   batch_run_strategy(...,  initial_capital=0) -> ValueError, correctly
+//   batch_run_strategy_zerocopy(..., 0)         -> [0.0, nan, 0.0129, 6.595]
+//
+// A NaN total_return beside a decisive-looking 6.6 Sharpe. Same story for
+// simulate_forward_paths_zerocopy, which skipped the positive-int checks and
+// reported a vaguer error from the kernel's own defence-in-depth instead.
+//
+// One call per binding now, so the question a reviewer has to answer is
+// "does this binding validate?" rather than "are all four lines present and
+// spelled with the right function name?".
+static void require_backtest_scalars(
+    double initial_capital, double commission_pct, double slippage_pct,
+    double periods_per_year, const char* fn)
+{
+    require_positive(initial_capital, "initial_capital", fn);
+    require_non_negative(commission_pct, "commission_pct", fn);
+    require_non_negative(slippage_pct, "slippage_pct", fn);
+    require_positive(periods_per_year, "periods_per_year", fn);
+}
+
+static void require_simulation_scalars(
+    int horizon_days, int n_simulations, int block_size,
+    double initial_capital, const char* fn)
+{
+    require_positive_int(horizon_days, "horizon_days", fn);
+    require_positive_int(n_simulations, "n_simulations", fn);
+    require_positive_int(block_size, "block_size", fn);
+    require_positive(initial_capital, "initial_capital", fn);
+}
+
 static py::dict hurst_result_to_dict(const sqt::HurstResult& r) {
     py::dict d;
     d["hurst"]          = r.hurst;
@@ -394,10 +432,8 @@ PYBIND11_MODULE(_sqt_core, m) {
             require_1d(signals, "signals");
             if (prices.size() != signals.size())
                 throw std::invalid_argument("prices and signals must have equal length");
-            require_positive(initial_capital, "initial_capital", "run_strategy");
-            require_non_negative(commission_pct, "commission_pct", "run_strategy");
-            require_non_negative(slippage_pct, "slippage_pct", "run_strategy");
-            require_positive(periods_per_year, "periods_per_year", "run_strategy");
+            require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
+                                     periods_per_year, "run_strategy");
             const double* prices_ptr  = prices.data();
             const double* signals_ptr = signals.data();
             const auto    n           = prices.size();
@@ -475,10 +511,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
-            require_positive(initial_capital, "initial_capital", "batch_backtest_crossover");
-            require_non_negative(commission_pct, "commission_pct", "batch_backtest_crossover");
-            require_non_negative(slippage_pct, "slippage_pct", "batch_backtest_crossover");
-            require_positive(periods_per_year, "periods_per_year", "batch_backtest_crossover");
+            require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
+                                     periods_per_year, "batch_backtest_crossover");
             auto ind_buf  = indicators.request();
             auto pair_buf = pair_idx.request();
             if (ind_buf.ndim != 2)
@@ -569,10 +603,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
-            require_positive(initial_capital, "initial_capital", "batch_run_strategy");
-            require_non_negative(commission_pct, "commission_pct", "batch_run_strategy");
-            require_non_negative(slippage_pct, "slippage_pct", "batch_run_strategy");
-            require_positive(periods_per_year, "periods_per_year", "batch_run_strategy");
+            require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
+                                     periods_per_year, "batch_run_strategy");
             auto prices_buf  = prices.request();
             auto signals_buf = signals_2d.request();
 
@@ -665,6 +697,8 @@ PYBIND11_MODULE(_sqt_core, m) {
                ref_prices)
         -> py::array_t<double>
         {
+            require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
+                                     periods_per_year, "batch_run_strategy_zerocopy");
             auto prices_arr  = require_strict_f64_1d(prices_obj, "prices");
             auto signals_arr = require_strict_f64_2d(signals_obj, "signals");
             auto prices_buf  = prices_arr.request();
@@ -734,7 +768,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Strict/zero-copy variant of batch_run_strategy() -- `prices`/"
         "`signals` must already be C-contiguous float64 arrays (raises "
         "instead of implicitly copying on a mismatch). Same "
-        "semantics/output otherwise.");
+        "semantics/output/validation otherwise.");
 
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
@@ -1196,10 +1230,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, py::object seed) -> py::array_t<double>
         {
             require_1d(values, "values");
-            require_positive_int(horizon_days, "horizon_days", "simulate_forward_paths");
-            require_positive_int(n_simulations, "n_simulations", "simulate_forward_paths");
-            require_positive_int(block_size, "block_size", "simulate_forward_paths");
-            require_positive(initial_capital, "initial_capital", "simulate_forward_paths");
+            require_simulation_scalars(horizon_days, n_simulations, block_size,
+                                       initial_capital, "simulate_forward_paths");
             const bool has_seed = !seed.is_none();
             const unsigned long long seed_val =
                 has_seed ? seed.cast<unsigned long long>() : 0ULL;
@@ -1256,6 +1288,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](py::array values_obj, int horizon_days, int n_simulations, int block_size,
            double initial_capital, py::object seed) -> py::array_t<double>
         {
+            require_simulation_scalars(horizon_days, n_simulations, block_size,
+                                       initial_capital,
+                                       "simulate_forward_paths_zerocopy");
             auto values = require_strict_f64_1d(values_obj, "values");
             const bool has_seed = !seed.is_none();
             const unsigned long long seed_val =
@@ -1293,7 +1328,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("seed") = py::none(),
         "Strict/zero-copy variant of simulate_forward_paths() -- `values` "
         "must already be a C-contiguous float64 array (raises instead of "
-        "implicitly copying on a mismatch). Same semantics/output otherwise.");
+        "implicitly copying on a mismatch). Same semantics/output/validation "
+        "otherwise.");
 
     m.def(
         "simulate_forward_paths_terminal",
@@ -1301,10 +1337,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, py::object seed) -> py::array_t<double>
         {
             require_1d(values, "values");
-            require_positive_int(horizon_days, "horizon_days", "simulate_forward_paths_terminal");
-            require_positive_int(n_simulations, "n_simulations", "simulate_forward_paths_terminal");
-            require_positive_int(block_size, "block_size", "simulate_forward_paths_terminal");
-            require_positive(initial_capital, "initial_capital", "simulate_forward_paths_terminal");
+            require_simulation_scalars(horizon_days, n_simulations, block_size,
+                                       initial_capital, "simulate_forward_paths_terminal");
             const bool has_seed = !seed.is_none();
             const unsigned long long seed_val =
                 has_seed ? seed.cast<unsigned long long>() : 0ULL;
