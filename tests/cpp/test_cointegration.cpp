@@ -285,6 +285,37 @@ static void test_eg_critical_values_ordered() {
     CHECK(r.cv_10pct < 0.0);
 }
 
+static void test_eg_critical_values_match_mackinnon_2010_exactly() {
+    // Ordering was the ONLY thing asserted about these numbers, here and in
+    // tests/cpp_bindings/, which is why the kernel shipped MacKinnon (1991)
+    // Table 1 coefficients under a comment naming MacKinnon (2010) Table 2.
+    // The 1991 set is also monotonic and also negative, so it satisfied
+    // every existing assertion while disagreeing with the statsmodels
+    // fallback by up to 0.006.
+    //
+    // Expected values below are statsmodels 0.14.3's
+    //   mackinnoncrit(N=2, regression="c", nobs=n-1)
+    // evaluated once and pinned, so this test needs no Python at runtime.
+    // n-1, not n, is what coint() passes -- see engle_granger's call site.
+    struct Case { int n; double cv1; double cv5; double cv10; };
+    const Case cases[] = {
+        //  n     1%           5%           10%
+        {  51, -4.1288888000, -3.4610612000, -3.1303620000},
+        { 101, -4.0093117000, -3.3979133000, -3.0871340000},
+        { 251, -3.9407840320, -3.3606795680, -3.0614583200},
+        {1001, -3.9074254270, -3.3422469230, -3.0486939200},
+    };
+    for (const auto& tc : cases) {
+        auto rw1 = random_walk(tc.n, 17);
+        auto rw2 = random_walk(tc.n, 19);
+        auto r = sqt::engle_granger(rw1.data(), rw2.data(),
+                                    static_cast<std::size_t>(tc.n));
+        CHECK_NEAR(r.cv_1pct,  tc.cv1,  1e-8);
+        CHECK_NEAR(r.cv_5pct,  tc.cv5,  1e-8);
+        CHECK_NEAR(r.cv_10pct, tc.cv10, 1e-8);
+    }
+}
+
 static void test_eg_p_value_in_unit_interval() {
     int n = 250;
     auto rw1 = random_walk(n, 31);
@@ -490,6 +521,7 @@ int main() {
     test_eg_independent_random_walks();
     test_eg_hedge_ratio_sign();
     test_eg_critical_values_ordered();
+    test_eg_critical_values_match_mackinnon_2010_exactly();
     test_eg_p_value_in_unit_interval();
     test_eg_p_value_matches_mackinnon_regression_surface();
     test_eg_intercept_finite();

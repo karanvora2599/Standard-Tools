@@ -36,21 +36,48 @@ struct AdfLagFit {
 
 
 // ── MacKinnon (2010) critical values ──────────────────────────────────────────
-// Response surface: cv(T) = c_inf + c1/T + c2/T²
+// Response surface: cv(T) = c_inf + c1/T + c2/T² + c3/T³
 // For 2-variable cointegration, constant (trend="c").
-
+//
+// These are now genuinely the 2010 coefficients. The previous set --
+// (-3.9001, -10.534, -30.030) / (-3.3377, -5.967, -8.982) /
+// (-3.0462, -4.069, -5.730) -- is MacKinnon (1991) Table 1, under a comment
+// claiming MacKinnon (2010) Table 2, in a file whose stated goal is
+// statsmodels parity. statsmodels' coint() calls mackinnoncrit(), which
+// reads tau_2010s["c"][1]; transcribed here verbatim from statsmodels
+// 0.14.3, including the cubic term (exactly 0.0 for N=2, kept so the
+// transcription is checkable line-for-line against the source table rather
+// than silently truncated).
+//
+// The disagreement was small but systematic, and always in the same
+// direction on a given sample size -- measured against
+// statsmodels.tsa.adfvalues.mackinnoncrit(N=2, regression="c"):
+//
+//     T      1%        5%       10%
+//     50   +0.0061   +0.0004   +0.0005
+//    100   +0.0009   -0.0004   -0.0003
+//    250   -0.0019   -0.0010   -0.0011
+//   1000   -0.0032   -0.0014   -0.0016
+//
+// Nothing caught it because the only assertions on these values, in both
+// tests/cpp/test_cointegration.cpp and tests/cpp_bindings/, check ORDERING
+// (cv_1pct < cv_5pct < cv_10pct < 0) and never a number.
+//
+// Sample size is nobs-1, not nobs -- see the call site.
 static double mackinnon_cv(double level_pct, std::size_t n) {
-    // Coefficients from MacKinnon (2010), Table 2, N=2, c.
-    double c_inf, c1, c2;
+    // statsmodels 0.14.3, tau_2010s["c"][N-1] with N=2, rows [1%, 5%, 10%].
+    double c_inf, c1, c2, c3;
     if (level_pct <= 1.0) {
-        c_inf = -3.9001; c1 = -10.534; c2 = -30.030;
+        c_inf = -3.89644; c1 = -10.9519; c2 = -33.527; c3 = 0.0;
     } else if (level_pct <= 5.0) {
-        c_inf = -3.3377; c1 = -5.967;  c2 = -8.982;
+        c_inf = -3.33613; c1 = -6.1101;  c2 = -6.823;  c3 = 0.0;
     } else {
-        c_inf = -3.0462; c1 = -4.069;  c2 = -5.730;
+        c_inf = -3.04445; c1 = -4.2412;  c2 = -2.72;   c3 = 0.0;
     }
-    const double T = static_cast<double>(n);
-    return c_inf + c1 / T + c2 / (T * T);
+    if (n == 0) return c_inf;  // no sample: the asymptotic value is all there is
+    const double invT = 1.0 / static_cast<double>(n);
+    // Horner in 1/T, matching numpy.polyval's evaluation in mackinnoncrit.
+    return c_inf + invT * (c1 + invT * (c2 + invT * c3));
 }
 
 
@@ -116,7 +143,9 @@ static double ar1_halflife(const double* y, std::size_t n) {
     const double beta = res.slope;
     // beta>=0.0 is false for NaN under IEEE754 (all NaN comparisons are
     // false), so a degenerate zero-variance lag series -- ols2's own
-    // det<1e-14 guard returns slope=NaN for that case -- would otherwise
+    // relative-epsilon singularity guard (numerics::is_negligible_pivot,
+    // not the fixed 1e-14 threshold this comment used to name) returns
+    // slope=NaN for that case -- would otherwise
     // fall through to -log(2)/NaN = NaN instead of the same "not mean-
     // reverting" +inf sentinel a non-negative beta already gets. A
     // zero-variance predictor carries no information about mean
@@ -406,9 +435,17 @@ CointResult engle_granger(
     r.optimal_lag   = adf.optimal_lag;
 
     // ── Step 3: MacKinnon (2010) critical values and p-value ─────────────────
-    r.cv_1pct  = mackinnon_cv(1.0,  n);
-    r.cv_5pct  = mackinnon_cv(5.0,  n);
-    r.cv_10pct = mackinnon_cv(10.0, n);
+    // nobs-1, not nobs. statsmodels' coint() calls
+    // mackinnoncrit(..., nobs=nobs-1) with its own comment on the line --
+    // "the -1 is to match egranger in Stata, I do not know why". This
+    // kernel passed the full n, so even with correct coefficients it would
+    // have evaluated the response surface at the wrong sample size. Both
+    // halves are needed to agree with the Python fallback, which IS
+    // statsmodels.
+    const std::size_t cv_nobs = n - 1;  // n >= 8 is guaranteed above
+    r.cv_1pct  = mackinnon_cv(1.0,  cv_nobs);
+    r.cv_5pct  = mackinnon_cv(5.0,  cv_nobs);
+    r.cv_10pct = mackinnon_cv(10.0, cv_nobs);
 
     if (!std::isnan(adf.statistic)) {
         r.p_value     = mackinnon_pvalue(adf.statistic);

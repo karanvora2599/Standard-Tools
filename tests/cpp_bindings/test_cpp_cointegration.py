@@ -252,6 +252,30 @@ class TestCppEngleGrangerDirect:
         assert result["cv_1pct"] < result["cv_5pct"] < result["cv_10pct"] < 0.0
 
     @requires_cpp
+    @pytest.mark.parametrize("n", [40, 51, 100, 250, 601, 1000])
+    def test_critical_values_match_statsmodels_exactly(self, n):
+        """Ordering was all that was ever asserted about these numbers.
+
+        The kernel shipped MacKinnon (1991) Table 1 coefficients under a
+        comment naming MacKinnon (2010) Table 2, and evaluated the response
+        surface at nobs rather than the nobs-1 statsmodels' coint() uses.
+        Both are monotonic and negative, so `cv_1pct < cv_5pct < cv_10pct <
+        0` passed throughout while the values disagreed by up to 0.006 --
+        largest on the short samples a walk-forward fold actually uses.
+        """
+        from statsmodels.tsa.adfvalues import mackinnoncrit
+
+        rng = np.random.default_rng(n)
+        y1 = rng.standard_normal(n).cumsum() + 100.0
+        y0 = 1.7 * y1 + rng.standard_normal(n)
+        result = _cpp.engle_granger(y0, y1)
+
+        expected = mackinnoncrit(N=2, regression="c", nobs=n - 1)
+        assert result["cv_1pct"] == pytest.approx(expected[0], abs=1e-12)
+        assert result["cv_5pct"] == pytest.approx(expected[1], abs=1e-12)
+        assert result["cv_10pct"] == pytest.approx(expected[2], abs=1e-12)
+
+    @requires_cpp
     def test_p_value_in_unit_interval(self):
         rng = np.random.default_rng(30)
         y0 = rng.standard_normal(250).cumsum()
@@ -342,6 +366,35 @@ class TestCppEngleGrangerDirect:
 
 class TestCppVsStatsmodels:
     """Cross-validate C++ against the statsmodels fallback on the same data."""
+
+    @requires_cpp
+    def test_critical_values_match_coint_across_random_pairs(self):
+        """End-to-end: the same call, both backends, on the same data.
+
+        test_critical_values_match_statsmodels_exactly checks the response
+        surface against mackinnoncrit directly. This checks the whole
+        engle_granger path against coint(), which is what
+        cointegration_test() actually dispatches to when the extension is
+        not built -- including that both agree on the SAMPLE SIZE fed to the
+        surface, the second half of the defect.
+        """
+        from statsmodels.tsa.stattools import coint
+
+        worst = 0.0
+        for seed in range(25):
+            rng = np.random.default_rng(seed)
+            n = int(rng.integers(40, 600))
+            y1 = rng.standard_normal(n).cumsum() + 100.0
+            y0 = 1.7 * y1 + rng.standard_normal(n) * rng.uniform(0.5, 4.0)
+            result = _cpp.engle_granger(y0, y1)
+            _, _, sm_cv = coint(y0, y1, trend="c", autolag="aic")
+            worst = max(
+                worst,
+                abs(result["cv_1pct"] - sm_cv[0]),
+                abs(result["cv_5pct"] - sm_cv[1]),
+                abs(result["cv_10pct"] - sm_cv[2]),
+            )
+        assert worst < 1e-12, f"worst critical-value disagreement {worst:.3e}"
 
     @requires_cpp
     def test_p_value_broadly_consistent(self):
