@@ -20,6 +20,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -460,6 +461,70 @@ static void test_rolling_hurst_large_step_matches_direct() {
 }
 
 
+// ── Bad input data: all three entry points must agree ────────────────────────
+
+static void test_rolling_hurst_nan_data_returns_nan_not_throws() {
+    // REGRESSION. dfa_onepass's negative-SSE guard treated a non-finite
+    // residual sum of squares as "indicates a real bug" and set the error
+    // flag, which rolling_hurst_into rethrew as std::runtime_error. But a
+    // NaN raw_sse is just a NaN bar in `arr` flowing through Syy/Sy/S_jy --
+    // it is neither >= 0.0 nor smaller than any tolerance, so bad DATA came
+    // out of the branch reserved for bad CODE.
+    //
+    // Measured before the fix, on one series with one NaN:
+    //   hurst_exponent(arr, "dfa")   -> {hurst: NaN, regime: "unknown"}
+    //   rolling_hurst(arr, "rs")     -> NaN
+    //   rolling_hurst(arr, "dfa")    -> RuntimeError
+    // Three entry points to one estimator disagreeing about whether a bad
+    // bar is an error.
+    const int n = 600;
+    auto data = white_noise(n, /*seed=*/12345);
+    data[300] = std::numeric_limits<double>::quiet_NaN();
+
+    bool threw = false;
+    std::vector<double> out;
+    try {
+        out = sqt::rolling_hurst(data.data(), data.size(), 200, 10, "dfa", 10);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK_TRUE(!threw);
+    CHECK(out.size() == static_cast<std::size_t>(n));
+
+    // Every window that COVERS bar 300 is unevaluable; windows that do not
+    // must still produce a number. That second half is what a bare "does
+    // not throw" assertion would miss -- returning all-NaN would pass it.
+    bool saw_covering  = false;
+    bool saw_clean_fit = false;
+    for (std::size_t i = 199; i < static_cast<std::size_t>(n); i += 10) {
+        const std::size_t start = i - 199;
+        if (start <= 300 && 300 <= i) { saw_covering = true; CHECK_NAN(out[i]); }
+        else if (!std::isnan(out[i])) saw_clean_fit = true;
+    }
+    CHECK_TRUE(saw_covering);
+    CHECK_TRUE(saw_clean_fit);
+
+    // And the "rs" path, which never had the defect, must be unchanged.
+    bool rs_threw = false;
+    try {
+        (void)sqt::rolling_hurst(data.data(), data.size(), 200, 10, "rs", 10);
+    } catch (const std::exception&) {
+        rs_threw = true;
+    }
+    CHECK_TRUE(!rs_threw);
+}
+
+static void test_hurst_exponent_nan_data_is_unknown_regime() {
+    // The non-rolling entry point already behaved; pinned here so the two
+    // cannot drift apart again in the other direction.
+    auto data = white_noise(600, /*seed=*/999);
+    data[42] = std::numeric_limits<double>::quiet_NaN();
+
+    const auto r = sqt::hurst_exponent(data.data(), data.size(), "dfa", 10, -1);
+    CHECK_NAN(r.hurst);
+    CHECK_TRUE(r.regime == "unknown");
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -496,6 +561,8 @@ int main() {
     test_rolling_hurst_matches_direct_hurst_exponent_rs();
     test_rolling_hurst_large_step_matches_direct();
     test_dfa_onepass_tolerance_ill_conditioned();
+    test_rolling_hurst_nan_data_returns_nan_not_throws();
+    test_hurst_exponent_nan_data_is_unknown_regime();
 
     std::printf("\n%d / %d tests passed.\n", g_tests_run - g_tests_failed, g_tests_run);
     return (g_tests_failed == 0) ? 0 : 1;

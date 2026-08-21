@@ -272,8 +272,28 @@ dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points
             // cancellation for an ill-conditioned chunk. Clamp to 0 only
             // when the negative magnitude is negligible relative to Syy
             // (the dominant raw term feeding the subtraction); otherwise
-            // this is not noise and numerics::clamp_near_zero_sumsq throws,
-            // surfacing a real bug instead of silently hiding it.
+            // this is not noise and must surface as a real bug.
+            //
+            // The threshold is now numerics::is_negligible_pivot's shared
+            // pure-ratio convention rather than the local
+            // `1.0e-9 * max(|Syy|, 1.0)` it replaces. numerics.hpp spends a
+            // paragraph on why that max(., 1.0) floor is wrong -- below unit
+            // scale it silently converts a relative test into an absolute
+            // one and clamps away drift far larger than real noise -- and
+            // this was the one site in the codebase still carrying it,
+            // under a comment claiming it used the shared helper.
+            //
+            // NON-FINITE sse is passed through as data, not reported as a
+            // bug: a NaN/Inf bar in `arr` propagates into Syy/Sy/S_jy and
+            // makes raw_sse NaN, which is neither >= 0.0 nor smaller than
+            // any tolerance, so it fell straight through to the error flag.
+            // Measured: rolling_hurst(method="dfa") raised RuntimeError on a
+            // series with one NaN, while hurst_exponent() on the SAME series
+            // returned an honest {hurst: NaN, regime: "unknown"} and
+            // rolling_hurst(method="rs") returned NaN -- three entry points
+            // to one estimator disagreeing about whether bad data is an
+            // error. The NaN now flows into rms_acc and out through the
+            // log-log fit, which already yields NaN.
             //
             // Reported through `sse_error` rather than thrown directly:
             // dfa_onepass runs inside rolling_hurst_into's OpenMP parallel
@@ -283,9 +303,9 @@ dfa_onepass(const double* arr, std::size_t n, int min_w, int max_w, int n_points
             // the caller, outside the region.
             const double raw_sse = Syy - a * Sy - b * S_jy;
             double sse;
-            if (raw_sse >= 0.0) {
+            if (raw_sse >= 0.0 || !std::isfinite(raw_sse)) {
                 sse = raw_sse;
-            } else if (std::abs(raw_sse) < 1.0e-9 * std::max(std::abs(Syy), 1.0)) {
+            } else if (numerics::is_negligible_pivot(raw_sse, Syy, 1.0e-9)) {
                 sse = 0.0;
             } else {
                 sse_error = true;
@@ -632,6 +652,13 @@ void rolling_hurst_into(
     // numerics::clamp_near_zero_sumsq's own throw carries: a residual sum of
     // squares this far below zero is not floating-point noise, it indicates
     // a real bug, and must surface rather than being silently clamped.
+    //
+    // This is now genuinely reserved for that case. It used to fire on any
+    // NaN in `arr` as well, because a non-finite raw_sse satisfies neither
+    // the >= 0 branch nor the tolerance branch -- so bad input data, which
+    // every other kernel answers with NaN, came back here as "indicates a
+    // real bug". dfa_onepass passes non-finite values through as data now
+    // (see its own comment), leaving this flag to mean what it says.
     if (sse_error) {
         throw std::runtime_error(
             "rolling_hurst: sum-of-squares went unexpectedly negative in "

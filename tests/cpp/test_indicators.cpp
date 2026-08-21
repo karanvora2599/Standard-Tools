@@ -1,5 +1,7 @@
 /**
- * C++ unit tests for sqt::rsi, sqt::adx, sqt::parabolic_sar.
+ * C++ unit tests for sqt::rsi, sqt::adx, sqt::parabolic_sar,
+ * sqt::wilder_atr, sqt::bollinger_bands, sqt::stochastic_oscillator and the
+ * fused sqt::technical_indicators.
  *
  * Build:
  *   cmake -B build -DSQT_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
@@ -530,8 +532,18 @@ static std::vector<double> brute_force_stochastic(
     std::vector<double> result(2 * n, std::numeric_limits<double>::quiet_NaN());
     if (n < k_period || k_period < 1 || d_period <= 0) return result;
 
-    std::vector<double> K(n, std::numeric_limits<double>::quiet_NaN());
+    const double kNaNRef = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> K(n, kNaNRef);
     for (int i = k_period - 1; i < n; ++i) {
+        // A window holding a missing observation has no extremes to take,
+        // so it has no %K -- the same rolling(min_periods=k_period) rule
+        // pandas applies, spelled out here rather than inherited from the
+        // implementation under test.
+        bool missing = false;
+        for (int j = i - k_period + 1; j <= i; ++j) {
+            if (std::isnan(low[j]) || std::isnan(high[j])) { missing = true; break; }
+        }
+        if (missing) continue;
         double lo = low[i], hi = high[i];
         for (int j = i - k_period + 1; j <= i; ++j) {
             if (low[j]  < lo) lo = low[j];
@@ -544,8 +556,12 @@ static std::vector<double> brute_force_stochastic(
         result[i * 2] = K[i];
         if (i >= k_period - 1 + d_period - 1) {
             double s = 0.0;
-            for (int j = i - d_period + 1; j <= i; ++j) s += K[j];
-            result[i * 2 + 1] = s / d_period;
+            bool   missing = false;
+            for (int j = i - d_period + 1; j <= i; ++j) {
+                if (std::isnan(K[j])) { missing = true; break; }
+                s += K[j];
+            }
+            result[i * 2 + 1] = missing ? kNaNRef : s / d_period;
         }
     }
     return result;
@@ -628,6 +644,246 @@ static void test_stochastic_close_at_high_yields_k_100() {
 static void test_stochastic_empty() {
     auto result = sqt::stochastic_oscillator(nullptr, nullptr, nullptr, 0, 14, 3);
     CHECK_EQ(static_cast<int>(result.size()), 0);
+}
+
+
+// ── Bollinger Bands tests ─────────────────────────────────────────────────────
+//
+// This kernel had NO direct C++ coverage before -- only an indirect
+// equality check inside test_technical_indicators_matches_individual_
+// functions, which compares the fused path against this same function and
+// so agrees with it whether or not either is right. It is also the most
+// intricate sliding-window arithmetic in the file (shifted sums, periodic
+// re-centering, a variance that is a difference of large near-equal terms),
+// and the place a NaN-handling defect actually shipped.
+
+// Independent brute-force reference: recompute mean and ddof=1 standard
+// deviation from scratch for every window, in the obvious two-pass way.
+// Shares no code with the incremental implementation, so agreement means
+// the O(1) sliding update is correct rather than merely self-consistent.
+static std::vector<double> brute_force_bollinger(
+    const std::vector<double>& prices, int period, double num_std)
+{
+    const int n = static_cast<int>(prices.size());
+    const double kNaNRef = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> result(3 * static_cast<std::size_t>(n), kNaNRef);
+    if (period < 2 || n < period) return result;
+
+    for (int i = period - 1; i < n; ++i) {
+        bool missing = false;
+        for (int j = i - period + 1; j <= i; ++j) {
+            if (!std::isfinite(prices[j])) { missing = true; break; }
+        }
+        if (missing) continue;  // leave the whole triple NaN
+
+        double sum = 0.0;
+        for (int j = i - period + 1; j <= i; ++j) sum += prices[j];
+        const double mean = sum / period;
+        double ss = 0.0;
+        for (int j = i - period + 1; j <= i; ++j) {
+            const double d = prices[j] - mean;
+            ss += d * d;
+        }
+        const double sd = std::sqrt(ss / (period - 1));
+        const std::size_t o = static_cast<std::size_t>(i) * 3;
+        result[o]     = mean + num_std * sd;
+        result[o + 1] = mean;
+        result[o + 2] = mean - num_std * sd;
+    }
+    return result;
+}
+
+static void check_matches_brute_force_bollinger(
+    const std::vector<double>& prices, int period, double num_std, double tol)
+{
+    auto result   = sqt::bollinger_bands(prices.data(), prices.size(), period, num_std);
+    auto expected = brute_force_bollinger(prices, period, num_std);
+    CHECK_EQ(result.size(), expected.size());
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        if (std::isnan(expected[i])) { CHECK_NAN(result[i]); }
+        else                         { CHECK_NEAR(result[i], expected[i], tol); }
+    }
+}
+
+static void test_bollinger_nan_prefix_and_shape() {
+    const int period = 20;
+    auto prices = pseudo_random(60);
+    auto result = sqt::bollinger_bands(prices.data(), prices.size(), period, 2.0);
+
+    CHECK_EQ(result.size(), prices.size() * 3);
+    for (int i = 0; i < period - 1; ++i) {
+        CHECK_NAN(result[static_cast<std::size_t>(i) * 3]);
+        CHECK_NAN(result[static_cast<std::size_t>(i) * 3 + 1]);
+        CHECK_NAN(result[static_cast<std::size_t>(i) * 3 + 2]);
+    }
+    for (std::size_t i = period - 1; i < prices.size(); ++i) {
+        CHECK_NOT_NAN(result[i * 3 + 1]);
+    }
+}
+
+static void test_bollinger_matches_brute_force_random() {
+    auto prices = pseudo_random(300);
+    check_matches_brute_force_bollinger(prices, 20, 2.0, 1e-9);
+}
+
+static void test_bollinger_matches_brute_force_across_refresh_boundary() {
+    // The incremental sums are rebuilt from scratch every `period` bars.
+    // A series several multiples of `period` long walks that boundary
+    // repeatedly, which is where a refresh that re-centres on the wrong
+    // start index would show up.
+    auto prices = pseudo_random(97, 7);
+    check_matches_brute_force_bollinger(prices, 5, 2.0, 1e-9);
+    check_matches_brute_force_bollinger(prices, 12, 1.5, 1e-9);
+}
+
+static void test_bollinger_constant_series_has_zero_width() {
+    std::vector<double> prices(40, 123.5);
+    auto result = sqt::bollinger_bands(prices.data(), prices.size(), 10, 2.0);
+    for (std::size_t i = 9; i < prices.size(); ++i) {
+        CHECK_NEAR(result[i * 3 + 1], 123.5, 1e-12);  // middle
+        CHECK_NEAR(result[i * 3],     123.5, 1e-12);  // upper == middle
+        CHECK_NEAR(result[i * 3 + 2], 123.5, 1e-12);  // lower == middle
+    }
+}
+
+static void test_bollinger_large_baseline_no_catastrophic_cancellation() {
+    // Pins the shift-by-reference-point centering. Raw-moment sums on a
+    // ~1e9-level series with variance ~0.35 previously produced a NEGATIVE
+    // variance (measured: -215.58), silently clamped to std=0 -- Bollinger
+    // bands collapsing onto the moving average with no signal at all.
+    std::vector<double> prices(200);
+    for (int i = 0; i < 200; ++i) {
+        prices[static_cast<std::size_t>(i)] =
+            1.0e9 + ((i * 37) % 13) * 0.1;  // deterministic, spread ~1.2
+    }
+    auto result = sqt::bollinger_bands(prices.data(), prices.size(), 20, 2.0);
+    for (std::size_t i = 19; i < prices.size(); ++i) {
+        CHECK_NOT_NAN(result[i * 3 + 1]);
+        // A genuinely non-degenerate window must have non-zero width.
+        CHECK(result[i * 3] > result[i * 3 + 2]);
+    }
+    // And the values must still be right, not merely non-degenerate.
+    check_matches_brute_force_bollinger(prices, 20, 2.0, 1e-6);
+}
+
+static void test_bollinger_short_series_and_bad_period() {
+    auto prices = pseudo_random(10);
+    for (const double v : sqt::bollinger_bands(prices.data(), prices.size(), 20, 2.0))
+        CHECK_NAN(v);                                    // n < period
+    for (const double v : sqt::bollinger_bands(prices.data(), prices.size(), 1, 2.0))
+        CHECK_NAN(v);                                    // period < 2
+    for (const double v : sqt::bollinger_bands(prices.data(), prices.size(), -5, 2.0))
+        CHECK_NAN(v);                                    // negative period
+    CHECK(sqt::bollinger_bands(nullptr, 0, 20, 2.0).empty());
+}
+
+static void test_bollinger_nan_bar_does_not_throw_and_stays_local() {
+    // REGRESSION. A single NaN price used to make this raise
+    // std::runtime_error for the WHOLE series: clamp_near_zero_sumsq fell
+    // through to its throw because `NaN >= 0.0` and `|NaN| < eps*|NaN|` are
+    // both false. The documented contract for bad bars in this project is
+    // NaN propagation, never an exception.
+    //
+    // The second half is subtler and is what the brute-force comparison
+    // pins: an O(1) sliding sum cannot un-add a NaN (NaN - NaN is NaN), so
+    // even after the fix the sums stayed poisoned until the next periodic
+    // refresh and the kernel reported NaN for a run of windows containing
+    // no bad data at all.
+    auto prices = pseudo_random(80);
+    prices[30] = std::numeric_limits<double>::quiet_NaN();
+    check_matches_brute_force_bollinger(prices, 10, 2.0, 1e-9);
+
+    // Explicitly: NaN for exactly the 10 windows covering bar 30, and a
+    // real number on the very next bar.
+    auto result = sqt::bollinger_bands(prices.data(), prices.size(), 10, 2.0);
+    for (std::size_t i = 30; i <= 39; ++i) CHECK_NAN(result[i * 3 + 1]);
+    CHECK_NOT_NAN(result[40 * 3 + 1]);
+}
+
+static void test_bollinger_inf_bar_does_not_throw_and_stays_local() {
+    // Inf is folded in with NaN here (unlike the stochastic kernel) because
+    // an Inf entering the sliding sums is equally unrecoverable: the update
+    // subtracts it back out as inf - inf = NaN.
+    auto prices = pseudo_random(80);
+    prices[30] = std::numeric_limits<double>::infinity();
+    check_matches_brute_force_bollinger(prices, 10, 2.0, 1e-9);
+
+    auto result = sqt::bollinger_bands(prices.data(), prices.size(), 10, 2.0);
+    for (std::size_t i = 30; i <= 39; ++i) CHECK_NAN(result[i * 3 + 1]);
+    CHECK_NOT_NAN(result[40 * 3 + 1]);
+}
+
+static void test_bollinger_leading_nan_does_not_poison_the_series() {
+    // The seed window starts at bar 0, so a NaN at bar 0 is also the
+    // reference point the shifted sums are centred on.
+    auto prices = pseudo_random(60);
+    prices[0] = std::numeric_limits<double>::quiet_NaN();
+    check_matches_brute_force_bollinger(prices, 10, 2.0, 1e-9);
+}
+
+
+// ── Stochastic Oscillator: missing-observation handling ──────────────────────
+
+static void test_stochastic_nan_high_does_not_corrupt_the_deque() {
+    // REGRESSION. A NaN was pushed into the monotonic deque like any other
+    // value. Every comparison against NaN is false, so it was never popped
+    // from the back and it blocked eviction of the stale indices behind it
+    // -- the deque front stopped being the window maximum. Measured on this
+    // exact input: %K, which is bounded 0..100 by construction, returned
+    // 125, 166.67 and 250 from a stale max, then a fabricated 0.0 once the
+    // NaN reached the front.
+    auto close = rising_prices(20, 9.0);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    high[5] = std::numeric_limits<double>::quiet_NaN();
+
+    check_matches_brute_force(high, low, close, 5, 3);
+
+    auto result = sqt::stochastic_oscillator(
+        high.data(), low.data(), close.data(), close.size(), 5, 3);
+    for (std::size_t i = 0; i < close.size(); ++i) {
+        const double k = result[i * 2];
+        if (!std::isnan(k)) CHECK(k >= 0.0 && k <= 100.0);
+    }
+    // NaN for exactly the 5 windows covering bar 5, real again at bar 10.
+    for (std::size_t i = 5; i <= 9; ++i) CHECK_NAN(result[i * 2]);
+    CHECK_NOT_NAN(result[10 * 2]);
+}
+
+static void test_stochastic_nan_low_only_still_yields_the_right_max() {
+    // Each deque is gated on its own series: a bar with a valid high but a
+    // missing low must still be a max candidate once the low ages out, or
+    // the window maximum is silently lost.
+    auto close = pseudo_random(40);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    low[12] = std::numeric_limits<double>::quiet_NaN();
+    check_matches_brute_force(high, low, close, 6, 3);
+}
+
+static void test_stochastic_nan_k_does_not_poison_every_later_d() {
+    // REGRESSION. %D was a running sum, so one NaN %K entered it and could
+    // never be subtracted back out -- every %D for the rest of the series
+    // came back NaN, long after the bad bar had left both windows.
+    auto close = pseudo_random(60);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    high[20] = std::numeric_limits<double>::quiet_NaN();
+
+    check_matches_brute_force(high, low, close, 5, 3);
+
+    auto result = sqt::stochastic_oscillator(
+        high.data(), low.data(), close.data(), close.size(), 5, 3);
+    CHECK_NOT_NAN(result[59 * 2 + 1]);  // %D recovered well before the end
+}
+
+static void test_stochastic_all_nan_series_is_all_nan_not_a_crash() {
+    const std::size_t n = 30;
+    std::vector<double> nanv(n, std::numeric_limits<double>::quiet_NaN());
+    auto result = sqt::stochastic_oscillator(
+        nanv.data(), nanv.data(), nanv.data(), n, 5, 3);
+    CHECK_EQ(result.size(), n * 2);
+    for (const double v : result) CHECK_NAN(v);
 }
 
 
@@ -762,6 +1018,17 @@ int main() {
     test_wilder_atr_empty();
     test_wilder_atr_decays_toward_tr();
 
+    // Bollinger Bands
+    test_bollinger_nan_prefix_and_shape();
+    test_bollinger_matches_brute_force_random();
+    test_bollinger_matches_brute_force_across_refresh_boundary();
+    test_bollinger_constant_series_has_zero_width();
+    test_bollinger_large_baseline_no_catastrophic_cancellation();
+    test_bollinger_short_series_and_bad_period();
+    test_bollinger_nan_bar_does_not_throw_and_stays_local();
+    test_bollinger_inf_bar_does_not_throw_and_stays_local();
+    test_bollinger_leading_nan_does_not_poison_the_series();
+
     // Stochastic Oscillator
     test_stochastic_matches_brute_force_random();
     test_stochastic_matches_brute_force_monotonic_rising();
@@ -770,6 +1037,10 @@ int main() {
     test_stochastic_k_bounds_0_to_100();
     test_stochastic_close_at_high_yields_k_100();
     test_stochastic_empty();
+    test_stochastic_nan_high_does_not_corrupt_the_deque();
+    test_stochastic_nan_low_only_still_yields_the_right_max();
+    test_stochastic_nan_k_does_not_poison_every_later_d();
+    test_stochastic_all_nan_series_is_all_nan_not_a_crash();
 
     // Fused technical_indicators()
     test_technical_indicators_matches_individual_functions();

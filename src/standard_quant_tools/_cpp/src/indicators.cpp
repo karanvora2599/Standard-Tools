@@ -376,19 +376,69 @@ void bollinger_bands_into(
     double c = 0.0, Sx = 0.0, Sxx = 0.0;
     std::size_t since_refresh = 0;
 
+    // ── Non-finite bars ───────────────────────────────────────────────────
+    // A NaN/Inf price is a MISSING observation, and the window it falls in
+    // has no mean or standard deviation -- pandas' rolling(min_periods=
+    // period) reports NaN for exactly those windows, and so does this
+    // kernel (`nan_in_window`).
+    //
+    // Inf is folded in with NaN here, unlike stochastic_oscillator_into
+    // below, which lets it flow through. That is not an inconsistency: an
+    // Inf entering these sums is unrecoverable, because the sliding update
+    // subtracts it back out as inf - inf = NaN, so an Inf bar would corrupt
+    // every later window exactly the way a NaN does. The deques in the
+    // stochastic kernel have no such accumulator and compare against Inf
+    // correctly, so there is nothing to protect there. pandas reports an
+    // Inf mean and a NaN standard deviation for such a window; this reports
+    // NaN for all three bands, which is the same information without a
+    // middle band a caller could plot.
+    //
+    // The second variable is the one that is easy to miss. An O(1) sliding
+    // sum cannot un-add a NaN: `Sx += (prices[i]-c) - (prices[old]-c)`
+    // leaves Sx as NaN forever once a NaN has entered it, because
+    // NaN - NaN is NaN, not 0. So the sums stayed poisoned for up to
+    // `period` further bars after the bad bar had already left the window
+    // -- until the periodic refresh happened to fire -- and the kernel
+    // reported NaN for a stretch of windows containing no bad data at all.
+    // `sums_polluted` records that a non-finite value was ever ADDED to the
+    // running sums, so the moment the window is clean again the sums are
+    // rebuilt from scratch rather than waiting on the refresh cadence.
+    std::size_t nan_in_window = 0;
+    bool        sums_polluted = false;
+
     auto recompute_window = [&](std::size_t start) {
-        c = prices[start];
         Sx = 0.0;
         Sxx = 0.0;
+        nan_in_window = 0;
+        for (std::size_t j = start; j < start + static_cast<std::size_t>(period); ++j) {
+            if (!std::isfinite(prices[j])) ++nan_in_window;
+        }
+        // The reference point must itself be finite or it poisons every
+        // shifted value in the window. prices[start] is the natural choice
+        // (it keeps the shifted values near the window's own variation);
+        // fall back to 0.0 only when the window is unevaluable anyway.
+        c = std::isfinite(prices[start]) ? prices[start] : 0.0;
         for (std::size_t j = start; j < start + static_cast<std::size_t>(period); ++j) {
             const double d = prices[j] - c;
             Sx += d;
             Sxx += d * d;
         }
         since_refresh = 0;
+        sums_polluted = (nan_in_window > 0);
     };
 
     auto write_bands = [&](std::size_t i) {
+        const std::size_t o = i * 3;
+        // A window holding a missing observation has no bands to report.
+        // Returning NaN here (rather than letting the arithmetic below
+        // produce it) also keeps the sums' own pollution state from
+        // leaking into the output for windows that are already clean.
+        if (nan_in_window > 0) {
+            out[o]     = kNaN;
+            out[o + 1] = kNaN;
+            out[o + 2] = kNaN;
+            return;
+        }
         const double mean = c + Sx / W;
         const double raw_var = (Sxx - Sx * Sx / W) / dof;
         // A variance is a sum of squares over dof -- mathematically >= 0, but
@@ -398,12 +448,14 @@ void bollinger_bands_into(
         // exact silent failure the shift-by-reference-point centering above
         // was introduced to prevent, left undetectable if it ever recurred.
         // clamp_near_zero_sumsq clamps genuine noise and throws on anything
-        // larger, so a real regression surfaces instead of hiding.
+        // larger, so a real regression surfaces instead of hiding. (It
+        // passes NaN/Inf straight through rather than throwing -- but this
+        // lambda has already returned above for any window containing one,
+        // so that path is unreachable from here.)
         const double var = numerics::clamp_near_zero_sumsq(
             raw_var, Sxx / dof, "indicators::bollinger_bands");
         const double std  = (var > 0.0) ? std::sqrt(var) : 0.0;
         const double bw   = num_std * std;
-        const std::size_t o = i * 3;
         out[o]     = mean + bw;  // upper
         out[o + 1] = mean;       // middle
         out[o + 2] = mean - bw;  // lower
@@ -418,11 +470,16 @@ void bollinger_bands_into(
     const std::size_t period_sz = static_cast<std::size_t>(period);
     for (std::size_t i = period_sz; i < n; ++i) {
         const std::size_t old = i - period_sz;
+        if (!std::isfinite(prices[old])) --nan_in_window;
+        if (!std::isfinite(prices[i])) { ++nan_in_window; sums_polluted = true; }
         Sx  += (prices[i] - c) - (prices[old] - c);
         Sxx += (prices[i] - c) * (prices[i] - c) - (prices[old] - c) * (prices[old] - c);
         ++since_refresh;
 
-        if (since_refresh >= period_sz) {
+        // Second condition: the window just became clean but the sums still
+        // carry a NaN/Inf that no subtraction can remove -- rebuild now
+        // instead of reporting NaN until the refresh cadence catches up.
+        if (since_refresh >= period_sz || (nan_in_window == 0 && sums_polluted)) {
             recompute_window(old + 1);
         }
 
@@ -477,6 +534,27 @@ void stochastic_oscillator_into(
     // and at least as extreme), and popped from the front once it slides
     // out of the [i-k_period+1, i] window.
     std::vector<double> K_vals(n, kNaN);
+    // Sliding count of bars whose high or low is a missing observation.
+    //
+    // A NaN can never be a window extreme, and pushing its index into a
+    // monotonic deque destroys the deque's whole invariant: every
+    // comparison against NaN is false, so `high[max_dq.back()] <= high[i]`
+    // never pops it, and it then blocks the eviction of every stale index
+    // sitting behind it. The front stops being the window maximum. Measured
+    // on a rising series with one NaN high and k_period=5, %K -- bounded
+    // 0..100 by construction -- returned 125, 166.67 and 250 from a stale
+    // max, then a fabricated 0.0 once the NaN reached the front. That is
+    // strictly worse than an exception: it is a confident wrong number in
+    // an indicator whose range is its meaning.
+    //
+    // So NaN indices are never pushed (below), and this counter is what
+    // reports the window as unevaluable -- matching pandas'
+    // rolling(min_periods=k), where a window containing a missing
+    // observation yields NaN rather than a number computed from whichever
+    // observations happen to be present. +/-Inf is a real observation, not
+    // a missing one, and is left to flow through the arithmetic as pandas
+    // does.
+    long long nan_in_window = 0;
     // long long (not int) indices/deques: window_start and the loop bound
     // below are derived from n, which can exceed INT_MAX for a large
     // series -- matching the signed-induction-variable precedent already
@@ -492,18 +570,38 @@ void stochastic_oscillator_into(
     for (long long i = 0; i < n_ll; ++i) {
         const std::size_t i_sz = static_cast<std::size_t>(i);
         const long long window_start = i - k_period_ll + 1;
+
+        // Slide the missing-observation count: drop the bar that just left
+        // the window, then add the bar that just entered it.
+        if (window_start >= 1) {
+            const std::size_t leaving = static_cast<std::size_t>(window_start - 1);
+            if (std::isnan(high[leaving]) || std::isnan(low[leaving])) --nan_in_window;
+        }
+        const bool high_missing = std::isnan(high[i_sz]);
+        const bool low_missing  = std::isnan(low[i_sz]);
+        if (high_missing || low_missing) ++nan_in_window;
+
         while (!max_dq.empty() && max_dq.front() < window_start) max_dq.pop_front();
         while (!min_dq.empty() && min_dq.front() < window_start) min_dq.pop_front();
 
-        while (!max_dq.empty() &&
-               high[static_cast<std::size_t>(max_dq.back())] <= high[i_sz]) max_dq.pop_back();
-        max_dq.push_back(i);
+        // Each deque is gated on ITS OWN series, not on the bar as a whole:
+        // a bar with a NaN high but a valid low is still a candidate for
+        // the window minimum, and skipping it in min_dq would lose a real
+        // extreme once the NaN high aged out of the window.
+        if (!high_missing) {
+            while (!max_dq.empty() &&
+                   high[static_cast<std::size_t>(max_dq.back())] <= high[i_sz]) max_dq.pop_back();
+            max_dq.push_back(i);
+        }
+        if (!low_missing) {
+            while (!min_dq.empty() &&
+                   low[static_cast<std::size_t>(min_dq.back())] >= low[i_sz]) min_dq.pop_back();
+            min_dq.push_back(i);
+        }
 
-        while (!min_dq.empty() &&
-               low[static_cast<std::size_t>(min_dq.back())] >= low[i_sz]) min_dq.pop_back();
-        min_dq.push_back(i);
-
-        if (i >= k_period_ll - 1) {
+        if (i >= k_period_ll - 1 && nan_in_window == 0) {
+            // nan_in_window == 0 guarantees both deques are non-empty here:
+            // every bar of the window was pushed into each of them.
             const double hi  = high[static_cast<std::size_t>(max_dq.front())];
             const double lo  = low[static_cast<std::size_t>(min_dq.front())];
             const double rng = hi - lo;
@@ -511,19 +609,31 @@ void stochastic_oscillator_into(
         }
     }
 
-    // Compute %D = SMA(%K, d_period) and store both to out
-    double    Sk    = 0.0;
+    // Compute %D = SMA(%K, d_period) and store both to out.
+    //
+    // `nan_k` is the same problem the sliding sums in bollinger_bands_into
+    // have, in a second place: a NaN %K added to the running sum can never
+    // be subtracted back out (NaN - NaN is NaN), so one unevaluable window
+    // used to poison every %D for the rest of the series. Missing values
+    // are counted instead of summed, which both keeps Sk finite and gives
+    // %D the same rolling(min_periods=d_period) semantics %K now has. For
+    // an all-finite series the adds and subtracts happen in the identical
+    // order as before, so this is bit-for-bit unchanged on clean data.
+    double    Sk     = 0.0;
     long long count  = 0;
+    long long nan_k  = 0;
     const long long d_period_ll = d_period;
     for (long long i = k_period_ll - 1; i < n_ll; ++i) {
         const std::size_t i_sz = static_cast<std::size_t>(i);
-        out[i_sz * 2] = K_vals[i_sz];  // %K
+        const double k_in = K_vals[i_sz];
+        out[i_sz * 2] = k_in;  // %K
 
-        Sk += K_vals[i_sz];
+        if (std::isnan(k_in)) ++nan_k; else Sk += k_in;
         ++count;
         if (count >= d_period_ll) {
-            out[i_sz * 2 + 1] = Sk / d_period;  // %D
-            Sk -= K_vals[static_cast<std::size_t>(i - d_period_ll + 1)];
+            out[i_sz * 2 + 1] = (nan_k == 0) ? Sk / d_period : kNaN;  // %D
+            const double k_out = K_vals[static_cast<std::size_t>(i - d_period_ll + 1)];
+            if (std::isnan(k_out)) --nan_k; else Sk -= k_out;
         }
     }
 }
