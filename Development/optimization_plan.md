@@ -2,7 +2,9 @@
 
 **Date:** 2026-08-21
 **Scope:** `_sqt_core` and the Python layers that call it, with an explicit target of a **2,000-ticker universe**.
-**Status:** plan — nothing here is implemented yet.
+**Status:** phases 1-3 shipped, phase 4-5 partly. Per-item status is marked inline;
+§7 has the summary. Where a measurement contradicted this document's own prediction, the
+prediction is kept alongside the result rather than quietly replaced.
 
 This supersedes the forward-looking parts of `performance_insights.md`, which documents
 what was ported and what it gained. That document's per-kernel numbers are still broadly
@@ -28,7 +30,7 @@ it is in three places the porting effort never reached:
 | **C** | Parallel scaling is non-monotonic | `batch_run_strategy` is *slower* on 8 threads (60.4 ms) than on 6 (44.5 ms) | `schedule(guided)` — `static` never rebalances, on any machine |
 
 Fixing A and B together takes the flagship 2,000-ticker cointegration scan from
-**9.8 hours to an estimated ~1.5 minutes**. That single item is worth more than every
+**9.8 hours to 5.31 minutes** — measured, 111×. That single item is worth more than every
 remaining kernel micro-optimization in this document combined.
 
 The honest counterpoint, stated up front so it is not buried: **the per-bar indicator
@@ -280,7 +282,24 @@ unit-stride. This does not affect the pair-scan use case — at n=500–2000 the
 
 **Effort:** ~1 day. **Risk:** low — self-contained in `adf_test`, strong existing gate.
 
-### 3.2 A batch pair-scan kernel
+### 3.2 A batch pair-scan kernel — ✅ SHIPPED
+
+> **Result: the 2,000-ticker scan went from 9.81 hr to 5.31 min at 2,000 bars (111×),
+> and from 61.7 min to 46.7 s at 500 bars (79×).** Output is bit-identical to a loop of
+> `engle_granger()` calls, field by field.
+>
+> An unforeseen second win did most of the parallel scaling. The batch kernel initially
+> reached only 3.0–3.8× and got *slower* past 6 threads, which was neither scheduling
+> (guided was already in place) nor allocation (4× more compute per pair did not help).
+> It was memory: the QR design was stored **row-major** while the factorization walks
+> **columns**, so every element access pulled a fresh cache line and used 8 bytes of it.
+> Column-major storage made the inner loops unit-stride, flattened cost-per-flop
+> (0.99→0.52 ms/Mflop at n=8000, 2.69→0.77 at n=24000), and by itself fixed the thread
+> scaling — monotonic to 16 threads, 5.9× instead of 2.4×.
+>
+> That is worth recording as a correction: §5.1 diagnosed non-monotonic scaling as a
+> *scheduling* problem. For this kernel it was bandwidth. Both fixes are machine-agnostic,
+> but for different reasons.
 
 **Problem.** `agent/tools.py:2006` loops `for a, b in combinations(valid_tickers, 2)` in
 Python, calling `cointegration_test` per pair. At 2,000 tickers that is 1,999,000 iterations,
@@ -349,7 +368,35 @@ from measured lag counts, not assumed.
 
 ## 4. P1 — Port the remaining universe-scale Python
 
-### 4.1 Portfolio simulation bar loop
+### 4.1 Portfolio simulation bar loop — ✅ SHIPPED, and this section's diagnosis was wrong
+
+> **Result: 188.7 → 35.8 ms at 1,000 tickers × 2,000 bars (5.3×); 63.8 → 10.5 ms at
+> 500 × 504 (6.1×).** Below the 20–50× predicted below, and for an instructive reason.
+>
+> **The bar loop was not the bottleneck.** This section derived 124.6 µs/bar by dividing
+> total runtime by bar count — which charges the whole function to the loop. Profiling
+> after the native kernel was in and only 1.1–2.0× faster:
+>
+> | | |
+> |---|---:|
+> | `_matrix` (building the dense price matrices) | 0.780 s of 0.844 s — **92%** |
+> | the bar loop and everything else | 0.064 s — 8% |
+>
+> `_matrix` called `frame.loc[master_index, column]` once per *(ticker, column)* — 2,500
+> calls at 500 tickers — each taking pandas' 2-D tuple-key path and each recomputing the
+> same row alignment for that ticker. Resolving positions once per **ticker**, and
+> skipping alignment entirely when every frame is already on the master calendar, is most
+> of the win. The native kernel adds a further 1.7–3.3× on top and is what keeps scaling
+> as bars grow.
+>
+> This is the same finding the existing comment above `_matrix` already records — "the
+> bottleneck was never the accounting; it was addressing the data" — one level further
+> out. The earlier fix moved from a lookup per *(ticker, bar)* to one per
+> *(ticker, column)*; at universe scale the per-column one had become the cost.
+>
+> **Not bit-identical**, deliberately: Python sums with `np.sum` (pairwise), the kernel
+> sequentially. Measured 4.5–20 ULPs on the equity curve, growing like √(accumulation
+> count). Tolerance-gated, following `rolling_beta`'s AVX2 precedent.
 
 **Problem.** `run_portfolio_simulation`'s `for bar, date in enumerate(master_index)` loop
 (portfolio_engine.py:753) is Python. It has already been carefully optimized — dense
@@ -393,7 +440,11 @@ Python path across randomized universes, the way `run_strategy_summary` is gated
 **Effort:** ~3–4 days. **Risk:** medium — large surface, but the fast-path restriction and
 a bit-identical gate contain it.
 
-### 4.2 Cross-sectional panel primitives
+### 4.2 Cross-sectional panel primitives — ⬜ NOT DONE
+
+> Still the largest un-taken item. The measurement stands: 4852 µs/date at 2,000 entities
+> for `top_bottom_quantile`, 2.4 s for a 504-date panel, with cost driven by per-date
+> Python rather than cross-section size.
 
 **Problem.** `transform_predictions_to_weights` loops per date in Python
 (portfolio_eval.py:422), calling `apply_exposure_targets` — which itself contains an
@@ -431,7 +482,14 @@ measurement variance noted in §2.3 — the finding is the order of magnitude, n
 
 **Effort:** ~2 days. **Risk:** low–medium.
 
-### 4.3 Panel indicator entry points
+### 4.3 Panel indicator entry points — ✅ SHIPPED
+
+> **Result: 1727.6 → 144.7 ms for five indicators over 500 tickers × 1,000 bars (11.9×).**
+> At the binding layer, 2,000 × 2,000: 596.2 → 98.2 ms (6.1×). Bit-identical to calling
+> `technical_indicators()` once per ticker.
+>
+> The decomposition below held up: batching the C++ calls alone was worth ~14%; the win is
+> removing the pandas layer and parallelizing. `indicators/panel.py` is the entry point.
 
 **Problem.** §2.4. The feature builder loops per entity
 (`modeling/dataset/builder.py:297`), and each iteration pays 318 µs of Python wrapper for
@@ -468,7 +526,20 @@ the 90× for a fraction of the work.
 
 ## 5. P2 — Parallel efficiency and memory
 
-### 5.1 Fix the OpenMP scheduling
+### 5.1 Fix the OpenMP scheduling — ✅ items 1–2 SHIPPED
+
+> **Result: `schedule(guided)` on every parallel loop; scaling is monotonic.**
+> `batch_run_strategy` was 44.5 ms on 6 threads and 60.4 ms on 8 — that regression is
+> gone (40.9 → 39.9). `rolling_hurst` is now fastest at 16 threads (23.8 ms) rather than
+> at 12 (was 28.3 ms at 16), a 16% gain at full width.
+>
+> No thread count is hardcoded, per item 2. The reasoning lives once in `omp_policy.hpp`.
+>
+> Items 3 (per-thread allocation churn) and 4 (false sharing) are **not done**. The
+> §3.2 finding suggests measuring memory traffic before either: for `batch_engle_granger`
+> the scaling ceiling turned out to be bandwidth, and neither allocation nor scheduling.
+
+
 
 §2.2 established the ceiling (~9.7× on this hybrid part, not 16×) and the symptom: scaling
 is **non-monotonic**, with real regressions at 4, 8 and 14 threads. Realistic headroom is
@@ -524,7 +595,17 @@ which is a property that should hold on any machine and is exactly what fails to
 **Effort:** ~2 days including measurement. **Risk:** low — items 1–3 have no effect on
 results, and are gated by the existing thread-count-independence tests.
 
-### 5.2 `rolling_factor_loadings`: QR update/downdate
+### 5.2 `rolling_factor_loadings`: QR update/downdate — ⬜ NOT DONE
+
+> Deliberately not attempted in this pass. It is the one item on this list whose stated
+> risk is *high with precedent* — the analogous Cholesky update/downdate was implemented,
+> gated and reverted — and it deserves its own focused pass with the adversarial corpus
+> ready, not the tail end of a long one.
+>
+> One input from §3.2 that did not exist when this was written: the column-major layout
+> change made the QR inner loops unit-stride, so re-measure `rolling_factor_loadings`
+> before starting. Some of the 29 ms may already be gone, and it shares no code with the
+> nested path, so it has *not* been re-measured here.
 
 **Problem.** The heaviest per-bar kernel: 29 ms at n=20k/k=3/w=60, **128 ms** at k=10,
 **120 ms** at w=252. Per-window QR is `O(n·w·p²)`.
@@ -560,24 +641,39 @@ already used elsewhere in the file) bounds the drift and costs one full QR per w
 
 **Effort:** ~3 days including the gate. **Risk:** high, mitigated by a documented revert.
 
-### 5.3 Monte Carlo: the output is the bottleneck
+### 5.3 Monte Carlo: the output is the bottleneck — ⬜ NOT DONE, and option 1 below was wrong
 
 The core is fine (1.2 G steps/s). But `simulate_forward_paths` at 1 M sims × 252 days needs
 a **2.02 GB** output array, which is why only the terminal-only variant was measurable.
 
-Three options, in increasing order of usefulness:
+> **Correction.** Option 1 as originally written — "compute percentile bands natively and
+> never materialize the matrix" — does not work, and it is worth saying why rather than
+> quietly dropping it. A per-bar percentile across N paths needs all N values *at that
+> bar*. Paths are generated path-major and sequentially in time, so at the moment bar `t`
+> of path `i` exists, no other path has reached bar `t` yet. There is no streaming order
+> in which exact per-bar quantiles fall out.
+>
+> What is actually available, and should be chosen deliberately rather than bolted on:
+>
+> - **Approximate quantiles** (t-digest, P²) — genuinely streaming, bounded memory, at the
+>   cost of exactness. Probably the right answer for percentile *bands*, which are a
+>   visualization.
+> - **Bar-chunked regeneration** — exact, memory bounded by `n_sims × chunk`, paid for
+>   with `horizon/chunk` times the compute. Viable only because each path is
+>   independently seeded and therefore reproducible.
+> - **`float32` output** — an honest 2×, no approximation, no extra compute. 1 M × 252
+>   becomes 1.01 GB.
+>
+> The terminal-only variant already exists and is exact, so the gap is specifically
+> *per-bar bands at very large N*, which is narrower than this section originally implied.
 
-1. **Percentile bands in-kernel.** Almost every caller reduces the path matrix to
-   percentile bands and a terminal distribution. Computing those natively and never
-   materializing the matrix removes the 2 GB entirely. This is the same "fuse the reduction
-   into the kernel" argument that made `garch11_neg_loglik` a 7.8× win over the recursion
-   alone.
+Options 2 and 3 stand as written:
+
 2. **Chunked streaming.** Yield the matrix in row blocks so peak memory is bounded.
 3. **`float` output.** Halves the footprint; simulated equity paths do not need 15
    significant digits. Opt-in.
 
-**Effort:** ~1 day for (1). **Risk:** low. **Expected gain:** not speed — *feasibility*
-above ~500 k simulations.
+**Expected gain:** not speed — *feasibility* above ~500 k simulations.
 
 ---
 
@@ -599,16 +695,26 @@ Stated explicitly, with the evidence, so it does not get relitigated:
 
 ## 7. Sequencing
 
-| Phase | Items | Effort | Headline outcome |
-|---|---|---:|---|
-| **1** | §3.1 nested QR, §3.2 batch pair scan | ~2 days | 2,000-ticker scan: **9.8 hr → ~1.5 min** |
-| **2** | §4.3 panel indicators (Python-only 16.7× first), §5.3 Monte Carlo reduction | ~2 days | Feature builds ~17× faster; MC usable at 1 M sims |
-| **3** | §4.1 portfolio simulation fast path | ~4 days | Portfolio backtest **20–50×** at universe scale |
-| **4** | §4.2 panel weight transform, §5.1 OpenMP efficiency | ~4 days | Panel transform 10–30×; ~2× across all parallel kernels |
-| **5** | §5.2 `rolling_factor_loadings` update/downdate | ~3 days | 10–30×, **or a documented revert** |
-| opt-in | §3.3 correlation pre-filter | ~0.5 day | Another order of magnitude, *changes results* |
+| Phase | Items | Status | Predicted | **Measured** |
+|---|---|---|---|---|
+| **1** | §3.1 nested QR + §3.2 batch pair scan | ✅ | 2,000-ticker scan 9.8 hr → ~1.5 min | **9.81 hr → 5.31 min (111×)** at 2,000 bars; 61.7 min → 46.7 s at 500 |
+| **2** | §4.3 panel indicators | ✅ | ~17× on feature builds | **11.9×** (1727.6 → 144.7 ms, 5 indicators × 500 tickers) |
+| **2** | §5.3 Monte Carlo reduction | ⬜ | MC usable at 1 M sims | **specification was wrong** — see §5.3 |
+| **3** | §4.1 portfolio simulation | ✅ | 20–50× | **5.3×** — and the bottleneck was `_matrix`, not the loop |
+| **4** | §5.1 OpenMP scheduling | ✅ | ~2× across parallel kernels | scaling is **monotonic**; `rolling_hurst` 16% better at full width |
+| **4** | §4.2 panel weight transform | ⬜ | 10–30× | not attempted |
+| **5** | §5.2 `rolling_factor_loadings` | ⬜ | 10–30× or a revert | not attempted — deserves its own pass, see §5.2 |
+| opt-in | §3.3 correlation pre-filter | ⬜ | another order of magnitude | not attempted; *changes results*, so it is a modelling call |
 
-Phase 1 alone is worth more than phases 2–5 combined. If only one thing gets done, do §3.1.
+Phase 1 was indeed worth more than everything else combined, and by a wider margin than
+predicted.
+
+**Three predictions in this document were wrong, and each is kept next to its result**
+rather than edited away: §3.1's speedup was over-estimated 3× by bad arithmetic (the sweep
+is `Σₚ(p+1)² = L³/3`, so the factor is `L/3`, not `L`); §4.1 blamed the bar loop when 92%
+of the time was in building the price matrices; and §5.3's headline option cannot work at
+all, because exact per-bar quantiles have no streaming order. The measurements that
+contradicted them are the point of having committed the harnesses.
 
 ---
 
