@@ -13,7 +13,7 @@ exists alongside the vectorized per-ticker one.
 
 import logging
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -33,6 +33,208 @@ logger = logging.getLogger(__name__)
 
 _VALID_FILL_PRICES = ("close", "next_open", "hl2_exploratory")
 _VALID_COMMISSION_MODELS = ("pct", "per_share")
+
+
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = True
+except ImportError:
+    pass
+
+# Kernel status codes -> the message this engine has always raised. Kept in
+# Python so the wording, and the fact that it names a date and a ticker, does
+# not have to be duplicated in C++.
+_PORTFOLIO_OK = 0
+_PORTFOLIO_BAD_EXEC_PRICE = 1
+_PORTFOLIO_INSOLVENT_AT_REBALANCE = 2
+_PORTFOLIO_LEVERAGE_BREACH = 3
+_PORTFOLIO_POSITION_BREACH = 4
+_PORTFOLIO_INSOLVENT_AT_BAR = 5
+
+_FILL_CODES = {"close": 0, "next_open": 1, "hl2_exploratory": 2}
+
+
+def _native_portfolio_sim(
+    *,
+    close_mat: np.ndarray,
+    open_mat: Optional[np.ndarray],
+    hl2_mat: Optional[np.ndarray],
+    weights_mat: np.ndarray,
+    rebalance_index: pd.Index,
+    master_index: pd.Index,
+    tickers: List[str],
+    fill_price: str,
+    commission_model: str,
+    use_impact_model: bool,
+    max_adv_participation: Optional[float],
+    initial_capital: float,
+    commission_pct: float,
+    slippage_pct: float,
+    max_gross_leverage: float,
+    max_position_pct: float,
+    borrow_fee_bps: float,
+    margin_interest_rate: float,
+) -> Optional[
+    Tuple[List[float], List[float], List[float], List[float], List[Dict[str, Any]]]
+]:
+    """Run the bar loop natively, or return None if this configuration is not covered.
+
+    Returning None rather than raising is the whole point: an unsupported
+    option is not an error, it just means the Python loop runs instead.
+    """
+    if not (HAS_CPP and _cpp_core is not None):
+        return None
+    # Exactly the condition _apply_rebalance uses to take its own vectorized
+    # branch. Anything else is a genuinely per-element decision the kernel
+    # does not implement.
+    if (
+        commission_model != "pct"
+        or use_impact_model
+        or max_adv_participation is not None
+    ):
+        return None
+    if fill_price not in _FILL_CODES:
+        return None
+
+    n_bars = len(master_index)
+    if n_bars == 0:
+        return None
+
+    if fill_price == "next_open":
+        exec_mat = open_mat
+    elif fill_price == "hl2_exploratory":
+        exec_mat = hl2_mat
+    else:
+        exec_mat = close_mat
+    if exec_mat is None:
+        return None
+
+    # Bar index each weights row triggers at. The upfront validation already
+    # rejected a rebalance date that is not on the master calendar, so
+    # get_indexer cannot return -1 here.
+    rebal_bars = master_index.get_indexer(rebalance_index).astype(np.int64)
+    if (rebal_bars < 0).any():
+        return None
+
+    # Calendar days since the previous bar, so a Friday->Monday gap accrues
+    # three days of financing rather than one.
+    if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
+        deltas = np.diff(master_index.to_numpy()).astype("timedelta64[D]")
+        day_gaps = np.empty(n_bars, dtype=np.float64)
+        day_gaps[0] = 1.0
+        day_gaps[1:] = deltas.astype(np.float64)
+    else:
+        day_gaps = np.ones(n_bars, dtype=np.float64)
+
+    res = _cpp_core.run_portfolio_simulation(
+        np.ascontiguousarray(close_mat, dtype=np.float64),
+        np.ascontiguousarray(exec_mat, dtype=np.float64),
+        np.ascontiguousarray(weights_mat, dtype=np.float64),
+        rebal_bars,
+        day_gaps,
+        initial_capital,
+        commission_pct,
+        slippage_pct,
+        max_gross_leverage,
+        max_position_pct,
+        borrow_fee_bps,
+        margin_interest_rate,
+        _FILL_CODES[fill_price],
+    )
+
+    status = int(res["status"])
+    if status != _PORTFOLIO_OK:
+        _raise_portfolio_error(
+            status, res, master_index, tickers, max_gross_leverage, max_position_pct
+        )
+
+    n_exec = int(res["n_executed"])
+    reb = res["rebalances"]
+    # Which weight rows actually executed, in order. Under next_open a row
+    # triggering on the final bar never executes -- there is no following
+    # Open to fill at -- which is exactly what the Python loop does.
+    executed_rows = [
+        row
+        for row, bar in enumerate(rebal_bars)
+        if fill_price != "next_open" or bar + 1 < n_bars
+    ][:n_exec]
+
+    rebalance_log: List[Dict[str, Any]] = []
+    for i, row in enumerate(executed_rows):
+        trigger_date = rebalance_index[row]
+        rebalance_log.append(
+            {
+                "date": (
+                    str(trigger_date.date())
+                    if hasattr(trigger_date, "date")
+                    else str(trigger_date)
+                ),
+                "turnover_pct": round(float(reb[i, 0]), 6),
+                "gross_leverage_after": round(float(reb[i, 1]), 6),
+                "n_positions": int(reb[i, 2]),
+            }
+        )
+
+    return (
+        res["equity"].tolist(),
+        res["cash"].tolist(),
+        res["gross"].tolist(),
+        res["net"].tolist(),
+        rebalance_log,
+    )
+
+
+def _raise_portfolio_error(
+    status: int,
+    res: Dict[str, Any],
+    master_index: pd.Index,
+    tickers: List[str],
+    max_gross_leverage: float,
+    max_position_pct: float,
+) -> None:
+    """Re-raise a kernel status as the message the Python loop would have raised."""
+    bar = int(res["bar"])
+    value = float(res["value"])
+    date = master_index[bar] if bar < len(master_index) else bar
+
+    if status == _PORTFOLIO_BAD_EXEC_PRICE:
+        ticker = tickers[int(res["ticker"])]
+        raise ValidationError(
+            f"rebalance {date} ticker {ticker!r}: execution price "
+            f"{value!r} is nonpositive or non-finite — cannot size "
+            "a nonzero target weight from it."
+        )
+    if status == _PORTFOLIO_INSOLVENT_AT_REBALANCE:
+        raise ValidationError(
+            f"rebalance {date}: account equity is {value!r} "
+            "(zero or negative) after this rebalance's costs — insolvent; "
+            "this engine does not model forced liquidation/margin calls, "
+            "so the simulation cannot continue meaningfully."
+        )
+    if status == _PORTFOLIO_LEVERAGE_BREACH:
+        raise ValidationError(
+            f"rebalance {date}: realized gross leverage "
+            f"{value:.4f} exceeds max_gross_leverage="
+            f"{max_gross_leverage} (shares sized from this rebalance's "
+            "equity do not match the requested weights)"
+        )
+    if status == _PORTFOLIO_POSITION_BREACH:
+        raise ValidationError(
+            f"rebalance {date}: realized position size "
+            f"{value:.4f} exceeds max_position_pct={max_position_pct}"
+        )
+    if status == _PORTFOLIO_INSOLVENT_AT_BAR:
+        raise ValidationError(
+            f"{date}: account equity is {value!r} (zero or negative) — "
+            "insolvent; this engine does not model forced liquidation/"
+            "margin calls, so the simulation cannot continue meaningfully."
+        )
+    raise ValidationError(f"portfolio simulation failed with status {status}")
 
 
 def run_portfolio_simulation(
@@ -312,15 +514,38 @@ def run_portfolio_simulation(
     n_tickers = len(tickers)
     ticker_pos = {t: i for i, t in enumerate(tickers)}
 
-    def _matrix(column: str) -> np.ndarray:
-        out = np.empty((n_bars, n_tickers), dtype=np.float64)
-        for t, i in ticker_pos.items():
-            out[:, i] = (
-                price_data[t].loc[master_index, column].to_numpy(dtype=np.float64)
-            )
-        return out
+    def _build_matrices(columns: Sequence[str]) -> Dict[str, np.ndarray]:
+        """One row alignment per TICKER, not per (ticker, column).
 
-    price_matrices = {col: _matrix(col) for col in required_cols[fill_price]}
+        `frame.loc[master_index, column]` takes pandas' 2-D tuple-key path and
+        recomputes the same alignment for every column of the same ticker.
+        Profiling 500 tickers x 504 bars put 92% of this function's runtime
+        right here. Resolving the row positions once per ticker and taking
+        them from each column's raw array does the same work once.
+
+        master_index is the INTERSECTION of every ticker's index (built just
+        above), so every label is present in every frame and `get_indexer`
+        cannot return -1 -- which is what makes positional take safe here and
+        would not be safe on a union calendar.
+        """
+        mats = {c: np.empty((n_bars, n_tickers), dtype=np.float64) for c in columns}
+        # Checked once for the whole universe rather than per ticker: when
+        # every frame is already on the master calendar -- one date range from
+        # one provider, the common case -- there is no alignment to do at all,
+        # and Index.equals is itself not free at 500+ tickers.
+        aligned = all(price_data[t].index.equals(master_index) for t in ticker_pos)
+        for t, i in ticker_pos.items():
+            frame = price_data[t]
+            if aligned:
+                for c in columns:
+                    mats[c][:, i] = frame[c].to_numpy(dtype=np.float64)
+            else:
+                take = frame.index.get_indexer(master_index)
+                for c in columns:
+                    mats[c][:, i] = frame[c].to_numpy(dtype=np.float64)[take]
+        return mats
+
+    price_matrices = _build_matrices(required_cols[fill_price])
 
     # Screen each column with one whole-matrix pass. Only when something is
     # actually wrong do we walk ticker-by-ticker, and that walk reproduces
@@ -744,87 +969,129 @@ def run_portfolio_simulation(
             }
         )
 
-    # (trigger_date, trigger_bar, weights_arr) awaiting execution at the
-    # *next* bar's Open
-    # — only used when fill_price == "next_open".
-    pending_rebalance: Any = None
-    prev_date: Any = None
+    # ── Native fast path ──────────────────────────────────────────────────
+    # The bar loop below is Python. It has already been optimized hard --
+    # dense matrices materialized once, positional indexing, a vectorized
+    # rebalance branch -- and still costs 124.6 us/bar at 500 tickers,
+    # extrapolating to ~450 us/bar at 2,000. A walk-forward or a parameter
+    # sweep multiplies that by fifty or a hundred.
+    #
+    # The kernel covers exactly the configuration _apply_rebalance's own
+    # vectorized branch covers, and nothing else: percentage commission, no
+    # impact model, no ADV constraint. The per-share model has a per-ORDER
+    # minimum, the impact model needs a per-ticker volatility lookup, and the
+    # ADV constraint has to raise naming one ticker -- each is a per-element
+    # decision that would have to be restated in C++ to be supported, and
+    # restating it is how two implementations drift.
+    #
+    # Anything else falls through to the loop, which is unchanged: the diff
+    # that introduced this is an indent plus this guard.
+    _native = _native_portfolio_sim(
+        close_mat=close_mat,
+        open_mat=open_mat,
+        hl2_mat=hl2_mat,
+        weights_mat=weights_mat,
+        rebalance_index=target_weights.index,
+        master_index=master_index,
+        tickers=tickers,
+        fill_price=fill_price,
+        commission_model=commission_model,
+        use_impact_model=use_impact_model,
+        max_adv_participation=max_adv_participation,
+        initial_capital=initial_capital,
+        commission_pct=commission_pct,
+        slippage_pct=slippage_pct,
+        max_gross_leverage=max_gross_leverage,
+        max_position_pct=max_position_pct,
+        borrow_fee_bps=borrow_fee_bps,
+        margin_interest_rate=margin_interest_rate,
+    )
+    if _native is not None:
+        equity_records, cash_records, gross_records, net_records, rebalance_log = (
+            _native
+        )
+    else:
+        # (trigger_date, trigger_bar, weights_arr) awaiting execution at the
+        # *next* bar's Open
+        # — only used when fill_price == "next_open".
+        pending_rebalance: Any = None
+        prev_date: Any = None
 
-    for bar, date in enumerate(master_index):
-        close_prices = close_mat[bar]
+        for bar, date in enumerate(master_index):
+            close_prices = close_mat[bar]
 
-        # Daily-accrued financing costs (borrow fee on shorts, margin
-        # interest on negative cash), based on the position/cash carried
-        # into this bar from the previous one — before today's rebalance,
-        # if any, changes them. Uses the actual elapsed CALENDAR days since
-        # the prior bar (e.g. 3 for a Friday->Monday gap over a weekend),
-        # not a hardcoded 1 — a fixed days=1 would under-accrue financing
-        # across every weekend/holiday gap in the trading calendar.
-        if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
-            days = float((date - prev_date).days) if prev_date is not None else 1.0
-            daily_cost = margin_interest(cash, margin_interest_rate, days=days)
-            if borrow_fee_bps > 0.0:
-                # The borrow fee is LINEAR in notional, so the per-ticker
-                # loop this replaces was scaling each short's notional by
-                # the same rate and adding them up. Summing the short book's
-                # notional first and scaling once is the same quantity (to
-                # within floating-point associativity) and avoids 200,000
-                # short_borrow_cost calls on a 100-name, 2,000-bar backtest,
-                # each re-validating the same two scalars.
-                short_notional = float(
-                    np.abs(
-                        np.where(shares_vec < 0, shares_vec * close_prices, 0.0)
-                    ).sum()
-                )
-                if short_notional > 0.0:
-                    daily_cost += short_borrow_cost(
-                        short_notional, borrow_fee_bps, days=days
+            # Daily-accrued financing costs (borrow fee on shorts, margin
+            # interest on negative cash), based on the position/cash carried
+            # into this bar from the previous one — before today's rebalance,
+            # if any, changes them. Uses the actual elapsed CALENDAR days since
+            # the prior bar (e.g. 3 for a Friday->Monday gap over a weekend),
+            # not a hardcoded 1 — a fixed days=1 would under-accrue financing
+            # across every weekend/holiday gap in the trading calendar.
+            if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
+                days = float((date - prev_date).days) if prev_date is not None else 1.0
+                daily_cost = margin_interest(cash, margin_interest_rate, days=days)
+                if borrow_fee_bps > 0.0:
+                    # The borrow fee is LINEAR in notional, so the per-ticker
+                    # loop this replaces was scaling each short's notional by
+                    # the same rate and adding them up. Summing the short book's
+                    # notional first and scaling once is the same quantity (to
+                    # within floating-point associativity) and avoids 200,000
+                    # short_borrow_cost calls on a 100-name, 2,000-bar backtest,
+                    # each re-validating the same two scalars.
+                    short_notional = float(
+                        np.abs(
+                            np.where(shares_vec < 0, shares_vec * close_prices, 0.0)
+                        ).sum()
                     )
-            cash -= daily_cost
+                    if short_notional > 0.0:
+                        daily_cost += short_borrow_cost(
+                            short_notional, borrow_fee_bps, days=days
+                        )
+                cash -= daily_cost
 
-        if fill_price == "next_open" and pending_rebalance is not None:
-            trigger_date, trigger_bar, pending_weights = pending_rebalance
-            _apply_rebalance(
-                trigger_date, trigger_bar, date, pending_weights, open_mat[bar]
-            )
-            pending_rebalance = None
+            if fill_price == "next_open" and pending_rebalance is not None:
+                trigger_date, trigger_bar, pending_weights = pending_rebalance
+                _apply_rebalance(
+                    trigger_date, trigger_bar, date, pending_weights, open_mat[bar]
+                )
+                pending_rebalance = None
 
-        rebalance_row = rebalance_rows.get(date)
-        if rebalance_row is not None:
-            weights_arr = weights_mat[rebalance_row]
-            if fill_price == "close":
-                _apply_rebalance(date, bar, date, weights_arr, close_prices)
-            elif fill_price == "hl2_exploratory":
-                _apply_rebalance(date, bar, date, weights_arr, hl2_mat[bar])
-            else:  # next_open — defer execution to the following bar's Open
-                pending_rebalance = (date, bar, weights_arr)
+            rebalance_row = rebalance_rows.get(date)
+            if rebalance_row is not None:
+                weights_arr = weights_mat[rebalance_row]
+                if fill_price == "close":
+                    _apply_rebalance(date, bar, date, weights_arr, close_prices)
+                elif fill_price == "hl2_exploratory":
+                    _apply_rebalance(date, bar, date, weights_arr, hl2_mat[bar])
+                else:  # next_open — defer execution to the following bar's Open
+                    pending_rebalance = (date, bar, weights_arr)
 
-        # Equity is always marked to Close, regardless of fill_price — only
-        # the rebalance trade's own execution price changes.
-        # One elementwise product per bar instead of a per-ticker Python
-        # sum. Net and gross exposure are both reductions over this same
-        # vector, so it is formed once and reduced twice.
-        position_values = shares_vec * close_prices
-        position_value = float(position_values.sum())
-        equity = cash + position_value
+            # Equity is always marked to Close, regardless of fill_price — only
+            # the rebalance trade's own execution price changes.
+            # One elementwise product per bar instead of a per-ticker Python
+            # sum. Net and gross exposure are both reductions over this same
+            # vector, so it is formed once and reduced twice.
+            position_values = shares_vec * close_prices
+            position_value = float(position_values.sum())
+            equity = cash + position_value
 
-        # Insolvency (see the identical check in _apply_rebalance): a
-        # position that drifts to zero/negative equity purely from price
-        # moves between rebalances (no trade involved) is just as
-        # meaningless to continue marking as one that goes insolvent AT a
-        # rebalance — same fail-fast rationale.
-        if equity <= 0:
-            raise ValidationError(
-                f"{date}: account equity is {equity!r} (zero or negative) — "
-                "insolvent; this engine does not model forced liquidation/"
-                "margin calls, so the simulation cannot continue meaningfully."
-            )
+            # Insolvency (see the identical check in _apply_rebalance): a
+            # position that drifts to zero/negative equity purely from price
+            # moves between rebalances (no trade involved) is just as
+            # meaningless to continue marking as one that goes insolvent AT a
+            # rebalance — same fail-fast rationale.
+            if equity <= 0:
+                raise ValidationError(
+                    f"{date}: account equity is {equity!r} (zero or negative) — "
+                    "insolvent; this engine does not model forced liquidation/"
+                    "margin calls, so the simulation cannot continue meaningfully."
+                )
 
-        equity_records.append(equity)
-        cash_records.append(cash)
-        gross_records.append(float(np.abs(position_values).sum()))
-        net_records.append(position_value)
-        prev_date = date
+            equity_records.append(equity)
+            cash_records.append(cash)
+            gross_records.append(float(np.abs(position_values).sum()))
+            net_records.append(position_value)
+            prev_date = date
 
     warnings: List[str] = []
     if fill_price == "close" and rebalance_dates:

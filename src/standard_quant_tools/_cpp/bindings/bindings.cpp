@@ -770,6 +770,124 @@ PYBIND11_MODULE(_sqt_core, m) {
         "instead of implicitly copying on a mismatch). Same "
         "semantics/output/validation otherwise.");
 
+    m.def(
+        "run_portfolio_simulation",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> close,
+           py::array_t<double, py::array::c_style | py::array::forcecast> exec_prices,
+           py::array_t<double, py::array::c_style | py::array::forcecast> weights,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> rebal_bars,
+           py::array_t<double, py::array::c_style | py::array::forcecast> day_gaps,
+           double initial_capital, double commission_pct, double slippage_pct,
+           double max_gross_leverage, double max_position_pct,
+           double borrow_fee_bps, double margin_interest_rate,
+           int fill) -> py::dict
+        {
+            auto c_buf = close.request();
+            auto x_buf = exec_prices.request();
+            auto w_buf = weights.request();
+            auto r_buf = rebal_bars.request();
+            auto g_buf = day_gaps.request();
+            if (c_buf.ndim != 2 || x_buf.ndim != 2 || w_buf.ndim != 2)
+                throw std::invalid_argument(
+                    "close, exec_prices and weights must each be 2-D");
+            if (r_buf.ndim != 1 || g_buf.ndim != 1)
+                throw std::invalid_argument(
+                    "rebal_bars and day_gaps must each be 1-D");
+
+            const auto n_bars    = static_cast<std::size_t>(c_buf.shape[0]);
+            const auto n_tickers = static_cast<std::size_t>(c_buf.shape[1]);
+            const auto n_rebal   = static_cast<std::size_t>(w_buf.shape[0]);
+            if (static_cast<std::size_t>(x_buf.shape[0]) != n_bars ||
+                static_cast<std::size_t>(x_buf.shape[1]) != n_tickers)
+                throw std::invalid_argument(
+                    "exec_prices must have the same shape as close");
+            if (static_cast<std::size_t>(w_buf.shape[1]) != n_tickers)
+                throw std::invalid_argument(
+                    "weights.shape[1] must equal close.shape[1]");
+            if (static_cast<std::size_t>(r_buf.shape[0]) != n_rebal)
+                throw std::invalid_argument(
+                    "rebal_bars must have one entry per weights row");
+            if (static_cast<std::size_t>(g_buf.shape[0]) != n_bars)
+                throw std::invalid_argument(
+                    "day_gaps must have one entry per bar");
+
+            sqt::PortfolioCosts costs;
+            costs.initial_capital      = initial_capital;
+            costs.commission_pct       = commission_pct;
+            costs.slippage_pct         = slippage_pct;
+            costs.max_gross_leverage   = max_gross_leverage;
+            costs.max_position_pct     = max_position_pct;
+            costs.borrow_fee_bps       = borrow_fee_bps;
+            costs.margin_interest_rate = margin_interest_rate;
+            costs.fill                 = fill;
+
+            const auto nb = static_cast<py::ssize_t>(n_bars);
+            py::array_t<double> eq(nb), csh(nb), grs(nb), net(nb);
+            py::array_t<double> reb({static_cast<py::ssize_t>(n_rebal),
+                                     py::ssize_t(3)});
+
+            const double*    c_ptr = static_cast<const double*>(c_buf.ptr);
+            const double*    x_ptr = static_cast<const double*>(x_buf.ptr);
+            const double*    w_ptr = static_cast<const double*>(w_buf.ptr);
+            const long long* r_ptr = static_cast<const long long*>(r_buf.ptr);
+            const double*    g_ptr = static_cast<const double*>(g_buf.ptr);
+            double* eq_ptr  = eq.mutable_data();
+            double* csh_ptr = csh.mutable_data();
+            double* grs_ptr = grs.mutable_data();
+            double* net_ptr = net.mutable_data();
+            double* reb_ptr = n_rebal ? reb.mutable_data() : nullptr;
+
+            sqt::PortfolioSimError err;
+            std::size_t n_executed = 0;
+            {
+                py::gil_scoped_release release;
+                n_executed = sqt::run_portfolio_simulation(
+                    c_ptr, x_ptr, w_ptr, r_ptr, g_ptr,
+                    n_bars, n_tickers, n_rebal, costs,
+                    eq_ptr, csh_ptr, grs_ptr, net_ptr, reb_ptr, &err);
+            }
+
+            py::dict d;
+            d["equity"]      = eq;
+            d["cash"]        = csh;
+            d["gross"]       = grs;
+            d["net"]         = net;
+            d["rebalances"]  = reb;
+            d["n_executed"]  = static_cast<py::ssize_t>(n_executed);
+            d["status"]      = err.status;
+            d["bar"]         = static_cast<py::ssize_t>(err.bar);
+            d["ticker"]      = err.ticker;
+            d["value"]       = err.value;
+            return d;
+        },
+        py::arg("close"),
+        py::arg("exec_prices"),
+        py::arg("weights"),
+        py::arg("rebal_bars"),
+        py::arg("day_gaps"),
+        py::arg("initial_capital")      = 10'000.0,
+        py::arg("commission_pct")       = 0.001,
+        py::arg("slippage_pct")         = 0.0005,
+        py::arg("max_gross_leverage")   = 1.0,
+        py::arg("max_position_pct")     = 1.0,
+        py::arg("borrow_fee_bps")       = 0.0,
+        py::arg("margin_interest_rate") = 0.0,
+        py::arg("fill")                 = 0,
+        "Shared-cash multi-asset portfolio simulation.\\n\\n"
+        "Implements only the configuration portfolio_engine.py already treats\\n"
+        "as its vectorized fast path: percentage commission, no impact model,\\n"
+        "no ADV constraint. Anything else stays on the Python loop.\\n\\n"
+        "close/exec_prices are (n_bars, n_tickers); weights is\\n"
+        "(n_rebal, n_tickers); rebal_bars is the bar index each weights row\\n"
+        "triggers at; day_gaps is calendar days since the previous bar, for\\n"
+        "financing accrual.\\n\\n"
+        "fill: 0 = Close, 1 = next Open, 2 = (High+Low)/2.\\n\\n"
+        "Returns a dict with equity/cash/gross/net (n_bars each), rebalances\\n"
+        "(n_rebal, 3) of turnover_pct/gross_leverage_after/n_positions,\\n"
+        "n_executed, and a status/bar/ticker/value quartet describing why the\\n"
+        "simulation stopped -- status 0 means it ran to the end. The caller\\n"
+        "raises; this never does, so the exact message stays in Python.");
+
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
     m.def(
