@@ -1,12 +1,19 @@
 #include "sqt/indicators.hpp"
 
 #include "sqt/numerics.hpp"
+#include "sqt/omp_policy.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <deque>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace sqt {
 
@@ -653,6 +660,94 @@ std::vector<double> stochastic_oscillator(
 
 
 // ── Fused technical indicators ─────────────────────────────────────────────
+
+void technical_indicators_panel(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n_tickers,
+    std::size_t   n_bars,
+    const TechnicalIndicatorsConfig& config,
+    const TechnicalIndicatorsPanelOut& out)
+{
+    if (n_tickers == 0 || n_bars == 0) return;
+    if (high == nullptr || low == nullptr || close == nullptr)
+        throw std::invalid_argument("technical_indicators_panel: null input panel.");
+
+    // Every check that can fail happens here, before the region -- an
+    // exception escaping an OpenMP structured block is undefined behaviour.
+    auto need = [](bool requested, const double* buf, const char* name) {
+        if (requested && buf == nullptr)
+            throw std::invalid_argument(
+                std::string("technical_indicators_panel: ") + name +
+                " was requested but its output buffer is null.");
+    };
+    need(config.compute_rsi,        out.rsi,        "rsi");
+    need(config.compute_adx,        out.adx,        "adx");
+    need(config.compute_atr,        out.atr,        "atr");
+    need(config.compute_bollinger,  out.bollinger,  "bollinger");
+    need(config.compute_stochastic, out.stochastic, "stochastic");
+
+    // Total work is tickers x bars x however many indicators were asked for;
+    // one indicator over a handful of short series is not worth a region.
+    const std::size_t n_indicators =
+        static_cast<std::size_t>(config.compute_rsi) +
+        static_cast<std::size_t>(config.compute_adx) +
+        static_cast<std::size_t>(config.compute_atr) +
+        static_cast<std::size_t>(config.compute_bollinger) +
+        static_cast<std::size_t>(config.compute_stochastic);
+    if (n_indicators == 0) return;
+
+    const long long n_tickers_ll = static_cast<long long>(n_tickers);
+    bool region_error = false;
+
+#ifdef _OPENMP
+    // schedule(guided) rather than static: per-ticker cost is uniform here,
+    // but the THREADS are not necessarily -- SMT siblings, hybrid P/E cores,
+    // a cgroup CPU quota or another process on the box all make an equal
+    // split of iterations finish at unequal times. guided rebalances on
+    // demand without assuming anything about the machine.
+    #pragma omp parallel for schedule(guided) reduction(||: region_error) \
+        if(sqt::omp_policy::worth_parallel(n_tickers, n_bars * n_indicators)) \
+        num_threads(sqt::omp_policy::max_threads() > 0 \
+                    ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+#endif
+    for (long long t = 0; t < n_tickers_ll; ++t) {
+        try {
+            const std::size_t ti = static_cast<std::size_t>(t);
+            const std::size_t off = ti * n_bars;
+            const double* h = high + off;
+            const double* l = low + off;
+            const double* c = close + off;
+
+            // Each row goes through the same *_into kernel the single-series
+            // path uses -- no second implementation of any indicator.
+            if (config.compute_rsi)
+                rsi_into(c, n_bars, config.rsi_period, out.rsi + off);
+            if (config.compute_adx)
+                adx_into(h, l, c, n_bars, config.adx_period, out.adx + off * 3);
+            if (config.compute_atr)
+                wilder_atr_into(h, l, c, n_bars, config.atr_period, out.atr + off);
+            if (config.compute_bollinger)
+                bollinger_bands_into(c, n_bars, config.bollinger_period,
+                                      config.bollinger_num_std, out.bollinger + off * 3);
+            if (config.compute_stochastic)
+                stochastic_oscillator_into(h, l, c, n_bars, config.stoch_k_period,
+                                            config.stoch_d_period, out.stochastic + off * 2);
+        } catch (...) {
+            region_error = true;
+        }
+    }
+
+    if (region_error) {
+        throw std::runtime_error(
+            "technical_indicators_panel: a worker thread failed (most likely "
+            "std::bad_alloc); rethrown here, outside the parallel region, "
+            "because letting it escape the structured block is undefined "
+            "behaviour.");
+    }
+}
+
 
 TechnicalIndicatorsResult technical_indicators(
     const double* high,

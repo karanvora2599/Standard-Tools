@@ -1194,6 +1194,115 @@ PYBIND11_MODULE(_sqt_core, m) {
         "instead of implicitly copying on a mismatch). Same "
         "semantics/output otherwise.");
 
+    m.def(
+        "technical_indicators_panel",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> high,
+           py::array_t<double, py::array::c_style | py::array::forcecast> low,
+           py::array_t<double, py::array::c_style | py::array::forcecast> close,
+           bool compute_rsi, int rsi_period,
+           bool compute_adx, int adx_period,
+           bool compute_atr, int atr_period,
+           bool compute_bollinger, int bollinger_period, double bollinger_num_std,
+           bool compute_stochastic, int stoch_k_period, int stoch_d_period) -> py::dict
+        {
+            auto h_buf = high.request();
+            auto l_buf = low.request();
+            auto c_buf = close.request();
+            if (h_buf.ndim != 2 || l_buf.ndim != 2 || c_buf.ndim != 2)
+                throw std::invalid_argument(
+                    "high, low and close must each be 2-D (n_tickers, n_bars)");
+            if (h_buf.shape[0] != l_buf.shape[0] || h_buf.shape[0] != c_buf.shape[0] ||
+                h_buf.shape[1] != l_buf.shape[1] || h_buf.shape[1] != c_buf.shape[1])
+                throw std::invalid_argument(
+                    "high, low and close must have identical shapes");
+
+            const auto n_tickers = static_cast<std::size_t>(h_buf.shape[0]);
+            const auto n_bars    = static_cast<std::size_t>(h_buf.shape[1]);
+            const auto nt = static_cast<py::ssize_t>(n_tickers);
+            const auto nb = static_cast<py::ssize_t>(n_bars);
+
+            sqt::TechnicalIndicatorsConfig cfg;
+            cfg.compute_rsi        = compute_rsi;
+            cfg.rsi_period         = rsi_period;
+            cfg.compute_adx        = compute_adx;
+            cfg.adx_period         = adx_period;
+            cfg.compute_atr        = compute_atr;
+            cfg.atr_period         = atr_period;
+            cfg.compute_bollinger  = compute_bollinger;
+            cfg.bollinger_period   = bollinger_period;
+            cfg.bollinger_num_std  = bollinger_num_std;
+            cfg.compute_stochastic = compute_stochastic;
+            cfg.stoch_k_period     = stoch_k_period;
+            cfg.stoch_d_period     = stoch_d_period;
+
+            // Allocated here, while the GIL is held; the kernel writes into
+            // them directly, so nothing is copied on the way back.
+            py::array_t<double> a_rsi, a_adx, a_atr, a_bb, a_stoch;
+            sqt::TechnicalIndicatorsPanelOut dest;
+            if (compute_rsi) {
+                a_rsi = py::array_t<double>({nt, nb});
+                dest.rsi = a_rsi.mutable_data();
+            }
+            if (compute_adx) {
+                a_adx = py::array_t<double>({nt, nb, py::ssize_t(3)});
+                dest.adx = a_adx.mutable_data();
+            }
+            if (compute_atr) {
+                a_atr = py::array_t<double>({nt, nb});
+                dest.atr = a_atr.mutable_data();
+            }
+            if (compute_bollinger) {
+                a_bb = py::array_t<double>({nt, nb, py::ssize_t(3)});
+                dest.bollinger = a_bb.mutable_data();
+            }
+            if (compute_stochastic) {
+                a_stoch = py::array_t<double>({nt, nb, py::ssize_t(2)});
+                dest.stochastic = a_stoch.mutable_data();
+            }
+
+            const double* h_ptr = static_cast<const double*>(h_buf.ptr);
+            const double* l_ptr = static_cast<const double*>(l_buf.ptr);
+            const double* c_ptr = static_cast<const double*>(c_buf.ptr);
+            {
+                py::gil_scoped_release release;
+                sqt::technical_indicators_panel(h_ptr, l_ptr, c_ptr,
+                                                 n_tickers, n_bars, cfg, dest);
+            }
+
+            py::dict d;
+            if (compute_rsi)        d["rsi"] = a_rsi;
+            if (compute_adx)        d["adx"] = a_adx;
+            if (compute_atr)        d["atr"] = a_atr;
+            if (compute_bollinger)  d["bollinger_bands"] = a_bb;
+            if (compute_stochastic) d["stochastic_oscillator"] = a_stoch;
+            return d;
+        },
+        py::arg("high"),
+        py::arg("low"),
+        py::arg("close"),
+        py::arg("compute_rsi")        = false,
+        py::arg("rsi_period")         = 14,
+        py::arg("compute_adx")        = false,
+        py::arg("adx_period")         = 14,
+        py::arg("compute_atr")        = false,
+        py::arg("atr_period")         = 14,
+        py::arg("compute_bollinger")  = false,
+        py::arg("bollinger_period")   = 20,
+        py::arg("bollinger_num_std")  = 2.0,
+        py::arg("compute_stochastic") = false,
+        py::arg("stoch_k_period")     = 14,
+        py::arg("stoch_d_period")     = 3,
+        "technical_indicators() over a whole universe in one call.\\n\\n"
+        "high/low/close are 2-D float64 (n_tickers, n_bars); row t is\\n"
+        "ticker t. Tickers are computed in parallel.\\n\\n"
+        "Returns a dict containing only the requested keys, each with the\\n"
+        "ticker axis prepended to the single-series shape: 'rsi'\\n"
+        "(n_tickers, n_bars), 'adx' (n_tickers, n_bars, 3), 'atr'\\n"
+        "(n_tickers, n_bars), 'bollinger_bands' (n_tickers, n_bars, 3),\\n"
+        "'stochastic_oscillator' (n_tickers, n_bars, 2).\\n\\n"
+        "Bit-identical to calling technical_indicators() once per ticker --\\n"
+        "each row goes through the same kernels.");
+
     // ── Engle-Granger cointegration ───────────────────────────────────────────
 
     m.def(

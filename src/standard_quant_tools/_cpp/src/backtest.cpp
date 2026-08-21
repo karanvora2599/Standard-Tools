@@ -646,7 +646,7 @@ std::vector<BacktestResult> batch_backtest_crossover(
         } catch (...) {
             region_error = true;
         }
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (long long t = 0; t < num_combos_ll; ++t) {
             if (region_error) continue;  // this thread's buffer never allocated
             try {
@@ -726,7 +726,7 @@ std::vector<BacktestResult> batch_run_strategy(
     // Work-based, not count-based: two tiny backtests cost more in thread
     // startup than they save, and this library often runs inside something
     // already parallel. See sqt::omp_policy.
-    #pragma omp parallel for schedule(static) \
+    #pragma omp parallel for schedule(guided) \
         if(sqt::omp_policy::worth_parallel(num_tests, n)) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                     ? sqt::omp_policy::max_threads() : omp_get_max_threads())

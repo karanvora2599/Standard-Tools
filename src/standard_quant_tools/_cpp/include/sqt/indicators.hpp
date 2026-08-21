@@ -250,6 +250,56 @@ struct TechnicalIndicatorsResult {
     std::vector<double> stochastic;  // length 2*n if compute_stochastic, else empty
 };
 
+// Destination buffers for technical_indicators_panel. A null pointer means
+// "not requested"; the corresponding config.compute_* flag must agree.
+//
+// Shapes, all row-major with ticker as the slowest axis:
+//   rsi         (n_tickers x n_bars)
+//   adx         (n_tickers x n_bars x 3)
+//   atr         (n_tickers x n_bars)
+//   bollinger   (n_tickers x n_bars x 3)
+//   stochastic  (n_tickers x n_bars x 2)
+struct TechnicalIndicatorsPanelOut {
+    double* rsi        = nullptr;
+    double* adx        = nullptr;
+    double* atr        = nullptr;
+    double* bollinger  = nullptr;
+    double* stochastic = nullptr;
+};
+
+/**
+ * technical_indicators() over a whole universe in ONE call.
+ *
+ * The feature builder walks entities in Python and calls a per-ticker wrapper
+ * for each. Measured at 2,000 tickers x 2,000 bars, that costs 318 us per
+ * ticker against 19 us of actual kernel -- a 16.7x tax, and none of it
+ * parallel. The pybind11 boundary is NOT the problem (2.7 us per call, 14%);
+ * the pandas Series round trip is.
+ *
+ * So this exists to let the Python side convert once and hand over a matrix,
+ * and to run the tickers concurrently. Every ticker is independent, so the
+ * loop parallelizes with nothing shared.
+ *
+ * There is no new indicator arithmetic here: each row is handed to the same
+ * already-tested `*_into` kernel the single-series path uses, so panel output
+ * is bit-identical to calling technical_indicators() once per ticker.
+ *
+ * @param high, low, close  (n_tickers x n_bars) row-major. Row t is ticker t.
+ * @param n_tickers, n_bars Panel dimensions.
+ * @param config            Which indicators, and their periods. Same struct
+ *                          the single-series entry point takes.
+ * @param out               Destination buffers; see the shapes above. A
+ *                          requested indicator with a null buffer throws.
+ */
+void technical_indicators_panel(
+    const double* high,
+    const double* low,
+    const double* close,
+    std::size_t   n_tickers,
+    std::size_t   n_bars,
+    const TechnicalIndicatorsConfig& config,
+    const TechnicalIndicatorsPanelOut& out);
+
 /**
  * Compute whichever indicators `config` requests, in one native call.
  *

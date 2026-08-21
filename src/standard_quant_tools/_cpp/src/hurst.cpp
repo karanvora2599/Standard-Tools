@@ -648,7 +648,10 @@ void rolling_hurst_into(
         }
 
 #ifdef _OPENMP
-        #pragma omp for schedule(static)
+        // guided: per-window cost is genuinely uneven here, because
+        // log_sizes yields a different box count per window. static's equal
+        // split therefore finishes when its unluckiest thread does.
+        #pragma omp for schedule(guided)
 #endif
         for (long long idx = 0; idx < count; ++idx) {
             try {
