@@ -1,12 +1,19 @@
 #include "sqt/cointegration.hpp"
 
 #include "sqt/numerics.hpp"
+#include "sqt/omp_policy.hpp"
 #include "sqt/qr.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace sqt {
 
@@ -304,7 +311,14 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
 
     // Fits Δy_t = [c +] φ·y_{t-1} + Σψⱼ·Δy_{t-j} over rows t = start_t .. n-1.
     //
-    // start_t is the whole point of this refactor. The usable row count at lag
+    // Used ONLY by the report pass now -- the selection sweep below reads
+    // every candidate's RSS off a single nested factorization instead of
+    // calling this once per lag. The report pass still needs the full
+    // column-pivoted solve, because the reported t-statistic wants both the
+    // coefficient and xtx_inv_diag from one decomposition, so this stays
+    // exactly as it was.
+    //
+    // start_t is the whole point of the earlier refactor. The usable row count at lag
     // p is n-1-p, so a larger p is fitted on FEWER observations, and the
     // previous implementation scored every candidate on its own such sample.
     // Information criteria computed from different response vectors are not
@@ -369,35 +383,98 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
         return f;
     };
 
-    // ── Selection pass: one common sample for every candidate ────────────────
+    // ── Selection pass: ONE factorization for every candidate ────────────────
+    //
+    // This used to call fit_lag once per candidate lag, so the sweep built
+    // max_lag+1 separate design matrices and ran max_lag+1 separate
+    // column-pivoted QRs -- O(T*L^3) in total, with L growing as n^(1/4) via
+    // Schwert's rule. That made adf_test, and therefore engle_granger, the
+    // only kernel in the extension that is not linear in n. Measured before
+    // this change: O(n^1.99), 246ms at n=8000, of which forcing max_lag=0
+    // showed 1953x was the sweep itself.
+    //
+    // The candidates are NESTED and the sweep already holds all of them to a
+    // common sample. fit_lag emits columns as
+    //     [const?, y_{t-1}, dy_{t-1}, ..., dy_{t-p}]
+    // so the lag-p design is exactly the first ntrend+1+p columns of the
+    // lag-max_lag design, on identical rows. One unpivoted Householder QR of
+    // the full design therefore yields every candidate's RSS at once -- see
+    // qr::lstsq_nested_rss for why the identity is exact.
+    //
+    // The arithmetic per candidate below is unchanged; only where RSS and the
+    // rank verdict come from is different.
     double best_ic  = kInf;
     int    best_lag = -1;
     const std::size_t sel_start = static_cast<std::size_t>(max_lag) + 1;
 
-    for (int p = 0; p <= max_lag; ++p) {
-        const auto f = fit_lag(p, sel_start, /*want_t=*/false);
-        if (!f.ok) continue;  // rank-deficient at this p; another p may solve
+    if (sel_start < n) {
+        const std::size_t T_sz   = n - sel_start;
+        const int         k_full = ntrend + 1 + max_lag;
+        const std::size_t kf_sz  = static_cast<std::size_t>(k_full);
+        const int T =
+            numerics::checked_narrow_to_int(T_sz, "adf_test: regression rows");
 
-        const double T_d = static_cast<double>(f.T);
-        const double k_d = static_cast<double>(f.k);
-        double ic;
-        if (f.rss <= 0.0) {
-            ic = -kInf;  // exact fit wins outright
-        } else {
-            // σ² = RSS/T, the MLE variance -- NOT the unbiased RSS/(T-k).
-            // statsmodels' OLS.aic/.bic are log-likelihood based and the
-            // likelihood uses the MLE variance; the previous RSS/(T-k) form
-            // folded a df correction into a criterion that already carries its
-            // own k penalty, which changes which lag wins. Both this and the
-            // common sample above are needed: measured over 200 series, fixing
-            // only the sample cut disagreement with statsmodels from 33% to
-            // 20.5%, fixing only σ² made it slightly worse at 34.5%, and both
-            // together reached exact agreement on all 200.
-            const double sig2 = f.rss / T_d;
-            ic = std::log(sig2) +
-                 (use_aic ? 2.0 * k_d / T_d : std::log(T_d) * k_d / T_d);
+        // COLUMN-major, matching qr::lstsq_nested_rss -- see its layout note.
+        // Building it this way is also the natural direction here: each
+        // column is one contiguous run rather than a strided scatter.
+        std::vector<double> A(numerics::checked_mul(T_sz, kf_sz,
+            "adf_test: design matrix size"));
+        std::vector<double> b(T_sz);
+        {
+            int c = 0;
+            if (include_constant) {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                for (std::size_t row = 0; row < T_sz; ++row) col[row] = 1.0;
+            }
+            {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                for (std::size_t row = 0; row < T_sz; ++row)
+                    col[row] = y[sel_start + row - 1];
+            }
+            for (int j = 1; j <= max_lag; ++j) {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                // Δy_{t-j} = y[t-j] - y[t-j-1] = dy[t-j-1]
+                for (std::size_t row = 0; row < T_sz; ++row)
+                    col[row] = dy[sel_start + row - 1 - static_cast<std::size_t>(j)];
+            }
+            for (std::size_t row = 0; row < T_sz; ++row)
+                b[row] = dy[sel_start + row - 1];  // Δy_t
         }
-        if (ic < best_ic) { best_ic = ic; best_lag = p; }
+
+        std::vector<double>        rss(kf_sz + 1);
+        std::vector<unsigned char> full_rank(kf_sz + 1);
+        qr::lstsq_nested_rss(A.data(), b.data(), T, k_full,
+                             rss.data(), full_rank.data());
+
+        const double T_d = static_cast<double>(T);
+        for (int p = 0; p <= max_lag; ++p) {
+            const int k = ntrend + 1 + p;
+            if (T_sz <= static_cast<std::size_t>(k)) continue;  // need df >= 1
+            // Rank-deficient at this p; another p may still solve. Same
+            // policy as the fit_lag(...).ok check this replaces.
+            if (!full_rank[static_cast<std::size_t>(k)]) continue;
+
+            const double r   = rss[static_cast<std::size_t>(k)];
+            const double k_d = static_cast<double>(k);
+            double ic;
+            if (r <= 0.0) {
+                ic = -kInf;  // exact fit wins outright
+            } else {
+                // σ² = RSS/T, the MLE variance -- NOT the unbiased RSS/(T-k).
+                // statsmodels' OLS.aic/.bic are log-likelihood based and the
+                // likelihood uses the MLE variance; the previous RSS/(T-k) form
+                // folded a df correction into a criterion that already carries its
+                // own k penalty, which changes which lag wins. Both this and the
+                // common sample above are needed: measured over 200 series, fixing
+                // only the sample cut disagreement with statsmodels from 33% to
+                // 20.5%, fixing only σ² made it slightly worse at 34.5%, and both
+                // together reached exact agreement on all 200.
+                const double sig2 = r / T_d;
+                ic = std::log(sig2) +
+                     (use_aic ? 2.0 * k_d / T_d : std::log(T_d) * k_d / T_d);
+            }
+            if (ic < best_ic) { best_ic = ic; best_lag = p; }
+        }
     }
 
     if (best_lag < 0) return out;  // nothing solved at any lag: NaN is honest
@@ -477,6 +554,95 @@ CointResult engle_granger(
 
     return r;
 }
+
+// ── Public: batch_engle_granger ──────────────────────────────────────────────
+
+void batch_engle_granger(
+    const double* prices,
+    std::size_t   n_tickers,
+    std::size_t   n_bars,
+    const int*    pairs,
+    std::size_t   n_pairs,
+    int           max_lag,
+    bool          use_aic,
+    double*       out)
+{
+    if (n_pairs == 0) return;
+
+    // ── Validate before the region, where throwing is safe ─────────────────
+    // An exception escaping an OpenMP structured block is undefined
+    // behaviour, so every check that can fail on the caller's arguments
+    // happens here, once, single-threaded.
+    if (prices == nullptr || pairs == nullptr || out == nullptr)
+        throw std::invalid_argument("batch_engle_granger: null pointer argument.");
+    for (std::size_t i = 0; i < n_pairs; ++i) {
+        const int a = pairs[i * 2];
+        const int b = pairs[i * 2 + 1];
+        if (a < 0 || b < 0 ||
+            static_cast<std::size_t>(a) >= n_tickers ||
+            static_cast<std::size_t>(b) >= n_tickers) {
+            throw std::invalid_argument(
+                "batch_engle_granger: pairs row " + std::to_string(i) +
+                " references a ticker outside [0, " + std::to_string(n_tickers) + ").");
+        }
+    }
+    // engle_granger narrows n to int for its own n_obs field. Hoisted here so
+    // that throw is unreachable from inside the region.
+    (void)numerics::checked_narrow_to_int(n_bars, "batch_engle_granger: bars per series");
+
+    const long long n_pairs_ll = static_cast<long long>(n_pairs);
+    bool region_error = false;
+
+#ifdef _OPENMP
+    // schedule(guided), not static. Per-pair cost is not uniform -- the
+    // automatic max-lag rule and the rank-deficiency early-outs mean some
+    // pairs do materially less work than others -- and static assigns equal
+    // iteration COUNTS up front with no rebalancing, so the region finishes
+    // when its unluckiest thread does. guided hands out shrinking chunks on
+    // demand, which also absorbs unequal threads (SMT siblings, hybrid
+    // P/E cores, a cgroup CPU quota, another process on the box) without
+    // assuming anything about the machine.
+    #pragma omp parallel for schedule(guided) reduction(||: region_error) \
+        if(sqt::omp_policy::worth_parallel(n_pairs, n_bars)) \
+        num_threads(sqt::omp_policy::max_threads() > 0 \
+                    ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+#endif
+    for (long long i = 0; i < n_pairs_ll; ++i) {
+        try {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            const double* y0 = prices + static_cast<std::size_t>(pairs[ii * 2]) * n_bars;
+            const double* y1 = prices + static_cast<std::size_t>(pairs[ii * 2 + 1]) * n_bars;
+
+            const CointResult r = engle_granger(y0, y1, n_bars, max_lag, use_aic);
+
+            double* row = out + ii * static_cast<std::size_t>(kBatchCointCols);
+            row[0]  = r.intercept;
+            row[1]  = r.hedge_ratio;
+            row[2]  = r.adf_statistic;
+            row[3]  = static_cast<double>(r.optimal_lag);
+            row[4]  = r.p_value;
+            row[5]  = r.cv_1pct;
+            row[6]  = r.cv_5pct;
+            row[7]  = r.cv_10pct;
+            row[8]  = r.half_life;
+            row[9]  = static_cast<double>(r.n_obs);
+            row[10] = r.cointegrated ? 1.0 : 0.0;
+        } catch (...) {
+            // Most likely std::bad_alloc on a per-pair design matrix.
+            // Contained here and rethrown outside the region.
+            region_error = true;
+        }
+    }
+
+    if (region_error) {
+        throw std::runtime_error(
+            "batch_engle_granger: a worker thread failed (most likely "
+            "std::bad_alloc on a per-pair design matrix); rethrown here, "
+            "outside the parallel region, because letting it escape the "
+            "structured block is undefined behaviour.");
+    }
+}
+
 
 // ── Kalman filters (time-varying hedge ratio) ─────────────────────────────────
 //

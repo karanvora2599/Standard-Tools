@@ -31,6 +31,29 @@ namespace omp_policy {
  *                     own default). Set this to 1 inside a process pool.
  *   SQT_OMP_MIN_WORK  minimum tasks x elements before a region goes parallel
  *                     at all (default 50,000).
+ *
+ * SCHEDULING. Every parallel loop in this codebase uses schedule(guided), not
+ * schedule(static). static assigns each thread an equal COUNT of iterations
+ * up front and never rebalances, which is optimal only when the work per
+ * iteration and the speed of each thread are both uniform. Neither is
+ * something a library can assume:
+ *
+ *   - Work per iteration varies for real. rolling_hurst's per-window cost
+ *     depends on how many boxes log_sizes yields for that window.
+ *   - Threads are not equal. SMT siblings share a physical core; hybrid
+ *     P/E designs (Intel 12th gen+, Apple silicon, ARM big.LITTLE) differ by
+ *     ~2x; a cgroup CPU quota, a co-tenant process, or thermal throttling
+ *     all skew throughput mid-run.
+ *
+ * Measured on one such machine before the change, scaling was NON-MONOTONIC:
+ * batch_run_strategy took 44.5 ms on 6 threads and 60.4 ms on 8. That is the
+ * signature of an equal split landing on unequal cores.
+ *
+ * The fix is deliberately NOT a tuned thread count. "Cap threads at this
+ * box's fast-core count" is a statement about one machine and wrong to ship;
+ * guided adapts to whatever the machine turns out to be. The verification bar
+ * is likewise machine-independent: adding a thread must never make a kernel
+ * slower.
  */
 inline long long env_ll(const char* name, long long fallback) {
 #ifdef _MSC_VER

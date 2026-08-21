@@ -770,6 +770,124 @@ PYBIND11_MODULE(_sqt_core, m) {
         "instead of implicitly copying on a mismatch). Same "
         "semantics/output/validation otherwise.");
 
+    m.def(
+        "run_portfolio_simulation",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> close,
+           py::array_t<double, py::array::c_style | py::array::forcecast> exec_prices,
+           py::array_t<double, py::array::c_style | py::array::forcecast> weights,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> rebal_bars,
+           py::array_t<double, py::array::c_style | py::array::forcecast> day_gaps,
+           double initial_capital, double commission_pct, double slippage_pct,
+           double max_gross_leverage, double max_position_pct,
+           double borrow_fee_bps, double margin_interest_rate,
+           int fill) -> py::dict
+        {
+            auto c_buf = close.request();
+            auto x_buf = exec_prices.request();
+            auto w_buf = weights.request();
+            auto r_buf = rebal_bars.request();
+            auto g_buf = day_gaps.request();
+            if (c_buf.ndim != 2 || x_buf.ndim != 2 || w_buf.ndim != 2)
+                throw std::invalid_argument(
+                    "close, exec_prices and weights must each be 2-D");
+            if (r_buf.ndim != 1 || g_buf.ndim != 1)
+                throw std::invalid_argument(
+                    "rebal_bars and day_gaps must each be 1-D");
+
+            const auto n_bars    = static_cast<std::size_t>(c_buf.shape[0]);
+            const auto n_tickers = static_cast<std::size_t>(c_buf.shape[1]);
+            const auto n_rebal   = static_cast<std::size_t>(w_buf.shape[0]);
+            if (static_cast<std::size_t>(x_buf.shape[0]) != n_bars ||
+                static_cast<std::size_t>(x_buf.shape[1]) != n_tickers)
+                throw std::invalid_argument(
+                    "exec_prices must have the same shape as close");
+            if (static_cast<std::size_t>(w_buf.shape[1]) != n_tickers)
+                throw std::invalid_argument(
+                    "weights.shape[1] must equal close.shape[1]");
+            if (static_cast<std::size_t>(r_buf.shape[0]) != n_rebal)
+                throw std::invalid_argument(
+                    "rebal_bars must have one entry per weights row");
+            if (static_cast<std::size_t>(g_buf.shape[0]) != n_bars)
+                throw std::invalid_argument(
+                    "day_gaps must have one entry per bar");
+
+            sqt::PortfolioCosts costs;
+            costs.initial_capital      = initial_capital;
+            costs.commission_pct       = commission_pct;
+            costs.slippage_pct         = slippage_pct;
+            costs.max_gross_leverage   = max_gross_leverage;
+            costs.max_position_pct     = max_position_pct;
+            costs.borrow_fee_bps       = borrow_fee_bps;
+            costs.margin_interest_rate = margin_interest_rate;
+            costs.fill                 = fill;
+
+            const auto nb = static_cast<py::ssize_t>(n_bars);
+            py::array_t<double> eq(nb), csh(nb), grs(nb), net(nb);
+            py::array_t<double> reb({static_cast<py::ssize_t>(n_rebal),
+                                     py::ssize_t(3)});
+
+            const double*    c_ptr = static_cast<const double*>(c_buf.ptr);
+            const double*    x_ptr = static_cast<const double*>(x_buf.ptr);
+            const double*    w_ptr = static_cast<const double*>(w_buf.ptr);
+            const long long* r_ptr = static_cast<const long long*>(r_buf.ptr);
+            const double*    g_ptr = static_cast<const double*>(g_buf.ptr);
+            double* eq_ptr  = eq.mutable_data();
+            double* csh_ptr = csh.mutable_data();
+            double* grs_ptr = grs.mutable_data();
+            double* net_ptr = net.mutable_data();
+            double* reb_ptr = n_rebal ? reb.mutable_data() : nullptr;
+
+            sqt::PortfolioSimError err;
+            std::size_t n_executed = 0;
+            {
+                py::gil_scoped_release release;
+                n_executed = sqt::run_portfolio_simulation(
+                    c_ptr, x_ptr, w_ptr, r_ptr, g_ptr,
+                    n_bars, n_tickers, n_rebal, costs,
+                    eq_ptr, csh_ptr, grs_ptr, net_ptr, reb_ptr, &err);
+            }
+
+            py::dict d;
+            d["equity"]      = eq;
+            d["cash"]        = csh;
+            d["gross"]       = grs;
+            d["net"]         = net;
+            d["rebalances"]  = reb;
+            d["n_executed"]  = static_cast<py::ssize_t>(n_executed);
+            d["status"]      = err.status;
+            d["bar"]         = static_cast<py::ssize_t>(err.bar);
+            d["ticker"]      = err.ticker;
+            d["value"]       = err.value;
+            return d;
+        },
+        py::arg("close"),
+        py::arg("exec_prices"),
+        py::arg("weights"),
+        py::arg("rebal_bars"),
+        py::arg("day_gaps"),
+        py::arg("initial_capital")      = 10'000.0,
+        py::arg("commission_pct")       = 0.001,
+        py::arg("slippage_pct")         = 0.0005,
+        py::arg("max_gross_leverage")   = 1.0,
+        py::arg("max_position_pct")     = 1.0,
+        py::arg("borrow_fee_bps")       = 0.0,
+        py::arg("margin_interest_rate") = 0.0,
+        py::arg("fill")                 = 0,
+        "Shared-cash multi-asset portfolio simulation.\\n\\n"
+        "Implements only the configuration portfolio_engine.py already treats\\n"
+        "as its vectorized fast path: percentage commission, no impact model,\\n"
+        "no ADV constraint. Anything else stays on the Python loop.\\n\\n"
+        "close/exec_prices are (n_bars, n_tickers); weights is\\n"
+        "(n_rebal, n_tickers); rebal_bars is the bar index each weights row\\n"
+        "triggers at; day_gaps is calendar days since the previous bar, for\\n"
+        "financing accrual.\\n\\n"
+        "fill: 0 = Close, 1 = next Open, 2 = (High+Low)/2.\\n\\n"
+        "Returns a dict with equity/cash/gross/net (n_bars each), rebalances\\n"
+        "(n_rebal, 3) of turnover_pct/gross_leverage_after/n_positions,\\n"
+        "n_executed, and a status/bar/ticker/value quartet describing why the\\n"
+        "simulation stopped -- status 0 means it ran to the end. The caller\\n"
+        "raises; this never does, so the exact message stays in Python.");
+
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
     m.def(
@@ -1194,6 +1312,115 @@ PYBIND11_MODULE(_sqt_core, m) {
         "instead of implicitly copying on a mismatch). Same "
         "semantics/output otherwise.");
 
+    m.def(
+        "technical_indicators_panel",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> high,
+           py::array_t<double, py::array::c_style | py::array::forcecast> low,
+           py::array_t<double, py::array::c_style | py::array::forcecast> close,
+           bool compute_rsi, int rsi_period,
+           bool compute_adx, int adx_period,
+           bool compute_atr, int atr_period,
+           bool compute_bollinger, int bollinger_period, double bollinger_num_std,
+           bool compute_stochastic, int stoch_k_period, int stoch_d_period) -> py::dict
+        {
+            auto h_buf = high.request();
+            auto l_buf = low.request();
+            auto c_buf = close.request();
+            if (h_buf.ndim != 2 || l_buf.ndim != 2 || c_buf.ndim != 2)
+                throw std::invalid_argument(
+                    "high, low and close must each be 2-D (n_tickers, n_bars)");
+            if (h_buf.shape[0] != l_buf.shape[0] || h_buf.shape[0] != c_buf.shape[0] ||
+                h_buf.shape[1] != l_buf.shape[1] || h_buf.shape[1] != c_buf.shape[1])
+                throw std::invalid_argument(
+                    "high, low and close must have identical shapes");
+
+            const auto n_tickers = static_cast<std::size_t>(h_buf.shape[0]);
+            const auto n_bars    = static_cast<std::size_t>(h_buf.shape[1]);
+            const auto nt = static_cast<py::ssize_t>(n_tickers);
+            const auto nb = static_cast<py::ssize_t>(n_bars);
+
+            sqt::TechnicalIndicatorsConfig cfg;
+            cfg.compute_rsi        = compute_rsi;
+            cfg.rsi_period         = rsi_period;
+            cfg.compute_adx        = compute_adx;
+            cfg.adx_period         = adx_period;
+            cfg.compute_atr        = compute_atr;
+            cfg.atr_period         = atr_period;
+            cfg.compute_bollinger  = compute_bollinger;
+            cfg.bollinger_period   = bollinger_period;
+            cfg.bollinger_num_std  = bollinger_num_std;
+            cfg.compute_stochastic = compute_stochastic;
+            cfg.stoch_k_period     = stoch_k_period;
+            cfg.stoch_d_period     = stoch_d_period;
+
+            // Allocated here, while the GIL is held; the kernel writes into
+            // them directly, so nothing is copied on the way back.
+            py::array_t<double> a_rsi, a_adx, a_atr, a_bb, a_stoch;
+            sqt::TechnicalIndicatorsPanelOut dest;
+            if (compute_rsi) {
+                a_rsi = py::array_t<double>({nt, nb});
+                dest.rsi = a_rsi.mutable_data();
+            }
+            if (compute_adx) {
+                a_adx = py::array_t<double>({nt, nb, py::ssize_t(3)});
+                dest.adx = a_adx.mutable_data();
+            }
+            if (compute_atr) {
+                a_atr = py::array_t<double>({nt, nb});
+                dest.atr = a_atr.mutable_data();
+            }
+            if (compute_bollinger) {
+                a_bb = py::array_t<double>({nt, nb, py::ssize_t(3)});
+                dest.bollinger = a_bb.mutable_data();
+            }
+            if (compute_stochastic) {
+                a_stoch = py::array_t<double>({nt, nb, py::ssize_t(2)});
+                dest.stochastic = a_stoch.mutable_data();
+            }
+
+            const double* h_ptr = static_cast<const double*>(h_buf.ptr);
+            const double* l_ptr = static_cast<const double*>(l_buf.ptr);
+            const double* c_ptr = static_cast<const double*>(c_buf.ptr);
+            {
+                py::gil_scoped_release release;
+                sqt::technical_indicators_panel(h_ptr, l_ptr, c_ptr,
+                                                 n_tickers, n_bars, cfg, dest);
+            }
+
+            py::dict d;
+            if (compute_rsi)        d["rsi"] = a_rsi;
+            if (compute_adx)        d["adx"] = a_adx;
+            if (compute_atr)        d["atr"] = a_atr;
+            if (compute_bollinger)  d["bollinger_bands"] = a_bb;
+            if (compute_stochastic) d["stochastic_oscillator"] = a_stoch;
+            return d;
+        },
+        py::arg("high"),
+        py::arg("low"),
+        py::arg("close"),
+        py::arg("compute_rsi")        = false,
+        py::arg("rsi_period")         = 14,
+        py::arg("compute_adx")        = false,
+        py::arg("adx_period")         = 14,
+        py::arg("compute_atr")        = false,
+        py::arg("atr_period")         = 14,
+        py::arg("compute_bollinger")  = false,
+        py::arg("bollinger_period")   = 20,
+        py::arg("bollinger_num_std")  = 2.0,
+        py::arg("compute_stochastic") = false,
+        py::arg("stoch_k_period")     = 14,
+        py::arg("stoch_d_period")     = 3,
+        "technical_indicators() over a whole universe in one call.\\n\\n"
+        "high/low/close are 2-D float64 (n_tickers, n_bars); row t is\\n"
+        "ticker t. Tickers are computed in parallel.\\n\\n"
+        "Returns a dict containing only the requested keys, each with the\\n"
+        "ticker axis prepended to the single-series shape: 'rsi'\\n"
+        "(n_tickers, n_bars), 'adx' (n_tickers, n_bars, 3), 'atr'\\n"
+        "(n_tickers, n_bars), 'bollinger_bands' (n_tickers, n_bars, 3),\\n"
+        "'stochastic_oscillator' (n_tickers, n_bars, 2).\\n\\n"
+        "Bit-identical to calling technical_indicators() once per ticker --\\n"
+        "each row goes through the same kernels.");
+
     // ── Engle-Granger cointegration ───────────────────────────────────────────
 
     m.def(
@@ -1236,6 +1463,54 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Returns a dict with keys: intercept, hedge_ratio, adf_statistic,\n"
         "optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct, half_life,\n"
         "n_obs, cointegrated.");
+
+    m.def(
+        "batch_engle_granger",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> prices,
+           py::array_t<int, py::array::c_style | py::array::forcecast> pairs,
+           int max_lag, bool use_aic) -> py::array_t<double>
+        {
+            auto p_buf = prices.request();
+            auto q_buf = pairs.request();
+            if (p_buf.ndim != 2)
+                throw std::invalid_argument(
+                    "prices must be a 2-D array (n_tickers, n_bars)");
+            if (q_buf.ndim != 2 || q_buf.shape[1] != 2)
+                throw std::invalid_argument("pairs must be a 2-D array (n_pairs, 2)");
+
+            const auto n_tickers = static_cast<std::size_t>(p_buf.shape[0]);
+            const auto n_bars    = static_cast<std::size_t>(p_buf.shape[1]);
+            const auto n_pairs   = static_cast<std::size_t>(q_buf.shape[0]);
+
+            constexpr py::ssize_t kCols = sqt::kBatchCointCols;
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(n_pairs), kCols});
+            double* out_ptr = out.mutable_data();
+            const double* p_ptr = static_cast<const double*>(p_buf.ptr);
+            const int*    q_ptr = static_cast<const int*>(q_buf.ptr);
+            {
+                py::gil_scoped_release release;
+                sqt::batch_engle_granger(p_ptr, n_tickers, n_bars, q_ptr, n_pairs,
+                                          max_lag, use_aic, out_ptr);
+            }
+            return out;
+        },
+        py::arg("prices"),
+        py::arg("pairs"),
+        py::arg("max_lag") = -1,
+        py::arg("use_aic") = true,
+        "Engle-Granger over many pairs in one native call.\\n\\n"
+        "prices : 2-D float64 (n_tickers, n_bars), already aligned onto a\\n"
+        "         common index by the caller -- this kernel never sees an\\n"
+        "         index and does no date alignment.\\n"
+        "pairs  : 2-D int32 (n_pairs, 2), row indices into `prices`.\\n\\n"
+        "Returns a 2-D float64 array of shape (n_pairs, 11), one row per pair\\n"
+        "in input order. Columns (fixed order): intercept, hedge_ratio,\\n"
+        "adf_statistic, optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct,\\n"
+        "half_life, n_obs, cointegrated (0.0/1.0).\\n\\n"
+        "Bit-identical to calling engle_granger() once per pair, and\\n"
+        "independent of thread count. Raises ValueError if a pairs row\\n"
+        "references a ticker outside the panel.");
 
     // ── Monte Carlo (moving-block bootstrap) ──────────────────────────────────
 

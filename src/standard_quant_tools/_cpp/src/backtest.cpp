@@ -559,6 +559,219 @@ BacktestResult run_strategy_summary(
     return r;
 }
 
+// ── run_portfolio_simulation ─────────────────────────────────────────────────
+//
+// A faithful port of backtest/portfolio_engine.py's per-bar loop, restricted
+// to its own vectorized fast path (see backtest.hpp for why). Every formula
+// below is the Python one, in the same order, so the two agree bit for bit:
+// the arithmetic per bar is unchanged and only where the running state lives
+// is different -- scalars and a dense shares vector here, Python floats and
+// NumPy calls there.
+
+std::size_t run_portfolio_simulation(
+    const double* close,
+    const double* exec_prices,
+    const double* weights,
+    const long long* rebal_bars,
+    const double* day_gaps,
+    std::size_t   n_bars,
+    std::size_t   n_tickers,
+    std::size_t   n_rebal,
+    const PortfolioCosts& costs,
+    double* out_equity,
+    double* out_cash,
+    double* out_gross,
+    double* out_net,
+    double* out_rebal,
+    PortfolioSimError* err)
+{
+    if (err) *err = PortfolioSimError{};
+    if (n_bars == 0) return 0;
+
+    const double cost_rate = costs.commission_pct + costs.slippage_pct;
+    double cash = costs.initial_capital;
+    std::vector<double> shares(n_tickers, 0.0);
+    std::vector<double> position_values(n_tickers, 0.0);
+
+    std::size_t next_rebal = 0;   // index into rebal_bars / weights
+    std::size_t n_executed = 0;
+
+    // For kFillNextOpen a rebalance decided at bar b executes at bar b+1.
+    bool        pending        = false;
+    std::size_t pending_row    = 0;
+
+    auto fail = [&](int status, std::size_t bar, int ticker, double value) {
+        if (err) *err = PortfolioSimError{status, bar, ticker, value};
+    };
+
+    // Applies one rebalance row at `bar`, executing at exec_prices[bar].
+    // Returns false (and fills `err`) if the account cannot continue.
+    auto apply_rebalance = [&](std::size_t row, std::size_t bar) -> bool {
+        const double* px = exec_prices + bar * n_tickers;
+        const double* w  = weights + row * n_tickers;
+
+        double equity_now = cash;
+        for (std::size_t i = 0; i < n_tickers; ++i) equity_now += shares[i] * px[i];
+
+        double turnover_notional = 0.0;
+        double cash_delta = 0.0;   // accumulated separately, then applied once,
+                                   // matching the Python's two np.sum() calls
+        double cost_total = 0.0;
+        for (std::size_t i = 0; i < n_tickers; ++i) {
+            const double price = px[i];
+            const bool bad = !std::isfinite(price) || price <= 0.0;
+            if (bad && std::abs(w[i]) > 1e-12) {
+                // A zero target needs no valid price to size -- there is
+                // nothing to buy -- so only a nonzero weight is an error.
+                fail(kPortfolioBadExecPrice, bar, static_cast<int>(i), price);
+                return false;
+            }
+            const double target = bad ? 0.0 : equity_now * w[i] / price;
+            const double delta  = target - shares[i];
+            // Zero-size trade: an unchanged target costs nothing and
+            // generates no turnover. Same 1e-9 rule as the Python.
+            if (std::abs(delta) > 1e-9) {
+                const double notional = std::abs(delta) * price;
+                turnover_notional += notional;
+                cash_delta        += delta * price;
+                cost_total        += notional * cost_rate;
+            }
+            shares[i] = target;
+        }
+        cash -= cash_delta;
+        cash -= cost_total;
+
+        // The three post-trade invariants all interrogate the signed market
+        // value of each position, so it is formed once.
+        double equity_after = cash;
+        double gross_after  = 0.0;
+        double max_abs_pos  = 0.0;
+        for (std::size_t i = 0; i < n_tickers; ++i) {
+            const double v = shares[i] * px[i];
+            position_values[i] = v;
+            equity_after += v;
+            const double av = std::abs(v);
+            gross_after += av;
+            if (av > max_abs_pos) max_abs_pos = av;
+        }
+
+        if (equity_after <= 0.0) {
+            fail(kPortfolioInsolventAtRebalance, bar, -1, equity_after);
+            return false;
+        }
+
+        // Compared against equity_now (the actual sizing basis), not
+        // equity_after: costs shrink equity_after below equity_now on every
+        // trade, which would push the reported ratio over a boundary limit
+        // with no sizing bug involved.
+        if (equity_now > 0.0) {
+            const double realized_gross = gross_after / equity_now;
+            if (realized_gross > costs.max_gross_leverage + 1e-9) {
+                fail(kPortfolioLeverageBreach, bar, -1, realized_gross);
+                return false;
+            }
+            const double realized_max_pos =
+                (n_tickers > 0) ? (max_abs_pos / equity_now) : 0.0;
+            if (realized_max_pos > costs.max_position_pct + 1e-9) {
+                fail(kPortfolioPositionBreach, bar, -1, realized_max_pos);
+                return false;
+            }
+        }
+
+        if (out_rebal) {
+            double* r = out_rebal + n_executed * 3;
+            r[0] = (equity_after > 0.0) ? turnover_notional / equity_after : 0.0;
+            r[1] = (equity_after > 0.0) ? gross_after / equity_after : 0.0;
+            long long n_pos = 0;
+            for (std::size_t i = 0; i < n_tickers; ++i)
+                if (std::abs(shares[i]) > 1e-9) ++n_pos;
+            r[2] = static_cast<double>(n_pos);
+        }
+        ++n_executed;
+        return true;
+    };
+
+    for (std::size_t bar = 0; bar < n_bars; ++bar) {
+        const double* cp = close + bar * n_tickers;
+
+        // ── Financing, on the position carried INTO this bar ──────────────
+        // Before today's rebalance changes it, and on the actual elapsed
+        // calendar days, so a weekend gap accrues three days rather than one.
+        if (costs.borrow_fee_bps > 0.0 || costs.margin_interest_rate > 0.0) {
+            const double days = (bar == 0) ? 1.0 : day_gaps[bar];
+            double daily_cost = 0.0;
+            if (cash < 0.0)
+                daily_cost += std::abs(cash) * costs.margin_interest_rate * (days / 365.0);
+            if (costs.borrow_fee_bps > 0.0) {
+                // The fee is LINEAR in notional, so summing the short book
+                // first and scaling once is the same quantity as scaling
+                // each short separately.
+                double short_notional = 0.0;
+                for (std::size_t i = 0; i < n_tickers; ++i)
+                    if (shares[i] < 0.0) short_notional += std::abs(shares[i] * cp[i]);
+                if (short_notional > 0.0)
+                    daily_cost += short_notional * (costs.borrow_fee_bps / 10'000.0) *
+                                  (days / 365.0);
+            }
+            cash -= daily_cost;
+        }
+
+        // ── Deferred next_open execution from the previous bar ────────────
+        if (costs.fill == kFillNextOpen && pending) {
+            if (!apply_rebalance(pending_row, bar)) return n_executed;
+            pending = false;
+        }
+
+        // ── A rebalance triggering at this bar ────────────────────────────
+        while (next_rebal < n_rebal &&
+               rebal_bars[next_rebal] < static_cast<long long>(bar)) {
+            ++next_rebal;  // a trigger before the first bar cannot execute
+        }
+        if (next_rebal < n_rebal &&
+            rebal_bars[next_rebal] == static_cast<long long>(bar)) {
+            if (costs.fill == kFillNextOpen) {
+                // Defer to the following bar's Open. A trigger on the LAST
+                // bar never executes, which is what the Python does too.
+                pending = true;
+                pending_row = next_rebal;
+            } else {
+                if (!apply_rebalance(next_rebal, bar)) return n_executed;
+            }
+            ++next_rebal;
+        }
+
+        // ── Mark to Close ─────────────────────────────────────────────────
+        double position_value = 0.0;
+        double gross = 0.0;
+        for (std::size_t i = 0; i < n_tickers; ++i) {
+            const double v = shares[i] * cp[i];
+            position_value += v;
+            gross += std::abs(v);
+        }
+        const double equity = cash + position_value;
+
+        // A position that drifts to zero equity purely from price moves is
+        // just as meaningless to keep marking as one that goes insolvent AT
+        // a rebalance -- same fail-fast rationale.
+        if (equity <= 0.0) {
+            out_equity[bar] = equity;
+            out_cash[bar]   = cash;
+            out_gross[bar]  = gross;
+            out_net[bar]    = position_value;
+            fail(kPortfolioInsolventAtBar, bar, -1, equity);
+            return n_executed;
+        }
+
+        out_equity[bar] = equity;
+        out_cash[bar]   = cash;
+        out_gross[bar]  = gross;
+        out_net[bar]    = position_value;
+    }
+
+    return n_executed;
+}
+
+
 // ── batch_run_strategy ────────────────────────────────────────────────────────
 //
 // Each test index t is fully independent: run_strategy_summary() is a pure
@@ -646,7 +859,7 @@ std::vector<BacktestResult> batch_backtest_crossover(
         } catch (...) {
             region_error = true;
         }
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (long long t = 0; t < num_combos_ll; ++t) {
             if (region_error) continue;  // this thread's buffer never allocated
             try {
@@ -726,7 +939,7 @@ std::vector<BacktestResult> batch_run_strategy(
     // Work-based, not count-based: two tiny backtests cost more in thread
     // startup than they save, and this library often runs inside something
     // already parallel. See sqt::omp_policy.
-    #pragma omp parallel for schedule(static) \
+    #pragma omp parallel for schedule(guided) \
         if(sqt::omp_policy::worth_parallel(num_tests, n)) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                     ? sqt::omp_policy::max_threads() : omp_get_max_threads())

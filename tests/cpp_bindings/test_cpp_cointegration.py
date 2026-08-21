@@ -729,3 +729,186 @@ class TestKalmanHedgeRatioWrapper:
             coint_module.HAS_CPP = True
 
         pd.testing.assert_frame_equal(result_cpp, result_numba, atol=1e-10)
+
+
+# ── batch_engle_granger / scan_cointegrated_pairs ────────────────────────────
+
+
+@requires_cpp
+class TestBatchEngleGranger:
+    """One native call over a whole panel must equal a loop over the pairs.
+
+    Exact equality, not a tolerance: nothing accumulates across pairs, so
+    there is no floating-point reason for a difference and a tolerance would
+    hide an indexing bug.
+    """
+
+    COLUMNS = [
+        "intercept",
+        "hedge_ratio",
+        "adf_statistic",
+        "optimal_lag",
+        "p_value",
+        "cv_1pct",
+        "cv_5pct",
+        "cv_10pct",
+        "half_life",
+        "n_obs",
+        "cointegrated",
+    ]
+
+    @staticmethod
+    def _panel(n_tickers, n_bars, seed=0):
+        rng = np.random.default_rng(seed)
+        base = np.cumsum(rng.normal(0, 1, n_bars)) + 100.0
+        rows = []
+        for i in range(n_tickers):
+            if i % 3:
+                rows.append((1.0 + 0.1 * i) * base + rng.normal(0, 1.5, n_bars))
+            else:
+                rows.append(np.cumsum(rng.normal(0, 1, n_bars)) + 100.0)
+        return np.ascontiguousarray(np.array(rows))
+
+    @staticmethod
+    def _all_pairs(n):
+        return np.array(
+            [(a, b) for a in range(n) for b in range(a + 1, n)], dtype=np.int32
+        )
+
+    def test_matches_per_pair_exactly(self):
+        panel = self._panel(10, 300)
+        pairs = self._all_pairs(10)
+        out = _cpp.batch_engle_granger(panel, pairs)
+        assert out.shape == (len(pairs), 11)
+
+        for i, (a, b) in enumerate(pairs):
+            r = _cpp.engle_granger(panel[a], panel[b])
+            expected = [
+                r["intercept"],
+                r["hedge_ratio"],
+                r["adf_statistic"],
+                float(r["optimal_lag"]),
+                r["p_value"],
+                r["cv_1pct"],
+                r["cv_5pct"],
+                r["cv_10pct"],
+                r["half_life"],
+                float(r["n_obs"]),
+                float(r["cointegrated"]),
+            ]
+            for col, (got, exp) in enumerate(zip(out[i], expected)):
+                if np.isnan(exp):
+                    assert np.isnan(got), f"pair {i} col {self.COLUMNS[col]}"
+                else:
+                    assert got == exp, f"pair {i} col {self.COLUMNS[col]}"
+
+    @pytest.mark.parametrize("max_lag,use_aic", [(-1, True), (4, True), (2, False)])
+    def test_lag_options_are_passed_through(self, max_lag, use_aic):
+        panel = self._panel(6, 250, seed=4)
+        pairs = self._all_pairs(6)
+        out = _cpp.batch_engle_granger(panel, pairs, max_lag, use_aic)
+        for i, (a, b) in enumerate(pairs):
+            r = _cpp.engle_granger(panel[a], panel[b], max_lag, use_aic)
+            assert out[i, 1] == r["hedge_ratio"]
+            assert out[i, 3] == float(r["optimal_lag"])
+
+    def test_row_order_follows_pairs(self):
+        panel = self._panel(4, 200, seed=9)
+        pairs = np.array([[3, 0], [1, 2], [0, 1], [3, 0]], dtype=np.int32)
+        out = _cpp.batch_engle_granger(panel, pairs)
+        for i, (a, b) in enumerate(pairs):
+            r = _cpp.engle_granger(panel[a], panel[b])
+            assert out[i, 1] == r["hedge_ratio"]
+        # Rows 0 and 3 name the same pair, so they must agree exactly.
+        np.testing.assert_array_equal(out[0], out[3])
+
+    @pytest.mark.parametrize("bad", [[[0, 4]], [[4, 0]], [[-1, 1]]])
+    def test_out_of_range_pair_raises(self, bad):
+        panel = self._panel(3, 120, seed=2)
+        with pytest.raises(ValueError, match="outside"):
+            _cpp.batch_engle_granger(panel, np.array(bad, dtype=np.int32))
+
+    def test_shape_validation(self):
+        panel = self._panel(3, 120, seed=2)
+        with pytest.raises(ValueError, match="2-D"):
+            _cpp.batch_engle_granger(panel[0], np.array([[0, 1]], dtype=np.int32))
+        with pytest.raises(ValueError, match="2-D"):
+            _cpp.batch_engle_granger(panel, np.array([0, 1], dtype=np.int32))
+
+    def test_empty_pairs(self):
+        panel = self._panel(3, 120, seed=2)
+        out = _cpp.batch_engle_granger(panel, np.zeros((0, 2), dtype=np.int32))
+        assert out.shape == (0, 11)
+
+
+@requires_cpp
+class TestScanCointegratedPairs:
+    """The Python entry point over the batch kernel."""
+
+    @staticmethod
+    def _frame(n_tickers=8, n_bars=300, seed=11):
+        rng = np.random.default_rng(seed)
+        idx = pd.date_range("2020-01-01", periods=n_bars, freq="B")
+        base = np.cumsum(rng.normal(0, 1, n_bars)) + 100.0
+        data = {}
+        for i in range(n_tickers):
+            name = f"T{i:02d}"
+            if i % 3:
+                data[name] = (1.0 + 0.1 * i) * base + rng.normal(0, 1.5, n_bars)
+            else:
+                data[name] = np.cumsum(rng.normal(0, 1, n_bars)) + 100.0
+        return pd.DataFrame(data, index=idx)
+
+    def test_matches_cointegration_test_per_pair(self):
+        from standard_quant_tools.analysis.cointegration import (
+            cointegration_test,
+            scan_cointegrated_pairs,
+        )
+
+        df = self._frame()
+        res = scan_cointegrated_pairs(df)
+        assert res.index.names == ["symbol_a", "symbol_b"]
+        assert len(res) == 8 * 7 // 2
+
+        for (a, b), row in res.iterrows():
+            r = cointegration_test(df[a], df[b])
+            assert row["p_value"] == r["p_value"]
+            assert row["hedge_ratio"] == r["hedge_ratio"]
+            assert row["adf_statistic"] == r["adf_statistic"]
+            assert bool(row["cointegrated"]) is bool(r["cointegrated"])
+
+    def test_explicit_pair_subset(self):
+        from standard_quant_tools.analysis.cointegration import (
+            scan_cointegrated_pairs,
+        )
+
+        df = self._frame()
+        subset = [("T00", "T03"), ("T01", "T02")]
+        res = scan_cointegrated_pairs(df, pairs=subset)
+        assert list(res.index) == subset
+
+    def test_dtypes_are_useful(self):
+        from standard_quant_tools.analysis.cointegration import (
+            scan_cointegrated_pairs,
+        )
+
+        res = scan_cointegrated_pairs(self._frame(4, 200))
+        assert res["cointegrated"].dtype == bool
+        assert res["optimal_lag"].dtype.kind == "i"
+        assert res["n_obs"].dtype.kind == "i"
+
+    def test_rejects_bad_input(self):
+        from standard_quant_tools.analysis.cointegration import (
+            scan_cointegrated_pairs,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        df = self._frame(4, 200)
+        with pytest.raises(ValidationError, match="autolag"):
+            scan_cointegrated_pairs(df, autolag="xyz")
+        with pytest.raises(ValidationError, match="unknown ticker"):
+            scan_cointegrated_pairs(df, pairs=[("T00", "NOPE")])
+        with pytest.raises(ValidationError, match="at least 2 series"):
+            scan_cointegrated_pairs(df[["T00"]])
+        with pytest.raises(ValidationError, match="at least 8 aligned bars"):
+            scan_cointegrated_pairs(df.iloc[:5])

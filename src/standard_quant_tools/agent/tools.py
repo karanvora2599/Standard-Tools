@@ -1973,6 +1973,9 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     """
     from standard_quant_tools.analysis.cointegration import cointegration_test as _coint
     from standard_quant_tools.analysis.cointegration import compute_spread as _spread
+    from standard_quant_tools.analysis.cointegration import (
+        scan_cointegrated_pairs as _scan_pairs_batch,
+    )
     from standard_quant_tools.analysis.cointegration import spread_zscore as _zscore
 
     n_t = len(input_data.tickers)
@@ -2003,9 +2006,55 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     passing: List[PairResult] = []
     failed_pairs: List[PairFailure] = []
 
+    # ── Batch fast path ──────────────────────────────────────────────────
+    # The loop below is O(N^2) in the universe -- 2,000 tickers is 1,999,000
+    # iterations, each paying a full pandas round trip into the extension and
+    # none of them parallel. Measured at 2,000 bars that is 9.8 hours;
+    # scan_cointegrated_pairs does the same work in about 5 minutes.
+    #
+    # Engaged only when every series shares an IDENTICAL index. The batch
+    # path aligns the whole universe onto one common sample, while this loop
+    # aligns each pair against only its own partner -- the same thing when
+    # the indexes already match (the usual case for one date range from one
+    # provider) and NOT the same thing when they do not. Rather than silently
+    # change which bars a pair is tested on, fall back to the loop.
+    batch: Dict[Tuple[str, str], Any] = {}
+    if len(valid_tickers) >= 2:
+        first = prices[valid_tickers[0]].index  # type: ignore[union-attr]
+        if all(prices[t].index.equals(first) for t in valid_tickers[1:]):  # type: ignore[union-attr]
+            try:
+                frame = pd.DataFrame({t: prices[t] for t in valid_tickers})
+                scanned = _scan_pairs_batch(frame, all_pairs)
+                batch = {(a, b): row for (a, b), row in scanned.iterrows()}
+                logger.debug(
+                    "[scan_pairs] batch path: %d pairs in one native call",
+                    len(batch),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "[scan_pairs] batch path failed (%s) - using the per-pair loop",
+                    exc,
+                )
+                batch = {}
+
     for a, b in all_pairs:
         try:
-            result = _coint(prices[a], prices[b])  # type: ignore[arg-type]
+            if batch:
+                row = batch[(a, b)]
+                if not math.isfinite(float(row["adf_statistic"])):
+                    raise ValueError(
+                        "Engle-Granger produced no statistic for this pair "
+                        "(degenerate or perfectly collinear series)"
+                    )
+                result = {
+                    "cointegrated": bool(row["cointegrated"]),
+                    "p_value": float(row["p_value"]),
+                    "hedge_ratio": float(row["hedge_ratio"]),
+                    "adf_statistic": float(row["adf_statistic"]),
+                    "half_life_days": float(row["half_life_days"]),
+                }
+            else:
+                result = _coint(prices[a], prices[b])  # type: ignore[arg-type]
             n_tested += 1
 
             if (

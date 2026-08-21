@@ -205,6 +205,104 @@ std::vector<BacktestResult> batch_backtest_crossover(
  * @return               Vector of BacktestResult, one per test in input order.
  *                       equity_curve is empty in every result to save memory.
  */
+// ── Multi-asset portfolio simulation ────────────────────────────────────────
+//
+// run_strategy is the single-asset case; this is the shared-cash portfolio
+// account. The Python engine's per-bar loop had already been optimized hard
+// (dense matrices materialized once, positional indexing, a vectorized
+// rebalance path) and still cost 124.6 us/bar at 500 tickers, extrapolating
+// to ~450 us/bar at 2,000 -- about 0.9 s for one 2,000-bar backtest, which a
+// walk-forward or a parameter sweep multiplies by fifty or a hundred.
+//
+// SCOPE. This deliberately implements ONLY the configuration the Python
+// engine itself already carves out as its vectorized fast path:
+//
+//     commission_model == "pct" and not use_impact_model
+//                              and max_adv_participation is None
+//
+// The per-share commission model has a per-ORDER minimum, the impact model
+// needs a per-ticker volatility lookup, and the ADV constraint has to raise
+// naming one ticker -- each is a genuinely per-element decision that would
+// have to be restated here to be supported, and restating it is how the two
+// implementations drift. Everything outside the fast path stays on the
+// Python loop, which is unchanged.
+
+// Why a simulation stopped, so the caller can raise the same message it
+// always raised rather than a generic one from the kernel.
+enum PortfolioSimStatus : int {
+    kPortfolioOk = 0,
+    kPortfolioBadExecPrice,          // nonpositive/non-finite price, nonzero target
+    kPortfolioInsolventAtRebalance,  // equity <= 0 after a rebalance's costs
+    kPortfolioLeverageBreach,        // realized gross leverage over the limit
+    kPortfolioPositionBreach,        // realized position size over the limit
+    kPortfolioInsolventAtBar,        // equity <= 0 from price drift alone
+};
+
+struct PortfolioSimError {
+    int         status = kPortfolioOk;
+    std::size_t bar    = 0;    // bar index where it happened
+    int         ticker = -1;   // ticker position, or -1 when not ticker-specific
+    double      value  = 0.0;  // the offending quantity, for the message
+};
+
+// Where a rebalance executes. Mirrors the Python `fill_price` parameter.
+enum PortfolioFill : int {
+    kFillClose   = 0,  // execute at this bar's Close
+    kFillNextOpen = 1, // execute at the NEXT bar's Open
+    kFillHl2      = 2, // execute at this bar's (High+Low)/2
+};
+
+struct PortfolioCosts {
+    double initial_capital     = 10'000.0;
+    double commission_pct      = 0.001;
+    double slippage_pct        = 0.0005;
+    double max_gross_leverage  = 1.0;
+    double max_position_pct    = 1.0;
+    double borrow_fee_bps      = 0.0;
+    double margin_interest_rate = 0.0;
+    int    fill                = kFillClose;
+};
+
+/**
+ * Simulate one shared-cash portfolio account.
+ *
+ * @param close       (n_bars x n_tickers) row-major closes. Equity is always
+ *                    marked to Close regardless of where trades execute.
+ * @param exec_prices (n_bars x n_tickers) row-major execution prices: the
+ *                    Open matrix for kFillNextOpen, (High+Low)/2 for kFillHl2,
+ *                    and `close` itself for kFillClose.
+ * @param weights     (n_rebal x n_tickers) row-major target weights.
+ * @param rebal_bars  (n_rebal) bar index each weight row triggers at, ascending.
+ * @param day_gaps    (n_bars) calendar days since the previous bar, for
+ *                    financing accrual. day_gaps[0] is unused (1.0 by
+ *                    convention). A Friday->Monday gap is 3, not 1.
+ * @param out_equity, out_cash, out_gross, out_net  (n_bars) each.
+ * @param out_rebal   (n_rebal x 3): turnover_pct, gross_leverage_after,
+ *                    n_positions. Only rows for rebalances that actually
+ *                    executed are written; see the return value.
+ * @param err         Set when the simulation stops early. On any non-ok
+ *                    status the output buffers are valid only up to `bar`.
+ *
+ * @returns the number of rebalances that executed.
+ */
+std::size_t run_portfolio_simulation(
+    const double* close,
+    const double* exec_prices,
+    const double* weights,
+    const long long* rebal_bars,
+    const double* day_gaps,
+    std::size_t   n_bars,
+    std::size_t   n_tickers,
+    std::size_t   n_rebal,
+    const PortfolioCosts& costs,
+    double* out_equity,
+    double* out_cash,
+    double* out_gross,
+    double* out_net,
+    double* out_rebal,
+    PortfolioSimError* err);
+
+
 std::vector<BacktestResult> batch_run_strategy(
     const double* prices,
     const double* signals_flat,

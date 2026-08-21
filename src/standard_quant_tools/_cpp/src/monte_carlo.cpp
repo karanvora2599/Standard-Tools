@@ -84,7 +84,7 @@ bool simulate_forward_paths_into(
         std::uniform_int_distribution<std::size_t> dist(0, max_start);
 
 #ifdef _OPENMP
-        #pragma omp for schedule(static)
+        #pragma omp for schedule(guided)
 #endif
         for (int i = 0; i < n_simulations; ++i) {
             // Derive this path's own seed from the base seed and its
@@ -203,7 +203,7 @@ bool simulate_forward_paths_terminal_into(
         std::uniform_int_distribution<std::size_t> dist(0, max_start);
 
 #ifdef _OPENMP
-        #pragma omp for schedule(static)
+        #pragma omp for schedule(guided)
 #endif
         for (int i = 0; i < n_simulations; ++i) {
             std::uint64_t mix_state = base_seed ^ (static_cast<std::uint64_t>(i) * 0x9E3779B97F4A7C15ULL + 1);
