@@ -23,9 +23,9 @@ it is in three places the porting effort never reached:
 
 | | Where the time is | Measured | Fix |
 |---|---|---|---|
-| **A** | ADF lag selection is `O(T · L³)` | `engle_granger` is **O(n²)**: 246 ms at n=8000, of which **1953×** is the lag sweep | One nested QR instead of `L` independent ones → `O(T · L²)` |
+| **A** | ~~ADF lag selection is `O(T · L³)`~~ ✅ **shipped** | was **O(n^1.99)**, 246 ms at n=8000 → now **13.8 ms**, 9.6–17.9× | One nested QR replaced `L` independent ones |
 | **B** | Universe work loops in **Python**, one call per ticker or per pair | 2,000-ticker pair scan: **9.8 hr serial / 37 min on 16 cores** | Batch entry points that cross the boundary once |
-| **C** | Parallel scaling is non-monotonic | `batch_run_strategy` is *slower* on 8 threads (60.4 ms) than on 6 (44.5 ms) | `schedule(guided)` — `static` is wrong on a hybrid P/E-core CPU |
+| **C** | Parallel scaling is non-monotonic | `batch_run_strategy` is *slower* on 8 threads (60.4 ms) than on 6 (44.5 ms) | `schedule(guided)` — `static` never rebalances, on any machine |
 
 Fixing A and B together takes the flagship 2,000-ticker cointegration scan from
 **9.8 hours to an estimated ~1.5 minutes**. That single item is worth more than every
@@ -73,8 +73,15 @@ Raw binding time, min of 7. `n^x` is the empirical exponent between the two larg
 ### 2.2 Thread scaling — and why 16 cores are not 16 cores
 
 The CPU is an **i7-13620H: 6 P-cores (12 threads via SMT) + 4 E-cores (4 threads)**,
-10 physical / 16 logical. This is a *hybrid* part, and it governs the whole analysis
-below — E-cores run roughly half the throughput of a P-core.
+10 physical / 16 logical — a *hybrid* part, where E-cores run roughly half the throughput
+of a P-core.
+
+That matters for reading the absolute numbers, and it is **not** what the fix in §5.1 is
+tuned to. A hybrid CPU is simply an environment that makes an existing load-imbalance bug
+easy to see; the same bug shows up under an SMT pairing, a cgroup CPU quota, a busy shared
+machine, or merely uneven work per iteration. Treat the table below as evidence that
+`schedule(static)` does not rebalance — a fact about the scheduling clause, true on every
+machine — rather than as a tuning target for this one.
 
 A realistic aggregate ceiling is therefore about
 `6×1.0 (P) + 6×0.25 (SMT siblings) + 4×0.55 (E) ≈ 9.7×`, **not 16×**.
@@ -186,7 +193,12 @@ pandas layer wins ~14%. A batch *entry point* that removes it wins ~94%.
 
 The flagship item. Three changes, independently valuable, multiplicative together.
 
-### 3.1 One nested QR for ADF lag selection
+### 3.1 One nested QR for ADF lag selection — ✅ SHIPPED
+
+> **Result: 9.6–17.9× measured, growing with n.** Not the 26–36× predicted below; that
+> estimate was wrong and the arithmetic is corrected under "What it actually delivered".
+> statsmodels parity holds to 8.2e-13 on the ADF statistic across 200 random pairs, with
+> zero disagreements on the `cointegrated` flag.
 
 **Problem.** `adf_test` scores every candidate lag `p ∈ [0, L]` by building a fresh
 `(T × k)` design matrix and running a full column-pivoted QR, `k = ntrend + 1 + p`. Total
@@ -216,8 +228,44 @@ RSS(p) = Σ_{i ≥ ntrend+1+p} (Q'b)_i²
 
 One `O(T·L²)` factorization replaces `L` factorizations totalling `O(T·L³)`.
 
-**Expected gain.** `L×` on the selection pass — **26× at n=2000, 36× at n=8000** — turning
-`engle_granger` from `O(n^1.99)` into roughly `O(n^1.25)`.
+**Expected gain (as originally estimated — see below for what was wrong).** `L×` on the
+selection pass, **26× at n=2000, 36× at n=8000**.
+
+**What it actually delivered.**
+
+| n | before | after | speedup |
+|---:|---:|---:|---:|
+| 500 | 1.100 ms | 0.115 ms | 9.6× |
+| 1000 | 5.330 | 0.506 | 10.5× |
+| 2000 | 17.998 | 1.622 | 11.1× |
+| 4000 | 63.767 | 6.274 | 10.2× |
+| 8000 | 245.931 | 13.776 | **17.9×** |
+
+**The `L×` estimate was wrong, and it is worth recording why.** The old sweep costs
+`Σₚ O(T·(p+1)²) ≈ O(T·L³/3)`, not `O(T·L³)`. Against the new `O(T·L²)` that is a factor of
+`L/3`, not `L` — 8.7× at L=26 and 12× at L=36. The measured numbers *beat* that corrected
+figure (11.1× and 17.9×) because the change also removed column pivoting from the sweep,
+and pivoting recomputes remaining column norms at every step, which is itself `O(T·k²)` on
+top of the reflections.
+
+So: right idea, right mechanism, arithmetic off by 3×. The honest summary is
+**~10× at the sizes a pair scan actually uses, rising to ~18× at n=8000.**
+
+**A new bottleneck surfaced.** With the sweep no longer dominating, the single large QR is,
+and it is now *memory*-bound rather than flop-bound at large n:
+
+| n | design matrix | `T·k²` | ms per Mflop |
+|---:|---:|---:|---:|
+| 8000 | 2.37 MB | 11.0 M | 0.99 |
+| 12000 | 3.94 MB | 20.2 M | 1.31 |
+| 16000 | 5.63 MB | 31.0 M | 2.21 |
+| 24000 | 9.41 MB | 57.6 M | 2.69 |
+
+Cost per flop nearly triples as the design outgrows cache. The cause is layout: the design
+is **row-major** while the factorization is **column-oriented**, so every reflection strides
+through memory with stride `k`. Storing it column-major would make every inner loop
+unit-stride. This does not affect the pair-scan use case — at n=500–2000 the design is
+76 KB–600 KB and fully cache-resident — so it is logged as a follow-up, not done here.
 
 **Risks and design notes.**
 - Pivoting must be dropped for the nested read-off, since it reorders columns. The
@@ -426,27 +474,55 @@ the 90× for a fraction of the work.
 is **non-monotonic**, with real regressions at 4, 8 and 14 threads. Realistic headroom is
 **1.7–2.3×** across every parallel kernel, for no algorithmic change.
 
+**The fix must be machine-agnostic.** Everything measured above came from one hybrid
+laptop, and this library runs on servers, CI containers with cgroup CPU quotas, other
+laptops, and ARM. A recommendation like "cap threads at 12 because 12 is this box's P-core
+count" would be tuning the library to the machine that happened to profile it — on a
+16-core homogeneous server it is a 25% throughput cut for no reason. The changes below are
+chosen because they are *right everywhere*, and the hybrid CPU is only the environment that
+made the existing problem visible.
+
 In priority order:
 
 1. **Replace `schedule(static)` with `schedule(guided)`.** Every parallel loop in the
-   codebase uses `static`, which assigns each thread an equal *count* of iterations. On a
-   6 P-core + 4 E-core CPU the threads are not equal, so the region finishes when the
-   E-core chunks do. This is the direct explanation for 8-threads-slower-than-6, and it is
-   a one-line change per pragma. `rolling_hurst` has a second reason to want it: per-window
-   cost genuinely varies, because `log_sizes` yields a different box count per window.
-2. **Cap default threads at the P-core count.** `rolling_hurst` is fastest at 12 threads
-   (26.2 ms) and 8% slower at 16 (28.3 ms). `omp_get_max_threads()` returns 16. Consider
-   defaulting to the physical/P-core count and letting `SQT_NUM_THREADS` raise it —
-   measure per kernel, since `batch_run_strategy` does still prefer 16.
+   codebase uses `static`, which assigns each thread an equal *count* of iterations up
+   front and never rebalances. That is only optimal when every iteration costs the same
+   *and* every thread runs at the same speed — and neither holds in general:
+
+   - **Uneven work per iteration.** `rolling_hurst`'s per-window cost genuinely varies,
+     because `log_sizes` yields a different box count per window. Nothing about that is
+     machine-specific.
+   - **Uneven threads.** Hybrid P/E cores (Intel 12th gen+, Apple silicon, ARM
+     big.LITTLE), SMT siblings sharing a physical core, a cgroup CPU quota, another
+     process on the box, or thermal/power asymmetry. All of these are common; the hybrid
+     laptop here is just one instance.
+
+   `guided` hands out shrinking chunks on demand, so a thread that finishes early takes
+   more work. It adapts to whatever the machine turns out to be rather than assuming.
+   One line per pragma, no effect on results.
+
+2. **Do not hardcode a thread count.** The right default is what the environment already
+   says: `SQT_NUM_THREADS` when set, otherwise OpenMP's own default, which honours
+   `OMP_NUM_THREADS` and on Linux generally reflects the container's CPU allocation. The
+   observation that this box prefers 12 threads for `rolling_hurst` is evidence for item 1
+   — load imbalance — not a number to ship. Fixing the scheduling is what removes the
+   reason a thread count above the P-core count hurt in the first place.
+
 3. **Per-thread allocation churn.** Each `rolling_hurst` window builds several small
    `std::vector`s and a `HurstResult` holding two `std::string`s. Hoist what can be hoisted
-   into the existing `RollingHurstScratch`.
+   into the existing `RollingHurstScratch`. Allocator contention across threads is
+   machine-independent.
+
 4. **False sharing** on the results arrays. `batch_run_strategy` writes `results[t]` from
    every thread. `BacktestResult` is large enough that this is probably fine — but it is
    unmeasured, so confirm before assuming either way.
 
-**Effort:** ~2 days including measurement. **Risk:** low — items 1 and 2 are configuration
-changes with no effect on results, gated by the existing thread-count-independence tests.
+**Verification must also be machine-agnostic.** "Faster on this laptop" is not the bar. The
+gate is that scaling becomes **monotonic** — adding a thread never makes a kernel slower —
+which is a property that should hold on any machine and is exactly what fails today.
+
+**Effort:** ~2 days including measurement. **Risk:** low — items 1–3 have no effect on
+results, and are gated by the existing thread-count-independence tests.
 
 ### 5.2 `rolling_factor_loadings`: QR update/downdate
 

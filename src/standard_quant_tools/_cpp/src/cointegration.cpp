@@ -304,7 +304,14 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
 
     // Fits Δy_t = [c +] φ·y_{t-1} + Σψⱼ·Δy_{t-j} over rows t = start_t .. n-1.
     //
-    // start_t is the whole point of this refactor. The usable row count at lag
+    // Used ONLY by the report pass now -- the selection sweep below reads
+    // every candidate's RSS off a single nested factorization instead of
+    // calling this once per lag. The report pass still needs the full
+    // column-pivoted solve, because the reported t-statistic wants both the
+    // coefficient and xtx_inv_diag from one decomposition, so this stays
+    // exactly as it was.
+    //
+    // start_t is the whole point of the earlier refactor. The usable row count at lag
     // p is n-1-p, so a larger p is fitted on FEWER observations, and the
     // previous implementation scored every candidate on its own such sample.
     // Information criteria computed from different response vectors are not
@@ -369,35 +376,86 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
         return f;
     };
 
-    // ── Selection pass: one common sample for every candidate ────────────────
+    // ── Selection pass: ONE factorization for every candidate ────────────────
+    //
+    // This used to call fit_lag once per candidate lag, so the sweep built
+    // max_lag+1 separate design matrices and ran max_lag+1 separate
+    // column-pivoted QRs -- O(T*L^3) in total, with L growing as n^(1/4) via
+    // Schwert's rule. That made adf_test, and therefore engle_granger, the
+    // only kernel in the extension that is not linear in n. Measured before
+    // this change: O(n^1.99), 246ms at n=8000, of which forcing max_lag=0
+    // showed 1953x was the sweep itself.
+    //
+    // The candidates are NESTED and the sweep already holds all of them to a
+    // common sample. fit_lag emits columns as
+    //     [const?, y_{t-1}, dy_{t-1}, ..., dy_{t-p}]
+    // so the lag-p design is exactly the first ntrend+1+p columns of the
+    // lag-max_lag design, on identical rows. One unpivoted Householder QR of
+    // the full design therefore yields every candidate's RSS at once -- see
+    // qr::lstsq_nested_rss for why the identity is exact.
+    //
+    // The arithmetic per candidate below is unchanged; only where RSS and the
+    // rank verdict come from is different.
     double best_ic  = kInf;
     int    best_lag = -1;
     const std::size_t sel_start = static_cast<std::size_t>(max_lag) + 1;
 
-    for (int p = 0; p <= max_lag; ++p) {
-        const auto f = fit_lag(p, sel_start, /*want_t=*/false);
-        if (!f.ok) continue;  // rank-deficient at this p; another p may solve
+    if (sel_start < n) {
+        const std::size_t T_sz   = n - sel_start;
+        const int         k_full = ntrend + 1 + max_lag;
+        const std::size_t kf_sz  = static_cast<std::size_t>(k_full);
+        const int T =
+            numerics::checked_narrow_to_int(T_sz, "adf_test: regression rows");
 
-        const double T_d = static_cast<double>(f.T);
-        const double k_d = static_cast<double>(f.k);
-        double ic;
-        if (f.rss <= 0.0) {
-            ic = -kInf;  // exact fit wins outright
-        } else {
-            // σ² = RSS/T, the MLE variance -- NOT the unbiased RSS/(T-k).
-            // statsmodels' OLS.aic/.bic are log-likelihood based and the
-            // likelihood uses the MLE variance; the previous RSS/(T-k) form
-            // folded a df correction into a criterion that already carries its
-            // own k penalty, which changes which lag wins. Both this and the
-            // common sample above are needed: measured over 200 series, fixing
-            // only the sample cut disagreement with statsmodels from 33% to
-            // 20.5%, fixing only σ² made it slightly worse at 34.5%, and both
-            // together reached exact agreement on all 200.
-            const double sig2 = f.rss / T_d;
-            ic = std::log(sig2) +
-                 (use_aic ? 2.0 * k_d / T_d : std::log(T_d) * k_d / T_d);
+        std::vector<double> A(numerics::checked_mul(T_sz, kf_sz,
+            "adf_test: design matrix size"));
+        std::vector<double> b(T_sz);
+        for (std::size_t row = 0; row < T_sz; ++row) {
+            const std::size_t t = sel_start + row;
+            double* rp = A.data() + row * kf_sz;
+            int c = 0;
+            if (include_constant) rp[c++] = 1.0;
+            rp[c++] = y[t - 1];
+            // Δy_{t-j} = y[t-j] - y[t-j-1] = dy[t-j-1]
+            for (int j = 1; j <= max_lag; ++j)
+                rp[c++] = dy[t - 1 - static_cast<std::size_t>(j)];
+            b[row] = dy[t - 1];  // Δy_t
         }
-        if (ic < best_ic) { best_ic = ic; best_lag = p; }
+
+        std::vector<double>        rss(kf_sz + 1);
+        std::vector<unsigned char> full_rank(kf_sz + 1);
+        qr::lstsq_nested_rss(A.data(), b.data(), T, k_full,
+                             rss.data(), full_rank.data());
+
+        const double T_d = static_cast<double>(T);
+        for (int p = 0; p <= max_lag; ++p) {
+            const int k = ntrend + 1 + p;
+            if (T_sz <= static_cast<std::size_t>(k)) continue;  // need df >= 1
+            // Rank-deficient at this p; another p may still solve. Same
+            // policy as the fit_lag(...).ok check this replaces.
+            if (!full_rank[static_cast<std::size_t>(k)]) continue;
+
+            const double r   = rss[static_cast<std::size_t>(k)];
+            const double k_d = static_cast<double>(k);
+            double ic;
+            if (r <= 0.0) {
+                ic = -kInf;  // exact fit wins outright
+            } else {
+                // σ² = RSS/T, the MLE variance -- NOT the unbiased RSS/(T-k).
+                // statsmodels' OLS.aic/.bic are log-likelihood based and the
+                // likelihood uses the MLE variance; the previous RSS/(T-k) form
+                // folded a df correction into a criterion that already carries its
+                // own k penalty, which changes which lag wins. Both this and the
+                // common sample above are needed: measured over 200 series, fixing
+                // only the sample cut disagreement with statsmodels from 33% to
+                // 20.5%, fixing only σ² made it slightly worse at 34.5%, and both
+                // together reached exact agreement on all 200.
+                const double sig2 = r / T_d;
+                ic = std::log(sig2) +
+                     (use_aic ? 2.0 * k_d / T_d : std::log(T_d) * k_d / T_d);
+            }
+            if (ic < best_ic) { best_ic = ic; best_lag = p; }
+        }
     }
 
     if (best_lag < 0) return out;  // nothing solved at any lag: NaN is honest

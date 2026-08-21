@@ -10,10 +10,13 @@
  */
 
 #include "sqt/cointegration.hpp"
+#include "sqt/qr.hpp"
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 // ── Tiny assertion helpers ────────────────────────────────────────────────────
@@ -76,6 +79,19 @@ static std::vector<double> ar1_series(int n, double phi = 0.9,
     out[0] = eps[0];
     for (int i = 1; i < n; ++i) out[i] = phi * out[i - 1] + eps[i];
     return out;
+}
+
+
+// Deterministic per-element pseudo-random in [-1, 1), for building design
+// matrices. random_walk() above returns a whole cumulative series, which is
+// the wrong shape for filling individual regressor cells.
+static double pseudo_random(std::uint64_t& state) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    std::uint64_t x = state;
+    x ^= x >> 33;
+    x *= 0xFF51AFD7ED558CCDULL;
+    x ^= x >> 33;
+    return (static_cast<double>(x >> 11) / 9007199254740992.0) * 2.0 - 1.0;
 }
 
 
@@ -496,6 +512,182 @@ static void test_kalman_2state_tracks_true_alpha_beta() {
 }
 
 
+// ── qr::lstsq_nested_rss ─────────────────────────────────────────────────────
+//
+// The primitive behind adf_test's lag sweep. It claims that ONE unpivoted
+// factorization of a T x k design yields the residual sum of squares of every
+// first-j-columns submodel. These tests check that claim against the thing it
+// replaced: an independent qr::lstsq of each prefix, factorized separately.
+
+static void check_nested_matches_per_prefix(
+    const std::vector<double>& design, int T, int k,
+    const std::vector<double>& rhs, double tol)
+{
+    // Reference: factorize each prefix on its own, the old way.
+    std::vector<double> ref_rss(static_cast<std::size_t>(k) + 1,
+                                std::numeric_limits<double>::quiet_NaN());
+    std::vector<unsigned char> ref_ok(static_cast<std::size_t>(k) + 1, 0);
+    for (int j = 1; j <= k; ++j) {
+        if (T <= j) continue;
+        std::vector<double> A(static_cast<std::size_t>(T) * static_cast<std::size_t>(j));
+        for (int r = 0; r < T; ++r)
+            for (int c = 0; c < j; ++c)
+                A[static_cast<std::size_t>(r) * static_cast<std::size_t>(j) +
+                  static_cast<std::size_t>(c)] =
+                    design[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
+                           static_cast<std::size_t>(c)];
+        std::vector<double> b = rhs;
+        std::vector<int> perm(static_cast<std::size_t>(j));
+        const auto sol = sqt::qr::lstsq(A.data(), b.data(), T, j, perm.data());
+        ref_ok[static_cast<std::size_t>(j)] = sol.full_rank ? 1u : 0u;
+        if (sol.full_rank) ref_rss[static_cast<std::size_t>(j)] = sol.rss;
+    }
+
+    // Under test: one factorization for all of them.
+    std::vector<double> A2 = design;
+    std::vector<double> b2 = rhs;
+    std::vector<double> got_rss(static_cast<std::size_t>(k) + 1);
+    std::vector<unsigned char> got_ok(static_cast<std::size_t>(k) + 1);
+    sqt::qr::lstsq_nested_rss(A2.data(), b2.data(), T, k, got_rss.data(), got_ok.data());
+
+    for (int j = 1; j <= k; ++j) {
+        if (T <= j) continue;
+        const std::size_t jj = static_cast<std::size_t>(j);
+        CHECK(got_ok[jj] == ref_ok[jj]);
+        if (!ref_ok[jj]) continue;
+        CHECK(got_rss[jj] >= 0.0);  // suffix sum of squares, never negative
+        const double scale = std::max(std::abs(ref_rss[jj]), 1e-12);
+        CHECK_NEAR(got_rss[jj] / scale, ref_rss[jj] / scale, tol);
+    }
+}
+
+static void test_nested_rss_matches_independent_fits_random() {
+    std::uint64_t state = 20260821;
+    for (int trial = 0; trial < 20; ++trial) {
+        const int T = 40 + static_cast<int>((pseudo_random(state) + 1.0) * 120.0);
+        const int k = 2 + static_cast<int>((pseudo_random(state) + 1.0) * 9.0);
+        std::vector<double> design(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
+        std::vector<double> rhs(static_cast<std::size_t>(T));
+        for (int r = 0; r < T; ++r) {
+            for (int c = 0; c < k; ++c)
+                design[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
+                       static_cast<std::size_t>(c)] = (c == 0) ? 1.0 : pseudo_random(state);
+            rhs[static_cast<std::size_t>(r)] = pseudo_random(state);
+        }
+        check_nested_matches_per_prefix(design, T, k, rhs, 1e-9);
+    }
+}
+
+static void test_nested_rss_is_monotone_nonincreasing_in_k() {
+    // Adding a regressor can never increase the residual sum of squares.
+    // A property the identity must satisfy regardless of what the reference
+    // says -- and one that a wrong suffix offset would break immediately.
+    std::uint64_t state = 4242;
+    const int T = 120, k = 8;
+    std::vector<double> A(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
+    std::vector<double> b(static_cast<std::size_t>(T));
+    for (int r = 0; r < T; ++r) {
+        for (int c = 0; c < k; ++c)
+            A[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
+              static_cast<std::size_t>(c)] = (c == 0) ? 1.0 : pseudo_random(state);
+        b[static_cast<std::size_t>(r)] = pseudo_random(state);
+    }
+    std::vector<double> rss(static_cast<std::size_t>(k) + 1);
+    std::vector<unsigned char> ok(static_cast<std::size_t>(k) + 1);
+    sqt::qr::lstsq_nested_rss(A.data(), b.data(), T, k, rss.data(), ok.data());
+    for (int j = 1; j <= k; ++j)
+        CHECK(rss[static_cast<std::size_t>(j)] <=
+              rss[static_cast<std::size_t>(j - 1)] + 1e-9);
+}
+
+static void test_nested_rss_flags_a_duplicated_column() {
+    // Column 3 duplicates column 1, so every prefix through it is rank
+    // deficient and every prefix before it is not.
+    std::uint64_t state = 77;
+    const int T = 80, k = 5;
+    std::vector<double> A(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
+    std::vector<double> b(static_cast<std::size_t>(T));
+    for (int r = 0; r < T; ++r) {
+        double* rp = A.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(k);
+        rp[0] = 1.0;
+        rp[1] = pseudo_random(state);
+        rp[2] = pseudo_random(state);
+        rp[3] = rp[1];               // exact duplicate
+        rp[4] = pseudo_random(state);
+        b[static_cast<std::size_t>(r)] = pseudo_random(state);
+    }
+    std::vector<double> rss(static_cast<std::size_t>(k) + 1);
+    std::vector<unsigned char> ok(static_cast<std::size_t>(k) + 1);
+    sqt::qr::lstsq_nested_rss(A.data(), b.data(), T, k, rss.data(), ok.data());
+    CHECK(ok[1] == 1);
+    CHECK(ok[2] == 1);
+    CHECK(ok[3] == 1);
+    CHECK(ok[4] == 0);  // the duplicate enters here
+    CHECK(ok[5] == 0);  // and every longer prefix stays deficient
+}
+
+static void test_nested_rss_handles_prefixes_beyond_T() {
+    // A design wider than it is tall: short prefixes are still answerable,
+    // which is exactly the case adf_test hits on a short series with a large
+    // auto max_lag.
+    std::uint64_t state = 5;
+    const int T = 6, k = 10;
+    std::vector<double> A(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
+    std::vector<double> b(static_cast<std::size_t>(T));
+    for (int r = 0; r < T; ++r) {
+        for (int c = 0; c < k; ++c)
+            A[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
+              static_cast<std::size_t>(c)] = (c == 0) ? 1.0 : pseudo_random(state);
+        b[static_cast<std::size_t>(r)] = pseudo_random(state);
+    }
+    std::vector<double> rss(static_cast<std::size_t>(k) + 1);
+    std::vector<unsigned char> ok(static_cast<std::size_t>(k) + 1);
+    sqt::qr::lstsq_nested_rss(A.data(), b.data(), T, k, rss.data(), ok.data());
+    for (int j = 1; j < T; ++j) {
+        CHECK(!std::isnan(rss[static_cast<std::size_t>(j)]));
+        CHECK(rss[static_cast<std::size_t>(j)] >= 0.0);
+    }
+    for (int j = T + 1; j <= k; ++j)
+        CHECK(ok[static_cast<std::size_t>(j)] == 0);
+}
+
+static void test_nested_rss_scale_invariant() {
+    // The rank verdict must not change when a column is re-expressed in
+    // different units -- the reason the routine equilibrates before
+    // factorizing. RSS is invariant under column scaling by construction.
+    std::uint64_t state = 909;
+    const int T = 100, k = 4;
+    std::vector<double> A(static_cast<std::size_t>(T) * static_cast<std::size_t>(k));
+    std::vector<double> b(static_cast<std::size_t>(T));
+    for (int r = 0; r < T; ++r) {
+        double* rp = A.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(k);
+        rp[0] = 1.0;
+        for (int c = 1; c < k; ++c) rp[c] = pseudo_random(state);
+        b[static_cast<std::size_t>(r)] = pseudo_random(state);
+    }
+    std::vector<double> A1 = A, b1 = b;
+    std::vector<double> rss1(static_cast<std::size_t>(k) + 1);
+    std::vector<unsigned char> ok1(static_cast<std::size_t>(k) + 1);
+    sqt::qr::lstsq_nested_rss(A1.data(), b1.data(), T, k, rss1.data(), ok1.data());
+
+    // Same design, columns 1..k-1 rescaled by 1e13 / 1e-13 alternately.
+    std::vector<double> A2 = A, b2 = b;
+    for (int r = 0; r < T; ++r)
+        for (int c = 1; c < k; ++c)
+            A2[static_cast<std::size_t>(r) * static_cast<std::size_t>(k) +
+               static_cast<std::size_t>(c)] *= (c % 2 == 0) ? 1e13 : 1e-13;
+    std::vector<double> rss2(static_cast<std::size_t>(k) + 1);
+    std::vector<unsigned char> ok2(static_cast<std::size_t>(k) + 1);
+    sqt::qr::lstsq_nested_rss(A2.data(), b2.data(), T, k, rss2.data(), ok2.data());
+
+    for (int j = 1; j <= k; ++j) {
+        CHECK(ok1[static_cast<std::size_t>(j)] == ok2[static_cast<std::size_t>(j)]);
+        const double s = std::max(std::abs(rss1[static_cast<std::size_t>(j)]), 1e-12);
+        CHECK_NEAR(rss1[static_cast<std::size_t>(j)] / s,
+                   rss2[static_cast<std::size_t>(j)] / s, 1e-8);
+    }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -520,6 +712,13 @@ int main() {
     test_eg_large_baseline_hedge_ratio_recovered();
     test_eg_independent_random_walks();
     test_eg_hedge_ratio_sign();
+    // qr::lstsq_nested_rss (the primitive behind the lag sweep)
+    test_nested_rss_matches_independent_fits_random();
+    test_nested_rss_is_monotone_nonincreasing_in_k();
+    test_nested_rss_flags_a_duplicated_column();
+    test_nested_rss_handles_prefixes_beyond_T();
+    test_nested_rss_scale_invariant();
+
     test_eg_critical_values_ordered();
     test_eg_critical_values_match_mackinnon_2010_exactly();
     test_eg_p_value_in_unit_interval();
