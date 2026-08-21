@@ -6,6 +6,29 @@
 // MSVC has no per-function ISA-target attribute, so isolating AVX2
 // intrinsics into their own file compiled with /arch:AVX2 is the only
 // portable way to keep the rest of the module's codegen unaffected.
+//
+// "Isolating into their own translation unit" is only true if nothing
+// crosses that boundary, and the extension is built with LINK-TIME
+// OPTIMIZATION on for Release (INTERPROCEDURAL_OPTIMIZATION_RELEASE in
+// _cpp/CMakeLists.txt, plus pybind11_add_module's own LTO, so /GL appears
+// twice on the command line). LTO exists precisely to inline across
+// translation units. Were the optimizer to inline this function into
+// rolling_beta_into -- compiled WITHOUT /arch:AVX2 when SQT_NATIVE_ARCH is
+// off, which is the default and the configuration wheels ship in -- AVX2
+// instructions would land in a function reached without any CPUID check,
+// and the runtime dispatch in isa_dispatch.cpp would be protecting nothing.
+//
+// It does not currently do that, and that was checked rather than assumed.
+// Built with SQT_NATIVE_ARCH=OFF and disassembled with dumpbin, the linked
+// module contains exactly 2 vfmadd instructions -- the two this kernel
+// issues for vSxy and vSxx -- and the count is identical with and without
+// SQT_NOINLINE. MSVC 19.44 LTCG leaves the body here.
+//
+// SQT_NOINLINE stays anyway. The isolation this file's design depends on is
+// otherwise guaranteed by nothing but an optimizer's present-day choice,
+// the property at stake is "does this crash on a pre-Haswell CPU", and the
+// cost is one out-of-line call against a body that loops over an entire
+// window. GCC/Clang LTO is a different optimizer and was not measured here.
 
 #include "sqt/rolling_beta_avx2.hpp"
 
@@ -28,7 +51,7 @@ namespace sqt {
 
 #if SQT_ROLLING_BETA_AVX2_REAL
 
-void rolling_beta_reduce_avx2(
+SQT_NOINLINE void rolling_beta_reduce_avx2(
     const double* x,
     const double* y,
     std::size_t   start,
@@ -86,7 +109,7 @@ void rolling_beta_reduce_avx2(
 
 #else  // !SQT_ROLLING_BETA_AVX2_REAL
 
-void rolling_beta_reduce_avx2(
+SQT_NOINLINE void rolling_beta_reduce_avx2(
     const double* /*x*/,
     const double* /*y*/,
     std::size_t   /*start*/,

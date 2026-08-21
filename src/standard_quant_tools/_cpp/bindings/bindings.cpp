@@ -818,7 +818,14 @@ PYBIND11_MODULE(_sqt_core, m) {
 
             const auto n = static_cast<std::size_t>(y_buf.shape[0]);
             const auto k = static_cast<std::size_t>(f_buf.shape[1]);
-            const int  p = static_cast<int>(k) + 1;
+            // Checked: `k` is factors.shape[1] as the caller supplied it, and
+            // this is the output array's column count. k+1 is formed in
+            // size_t space so the intercept column cannot overflow the check
+            // itself. (bindings.cpp compiles with /wd4244 /wd4267 for
+            // pybind11's own py::ssize_t conversions, so a silent narrowing
+            // here would not even warn.)
+            const int  p = sqt::numerics::checked_narrow_to_int(
+                k + 1, "rolling_factor_loadings: intercept + factor count");
 
             const double* y_ptr = static_cast<const double*>(y_buf.ptr);
             const double* f_ptr = static_cast<const double*>(f_buf.ptr);
@@ -835,13 +842,14 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("y"),
         py::arg("factors"),
         py::arg("window"),
-        "Rolling OLS factor loadings (incremental rank-1 updates + periodic refresh).\n\n"
+        "Rolling OLS factor loadings (per-window rank-revealing QR).\n\n"
         "y      : 1-D float64 array of length n (asset returns).\n"
         "factors: 2-D float64 array of shape (n, k).\n"
         "window : rolling window size in bars.\n\n"
         "Returns a 2-D float64 array of shape (n, k+1):\n"
         "  col 0 = alpha (intercept); cols 1..k = factor loadings.\n"
-        "First (window-1) rows are NaN.");
+        "First (window-1) rows are NaN, as is any row whose window is\n"
+        "rank-deficient (duplicated or perfectly collinear factors).");
 
     m.def(
         "rolling_factor_loadings_zerocopy",
@@ -857,7 +865,14 @@ PYBIND11_MODULE(_sqt_core, m) {
 
             const auto n = static_cast<std::size_t>(y_buf.shape[0]);
             const auto k = static_cast<std::size_t>(f_buf.shape[1]);
-            const int  p = static_cast<int>(k) + 1;
+            // Checked: `k` is factors.shape[1] as the caller supplied it, and
+            // this is the output array's column count. k+1 is formed in
+            // size_t space so the intercept column cannot overflow the check
+            // itself. (bindings.cpp compiles with /wd4244 /wd4267 for
+            // pybind11's own py::ssize_t conversions, so a silent narrowing
+            // here would not even warn.)
+            const int  p = sqt::numerics::checked_narrow_to_int(
+                k + 1, "rolling_factor_loadings: intercept + factor count");
 
             const double* y_ptr = static_cast<const double*>(y_buf.ptr);
             const double* f_ptr = static_cast<const double*>(f_buf.ptr);

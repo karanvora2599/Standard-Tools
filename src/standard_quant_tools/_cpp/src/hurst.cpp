@@ -353,7 +353,13 @@ rs_analysis(const double* arr, std::size_t n, int min_w, int max_w, int n_points
             mean /= sz;
 
             // Range of cumulative mean-adjusted deviations
-            double cs = 0.0, R_max = -1e300, R_min = 1e300;
+            // +/-infinity, not 1e300. The old sentinels were a magic
+            // constant chosen to be "big enough", which is a claim about the
+            // caller's data rather than about arithmetic; an infinity is
+            // correct for every input by construction.
+            double cs = 0.0;
+            double R_max = -std::numeric_limits<double>::infinity();
+            double R_min =  std::numeric_limits<double>::infinity();
             // Variance (ddof=1 to match numpy chunk.std(ddof=1))
             double var = 0.0;
             for (int j = 0; j < sz; ++j) {
@@ -609,42 +615,57 @@ void rolling_hurst_into(
     // written from several threads would be a data race even though every
     // write stores the same value.
     bool sse_error = false;
+    // Same mechanism, for anything else the region can throw. The comment
+    // block above lists three things that "together keep any exception from
+    // escaping the parallel region", and they do cover every deliberate
+    // throw -- but not std::bad_alloc. hurst_exponent_scratch, dfa_onepass
+    // and rs_analysis each build several std::vectors per window (sizes,
+    // flucts, valid_sizes, log_s, log_v) and a HurstResult holding two
+    // std::strings. Each is small, so this should never fire; "should never
+    // fire" is exactly the standard the other three throw sites were held
+    // to, and undefined behaviour is not an acceptable response to running
+    // out of memory.
+    bool alloc_error = false;
 
 #ifdef _OPENMP
-    // Work-based, not count-based, and capped by SQT_NUM_THREADS -- the shared
-    // policy in omp_policy.hpp, which batch_run_strategy already used and these
-    // kernels bypassed with a bare `if(<count> > 1)`.
-    //
-    // That predicate is wrong twice over, which is exactly what omp_policy.hpp's
-    // own header comment says and why it exists: it is too eager (two tiny tasks
-    // cost more in thread startup than they save -- measured, a 2-path x 5-day
-    // simulation ran ~4x SLOWER than the serial path purely in region overhead),
-    // and too greedy (this library routinely runs inside a ProcessPoolExecutor
-    // screener or several agents, where every call grabbing every core
-    // oversubscribes the machine). SQT_NUM_THREADS=1 is the documented way to opt
-    // out, and it had no effect here at all before this change.
+    // Work-based, not count-based, and capped by SQT_NUM_THREADS. The
+    // reasoning -- why `if(<count> > 1)` is both too eager and too greedy,
+    // with the measurements -- lives once in omp_policy.hpp's header
+    // comment rather than being restated at each call site.
     // Work per task is one Hurst fit over win_sz bars, so total work is
     // count*win_sz -- not `count`, which says nothing about window size.
-    #pragma omp parallel reduction(||: sse_error) if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(count), win_sz)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    #pragma omp parallel reduction(||: sse_error) reduction(||: alloc_error) if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(count), win_sz)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     {
         RollingHurstScratch scratch;
-        scratch.y.reserve(win_sz);
+        // reserve() can throw, and this sits in the region prologue rather
+        // than the loop body, so it needs its own guard: an escape from here
+        // is the same undefined behaviour as an escape from the loop.
+        try {
+            scratch.y.reserve(win_sz);
+        } catch (...) {
+            alloc_error = true;
+        }
 
 #ifdef _OPENMP
         #pragma omp for schedule(static)
 #endif
         for (long long idx = 0; idx < count; ++idx) {
-            const std::size_t i = (win_sz - 1) + static_cast<std::size_t>(idx) * step_sz;
-            const auto result = hurst_exponent_scratch(
-                arr + (i - win_sz + 1),
-                win_sz,
-                method,
-                min_window,
-                /*max_window=*/-1,   // auto per chunk size
-                scratch,
-                sse_error);
-            out[i] = result.hurst;
+            try {
+                const std::size_t i =
+                    (win_sz - 1) + static_cast<std::size_t>(idx) * step_sz;
+                const auto result = hurst_exponent_scratch(
+                    arr + (i - win_sz + 1),
+                    win_sz,
+                    method,
+                    min_window,
+                    /*max_window=*/-1,   // auto per chunk size
+                    scratch,
+                    sse_error);
+                out[i] = result.hurst;
+            } catch (...) {
+                alloc_error = true;
+            }
         }
     }
 
@@ -659,6 +680,13 @@ void rolling_hurst_into(
     // every other kernel answers with NaN, came back here as "indicates a
     // real bug". dfa_onepass passes non-finite values through as data now
     // (see its own comment), leaving this flag to mean what it says.
+    if (alloc_error) {
+        throw std::runtime_error(
+            "rolling_hurst: a worker thread failed (most likely "
+            "std::bad_alloc); rethrown here, outside the parallel region, "
+            "because letting it escape the structured block is undefined "
+            "behaviour.");
+    }
     if (sse_error) {
         throw std::runtime_error(
             "rolling_hurst: sum-of-squares went unexpectedly negative in "

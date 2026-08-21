@@ -245,7 +245,16 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
         // searched different lags before the selection logic even ran.
         max_lag = static_cast<int>(
             std::ceil(12.0 * std::pow(static_cast<double>(n) / 100.0, 0.25)));
-        max_lag = std::min(max_lag, static_cast<int>(n / 2) - ntrend - 1);
+        // The cap is compared in long long space. `n/2` was narrowed to int
+        // first, which wraps for a series longer than 2*INT_MAX bars and
+        // would silently produce a NEGATIVE cap -- an early return reporting
+        // "no lag solved" for a series large enough that lag selection is
+        // the least of the problems, but wrong in the direction that is
+        // hardest to notice.
+        const long long half =
+            numerics::checked_narrow_to_ll(n / 2, "adf_test: max-lag cap");
+        const long long cap = half - ntrend - 1;
+        max_lag = static_cast<int>(std::min<long long>(max_lag, cap));
         if (max_lag < 0) return out;
     }
 

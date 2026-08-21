@@ -27,8 +27,15 @@ void rolling_factor_loadings_into(
     int           window,
     double* SQT_RESTRICT       out)
 {
-    const int p = static_cast<int>(k) + 1;  // intercept + k factors
-    std::fill(out, out + n * static_cast<std::size_t>(p), kNaN);
+    // Checked, not a bare cast: `k` is factors.shape[1] straight from the
+    // caller, and this file's own numerics.hpp exists to stop exactly this
+    // narrowing being silent. Computed as k+1 in size_t space so the
+    // intercept column cannot itself overflow the check.
+    const int p = numerics::checked_narrow_to_int(
+        k + 1, "rolling_factor_loadings: intercept + factor count");
+    std::fill(out, out + numerics::checked_mul(n, static_cast<std::size_t>(p),
+                                               "rolling_factor_loadings: output size"),
+              kNaN);
 
     if (window < p + 1 || n < static_cast<std::size_t>(window)) return;
 
@@ -121,8 +128,10 @@ std::vector<double> rolling_factor_loadings(
     std::size_t   k,
     int           window)
 {
-    const int p = static_cast<int>(k) + 1;
-    std::vector<double> result(n * static_cast<std::size_t>(p));
+    const int p = numerics::checked_narrow_to_int(
+        k + 1, "rolling_factor_loadings: intercept + factor count");
+    std::vector<double> result(numerics::checked_mul(
+        n, static_cast<std::size_t>(p), "rolling_factor_loadings: output size"));
     rolling_factor_loadings_into(y, factors, n, k, window, result.data());
     return result;
 }

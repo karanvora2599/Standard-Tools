@@ -8,11 +8,22 @@
 namespace sqt {
 
 /**
- * Incremental sliding-window OLS: y ~ [1, factors_1, ..., factors_k].
+ * Sliding-window OLS: y ~ [1, factors_1, ..., factors_k].
  *
- * Uses rank-1 XtX / Xty updates to slide the window in O(k²) per step
- * instead of O(window × k²).  A full recompute is issued every `window`
- * steps to prevent floating-point drift.
+ * Each window is solved by rank-revealing Householder QR with column
+ * pivoting (sqt::qr::lstsq), NOT by the rank-1 XtX/Xty update this comment
+ * used to describe. That update was removed because it was wrong twice: its
+ * pivot test compared every column against the single largest diagonal of
+ * XtX -- the intercept column's, equal to the window length -- so factor
+ * values around 1e-6 made the whole window read as singular and the kernel
+ * returned all-NaN where the NumPy fallback returned a correct answer; and
+ * forming XtX squares the condition number, which is what made the periodic
+ * full recompute necessary in the first place. See rolling_regression.cpp
+ * for the measured cost of the replacement (per-window QR is 15-60x slower
+ * than the update was, paid knowingly).
+ *
+ * A rank-deficient window yields a NaN row rather than a minimum-norm
+ * solution -- one rank policy, shared with analysis/multi_factor.py.
  *
  * @param y        Response array, length n.
  * @param factors  Factor matrix flattened row-major (n × k):
