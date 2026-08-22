@@ -50,7 +50,12 @@ from .coverage import (
 from .fetch import fetch_universe_ohlcv
 from .leakage import check_point_in_time_safety
 from .panel_features import compute_panel_features
-from .target import build_label_end_dates, build_target
+from .target import (
+    CROSS_SECTIONAL_TARGETS,
+    apply_cross_sectional_target,
+    build_label_end_dates,
+    build_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +357,25 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         long_panel, drop_attribution = stack_long(
             per_entity_features, target_by_entity, label_end_by_entity
         )
+        # A rank within the date, and a return measured against the
+        # universe average, are defined against the OTHER entities present
+        # that day, so they cannot exist until every entity is in one
+        # frame. Applied here, then the rows it could not define (a date
+        # carrying a single entity has no cross-section) are dropped, so
+        # the panel keeps its "no NaN targets" contract.
+        if spec.target.type in CROSS_SECTIONAL_TARGETS:
+            long_panel = apply_cross_sectional_target(long_panel, spec.target)
+            n_before = len(long_panel)
+            long_panel = long_panel[long_panel["target"].notna()]
+            n_dropped = n_before - len(long_panel)
+            if n_dropped:
+                warnings.append(
+                    f"NOTE: target {spec.target.type!r} is cross-sectional, so "
+                    f"{n_dropped} row(s) on dates carrying a single entity were "
+                    "dropped — a one-name cross-section has no rank and a "
+                    "market-relative return of exactly zero by construction, "
+                    "neither of which is a measurement."
+                )
     else:
         long_panel, drop_attribution = stack_features_only(per_entity_features)
 
