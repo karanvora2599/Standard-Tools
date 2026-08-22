@@ -72,12 +72,35 @@ class FeatureSpec(BaseModel):
 
 
 class TargetSpec(BaseModel):
-    type: Literal["forward_return", "forward_direction"] = Field(
+    type: Literal[
+        "forward_return",
+        "forward_direction",
+        "forward_return_vol_scaled",
+        "forward_return_rank",
+        "forward_return_market_neutral",
+        "triple_barrier",
+    ] = Field(
         "forward_return",
         description=(
             "'forward_return' (default) — continuous forward return, for "
             "task='regression'. 'forward_direction' — 1.0 when that forward "
-            "return exceeds `threshold`, else 0.0, for task='classification'."
+            "return exceeds `threshold`, else 0.0, for task='classification'. "
+            "'forward_return_vol_scaled' — that return divided by the entity's "
+            "own trailing volatility, so a 2% move in a quiet name and a 2% "
+            "move in a volatile one are not treated as equal evidence; an "
+            "unscaled return target otherwise lets the highest-volatility "
+            "names dominate the loss. 'forward_return_rank' — the return's "
+            "rank within its date's cross-section mapped to [-0.5, 0.5], which "
+            "matches how the model is SCORED (cross-sectional rank IC) and is "
+            "immune to a fat-tailed return distribution. "
+            "'forward_return_market_neutral' — the return minus that date's "
+            "equal-weighted universe return, removing the market factor from "
+            "the LABEL rather than hoping the model learns to ignore it. "
+            "'triple_barrier' — 1.0 if an upper barrier is touched first, 0.0 "
+            "if a lower one is, 2.0 if neither is touched within the horizon; "
+            "for task='classification'. Those are three nominal class ids, not "
+            "an ordered scale: 'up' is 1 so the predicted probability the "
+            "downstream signal path reads is P(up)."
         ),
     )
     horizon: int = Field(
@@ -94,12 +117,34 @@ class TargetSpec(BaseModel):
         ),
     )
 
+    vol_window: int = Field(
+        20,
+        gt=1,
+        description="forward_return_vol_scaled and triple_barrier: bars of "
+        "trailing return history used for the volatility scale.",
+    )
+    barrier: float = Field(
+        0.0,
+        ge=0.0,
+        description="triple_barrier only: the symmetric barrier as a fraction "
+        "of the entry price (0.05 = +/-5%). Left at 0.0 the barriers are set "
+        "from `vol_window` trailing volatility scaled to the horizon, which is "
+        "the volatility-adaptive form — a fixed 5% barrier is a coin flip in a "
+        "quiet name and unreachable in a volatile one.",
+    )
+
     @model_validator(mode="after")
     def _threshold_only_for_direction(self) -> "TargetSpec":
-        if self.type == "forward_return" and self.threshold != 0.0:
+        continuous = {
+            "forward_return",
+            "forward_return_vol_scaled",
+            "forward_return_rank",
+            "forward_return_market_neutral",
+        }
+        if self.type in continuous and self.threshold != 0.0:
             raise ValueError(
-                "threshold applies to type='forward_direction' only; "
-                "'forward_return' is the raw continuous return."
+                "threshold applies to a binarized target ('forward_direction' "
+                f"or 'triple_barrier'); {self.type!r} is a continuous value."
             )
         if not math.isfinite(self.threshold):
             raise ValueError(f"threshold must be finite, got {self.threshold}")
@@ -219,9 +264,39 @@ class EstimatorSpec(BaseModel):
 
 
 class ValidationSpec(BaseModel):
-    method: Literal["walk_forward"] = "walk_forward"
-    train_window: int = Field(..., gt=0, description="Bars per training fold.")
-    test_window: int = Field(..., gt=0, description="Bars per test fold.")
+    method: Literal["walk_forward", "purged_kfold"] = Field(
+        "walk_forward",
+        description=(
+            "'walk_forward' (default) — train on the past, test on the "
+            "immediate future, repeatedly. The only scheme here that simulates "
+            "live trading, and the one to quote a return from. 'purged_kfold' "
+            "— K contiguous test blocks covering every date exactly once, with "
+            "overlapping labels purged and an embargo on both sides. Uses a "
+            "short history far better and is not dominated by the end of the "
+            "sample, but later folds train partly on data that postdates their "
+            "test block, so it answers 'is there a signal here', not 'what "
+            "would this have earned'."
+        ),
+    )
+    scheme: Literal["rolling", "expanding"] = Field(
+        "rolling",
+        description=(
+            "walk_forward only. 'rolling' (default) keeps the training window a "
+            "fixed length so every fold is fit on comparable data. 'expanding' "
+            "anchors it at the start of the sample and lets it grow, which "
+            "stops a short history being discarded but makes a trend across "
+            "folds mix skill with sample size."
+        ),
+    )
+    n_splits: int = Field(
+        5, ge=2, description="purged_kfold only: how many contiguous test blocks."
+    )
+    train_window: Optional[int] = Field(
+        None, gt=0, description="Bars per training fold (walk_forward)."
+    )
+    test_window: Optional[int] = Field(
+        None, gt=0, description="Bars per test fold (walk_forward)."
+    )
     embargo: int = Field(
         0,
         ge=0,
@@ -242,11 +317,137 @@ class ValidationSpec(BaseModel):
         "exploratory run.",
     )
 
+    @model_validator(mode="after")
+    def _windows_required_for_walk_forward(self) -> "ValidationSpec":
+        if self.method == "walk_forward":
+            missing = [
+                name
+                for name in ("train_window", "test_window")
+                if getattr(self, name) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"method='walk_forward' requires {' and '.join(missing)} "
+                    "(method='purged_kfold' does not, since its fold sizes come "
+                    "from n_splits)."
+                )
+        return self
+
+
+class PreprocessingSpec(BaseModel):
+    """How feature columns are normalized before the estimator sees them."""
+
+    normalization: Literal["pooled", "cross_sectional"] = Field(
+        "pooled",
+        description=(
+            "'pooled' (default, and the original behaviour) — one mean and "
+            "standard deviation fitted over the whole training panel. "
+            "'cross_sectional' — standardize within each date, so what reaches "
+            "the model is each entity's position relative to its peers that "
+            "day. Pooled normalization leaves the market factor inside every "
+            "feature, which lets a model score well by learning 'today was an "
+            "up day' rather than 'this name is strong relative to its peers' — "
+            "for a model judged on cross-sectional IC that is the wrong thing "
+            "to have learned. It is not the default only because switching it "
+            "changes what every existing model predicts."
+        ),
+    )
+    clip_sigma: float = Field(
+        3.0,
+        ge=0.0,
+        description="cross_sectional only: clip standardized features at this "
+        "many standard deviations (0 disables). Replaces the pooled path's "
+        "1st/99th percentile winsorizing, which is meaningless within a single "
+        "date — the 1st percentile of a 20-name cross-section is its minimum, "
+        "so clipping to it would do nothing at all.",
+    )
+
+
+class WeightingSpec(BaseModel):
+    """How much each training row counts."""
+
+    method: Literal[
+        "none", "label_uniqueness", "time_decay", "uniqueness_and_time_decay"
+    ] = Field(
+        "none",
+        description=(
+            "'none' (default) — every row at weight 1. 'label_uniqueness' — "
+            "weight by the average uniqueness of each row's label, correcting "
+            "for overlapping forward returns making consecutive rows largely "
+            "redundant; this is the quantity effective_sample_size already "
+            "reports and that nothing acted on. 'time_decay' — exponential "
+            "decay in calendar time, for a relationship that drifts. "
+            "'uniqueness_and_time_decay' — both."
+        ),
+    )
+    half_life_days: float = Field(
+        252.0,
+        gt=0.0,
+        description="time_decay only: calendar days after which a row's weight "
+        "halves. Days rather than bars, so the intent survives a change of data "
+        "frequency.",
+    )
+
+
+class SearchSpec(BaseModel):
+    """
+    Hyperparameter search on the TRAINING window of each fold.
+
+    The search runs its own inner walk-forward inside the training data and
+    never sees the fold's test window, so the outer out-of-sample metric
+    stays out-of-sample. That is why this exists rather than a sklearn
+    GridSearchCV wrapped around the panel: an ordinary K-fold over stacked
+    (entity, date) rows puts the same date on both sides of a split and
+    would select hyperparameters on leaked information.
+    """
+
+    method: Literal["grid", "random"] = Field(
+        "grid",
+        description="'grid' — every combination. 'random' — `n_iter` samples "
+        "from the grid, the better use of a fixed budget once the grid has "
+        "more than a couple of axes.",
+    )
+    param_grid: Dict[str, List[object]] = Field(
+        ...,
+        description="Estimator parameter name -> candidate values. Every name "
+        "must be allowed for the chosen estimator, checked at the same boundary "
+        "as EstimatorSpec.params.",
+    )
+    n_iter: int = Field(
+        20, gt=0, description="random only: how many combinations to sample."
+    )
+    inner_splits: int = Field(
+        3, ge=2, description="Inner walk-forward folds used to score a candidate."
+    )
+    scoring: Literal["cs_rank_ic", "cs_ic", "r2", "neg_mae", "accuracy", "auc"] = Field(
+        "cs_rank_ic",
+        description="What the search maximizes. Defaults to cross-sectional "
+        "rank IC because that is what the outer report leads with — selecting "
+        "on r2 and then quoting rank IC optimizes one thing and reports "
+        "another.",
+    )
+
+    @model_validator(mode="after")
+    def _grid_not_empty(self) -> "SearchSpec":
+        if not self.param_grid:
+            raise ValueError("param_grid must name at least one parameter")
+        for name, values in self.param_grid.items():
+            if not values:
+                raise ValueError(f"param_grid[{name!r}] has no candidate values")
+        return self
+
 
 class ModelSpec(BaseModel):
     task: Literal["regression", "classification"]
     estimator: EstimatorSpec
     validation: ValidationSpec
+    preprocessing: PreprocessingSpec = Field(default_factory=PreprocessingSpec)
+    weighting: WeightingSpec = Field(default_factory=WeightingSpec)
+    search: Optional[SearchSpec] = Field(
+        None,
+        description="Optional hyperparameter search on each fold's training "
+        "window. Costs roughly (grid size x inner_splits) extra fits per fold.",
+    )
     random_seed: int = Field(
         42,
         ge=0,

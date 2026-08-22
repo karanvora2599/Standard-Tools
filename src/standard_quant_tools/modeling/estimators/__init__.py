@@ -2,6 +2,7 @@
 ESTIMATOR_REGISTRY as a side effect."""
 
 from . import (  # noqa: F401  (registration side effect)
+    boosting,
     classification,
     regression,
     trees,

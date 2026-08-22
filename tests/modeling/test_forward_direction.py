@@ -140,9 +140,11 @@ class TestClassificationThroughTheNormalPipeline:
             validation=ValidationSpec(train_window=150, test_window=30, embargo=5),
             random_seed=1,
         )
-        with pytest.raises(ValidationError, match="expects a 'forward_return'"):
+        with pytest.raises(ValidationError, match="task='regression' expects one of"):
             run_experiment(direction, regression, dataset_id="ds_fd3")
-        with pytest.raises(ValidationError, match="expects a 'forward_direction'"):
+        with pytest.raises(
+            ValidationError, match="task='classification' expects one of"
+        ):
             run_experiment(returns, _classifier_spec(), dataset_id="ds_fd4")
 
 

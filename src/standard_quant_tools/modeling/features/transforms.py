@@ -72,3 +72,72 @@ def apply_preprocessing(
         clipped = out[col].clip(lower=s["lo"], upper=s["hi"])
         out[col] = (clipped - s["mean"]) / s["std"]
     return out
+
+
+def standardize_cross_sectional(
+    frame: pd.DataFrame, dates: np.ndarray, clip_sigma: float = 3.0
+) -> pd.DataFrame:
+    """
+    Standardize every column WITHIN each date's cross-section.
+
+    WHY THIS IS A DIFFERENT ANSWER, NOT A DIFFERENT FLAVOUR. Pooled
+    z-scoring (fit_preprocessing) computes one mean and standard deviation
+    over the whole training panel, which leaves the market factor sitting
+    inside every feature: on a day the whole market rallies, every entity's
+    momentum reads high together, and a model fed those features can score
+    well by learning "today was an up day" rather than "this name is strong
+    relative to its peers". For a model whose scorecard is cross-sectional
+    IC, that is the wrong thing to have learned. Standardizing within the
+    date removes the common component by construction, so what reaches the
+    estimator is each entity's position relative to its peers that day.
+
+    NO FOLD-BOUNDARY PROBLEM. Unlike the pooled statistics, these are not
+    fitted on train and applied to test: each date is standardized using
+    only its own cross-section, which is contemporaneous information — on
+    the test date you genuinely do know every entity's features for that
+    date. So there is nothing here to leak across the split.
+
+    CLIPPING RATHER THAN QUANTILE WINSORIZING. The pooled path clips to the
+    1st/99th percentile, which is meaningful over tens of thousands of
+    pooled rows and meaningless within one date: the 1st percentile of a
+    20-name cross-section is just its minimum, so "winsorizing" would clip
+    the extreme observation to itself and do nothing at all. Clipping at
+    `clip_sigma` standard deviations after standardizing is the transform
+    that actually bounds an outlier at this sample size.
+
+    A date whose cross-section is constant (or has one usable entity) has
+    no dispersion to divide by; those rows become 0.0 — the value they are
+    standardized to be, since every entity sits exactly at the mean.
+    """
+    if frame.empty:
+        return frame.copy()
+
+    values = frame.to_numpy(dtype=np.float64, copy=True)
+    codes = pd.factorize(np.asarray(dates), sort=False)[0]
+    order = np.argsort(codes, kind="stable")
+    codes_sorted = codes[order]
+    block = values[order]
+
+    starts = np.flatnonzero(np.r_[True, codes_sorted[1:] != codes_sorted[:-1]])
+    counts = np.diff(np.r_[starts, codes_sorted.size]).astype(np.float64)
+    widths = counts[:, None]
+
+    # Per-date mean and (ddof=1) standard deviation, one reduceat pass per
+    # statistic over the whole block rather than a groupby per column.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.add.reduceat(block, starts, axis=0) / widths
+        centered = block - np.repeat(mean, counts.astype(np.int64), axis=0)
+        sum_sq = np.add.reduceat(centered * centered, starts, axis=0)
+        variance = sum_sq / np.maximum(widths - 1.0, 1.0)
+        std = np.sqrt(variance)
+        std = np.where(std > 0.0, std, np.nan)
+        standardized = centered / np.repeat(std, counts.astype(np.int64), axis=0)
+
+    # A flat cross-section leaves every entity exactly at the mean.
+    standardized = np.where(np.isfinite(standardized), standardized, 0.0)
+    if clip_sigma > 0:
+        np.clip(standardized, -clip_sigma, clip_sigma, out=standardized)
+
+    out = np.empty_like(standardized)
+    out[order] = standardized
+    return pd.DataFrame(out, index=frame.index, columns=frame.columns)

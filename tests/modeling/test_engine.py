@@ -165,7 +165,7 @@ class TestRunExperimentClassification:
             _dataset_spec(target=TargetSpec(type="forward_direction", horizon=5))
         )
         model_spec = _model_spec(task="regression", estimator="ridge")
-        with pytest.raises(ValidationError, match="expects a 'forward_return' target"):
+        with pytest.raises(ValidationError, match="task='regression' expects one of"):
             run_experiment(built, model_spec, dataset_id="ds_test")
 
     def test_classification_task_against_return_target_rejected(self, dataset):
@@ -175,7 +175,7 @@ class TestRunExperimentClassification:
         continuous'."""
         model_spec = _model_spec(task="classification", estimator="logistic")
         with pytest.raises(
-            ValidationError, match="expects a 'forward_direction' target"
+            ValidationError, match="task='classification' expects one of"
         ):
             run_experiment(dataset, model_spec, dataset_id="ds_test")
 
@@ -187,7 +187,7 @@ class TestRunExperimentClassification:
         # BINARY check rather than the task/target compatibility check.
         built = {**built, "panel": panel, "target_id": "forward_direction:5"}
         model_spec = _model_spec(task="classification", estimator="logistic")
-        with pytest.raises(ValidationError, match="binary"):
+        with pytest.raises(ValidationError, match="requires a discrete"):
             run_experiment(built, model_spec, dataset_id="ds_test")
 
     def test_fold_with_single_class_train_window_is_skipped_not_fatal(self):

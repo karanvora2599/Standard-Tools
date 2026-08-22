@@ -23,7 +23,11 @@ from standard_quant_tools.error import ValidationError
 from . import artifacts as _artifacts
 from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import get_estimator_class, validate_params
-from .features.transforms import apply_preprocessing, fit_preprocessing
+from .features.transforms import (
+    apply_preprocessing,
+    fit_preprocessing,
+    standardize_cross_sectional,
+)
 from .registry.model_registry import new_model_id, save_model
 from .specs import ModelSpec
 from .validation.diagnostics import fold_feature_importance, summarize_importance
@@ -36,7 +40,9 @@ from .validation.metrics import (
     positive_class_proba,
     regression_metrics,
 )
-from .validation.walk_forward import WalkForwardSplit
+from .validation.search import search_best_params
+from .validation.walk_forward import build_splitter
+from .validation.weights import build_sample_weights
 
 
 def _target_horizon(target_id: "str | None") -> "int | None":
@@ -71,16 +77,30 @@ def _validate_classification_target(panel: pd.DataFrame) -> None:
     """
     # Python set equality treats 0.0/1.0 and 0/1 as equal members, so this
     # single comparison covers both int- and float-dtype target columns.
+    #
+    # {0, 1, 2} is admitted alongside {0, 1} because that is what
+    # TargetSpec(type='triple_barrier') produces: lower barrier first, upper
+    # barrier first, or neither touched within the horizon. AUC is undefined
+    # for three classes and comes back NaN there, which
+    # classification_metrics already handles; accuracy and the class balance
+    # stay meaningful.
     unique_values = set(pd.unique(panel["target"].dropna()))
-    if unique_values != {0, 1}:
+    if not unique_values or not unique_values <= {0, 1, 2}:
         sample = sorted(unique_values)[:10]
         raise ValidationError(
-            "run_model_experiment: task='classification' requires a binary {0, 1} "
-            f"target, but the dataset's target column has values {sample}"
+            "run_model_experiment: task='classification' requires a discrete "
+            "target — {0, 1} from TargetSpec(type='forward_direction') or "
+            "{0, 1, 2} from TargetSpec(type='triple_barrier') — but the "
+            f"dataset's target column has values {sample}"
             + ("..." if len(unique_values) > 10 else "")
-            + ". Build the dataset with TargetSpec(type='forward_direction', "
-            "horizon=..., threshold=...) — that is the target type that produces a "
-            "binary label through the normal pipeline."
+            + "."
+        )
+    if len(unique_values) < 2:
+        raise ValidationError(
+            "run_model_experiment: task='classification' requires a discrete "
+            f"target with at least two classes, but every row is "
+            f"{sorted(unique_values)[0]!r}. A threshold that no bar exceeds "
+            "produces exactly this."
         )
 
 
@@ -95,17 +115,102 @@ def _check_task_target_compatibility(task: str, target_id: "str | None") -> None
     if not target_id or ":" not in target_id:
         return
     target_type = target_id.split(":", 1)[0]
-    expected = {
-        "regression": "forward_return",
-        "classification": "forward_direction",
+    # Several target types are continuous and several are discrete, so the
+    # check is against the SET a task can consume rather than one name.
+    allowed = {
+        "regression": {
+            "forward_return",
+            "forward_return_vol_scaled",
+            "forward_return_rank",
+            "forward_return_market_neutral",
+        },
+        "classification": {"forward_direction", "triple_barrier"},
     }.get(task)
-    if expected is None or target_type == expected:
+    if allowed is None or target_type in allowed:
         return
     raise ValidationError(
-        f"run_model_experiment: task={task!r} expects a {expected!r} target, but this "
-        f"dataset was built with {target_type!r}. Rebuild the dataset with "
-        f"TargetSpec(type={expected!r}, ...), or change the model's task."
+        f"run_model_experiment: task={task!r} expects one of "
+        f"{sorted(allowed)}, but this dataset was built with {target_type!r}. "
+        "Rebuild the dataset with a compatible TargetSpec(type=...), or change "
+        "the model's task."
     )
+
+
+def _preprocess(
+    model_spec: ModelSpec,
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    feature_ids: List[str],
+) -> "tuple[pd.DataFrame, pd.DataFrame]":
+    """
+    Normalize the feature columns for one fold.
+
+    The two modes differ in more than their arithmetic. Pooled statistics
+    are FITTED on the training rows and applied unchanged to the test rows,
+    which is the fold-boundary discipline that keeps the test window
+    genuinely out of sample. Cross-sectional standardization has nothing to
+    fit: each date is normalized against its own cross-section, which is
+    contemporaneous information a live model would also have, so train and
+    test are transformed independently and no statistic crosses the split.
+    """
+    if model_spec.preprocessing.normalization == "cross_sectional":
+        clip = model_spec.preprocessing.clip_sigma
+        return (
+            standardize_cross_sectional(
+                train_frame[feature_ids], train_frame["date"].to_numpy(), clip
+            ),
+            standardize_cross_sectional(
+                test_frame[feature_ids], test_frame["date"].to_numpy(), clip
+            ),
+        )
+    stats = fit_preprocessing(train_frame[feature_ids])
+    return (
+        apply_preprocessing(train_frame[feature_ids], stats),
+        apply_preprocessing(test_frame[feature_ids], stats),
+    )
+
+
+def _fold_sample_weights(
+    model_spec: ModelSpec, train_frame: pd.DataFrame
+) -> "np.ndarray | None":
+    """Training-row weights for one fold, or None for an unweighted fit."""
+    if model_spec.weighting.method == "none":
+        return None
+    label_end = (
+        train_frame[LABEL_END_COL].to_numpy()
+        if LABEL_END_COL in train_frame.columns
+        else None
+    )
+    return build_sample_weights(
+        model_spec.weighting.method,
+        train_frame["date"].to_numpy(),
+        label_end,
+        train_frame["entity"].to_numpy(),
+        model_spec.weighting.half_life_days,
+    )
+
+
+def _fit(estimator: Any, X: "np.ndarray", y: Any, weights: "np.ndarray | None"):
+    """
+    Fit, passing sample weights only when they were asked for.
+
+    An estimator that does not accept `sample_weight` fails loudly rather
+    than silently ignoring the request — a weighting the caller believes is
+    active but which never reached the fit is worse than an error, because
+    the model looks like it corrected for label overlap and did not.
+    """
+    if weights is None:
+        estimator.fit(X, y)
+        return
+    try:
+        estimator.fit(X, y, sample_weight=weights)
+    except TypeError as exc:
+        raise ValidationError(
+            f"run_model_experiment: estimator {type(estimator).__name__} does not "
+            "accept sample_weight, so the requested weighting cannot be applied. "
+            "Use weighting.method='none', or choose an estimator that supports "
+            "weighted fitting."
+        ) from exc
 
 
 def _predict_fold(
@@ -173,12 +278,14 @@ def run_experiment(
     feature_ids = dataset["feature_ids"]
     dates = pd.Index(sorted(panel["date"].unique()))
 
-    splitter = WalkForwardSplit(
-        train_window=model_spec.validation.train_window,
-        test_window=model_spec.validation.test_window,
-        embargo=model_spec.validation.embargo,
-    )
+    splitter = build_splitter(model_spec.validation)
     if splitter.n_splits(dates) < 1:
+        if model_spec.validation.method == "purged_kfold":
+            raise ValidationError(
+                f"run_model_experiment: dataset has {len(dates)} dates, not enough "
+                f"for {model_spec.validation.n_splits} purged k-fold blocks with "
+                f"embargo={model_spec.validation.embargo}."
+            )
         raise ValidationError(
             f"run_model_experiment: dataset has {len(dates)} dates, not enough for one "
             f"walk-forward fold with train_window={model_spec.validation.train_window}, "
@@ -198,6 +305,11 @@ def run_experiment(
     # many folds SURVIVED, so a run where 8 of 10 folds were dropped looked
     # identical to a clean 2-fold run.
     skipped: List[Dict[str, str]] = []
+    # One entry per fold that ran a hyperparameter search, so a reader can
+    # see whether the chosen parameters were stable across folds or whether
+    # each fold picked something different -- the latter means the search
+    # was fitting noise, and the report is the only place that shows it.
+    search_reports: List[Dict[str, Any]] = []
     n_expected_folds = splitter.n_splits(dates)
     # Row -> position in `dates`, computed once instead of hashing the whole
     # date column against a fresh set on every fold. `dates` is sorted and
@@ -230,8 +342,20 @@ def run_experiment(
         # where t+horizon entity bars != t+horizon global panel dates.
         if has_label_end and not train_df.empty and len(test_dates) > 0:
             first_test_date = test_dates[0]
-            keep = train_df[LABEL_END_COL] < first_test_date
-            n_purged_total += int((~keep).sum())
+            last_test_date = test_dates[-1]
+            # A training row is purged when the bars its label spans
+            # OVERLAP the test block: the label ends on or after the block
+            # starts, and the row itself begins on or before the block
+            # ends. Under walk-forward the second condition is always true
+            # (training precedes testing), so this reduces exactly to the
+            # previous rule; it is written in full because purged k-fold
+            # puts training rows on BOTH sides of the test block, and there
+            # the rows after it must not be purged for the wrong reason.
+            overlaps = (train_df[LABEL_END_COL] >= first_test_date) & (
+                train_df["date"] <= last_test_date
+            )
+            keep = ~overlaps
+            n_purged_total += int(overlaps.sum())
             train_df = train_df[keep]
 
         if train_df.empty or test_df.empty:
@@ -263,14 +387,47 @@ def run_experiment(
             )
             continue
 
-        stats = fit_preprocessing(train_df[feature_ids])
-        train_X = apply_preprocessing(train_df[feature_ids], stats)
-        test_X = apply_preprocessing(test_df[feature_ids], stats)
+        train_X, test_X = _preprocess(model_spec, train_df, test_df, feature_ids)
+        sample_weight = _fold_sample_weights(model_spec, train_df)
 
-        estimator = _instantiate(
-            estimator_cls, model_spec.estimator.params, model_spec.random_seed
-        )
-        estimator.fit(train_X.to_numpy(), train_y)
+        fold_params = model_spec.estimator.params
+        if model_spec.search is not None:
+
+            def _fit_predict(params, inner_train, inner_test):
+                """Score one candidate the way the real fit will run it —
+                same preprocessing, same weighting — so the search cannot
+                select for a pipeline that is never used."""
+                inner_train_X, inner_test_X = _preprocess(
+                    model_spec, inner_train, inner_test, feature_ids
+                )
+                candidate = _instantiate(estimator_cls, params, model_spec.random_seed)
+                _fit(
+                    candidate,
+                    inner_train_X.to_numpy(),
+                    inner_train["target"].to_numpy(),
+                    _fold_sample_weights(model_spec, inner_train),
+                )
+                predictions = candidate.predict(inner_test_X.to_numpy())
+                probabilities = (
+                    positive_class_proba(candidate, inner_test_X.to_numpy())
+                    if model_spec.task == "classification"
+                    else None
+                )
+                return predictions, probabilities
+
+            fold_params, search_report = search_best_params(
+                task=model_spec.task,
+                search_spec=model_spec.search,
+                base_params=model_spec.estimator.params,
+                train_frame=train_df,
+                feature_ids=feature_ids,
+                random_seed=model_spec.random_seed,
+                fit_predict=_fit_predict,
+            )
+            search_reports.append(search_report)
+
+        estimator = _instantiate(estimator_cls, fold_params, model_spec.random_seed)
+        _fit(estimator, train_X.to_numpy(), train_y, sample_weight)
 
         metrics, prediction_values, fold_ic = _predict_fold(
             model_spec.task,
@@ -384,6 +541,19 @@ def run_experiment(
     )
 
     validation_report = {
+        "method": model_spec.validation.method,
+        "scheme": (
+            model_spec.validation.scheme
+            if model_spec.validation.method == "walk_forward"
+            else None
+        ),
+        "normalization": model_spec.preprocessing.normalization,
+        "weighting": model_spec.weighting.method,
+        # Per fold, so a reader can see whether the search settled on the
+        # same parameters every time or picked something different each
+        # fold. The second is the useful signal: it means the search was
+        # fitting noise, and an averaged "best alpha" would have hidden it.
+        "hyperparameter_search": search_reports or None,
         "n_folds_expected": int(n_expected_folds),
         "n_folds_completed": len(fold_metrics),
         "n_folds_skipped": len(skipped),
