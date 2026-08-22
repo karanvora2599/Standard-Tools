@@ -18,6 +18,7 @@ set(SQT_SOURCES
     src/signal_state_machines.cpp
     src/isa_dispatch.cpp
     src/rolling_beta_avx2.cpp
+    src/panel_stats.cpp
     bindings/bindings.cpp
 )
 

@@ -33,12 +33,53 @@ modelling decision and not a default this module gets to make.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+
+# Optional native fast path. This was the worst per-row cost in the module --
+# 5.7 microseconds per row at 2,000,000 rows, two orders of magnitude off
+# what the arithmetic costs -- because the Python below loops once per
+# entity. The Python stays as the reference and the test oracle.
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = hasattr(_cpp_core, "label_uniqueness")
+except ImportError:
+    pass
+
+# Below this the kernel LOSES: the argument conversion and its per-entity
+# setup cost more than the Python loop saves, measured at 0.4x on a
+# 12,600-row panel before this guard existed. A fast path that is slower is
+# a bug, so it is gated rather than left to be discovered by whoever runs a
+# small universe. The crossover measured between 12,600 and 126,000 rows;
+# the threshold sits comfortably above the losing end.
+_NATIVE_MIN_ROWS = 50_000
+
+
+def _as_int64_ns(values: np.ndarray) -> np.ndarray:
+    """
+    Datetime values as int64 nanoseconds, without a pandas round trip when
+    one is not needed.
+
+    `datetime64[ns]` reinterprets as int64 for free, and NaT arrives as
+    INT64_MIN -- which is exactly the sentinel the kernel tests for. Anything
+    else (object dtype, a coarser unit) goes through pandas to normalize it
+    first. The distinction matters: the round trip was most of why the
+    kernel lost on small panels.
+    """
+    array = np.asarray(values)
+    if array.dtype == np.dtype("datetime64[ns]"):
+        return np.ascontiguousarray(array).view(np.int64)
+    converted = pd.to_datetime(pd.Series(array)).to_numpy("datetime64[ns]")
+    return np.ascontiguousarray(converted).view(np.int64)
 
 
 def label_uniqueness_weights(
@@ -66,8 +107,21 @@ def label_uniqueness_weights(
             f"be the same length, got {n}, {label_end_dates.size}, {entities.size}"
         )
 
-    weights = np.ones(n, dtype=np.float64)
     entity_codes = pd.factorize(entities, sort=False)[0]
+
+    if HAS_CPP and n >= _NATIVE_MIN_ROWS:
+        # Timestamps rather than integer offsets because `horizon` counts
+        # each ENTITY's own bars: with entities on different calendars,
+        # t+horizon of one entity is not t+horizon of the global date axis.
+        native = _cpp_core.label_uniqueness(
+            _as_int64_ns(dates),
+            _as_int64_ns(label_end_dates),
+            np.ascontiguousarray(entity_codes, dtype=np.int64),
+            int(entity_codes.max()) + 1 if entity_codes.size else 0,
+        )
+        return np.asarray(native, dtype=np.float64)
+
+    weights = np.ones(n, dtype=np.float64)
     for code in np.unique(entity_codes):
         rows = np.flatnonzero(entity_codes == code)
         if rows.size == 0:
