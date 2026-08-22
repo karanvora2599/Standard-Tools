@@ -199,11 +199,22 @@ def run_experiment(
     # identical to a clean 2-fold run.
     skipped: List[Dict[str, str]] = []
     n_expected_folds = splitter.n_splits(dates)
+    # Row -> position in `dates`, computed once instead of hashing the whole
+    # date column against a fresh set on every fold. `dates` is sorted and
+    # every row's date is in it by construction, so searchsorted is exact.
+    # A fold then selects rows by gathering a small per-date boolean, which
+    # also keeps working for splitters whose folds are not contiguous
+    # (purged K-fold) -- an interval slice would not.
+    date_code = np.searchsorted(dates.to_numpy(), panel["date"].to_numpy())
     for train_pos, test_pos in splitter.split(dates):
         train_dates = dates[train_pos]
         test_dates = dates[test_pos]
-        train_df = panel[panel["date"].isin(train_dates)]
-        test_df = panel[panel["date"].isin(test_dates)]
+        in_train = np.zeros(len(dates), dtype=bool)
+        in_train[train_pos] = True
+        in_test = np.zeros(len(dates), dtype=bool)
+        in_test[test_pos] = True
+        train_df = panel[in_train[date_code]]
+        test_df = panel[in_test[date_code]]
 
         # ── Target-overlap purge ──────────────────────────────────────────
         # A forward-return label on training row t is only finished once

@@ -399,3 +399,188 @@ class TestPooledCrossSectionalIC:
 
         out = aggregate_cross_sectional_ic([], "cs_ic")
         assert out["cs_ic_n_dates"] == 0.0
+
+
+def _reference_cross_sectional_ic(y_true, y_pred, dates, method="spearman"):
+    """
+    The per-date implementation cross_sectional_ic replaced, kept verbatim
+    as the oracle. The vectorized version exists purely for speed, so the
+    only thing worth asserting about it is that it computes the same
+    numbers — an independent reimplementation would test whether the two
+    agree on a definition, which is not the question.
+    """
+    frame = pd.DataFrame({"date": dates, "y": y_true, "p": y_pred})
+    per_date = {}
+    for date, group in frame.groupby("date", sort=True):
+        if len(group) < 2:
+            continue
+        value = float(group["y"].corr(group["p"], method=method))
+        per_date[date] = 0.0 if np.isnan(value) else value
+    return pd.Series(per_date, dtype=float)
+
+
+def _assert_matches_reference(y, p, dates, tol=1e-12):
+    for method in ("spearman", "pearson"):
+        expected = _reference_cross_sectional_ic(y, p, dates, method)
+        actual = cross_sectional_ic(y, p, dates, method)
+        assert list(actual.index) == list(expected.index), method
+        assert len(actual) == len(expected), method
+        if len(expected):
+            np.testing.assert_allclose(
+                actual.to_numpy(), expected.to_numpy(), rtol=0, atol=tol
+            )
+
+
+class TestCrossSectionalICVectorization:
+    """
+    cross_sectional_ic was 72% of a measured ridge walk-forward run, so it
+    was rewritten from a per-date groupby into a small number of array
+    passes. It has two internal layouts — a balanced-panel path that
+    reshapes to (n_dates, n_entities), and a segment-reduction fallback for
+    ragged panels — and both must reproduce the previous numbers exactly.
+    """
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_balanced_panel_matches_reference(self, seed):
+        rng = np.random.default_rng(seed)
+        n_dates, n_entities = 30, 14
+        dates = np.repeat(pd.date_range("2020-01-01", periods=n_dates), n_entities)
+        y = rng.normal(0, 1, n_dates * n_entities)
+        p = 0.3 * y + rng.normal(0, 1, n_dates * n_entities)
+        _assert_matches_reference(y, p, dates)
+
+    def test_ties_are_averaged_the_way_pandas_averages_them(self):
+        """
+        Rounding to one decimal forces many equal values per cross-section.
+        Tie handling is the one part of a hand-written Spearman that
+        silently disagrees rather than failing loudly: every member of a
+        tied run must take the run's MEAN ordinal.
+        """
+        rng = np.random.default_rng(11)
+        dates = np.repeat(pd.date_range("2020-01-01", periods=25), 20)
+        y = np.round(rng.normal(0, 1, 500), 1)
+        p = np.round(0.4 * y + rng.normal(0, 1, 500), 1)
+        assert len(np.unique(y)) < 100, "test data is not actually tied"
+        _assert_matches_reference(y, p, dates)
+
+    def test_return_scale_data_does_not_lose_precision(self):
+        """
+        Real inputs are daily returns (~1e-2), where the textbook
+        n*Sxy - Sx*Sy shortcut differences two nearly equal large numbers
+        and loses most of its significant digits. Pinning a tight tolerance
+        here is what keeps the implementation on the centered form.
+        """
+        rng = np.random.default_rng(3)
+        dates = np.repeat(pd.date_range("2020-01-01", periods=40), 60)
+        y = rng.normal(0.0004, 0.012, 2400)
+        p = 0.25 * y + rng.normal(0.0004, 0.012, 2400)
+        _assert_matches_reference(y, p, dates, tol=1e-13)
+
+    def test_constant_cross_section_scores_zero_not_nan(self):
+        """A date where every prediction is identical has undefined
+        correlation; the contract is 0.0, not NaN."""
+        dates = np.repeat(pd.date_range("2020-01-01", periods=4), 6)
+        rng = np.random.default_rng(5)
+        y = rng.normal(0, 1, 24)
+        p = rng.normal(0, 1, 24)
+        p[:6] = 7.0
+        out = cross_sectional_ic(y, p, dates, "pearson")
+        assert out.iloc[0] == 0.0
+        assert not out.isna().any()
+        _assert_matches_reference(y, p, dates)
+
+    def test_ragged_panel_matches_reference(self):
+        """Entities entering and leaving makes the panel non-rectangular,
+        which routes through the segment-reduction fallback."""
+        rng = np.random.default_rng(17)
+        rows = []
+        for date in pd.date_range("2021-01-04", periods=45):
+            for _ in range(int(rng.integers(1, 22))):
+                rows.append((date, rng.normal(), rng.normal()))
+        frame = pd.DataFrame(rows, columns=["date", "y", "p"])
+        widths = frame.groupby("date").size()
+        assert widths.nunique() > 1, "test panel is not actually ragged"
+        _assert_matches_reference(
+            frame["y"].to_numpy(), frame["p"].to_numpy(), frame["date"].to_numpy()
+        )
+
+    def test_both_internal_paths_agree_on_the_same_data(self):
+        """
+        A balanced panel with one row deleted is the same data seen through
+        the other code path. The two layouts must not disagree, or an
+        entity's IPO date would silently change every earlier date's score.
+        """
+        rng = np.random.default_rng(23)
+        n_dates, n_entities = 20, 9
+        dates = np.repeat(pd.date_range("2020-01-01", periods=n_dates), n_entities)
+        y = rng.normal(0, 1, n_dates * n_entities)
+        p = 0.5 * y + rng.normal(0, 1, n_dates * n_entities)
+
+        balanced = cross_sectional_ic(y, p, dates, "spearman")
+        # Drop one row from the LAST date only; every earlier date is
+        # untouched and must score identically through the ragged path.
+        ragged = cross_sectional_ic(y[:-1], p[:-1], dates[:-1], "spearman")
+        np.testing.assert_allclose(
+            balanced.to_numpy()[:-1], ragged.to_numpy()[:-1], rtol=0, atol=1e-12
+        )
+
+    def test_nan_rows_are_dropped_pairwise_like_pandas(self):
+        rng = np.random.default_rng(29)
+        dates = np.repeat(pd.date_range("2022-02-01", periods=25), 12)
+        y = rng.normal(0, 1, 300)
+        p = 0.4 * y + rng.normal(0, 1, 300)
+        y[rng.random(300) < 0.25] = np.nan
+        p[rng.random(300) < 0.15] = np.nan
+        _assert_matches_reference(y, p, dates)
+
+    def test_all_nan_date_is_emitted_as_zero_not_dropped(self):
+        """
+        Pinning a quirk that was deliberately preserved. The row-count gate
+        runs BEFORE the NaN drop, so a date with two all-NaN rows is
+        reported as exactly 0.0 rather than omitted. Arguably wrong — a
+        date with no usable data is not a date with zero IC — but the
+        vectorization was a speed change and had no business moving a
+        reported metric. Changing it is a separate decision; this test is
+        what would catch it happening by accident.
+        """
+        dates = np.repeat(pd.date_range("2020-05-05", periods=2), 4)
+        y = np.array([np.nan] * 4 + [1.0, 2.0, 3.0, 4.0])
+        p = np.array([np.nan] * 4 + [2.0, 1.0, 4.0, 3.0])
+        out = cross_sectional_ic(y, p, dates, "pearson")
+        assert len(out) == 2
+        assert out.iloc[0] == 0.0
+        _assert_matches_reference(y, p, dates)
+
+    def test_infinities_are_not_treated_as_missing(self):
+        """pandas only treats NaN as missing, so inf must flow through:
+        it ranks as an extreme for spearman and voids pearson to 0.0."""
+        dates = np.repeat(pd.date_range("2023-01-02", periods=5), 8)
+        rng = np.random.default_rng(31)
+        y = rng.normal(0, 1, 40)
+        p = rng.normal(0, 1, 40)
+        p[3] = np.inf
+        y[20] = -np.inf
+        _assert_matches_reference(y, p, dates)
+
+    @pytest.mark.parametrize(
+        "y,p,dates",
+        [
+            (np.array([]), np.array([]), np.array([], dtype="datetime64[ns]")),
+            (
+                np.array([1.0]),
+                np.array([2.0]),
+                np.array(["2020-01-01"], dtype="datetime64[ns]"),
+            ),
+            (
+                np.arange(5.0),
+                np.arange(5.0)[::-1],
+                pd.date_range("2020-01-01", periods=5).to_numpy(),
+            ),
+        ],
+        ids=["empty", "single-row", "every-date-has-one-entity"],
+    )
+    def test_degenerate_shapes_return_an_empty_float_series(self, y, p, dates):
+        out = cross_sectional_ic(y, p, dates, "spearman")
+        assert out.empty
+        assert out.dtype == float
+        _assert_matches_reference(y, p, dates)
