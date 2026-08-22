@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -603,6 +604,128 @@ bool standardize_by_date(const double* values,
     }
 
     return !alloc_error;
+}
+
+
+bool label_uniqueness(const long long* dates,
+                      const long long* label_end,
+                      const long long* entity_codes,
+                      std::size_t n_rows,
+                      std::size_t n_entities,
+                      double* out_weights) {
+    if (out_weights == nullptr) return true;
+    for (std::size_t i = 0; i < n_rows; ++i) out_weights[i] = 1.0;
+    if (n_rows == 0 || n_entities == 0 || dates == nullptr ||
+        label_end == nullptr || entity_codes == nullptr)
+        return true;
+
+    const auto keep_all = [](std::size_t) { return true; };
+    std::vector<std::size_t> offsets, counts, order;
+    if (!bucket_by_date(entity_codes, n_rows, n_entities, keep_all, offsets,
+                        counts, order))
+        return false;
+
+    bool alloc_error = false;
+
+    #pragma omp parallel for schedule(guided) reduction(|| : alloc_error) \
+        if (sqt::omp_policy::worth_parallel(n_entities, n_rows / n_entities)) \
+        num_threads(sqt::omp_policy::max_threads() > 0 \
+                        ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    for (std::ptrdiff_t entity = 0;
+         entity < static_cast<std::ptrdiff_t>(n_entities); ++entity) {
+        const auto e = static_cast<std::size_t>(entity);
+        const std::size_t n = counts[e];
+        if (n == 0) continue;
+        const std::size_t base = offsets[e];
+
+        std::vector<std::size_t> rows;
+        std::vector<long long> axis;
+        std::vector<double> delta, cumulative;
+        try {
+            rows.assign(order.begin() + static_cast<std::ptrdiff_t>(base),
+                        order.begin() + static_cast<std::ptrdiff_t>(base + n));
+            axis.resize(n);
+            delta.assign(n + 1, 0.0);
+            cumulative.resize(n + 1);
+        } catch (const std::bad_alloc&) {
+            alloc_error = true;
+            continue;
+        }
+
+        // Sort this entity's rows by its OWN date axis. Positions are then
+        // bar indices for this entity specifically, which is the whole
+        // reason label ends are carried as timestamps rather than integer
+        // offsets: with entities on different calendars, t+horizon of one
+        // entity's bars is not t+horizon of the global panel's dates.
+        std::sort(rows.begin(), rows.end(),
+                  [dates](std::size_t a, std::size_t b) {
+                      return dates[a] < dates[b];
+                  });
+        for (std::size_t i = 0; i < n; ++i) axis[i] = dates[rows[i]];
+
+        // Concurrency by difference array: +1 where a label starts, -1 just
+        // past where it ends, then a running sum. O(n) for what would
+        // otherwise be an O(n * horizon) sweep over every label's span.
+        for (std::size_t i = 0; i < n; ++i) {
+            const long long end = label_end[rows[i]];
+            std::size_t end_pos = i;
+            // NaT marks a label that never resolves (the final `horizon`
+            // rows). numpy stores it as INT64_MIN; such a row spans only
+            // itself rather than being dropped, matching the Python.
+            if (end != std::numeric_limits<long long>::min()) {
+                const auto upper =
+                    std::upper_bound(axis.begin(), axis.end(), end);
+                const auto distance = upper - axis.begin();
+                if (distance > 0) {
+                    const auto candidate = static_cast<std::size_t>(distance - 1);
+                    if (candidate > end_pos) end_pos = candidate;
+                }
+            }
+            delta[i] += 1.0;
+            delta[end_pos + 1] -= 1.0;
+        }
+
+        double running = 0.0;
+        cumulative[0] = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            running += delta[i];
+            // A bar covered by no label cannot lie inside any label's span,
+            // so the guard only protects the division, never a real value.
+            cumulative[i + 1] = cumulative[i] + 1.0 / std::max(running, 1.0);
+        }
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const long long end = label_end[rows[i]];
+            std::size_t end_pos = i;
+            if (end != std::numeric_limits<long long>::min()) {
+                const auto upper =
+                    std::upper_bound(axis.begin(), axis.end(), end);
+                const auto distance = upper - axis.begin();
+                if (distance > 0) {
+                    const auto candidate = static_cast<std::size_t>(distance - 1);
+                    if (candidate > end_pos) end_pos = candidate;
+                }
+            }
+            const double span = static_cast<double>(end_pos - i + 1);
+            out_weights[rows[i]] =
+                (cumulative[end_pos + 1] - cumulative[i]) / span;
+        }
+    }
+
+    if (alloc_error) return false;
+
+    // Normalized to mean 1 over EVERY row, so switching weighting on does
+    // not also rescale the effective regularization strength. Summed
+    // pairwise for the same reason the other kernels are: this has to agree
+    // with numpy's mean.
+    const double* weights = out_weights;
+    const double total =
+        pairwise_sum([weights](std::size_t i) { return weights[i]; }, 0, n_rows);
+    const double mean = total / static_cast<double>(n_rows);
+    if (mean > 0.0) {
+        for (std::size_t i = 0; i < n_rows; ++i) out_weights[i] /= mean;
+    }
+    return true;
 }
 
 }  // namespace sqt

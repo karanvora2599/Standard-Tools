@@ -5,7 +5,9 @@ the Python-level pass. The bottleneck moved, and it moved somewhere a C++
 kernel can actually reach — but not as far as the headline numbers suggest,
 and this document says how far before it says how.
 
-Reproduce every figure with `python tests/bench/bench_modeling.py`.
+**Status: phases 1-3 are implemented and merged.** Section 6 records what
+each was worth, including the two things the plan had wrong. Reproduce every
+figure with `python tests/bench/bench_modeling.py`.
 
 ## 1. The bottleneck moved
 
@@ -194,3 +196,62 @@ it loses is either fixed or guarded with a threshold.
 
 Each of those is a real cost. None is the biggest one, and the point of
 measuring first is to spend the effort where the measurement points.
+
+## 6. What the phases were actually worth
+
+| Kernel | Measured | vs. predicted |
+|---|---|---|
+| `fit_preprocess_stats` | **5.5-23.5x** | 5-10x — at the top of it |
+| `apply_preprocess_stats` | **14.5-53.6x** | 5-10x — well above |
+| `standardize_by_date` | **8.6-11.6x** | 4-8x — above |
+| cross-sectional IC, spearman | **4.9-6.2x** | 5-15x — bottom of it |
+| cross-sectional IC, pearson | **3.0-4.2x** | 2-4x — as predicted |
+| pooled rank IC | **1.6-3.0x** | *not in the plan* |
+| `label_uniqueness` | **8-23x** | 20-50x — below it |
+
+End to end, `run_experiment` against the pure-Python path:
+
+| Universe | Pooled (default) | Cross-sectional | + uniqueness weights |
+|---|---:|---:|---:|
+| 200 entities, 293,600 rows | 1.92x | 1.59x | **2.23x** |
+| 500 entities, 734,000 rows | 2.05x | 1.82x | **2.55x** |
+
+Every kernel agrees with the Python it replaces to 8.9e-16 or better.
+
+### The plan got two things wrong
+
+**It missed the largest metric cost entirely.** The pooled rank IC was not on
+the list, and re-measuring after phase 1 showed it is 41% of
+`regression_metrics` at 25,000 rows and 51% at 250,000 — larger than the
+per-date IC the plan did name. It sorts the whole test fold through scipy on
+every fold. The lesson is the one phase 1 already demonstrated: the profile
+after a change is not the profile before it, and the discipline is to
+re-measure between phases rather than work down a list written once.
+
+**It expected 20-50x from `label_uniqueness` and got 8-23x.** The estimate
+came from the per-row cost, which was two orders of magnitude off what the
+arithmetic should take. That was true, but the kernel still has to convert
+timestamps, bucket by entity, and normalize — and the first version was
+actually *slower* than Python on a 12,600-row panel, because the argument
+conversion cost more than the loop saved. Fixed by taking the cheap
+reinterpret path when the input is already `datetime64[ns]`, and by gating
+the kernel below 50,000 rows. A fast path that is slower is a bug.
+
+### What the ceiling arithmetic got right
+
+Section 2 predicted ~2x end to end and explained why: preprocessing was ~50%
+of a run, and the rest is pandas plumbing no kernel reaches. Measured, the
+pooled default lands at 1.92-2.05x. After phase 1 the attribution shifted
+exactly as the ceiling implied — preprocessing fell from 47% to 13% of a run,
+and "everything else" rose to **70%**. That 70% is fold slicing, DataFrame
+construction and the parquet write, and it is now what bounds the number.
+
+Stating the ceiling before the method was worth more than any individual
+kernel: it is why this stopped at three phases instead of chasing the
+remaining 70% with tools that cannot reach it.
+
+### Where the remaining time goes
+
+At 200 entities, after all three phases: `_predict_fold` 34%, `_preprocess`
+13%, `DataFrame.__getitem__` 13%, the final refit 8%, `estimator.fit` 6%,
+the parquet write 5%. Nothing left in that list is a numeric loop.

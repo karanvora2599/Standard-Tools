@@ -275,3 +275,98 @@ class TestStandardizeByDate:
             frame.iloc[shuffle].reset_index(drop=True), dates[shuffle]
         ).to_numpy()
         np.testing.assert_allclose(ordered[shuffle], shuffled, rtol=0, atol=TOL)
+
+
+class TestLabelUniqueness:
+    """
+    The worst per-row cost in the module before it got a kernel: 5.7
+    microseconds per row at 2,000,000 rows, because the Python loops once
+    per entity. The kernel is gated by size, since below the crossover the
+    argument conversion costs more than the loop saves -- a fast path that
+    is slower is a bug, not a trade-off.
+    """
+
+    @staticmethod
+    def _panel(n_entities, n_bars, horizon=5, shuffle=False, seed=0):
+        rng = np.random.default_rng(seed)
+        rows = []
+        for entity in range(n_entities):
+            index = pd.date_range("2015-01-02", periods=n_bars, freq="B")
+            ends = np.r_[
+                index[horizon:].to_numpy(),
+                np.repeat(np.datetime64("NaT"), min(horizon, n_bars)),
+            ][:n_bars]
+            for i in range(n_bars):
+                rows.append((index[i], ends[i], f"E{entity}"))
+        if shuffle:
+            rng.shuffle(rows)
+        frame = pd.DataFrame(rows, columns=["date", "end", "entity"])
+        return (
+            frame["date"].to_numpy(),
+            frame["end"].to_numpy(),
+            frame["entity"].to_numpy(),
+        )
+
+    def _agree(self, dates, ends, entities, monkeypatch):
+        from standard_quant_tools.modeling.validation import weights as weights_module
+
+        native = weights_module.label_uniqueness_weights(dates, ends, entities)
+        monkeypatch.setattr(weights_module, "HAS_CPP", False)
+        python = weights_module.label_uniqueness_weights(dates, ends, entities)
+        monkeypatch.undo()
+        np.testing.assert_allclose(native, python, rtol=0, atol=1e-12)
+        assert np.isclose(native.mean(), 1.0), "weights are normalized to mean 1"
+
+    def test_matches_python_above_the_threshold(self, monkeypatch):
+        """Big enough that the native path actually engages."""
+        from standard_quant_tools.modeling.validation import weights as weights_module
+
+        dates, ends, entities = self._panel(250, 252)
+        assert dates.size >= weights_module._NATIVE_MIN_ROWS
+        self._agree(dates, ends, entities, monkeypatch)
+
+    def test_matches_python_below_the_threshold(self, monkeypatch):
+        """Small panels take the Python path; they must still be right."""
+        dates, ends, entities = self._panel(5, 60)
+        self._agree(dates, ends, entities, monkeypatch)
+
+    def test_unsorted_rows(self, monkeypatch):
+        """The kernel buckets by entity and orders each by its own dates, so
+        the caller need not have sorted anything."""
+        dates, ends, entities = self._panel(250, 252, shuffle=True, seed=3)
+        self._agree(dates, ends, entities, monkeypatch)
+
+    def test_entities_on_different_calendars(self, monkeypatch):
+        """
+        The reason label ends are timestamps and not integer offsets: with
+        entities on different bar calendars, t+horizon of one entity is not
+        t+horizon of another, and an offset would purge the wrong rows.
+        """
+        rows = []
+        for entity in range(200):
+            freq = "B" if entity % 2 else "2B"
+            index = pd.date_range("2015-01-02", periods=252, freq=freq)
+            ends = np.r_[index[5:].to_numpy(), np.repeat(np.datetime64("NaT"), 5)]
+            for i in range(252):
+                rows.append((index[i], ends[i], f"E{entity}"))
+        frame = pd.DataFrame(rows, columns=["date", "end", "entity"])
+        self._agree(
+            frame["date"].to_numpy(),
+            frame["end"].to_numpy(),
+            frame["entity"].to_numpy(),
+            monkeypatch,
+        )
+
+    def test_all_labels_unresolved(self, monkeypatch):
+        """Every label NaT: each row spans only its own bar, so every weight
+        is identical and normalization makes them all 1.0."""
+        from standard_quant_tools.modeling.validation import weights as weights_module
+
+        n = 60_000
+        dates = np.tile(
+            pd.date_range("2015-01-02", periods=300, freq="B").to_numpy(), 200
+        )
+        ends = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
+        entities = np.repeat([f"E{i}" for i in range(200)], 300)
+        out = weights_module.label_uniqueness_weights(dates, ends, entities)
+        np.testing.assert_allclose(out, np.ones(n), rtol=0, atol=1e-12)

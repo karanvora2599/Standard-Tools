@@ -2089,4 +2089,48 @@ PYBIND11_MODULE(_sqt_core, m) {
         "back 0.0 rather than NaN -- NaN would drop the whole date\n"
         "downstream. NaN inputs are skipped by the moments and preserved in\n"
         "the output.");
+    m.def(
+        "label_uniqueness",
+        [](py::array_t<long long, py::array::c_style | py::array::forcecast> dates,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> label_end,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> entity_codes,
+           py::ssize_t n_entities) -> py::array_t<double>
+        {
+            if (dates.size() != label_end.size() ||
+                dates.size() != entity_codes.size())
+                throw std::invalid_argument(
+                    "dates, label_end and entity_codes must have the same length");
+            if (n_entities < 0)
+                throw std::invalid_argument("n_entities must be >= 0");
+
+            const auto n_rows = static_cast<std::size_t>(dates.size());
+            py::array_t<double> out(dates.size());
+            const long long* d = dates.data();
+            const long long* e = label_end.data();
+            const long long* c = entity_codes.data();
+            double* out_ptr = out.mutable_data();
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::label_uniqueness(d, e, c, n_rows,
+                                           static_cast<std::size_t>(n_entities),
+                                           out_ptr);
+            }
+            if (!ok)
+                throw std::runtime_error(
+                    "label_uniqueness: could not allocate a buffer");
+            return out;
+        },
+        py::arg("dates"),
+        py::arg("label_end"),
+        py::arg("entity_codes"),
+        py::arg("n_entities"),
+        "Average uniqueness of each row's label, within its entity.\n\n"
+        "Timestamps are nanoseconds since the epoch; numpy's NaT (INT64_MIN)\n"
+        "marks a label that never resolves and spans only its own bar. Rows\n"
+        "need not be sorted. Concurrency is accumulated with a difference\n"
+        "array, which is O(n) where sweeping every label's span would be\n"
+        "O(n * horizon).\n\n"
+        "Returns weights normalized to mean 1, so enabling weighting does\n"
+        "not also rescale the effective regularization strength.");
 }

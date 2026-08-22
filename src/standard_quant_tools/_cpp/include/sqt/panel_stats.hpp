@@ -162,4 +162,33 @@ bool standardize_by_date(const double* values,
                          double clip_sigma,
                          double* out);
 
+
+/**
+ * Average uniqueness of each row's label, computed within its entity.
+ *
+ * Overlapping forward returns make consecutive rows largely redundant:
+ * `effective_sample_size` has always reported that and nothing acted on it.
+ * This is the weight that does -- the mean of 1/concurrency over the bars a
+ * row's own label spans (Lopez de Prado, ch. 4).
+ *
+ * `dates` and `label_end` are nanoseconds since the epoch, with numpy's NaT
+ * (INT64_MIN) marking a label that never resolves -- the final `horizon`
+ * rows, which span only themselves. Rows need not be sorted; the kernel
+ * buckets by entity and orders each entity by its OWN date axis, which is
+ * the point of carrying label ends as timestamps: with entities on
+ * different calendars, t+horizon of one entity's bars is not t+horizon of
+ * the global panel's dates.
+ *
+ * Weights come back normalized to mean 1 over every row, so turning
+ * weighting on does not also rescale the effective regularization strength.
+ *
+ * @return false if a working buffer could not be allocated.
+ */
+bool label_uniqueness(const long long* dates,
+                      const long long* label_end,
+                      const long long* entity_codes,
+                      std::size_t n_rows,
+                      std::size_t n_entities,
+                      double* out_weights);
+
 }  // namespace sqt
