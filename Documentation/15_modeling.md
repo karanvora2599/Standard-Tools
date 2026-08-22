@@ -141,7 +141,8 @@ model_spec = ModelSpec(
 )
 ```
 
-Task and target must agree: `regression` requires `forward_return` and
+Task and target must agree — see **Targets** below for the full set.
+Historically this was one type each: `regression` requires `forward_return` and
 `classification` requires `forward_direction`. Both mismatches are rejected
 up front. (A 0/1 target handed to a regressor is the dangerous one — it
 fits happily and reports meaningless R²/IC.)
@@ -534,15 +535,51 @@ look forward", not "this dataset is point-in-time correct".
 ## Estimators
 
 `modeling.estimators.registry.ESTIMATOR_REGISTRY` — an explicit allowlist,
-keyed by `(task, name)`, all from `scikit-learn>=1.3.0` (already a core
-dependency — no new install):
+keyed by `(task, name)`:
 
-- **regression**: `linear`, `ridge`, `lasso`, `elastic_net`, `hist_gradient_boosting`, `random_forest`, `gradient_boosting`
-- **classification**: `logistic`, `hist_gradient_boosting`, `random_forest`, `gradient_boosting`
+- **regression** (scikit-learn): `linear`, `ridge`, `lasso`, `elastic_net`,
+  `hist_gradient_boosting`, `random_forest`, `gradient_boosting`,
+  `quantile`, `quantile_gradient_boosting`
+- **classification** (scikit-learn): `logistic`, `hist_gradient_boosting`,
+  `random_forest`, `gradient_boosting`
+- **both, when installed**: `lightgbm`, `xgboost`
 
 `engine.run_experiment` refuses any estimator type not in this registry —
 no arbitrary `sklearn` import, no `exec()`. An LLM builds a declarative
 `ModelSpec`; the engine decides exactly how it executes.
+
+### The two optional boosters, and why they are worth installing
+
+Measured on this pipeline — 50 entities, 73,400 panel rows, one
+walk-forward run:
+
+| Estimator | Time |
+|---|---:|
+| `random_forest` (n_estimators=100) | 62.9 s |
+| `hist_gradient_boosting` | 10.9 s |
+| `lightgbm` | **3.55 s** |
+| `xgboost` | **3.50 s** |
+
+`random_forest` is the estimator that stops being usable first as the
+universe grows, and no amount of tuning the surrounding Python changes that
+— the cost is inside sklearn's tree building. LightGBM and XGBoost are
+roughly **18×** faster on the same panel.
+
+Neither is a declared dependency. Registration is guarded, so a missing
+library leaves the registry reporting what *is* installed rather than
+breaking an import of `standard_quant_tools.modeling`. Install with
+`pip install lightgbm xgboost` if you want them; `hist_gradient_boosting`
+closes most of the gap with no extra install.
+
+### Quantile regression
+
+`quantile` (a linear program, exact and cheap) and
+`quantile_gradient_boosting` (captures interactions, one model per
+quantile) predict a chosen quantile of the target rather than its mean.
+Fitting the 10th, 50th and 90th gives an uncertainty band — the spread
+between them is the model's own statement about its confidence. The median
+is also far less sensitive to a fat tail than the mean, which matters for
+return data specifically.
 
 ### Parameter values are bounded, not just named
 
@@ -607,10 +644,47 @@ features.
 
 ## Walk-forward validation & the leakage discipline
 
-`modeling.validation.walk_forward.WalkForwardSplit(train_window, test_window, embargo)`
+`modeling.validation.walk_forward.WalkForwardSplit(train_window, test_window, embargo, scheme)`
 yields `(train_positions, test_positions)` pairs over the dataset's
 unique dates, walking forward one `test_window` at a time, with an
 `embargo` gap between each fold's train and test window.
+
+### Three schemes
+
+`ValidationSpec.method` and `.scheme` choose between them:
+
+| Setting | Training window | Use it to answer |
+|---|---|---|
+| `walk_forward` + `rolling` (default) | fixed length, slides forward | what would this have earned |
+| `walk_forward` + `expanding` | anchored at the start, grows | same, on a short history |
+| `purged_kfold` | everything outside the test block | is there a signal here at all |
+
+**`expanding`** keeps the same fold *boundaries* as rolling — the test
+windows are identical — and only anchors the training start at the
+beginning of the sample, so the two remain directly comparable. It stops a
+short history being discarded, at the cost that later folds train on more
+data than earlier ones, so a trend across folds mixes "the model improved"
+with "the model got more data".
+
+**`purged_kfold`** splits the date axis into K contiguous blocks and tests
+each exactly once, with overlapping labels purged and an embargo band on
+*both* sides. It uses a short history far better than walk-forward, which
+can never test its earliest `train_window` dates at all, and its metric is
+not dominated by whatever happened at the end of the sample.
+
+Its cost is stated rather than buried: **folds after the first train partly
+on data that postdates their test block.** That is not leakage in the label
+sense — the purge and the two-sided embargo remove the rows whose
+information touches the test window — but it is not a simulation of live
+trading either, because a live model cannot be fitted on next year's data.
+Use `purged_kfold` to decide whether a signal exists; use `walk_forward` to
+estimate what it would have earned.
+
+The target-overlap purge below is generalized to match: a training row is
+purged when its label's span *overlaps* the test block, rather than merely
+ending after the test starts. Under walk-forward the two rules are
+identical, since training always precedes testing; the general form exists
+because purged K-fold puts training rows on both sides.
 
 There are **two distinct leakage channels**, and the split only closes one:
 
@@ -758,8 +832,197 @@ preprocessing stats from that final refit are persisted alongside the model
 so `score_model` applies the identical transform, rather than refitting on
 whatever universe happens to be in the scoring call.
 
+
 ---
 
+## Targets
+
+`TargetSpec.type` selects what the model is trained to predict. The choice
+matters more than the estimator does, and the default is the simplest rather
+than the best.
+
+| Type | Task | What it is |
+|---|---|---|
+| `forward_return` (default) | regression | `(close[t+h] - close[t]) / close[t]` |
+| `forward_return_vol_scaled` | regression | that return over the entity's own trailing volatility, scaled to the horizon |
+| `forward_return_rank` | regression | the return's rank within its date's cross-section, mapped to `[-0.5, 0.5]` |
+| `forward_return_market_neutral` | regression | the return minus that date's equal-weighted universe return |
+| `forward_direction` | classification | `1.0` when the forward return exceeds `threshold`, else `0.0` |
+| `triple_barrier` | classification | `1.0` upper barrier first, `0.0` lower first, `2.0` neither |
+
+**Why not just use the raw return.** An unscaled return target lets the
+highest-volatility names dominate a squared-error loss — the model spends
+its capacity on whichever handful of entities moved most, which is rarely
+what you wanted it to learn. `forward_return_vol_scaled` divides that out.
+
+**Why a rank target is worth considering.** The model is *scored* on
+cross-sectional rank IC. Training it to predict a magnitude and then judging
+it on an ordering optimizes one thing and reports another;
+`forward_return_rank` aligns the two. It is also immune to the fat tail that
+lets a few extreme returns dominate the fit.
+
+**Market-neutral takes the market out of the label,** rather than leaving it
+in and hoping the model learns to ignore it. What remains is the relative
+performance a cross-sectional model is supposed to forecast.
+
+`forward_return_rank` and `forward_return_market_neutral` are *cross-sectional*:
+they are defined against the other entities on the same date, so they cannot be
+built per entity and are applied once after the panel is stacked. Rows on a
+date carrying a single entity are dropped with a `NOTE` — a one-name
+cross-section has no rank, and a market-relative return of exactly zero by
+construction is not a measurement.
+
+### Triple barrier
+
+`triple_barrier` asks which of two barriers the price touches first within
+the horizon. The third outcome — *neither* — is deliberately its own class
+rather than being folded into "down", because "the price went nowhere" is a
+real and common answer and a plain up/down label teaches the model something
+false about it.
+
+Left at `barrier=0.0` the barriers are placed at trailing volatility scaled
+to the horizon, which is the volatility-adaptive form. A fixed 5% barrier is
+a coin flip in a quiet name and unreachable in a volatile one, so the same
+label would mean different things for different entities.
+
+The class ids are `0` down, `1` up, `2` neither — nominal, not an ordered
+scale. Two constraints forced that specific numbering. It has to be
+integer-valued, because sklearn reads a float target whose values are
+`0.0/0.5/1.0` as *continuous* and refuses to fit any classifier to it. And
+"up" has to be class `1`, so `positive_class_proba` keeps returning P(up) —
+the probability the downstream signal path consumes as a score. Any ordering
+putting "neither" at class 1 would hand it P(nothing happened).
+
+Only closes are examined, not intrabar highs and lows, which makes this a
+conservative barrier test: a level touched and reversed inside one bar is
+not counted.
+
+---
+
+## Preprocessing: pooled vs cross-sectional
+
+`ModelSpec.preprocessing.normalization` chooses how feature columns are
+standardized before the estimator sees them.
+
+**`pooled`** (default) fits one mean and standard deviation over the whole
+training panel, and applies them unchanged to the test rows.
+
+**`cross_sectional`** standardizes within each date, so what reaches the
+model is each entity's position relative to its peers that day.
+
+The difference is not cosmetic. Pooled z-scoring leaves the market factor
+inside every feature: on a day the whole market rallies, every entity's
+momentum reads high together, and a model fed those features can score well
+by learning *"today was an up day"* rather than *"this name is strong
+relative to its peers"*. For a model judged on cross-sectional IC, that is
+the wrong thing to have learned.
+
+It is not the default only because switching it changes what every existing
+model predicts.
+
+Two properties worth knowing:
+
+- **No fold-boundary question.** Unlike the pooled statistics, these are not
+  fitted on train and carried to test — each date uses only its own
+  cross-section, which is contemporaneous information a live model would
+  also have. Nothing crosses the split.
+- **Clipping, not quantile winsorizing.** The pooled path clips to the
+  1st/99th percentile. That is meaningless inside a single date: the 1st
+  percentile of a 20-name cross-section *is* its minimum, so clipping to it
+  does nothing at all. `clip_sigma` (default 3.0) bounds outliers at the
+  sample size that actually exists.
+
+It is also cheaper — measured at 469 ms against 898 ms for pooled on a
+50-entity walk-forward, because it skips the quantile fitting entirely.
+
+---
+
+## Sample weighting
+
+`ModelSpec.weighting.method` decides how much each training row counts.
+Default `none`: every row at weight 1.
+
+| Method | Corrects for |
+|---|---|
+| `label_uniqueness` | overlapping forward returns making consecutive rows redundant |
+| `time_decay` | a relationship that drifts, so older evidence is less relevant |
+| `uniqueness_and_time_decay` | both |
+
+`effective_sample_size` has always been reported next to the OOS metrics: a
+`horizon`-bar forward return generated every bar produces labels that share
+`horizon - 1` of their bars, so 2,000 daily rows of a 20-day return carry
+roughly 100 independent observations per entity. That number was computed
+and then acted on by nothing. These are the weights that act on it.
+
+`label_uniqueness` weights each row by the mean of `1/concurrency` over the
+bars its own label spans (López de Prado, *Advances in Financial Machine
+Learning*, ch. 4). It is computed **per entity**, because two entities'
+labels are different series and do not make each other redundant. Weights
+are normalized to mean 1, so turning weighting on does not also rescale the
+effective regularization strength.
+
+`time_decay`'s `half_life_days` is in calendar days rather than bars, so the
+intent survives a change of data frequency.
+
+An estimator that does not accept `sample_weight` raises rather than
+silently ignoring it. A weighting the caller believes is active but which
+never reached the fit is worse than an error — the model looks like it
+corrected for label overlap and did not.
+
+---
+
+## Hyperparameter search
+
+`ModelSpec.search` is optional and off by default. When set, each fold runs
+a grid or random search **on its own training window** before the real fit.
+
+```python
+ModelSpec(
+    task="regression",
+    estimator=EstimatorSpec(type="ridge", params={}),
+    validation=ValidationSpec(train_window=250, test_window=125, embargo=5),
+    search=SearchSpec(
+        param_grid={"alpha": [0.01, 1.0, 100.0, 10000.0]},
+        inner_splits=3,
+        scoring="cs_rank_ic",
+    ),
+)
+```
+
+**Why not `GridSearchCV`.** sklearn's search helpers cross-validate by
+splitting *rows*. A modeling panel is stacked `(entity, date)` rows, so an
+ordinary K-fold puts the same date on both sides of an inner split — every
+entity on that date is a near-duplicate of the others, and the search then
+selects whichever hyperparameter best memorizes them. The selection is
+leaked even though the outer walk-forward split is clean. Splitting on
+*dates*, forward in time, is the only version of this that means anything
+here.
+
+`scoring` defaults to `cs_rank_ic` because that is what the outer report
+leads with — selecting on `r2` and then quoting rank IC optimizes one thing
+and reports another.
+
+**Read the report, not just the winner.** `validation_report.hyperparameter_search`
+carries one entry per fold, and each keeps *every* candidate's score:
+
+```python
+report = result["validation_report"]["hyperparameter_search"]
+[r["best_params"]["alpha"] for r in report if r["searched"]]
+# [10000.0, 0.01, 10000.0, 0.01, 100.0, 100.0, 100.0]
+```
+
+That output is from a real run, and it is the useful signal: the search
+picked a *different* alpha on most folds, which means it was fitting noise.
+A single averaged "best alpha" would have hidden that completely.
+
+**What it costs.** Roughly `(grid size × inner_splits)` extra fits per outer
+fold. A 12-point grid with 3 inner splits over 20 outer folds is 720 fits
+where there was 20. That is why it is opt-in. If the training window is too
+short to be split `inner_splits` times, the search declines for that fold
+and says so in `reason`, rather than selecting on two dates.
+
+---
+
 ## Model registry
 
 ```

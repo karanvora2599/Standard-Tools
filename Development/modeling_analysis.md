@@ -3,8 +3,12 @@
 Scope: `src/standard_quant_tools/modeling/`. Everything below was measured on
 this machine against a synthetic in-memory universe (1,500 business-day bars per
 ticker, `DataFactory` patched so no measurement includes network time). Numbers
-are best-of-N with the GC disabled. Nothing in this document has been
-implemented — it is an assessment and a proposal.
+are best-of-N with the GC disabled.
+
+**Status: all ten items are implemented and merged.** The assessment below is
+kept as written, and section 5 records what each prediction turned out to be
+worth — including the three that were wrong. Every figure here is reproducible
+with `python tests/bench/bench_modeling.py`.
 
 ## 1. What the module is
 
@@ -215,3 +219,79 @@ behaviour as the default rather than as a silent change.
 The single highest-value item is #1: it is the largest share of the runtime, the
 replacement is provably exact including ties and ragged panels, and it carries
 essentially no risk.
+
+## 5. What the predictions were actually worth
+
+All ten shipped. Three of the estimates above were wrong, and they are corrected
+here rather than edited into the text above, because the pattern is the useful
+part: every one of the three was wrong in the same direction, and for the same
+reason — a measurement taken in isolation was quoted as though it were the
+end-to-end effect.
+
+| # | Predicted | Measured | Verdict |
+|---|---|---|---|
+| 1 | 2–72× on 72% of the run | **44.8×/47.8×/5.3×/1.8×**; run 3.892 s → 1.577 s | as predicted |
+| 2 | up to 11.9× on the indicator share | **~2×** on the feature phase; whole build noisy | **over-stated** |
+| 3 | correctness, not speed | correctness — and 898 ms → 469 ms, so also faster | better than predicted |
+| 4 | correctness | correctness; no speed claim made or found | as predicted |
+| 5 | minutes → seconds | **62.9 s → 3.55 s (17.7×)** | as predicted |
+| 6 | more usable folds | purged K-fold tests every date once vs. walk-forward's tail | as predicted |
+| 7 | model quality | works; picked a *different* alpha per fold, i.e. it was fitting noise | see below |
+| 8 | few % + memory | folded into the fold-mask change; not separately measurable | not isolated |
+| 9 | breadth | four new target types | as predicted |
+| 10 | 12–18% of build | **~6% at 16 features, ~0% at 6** | **over-stated** |
+
+### The three that were wrong
+
+**Item 10 was wrong before this document was even finished** — and the
+correction is already recorded in §2.3, where the profile said 41% and the
+direct A/B said 12–18%. It was *still* wrong at 12–18%. That A/B disabled
+**all** validation, so it measured the cost of every check rather than the cost
+of the repeated ones. Instrumenting the actual memo hit rate showed most checks
+are first checks on distinct columns: the six-feature benchmark set barely
+shares columns between features, so there was little repetition to remove. The
+mechanism helps in proportion to how much the requested features overlap — 56.7%
+of checks avoided and 5.8% of the build saved at 16 features, nothing measurable
+at 6. Two successive over-estimates of the same item, each corrected by
+measuring one level closer to the thing itself.
+
+**Item 2 quoted 11.9×, which was the indicator kernels in isolation.** Indicators
+are only part of a build — fetching, stacking, alignment and hashing are
+unchanged — so the end-to-end effect was never going to be 11.9×. Attributing
+time directly to feature computation gives a stable **~2×**. The whole-build
+number is worse than that and, more importantly, is not reliably measurable on
+this machine: repeated interleaved A/B runs of the same change returned ratios
+from **0.62× to 1.39×**, a spread wider than the effect. An earlier run of mine
+reported the fast path as *slower*, and a later one as 1.35×; neither was
+trustworthy. `bench_modeling.py` now reports the attributed feature-phase time
+instead, and says why.
+
+**Item 7 works, and the interesting result is not the speedup.** The search
+selected a different `alpha` on most folds — `[10000, 0.01, 10000, 0.01, 100,
+100, 100]`. That is the search fitting noise, and it is visible only because the
+report keeps every candidate's score per fold instead of collapsing to one
+"best" value. A tuned hyperparameter that changes every fold is a warning, not a
+result.
+
+### Two bugs the implementation surfaced
+
+Neither was predictable from reading the code:
+
+- The first LightGBM wrapper subclassed `LGBMRegressor` with a `**kwargs`
+  `__init__` to pin `verbose=-1`. sklearn's `get_params()` reads parameter names
+  off the `__init__` signature, so `random_state` silently vanished and the fit
+  then failed inside LightGBM. The same defect was in the quantile booster.
+- `triple_barrier` was first encoded `{0.0, 0.5, 1.0}`. sklearn reads a float
+  target with those values as **continuous** and refuses to fit any classifier
+  to it, so the obvious encoding does not work at all. Re-encoded as three
+  integer classes with "up" deliberately at `1`, so `positive_class_proba` keeps
+  returning P(up) — any ordering putting "neither" at class 1 would hand the
+  downstream signal path P(nothing happened).
+
+### What did not need changing
+
+The leakage controls. The embargo plus the `LABEL_END_COL` target-overlap purge
+were correct as found, and the only change made to them was generalizing the
+purge from "label ends before the test starts" to "the label's span overlaps the
+test block" — bit-identical under walk-forward, and required only because purged
+K-fold puts training rows on both sides of the test window.
