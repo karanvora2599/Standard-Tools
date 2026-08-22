@@ -1557,6 +1557,85 @@ accusation.
 
 ---
 
+---
+
+## Performance
+
+Nothing here changes a result. Every accelerated path is held to agreement
+with the implementation it replaced, and the Python version stays as both the
+reference and the test oracle.
+
+### Where the time goes, and where it went
+
+`cross_sectional_ic` was **72%** of a ridge walk-forward run: it grouped by
+date in Python and called `Series.corr` once per date, which is thousands of
+tiny pandas calls per run. It is now a handful of array passes — a balanced
+panel reshapes to `(n_dates, n_entities)` and reduces along axis 1; a ragged
+one uses `np.add.reduceat` over segment bounds. Agreement with the per-date
+version is 2.2e-16 (spearman) and 5.0e-16 (pearson) across ties, constant
+cross-sections, NaN, infinities and ragged shapes.
+
+Removing it moved the bottleneck rather than ending the story, which is the
+part worth knowing: feature preprocessing then became 47–56% of a run, and
+five native kernels followed.
+
+| Kernel | Replaces | Measured |
+|---|---|---|
+| `fit_preprocess_stats` | per-column `quantile`/`clip`/moments | 5.5–23.5× |
+| `apply_preprocess_stats` | per-column clip + standardize | 14.5–53.6× |
+| `standardize_by_date` | `standardize_cross_sectional` | 8.6–11.6× |
+| `cross_sectional_correlation` | per-date IC | 3.0–6.2× |
+| `cross_sectional_correlation` | pooled `Series.corr("spearman")` | 1.6–3.0× |
+| `label_uniqueness` | `label_uniqueness_weights` | 8–23× |
+
+End to end, `run_experiment` against the pure-Python path: **1.92×/2.05×**
+pooled, **1.59×/1.82×** cross-sectional, **2.23×/2.55×** weighted, at
+200/500 entities.
+
+### The ceiling, stated before the method
+
+Roughly **70%** of a run is now pandas plumbing — fold slicing, DataFrame
+construction, the parquet write — and no kernel reaches any of it. The
+native plan said so before a line of C++ was written, and the measured
+end-to-end numbers landed where that arithmetic put them. It is also why the
+work stopped: the remaining profile has no numeric loop in it.
+
+`cross_sectional` normalization is measurably *faster* than `pooled` (469 ms
+against 898 ms on a 50-entity walk-forward), because it skips the quantile
+fitting entirely. That is a side effect, not the reason to choose it — see
+**Preprocessing** above for the reason.
+
+### Reproducing any of this
+
+    python tests/bench/bench_modeling.py            # everything
+    python tests/bench/bench_modeling.py ic build   # one section
+
+Every figure in `Development/modeling_analysis.md` and
+`Development/modeling_native_plan.md` comes from that script. It patches
+`DataFactory` with a synthetic in-memory universe, so no measurement includes
+network time.
+
+Its `build` section attributes time to feature computation directly rather
+than A/B-ing whole builds, and the reason is worth repeating: repeated on an
+ordinary workstation, a whole-build A/B of the same change returned ratios
+from **0.62× to 1.39×** — a spread wider than the effect being measured. When
+an end-to-end comparison is that noisy, measure the part that changed and say
+so.
+
+### Without the extension
+
+Everything works. `_sqt_core` is optional throughout, each module carries its
+own `HAS_CPP` flag, and the tests compare the two paths directly by toggling
+it — so they are meaningful whether or not a compiler was available.
+
+Two of the kernels are additionally gated by size, because below the
+crossover the argument conversion costs more than the kernel saves: pooled
+correlation above 5,000 rows, label uniqueness above 50,000. Both thresholds
+exist because the first versions were measurably *slower* than the Python
+they replaced on small panels.
+
+---
+
 ## Explicitly deferred
 
 Not built here, and not accidentally half-built either:
@@ -1597,14 +1676,25 @@ Not built here, and not accidentally half-built either:
   built: beta- and sector-neutralization, which need per-ticker
   beta/sector metadata this repo does not carry (the same blocker
   `backtest.sizing` documents for its own deferred list).
-- **Hyperparameter tuning, custom estimator import, multi-model
-  comparison tooling.** Note that selecting among candidates on
-  `evaluate_model_portfolio`'s reported Sharpe would turn those OOS folds
-  into tuning data — a nested inner-fold selection is what that needs,
-  and it is not built.
-- **Declarative preprocessing** — winsorize 1/99 + pooled z-score is
-  hardwired for every estimator, though trees, linear and cross-sectional
-  models want different treatment.
+- **Custom estimator import, multi-model comparison tooling.** The
+  estimator allowlist is deliberately closed — no arbitrary `sklearn`
+  import, no `exec()` — so adding an estimator means registering it, not
+  naming a class path. Comparison tooling is still absent, and the reason
+  it needs care rather than a loop is worth stating: selecting among
+  candidates on `evaluate_model_portfolio`'s reported Sharpe would turn
+  those OOS folds into tuning data.
+  *Hyperparameter tuning is no longer part of this gap* — see
+  [Hyperparameter search](#hyperparameter-search), which does exactly the
+  nested inner-fold selection this entry used to say was missing, on each
+  fold's training window only.
+- **Preprocessing beyond two schemes** — `PreprocessingSpec` now offers
+  pooled and cross-sectional normalization (see
+  [Preprocessing](#preprocessing-pooled-vs-cross-sectional)), which closes
+  the part of this gap that mattered: a cross-sectional model no longer
+  has to accept a transform that leaves the market factor in its features.
+  What is still hardwired is *per-estimator* treatment — trees do not need
+  standardization at all and pay for it anyway — and a per-feature choice
+  of transform. Neither changes a result today, so neither is urgent.
 - **Extracting a codebase-wide generic `standard_quant_tools.artifacts`
   package** — `modeling.artifacts` reuses `backtest.artifacts` directly
   today; a shared package is only worth building once there's a second

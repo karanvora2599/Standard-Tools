@@ -13,7 +13,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 - **Agent-First Design** — All tools return Pydantic models; 46 LLM-callable tools with OpenAI/Anthropic function-calling schemas, including two bring-your-own-signal tools; descriptive errors for self-correction
 - **Comprehensive Coverage** — 14 indicators, 13 risk/return metrics + 5 backtest diagnostics, 12 analysis functions plus Black-Scholes-Merton option pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), stock screener, 8 backtest strategies + parameter grid search, a shared-cash portfolio simulation engine with pluggable cost/constraint models, pairs backtest, and walk-forward/robustness diagnostics — grid search and the signal-panel backtester also accept your own signal-generating callable/matrix, not just the built-in strategies
 - **Robust Infrastructure** — Retry logic with exponential backoff, TTL + Parquet caching, custom exception hierarchy, `@validate_series` decorator, decision-record audit trail (`sqt` CLI), optional C++/scipy/numba graceful fallback
-- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), followed by two reviews of the modeling runtime: the first found 7 critical issues (two leakage channels, a PCA start-vector degeneracy), the second found 20 more across modeling, the data layer and the numerics — a full-refit model that had seen prices past its own recorded cutoff, an `end_date` that meant different things per provider, a "cross-section" that could mix dates, and aliases that could forge feature provenance. None of it was catchable by the suite as it stood. Every finding was reproduced against a live interpreter before being fixed, and each is pinned by a regression test. 2451 Python tests + 9 C++ suites, all green.
+- **Audited for correctness** — Both tiers have been through a line-by-line correctness audit (41 findings fixed; see [Correctness & Backend Parity](#correctness--backend-parity)), followed by two reviews of the modeling runtime: the first found 7 critical issues (two leakage channels, a PCA start-vector degeneracy), the second found 20 more across modeling, the data layer and the numerics — a full-refit model that had seen prices past its own recorded cutoff, an `end_date` that meant different things per provider, a "cross-section" that could mix dates, and aliases that could forge feature provenance. None of it was catchable by the suite as it stood. Every finding was reproduced against a live interpreter before being fixed, and each is pinned by a regression test. 3125 Python tests + 10 C++ suites, all green.
 
 ---
 
@@ -506,19 +506,38 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 ### Modeling Runtime (`standard_quant_tools.modeling`)
 
 A second, independent 6-tool registry — `list_features`, `build_model_dataset`,
-`run_model_experiment`, `score_model`, `inspect_model` — for building
-walk-forward-validated statistical models from this library's own features
-(21 built-in: technical, market, risk, volume, statistical and PCA-derived
-factors), never merged into the 46-tool `get_agent_tools()`/`TOOL_CATEGORY`
-surface above.
+`run_model_experiment`, `score_model`, `inspect_model`,
+`evaluate_model_portfolio` — for building walk-forward-validated statistical
+models from this library's own features (21 built-in: technical, market,
+risk, volume, statistical and PCA-derived factors), never merged into the
+46-tool `get_agent_tools()`/`TOOL_CATEGORY` surface above.
 
-Regression and classification are both reachable through the same five
-tools (`TargetSpec(type="forward_return" | "forward_direction")`).
+| Axis | What is available |
+|---|---|
+| **Targets** | `forward_return`, `forward_return_vol_scaled`, `forward_return_rank`, `forward_return_market_neutral` (regression); `forward_direction`, `triple_barrier` (classification) |
+| **Estimators** | 17 — 11 regression, 6 classification. scikit-learn throughout, plus `lightgbm`/`xgboost` when installed and two quantile-regression forms |
+| **Validation** | walk-forward (rolling or expanding) and purged K-fold, both with a target-overlap purge |
+| **Preprocessing** | pooled or cross-sectional normalization |
+| **Weighting** | none, label uniqueness, time decay, or both |
+| **Search** | optional grid or random search on each fold's training window |
+
+Everything past the defaults is opt-in behind an explicit spec field, so an
+existing `ModelSpec` predicts exactly what it predicted before.
+
 Walk-forward validation purges training rows whose forward-return label
 would resolve inside the test window — feature-side embargo alone does not
 close that channel. Registered models are content-addressed, verified on
 load, and self-contained; `score_model` refuses an `as_of` inside the
 training window, since the deployed estimator is refit on the full panel.
+
+Two of the options are corrections rather than variations, and the
+documentation says so. **Cross-sectional normalization** exists because
+pooled z-scoring leaves the market factor inside every feature, so a model
+judged on cross-sectional IC can score well by learning "today was an up
+day". **Sample weighting** exists because `effective_sample_size` was always
+reported and never acted on: overlapping forward returns make consecutive
+rows largely redundant. Neither is the default only because switching it
+changes what every existing model predicts.
 
 The provider and bar interval are named on the `DatasetSpec` (they were
 previously implicit, so every dataset came from the default provider at its
@@ -568,6 +587,12 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 | `rolling_factor_loadings` (n = 500, window = 60, k = 3) | **5.5×** (8.9ms → 1.6ms) | — | Was 26× when this used an incremental Cholesky update. That path was removed because it was wrong on small-magnitude factors (all-NaN where NumPy answered correctly); the replacement is a per-window rank-revealing QR. 10.0× at n=2 000/window=60, 2.3× at window=252 — the gap narrows as the window grows, since cost is `O(n·window·p²)`. |
 | `technical_indicators_panel` (500 tickers × 1 000 bars, 5 indicators) | **11.9×** (1 727.6ms → 144.7ms) | — | vs. looping the per-ticker Python wrappers. The pybind11 boundary was never the cost (2.7 µs/call, 14%) — the per-ticker pandas round trip was, at 318 µs against 19 µs of kernel. |
 | `run_portfolio_simulation` (1 000 tickers × 2 000 bars) | **5.3×** (188.7ms → 35.8ms) | — | Most of it was *not* the bar loop: profiling put 92% in building the dense price matrices, one pandas `.loc` per (ticker, column). The native bar-loop kernel adds a further 1.7–3.3× on top. |
+| `fit_preprocess_stats` (per-column winsorize + moments) | **5.5–23.5×** | — | Replaces two `Series.quantile` calls, a `clip` and two moments per column. Must reproduce pandas' *conventions*, not just its arithmetic: linearly interpolated quantiles, ddof=1, NaN skipped but infinities kept. |
+| `apply_preprocess_stats` (clip + standardize) | **14.5–53.6×** | — | One fused pass; the Python form allocated two full-panel temporaries per column. |
+| `standardize_by_date` (cross-sectional z-score) | **8.6–11.6×** | — | Per-date centre, scale and clip over a counting-sorted panel. |
+| `cross_sectional_correlation` (per-date IC) | **3.0–6.2×** | — | spearman 4.9–6.2×, pearson 3.0–4.2×. Counting-sorts rows by date in O(n), replacing an argsort and two gathers. |
+| `cross_sectional_correlation` (pooled rank IC) | **1.6–3.0×** | — | Same kernel, one segment. The pooled case has no per-date parallelism to draw on, so the ranking sort splits into per-thread runs and merges above 50 000 rows. |
+| `label_uniqueness` (label-overlap weights) | **8–23×** | — | Concurrency by difference array, O(n) where sweeping each label's span is O(n·horizon). Gated below 50 000 rows, where the argument conversion costs more than the Python loop saves. |
 | `rolling_hurst` (n = 2 000, window = 200) | **274×** vs. Python, plus a further ~10.5× from OpenMP + a one-pass DFA reformulation on top of the *original* C++ implementation (measured independently, at the same n/window) | — | Combining the two independently-measured ratios gives roughly ~2 900× vs. the pure-Python fallback at this size — not itself a single direct measurement, but both factors are real. |
 | `simulate_forward_paths` (n_simulations = 5 000, horizon = 60) | **2.0×** (74.8ms → 37.7ms) | — | No numba path ever existed for this one — was pure uncompiled Python. See OpenMP note below for the parallel path's own measured speedup. |
 | `garch11_variance_recursion` (n = 2 000, warm steady-state) | **0.8×** (10.8ms → 12.9ms, i.e. slightly *slower*) | 219ms → 4.8ms first call | The whole point of this port is the cold-start column, not this one — see below. |
@@ -580,6 +605,23 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 **Two honest findings from actually measuring this**, worth calling out rather than hiding:
 - **`run_strategy` originally showed only ~1.0× end-to-end**, not the then-documented 3–8×, even though the raw C++ kernel genuinely was faster in isolation (confirmed by `tests/cpp/bench_backtest.cpp`'s native-only numbers below). The gap was never the kernel — it was the Python wrapper: `pct_change`/`shift` computed unconditionally before the C++ dispatch check even though the C++ path never used them, and an unconditional Python trade-log rebuild that overwrote already-correct native stats every call. **Since fixed** (removing both, and only building the Python trade log when a caller actually asks for it via `include_trade_log=True`) — the real, current number is **~58×** (26.8ms → 0.46ms), reflected in the table above. `batch_run_strategy` never had this specific bug (its consumer already read native stats directly), but has since gained its own further ~6–11× from an allocation-free summary kernel plus OpenMP across the parameter grid.
 - **OpenMP's measured speedup for `simulate_forward_paths` is ~2.0–2.4×** on this 16-core machine (min-of-7-runs across separate process invocations, `n_simulations=200 000`) — not the near-linear-with-cores scaling the per-path independence would suggest in theory. MSVC's OpenMP support here is version 2.0 (an older spec) — some of that gap was expected going in. A later pass eliminating each path's small per-path RNG/buffer allocations moved this scaling ratio only within noise (~2.4×→~2.1×, both real measurements) — the allocation being eliminated turned out not to be the dominant cost at this problem size, a legitimate change worth keeping regardless (fewer allocations is never worse) but not the win that framing initially suggested.
+
+**A third honest finding, from the modeling kernels.** The plan for that work
+opened by stating a *ceiling* rather than a target: feature preprocessing was
+47–56% of a walk-forward run and everything else is pandas plumbing no kernel
+reaches, so ~2× end-to-end was the arithmetic limit however fast the kernel
+got. Measured afterwards: **1.59–2.55×** end-to-end, while the kernels
+themselves are 3–53×. The prediction held, and after the first phase the
+attribution shifted exactly as it implied — preprocessing fell to 13% of a
+run and "everything else" rose to **70%**. That is why the work stopped at
+three kernels instead of chasing the remaining 70% with tools that cannot
+reach it. Two smaller things went wrong on the way and are recorded in
+`Development/modeling_native_plan.md`: the plan missed the pooled rank IC
+entirely (41–51% of `regression_metrics`, larger than the per-date IC it did
+name, and only visible on re-measuring between phases), and two kernels were
+initially *slower* than the Python they replaced at small sizes — fixed with
+a cheaper argument conversion and an explicit size gate, because a fast path
+that is slower is a bug rather than a trade-off.
 
 Raw C++-only (no Python involved) numbers from `tests/cpp/bench_hurst.cpp` and `tests/cpp/bench_backtest.cpp`, run via `ctest`:
 
@@ -615,8 +657,20 @@ Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):
 | Portfolio covariance | — | BLAS `pandas.cov` | BLAS-backed | O(n·k²) via LAPACK |
 | Screener (50+ tickers) | — | ProcessPoolExecutor | multi-core | Auto async→multiprocess threshold |
 | Portfolio simulation (100 tickers × 2 000 bars, monthly) | 1 503 ms (per-ticker `.loc`) | 32 ms (dense matrices) | **47×** | 200 000 pandas label lookups replaced by positional indexing; 500 tickers → **78×** |
+| Cross-sectional IC (252 dates × 50 entities) | 91.5 ms (`groupby` + `Series.corr` per date) | 1.26 ms (array passes) | **47.8×** | Was **72%** of a ridge walk-forward run. Balanced panels reshape to `(n_dates, n_entities)`; ragged ones use `np.add.reduceat` over segment bounds. Agreement with the per-date version is 2.2e-16 (spearman) / 5.0e-16 (pearson), including ties and NaN. The multiple shrinks to 1.8× at 2 000 entities as the per-date overhead amortizes. |
+| Walk-forward fold masks | `panel["date"].isin(...)` per fold | one `searchsorted` + a per-date gather | — | Also keeps working for splitters whose folds are not contiguous, which purged K-fold needs. |
 
 > **Portfolio simulator note:** `run_portfolio_simulation` holds prices, target weights and liquidity baselines as dense `(n_bars × n_tickers)` matrices and executes the default cost configuration as array arithmetic. The vectorized rebalance is deliberately narrow — `per_share` commission, the impact model and the ADV constraint each need a per-element decision (a per-order minimum, a per-ticker volatility lookup, an error naming one ticker) and keep the explicit loop, selected automatically by cost model. Both routes are held to the same numbers by tests: agreement with the pre-vectorization implementation is within 1.7e-15 relative across every configuration, with `rebalance_log` identical, the residual being pairwise-vs-sequential summation rather than a different formula. The speedup grows with universe size because the removed cost scaled with tickers × bars. See [Documentation/04_backtesting.md](Documentation/04_backtesting.md).
+
+> **Cross-sectional IC note:** the centered two-pass correlation form is not
+> a refinement. The textbook `n·Σxy − ΣxΣy` shortcut differences two nearly
+> equal large numbers on return-scale data and loses most of its significant
+> digits; switching to the centered form moved pearson agreement from 2.2e-14
+> to 5.0e-16, and a test pins the tighter tolerance so it cannot drift back.
+> The same trap caught the native preprocessing kernel from the other
+> direction: pandas sums *pairwise* via numpy, and a sequential accumulator
+> disagreed in the 12th significant digit until the kernel was changed to
+> match. Both are recorded in `Development/modeling_analysis.md`.
 
 > **Numba note:** RSI, ADX, Parabolic SAR, GARCH's variance recursion, the Kalman filter, and every backtest-strategy state machine (RSI/Bollinger/Donchian/VWAP-reversion) are decorated with `@njit`. This requires Numba with a compatible NumPy version (≤ 2.0, or wherever Numba's own ABI support currently ends). On an incompatible NumPy version, Numba decorators are a no-op and the code falls back to interpreted Python, where C++ genuinely wins big (the original ~10–30× estimates for RSI/ADX/PSAR describe this scenario). On a machine where Numba *is* working (like the one that produced the measured table below), it's already close to C speed once warm — real measurement shows C++ landing anywhere from a tie to a modest win against it, not a blowout. What C++ reliably wins either way: no per-process JIT compile tax (measured at ~200ms–1.1s on the first call in a fresh process, gone entirely with C++) and no numpy-ABI fragility risk (the exact failure mode that motivated porting RSI/ADX/PSAR to C++ in the first place). Every one of these falls back to pure Python automatically when neither C++ nor Numba is available.
 
@@ -867,11 +921,11 @@ python tests/bench/bench_universe.py                    # 2,000-ticker shapes
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**2996 Python tests total** — 2994 passing, 2 skipped, with `_sqt_core` built. (Both skips are environmental: one needs `ANTHROPIC_API_KEY`, the other exercises a failure path that the input under test does not trigger.) Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
+**3127 Python tests total** — 3125 passing, 2 skipped, with `_sqt_core` built. (Both skips are environmental: one needs `ANTHROPIC_API_KEY`, the other exercises a failure path that the input under test does not trigger.) Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Correctness & Backend Parity](#correctness--backend-parity)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 
-**9 C++ test executables** run via `ctest` (Hurst, indicators, cointegration, backtest, Monte Carlo, GARCH, signal state machines, rolling regression, plus a randomized-input cointegration fuzz harness) — **67,688** assertion-level checks between them, 50,234 of which come from the fuzz harness alone.
+**10 C++ test executables** run via `ctest` (Hurst, indicators, cointegration, backtest, Monte Carlo, GARCH, signal state machines, rolling regression, panel statistics, plus a randomized-input cointegration fuzz harness) — **67,731** assertion-level checks between them, 50,234 of which come from the fuzz harness alone.
 
 Note what the fuzz harness does *not* generate: non-finite inputs. Every shape it builds is
 finite, which is why a NaN-handling defect once survived it alongside every other suite. The

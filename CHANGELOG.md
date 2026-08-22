@@ -9,6 +9,90 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (native kernels for the modeling layer)
+
+Five kernels in `_sqt_core`, from `Development/modeling_native_plan.md`. Each
+is an optional fast path with the Python implementation kept as both the
+reference and the test oracle, and each agrees with it to **8.9e-16 or
+better**.
+
+| Kernel | Replaces | Measured |
+|---|---|---|
+| `fit_preprocess_stats` | per-column `quantile`/`clip`/moments | 5.5–23.5× |
+| `apply_preprocess_stats` | per-column clip + standardize | 14.5–53.6× |
+| `standardize_by_date` | `standardize_cross_sectional` | 8.6–11.6× |
+| `cross_sectional_correlation` | `cross_sectional_ic` (per-date) | 3.0–6.2× |
+| `cross_sectional_correlation` | pooled `Series.corr(method="spearman")` | 1.6–3.0× |
+| `label_uniqueness` | `label_uniqueness_weights` | 8–23× |
+
+End to end, `run_experiment` against the pure-Python path: **1.92×/2.05×**
+pooled, **1.59×/1.82×** cross-sectional, **2.23×/2.55×** weighted, at
+200/500 entities.
+
+**The plan stated a ceiling before a method, and it held.** Feature
+preprocessing was 47–56% of a run and the rest is pandas plumbing no kernel
+reaches, so ~2× end-to-end was the arithmetic limit however fast the kernels
+got. After the first phase, preprocessing fell to 13% and "everything else"
+rose to 70% — fold slicing, DataFrame construction, the parquet write. That
+is why the work stopped at three phases rather than continuing.
+
+Exactness required reproducing pandas' *conventions*, not merely being
+defensible: linearly interpolated quantiles at `h=(n−1)q`, ddof=1 standard
+deviations, NaN skipped by moments but preserved by transforms, and
+infinities NOT treated as missing. One quirk is reproduced deliberately and
+pinned by a test — `standardize_cross_sectional` reduces with
+`np.add.reduceat`, so a single NaN propagates into the whole date's mean and
+zeroes that date's *entire* column, not just its own row. The first kernel
+skipped NaN, which is more defensible and disagreed; it was a speed change
+and had no business moving a number.
+
+The pooled correlation is the same kernel with one segment, so it cannot
+drift from the per-date form. Having no per-date parallelism to draw on, its
+ranking sort splits into per-thread runs and merges, above 50 000 rows only —
+the cross-sectional path never enters that region, which matters because it
+is already inside a parallel loop and OpenMP disables nested regions by
+default.
+
+### Fixed (two fast paths that were slower than what they replaced)
+
+Both found by benchmarking the small case as carefully as the large one.
+
+`apply_preprocess_stats` regressed past four threads under `schedule(guided)`.
+The case for guided rests on work per iteration varying, and here it provably
+does not — every row is the same `n_cols` operations. What the loop *is*, is
+memory-bandwidth bound, where guided's shrinking non-contiguous chunks work
+against the prefetcher. Switched to `schedule(static)`, which measured better
+at every thread count above one.
+
+`label_uniqueness` measured **0.4×** on a 12 600-row panel: three pandas round
+trips to normalize datetimes cost more than the Python loop saved. Fixed by
+reinterpreting `datetime64[ns]` to int64 for free where possible, and gating
+the kernel below 50 000 rows. After both: 1.4× at 12 600 rising to 22.8× at
+504 000, with no size losing.
+
+A fast path that is slower is a bug, not a trade-off.
+
+### Fixed (a null-guard that skipped a legitimate panel)
+
+`fit_preprocess_stats` returned early on a null `values` pointer. An empty
+`std::vector`'s `data()` is null, so a legitimate `(0, n_cols)` panel silently
+kept uninitialized statistics that the caller then divided by. Found by the
+C++ suite, not by Python, because the engine happens to guard against empty
+folds upstream. Zero-row columns now take the all-missing rule like any other
+column with no observations.
+
+### Added (tests)
+
+`tests/cpp/test_panel_stats.cpp` — a tenth C++ suite, 43 assertions covering
+the quantile interpolation rule, the ddof=1 divisor, NaN skipped by moments
+but preserved by transforms, infinities not treated as missing, constant and
+single-row columns, row-major column independence, and in-place aliasing.
+
+`tests/modeling/test_native_preprocessing.py` and
+`tests/modeling/test_native_metrics.py` compare the two paths directly by
+toggling each module's `HAS_CPP`, so they are meaningful whether or not the
+extension is present.
+
 ### Added (modeling: six capability gaps closed)
 
 An analysis of `standard_quant_tools.modeling` (`Development/modeling_analysis.md`)
