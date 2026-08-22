@@ -347,6 +347,14 @@ path uses, so output is bit-identical to calling the per-ticker function in a lo
 have. A ticker with a shorter history therefore truncates the panel for everyone, which is
 a real difference from computing each ticker on its own full history.
 
+That caveat is load-bearing, not decorative. `build_model_dataset` routes its
+technical features through this function, but **only when every entity's index is
+identical** — because every indicator here is path-dependent (Wilder smoothing, EMAs),
+so a truncated history changes the *values*, not merely the coverage. A universe with
+mid-sample IPOs, delistings, or entities on different holiday calendars falls back to
+the per-entity loop, which is correct there and always was. See
+[15_modeling.md](15_modeling.md).
+
 ---
 
 ## Multi-Indicator Example: Full Technical Dashboard

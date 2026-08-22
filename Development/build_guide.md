@@ -415,6 +415,7 @@ Standard Tools/
 │           │   ├── rolling_beta_avx2.cpp    ← AVX2+FMA kernel, its own translation unit (compiled with /arch:AVX2 unconditionally)
 │           │   ├── monte_carlo.cpp          ← moving-block bootstrap, optional OpenMP parallel loop
 │           │   ├── garch.cpp                ← GARCH(1,1) variance recursion + fused NLL/analytic-gradient implementation
+│           │   ├── panel_stats.cpp          ← modeling-layer panel statistics: per-column preprocessing, per-date correlation/standardization, label-overlap weights
 │           │   └── signal_state_machines.cpp ← Donchian / VWAP-reversion hysteresis implementation
 │           └── bindings/
 │               └── bindings.cpp             ← pybind11 module definition (all features, direct-write NumPy buffers)
@@ -440,6 +441,7 @@ Standard Tools/
         ├── test_garch.cpp                   ← 13 C++ unit tests (incl. analytic-gradient vs. numerical central differences)
         ├── test_signals.cpp                 ← 12 C++ unit tests
         ├── test_rolling_regression.cpp      ← 12 C++ unit tests (incl. AVX2-vs-scalar tolerance gate, forced-scalar-path test)
+        ├── test_panel_stats.cpp             ← 43 C++ assertions (quantile interpolation rule, ddof=1, NaN skipped by moments but preserved by transforms, infinities not missing, in-place aliasing)
         ├── bench_hurst.cpp                  ← Hurst timing benchmark (run manually)
         └── bench_backtest.cpp               ← Backtest kernel timing benchmark (run manually)
 ```
@@ -470,6 +472,9 @@ Standard Tools/
 | OpenMP policy (work threshold, thread cap, scheduling rationale) | `omp_policy.hpp` (header-only) | — | used by every parallel kernel |
 | Batch pair cointegration (`batch_engle_granger` — `(n_pairs, 11)` array, parallel across pairs) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py`'s `scan_cointegrated_pairs`, used by `agent/tools.py`'s `scan_pairs` |
 | Panel indicators (`technical_indicators_panel` — whole universe in one call, parallel across tickers) | `indicators.hpp` | `indicators.cpp` | `indicators/panel.py` |
+| Feature preprocessing (`fit_preprocess_stats` / `apply_preprocess_stats` — per-column winsorize bounds and clipped moments, then a fused clip+standardize pass) | `panel_stats.hpp` | `panel_stats.cpp` | `modeling/features/transforms.py` |
+| Per-date statistics (`cross_sectional_correlation`, `standardize_by_date` — counting-sorted by date, parallel across dates) | `panel_stats.hpp` | `panel_stats.cpp` | `modeling/validation/metrics.py`, `modeling/features/transforms.py` |
+| Label-overlap weights (`label_uniqueness` — concurrency by difference array, parallel across entities) | `panel_stats.hpp` | `panel_stats.cpp` | `modeling/validation/weights.py` |
 | Portfolio simulation (`run_portfolio_simulation` — shared-cash multi-asset account; percentage-commission fast path only) | `backtest.hpp` | `backtest.cpp` | `backtest/portfolio_engine.py` (falls back to the Python loop for per-share commission, the impact model, or an ADV constraint) |
 | Monte Carlo forward simulation (moving-block bootstrap, optional OpenMP) | `monte_carlo.hpp` | `monte_carlo.cpp` | `backtest/monte_carlo.py` |
 | GARCH(1,1) conditional variance recursion + fused NLL/analytic gradient | `garch.hpp` | `garch.cpp` | `analysis/garch.py` |
@@ -574,6 +579,19 @@ There are two cases:
 8. The relevant Python module — add `_cpp_core: Any = None` guard and fast path
 
 ### Case B — Extending an existing module (e.g. adding a function to `indicators.cpp`)
+
+> **A note on matching pandas rather than being defensible.** `panel_stats.cpp`
+> replaces specific pandas expressions, and the hard part is not the
+> arithmetic — it is reproducing conventions that are pandas' *choice*:
+> quantiles linearly interpolated at `h=(n−1)q` (a bare `nth_element` gives a
+> different answer on almost every real column), `ddof=1` standard deviations,
+> NaN skipped by moments but preserved by transforms, and infinities NOT
+> treated as missing. Most subtly, pandas sums **pairwise** via numpy; a
+> sequential accumulator in the kernel disagreed in the 12th significant digit
+> on return-scale data, which propagated to 3.8e-14 on the output. If you add
+> a kernel that replaces a pandas call, budget for this: the tolerance the
+> test asserts should be one the implementation has to *earn*, not one chosen
+> to make it pass.
 
 *Examples: Wilder's ATR was added to `indicators.hpp`/`indicators.cpp`, and
 the Kalman filter (1-state/2-state) was added to `cointegration.hpp`/
