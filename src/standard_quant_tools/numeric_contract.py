@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.validation import _memo_record, _memo_seen
 
 __all__ = [
     "require_finite_series",
@@ -80,6 +81,9 @@ def require_finite_series(
 
     Returns the series unchanged so this can be used inline.
     """
+    finite_tag = ("finite_series", allow_nan, allow_empty)
+    if _memo_seen(series, finite_tag):
+        return series
     if not isinstance(series, pd.Series):
         raise ValidationError(
             f"{func}: {name} must be a pandas Series, got {type(series).__name__}"
@@ -117,6 +121,7 @@ def require_finite_series(
             "gaps. Drop or fill them explicitly so the choice is yours rather "
             "than implicit."
         )
+    _memo_record(series, finite_tag)
     return series
 
 
@@ -132,6 +137,9 @@ def require_positive_price_series(
     `pct_change` against a zero divides by zero, and a negative denominator
     silently flips the sign of a return.
     """
+    positive_tag = ("positive_price_series", allow_nan)
+    if _memo_seen(series, positive_tag):
+        return series
     require_finite_series(series, name, func, allow_nan=allow_nan)
     values = pd.to_numeric(series, errors="coerce")
     nonpositive = values.notna() & (values <= 0)
@@ -144,6 +152,7 @@ def require_positive_price_series(
             "remaining perfectly finite — measured on run_strategy, a single "
             "-5.0 close produced a total return of +0.397914."
         )
+    _memo_record(series, positive_tag)
     return series
 
 

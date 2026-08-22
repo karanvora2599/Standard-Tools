@@ -109,6 +109,14 @@ def _risk_atr_pct(
     alignment drops it like any other missing value."""
     close = ohlcv["Close"]
     atr = _wilder_atr(ohlcv["High"], ohlcv["Low"], close, period=period)
+    return atr_pct_from_atr(atr, close)
+
+
+def atr_pct_from_atr(atr: pd.Series, close: pd.Series) -> pd.Series:
+    """The normalization step of risk.atr_pct, split out so the panel fast
+    path in dataset/panel_features.py applies the SAME guarded division to
+    a batch-computed ATR. Two copies of this would be two chances for the
+    fast path to drift away from the per-entity path silently."""
     return atr / close.where(close > 0)
 
 
@@ -136,8 +144,15 @@ def _risk_bollinger_pct_b(
     warm-up. Same guarded-denominator shape as the degenerate-window
     handling in stochastic_oscillator and spread_zscore."""
     bands = _bollinger_bands(ohlcv["Close"], period=period, num_std=num_std)
-    band_width = bands["BB_Upper"] - bands["BB_Lower"]
-    pct_b = (ohlcv["Close"] - bands["BB_Lower"]) / band_width.where(band_width > 0)
+    return pct_b_from_bands(ohlcv["Close"], bands["BB_Upper"], bands["BB_Lower"])
+
+
+def pct_b_from_bands(close: pd.Series, upper: pd.Series, lower: pd.Series) -> pd.Series:
+    """The %B step of risk.bollinger_pct_b, including the collapsed-band
+    rule, split out for the panel fast path. See _risk_bollinger_pct_b for
+    why a flat window is 0.5 rather than NaN."""
+    band_width = upper - lower
+    pct_b = (close - lower) / band_width.where(band_width > 0)
     return pct_b.where(band_width.isna() | (band_width > 0), 0.5)
 
 
