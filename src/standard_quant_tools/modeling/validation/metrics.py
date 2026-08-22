@@ -12,6 +12,30 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, mean_absolute_error, r2_score, roc_auc_score
 
+# Optional native fast path. The Python below stays the reference and the
+# test oracle; with the extension absent every function here still works.
+#
+# Ranking and correlation are 93% of regression_metrics at universe scale --
+# the POOLED rank IC alone is 41-51% of it, because it sorts the whole test
+# fold through scipy. Both the pooled and the per-date forms are the same
+# computation over different segmentations, so one kernel serves both rather
+# than two that could drift apart.
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = hasattr(_cpp_core, "cross_sectional_correlation")
+except ImportError:
+    pass
+
+# Below this the pandas/scipy call is competitive and the array conversion
+# is a real share of the cost, so the fast path is not worth taking. Measured
+# crossover is well under this; the margin is deliberate.
+_POOLED_NATIVE_MIN_ROWS = 5_000
+
 
 def positive_class_proba(estimator: Any, X: np.ndarray) -> np.ndarray:
     """
@@ -33,6 +57,37 @@ def positive_class_proba(estimator: Any, X: np.ndarray) -> np.ndarray:
 
 
 def _safe_corr(true_s: pd.Series, pred_s: pd.Series, method: str) -> float:
+    """
+    Correlation over every row, with an undefined result reported as 0.0.
+
+    The spearman branch takes the native path on a large fold: it is a full
+    sort of the test window through scipy, which measured at 41-51% of
+    regression_metrics at universe scale. Pearson stays in pandas — it is
+    already a couple of passes over the data and the kernel does not beat it
+    by enough to justify the conversion.
+    """
+    if (
+        HAS_CPP
+        and method == "spearman"
+        and len(true_s) >= _POOLED_NATIVE_MIN_ROWS
+        and len(true_s) == len(pred_s)
+    ):
+        try:
+            y_true = np.ascontiguousarray(true_s.to_numpy(dtype=np.float64))
+            y_pred = np.ascontiguousarray(pred_s.to_numpy(dtype=np.float64))
+        except (TypeError, ValueError):
+            y_true = y_pred = None
+        if y_true is not None:
+            # One segment covering every row is exactly the pooled
+            # correlation, so this reuses the per-date kernel rather than
+            # adding a second implementation of the same arithmetic.
+            single = np.zeros(y_true.size, dtype=np.int64)
+            return float(
+                _cpp_core.cross_sectional_correlation(y_true, y_pred, single, 1, True)[
+                    0
+                ]
+            )
+
     value = float(true_s.corr(pred_s, method=method))
     return 0.0 if np.isnan(value) else value
 
@@ -165,6 +220,18 @@ def cross_sectional_ic(
     emit = np.bincount(all_codes, minlength=n_dates) >= 2
     if not emit.any():
         return pd.Series(dtype=float)
+
+    if HAS_CPP:
+        # The kernel does its own NaN-pair drop and counting-sorts the rows
+        # by date, which replaces the argsort and the two gathers below.
+        ic_native = _cpp_core.cross_sectional_correlation(
+            np.ascontiguousarray(y_true),
+            np.ascontiguousarray(y_pred),
+            np.ascontiguousarray(all_codes.astype(np.int64)),
+            n_dates,
+            method == "spearman",
+        )
+        return pd.Series(ic_native[emit], index=uniques[emit], dtype=float)
 
     # Series.corr drops NaN PAIRWISE before correlating, and for spearman
     # ranks only what survives — so removing incomplete rows here is the

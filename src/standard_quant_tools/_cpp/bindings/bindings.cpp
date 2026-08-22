@@ -1992,4 +1992,101 @@ PYBIND11_MODULE(_sqt_core, m) {
         "(the clip result and the standardized result); this allocates one\n"
         "output array and nothing else. NaN passes through untouched, which\n"
         "is what Series.clip does with a missing value.");
+
+
+    m.def(
+        "cross_sectional_correlation",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> y_true,
+           py::array_t<double, py::array::c_style | py::array::forcecast> y_pred,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+           py::ssize_t n_dates,
+           bool spearman) -> py::array_t<double>
+        {
+            if (y_true.size() != y_pred.size() || y_true.size() != date_codes.size())
+                throw std::invalid_argument(
+                    "y_true, y_pred and date_codes must have the same length");
+            if (n_dates < 0)
+                throw std::invalid_argument("n_dates must be >= 0");
+
+            const auto n_rows = static_cast<std::size_t>(y_true.size());
+            py::array_t<double> out(n_dates);
+            const double* yt = y_true.data();
+            const double* yp = y_pred.data();
+            const long long* codes = date_codes.data();
+            double* out_ptr = out.mutable_data();
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::cross_sectional_correlation(
+                    yt, yp, codes, n_rows, static_cast<std::size_t>(n_dates),
+                    spearman, out_ptr);
+            }
+            if (!ok)
+                throw std::runtime_error(
+                    "cross_sectional_correlation: could not allocate a buffer");
+            return out;
+        },
+        py::arg("y_true"),
+        py::arg("y_pred"),
+        py::arg("date_codes"),
+        py::arg("n_dates"),
+        py::arg("spearman"),
+        "Per-date correlation between two aligned columns.\n\n"
+        "Rows need not be sorted by date: the kernel counting-sorts them in\n"
+        "O(n_rows), which replaces the caller's argsort and the two gathers\n"
+        "that followed it. NaN PAIRS are dropped, matching Series.corr;\n"
+        "infinities are kept, since pandas treats only NaN as missing.\n\n"
+        "Returns one value per date, 0.0 where the correlation is undefined\n"
+        "(fewer than two usable pairs, or a constant cross-section) -- the\n"
+        "same 0.0-not-NaN contract the Python _safe_corr established.\n\n"
+        "The POOLED correlation is this with n_dates=1 and all codes 0, so\n"
+        "both share one implementation rather than drifting apart.");
+
+    m.def(
+        "standardize_by_date",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> values,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+           py::ssize_t n_dates,
+           double clip_sigma) -> py::array_t<double>
+        {
+            auto buf = values.request();
+            if (buf.ndim != 2)
+                throw std::invalid_argument("values must be 2-D (n_rows, n_cols)");
+            if (date_codes.size() != buf.shape[0])
+                throw std::invalid_argument(
+                    "date_codes must have one entry per row of values");
+            if (n_dates < 0)
+                throw std::invalid_argument("n_dates must be >= 0");
+            if (!(clip_sigma >= 0.0))
+                throw std::invalid_argument("clip_sigma must be >= 0");
+
+            const auto n_rows = static_cast<std::size_t>(buf.shape[0]);
+            const auto n_cols = static_cast<std::size_t>(buf.shape[1]);
+            py::array_t<double> out({buf.shape[0], buf.shape[1]});
+            const double* ptr = values.data();
+            const long long* codes = date_codes.data();
+            double* out_ptr = out.mutable_data();
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::standardize_by_date(ptr, n_rows, n_cols, codes,
+                                              static_cast<std::size_t>(n_dates),
+                                              clip_sigma, out_ptr);
+            }
+            if (!ok)
+                throw std::runtime_error(
+                    "standardize_by_date: could not allocate a buffer");
+            return out;
+        },
+        py::arg("values"),
+        py::arg("date_codes"),
+        py::arg("n_dates"),
+        py::arg("clip_sigma"),
+        "Standardize every column within each date's cross-section.\n\n"
+        "Subtracts that date's mean and divides by its ddof=1 standard\n"
+        "deviation, then clips to +/- clip_sigma (0 disables). A date with no\n"
+        "dispersion has every entity exactly at the mean, so those rows come\n"
+        "back 0.0 rather than NaN -- NaN would drop the whole date\n"
+        "downstream. NaN inputs are skipped by the moments and preserved in\n"
+        "the output.");
 }

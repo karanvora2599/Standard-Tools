@@ -102,4 +102,64 @@ void apply_preprocess_stats(const double* values,
                             const PreprocessStats& stats,
                             double* out);
 
+
+/**
+ * Per-date correlation between two aligned columns.
+ *
+ * `date_codes[i]` is the date index of row i, in [0, n_dates). Rows need
+ * NOT be sorted: the kernel counting-sorts them into per-date buckets in
+ * O(n_rows), which replaces the caller's O(n log n) argsort AND the two
+ * gather passes that followed it.
+ *
+ * NaN PAIRS ARE DROPPED, matching Series.corr, which removes rows where
+ * either side is missing BEFORE correlating and (for spearman) before
+ * ranking. Infinities are kept: pandas treats only NaN as missing, so an
+ * inf ranks as an extreme for spearman and voids pearson to the undefined
+ * branch.
+ *
+ * `out_ic[d]` is that date's correlation, or 0.0 where it is undefined --
+ * fewer than two usable pairs, or a constant cross-section. 0.0 rather than
+ * NaN is the existing contract: the Python `_safe_corr` mapped NaN to 0.0
+ * and the metric summaries depend on it.
+ *
+ * The POOLED correlation is this same computation with one segment, so
+ * `_safe_corr` is served by calling this with n_dates=1 and all codes 0
+ * rather than by a second kernel that could drift from it.
+ *
+ * @return false if a working buffer could not be allocated.
+ */
+bool cross_sectional_correlation(const double* y_true,
+                                 const double* y_pred,
+                                 const long long* date_codes,
+                                 std::size_t n_rows,
+                                 std::size_t n_dates,
+                                 bool spearman,
+                                 double* out_ic);
+
+/**
+ * Standardize every column within each date's cross-section.
+ *
+ * `values` and `out` are row-major (n_rows, n_cols) and may alias.
+ * `date_codes[i]` is row i's date index, as above; rows need not be sorted.
+ *
+ * Per date and column: subtract the mean, divide by the ddof=1 standard
+ * deviation, then clip to +/- clip_sigma (0 disables the clip). A date whose
+ * cross-section is constant -- or which has a single usable entity -- has no
+ * dispersion, and every entity in it sits exactly at the mean, so those rows
+ * become 0.0 rather than NaN.
+ *
+ * NaN is skipped by the moments and preserved in the output, on the same
+ * reasoning as the preprocessing kernel: a missing feature must stay missing
+ * rather than be fabricated into an observation at the cross-section mean.
+ *
+ * @return false if a working buffer could not be allocated.
+ */
+bool standardize_by_date(const double* values,
+                         std::size_t n_rows,
+                         std::size_t n_cols,
+                         const long long* date_codes,
+                         std::size_t n_dates,
+                         double clip_sigma,
+                         double* out);
+
 }  // namespace sqt

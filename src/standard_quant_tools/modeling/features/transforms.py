@@ -180,8 +180,19 @@ def standardize_cross_sectional(
     if frame.empty:
         return frame.copy()
 
-    values = frame.to_numpy(dtype=np.float64, copy=True)
     codes = pd.factorize(np.asarray(dates), sort=False)[0]
+    if HAS_CPP and hasattr(_cpp_core, "standardize_by_date"):
+        matrix = _native_matrix(frame)
+        if matrix is not None:
+            standardized = _cpp_core.standardize_by_date(
+                matrix,
+                np.ascontiguousarray(codes.astype(np.int64)),
+                int(codes.max()) + 1 if codes.size else 0,
+                float(clip_sigma),
+            )
+            return pd.DataFrame(standardized, index=frame.index, columns=frame.columns)
+
+    values = frame.to_numpy(dtype=np.float64, copy=True)
     order = np.argsort(codes, kind="stable")
     codes_sorted = codes[order]
     block = values[order]
