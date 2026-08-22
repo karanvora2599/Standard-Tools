@@ -9,6 +9,109 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (modeling: six capability gaps closed)
+
+An analysis of `standard_quant_tools.modeling` (`Development/modeling_analysis.md`)
+found the architecture sound and the gaps in breadth. All of these change what a
+model predicts, so all of them are opt-in behind an explicit spec field and every
+default is unchanged.
+
+**Cross-sectional normalization** — `ModelSpec.preprocessing.normalization`.
+Pooled z-scoring leaves the market factor inside every feature: on a day the
+market rallies, every entity's momentum reads high together, and the model can
+score well by learning "today was an up day". For a model judged on
+cross-sectional IC that is the wrong thing to have learned. `cross_sectional`
+standardizes within each date instead. There is no fold-boundary question — a
+date uses only its own cross-section, which is contemporaneous information — and
+the pooled path's 1st/99th percentile winsorizing is replaced by sigma clipping,
+because a percentile inside one date is meaningless (the 1st percentile of a
+20-name cross-section *is* its minimum). `zscore_cross_sectional`, which had sat
+in `transforms.py` with zero callers, is what this is built on. Measured *faster*
+than pooled — 469 ms against 898 ms — since it skips the quantile fitting.
+
+**Sample weighting** — `ModelSpec.weighting`. `effective_sample_size` was
+computed into `oos_metrics` and acted on by nothing; there was no `sample_weight`
+anywhere in the module. Adds label-uniqueness weighting (the mean of
+1/concurrency over the bars a row's label spans, computed per entity), calendar
+time decay, and both. An estimator that does not accept `sample_weight` now
+raises rather than silently ignoring it — a weighting the caller believes is
+active but which never reached the fit is worse than an error.
+
+**Expanding and purged K-fold validation** — `ValidationSpec.scheme` and
+`.method`. `PurgedKFoldSplit` tests every date exactly once with a two-sided
+embargo, which uses a short history far better than walk-forward. Its cost is
+documented rather than buried: later folds train partly on data postdating their
+test block, so it answers "is there a signal here", not "what would this have
+earned".
+
+**Hyperparameter search** — `ModelSpec.search`. Grid or random search on each
+fold's training window, using an inner walk-forward over *dates*. Deliberately
+not `GridSearchCV`: sklearn splits rows, and a K-fold over stacked
+`(entity, date)` rows puts the same date on both sides of an inner split, so the
+selection would be leaked even though the outer split is clean. The report keeps
+every candidate's score per fold — on the benchmark the chosen `alpha` differed
+on most folds, which is the search fitting noise and is visible only because
+nothing was collapsed to a single "best" value.
+
+**Four more targets** — volatility-scaled forward return, cross-sectional rank
+(which matches the scorecard the model is judged on), market-neutral return, and
+triple barrier. The two cross-sectional ones are applied after stacking, since
+they are defined against the other entities on the date.
+
+**LightGBM, XGBoost and quantile regression.** `random_forest` was measured at
+62.9 s for one walk-forward run at 50 entities; `lightgbm` is 3.55 s and
+`xgboost` 3.50 s on the same panel — about 18×. Neither is a declared
+dependency: registration is guarded, so a missing library leaves the registry
+reporting what *is* installed rather than breaking an import.
+
+### Changed (modeling performance — no reported number moves)
+
+**`cross_sectional_ic` vectorized.** Measured at **72%** of a ridge walk-forward
+run: the per-date groupby called `Series.corr` thousands of times per run. Now a
+handful of array passes, with a balanced-panel path that reshapes to
+`(n_dates, n_entities)` and an `np.add.reduceat` segment path for ragged panels.
+Agreement with the implementation it replaces is 2.2e-16 (spearman) and 5.0e-16
+(pearson) across randomized panels with ties, constant cross-sections, NaN,
+infinities and ragged shapes. 44.8× at 63×50, 47.8× at 252×50, falling to 1.8× at
+252×2000 as the per-date overhead amortizes. `run_experiment` at 50 entities:
+3.892 s → 1.577 s.
+
+Two details are pinned by tests. The textbook `n*Sxy - Sx*Sy` shortcut
+catastrophically cancels on return-scale data; the centered two-pass form moved
+pearson agreement from 2.2e-14 to 5.0e-16. And the row-count gate runs *before*
+the NaN drop, so a date whose rows are all NaN is reported as exactly 0.0 rather
+than omitted — arguably wrong, deliberately preserved, since this was a speed
+change and had no business moving a metric.
+
+**Panel indicators wired into `build_dataset`.** `indicators/panel.py` existed
+since the native-scaling work and was unreachable from the modeling path. Now
+used for `rsi`, `adx`, `stochastic_k`, `atr_pct` and `bollinger_pct_b` — but only
+when every entity's index is identical. That guard is the substance of the
+change: the panel stacker uses the *intersection* of every ticker's bars, and
+every indicator involved is path-dependent, so a shorter history changes values
+and not merely coverage. A ragged universe falls back to the per-entity loop.
+About 2× on the feature phase.
+
+**Fold masks by gather rather than hash.** The walk-forward loop rebuilt
+`panel["date"].isin(fold_dates)` every fold. One `searchsorted` up front maps
+rows to date positions; a fold then gathers a small per-date boolean, which also
+keeps working for splitters whose folds are not contiguous.
+
+**Memoized input checks.** An opt-in scope in which an object that has already
+passed a given check is not re-checked, keyed on `(object identity, check
+variant)`, recording only successes. Outside the scope nothing changes. Worth
+5.8% of a 16-feature build and nothing measurable at 6 features — the analysis
+predicted 12–18%, which was wrong: it measured the cost of *all* validation
+rather than of the *repeated* validation.
+
+### Added (benchmarks)
+
+`tests/bench/bench_modeling.py` backs every figure in
+`Development/modeling_analysis.md`. Its `build` section attributes time to
+feature computation directly rather than A/B-ing whole builds: repeated on an
+ordinary workstation, a whole-build A/B of the same change returned ratios from
+0.62× to 1.39× — a spread wider than the effect being measured.
+
 ### Fixed (C++ audit: the NaN/Inf data contract, and undefined behaviour)
 
 `bindings.cpp` states a contract in writing — "degenerate arguments and bad
