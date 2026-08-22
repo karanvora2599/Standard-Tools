@@ -48,6 +48,30 @@ endif()
 
 add_test(NAME cpp_hurst COMMAND test_hurst)
 
+add_library(sqt_panel_stats_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/panel_stats.cpp
+)
+target_include_directories(sqt_panel_stats_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_panel_stats_impl PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(sqt_panel_stats_impl PRIVATE /O2 /W3)
+else()
+    target_compile_options(sqt_panel_stats_impl PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_executable(test_panel_stats test_panel_stats.cpp)
+target_link_libraries(test_panel_stats PRIVATE sqt_panel_stats_impl)
+target_compile_features(test_panel_stats PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_panel_stats PRIVATE /O2 /W3)
+else()
+    target_compile_options(test_panel_stats PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_panel_stats COMMAND test_panel_stats)
+
 add_executable(test_indicators test_indicators.cpp)
 target_link_libraries(test_indicators PRIVATE sqt_indicators_impl)
 target_compile_features(test_indicators PRIVATE cxx_std_17)

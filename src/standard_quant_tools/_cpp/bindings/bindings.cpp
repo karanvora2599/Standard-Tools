@@ -17,6 +17,7 @@
 #include "sqt/garch.hpp"
 #include "sqt/signal_state_machines.hpp"
 #include "sqt/numerics.hpp"
+#include "sqt/panel_stats.hpp"
 
 namespace py = pybind11;
 
@@ -1892,4 +1893,103 @@ PYBIND11_MODULE(_sqt_core, m) {
         "A NaN in vwap (rolling warmup) does not update the position state\n"
         "for that bar; output carries the position already held instead of\n"
         "hardcoding 0.0.");
+
+    // ── Modeling panel statistics ─────────────────────────────────────────
+    m.def(
+        "fit_preprocess_stats",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> values,
+           double q_low, double q_high) -> py::dict
+        {
+            auto buf = values.request();
+            if (buf.ndim != 2)
+                throw std::invalid_argument(
+                    "values must be 2-D (n_rows, n_cols)");
+            if (!(q_low >= 0.0 && q_low <= 1.0) || !(q_high >= 0.0 && q_high <= 1.0))
+                throw std::invalid_argument(
+                    "q_low and q_high must each lie in [0, 1]");
+            if (!(q_low < q_high))
+                throw std::invalid_argument("need q_low < q_high");
+
+            const auto n_rows = static_cast<std::size_t>(buf.shape[0]);
+            const auto n_cols = static_cast<std::size_t>(buf.shape[1]);
+            const auto nc = static_cast<py::ssize_t>(n_cols);
+
+            py::array_t<double> a_lo(nc), a_hi(nc), a_mean(nc), a_std(nc);
+            sqt::PreprocessStats out{a_lo.mutable_data(), a_hi.mutable_data(),
+                                     a_mean.mutable_data(), a_std.mutable_data()};
+            const double* ptr = values.data();
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::fit_preprocess_stats(ptr, n_rows, n_cols,
+                                               q_low, q_high, out);
+            }
+            if (!ok)
+                throw std::runtime_error(
+                    "fit_preprocess_stats: could not allocate a column buffer");
+
+            py::dict d;
+            d["lo"] = a_lo;
+            d["hi"] = a_hi;
+            d["mean"] = a_mean;
+            d["std"] = a_std;
+            return d;
+        },
+        py::arg("values"),
+        py::arg("q_low"),
+        py::arg("q_high"),
+        "Per-column winsorize bounds and clipped moments for a row-major\n"
+        "(n_rows, n_cols) feature panel.\n\n"
+        "Reproduces pandas exactly, including the conventions that are\n"
+        "pandas' choice rather than mathematical necessity: quantiles are\n"
+        "LINEARLY INTERPOLATED at h=(n-1)*q, the standard deviation is\n"
+        "ddof=1, and NaN is skipped rather than propagated. Infinities are\n"
+        "not skipped -- pandas treats only NaN as missing.\n\n"
+        "A column with no finite values returns NaN bounds and mean with\n"
+        "std=1.0; so does a constant column, so the caller's division stays\n"
+        "defined.");
+
+    m.def(
+        "apply_preprocess_stats",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> values,
+           py::array_t<double, py::array::c_style | py::array::forcecast> lo,
+           py::array_t<double, py::array::c_style | py::array::forcecast> hi,
+           py::array_t<double, py::array::c_style | py::array::forcecast> mean,
+           py::array_t<double, py::array::c_style | py::array::forcecast> stdev)
+            -> py::array_t<double>
+        {
+            auto buf = values.request();
+            if (buf.ndim != 2)
+                throw std::invalid_argument(
+                    "values must be 2-D (n_rows, n_cols)");
+            const auto n_rows = static_cast<std::size_t>(buf.shape[0]);
+            const auto n_cols = static_cast<std::size_t>(buf.shape[1]);
+            const auto expected = static_cast<py::ssize_t>(n_cols);
+            if (lo.size() != expected || hi.size() != expected ||
+                mean.size() != expected || stdev.size() != expected)
+                throw std::invalid_argument(
+                    "lo, hi, mean and std must each have one entry per column");
+
+            py::array_t<double> out({buf.shape[0], buf.shape[1]});
+            sqt::PreprocessStats stats{
+                const_cast<double*>(lo.data()), const_cast<double*>(hi.data()),
+                const_cast<double*>(mean.data()), const_cast<double*>(stdev.data())};
+            const double* ptr = values.data();
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::apply_preprocess_stats(ptr, n_rows, n_cols, stats, out_ptr);
+            }
+            return out;
+        },
+        py::arg("values"),
+        py::arg("lo"),
+        py::arg("hi"),
+        py::arg("mean"),
+        py::arg("std"),
+        "Clip to [lo, hi] then standardize, in one fused pass.\n\n"
+        "The Python form allocates two full-panel temporaries per column\n"
+        "(the clip result and the standardized result); this allocates one\n"
+        "output array and nothing else. NaN passes through untouched, which\n"
+        "is what Series.clip does with a missing value.");
 }
