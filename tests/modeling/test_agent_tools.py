@@ -123,17 +123,28 @@ class TestModelingDispatch:
         with pytest.raises(ValueError, match="Unknown modeling tool"):
             modeling_dispatch("not_a_real_tool", {})
 
-    def test_get_modeling_tools_returns_exactly_six(self):
+    def test_modeling_surface_is_exactly_these_tools(self):
+        """
+        The names, not the count. tools.py says so in as many words -- "the
+        5-tool count was never the invariant; every tool is a decision the
+        agent makes, not plumbing, was" -- and this test pinned the count
+        anyway, so it failed the first time a genuine seventh decision was
+        added rather than catching anything.
+
+        Pinning the SET still does the job it was meant to do: a tool added
+        without thought fails here and has to be justified in this list.
+        """
         tools = get_modeling_tools()
-        assert len(tools) == 6
         assert {t["function"]["name"] for t in tools} == {
             "list_features",
             "build_model_dataset",
+            "analyze_features",
             "run_model_experiment",
             "score_model",
             "inspect_model",
             "evaluate_model_portfolio",
         }
+        assert len(tools) == len({t["function"]["name"] for t in tools})
 
     def test_every_registered_tool_is_dispatchable(self):
         """The definition list and the dispatch table are maintained by

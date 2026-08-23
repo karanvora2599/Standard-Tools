@@ -256,6 +256,60 @@ class InspectModelResult(BaseModel):
     data: Dict[str, Any]
 
 
+# ── analyze_features ────────────────────────────────────────────────────
+
+
+class AnalyzeFeaturesInput(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    features: Optional[List[str]] = Field(
+        None,
+        description="Feature columns to analyze. Defaults to every feature in "
+        "the dataset.",
+    )
+    n_quantiles: int = Field(
+        10,
+        ge=2,
+        le=100,
+        description="Buckets used for the quantile spread and monotonicity. "
+        "Deciles by default; fewer hides the shape of the relationship, more "
+        "puts too few entities per bucket to mean anything on a small "
+        "universe.",
+    )
+    cluster_threshold: float = Field(
+        0.9,
+        ge=0.0,
+        le=1.0,
+        description="Absolute correlation at or above which two features are "
+        "grouped as near-duplicates.",
+    )
+    include_leakage: bool = Field(
+        True,
+        description="Run the lead-lag causality screen. It costs "
+        "(2 * leakage_max_shift + 1) IC passes per feature, which is the "
+        "expensive part of the report — but a screen nobody runs catches "
+        "nothing, so it is on by default.",
+    )
+    leakage_max_shift: int = Field(
+        5,
+        ge=1,
+        le=60,
+        description="How many bars either side to shift each feature for the "
+        "causality screen.",
+    )
+
+
+class AnalyzeFeaturesResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    dataset_id: str
+    report: Dict[str, Any]
+    warnings: List[str] = Field(default_factory=list)
+
+
 # ── evaluate_model_portfolio ────────────────────────────────────────────
 
 
