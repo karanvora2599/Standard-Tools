@@ -43,6 +43,7 @@ from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
+from ..analysis import build_feature_report
 from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
 from ..engine import run_experiment as _run_experiment
@@ -52,6 +53,8 @@ from ..registry.model_registry import load_manifest
 from ..scoring import score_model as _score_model
 from ..specs import DatasetSpec
 from .models import (
+    AnalyzeFeaturesInput,
+    AnalyzeFeaturesResult,
     BuildModelDatasetInput,
     BuildModelDatasetResult,
     EvaluateModelPortfolioInput,
@@ -159,23 +162,26 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
     )
 
 
-def run_model_experiment(
-    input_data: RunModelExperimentInput,
-) -> RunModelExperimentResult:
-    """Load the persisted dataset panel + its lineage metadata,
-    fit+walk-forward-validate+register a model — one call, no separate
-    "just fit" path."""
-    logger.debug(
-        "[run_model_experiment] dataset_id=%s  task=%s  estimator=%s",
-        input_data.dataset_id,
-        input_data.spec.task,
-        input_data.spec.estimator.type,
-    )
-    directory = _artifacts.run_dir(input_data.dataset_id)
+def _load_dataset_panel(dataset_id: str):
+    """
+    Load a persisted dataset panel, verifying it is the one that was built.
+
+    Extracted so every consumer of a dataset_id gets the integrity check,
+    not just the training path. The check matters as much for analysis as
+    for fitting: a feature report computed from an edited panel.parquet
+    would describe data that no recorded dataset hash covers, which is a
+    quieter failure than a wrong model but the same kind.
+
+    Returns (panel, meta, directory). The directory comes back because
+    callers need it for the sibling artifacts written next to the panel --
+    run_model_experiment reads dataset_spec.json from it to verify the spec
+    hash as well as the data hash.
+    """
+    directory = _artifacts.run_dir(dataset_id)
     meta_path = directory / "dataset_meta.json"
     if not meta_path.exists():
         raise ValidationError(
-            f"no dataset with dataset_id={input_data.dataset_id!r} — "
+            f"no dataset with dataset_id={dataset_id!r} — "
             "dataset_meta.json is written last, so its absence also means a "
             "previous build_model_dataset call did not complete."
         )
@@ -192,11 +198,27 @@ def run_model_experiment(
         actual_hash = hash_dataframe(panel)
         if actual_hash != stored_hash:
             raise ValidationError(
-                f"dataset {input_data.dataset_id!r}: panel.parquet no longer matches the "
+                f"dataset {dataset_id!r}: panel.parquet no longer matches the "
                 f"hash recorded when it was built (expected {stored_hash}, found "
-                f"{actual_hash}). Training on it would record a lineage hash that does "
+                f"{actual_hash}). Using it would record a lineage hash that does "
                 "not describe the data actually used — rebuild the dataset instead."
             )
+    return panel, meta, directory
+
+
+def run_model_experiment(
+    input_data: RunModelExperimentInput,
+) -> RunModelExperimentResult:
+    """Load the persisted dataset panel + its lineage metadata,
+    fit+walk-forward-validate+register a model — one call, no separate
+    "just fit" path."""
+    logger.debug(
+        "[run_model_experiment] dataset_id=%s  task=%s  estimator=%s",
+        input_data.dataset_id,
+        input_data.spec.task,
+        input_data.spec.estimator.type,
+    )
+    panel, meta, directory = _load_dataset_panel(input_data.dataset_id)
 
     # dataset_spec.json gets the same treatment panel.parquet just got, and
     # for a sharper reason. The panel is only READ during training, but the
@@ -349,6 +371,16 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         InspectModelInput,
     ),
     (
+        "analyze_features",
+        "Score a built dataset's FEATURES before fitting anything: coverage, "
+        "turnover, cross-sectional IC and ICIR, decile spread and monotonicity, "
+        "which features are near-duplicates of one another, and a lead-lag "
+        "causality screen for features whose information arrives too early. "
+        "Use this to choose features; use inspect_model(view='feature_importance') "
+        "to see what one fitted model then leaned on.",
+        AnalyzeFeaturesInput,
+    ),
+    (
         "evaluate_model_portfolio",
         "Evaluate a model's out-of-sample predictions as a shared-cash "
         "portfolio: transform predictions into target weights and simulate "
@@ -356,6 +388,48 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         EvaluateModelPortfolioInput,
     ),
 ]
+
+
+def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
+    """
+    Score the FEATURES of a built dataset, before any model is fitted.
+
+    `inspect_model(view="feature_importance")` answers "which columns did
+    this estimator lean on" — a statement about one fit, in units that
+    differ per estimator, and only available after the features have already
+    been chosen. This answers the earlier and more useful question: is this
+    a good feature at all.
+
+    Four things come back per feature — how well populated and how fast it
+    turns over, its cross-sectional IC and the decile shape behind it, which
+    other features are restatements of it, and whether its information is
+    actually available when it claims to be.
+    """
+    logger.debug("[analyze_features] dataset_id=%s", input_data.dataset_id)
+    panel, meta, _ = _load_dataset_panel(input_data.dataset_id)
+    features = input_data.features or list(meta.get("feature_ids", []))
+    if not features:
+        raise ValidationError(
+            f"dataset {input_data.dataset_id!r} records no feature_ids, and none "
+            "were supplied. Pass `features` explicitly."
+        )
+
+    report = build_feature_report(
+        panel,
+        features,
+        n_quantiles=input_data.n_quantiles,
+        cluster_threshold=input_data.cluster_threshold,
+        leakage_max_shift=input_data.leakage_max_shift,
+        include_leakage=input_data.include_leakage,
+    )
+    # Lifted out of the nested dict so an agent reading only the top level
+    # still sees them. They are the part of this result most likely to
+    # change what it does next.
+    warnings = list(report.pop("warnings", []))
+    return AnalyzeFeaturesResult(
+        dataset_id=input_data.dataset_id, report=report, warnings=warnings
+    )
+
 
 MODELING_TOOL_DISPATCH = {
     "list_features": (list_features, ListFeaturesInput),
@@ -367,6 +441,7 @@ MODELING_TOOL_DISPATCH = {
         evaluate_model_portfolio,
         EvaluateModelPortfolioInput,
     ),
+    "analyze_features": (analyze_features, AnalyzeFeaturesInput),
 }
 
 
