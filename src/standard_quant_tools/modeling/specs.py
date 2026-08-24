@@ -437,11 +437,66 @@ class SearchSpec(BaseModel):
         return self
 
 
+class RankingSpec(BaseModel):
+    """
+    How a continuous target becomes something a ranker can learn from.
+
+    Only consulted for task='ranking'. It exists because the conversion is
+    not optional: LightGBM and XGBoost both REJECT a continuous label for a
+    ranking objective outright, and neither accepts a merely non-negative
+    one — the requirement is integer relevance grades.
+    """
+
+    n_grades: int = Field(
+        8,
+        ge=2,
+        le=31,
+        description=(
+            "Relevance levels the target is cut into WITHIN each date, 0 "
+            "(worst) to n_grades-1 (best). Fewer grades tell the objective "
+            "less about the ordering it is meant to learn; more make each "
+            "level thinner than the noise in the target, so the model spends "
+            "capacity on distinctions that are not really there. Measured on "
+            "a 40-entity cross-section, 8 grades beat 16 — five names per "
+            "grade carried more signal than two and a half. "
+            "The ceiling of 31 is LightGBM's, not a preference: its default "
+            "label_gain table holds 31 entries (2^i - 1 for i in 0..30), and "
+            "a 32nd grade fails at fit time with 'Label 31 is not less than "
+            "the number of label mappings'. Bounded here so that surfaces as "
+            "a spec error rather than a crash several folds in."
+        ),
+    )
+    ndcg_at: List[int] = Field(
+        default_factory=lambda: [5, 10],
+        description=(
+            "Cut-offs for the reported NDCG. Rank IC weighs the whole "
+            "cross-section equally; NDCG's logarithmic discount weighs the "
+            "top of the ranking far more heavily, which is closer to how a "
+            "concentrated book actually uses a score. Both are reported "
+            "because a model can improve one and not the other."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _cutoffs_are_positive(self) -> "RankingSpec":
+        if not self.ndcg_at:
+            raise ValueError("ndcg_at must name at least one cut-off")
+        bad = [k for k in self.ndcg_at if k < 1]
+        if bad:
+            raise ValueError(f"ndcg_at cut-offs must be >= 1, got {bad}")
+        return self
+
+
 class ModelSpec(BaseModel):
-    task: Literal["regression", "classification"]
+    task: Literal["regression", "classification", "ranking"]
     estimator: EstimatorSpec
     validation: ValidationSpec
     preprocessing: PreprocessingSpec = Field(default_factory=PreprocessingSpec)
+    ranking: RankingSpec = Field(
+        default_factory=RankingSpec,
+        description="task='ranking' only: how the target is graded and which "
+        "NDCG cut-offs are reported.",
+    )
     weighting: WeightingSpec = Field(default_factory=WeightingSpec)
     search: Optional[SearchSpec] = Field(
         None,

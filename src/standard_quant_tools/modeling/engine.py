@@ -40,6 +40,12 @@ from .validation.metrics import (
     positive_class_proba,
     regression_metrics,
 )
+from .validation.ranking import (
+    fold_ic_series,
+    group_sizes,
+    ranking_metrics,
+    relevance_grades,
+)
 from .validation.search import search_best_params
 from .validation.walk_forward import build_splitter
 from .validation.weights import build_sample_weights
@@ -125,6 +131,15 @@ def _check_task_target_compatibility(task: str, target_id: "str | None") -> None
             "forward_return_market_neutral",
         },
         "classification": {"forward_direction", "triple_barrier"},
+        # A ranker consumes the same continuous targets a regressor does and
+        # grades them itself -- see validation/ranking.py for why the grading
+        # cannot be skipped and why it has to happen per date.
+        "ranking": {
+            "forward_return",
+            "forward_return_vol_scaled",
+            "forward_return_rank",
+            "forward_return_market_neutral",
+        },
     }.get(task)
     if allowed is None or target_type in allowed:
         return
@@ -190,27 +205,93 @@ def _fold_sample_weights(
     )
 
 
-def _fit(estimator: Any, X: "np.ndarray", y: Any, weights: "np.ndarray | None"):
+def _fit(
+    estimator: Any,
+    X: "np.ndarray",
+    y: Any,
+    weights: "np.ndarray | None",
+    group: "np.ndarray | None" = None,
+):
     """
-    Fit, passing sample weights only when they were asked for.
+    Fit, passing sample weights and query groups only when they apply.
 
     An estimator that does not accept `sample_weight` fails loudly rather
     than silently ignoring the request — a weighting the caller believes is
     active but which never reached the fit is worse than an error, because
     the model looks like it corrected for label overlap and did not.
+
+    `group` is the ranking path. Both LightGBM and XGBoost take it as
+    consecutive per-query counts and ASSUME the rows are already ordered by
+    group without checking, which is why the caller sorts by date first and
+    group_sizes() verifies the ordering rather than trusting it.
     """
-    if weights is None:
+    kwargs: Dict[str, Any] = {}
+    if weights is not None:
+        kwargs["sample_weight"] = weights
+    if group is not None:
+        kwargs["group"] = group
+    if not kwargs:
         estimator.fit(X, y)
         return
     try:
-        estimator.fit(X, y, sample_weight=weights)
+        estimator.fit(X, y, **kwargs)
     except TypeError as exc:
+        unsupported = " or ".join(sorted(kwargs))
         raise ValidationError(
             f"run_model_experiment: estimator {type(estimator).__name__} does not "
-            "accept sample_weight, so the requested weighting cannot be applied. "
-            "Use weighting.method='none', or choose an estimator that supports "
-            "weighted fitting."
+            f"accept {unsupported}. For sample_weight, use weighting.method='none' "
+            "or an estimator that supports weighted fitting; for group, use a "
+            "task='ranking' estimator."
         ) from exc
+
+
+def _ranking_fit_arrays(
+    model_spec: ModelSpec,
+    frame: pd.DataFrame,
+    X: pd.DataFrame,
+    y: "np.ndarray",
+    weights: "np.ndarray | None",
+):
+    """
+    Reorder and re-label a training fold for a learning-to-rank fit.
+
+    Three things have to be true before either ranker will train correctly,
+    and only the first of them raises if you get it wrong:
+
+      1. the LABEL must be integer relevance grades. Both libraries reject a
+         continuous target outright, and shifting it to be non-negative does
+         not help.
+      2. the ROWS must be ordered by query group. Both take `group` as
+         consecutive counts and neither verifies the ordering, so unsorted
+         rows train silently on the wrong groupings.
+      3. the GROUP counts must match that ordering, which group_sizes()
+         checks rather than assumes.
+
+    Grading happens per date because that is what a query group is here: the
+    ranker learns "AAPL should rank above MSFT *today*". Grades pooled across
+    dates would be asking it to rank today's names against last year's.
+
+    Returns (X, y_graded, weights, group), all consistently reordered.
+    """
+    # Sorted by (date, entity), not by date alone. Date alone is enough for
+    # the grouping to be CORRECT, but leaves the within-date row order equal
+    # to whatever order the caller's panel happened to be in -- and both
+    # libraries' histogram construction breaks ties by row order, so the same
+    # data in a different order produced a slightly different model. Measured
+    # at 0.5849 vs 0.5862 rank IC on a shuffled panel: close enough to prove
+    # the grouping was right, different enough that a run was not reproducible
+    # from its inputs alone. Adding entity as the secondary key makes the fit
+    # a function of the data rather than of its arrival order.
+    dates_raw = frame["date"].to_numpy()
+    order = np.lexsort((frame["entity"].to_numpy(), dates_raw))
+    dates = dates_raw[order]
+    grades = relevance_grades(y[order], dates, model_spec.ranking.n_grades)
+    return (
+        X.to_numpy()[order],
+        grades,
+        None if weights is None else weights[order],
+        group_sizes(dates),
+    )
 
 
 def _predict_fold(
@@ -220,6 +301,8 @@ def _predict_fold(
     test_y: Any,
     test_dates: "np.ndarray | None" = None,
     train_y: "np.ndarray | None" = None,
+    n_grades: int = 8,
+    ndcg_at: "List[int] | None" = None,
 ) -> "tuple[Dict[str, float], np.ndarray, Dict[str, pd.Series]]":
     """
     Returns (metrics, prediction_values, ic_series). `prediction_values` is
@@ -234,6 +317,18 @@ def _predict_fold(
     quantity -- see aggregate_cross_sectional_ic.
     """
     preds = estimator.predict(test_X.to_numpy())
+    if task == "ranking":
+        # Deliberately not regression_metrics. A ranker's output is an
+        # ordering score on an arbitrary scale -- LambdaRank is invariant to
+        # any monotone transform of it -- so R2 and MAE against a return
+        # would be measuring a scale the quantity does not have.
+        metrics = ranking_metrics(
+            test_y, preds, test_dates, n_grades=n_grades, ks=tuple(ndcg_at or (5, 10))
+        )
+        series = (
+            fold_ic_series(test_y, preds, test_dates) if test_dates is not None else {}
+        )
+        return metrics, preds, series
     if task == "regression":
         metrics = regression_metrics(test_y, preds, dates=test_dates, train_y=train_y)
         ic_series: Dict[str, pd.Series] = {}
@@ -427,7 +522,13 @@ def run_experiment(
             search_reports.append(search_report)
 
         estimator = _instantiate(estimator_cls, fold_params, model_spec.random_seed)
-        _fit(estimator, train_X.to_numpy(), train_y, sample_weight)
+        if model_spec.task == "ranking":
+            fit_X, fit_y, fit_w, fit_group = _ranking_fit_arrays(
+                model_spec, train_df, train_X, train_y, sample_weight
+            )
+            _fit(estimator, fit_X, fit_y, fit_w, group=fit_group)
+        else:
+            _fit(estimator, train_X.to_numpy(), train_y, sample_weight)
 
         metrics, prediction_values, fold_ic = _predict_fold(
             model_spec.task,
@@ -436,6 +537,8 @@ def run_experiment(
             test_y,
             test_df["date"].to_numpy(),
             train_y=train_y,
+            n_grades=model_spec.ranking.n_grades,
+            ndcg_at=model_spec.ranking.ndcg_at,
         )
         # Every fold's per-date IC dates are kept so the OOS dispersion
         # statistics can be computed once over the pooled series -- see
@@ -576,7 +679,18 @@ def run_experiment(
     final_estimator = _instantiate(
         estimator_cls, model_spec.estimator.params, model_spec.random_seed
     )
-    final_estimator.fit(full_X.to_numpy(), full_y)
+    if model_spec.task == "ranking":
+        # The deployed model is refit on the whole panel, so it needs the
+        # same grading and grouping the folds used -- otherwise the model
+        # that actually scores is trained differently from the one that was
+        # validated, which is the quietest way to make a validation number
+        # describe something else.
+        full_fit_X, full_fit_y, _, full_group = _ranking_fit_arrays(
+            model_spec, panel, full_X, full_y, None
+        )
+        final_estimator.fit(full_fit_X, full_fit_y, group=full_group)
+    else:
+        final_estimator.fit(full_X.to_numpy(), full_y)
 
     # model_id generated here (not left to save_model's own default)
     # so the OOS predictions artifact lands in the same

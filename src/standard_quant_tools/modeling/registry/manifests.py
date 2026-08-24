@@ -4,9 +4,45 @@ already captures (git_commit_sha, package_version) so a model's lineage
 is legible by reading manifest.json alone, without cross-referencing the
 audit log."""
 
+import math
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _nulls_to_nan(mapping: Any) -> Any:
+    """
+    JSON has no NaN, so a NaN metric is written as `null` and comes back as
+    None. Map it to NaN on the way in.
+
+    This is not a nicety. Without it, EVERY tree-based model was unloadable:
+    summarize_importance correctly reports signed_mean / signed_std /
+    sign_consistency as NaN for an estimator with no coefficient sign, those
+    became `null` in manifest.json, and ModelManifest then rejected the file
+    it had itself written -- so load_model and, through it, score_model failed
+    for random_forest, gradient boosting, LightGBM and XGBoost alike. Linear
+    models were unaffected, which is why it survived: they have a sign, so
+    none of their fields were ever NaN.
+
+    oos_metrics has the same exposure and gets the same treatment: a
+    single-class fold's AUC and a single-date fold's IC standard deviation are
+    both legitimately NaN.
+
+    NaN rather than dropping the key, because the two say different things --
+    a NaN entry means "this quantity does not exist for this model", and an
+    absent one means "this version did not record it".
+    """
+    if not isinstance(mapping, dict):
+        return mapping
+    out: Dict[str, Any] = {}
+    for key, value in mapping.items():
+        if value is None:
+            out[key] = math.nan
+        elif isinstance(value, dict):
+            out[key] = _nulls_to_nan(value)
+        else:
+            out[key] = value
+    return out
 
 
 class ModelManifest(BaseModel):
@@ -46,6 +82,10 @@ class ModelManifest(BaseModel):
     # registered before content hashing existed -- verify_file skips a
     # None expectation rather than failing every older model.
     content_hashes: Dict[str, str] = Field(default_factory=dict)
+
+    _coerce_metric_nulls = field_validator(
+        "oos_metrics", "feature_importance_summary", mode="before"
+    )(_nulls_to_nan)
     # {feature_id: hash of that feature's implementation source}. A git
     # SHA covers the repo, but says nothing about a custom feature
     # registered at runtime from outside it.
