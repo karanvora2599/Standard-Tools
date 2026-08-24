@@ -502,6 +502,12 @@ def average_fold_metrics(
     Metrics whose names end in `_n_dates` are SUMMED rather than averaged:
     a count of dates observed is not a per-fold rate.
     """
+    # An empty list is unreachable through run_experiment -- it guards on
+    # both `not fold_metrics` and min_folds >= 1 before getting here -- but
+    # this is an importable helper, and `fold_metrics[0]` on an empty list
+    # is an IndexError rather than anything a caller could act on.
+    if not fold_metrics:
+        return {}
     keys = list(fold_metrics[0].keys())
     if fold_weights is None:
         fold_weights = [1.0] * len(fold_metrics)

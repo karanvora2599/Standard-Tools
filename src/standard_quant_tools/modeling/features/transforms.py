@@ -177,6 +177,16 @@ def standardize_cross_sectional(
     no dispersion to divide by; those rows become 0.0 — the value they are
     standardized to be, since every entity sits exactly at the mean.
     """
+    # Validated on the PYTHON side so both paths agree. The native kernel
+    # already rejects a negative clip_sigma; without this the same call
+    # raised ValueError on a machine with the extension built and silently
+    # skipped clipping on one without it -- a backend divergence, and the
+    # kind that only shows up as two users getting different numbers.
+    if not (clip_sigma >= 0.0):
+        raise ValidationError(
+            f"standardize_cross_sectional: clip_sigma must be >= 0, got "
+            f"{clip_sigma}. Use 0.0 to disable clipping."
+        )
     if frame.empty:
         return frame.copy()
 
