@@ -32,6 +32,10 @@ from standard_quant_tools.agent.router import (
     parse_router_response,
 )
 from standard_quant_tools.agent.tools import dispatch, get_agent_tools
+from standard_quant_tools.modeling.agent import (
+    get_modeling_tools,
+    modeling_dispatch,
+)
 
 # ── Constants ──────────────────────────────────────────────────────
 _LOGS_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
@@ -171,6 +175,59 @@ def route_request(
 # ── Core agent loop ─────────────────────────────────────────────────
 
 
+# ── The two tool registries ──────────────────────────────────────────
+#
+# This library exposes TWO agent-tool registries and deliberately does not
+# merge them (see Documentation/15_modeling.md):
+#
+#   "analysis"  standard_quant_tools.agent           46 tools, 7 categories
+#   "modeling"  standard_quant_tools.modeling.agent   8 tools, one pipeline
+#
+# Their shapes are identical -- same OpenAI-format schema, same
+# dispatch(tool_name, arguments) signature -- which is exactly why keeping
+# them apart has to be deliberate rather than incidental. A caller names ONE
+# registry and gets that registry's schemas and its dispatch function
+# together. Taking the tool list from one and the dispatcher from the other
+# would fail at the first tool call, with an "unknown tool" error that
+# points at the model's choice rather than at this wiring.
+_REGISTRIES = {
+    "analysis": (get_agent_tools, dispatch),
+    "modeling": (get_modeling_tools, modeling_dispatch),
+}
+
+
+def _registry(registry: str):
+    """The (load_tools, dispatch) pair for a registry name."""
+    if registry not in _REGISTRIES:
+        raise ValueError(
+            f"Unknown registry {registry!r}; expected one of {sorted(_REGISTRIES)}."
+        )
+    return _REGISTRIES[registry]
+
+
+def _registry_tools(registry: str, categories=None):
+    """
+    A registry's tool schemas in OpenAI format, optionally narrowed to a set
+    of router categories.
+
+    Category routing is an ANALYSIS-registry idea: it exists because 46
+    similarly-shaped tools cause selection ambiguity. The modeling runtime is
+    eight tools in one ordered pipeline with no taxonomy to route across, so
+    a category filter here is a caller mistake rather than a harmless no-op
+    -- accepting it silently would hide that the request was never narrowed.
+    """
+    load_tools, _ = _registry(registry)
+    if registry != "analysis":
+        if categories:
+            raise ValueError(
+                f"categories={categories!r} was given for the {registry!r} "
+                "registry, which has no category taxonomy to route across. "
+                "Only the analysis registry can be narrowed this way."
+            )
+        return load_tools()
+    return load_tools(categories=categories)
+
+
 def run_agent(
     system_prompt: str,
     user_request: str,
@@ -182,6 +239,7 @@ def run_agent(
     tool_timeout_s: float = 120.0,
     verbose: bool = True,
     categories: Optional[List[str]] = None,
+    registry: str = "analysis",
 ) -> str:
     """
     Run the agentic loop: send user_request to Claude, execute any tool calls
@@ -203,10 +261,17 @@ def run_agent(
     None (the default) loads every tool, identical to this function's
     behavior before this parameter existed.
 
+    registry: which tool registry to load -- "analysis" for the 46-tool
+    analysis/backtest surface (the default, and this function's behavior
+    before the parameter existed), or "modeling" for the separate 8-tool
+    model-construction pipeline. The registry also decides which dispatch
+    function executes the calls, so the two never mix.
+
     Returns the final text response from the model.
     """
     client = Anthropic(api_key=api_key, timeout=request_timeout_s)
-    tools = _to_anthropic_tools(get_agent_tools(categories=categories))
+    tools = _to_anthropic_tools(_registry_tools(registry, categories))
+    _, tool_dispatch = _registry(registry)
 
     _header("AGENT SESSION STARTED  (Anthropic)")
     _log("Model", model)
@@ -335,7 +400,7 @@ def run_agent(
             # immediately while the orphaned thread runs out on its own.
             ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                result = ex.submit(dispatch, block.name, block.input).result(
+                result = ex.submit(tool_dispatch, block.name, block.input).result(
                     timeout=tool_timeout_s
                 )
                 ms = (time.perf_counter() - t0) * 1000

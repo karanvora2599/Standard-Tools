@@ -17,6 +17,15 @@ hardcoded count to go stale here). Calling one spins up a fresh,
 independently-scoped run_agent() session for that worker and returns its
 final answer as the tool result.
 
+The workers span TWO registries. Seven draw from the 46-tool analysis and
+backtest surface; two — Model Research and Model Builder — draw from the
+separate 8-tool modeling runtime (standard_quant_tools.modeling.agent),
+which the library never merges into the first. The orchestrator does not
+need to know that: a delegate call looks the same either way, and each
+worker carries its own registry (see worker_agents.py). That is the point
+of routing through workers rather than through one flat tool list — a
+second registry costs one more worker, not a redesign.
+
 Why this helps over a single flat agent with every tool loaded: a worker
 that was never given run_sma_backtest cannot mistakenly call it instead of
 run_custom_signal_backtest — the confusable tool simply isn't in front of
@@ -102,6 +111,22 @@ Rules:
   state the exact numbers each specialist reported and a clear recommendation.
 - If a request doesn't need multiple specialists, delegate to just the one
   that's relevant — do not call agents you don't need.
+
+Building a model is the one workflow with a REQUIRED order:
+
+  delegate_to_model_research_agent   builds the dataset, returns a dataset_id
+  delegate_to_model_builder_agent    fits/validates/scores it, needs that id
+
+  The Model Builder has no tool that can create a dataset. Delegating to it
+  without a dataset_id copied verbatim from the Research agent's answer
+  cannot succeed — so always run Research first, read the id out of its
+  reply, and put that exact string in the Builder's request. Never make one
+  up, and never assume an id from an earlier session still exists.
+
+  When the user asks whether a model would have MADE MONEY, that is
+  evaluate_model_portfolio (Model Builder), not out-of-sample IC. Ask for
+  it explicitly, because a good IC and a losing portfolio are compatible
+  once costs are charged.
 """
 
 

@@ -10,7 +10,7 @@ phase, and what's deliberately deferred.
 ## Why a separate runtime, not a 47th tool
 
 `agent/tools.py`'s `TOOL_CATEGORY` router and `Multi_Agent_Implementation/`'s
-7-worker split (see
+worker split (see
 [Documentation/13_agent_orchestration.md](13_agent_orchestration.md))
 exist specifically because handing an LLM 46 similarly-shaped tools on
 every call causes selection ambiguity. Fitting/validating/registering a
@@ -56,6 +56,29 @@ core stays one thing; only the agent-facing vocabulary is separate.
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
+
+### Driving these from an agent
+
+`Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
+whole pipeline as a single agent, on all three providers. It is the one
+example script that does not use the 46-tool surface: it passes
+`registry="modeling"` to `run_agent()`, which loads these eight schemas and
+`modeling_dispatch` together.
+
+It also skips the category router, deliberately. Routing exists to narrow 46
+similarly-shaped tools down to the relevant few; eight tools in one ordered
+pipeline have nothing to narrow, since every one of them is used in
+sequence. Passing `categories=` alongside `registry="modeling"` raises
+rather than being quietly ignored.
+
+For the split-agent version, `Multi_Agent_Implementation/` gives these eight
+tools two workers rather than one — `model_research` (capabilities,
+catalog, build, analyze) and `model_builder` (fit, inspect, score,
+evaluate). The cut is at the dataset, which is the only handoff in the
+pipeline that carries a single value (`dataset_id`) rather than a whole
+panel — and therefore the only one that survives two agent sessions that
+cannot see each other's context. See
+[13_agent_orchestration.md](13_agent_orchestration.md).
 
 `run_model_experiment` doing fit+validate+register in one call is
 deliberate: there is no separate "just fit" tool, so it's structurally

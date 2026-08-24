@@ -1,8 +1,8 @@
 # Agent Orchestration
 
-`get_agent_tools()` now returns 45 LLM-callable tools (see
+`get_agent_tools()` returns 46 LLM-callable tools (see
 [07_agent_tools.md](07_agent_tools.md) /
-[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 45 to
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 46 to
 one model on every call — the default behavior of every single-agent script
 in `Implementation/{Anthropic,OpenAI,Gemini}/` — is the largest untreated
 source of tool-selection error: similarly-named or similarly-scoped tools
@@ -16,21 +16,58 @@ tool list before it reaches the model, and when to use which:
 1. **The tool-category router** (`standard_quant_tools.agent.router`) — a
    single cheap classification call that narrows the tool list before the
    real completion call, without spinning up a separate agent session.
-   Used by every `Implementation/*/Agent_*.py` script.
+   Used by every `Implementation/*/Agent_*.py` script that draws on the
+   46-tool surface.
 2. **The multi-agent orchestrator** (`Multi_Agent_Implementation/`) — a lead
-   agent that delegates each sub-task to one of 7 specialist worker agents,
+   agent that delegates each sub-task to one of 9 specialist worker agents,
    each with its own independent session and system prompt scoped to a
    small, non-overlapping tool subset.
 
 Both are built on the same underlying taxonomy, so a tool's categorization
 only ever needs to be correct in one place.
 
+## Two registries, not one
+
+Everything above concerns the 46-tool analysis and backtest surface. There
+is a second one: `standard_quant_tools.modeling.agent`, 8 tools, which the
+library deliberately never merges into the first — see
+[15_modeling.md](15_modeling.md) for why. The example implementations keep
+the same separation, and it shows up in three places:
+
+| | Analysis registry | Modeling registry |
+|---|---|---|
+| Module | `standard_quant_tools.agent` | `standard_quant_tools.modeling.agent` |
+| Size | 46 tools, 7 categories | 8 tools, one ordered pipeline |
+| Narrowing | `route_request()` → `categories=` | nothing to narrow — every tool is used, in sequence |
+| Single-agent script | `Agent_*.py` (eight of them) | `Agent_Model_Builder.py` |
+| Workers | 7 | 2 (`model_research`, `model_builder`) |
+
+Each `_agent_utils.py` names a registry once and gets that registry's tool
+schemas **and** its dispatch function together:
+
+```python
+run_agent(..., registry="modeling")     # 8 tools, modeling_dispatch
+run_agent(..., registry="analysis")     # 46 tools, dispatch   (the default)
+```
+
+That pairing is the whole point. The two registries have identical shapes —
+same OpenAI-format schema, same `dispatch(tool_name, arguments)` signature —
+so nothing structural stops you from loading one registry's tool list and
+calling the other's dispatcher. It would fail at the first tool call with an
+"unknown tool" error naming the model's choice, which reads like the model
+picked badly rather than like the wiring is wrong. Binding the pair together
+in one lookup is what makes that mistake unwriteable.
+
+Passing `categories=` alongside `registry="modeling"` raises rather than
+being ignored: a caller who thought they had narrowed the tool list and
+silently did not is worse off than one who gets an error.
+
 ---
 
 ## The category taxonomy (`TOOL_CATEGORY`)
 
 `standard_quant_tools.agent.tools.TOOL_CATEGORY: Dict[str, str]` is the
-single source of truth: every one of the 45 tool names mapped to exactly
+single source of truth: every one of the 46 tool names mapped to exactly
 one of 7 category keys.
 
 | Category | Tools | Covers |
@@ -165,29 +202,39 @@ classification call is caught and logged, and the function falls through to
 ## The multi-agent orchestrator (`Multi_Agent_Implementation/`)
 
 A heavier but more thorough answer to the same problem: instead of
-narrowing one model's tool list, delegate to one of 7 independent worker
+narrowing one model's tool list, delegate to one of 9 independent worker
 agents, each with its own session, system prompt, and fixed tool subset —
 the confusable tool is never loaded into the worker's context at all,
 not just deprioritized.
 
 ```
 Multi_Agent_Implementation/
-├── Agent_Orchestrator.py   # lead agent: 7 delegate_to_<worker>_agent tools
+├── Agent_Orchestrator.py   # lead agent: 9 delegate_to_<worker>_agent tools
 ├── worker_agents.py        # WORKER_AGENTS registry + run_worker_agent()
 └── _agent_utils.py         # scoped variant of Implementation/Anthropic's run_agent()
 ```
 
+Seven of the nine draw from the analysis registry; two draw from the
+modeling one. The orchestrator does not need to know which is which — a
+delegate call looks the same either way, and each worker carries its own
+`"registry"` field that `run_agent()` reads. That is what routing through
+workers buys: a second registry costs one more worker entry, not a
+redesign of the delegation loop.
+
 `WORKER_AGENTS` (`worker_agents.py`) has one entry per category above —
-the worker keys *are* the `TOOL_CATEGORY` values — and each worker's
-`"tools"` list is **derived** from `TOOL_CATEGORY`, not hand-duplicated:
+for the analysis workers the keys *are* the `TOOL_CATEGORY` values — and
+each of those workers' `"tools"` lists is **derived** from `TOOL_CATEGORY`,
+not hand-duplicated:
 
 ```python
 def _tools_for(category: str) -> List[str]:
     return sorted(name for name, cat in TOOL_CATEGORY.items() if cat == category)
 
 WORKER_AGENTS = {
-    "screener": {"tools": _tools_for("screener"), ...},
-    "backtest_execution": {"tools": _tools_for("backtest_execution"), ...},
+    "screener": {"registry": ANALYSIS_REGISTRY,
+                 "tools": _tools_for("screener"), ...},
+    "backtest_execution": {"registry": ANALYSIS_REGISTRY,
+                           "tools": _tools_for("backtest_execution"), ...},
     ...
 }
 ```
@@ -196,7 +243,33 @@ A tool's category only ever needs to be correct in `TOOL_CATEGORY` itself
 to show up correctly in both the router's classification prompt and this
 worker registry — there is no second list that can drift out of sync.
 
-The orchestrator's own "tools" are 7 hand-authored
+**The two modeling workers are split differently, because there is nothing
+to derive them from.** The modeling runtime has no category taxonomy — it
+is eight tools in one ordered pipeline — so the split is by pipeline
+*stage*, written out explicitly and then checked by the coverage test the
+same way `_tools_for()` is:
+
+```python
+_MODEL_RESEARCH_TOOLS = ["list_modeling_capabilities", "list_features",
+                         "build_model_dataset", "analyze_features"]
+_MODEL_BUILDER_TOOLS  = ["run_model_experiment", "inspect_model",
+                         "score_model", "evaluate_model_portfolio"]
+```
+
+The cut is at the dataset. Everything up to "is this dataset worth fitting"
+is research; everything after it is construction. That is where a human
+would stop and look, and it is the only handoff in the pipeline that
+carries a single value — the `dataset_id` — rather than a whole panel,
+which is what makes it a viable boundary between two agent sessions that
+cannot see each other's context.
+
+It is also a real constraint, not a tidy one. `model_builder` has no tool
+that can create a dataset, so the orchestrator must run `model_research`
+first and copy the `dataset_id` verbatim into the builder's request. The
+orchestrator's system prompt states that ordering explicitly rather than
+leaving it to the general "chain specialists when needed" rule.
+
+The orchestrator's own "tools" are 9 hand-authored
 `delegate_to_<worker>_agent(request)` tools, **auto-generated from
 `WORKER_AGENTS.keys()`** — adding, splitting, or removing a worker in
 `worker_agents.py` changes the orchestrator's delegate-tool set and system
@@ -218,19 +291,29 @@ orchestrator explicitly copies that text into the delegate call. See
 
 `tests/agent/test_multi_agent_tool_coverage.py` — pure data validation, no API
 key or network required:
-- every worker has tools, a system prompt, a label, a description
-- the union of every worker's tools equals the full library tool set,
-  checked both directions (nothing missing, nothing referencing a
-  nonexistent tool)
+- every worker has tools, a system prompt, a label, a description, and a
+  registry name the loader actually understands
+- **per registry**, the union of that registry's workers' tools equals that
+  registry's full tool set, checked both directions (nothing missing,
+  nothing referencing a nonexistent tool). Checking the merged union
+  instead would pass while a worker quietly listed a modeling tool under
+  the analysis registry — which fails at the first tool call, because the
+  two dispatch functions do not know each other's names
+- the two registries share no tool name, so "which dispatcher runs this"
+  can never depend on which worker happened to be asked
 - no tool is assigned to more than one worker
+- `build_model_dataset`/`analyze_features` sit in `model_research` and
+  `run_model_experiment`/`evaluate_model_portfolio` in `model_builder`, so
+  the `dataset_id` handoff cannot quietly disappear by the builder gaining
+  the ability to build its own dataset
 - `run_sma_backtest`/`run_custom_signal_backtest` land in different workers
   (the original confusion-pair regression test)
 - `run_sma_backtest`/`run_backtest_optimization` land in different workers
   (`backtest_execution` vs `backtest_validation` — the same guarantee one
   level narrower)
-- exactly 7 workers exist, by name — a regression guard for the
-  execution/validation split derived from the actual registry rather than
-  a magic number that could itself drift
+- exactly 9 workers exist, by name — a regression guard for the
+  execution/validation and research/builder splits, derived from the actual
+  registry rather than a magic number that could itself drift
 
 There is currently no test that runs the orchestrator's delegation loop
 itself against a live/mocked API, or asserts it picks the *correct* worker
@@ -244,7 +327,7 @@ known gap, not a hidden one.
 | | Router | Multi-agent orchestrator |
 |---|---|---|
 | Cost | One cheap classification call, then the normal agent loop | A full independent agent session per delegated worker |
-| Setup | `route_request()` + `categories=` param on an existing `run_agent()` | A lead agent, 7 worker sessions, its own delegation loop |
+| Setup | `route_request()` + `categories=` param on an existing `run_agent()` | A lead agent, 9 worker sessions, its own delegation loop |
 | Isolation | The unrouted tools are absent from *this* completion call | The unrouted tools are absent from that *worker's entire session* |
 | Best for | Single-agent scripts, cost-sensitive deployments, most requests | Complex multi-step requests that genuinely span several specialist domains in one turn (see `Agent_Orchestrator.py`'s example request) |
 

@@ -31,6 +31,10 @@ from anthropic import Anthropic
 from anthropic.types import Message, MessageParam, ToolParam
 
 from standard_quant_tools.agent.tools import dispatch, get_agent_tools
+from standard_quant_tools.modeling.agent import (
+    get_modeling_tools,
+    modeling_dispatch,
+)
 
 # ── Constants ──────────────────────────────────────────────────────
 _LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -127,19 +131,58 @@ def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
     ]
 
 
-def _scoped_tools(tool_names: Optional[List[str]]) -> list[ToolParam]:
+# ── The two registries ───────────────────────────────────────────────
+#
+# This library exposes TWO agent-tool registries, and deliberately does not
+# merge them (see Documentation/15_modeling.md):
+#
+#   "analysis"  standard_quant_tools.agent          46 tools, 7 categories
+#   "modeling"  standard_quant_tools.modeling.agent  8 tools, one pipeline
+#
+# They have identical shapes -- same OpenAI-format schema, same
+# dispatch(tool_name, arguments) signature -- which is exactly why keeping
+# them apart has to be deliberate rather than incidental. A registry is
+# named ONCE and supplies its schemas and its dispatch function together,
+# because a modeling tool name means nothing to agent.dispatch() and an
+# analysis tool name means nothing to modeling_dispatch(). Picking the
+# tool list from one and the dispatcher from the other would fail at the
+# first tool call, with an "unknown tool" error that points at the model's
+# choice rather than at this wiring.
+_REGISTRIES = {
+    "analysis": (get_agent_tools, dispatch),
+    "modeling": (get_modeling_tools, modeling_dispatch),
+}
+
+
+def _registry(registry: str):
+    """The (load_tools, dispatch) pair for a registry name."""
+    if registry not in _REGISTRIES:
+        raise ValueError(
+            f"Unknown registry {registry!r}; expected one of {sorted(_REGISTRIES)}."
+        )
+    return _REGISTRIES[registry]
+
+
+def _scoped_tools(
+    tool_names: Optional[List[str]], registry: str = "analysis"
+) -> list[ToolParam]:
     """
-    The full registered-tool set by default; filtered to tool_names when
-    given. A worker agent should always pass its own fixed subset here.
+    A registry's full tool set by default; filtered to tool_names when
+    given. A worker agent should always pass its own fixed subset here,
+    along with the registry that subset belongs to.
     """
-    all_tools = get_agent_tools()
+    load_tools, _ = _registry(registry)
+    all_tools = load_tools()
     if tool_names is not None:
         wanted = set(tool_names)
         all_tools = [t for t in all_tools if t["function"]["name"] in wanted]
         missing = wanted - {t["function"]["name"] for t in all_tools}
         if missing:
+            # Naming the registry matters here: the single most likely cause
+            # is a worker listing a tool that exists, but in the OTHER one.
             raise ValueError(
-                f"tool_names references unknown tool(s): {sorted(missing)}"
+                f"tool_names references tool(s) not in the {registry!r} "
+                f"registry: {sorted(missing)}"
             )
     return _to_anthropic_tools(all_tools)
 
@@ -155,6 +198,7 @@ def run_agent(
     max_iterations: int = 15,
     max_tokens: int = 8096,
     tool_names: Optional[List[str]] = None,
+    registry: str = "analysis",
 ) -> str:
     """
     Run the agentic loop: send user_request to Claude, execute any tool calls
@@ -164,10 +208,17 @@ def run_agent(
     registered tools (all of them if omitted). This is how a worker agent
     stays scoped to its own workflow.
 
+    registry: which tool registry tool_names is drawn from -- "analysis"
+    for the 46-tool analysis/backtest surface (the default, and what every
+    worker used before the modeling runtime existed), or "modeling" for the
+    separate 8-tool model-construction pipeline. The registry chosen here
+    also decides which dispatch function executes the calls.
+
     Returns the final text response from the model.
     """
     client = Anthropic(api_key=api_key)
-    tools = _scoped_tools(tool_names)
+    tools = _scoped_tools(tool_names, registry)
+    _, tool_dispatch = _registry(registry)
 
     _header("AGENT SESSION STARTED")
     _log("Model", model)
@@ -282,7 +333,7 @@ def run_agent(
 
             t0 = time.perf_counter()
             try:
-                result = dispatch(block.name, block.input)
+                result = tool_dispatch(block.name, block.input)
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✓  completed in {ms:.0f}ms")
                 print(_pretty_json(result, indent=5))

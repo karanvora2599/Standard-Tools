@@ -180,7 +180,7 @@ python tests/bench/bench_universe.py                    # 2,000-ticker shapes
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**3237 Python tests total.** With `_sqt_core` built, `-m "not integration"` gives **3229 passing, 1 skipped, 7 deselected**. The single skip is environmental — it exercises a failure path that the input under test does not trigger — and the 7 deselected are the integration tests, which need network. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Documentation/17_correctness.md](Documentation/17_correctness.md)).
+**3240 Python tests total.** With `_sqt_core` built, `-m "not integration"` gives **3232 passing, 1 skipped, 7 deselected**. The single skip is environmental — it exercises a failure path that the input under test does not trigger — and the 7 deselected are the integration tests, which need network. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Documentation/17_correctness.md](Documentation/17_correctness.md)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 
