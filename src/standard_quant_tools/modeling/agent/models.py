@@ -259,6 +259,23 @@ class InspectModelResult(BaseModel):
 # ── analyze_features ────────────────────────────────────────────────────
 
 
+class ListModelingCapabilitiesInput(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    include_estimators: bool = Field(
+        True,
+        description="Include the per-estimator capability table. Turn it off "
+        "for a compact answer when only the task/target/validation options "
+        "are needed.",
+    )
+
+
+class ListModelingCapabilitiesResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    capabilities: Dict[str, Any]
+
+
 class AnalyzeFeaturesInput(BaseModel):
     model_config = _NO_PROTECTED_NAMESPACES
 

@@ -44,6 +44,7 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..analysis import build_feature_report
+from ..capabilities import modeling_capabilities
 from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
 from ..engine import run_experiment as _run_experiment
@@ -64,6 +65,8 @@ from .models import (
     InspectModelResult,
     ListFeaturesInput,
     ListFeaturesResult,
+    ListModelingCapabilitiesInput,
+    ListModelingCapabilitiesResult,
     RunModelExperimentInput,
     RunModelExperimentResult,
     ScoreModelInput,
@@ -371,6 +374,16 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         InspectModelInput,
     ),
     (
+        "list_modeling_capabilities",
+        "What this modeling runtime can do: tasks, estimators and the "
+        "capabilities of each (sample weights, probabilities, query groups, "
+        "coefficients, feature importance), features, target types, "
+        "validation schemes, preprocessing and weighting options, and which "
+        "optional libraries are installed. Call this before choosing a model "
+        "rather than assuming an estimator is available.",
+        ListModelingCapabilitiesInput,
+    ),
+    (
         "analyze_features",
         "Score a built dataset's FEATURES before fitting anything: coverage, "
         "turnover, cross-sectional IC and ICIR, decile spread and monotonicity, "
@@ -388,6 +401,32 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         EvaluateModelPortfolioInput,
     ),
 ]
+
+
+def list_modeling_capabilities(
+    input_data: ListModelingCapabilitiesInput,
+) -> ListModelingCapabilitiesResult:
+    """
+    What this runtime can currently do: tasks, estimators and what each one
+    supports, features, targets, validation schemes, preprocessing,
+    weighting, and which optional libraries are installed.
+
+    One operation rather than one tool per model. Everything is read off the
+    live registries and the model adapters, so a newly registered estimator
+    describes itself correctly without anyone updating a table.
+
+    The part an agent most needs and cannot infer is `optional_dependencies`:
+    lightgbm and xgboost are not declared dependencies of this package, so
+    the ranking task and the fast boosters exist on one machine and not
+    another. An estimator list that is silently shorter is much harder to act
+    on than an explicit absence.
+    """
+    capabilities = modeling_capabilities()
+    if not input_data.include_estimators:
+        capabilities = {
+            key: value for key, value in capabilities.items() if key != "estimators"
+        }
+    return ListModelingCapabilitiesResult(capabilities=capabilities)
 
 
 def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
@@ -442,6 +481,10 @@ MODELING_TOOL_DISPATCH = {
         EvaluateModelPortfolioInput,
     ),
     "analyze_features": (analyze_features, AnalyzeFeaturesInput),
+    "list_modeling_capabilities": (
+        list_modeling_capabilities,
+        ListModelingCapabilitiesInput,
+    ),
 }
 
 
