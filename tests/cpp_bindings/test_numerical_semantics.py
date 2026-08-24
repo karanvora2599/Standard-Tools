@@ -81,10 +81,16 @@ class TestFillAwareTradeStatistics:
         )
         sig = pd.Series([1.0, 1.0, 0.0, 0.0], index=idx)
         r = run_strategy(
-            df, sig, fill_price="next_open",
-            commission_pct=0.0, slippage_pct=0.0, include_trade_log=True,
+            df,
+            sig,
+            fill_price="next_open",
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            include_trade_log=True,
         )
-        assert r["avg_trade_return_pct"] == pytest.approx((125 - 105) / 105 * 100, abs=1e-4)
+        assert r["avg_trade_return_pct"] == pytest.approx(
+            (125 - 105) / 105 * 100, abs=1e-4
+        )
         assert r["trade_log"]["entry_price"].iloc[0] == pytest.approx(105.0)
         assert r["trade_log"]["exit_price"].iloc[0] == pytest.approx(125.0)
 
@@ -105,8 +111,12 @@ class TestFillAwareTradeStatistics:
         )
         sig = pd.Series([1.0, 1.0, 0.0, 0.0], index=idx)
         r = run_strategy(
-            df, sig, fill_price="next_open",
-            commission_pct=0.0, slippage_pct=0.0, include_trade_log=True,
+            df,
+            sig,
+            fill_price="next_open",
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            include_trade_log=True,
         )
         assert r["avg_trade_return_pct"] < 0
         assert r["win_rate"] == 0.0
@@ -140,8 +150,11 @@ class TestFillAwareTradeStatistics:
             cost_c, cost_s = (0.0, 0.0) if trial % 2 else (0.001, 0.0005)
 
             r = run_strategy(
-                df, sig, fill_price=fill_price,
-                commission_pct=cost_c, slippage_pct=cost_s,
+                df,
+                sig,
+                fill_price=fill_price,
+                commission_pct=cost_c,
+                slippage_pct=cost_s,
                 include_trade_log=True,
             )
             log = r["trade_log"]
@@ -154,7 +167,12 @@ class TestFillAwareTradeStatistics:
             # display before these stats are recomputed from it.
             if abs(r["avg_trade_return_pct"] - py["avg_trade_return_pct"]) > 5e-3:
                 mismatches.append(
-                    (trial, "avg", r["avg_trade_return_pct"], py["avg_trade_return_pct"])
+                    (
+                        trial,
+                        "avg",
+                        r["avg_trade_return_pct"],
+                        py["avg_trade_return_pct"],
+                    )
                 )
         assert not mismatches, mismatches
 
@@ -237,11 +255,15 @@ class TestScaleInvariance:
             if base is None:
                 base = loadings
             else:
-                assert loadings == pytest.approx(base, rel=1e-9), f"drift at scale {s:g}"
+                assert loadings == pytest.approx(
+                    base, rel=1e-9
+                ), f"drift at scale {s:g}"
             # Loose: a 60-bar window with noise recovers the true loadings to
             # a couple of percent. The tight assertion is the invariance one
             # above; this only catches a result that is stable but wrong.
-            assert loadings == pytest.approx(true_beta, rel=0.05), f"wrong at scale {s:g}"
+            assert loadings == pytest.approx(
+                true_beta, rel=0.05
+            ), f"wrong at scale {s:g}"
 
     def test_ols2_is_scale_invariant(self):
         rng = np.random.default_rng(8)
@@ -267,7 +289,10 @@ class TestScaleInvariance:
         f0 = rng.standard_normal((200, 3))
         for s in (1e10, 1e13, 1e15):
             factors = f0 * s
-            y = factors @ np.array([1.5, -0.5, 0.8]) + rng.standard_normal(200) * s * 1e-3
+            y = (
+                factors @ np.array([1.5, -0.5, 0.8])
+                + rng.standard_normal(200) * s * 1e-3
+            )
             row = _cpp.rolling_factor_loadings(y, factors, 60)[-1]
             assert np.all(np.isfinite(row)), f"NaN at factor scale {s:g}"
             assert row[1] == pytest.approx(1.5, rel=1e-3)
@@ -387,10 +412,16 @@ class TestScalarConfigValidation:
     @pytest.mark.parametrize(
         "kwargs, why",
         [
-            (dict(initial_capital=0.0), "zero capital gave total_return=nan beside sharpe=9.99"),
+            (
+                dict(initial_capital=0.0),
+                "zero capital gave total_return=nan beside sharpe=9.99",
+            ),
             (dict(initial_capital=-100.0), "negative capital reported a +1.7% return"),
             (dict(periods_per_year=-1.0), "negative annualization gave NaN volatility"),
-            (dict(commission_pct=-0.1), "negative commission made the strategy profitable"),
+            (
+                dict(commission_pct=-0.1),
+                "negative commission made the strategy profitable",
+            ),
             (dict(slippage_pct=-0.1), "negative slippage, same"),
         ],
     )
@@ -412,10 +443,19 @@ class TestScalarConfigValidation:
                 args["periods_per_year"],
             ), why
 
-    @pytest.mark.parametrize("bad", [dict(n_simulations=0), dict(horizon_days=0),
-                                     dict(block_size=0), dict(initial_capital=-1.0)])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            dict(n_simulations=0),
+            dict(horizon_days=0),
+            dict(block_size=0),
+            dict(initial_capital=-1.0),
+        ],
+    )
     def test_nonsense_simulation_config_is_rejected(self, bad):
-        args = dict(horizon_days=10, n_simulations=5, block_size=5, initial_capital=10_000.0)
+        args = dict(
+            horizon_days=10, n_simulations=5, block_size=5, initial_capital=10_000.0
+        )
         args.update(bad)
         with pytest.raises(ValueError):
             _cpp.simulate_forward_paths(
