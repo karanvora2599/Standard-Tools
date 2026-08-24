@@ -9,6 +9,111 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (modeling: feature analysis, ranking, adapters, point-in-time)
+
+Four capabilities the previous cycle's analysis named as blocking, plus the two
+agent tools that expose them. The tool count goes 6 → 8, and the invariant that
+governed the first six still holds: **every tool is a decision the agent makes,
+not plumbing**. Nothing here changes what an existing `ModelSpec` predicts.
+
+**`analyze_features` — a feature report, not a feature list.**
+`modeling/analysis/feature_report.py` answers the question `list_features` never
+could: is this feature worth putting in a model. Per feature it reports
+distribution and coverage (missing fraction, dispersion, share beyond 4σ),
+predictive strength (IC, rank IC, ICIR, hit rate), autocorrelation, and a
+lead–lag IC curve across shifts. Across features it reports a redundancy matrix
+so an agent can see that two candidates are the same feature twice.
+
+The leakage screen is the part worth describing, because the first version of it
+was wrong. It flagged ADX and `realized_volatility` — both honest. The test had
+asked "does advancing the feature help", which is true of any slow-moving state
+variable and says nothing about leakage. The screen now asks whether shift 0 is a
+*strict* peak on the lead–lag curve **and** whether the effect is large
+(`_LEAKAGE_MIN_ABS_IC = 0.05`, raised from 0.01), with a persistence guard
+(`_LEAKAGE_MAX_PERSISTENCE = 0.95`) so a highly autocorrelated feature is not
+convicted for being autocorrelated. A fixture that had "caught" the screen being
+wrong turned out to use a contemporaneous target, against which an honest feature
+genuinely does peak at shift 0 — the screen was right and the test was wrong, and
+the fixture now builds a real forward return.
+
+**Learning-to-rank as a first-class task.** `ModelSpec.task` gains `"ranking"`,
+with `lightgbm_ranker` and `xgboost_ranker` behind the same guarded registration
+as the other optional estimators. Ranking is not regression with a different
+metric: it needs integer relevance grades, query groups that are the
+cross-section on each date, and NDCG rather than R². `modeling/validation/
+ranking.py` supplies `relevance_grades`, `group_sizes`, `ndcg_at_k` and
+`ranking_metrics`. `RankingSpec.n_grades` is bounded at 31, because LightGBM's
+default `label_gain` holds exactly 31 entries and a 32nd grade fails at fit time
+rather than at spec time.
+
+**`ModelAdapter` — the task dispatch, in one place.** `modeling/adapters.py`
+gives each task an adapter owning how its arrays are built, how a fitted model is
+scored, which metrics apply, and how a fold's IC series is computed.
+`run_experiment` no longer compares `task` anywhere in its body; it asks the
+adapter. Adding a fourth task is now a class, not a sweep through the engine.
+
+**`list_modeling_capabilities` — what this runtime can do, from the runtime.**
+`modeling/capabilities.py` reports tasks, estimators, features, targets,
+validation schemes, preprocessing, weighting, search, and which optional
+dependencies are actually importable. An agent no longer has to guess whether
+`xgboost_ranker` exists in this install, and the answer cannot drift from the
+registry because it is read from it.
+
+**A point-in-time join and its temporal contract.**
+`modeling/dataset/point_in_time.py` adds `asof_join`, `validate_pit_frame` and
+`coverage_report`. A record carries `available_time` separately from
+`event_time`, and the join rule is that a feature at *t* may consume only rows
+with `available_time <= t`. Revisions follow from the same rule: the value taken
+is the one that was current at *t*, not the corrected one. `validate_pit_frame`
+rejects `available_time < event_time` outright — a record available before the
+period it describes has ended is a column mix-up, and it is the one error that
+makes a backtest look prescient rather than merely wrong.
+
+**Why the modalities are not here.** This is the join primitive, not a
+fundamentals feed. `get_financial_ratios(symbol)` takes no `as_of` at all and
+every shipped provider reports `point_in_time=False`, so a `DataBundle` carrying
+fundamentals today would be an empty box with a correct label on it. What is
+buildable and testable now is the join and its rules, so that the leakage-critical
+part is already written and covered when a point-in-time source does arrive,
+rather than being invented under deadline.
+
+### Fixed (modeling audit — one of these made every tree model unscoreable)
+
+**`ModelManifest` rejected the JSON it had itself written.** JSON has no NaN, so
+a NaN metric serializes to `null` and returns as `None`, which the model failed
+validation on. `summarize_importance` correctly reports `signed_mean`,
+`signed_std` and `sign_consistency` as NaN for any estimator with no coefficient
+sign — so **every tree-based model was unloadable, and therefore unscoreable**:
+`random_forest`, gradient boosting, LightGBM and XGBoost alike. Linear models
+were unaffected because they have a sign and never wrote a NaN, which is exactly
+why this survived review. A `_nulls_to_nan` before-validator maps `null` back to
+NaN; `oos_metrics` gets the same treatment, since a single-class fold's AUC and a
+single-date fold's IC standard deviation are both legitimately NaN. Pre-existing,
+not introduced by this cycle.
+
+**`clip_sigma` disagreed across backends.** The native kernel raised `ValueError` on a
+negative value and the Python path silently skipped clipping — so the same spec
+produced differently-preprocessed features depending on whether `_sqt_core`
+was built. `standardize_cross_sectional` now validates before dispatching, so
+both paths raise `ValidationError`.
+
+**Capability discovery reported that no linear model exposes coefficients.**
+`hasattr(cls, "coef_")` is False on the class: scikit-learn sets `coef_` at fit
+time, not at class definition. Detection now tests `issubclass` against
+`LinearModel` / `LinearClassifierMixin`. Introduced in this cycle and caught
+before release.
+
+**`triple_barrier` returned a target no classifier would accept.** The encoding
+was `{0, 0.5, 1}`, which scikit-learn's type inference reads as *continuous* — so
+every classifier refused to fit. Re-encoded as `{0 = down, 1 = up, 2 = neither}`,
+with "up" deliberately at 1 so `positive_class_proba` still means P(up).
+
+**LightGBM estimators silently dropped `random_state`.** The wrapper took
+`**kwargs`, and `get_params()` reads the `__init__` signature — so parameters
+arrived at fit but were invisible to scikit-learn's cloning, and a "seeded" run
+was not reproducible. The real classes are now registered with explicit
+parameters, with the same defect fixed in `QuantileGradientBoostingRegressor`.
+
 ### Added (native kernels for the modeling layer)
 
 Five kernels in `_sqt_core`, from `Development/modeling_native_plan.md`. Each

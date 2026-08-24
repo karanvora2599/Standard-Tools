@@ -22,7 +22,7 @@ tool #47 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 6 tools, never merged into `agent.get_agent_tools()` /
+with exactly 8 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-     (46 tools, 7 categories)     (6 tools, one pipeline)
+     (46 tools, 7 categories)     (8 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,12 +44,14 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 6 tools
+## The 8 tools
 
 | Tool | Input → Output |
 |---|---|
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback) |
+| `list_modeling_capabilities` | → tasks, estimators and what each supports, features, targets, validation schemes, preprocessing, weighting, and which optional libraries are installed |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
+| `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen |
 | `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
@@ -61,6 +63,14 @@ impossible to register a model that was never walk-forward validated.
 `inspect_model` is one tool with four views instead of four separate
 inspection tools, for the same reason `get_rally_signal` returns five
 signal fields in one call instead of six tools.
+
+The count has grown from five to eight, and the invariant was never the
+count — it is that **every tool is a decision the agent makes, not
+plumbing**. Choosing features is a decision (`analyze_features`); so is
+choosing a model against what is actually installed
+(`list_modeling_capabilities`). The alternative to that second one was a
+tool per model, which would have grown the surface without adding a single
+decision to it.
 
 ### End-to-end example
 
@@ -1019,10 +1029,273 @@ A single averaged "best alpha" would have hidden that completely.
 fold. A 12-point grid with 3 inner splits over 20 outer folds is 720 fits
 where there was 20. That is why it is opt-in. If the training window is too
 short to be split `inner_splits` times, the search declines for that fold
-and says so in `reason`, rather than selecting on two dates.
-
----
-
+and says so in `reason`, rather than selecting on two dates.
+
+---
+
+## Analyzing features before choosing them
+
+`inspect_model(view="feature_importance")` answers *which columns did this
+estimator lean on* — one fit, in units that differ per estimator, and
+available only after the features have already been chosen.
+`analyze_features` answers the earlier and more useful question: **is this a
+good feature at all**. It needs no fitted model, so it runs on a dataset
+alone.
+
+Four layers come back per feature.
+
+**Distribution** — coverage, moments, outlier rate, within-entity
+autocorrelation, and rank **turnover**. Turnover is there because it is the
+part of a feature's cost that IC cannot see: two features with the same IC
+and very different turnover are not equally useful, and the fast one may not
+survive its own trading costs.
+
+**Predictive** — cross-sectional IC and ICIR, from the same
+`cross_sectional_ic` the engine reports models on, so a feature's standalone
+number and a model's number are the same quantity. Plus two more, because IC
+alone does not say whether a relationship is *usable*:
+
+| Metric | What it tells you |
+|---|---|
+| `quantile_spread` | mean target in the top decile minus the bottom, in target units — what a long-short on this feature alone would have captured per period, before costs |
+| `monotonicity` | rank correlation between decile index and decile mean; 1.0 is a cleanly ordered relationship, near 0 is real but not monotone |
+
+A feature with good IC, good spread and poor monotonicity is telling you it
+works at the extremes and not in the middle. That is worth knowing before it
+goes into a linear model.
+
+**Redundancy** — pairwise correlation, VIF from the inverse correlation
+matrix, condition number, and near-duplicate clusters. An agent that puts
+RSI, the stochastic oscillator, 20-day momentum and MACD into one model has
+not supplied four pieces of evidence; it has supplied roughly one, four
+times. Every importance-style diagnostic then splits that one signal across
+four columns and reports each as modest — which reads as several weak
+findings rather than one strong one.
+
+### The leakage screen
+
+For each feature, the IC is recomputed with the feature **shifted in time**
+against the same target. A positive shift delays it (it knows less); a
+negative shift advances it (it knows more). Shifting happens within each
+entity.
+
+Measured on the real catalog, the curve comes in three shapes and only one
+is a leak:
+
+| Shape | Example, shift −5 → 0 | Verdict |
+|---|---|---|
+| **ramp** — a path-dependent feature | RSI: `+0.680` → `−0.003` | honest |
+| **flat** — a slow-moving state feature | realized vol: `+0.005` → `+0.012` | **innocent** |
+| **tent** — peaks at 0, falls both sides | planted leak: `−0.001 / +0.766 / +0.986 / +0.766 / −0.001` | leak |
+
+An honest feature's IC *rises* as it is advanced, because `target[t]` spans
+bars t..t+horizon and a feature evaluated later has legitimately seen part
+of the answer. A leak's does not — the value at t already contained it, so
+displacing it in either direction only destroys the alignment.
+
+The first version of this screen asked "did advancing help", which is right
+for a ramp and **wrong for a flat curve**: a volatility level predicts the
+regime rather than the path, and separately barely changes over ±5 bars. It
+produced false positives on real catalog features. The test is now *is shift
+0 a strict peak, and is that peak enormous* — both conditions, because
+either alone misfires. `persistence` is reported alongside, and the screen
+abstains above 0.95: a feature compared against a near-copy of itself says
+nothing either way.
+
+**This is a screen, not a proof.** It will not catch a leak smaller than the
+`|IC| ≥ 0.05` floor, a leak in a feature too persistent to judge, or a leak
+that is constant across the whole sample. It tells an agent where to look.
+
+### One horizon, for now
+
+Everything is measured against the panel's own `target`, because that is the
+only target a built dataset carries. The more useful question — *at what
+horizon* is this predictive — needs multi-horizon targets in the dataset
+first. The module is shaped per-(feature, target) so that becomes a loop
+rather than a rewrite.
+
+---
+
+## Ranking models
+
+The pipeline judges a cross-sectional model on rank IC — did it order the
+names correctly today — while every other estimator optimizes squared error
+or log loss. `task="ranking"` closes that: a learning-to-rank objective
+trains directly on the ordering the scorecard measures.
+
+```python
+ModelSpec(
+    task="ranking",
+    estimator=EstimatorSpec(type="lightgbm_ranker", params={"n_estimators": 200}),
+    validation=ValidationSpec(train_window=250, test_window=125, embargo=5),
+    ranking=RankingSpec(n_grades=8, ndcg_at=[5, 10]),
+)
+```
+
+Three things must be true before either library trains correctly, and **only
+the first raises when you get it wrong**:
+
+1. **The label must be integer relevance grades.** Verified against LightGBM
+   4.5 and XGBoost 2.0: both reject a continuous label outright, and
+   shifting returns to be non-negative does not help. The target is cut
+   **within each date** into `n_grades` buckets by rank — per date because
+   that is what a query group is, and by rank rather than value because a
+   fat-tailed return distribution would otherwise put nearly every name in
+   one bucket.
+2. **The rows must be ordered by query group** — and this one is silent.
+   Both libraries take `group` as consecutive counts and neither checks the
+   ordering. The engine sorts by `(date, entity)` and `group_sizes()` raises
+   rather than trusting. Entity is the secondary key because both break
+   histogram ties by row order, so date alone left the fit dependent on the
+   caller's row order (measured: 0.5849 vs 0.5862 rank IC on a shuffled
+   panel).
+3. **Regression metrics do not apply.** A ranker's score is invariant to any
+   monotone rescale, so R² and MAE would measure a scale the quantity does
+   not have. Ranking reports the cross-sectional ICs plus **NDCG**, whose
+   logarithmic discount weighs the top of the ranking far more heavily —
+   closer to how a concentrated book uses a score. A model can improve one
+   and not the other, which is why both are reported.
+
+`n_grades` is capped at **31**, which is LightGBM's limit rather than a
+preference: its default `label_gain` table holds 31 entries, and a 32nd
+grade fails at fit time. Measured on a 40-entity cross-section, 8 grades
+beat 16 — five names per grade carried more signal than two and a half.
+
+### It is not automatically better
+
+On a panel built so the ordering is learnable but magnitudes are dominated
+by a cubed transform and t(2.5) noise:
+
+| Model | rank IC |
+|---|---:|
+| ridge | **0.402** |
+| lightgbm | 0.368 |
+| lightgbm_ranker | 0.364 |
+| xgboost | 0.325 |
+| xgboost_ranker | 0.358 |
+
+The ranker beat its counterpart for XGBoost and not for LightGBM, and plain
+ridge beat everything — that panel's ordering is linear in the features and
+rank IC is invariant to the monotone cubing, so ridge recovers it exactly.
+Reported rather than tuned away: this is a model family worth having
+available, not a free improvement.
+
+---
+
+## Model adapters
+
+Each task's *shape* — what the estimator is handed, how a continuous score
+comes out, which metrics mean anything, what the fold contributes to the
+pooled statistics — lives in one adapter rather than in branches through
+`run_experiment`.
+
+| Adapter | Score it produces | Metrics |
+|---|---|---|
+| regression | the raw prediction | R², MAE, IC, cross-sectional IC |
+| classification | the positive-class **probability**, never the 0/1 label | accuracy, AUC, class balance |
+| ranking | the ordering score | cross-sectional ICs, NDCG |
+
+The classification score is the probability rather than the predicted label
+because a label carries no ordering, and everything downstream — the
+portfolio bridge, the cross-sectional IC — needs one.
+
+This is deliberately **not** an abstraction over models needing a different
+`X` altogether. A sequence model wanting `(entity, time, feature)` tensors
+needs `build_dataset` to emit that shape; an interface shaped by speculation
+rather than by real cases would be worse than none.
+
+`list_modeling_capabilities` reads its answers off the live registries and
+these adapters, so a newly registered estimator describes itself correctly
+without anyone updating a table:
+
+```python
+{"name": "lightgbm_ranker", "task": "ranking", "input_kind": "tabular",
+ "needs_groups": True, "score_has_scale": False,
+ "supports_sample_weight": True, "supports_probability": False,
+ "exposes_coefficients": False, "exposes_feature_importance": True,
+ "allowed_params": ["colsample_bytree", "learning_rate", ...]}
+```
+
+`optional_dependencies` is the part an agent cannot infer: lightgbm and
+xgboost are not declared dependencies, so ranking and the fast boosters
+exist on one machine and not another. An estimator list that is silently
+shorter is much harder to act on than a stated absence.
+
+---
+
+## Point-in-time joins
+
+Everywhere else in this package, *was this known yet* is answered by one
+timestamp: the bar's own date. For prices that is right — a close is known
+when the bar closes. For everything else it is wrong, and wrong in the
+direction that flatters a backtest:
+
+```text
+AAPL Q2 EPS
+    period_end   2026-06-30    the quarter it describes
+    reported_at  2026-07-29    when anyone could act on it
+    revised_at   2026-08-14    when the number changed
+```
+
+A feature at 2026-07-15 joining on `period_end` reads a number nobody had
+for another fortnight. A feature joining on `reported_at` but taking the
+**latest** value reads a revision nobody had for another six weeks. Both
+look like ordinary joins.
+
+So a record carries `available_time` separately from `event_time`, and the
+rule is:
+
+```text
+a feature at t may consume only rows with available_time <= t
+```
+
+```python
+from standard_quant_tools.modeling.dataset.point_in_time import asof_join
+
+panel = asof_join(panel, earnings, fields=["eps"], prefix="fundamental.")
+panel = asof_join(panel, cpi_releases, fields=["cpi"], by_entity=False)
+```
+
+`asof_join` takes the most recent row available by each panel date — for a
+restated figure, **the version that was current at t, not the final one**.
+Reproducing a historical decision means seeing the numbers as they were,
+mistakes included.
+
+Three details that are load-bearing:
+
+- `validate_pit_frame` rejects `available_time < event_time`. A record
+  available before the period it describes has ended is not a tight
+  reporting calendar, it is the two columns swapped — and it is the single
+  error that makes every model built on the data look prescient.
+- `max_staleness` bounds how old a record may be and still be used. Without
+  it, a feed that stops updating supplies its last value forever and the
+  model learns from a number that stopped being a measurement years ago.
+- The join **sorts both sides itself**. `pandas.merge_asof` requires sorted
+  input and does not raise when it is missing — it silently produces wrong
+  matches.
+
+`by_entity=False` handles a global series (CPI, Fed Funds, the VIX): one
+release reaching every entity, from its release time rather than from the
+month it describes.
+
+### What is deliberately not built
+
+The join primitive and its rules, **not a fundamentals feed**. No shipped
+provider exposes point-in-time fundamentals: `get_financial_ratios(symbol)`
+takes no `as_of` at all, and yfinance, Polygon and Bloomberg all report
+`point_in_time=False`. A data bundle carrying fundamentals today would be an
+empty box with a correct label on it.
+
+What is buildable and testable now is the leakage-critical part, so that
+when a PIT source arrives it is already written and covered rather than
+being invented under deadline.
+
+
+
+---
+
+
+
 ## Model registry
 
 ```
@@ -1643,13 +1916,22 @@ Not built here, and not accidentally half-built either:
 - **Semantic feature search** — `list_features` is a plain catalog
   lookup. A 21-entry catalog doesn't need ranking; revisited only if the
   catalog grows large enough that it does.
-- **Fundamentals / true point-in-time revision tracking** — the
-  `CURRENT_ONLY` mechanism exists, but no fundamentals feature is
-  registered, since none of the current data providers expose
-  point-in-time-safe historical fundamentals. This is the honest blocker
-  on the "analyze fundamentals → turn them into model features → train"
-  workflow: it needs a PIT fundamentals provider first, not a feature
-  wrapper over today's reported ratios.
+- **A point-in-time fundamentals SOURCE** — the join is built (see
+  [Point-in-time joins](#point-in-time-joins)); the data is not. No shipped
+  provider exposes point-in-time fundamentals: `get_financial_ratios(symbol)`
+  takes no `as_of` at all, and yfinance, Polygon and Bloomberg all report
+  `point_in_time=False`. That is the honest blocker on the "analyze
+  fundamentals → turn them into model features → train" workflow, and it
+  needs a provider rather than a feature wrapper over today's reported
+  ratios. What changed is that the leakage-critical half — `available_time`
+  vs `event_time`, revisions, staleness bounds — is now written and tested,
+  so connecting a source is a data problem rather than a correctness one.
+- **Sequence and graph models** — the model adapters cover three task shapes
+  that all take a flat `(n_rows, n_features)` matrix. A sequence model
+  wanting `(entity, time, feature)` tensors, or a graph model wanting an
+  adjacency structure, needs `build_dataset` to emit a different shape;
+  that is a dataset change, not an adapter one, and inventing the interface
+  before there is a real case would shape it by speculation.
 - **Time-varying universe membership** — universes are static ticker
   lists, with no as-of membership, so historical models over a
   present-day universe carry survivorship bias (which the default
