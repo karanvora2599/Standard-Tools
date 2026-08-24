@@ -175,6 +175,72 @@ class QuantileGradientBoostingRegressor(_GradientBoostingRegressor):
         )
 
 
+_RANKER_LGBM = EstimatorParamSchema(
+    bounds={
+        "n_estimators": N_ESTIMATORS,
+        "num_leaves": NUM_LEAVES,
+        "max_depth": MAX_DEPTH,
+        "learning_rate": LEARNING_RATE,
+        "min_child_samples": MIN_CHILD_SAMPLES,
+        "subsample": SUBSAMPLE,
+        "colsample_bytree": COLSAMPLE,
+        "reg_alpha": REG_TERM,
+        "reg_lambda": REG_TERM,
+    }
+)
+
+_RANKER_XGB = EstimatorParamSchema(
+    bounds={
+        "n_estimators": N_ESTIMATORS,
+        "max_depth": MAX_DEPTH,
+        "learning_rate": LEARNING_RATE,
+        "min_child_weight": MIN_CHILD_WEIGHT,
+        "subsample": SUBSAMPLE,
+        "colsample_bytree": COLSAMPLE,
+        "reg_alpha": REG_TERM,
+        "reg_lambda": REG_TERM,
+    }
+)
+
+
+def _register_rankers() -> None:
+    """
+    Learning-to-rank estimators, under task='ranking'.
+
+    These close a mismatch the pipeline has had since it started reporting
+    cross-sectional rank IC: every other estimator here optimizes squared
+    error or log loss, and is then judged on whether it ordered the names
+    correctly. A LambdaRank objective trains on that ordering directly.
+
+    They are registered under their OWN task rather than as regression
+    estimators, because the difference is not cosmetic. A ranker needs query
+    groups at fit time, needs the target graded into integers first, and
+    emits a score on an arbitrary scale that R2 and MAE cannot meaningfully
+    be computed against. Filing them under 'regression' would have let a
+    caller reach them through a path that supplies none of that.
+    """
+    registered = False
+    try:
+        from lightgbm import LGBMRanker
+
+        register_estimator("ranking", "lightgbm_ranker", LGBMRanker, _RANKER_LGBM)
+        registered = True
+    except ImportError:
+        pass
+    try:
+        from xgboost import XGBRanker
+
+        register_estimator("ranking", "xgboost_ranker", XGBRanker, _RANKER_XGB)
+        registered = True
+    except ImportError:
+        pass
+    if not registered:
+        logger.debug(
+            "[modeling] no ranking estimator available; install lightgbm or "
+            "xgboost to reach task='ranking'"
+        )
+
+
 def _register_quantile() -> None:
     """
     Quantile regression, always available (both come from sklearn).
@@ -198,6 +264,8 @@ def _register_quantile() -> None:
 _register_quantile()
 HAS_LIGHTGBM = _register_lightgbm()
 HAS_XGBOOST = _register_xgboost()
+_register_rankers()
+HAS_RANKING = HAS_LIGHTGBM or HAS_XGBOOST
 
 if not (HAS_LIGHTGBM or HAS_XGBOOST):
     logger.debug(
