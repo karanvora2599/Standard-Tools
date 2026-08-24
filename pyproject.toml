@@ -54,6 +54,10 @@ Changelog = "https://github.com/karanvora2599/Standard-Tools/blob/main/CHANGELOG
 
 [project.scripts]
 sqt = "standard_quant_tools.cli:main"
+# The MCP server. Needs the [mcp] extra; without it the entry point
+# exists but fails on import with a clear ImportError rather than
+# making `mcp` a dependency of every install.
+sqt-mcp = "standard_quant_tools.mcp.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -69,7 +73,10 @@ markers = [
 test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "anthropic>=0.34.0"
+    "anthropic>=0.34.0",
+    # tests/mcp/ is schema- and wiring-level, no network, but it does
+    # need the SDK to build the server objects it inspects.
+    "mcp>=2.0.0"
 ]
 dev = [
     "black>=23.0.0",
@@ -84,6 +91,10 @@ signing = [
 ]
 polars = [
     "polars>=0.20.0"
+]
+
+mcp = [
+    "mcp>=2.0.0"
 ]
 
 [tool.scikit-build]

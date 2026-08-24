@@ -26,7 +26,7 @@ poetry install
 
 **Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `scikit-learn`, `plotly`, `pyarrow`, `python-dotenv`
 
-**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider). `pip install standard_quant_tools[polars]` adds optional `polars` interop for a growing subset of functions — pandas remains the default and required backend either way; see [Documentation/14_polars_support.md](Documentation/14_polars_support.md).
+**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider). `pip install standard_quant_tools[mcp]` adds the Model Context Protocol SDK and the `sqt-mcp` server, which exposes the whole library to any MCP client — see [Documentation/18_mcp.md](Documentation/18_mcp.md). `pip install standard_quant_tools[polars]` adds optional `polars` interop for a growing subset of functions — pandas remains the default and required backend either way; see [Documentation/14_polars_support.md](Documentation/14_polars_support.md).
 
 > **Note on the C++ extension:** `pip install .` now **builds `_sqt_core` when a C++ toolchain is available** (the backend is scikit-build-core, which drives the project's CMake build). Without a compiler the install still succeeds and you get the pure-Python package — every indicator, backtest and analysis function works through its Numba/pure-Python fallback, and `HAS_CPP` is `False`. That degradation is deliberate: the extension is an optional accelerator, so requiring a compiler to install would turn it into a hard dependency. Pass `-C cmake.define.SQT_REQUIRE_NATIVE=ON` to make a missing toolchain a hard error instead (what CI uses). For the in-place developer build, see [Development/build_guide.md](Development/build_guide.md).
 
@@ -75,6 +75,7 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 | `agent` | The 46-tool LLM surface, its dispatch, and orchestration patterns | [07](Documentation/07_agent_tools.md), [09](Documentation/09_advanced_agent_tools.md), [13](Documentation/13_agent_orchestration.md) |
 | `modeling` | A separate 8-tool runtime for building walk-forward-validated statistical models from this library's own features | [15](Documentation/15_modeling.md) |
 | `audit` | Content-addressed decision records, replay verification, and the `sqt` CLI | [10](Documentation/10_auditability.md) |
+| `mcp` | The whole library over the Model Context Protocol, with category-gated tool exposure, `sqt://` resources and workflow prompts | [18](Documentation/18_mcp.md) |
 
 Full API surface per module: [Documentation/00_module_reference.md](Documentation/00_module_reference.md).
 Polars interop: [14](Documentation/14_polars_support.md).
@@ -180,7 +181,7 @@ python tests/bench/bench_universe.py                    # 2,000-ticker shapes
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**3240 Python tests total.** With `_sqt_core` built, `-m "not integration"` gives **3232 passing, 1 skipped, 7 deselected**. The single skip is environmental — it exercises a failure path that the input under test does not trigger — and the 7 deselected are the integration tests, which need network. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Documentation/17_correctness.md](Documentation/17_correctness.md)).
+**3298 Python tests total.** With `_sqt_core` built, `-m "not integration"` gives **3280 passing, 1 skipped, 17 deselected**. The single skip is environmental — it exercises a failure path that the input under test does not trigger — and the 7 deselected are the integration tests, which need network. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Documentation/17_correctness.md](Documentation/17_correctness.md)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `data/`, `indicators/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 
@@ -226,11 +227,13 @@ NaN/Inf data contract is covered separately, in
 | `Documentation/15_modeling.md` | The separate 8-tool modeling runtime: feature catalog and feature report, regression/classification/ranking targets, leakage-purged walk-forward validation, sample weighting, the model adapters, point-in-time joins, the content-addressed model registry, the model→backtest bridge, portfolio evaluation of OOS predictions, and what's explicitly deferred |
 | `Documentation/16_performance.md` | Every measured C++ and Python-level performance figure, with methodology and the ports that did not pay off |
 | `Documentation/17_correctness.md` | The correctness audits and the backend-parity contract between the Python and C++ tiers |
+| `Documentation/18_mcp.md` | The MCP server: install, category budget, resources, prompts, and the audit trail over the protocol |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
 | `Development/optimization_plan.md` | The optimization backlog, each item with its measured outcome |
 | `Development/modeling_analysis.md` | Performance and capability analysis of the modeling layer |
 | `Development/modeling_native_plan.md` | The native-kernel plan for modeling, and the ceiling that stopped it at three phases |
+| `Development/mcp_plan.md` | The MCP server plan: the measured constraints, the design, and what was deferred |
 
 ---
 

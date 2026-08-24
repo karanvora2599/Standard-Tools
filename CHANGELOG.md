@@ -9,6 +9,91 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (an MCP server for the whole library)
+
+`standard_quant_tools.mcp` serves both tool registries over the Model
+Context Protocol, so any MCP client can use the library without the
+`Implementation/` scripts. Install with `pip install
+'standard_quant_tools[mcp]'`; the SDK is not a core dependency and the
+`sqt-mcp` entry point says so if it is missing.
+
+**Exposure is a policy, because the schemas are the constraint.** The 54
+tools cost **104,645 bytes — about 26,000 tokens** — and an MCP client holds
+that for the whole session. So tools are selected by category, using the
+same `TOOL_CATEGORY` taxonomy that already drives the router and the nine
+workers rather than a third grouping that could drift.
+
+The measurement worth keeping: **tool count and cost are barely related.**
+`analysis` is 13 tools in 11.9 KB; `custom_signal` is 2 tools in 6.1 KB;
+`backtest_execution` alone is a quarter of the surface. Picking categories
+by how many tools they hold gets the budget almost exactly backwards.
+`sqt-mcp --print-budget` prints the table, a test pins a ceiling against it,
+and the default — 22 tools, ~5k tokens — is stated at startup along with
+what it costs.
+
+**Structured results without the surcharge.** All 54 tools have typed
+Pydantic returns, so the server returns `structuredContent` on every call.
+Declaring `outputSchema` as well was assumed free in the plan and measured
+at **74 KB, a 77% increase** on the whole surface — so it became
+`--output-schemas`, off by default. The declaration only helps clients that
+validate against it; the structured payload arrives either way.
+
+**Seven schemas were dereferenced.** Those tools carried `$ref`/`$defs`
+upstream and are the most complex in the library, so they are the worst ones
+to hand a client that resolves references poorly. Inlining them turned out
+to *shrink* the payload 5.4% rather than grow it, because the `$defs` held
+definitions referenced once or not at all. A test asserts nothing reaching a
+client still contains a `$ref`.
+
+**Large results leave the conversation.** 83 list- or dict-valued fields
+live across 28 result models, and over MCP a five-year backtest's equity
+curve would sit in context for the rest of the session. A result over
+`--inline-limit` (4096 bytes) is stored whole and returned as a summary that
+names every field it withheld and how large it was, plus a `sqt://result/`
+link. All-or-nothing per field, deliberately: half a trade log looks like a
+whole trade log to a model reading it.
+
+**Eight resource URIs**, covering stored results, Parquet artifacts, model
+manifests, dataset metadata, audit records, and three static catalogs. Every
+path resolves through the library's existing sandbox guard, because a URI
+from a client is untrusted input and is the one place in the server where a
+traversal bug is reachable from outside.
+
+**Five workflow prompts.** A prompt invoked against a server that was not
+started with the categories it needs prepends a warning rather than handing
+the model a workflow it has no tools to run.
+
+**Annotations are derived, not maintained.** `readOnlyHint` is true for all
+54 and a test asserts it: this library does not place orders or move money,
+and one tool breaking that would force clients to treat the whole server as
+write-capable. `openWorldHint` comes from whether a symbol, ticker or
+universe appears anywhere in the input schema — including nested specs,
+since `build_model_dataset` hides its universe two levels down.
+`idempotentHint` is false for the four tools that persist an artifact.
+
+**The audit trail carries through.** Both dispatchers already route through
+`audit._run_and_record`, so every call made over MCP produces a
+hash-chained, replayable decision record, readable in-session at
+`sqt://audit/{request_id}` and by `sqt replay` afterward.
+
+**58 tests.** 48 schema- and wiring-level with no subprocess, and 10 that
+spawn the server and drive it with a real MCP client. The integration file
+earns its cost: it caught a resource handler constructing an object the SDK
+rejects, which all 48 in-process tests had passed over. It also pins that no
+library module writes to stdout — stdio transport shares that channel with
+JSON-RPC, and a stray `print()` corrupts every session in a way that looks
+like a protocol bug rather than a Python one.
+
+`Development/mcp_plan.md` gains a "what the build found" section recording
+the four plan assumptions that did not survive implementation, rather than
+being edited to match the outcome.
+
+### Fixed (formatting)
+
+`tests/cpp_bindings/test_numerical_semantics.py` had been failing
+`black --check src/ tests/` since 2026-08-19, so CI's lint job was red for a
+reason unrelated to anything since. Reformatted; no semantic change.
+
 ### Added (the example agents can now reach the modeling runtime)
 
 `Implementation/` and `Multi_Agent_Implementation/` had no way to build a
