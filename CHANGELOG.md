@@ -9,6 +9,81 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (the example agents can now reach the modeling runtime)
+
+`Implementation/` and `Multi_Agent_Implementation/` had no way to build a
+model. They loaded `standard_quant_tools.agent` and nothing else, so every
+capability of the modeling runtime — eight tools, its own registry since it
+shipped — was unreachable from the reference implementations. An agent built
+by copying these scripts could analyze, backtest and size, and could not fit.
+
+**One seam, in five files.** Each `_agent_utils.py` had exactly one place
+that loads tool schemas and one place that executes a call. Those are now
+paired behind a registry name:
+
+```python
+run_agent(..., registry="analysis")   # 46 tools, dispatch          (default)
+run_agent(..., registry="modeling")   #  8 tools, modeling_dispatch
+```
+
+The pairing is the point. The two registries have identical shapes — same
+OpenAI-format schema, same `dispatch(tool_name, arguments)` signature — so
+nothing structural prevents loading one registry's tool list and calling the
+other's dispatcher. That fails at the first tool call with an "unknown tool"
+error naming the model's choice, which reads like the model picked badly
+rather than like the wiring is wrong. Binding both to one lookup makes the
+mistake unwriteable rather than merely unlikely.
+
+`categories=` alongside `registry="modeling"` raises instead of being
+ignored. Category routing exists to narrow 46 similarly-shaped tools; eight
+tools in one ordered pipeline have nothing to narrow. A caller who believed
+they had scoped the tool list and silently had not is worse off than one who
+gets an error.
+
+**`Agent_Model_Builder.py`, on all three providers plus the top-level set.**
+Drives the full pipeline: capabilities, catalog, build, analyze, fit,
+inspect, evaluate as a portfolio. Its system prompt spends most of its length
+on two things the tools cannot enforce — that a leakage flag is a claim to
+check against the lead-lag curve rather than a verdict (a slow-moving state
+feature is not a leak), and that out-of-sample IC is not an answer to "would
+this have made money", which is what `evaluate_model_portfolio` is for.
+
+**Two modeling workers, not one.** `Multi_Agent_Implementation/` goes from
+seven workers to nine: `model_research` (capabilities, catalog, build,
+analyze) and `model_builder` (fit, inspect, score, evaluate). The analysis
+workers derive their tool lists from `TOOL_CATEGORY`; the modeling runtime
+has no taxonomy to derive from, so the split is by pipeline stage and is
+written out explicitly.
+
+The cut is at the dataset, for a structural reason rather than a tidy one:
+it is the only handoff in the pipeline carrying a single value — the
+`dataset_id` — rather than a whole panel, and therefore the only one that
+survives two agent sessions that cannot see each other's context.
+`model_builder` has no tool that can create a dataset, so the ordering is a
+real constraint and the orchestrator's prompt states it rather than leaving
+it to the general "chain specialists" rule.
+
+The orchestrator needed no structural change: its delegate tools already
+auto-generate from `WORKER_AGENTS.keys()`, so a second registry cost one
+worker entry each, not a redesign of the delegation loop.
+
+### Changed (the worker coverage check is now per-registry)
+
+`test_multi_agent_tool_coverage.py` asserted that the union of every worker's
+tools equals the library's tool set. With two registries that assertion would
+pass while a worker listed a modeling tool under the analysis registry —
+which fails at the first tool call, because the two dispatch functions do not
+know each other's names. Each registry is now required to be covered exactly
+once by the workers declaring it, the two are required to share no tool name,
+and the `dataset_id` handoff is pinned by asserting `build_model_dataset`
+stays out of `model_builder`.
+
+Verified by mutation rather than by reading: adding `score_model` to the
+screener worker fails the new check with "workers claim tool(s) this registry
+does not have", and passed the old one.
+
+Nine tests, up from seven.
+
 ### Added (modeling: feature analysis, ranking, adapters, point-in-time)
 
 Four capabilities the previous cycle's analysis named as blocking, plus the two

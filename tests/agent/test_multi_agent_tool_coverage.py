@@ -5,6 +5,14 @@ Pure data validation — no Anthropic API key or network access required.
 Fails fast if a new agent tool is ever added to the library without being
 assigned to exactly one worker agent, which would otherwise go unnoticed
 until someone actually tried to use it through the multi-agent example.
+
+The check is PER REGISTRY. There are two — the 46-tool analysis surface and
+the separate 8-tool modeling runtime — and the library never merges them.
+Checking their union against a merged tool list would pass while a worker
+quietly listed a modeling tool in an analysis worker, which fails at the
+first tool call because the two dispatch functions do not know each other's
+names. So each registry is required to be covered exactly once by the
+workers that declare it, and the two sets are required to be disjoint.
 """
 
 import sys
@@ -13,10 +21,18 @@ from pathlib import Path
 import pytest
 
 from standard_quant_tools.agent import get_agent_tools
+from standard_quant_tools.modeling.agent import get_modeling_tools
 
 from .. import REPO_ROOT
 
 MULTI_AGENT_DIR = REPO_ROOT / "Multi_Agent_Implementation"
+
+
+#: registry name -> the tool names that registry actually exposes.
+REGISTRY_TOOLS = {
+    "analysis": lambda: {t["function"]["name"] for t in get_agent_tools()},
+    "modeling": lambda: {t["function"]["name"] for t in get_modeling_tools()},
+}
 
 
 @pytest.fixture(scope="module")
@@ -27,23 +43,46 @@ def worker_agents():
     return WORKER_AGENTS
 
 
+def _by_registry(worker_agents):
+    """Tool names each worker registry claims, keyed by registry name."""
+    claimed: dict = {}
+    for worker in worker_agents.values():
+        claimed.setdefault(worker["registry"], set()).update(worker["tools"])
+    return claimed
+
+
 class TestWorkerToolCoverage:
-    def test_every_worker_has_tools_and_a_system_prompt(self, worker_agents):
+    def test_every_worker_has_tools_a_prompt_and_a_known_registry(self, worker_agents):
         for key, worker in worker_agents.items():
             assert worker["tools"], f"{key} has no tools assigned"
             assert worker["system_prompt"].strip(), f"{key} has an empty system prompt"
             assert worker["label"], f"{key} has no label"
             assert worker["description"], f"{key} has no description"
+            assert (
+                worker["registry"] in REGISTRY_TOOLS
+            ), f"{key} declares unknown registry {worker['registry']!r}"
 
-    def test_union_of_worker_tools_equals_all_library_tools(self, worker_agents):
-        library_tools = {t["function"]["name"] for t in get_agent_tools()}
-        assigned = set()
-        for worker in worker_agents.values():
-            assigned.update(worker["tools"])
-        missing = library_tools - assigned
-        extra = assigned - library_tools
-        assert not missing, f"Tools not assigned to any worker: {sorted(missing)}"
-        assert not extra, f"Workers reference tools that don't exist: {sorted(extra)}"
+    @pytest.mark.parametrize("registry", sorted(REGISTRY_TOOLS))
+    def test_workers_cover_each_registry_exactly(self, worker_agents, registry):
+        available = REGISTRY_TOOLS[registry]()
+        claimed = _by_registry(worker_agents).get(registry, set())
+        missing = available - claimed
+        extra = claimed - available
+        assert not missing, f"{registry}: tools in no worker: {sorted(missing)}"
+        assert not extra, (
+            f"{registry}: workers claim tool(s) this registry does not have: "
+            f"{sorted(extra)} — most likely listed under the wrong registry"
+        )
+
+    def test_the_two_registries_share_no_tool_name(self, worker_agents):
+        # If a name ever existed in both registries, "which dispatch function
+        # runs it" would depend on which worker happened to be asked, and the
+        # per-registry coverage check above would still pass.
+        analysis = REGISTRY_TOOLS["analysis"]()
+        modeling = REGISTRY_TOOLS["modeling"]()
+        assert analysis.isdisjoint(
+            modeling
+        ), f"name collision across registries: {sorted(analysis & modeling)}"
 
     def test_no_tool_is_assigned_to_more_than_one_worker(self, worker_agents):
         seen: dict = {}
@@ -84,12 +123,26 @@ class TestWorkerToolCoverage:
         assert "run_backtest_optimization" in validation_tools
         assert execution_tools.isdisjoint(validation_tools)
 
-    def test_there_are_seven_workers(self, worker_agents):
+    def test_the_modeling_pipeline_is_split_at_the_dataset(self, worker_agents):
+        # model_research ends by producing a dataset_id; model_builder needs
+        # one and has no tool that can make it. If build_model_dataset ever
+        # drifted into the builder, the handoff this split exists to force
+        # would silently disappear -- the builder could do everything itself
+        # and the research step would become optional.
+        research = set(worker_agents["model_research"]["tools"])
+        builder = set(worker_agents["model_builder"]["tools"])
+        assert "build_model_dataset" in research
+        assert "analyze_features" in research
+        assert "run_model_experiment" in builder
+        assert "evaluate_model_portfolio" in builder
+        assert research.isdisjoint(builder)
+
+    def test_there_are_nine_workers(self, worker_agents):
         """Regression guard for the backtest_execution/backtest_validation
-        split -- catches an accidental re-merge or an accidental further
-        split just as easily as a magic number would, but derived from the
-        actual registry rather than repeating a number that could itself
-        drift."""
+        split and the model_research/model_builder split -- catches an
+        accidental re-merge or an accidental further split just as easily as
+        a magic number would, but derived from the actual registry rather
+        than repeating a number that could itself drift."""
         assert set(worker_agents) == {
             "screener",
             "analysis",
@@ -98,4 +151,6 @@ class TestWorkerToolCoverage:
             "backtest_validation",
             "custom_signal",
             "portfolio_risk",
+            "model_research",
+            "model_builder",
         }

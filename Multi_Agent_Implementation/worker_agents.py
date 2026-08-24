@@ -3,8 +3,19 @@ Worker-agent registry for the multi-agent Standard Quant Tools example.
 
 Each worker owns a small, non-overlapping subset of the library's agent
 tools and a system prompt scoped to exactly that workflow. Together the
-seven workers cover every registered tool exactly once — see
+nine workers cover every registered tool exactly once — see
 test_multi_agent_tool_coverage in tests/ for the coverage check.
+
+TWO REGISTRIES, NOT ONE. Seven workers draw from the 46-tool analysis and
+backtest surface (standard_quant_tools.agent); two draw from the separate
+8-tool modeling runtime (standard_quant_tools.modeling.agent). The library
+keeps those apart deliberately — see Documentation/15_modeling.md — and so
+does this file: each worker declares which registry it belongs to, and
+run_agent() loads that registry's schemas and calls that registry's
+dispatch function together. They are never mixed, because a modeling tool
+name means nothing to agent.dispatch() and vice versa. The coverage check
+is therefore per-registry: every analysis tool in exactly one analysis
+worker, every modeling tool in exactly one modeling worker.
 
 This is the direct, structural answer to "how do I stop the model confusing
 similar tools like the backtest ones": give each agent so few, so tightly
@@ -32,6 +43,10 @@ from _agent_utils import _header, _log, _section, run_agent
 
 from standard_quant_tools.agent.tools import TOOL_CATEGORY
 
+#: Registry names understood by run_agent(). See the module docstring.
+ANALYSIS_REGISTRY = "analysis"
+MODELING_REGISTRY = "modeling"
+
 
 def _tools_for(category: str) -> List[str]:
     """Every tool name assigned to `category` in TOOL_CATEGORY, sorted for
@@ -40,10 +55,37 @@ def _tools_for(category: str) -> List[str]:
     return sorted(name for name, cat in TOOL_CATEGORY.items() if cat == category)
 
 
+# The modeling runtime has no category taxonomy to derive a split from --
+# it is eight tools in ONE ordered pipeline, so the split below is by
+# pipeline STAGE instead. Named here rather than written inline so the
+# coverage test can assert the two stages partition the modeling registry
+# exactly, which is the same guarantee _tools_for() gives the analysis
+# workers.
+#
+# The cut is at the dataset: everything up to and including "is this
+# dataset worth fitting" is research, everything after it is construction.
+# That is the point where a human would stop and look, and it is the only
+# handoff in the pipeline that carries a single value (the dataset_id)
+# rather than a whole panel.
+_MODEL_RESEARCH_TOOLS = [
+    "list_modeling_capabilities",
+    "list_features",
+    "build_model_dataset",
+    "analyze_features",
+]
+_MODEL_BUILDER_TOOLS = [
+    "run_model_experiment",
+    "inspect_model",
+    "score_model",
+    "evaluate_model_portfolio",
+]
+
+
 WORKER_AGENTS: Dict[str, Dict[str, Any]] = {
     "screener": {
         "label": "Screener Agent",
         "description": "Filter a ticker universe by fundamental/technical criteria and fetch company fundamentals.",
+        "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("screener"),
         "system_prompt": """You are a stock screening specialist. You have exactly two tools:
 run_screener (filter a ticker universe by fundamental/technical criteria) and
@@ -58,6 +100,7 @@ requesting agent can hand them to a different specialist.""",
     "analysis": {
         "label": "Technical & Risk Analysis Agent",
         "description": "Single-asset risk profiling, technical indicator snapshots, and multi-asset portfolio metrics.",
+        "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("analysis"),
         "system_prompt": """You are a risk and technical analysis specialist. Your tools cover
 single-asset risk profiling (analyze_stock_risk, get_extended_risk_metrics),
@@ -101,6 +144,7 @@ call, do not round or approximate them.""",
     "quant_research": {
         "label": "Quant Research Agent",
         "description": "Factor regression, cointegration/pairs testing, PCA, and Hurst regime detection.",
+        "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("quant_research"),
         "system_prompt": """You are a quantitative research specialist covering factor models
 (run_factor_regression), cointegration and pairs screening (run_cointegration_test,
@@ -125,6 +169,7 @@ Hurst exponents from your tool calls.""",
     "backtest_execution": {
         "label": "Backtest Execution Agent",
         "description": "Run the library's built-in named strategies (SMA/RSI/MACD/Bollinger, portfolio simulation, pair trades) once, with fixed parameters.",
+        "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("backtest_execution"),
         "system_prompt": """You are a backtest execution specialist for the library's BUILT-IN
 indicator strategies: SMA crossover, RSI mean-reversion, MACD crossover,
@@ -163,6 +208,7 @@ the backtest statistics and stop.""",
     "backtest_validation": {
         "label": "Backtest Validation Agent",
         "description": "Optimize, out-of-sample validate, and diagnose the library's built-in strategies (grid search, walk-forward, regime-adaptive, robustness, Monte Carlo).",
+        "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("backtest_validation"),
         "system_prompt": """You are a backtest validation specialist: optimizing, validating out
 of sample, and diagnosing the library's BUILT-IN indicator strategies —
@@ -196,6 +242,7 @@ strategies. Never size a position — report the statistics and stop.""",
     "custom_signal": {
         "label": "Custom Signal Agent",
         "description": "Backtest a signal computed outside this library — never generate one of your own.",
+        "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("custom_signal"),
         "system_prompt": """You are a custom-signal backtesting specialist. You exist for exactly
 one reason: the user (or an upstream model) has ALREADY computed a trading
@@ -212,6 +259,7 @@ Report the exact statistics from the tool call. Never size a position.""",
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing Agent",
         "description": "Portfolio risk decomposition (MCR/PCA/factor), portfolio optimization, and ATR/Kelly position sizing.",
+        "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("portfolio_risk"),
         "system_prompt": """You are a portfolio risk decomposition and position sizing specialist.
 get_portfolio_risk_attribution: marginal risk contribution, PCA variance
@@ -245,6 +293,71 @@ sizing, capacity analysis, historical stress-test replay, and liquidity
 analysis. If asked for a backtest or fundamental screen, say plainly that
 it's out of scope for this agent.""",
     },
+    "model_research": {
+        "label": "Model Research Agent",
+        "description": "Assemble a modeling dataset and judge its features BEFORE anything is fitted: catalog, coverage, predictive strength, redundancy, leakage.",
+        "registry": MODELING_REGISTRY,
+        "tools": _MODEL_RESEARCH_TOOLS,
+        "system_prompt": """You are a feature research specialist for the modeling runtime. You own
+the first half of one ordered pipeline and nothing else.
+
+list_modeling_capabilities: what this install can actually do — tasks,
+estimators, targets, validation schemes, and which optional dependencies
+(lightgbm, xgboost) are importable HERE. Call this first when a request
+names an estimator or a task, rather than assuming one exists.
+list_features: the feature catalog — what each feature means and what it
+costs to compute.
+build_model_dataset: fetch OHLCV, compute the requested features and
+target, and persist the panel. Returns a dataset_id. THAT ID IS THE
+HANDOFF — report it verbatim, because the Model Builder Agent cannot fit
+anything without it.
+analyze_features: score a BUILT dataset's features before any model is
+fitted — coverage, dispersion, IC and rank IC, autocorrelation, a lead-lag
+IC curve, a redundancy matrix, and a leakage screen.
+
+Your job ends at "here is the dataset, and here is what its features look
+like". You cannot fit, validate, register or score a model — those tools
+are not loaded for you — so never describe a model's performance as if you
+had measured it.
+
+Two judgements are the reason this agent exists, and you should make them
+explicitly rather than only reporting numbers: whether two features are the
+same feature twice, and whether the leakage screen flagged anything. A
+flagged feature is a claim you should check against the lead-lag curve
+before repeating it — a slow-moving state feature is not a leak.
+
+Always report the dataset_id, the exact feature list, and the tools' own
+numbers rather than a summary of them.""",
+    },
+    "model_builder": {
+        "label": "Model Builder Agent",
+        "description": "Fit, walk-forward validate, register, inspect and score a model from an ALREADY-BUILT dataset, and evaluate its predictions as a portfolio.",
+        "registry": MODELING_REGISTRY,
+        "tools": _MODEL_BUILDER_TOOLS,
+        "system_prompt": """You are a model construction specialist. You own the second half of one
+ordered pipeline: everything from a built dataset to a scored model.
+
+You REQUIRE a dataset_id and have no tool that can create one. If the
+request does not carry one, say so plainly and ask for the Model Research
+Agent to build the dataset first. Never invent an id.
+
+run_model_experiment: fit + leakage-purged walk-forward validation +
+registration in one call. Returns a model_id and out-of-sample metrics.
+inspect_model: a registered model's summary, feature importance, per-fold
+validation, or lineage. Use the validation view before quoting any
+performance number — a headline IC hides how unevenly it was earned across
+folds, and a signal carried by two folds out of ten is a different claim
+from the same average earned steadily.
+score_model: predictions for a universe as of a date, from a registered
+model.
+evaluate_model_portfolio: turn a model's out-of-sample predictions into a
+shared-cash portfolio backtest with real costs. This is the only honest
+answer to "would this have made money". Out-of-sample IC is not that
+answer and must never be reported as if it were.
+
+Report metrics exactly as the tools return them, and never describe an
+in-sample number as out-of-sample.""",
+    },
 }
 
 
@@ -263,6 +376,7 @@ def run_worker_agent(
 
     worker = WORKER_AGENTS[worker_key]
     _header(f"→ DELEGATING TO: {worker['label']}")
+    _log("Registry", worker["registry"])
     _log("Tools available", ", ".join(worker["tools"]))
     _section("SUB-REQUEST")
     print(f"  {request}")
@@ -274,6 +388,7 @@ def run_worker_agent(
         model=model,
         max_iterations=max_iterations,
         tool_names=worker["tools"],
+        registry=worker["registry"],
     )
 
     _section(f"← {worker['label']} RESULT")
