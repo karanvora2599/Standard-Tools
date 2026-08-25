@@ -43,6 +43,8 @@ from standard_quant_tools.agent.models import (
     CointegrationResult,
     CompareCostModelsInput,
     CompareCostModelsResult,
+    CompareDecisionsInput,
+    CompareDecisionsResult,
     CompareStrategiesInput,
     CompareStrategiesResult,
     CorrelationAnalysisInput,
@@ -55,6 +57,8 @@ from standard_quant_tools.agent.models import (
     DataCapabilitiesResult,
     DataQualityReportInput,
     DataQualityReportResult,
+    DataSourceMatch,
+    DataSourceRef,
     DescribeArtifactInput,
     DescribeArtifactResult,
     DrawdownEpisode,
@@ -62,6 +66,10 @@ from standard_quant_tools.agent.models import (
     DrawdownTableResult,
     EstimateTradeCostInput,
     EstimateTradeCostResult,
+    ExplainDecisionInput,
+    ExplainDecisionResult,
+    ExportAuditBundleInput,
+    ExportAuditBundleResult,
     ExposureDiagnostics,
     ExposureSummary,
     ExtendedRiskInput,
@@ -117,6 +125,8 @@ from standard_quant_tools.agent.models import (
     RegimeAdaptiveWalkForwardInput,
     RegimeAdaptiveWalkForwardResult,
     RegimeAdaptiveWalkForwardWindow,
+    ReplayDecisionInput,
+    ReplayDecisionResult,
     RiskAttributionInput,
     RiskAttributionResult,
     RiskSummary,
@@ -146,6 +156,8 @@ from standard_quant_tools.agent.models import (
     Trade,
     TradeCostLeg,
     TradeDiagnostics,
+    VerifyAuditIntegrityInput,
+    VerifyAuditIntegrityResult,
     VolatilityEstimatorsInput,
     VolatilityEstimatorsResult,
     WalkForwardInput,
@@ -178,6 +190,13 @@ from standard_quant_tools.analysis.options import (
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
+from standard_quant_tools.audit.export import export_bundle as _export_bundle
+from standard_quant_tools.audit.paths import _audit_dir
+from standard_quant_tools.audit.replay import verify_replay as _verify_replay
+from standard_quant_tools.audit.verify import verify_audit_log_integrity as _verify_day
+from standard_quant_tools.audit.verify import (
+    verify_audit_trail_integrity as _verify_trail,
+)
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.backtest.constraints import (
     capacity_report as _capacity_report,
@@ -4349,6 +4368,325 @@ def get_backtest_diagnostics(
 
 
 # ──────────────────────────────────────────────────────────────────
+# Provenance — reading and verifying the decision log
+#
+# Read and verify only. Retention (gc, seal, hold, release-hold, keygen)
+# stays CLI-only: an agent that can delete or seal the record of its own
+# decisions is not audited by it.
+# ──────────────────────────────────────────────────────────────────
+
+
+#: Day files are named YYYY-MM-DD.jsonl. The date argument is LLM-reachable
+#: and is joined into a filesystem path, so it is matched against this
+#: before it becomes one -- the same reason artifacts validate identifiers.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _find_audit_record(request_id: str) -> Dict[str, Any]:
+    """One record by id, as a plain dict.
+
+    Wraps cli.find_record so its ValueError becomes the ValidationError
+    every other tool raises for a bad argument -- an unknown request id is
+    a caller mistake, not an internal failure, and it should read like one.
+    """
+    from standard_quant_tools import cli as _cli
+
+    try:
+        return _cli.find_record(request_id)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
+def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
+    """
+    What one recorded tool call actually did: its inputs, the market data it
+    read (with the content hashes those inputs had AT THE TIME), which
+    execution path ran, how long it took, and the code state it ran under.
+
+    The execution path is the field that cannot be reconstructed later by
+    any other means. C++, Numba and pure Python are chosen at call time and
+    fall back transparently, so "which one ran" is knowable only because
+    the record says so.
+    """
+    record = _find_audit_record(input_data.request_id)
+    sources = [
+        DataSourceRef(
+            symbol=source.get("symbol"),
+            start_date=source.get("start") or source.get("start_date"),
+            end_date=source.get("end") or source.get("end_date"),
+            rows=source.get("rows"),
+            content_hash=source.get("content_hash") or source.get("hash"),
+        )
+        for source in record.get("data_sources", [])
+    ]
+    return ExplainDecisionResult(
+        request_id=record["request_id"],
+        timestamp_utc=record["timestamp_utc"],
+        tool_name=record["tool_name"],
+        status=record.get("status", "unknown"),
+        input=record.get("input", {}),
+        data_sources=sources,
+        duration_ms=float(record.get("duration_ms", 0.0)),
+        execution_path="C++" if record.get("cpp_available") else "Python/Numba",
+        output_hash=record.get("output_hash"),
+        git_commit_sha=record.get("git_commit_sha"),
+        package_version=record.get("package_version"),
+        random_seed=record.get("random_seed"),
+        error_type=record.get("error_type"),
+        error_message=record.get("error_message"),
+        record_hash=record.get("record_hash"),
+    )
+
+
+def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
+    """
+    Re-run a recorded call and say whether it still produces the same answer.
+
+    The useful part is the four-way verdict, not the boolean. A different
+    output on its own means nothing: the market data behind the call may
+    have been revised, and yfinance guarantees neither point-in-time values
+    nor that adjusted prices stay put. So the data hashes are checked
+    FIRST, and only "the inputs still hash the same but the output does
+    not" implicates the library -- that is `code_changed`. When the inputs
+    moved, the verdict is `data_changed` and the output difference is
+    expected rather than suspicious.
+    """
+    record = _find_audit_record(input_data.request_id)
+    try:
+        result = _verify_replay(record)
+    except Exception as exc:  # a replay that cannot run is a real answer
+        logger.warning("[replay_decision] %s failed: %s", input_data.request_id, exc)
+        return ReplayDecisionResult(
+            request_id=input_data.request_id,
+            tool_name=record.get("tool_name", "unknown"),
+            output_match=None,
+            verdict="failed",
+            notes=[f"replay could not run: {exc}"],
+        )
+
+    matches = [
+        DataSourceMatch(
+            symbol=match.get("symbol"),
+            matches=match.get("match"),
+            detail=(
+                f"{match.get('start')} -> {match.get('end')} "
+                f"({match.get('interval')})"
+            ),
+        )
+        for match in result.data_source_matches
+    ]
+    checked = [m.matches for m in matches if m.matches is not None]
+    data_moved = any(m is False for m in checked)
+
+    if result.output_match is None:
+        verdict = "not_comparable"
+    elif result.output_match:
+        verdict = "reproduced"
+    elif data_moved:
+        verdict = "data_changed"
+    else:
+        verdict = "code_changed"
+
+    notes = list(result.notes)
+    if verdict == "data_changed":
+        notes.append(
+            "The recorded inputs no longer hash the same, so a different "
+            "output is expected and says nothing about the library. This is "
+            "the normal consequence of a provider that does not guarantee "
+            "point-in-time values."
+        )
+    elif verdict == "code_changed":
+        notes.append(
+            "Every checked input still hashes identically and the output "
+            "does not match. That combination points at the code, not the "
+            "data -- compare git_commit_sha via explain_decision."
+        )
+    elif verdict == "not_comparable" and not notes:
+        notes.append(
+            "The record carries no comparable output hash, so replay can "
+            "neither confirm nor deny reproduction."
+        )
+
+    logger.debug("[replay_decision] %s verdict=%s", input_data.request_id, verdict)
+    return ReplayDecisionResult(
+        request_id=result.request_id,
+        tool_name=result.tool_name,
+        output_match=result.output_match,
+        data_source_matches=matches,
+        verdict=verdict,
+        notes=notes,
+    )
+
+
+def compare_decisions(input_data: CompareDecisionsInput) -> CompareDecisionsResult:
+    """
+    Diff two recorded calls: tool, inputs, output hash and code provenance.
+
+    The question this answers is "why did these two runs disagree", and the
+    summary states which of the three candidate causes the evidence
+    supports -- different inputs, different code, or the same of both with a
+    different answer, which means the data moved.
+    """
+    from standard_quant_tools import cli as _cli
+
+    a = _find_audit_record(input_data.request_id_a)
+    b = _find_audit_record(input_data.request_id_b)
+    diff = _cli.cmd_compare(input_data.request_id_a, input_data.request_id_b)
+
+    same_tool = a.get("tool_name") == b.get("tool_name")
+    same_input = a.get("input") == b.get("input")
+    same_output = a.get("output_hash") == b.get("output_hash")
+
+    summary: List[str] = []
+    if not same_tool:
+        summary.append(
+            f"Different tools ({a.get('tool_name')!r} vs "
+            f"{b.get('tool_name')!r}); nothing below is comparable."
+        )
+    elif not same_input:
+        summary.append(
+            "Same tool, different inputs — the outputs are expected to "
+            "differ and this diff explains why."
+        )
+    elif same_output:
+        summary.append(
+            "Same tool, same inputs, same output hash: these two runs are "
+            "reproductions of each other."
+        )
+    else:
+        summary.append(
+            "Same tool and identical inputs but a different output hash. "
+            "Either the code changed between them (compare git_commit_sha "
+            "and package_version above) or the underlying market data was "
+            "revised — replay_decision on each id distinguishes the two."
+        )
+    if a.get("git_commit_sha") != b.get("git_commit_sha"):
+        summary.append(
+            f"They ran at different commits ({a.get('git_commit_sha')} vs "
+            f"{b.get('git_commit_sha')})."
+        )
+
+    return CompareDecisionsResult(
+        request_id_a=input_data.request_id_a,
+        request_id_b=input_data.request_id_b,
+        same_tool=same_tool,
+        same_input=same_input,
+        same_output=same_output,
+        diff=diff,
+        summary=summary,
+    )
+
+
+def verify_audit_integrity(
+    input_data: VerifyAuditIntegrityInput,
+) -> VerifyAuditIntegrityResult:
+    """
+    Check the audit log's hash chain, and optionally a day's signature.
+
+    Each record's hash covers its own content plus the previous record's,
+    so editing a past line breaks every line after it. That detects
+    accidental or partial tampering. It does NOT detect a wholesale rewrite
+    of the file, because a rewriter can recompute the whole chain — only
+    the Ed25519 checkpoint signature catches that, which is why supplying
+    a public key is a materially stronger check and not merely a longer one.
+
+    With no date, the full cross-day trail is verified, which additionally
+    catches a missing day that a per-file check cannot see.
+    """
+    notes: List[str] = []
+    signature_valid: Optional[bool] = None
+
+    if input_data.date is None:
+        problems = list(_verify_trail())
+        scope = "trail"
+    else:
+        # Day files are named YYYY-MM-DD.jsonl under the audit dir. Built
+        # from the validated date rather than joined from raw input: this
+        # argument is LLM-reachable and goes into a filesystem path.
+        if not _DATE_RE.match(input_data.date):
+            raise ValidationError(f"date={input_data.date!r} must be YYYY-MM-DD.")
+        path = _audit_dir() / f"{input_data.date}.jsonl"
+        if not path.exists():
+            raise ValidationError(
+                f"no audit file for {input_data.date}. Verify the whole "
+                "trail (omit `date`) to see which days exist."
+            )
+        problems = list(_verify_day(path))
+        scope = input_data.date
+        notes.append(
+            "A single day verified in isolation cannot detect a MISSING "
+            "day. Omit `date` to verify the cross-day trail as well."
+        )
+
+    if input_data.public_key_path is not None:
+        from standard_quant_tools.audit.signing import verify_checkpoint_signature
+
+        try:
+            signature_valid = bool(
+                verify_checkpoint_signature(
+                    input_data.date, input_data.public_key_path  # type: ignore[arg-type]
+                )
+            )
+        except Exception as exc:
+            signature_valid = False
+            notes.append(f"checkpoint signature could not be verified: {exc}")
+    elif input_data.date is not None:
+        notes.append(
+            "No public key supplied, so this is a chain check only. The "
+            "chain detects partial tampering; a wholesale rewrite can "
+            "recompute it, and only a signed checkpoint catches that."
+        )
+
+    intact = not problems and signature_valid is not False
+    logger.debug(
+        "[verify_audit_integrity] scope=%s intact=%s problems=%d",
+        scope,
+        intact,
+        len(problems),
+    )
+    return VerifyAuditIntegrityResult(
+        scope=scope,
+        intact=intact,
+        problems=problems,
+        checkpoint_signature_valid=signature_valid,
+        notes=notes,
+    )
+
+
+def export_audit_bundle(
+    input_data: ExportAuditBundleInput,
+) -> ExportAuditBundleResult:
+    """
+    Package a date range of the audit log, plus the chain index and a
+    manifest, into one zip for handing to someone outside this process.
+
+    This is the only tool in the provenance set that writes anything, and
+    what it writes is a NEW file — no existing record is modified, moved or
+    removed. Retention operations that could destroy evidence (gc, seal,
+    hold) stay CLI-only on purpose.
+    """
+    out_path = Path(input_data.out_path)
+    notes: List[str] = []
+    if out_path.exists():
+        notes.append(f"Overwrote an existing file at {out_path}.")
+    written = _export_bundle(input_data.start_date, input_data.end_date, out_path)
+    size = int(Path(written).stat().st_size)
+    logger.debug("[export_audit_bundle] wrote %s (%d bytes)", written, size)
+    notes.append(
+        "The bundle is a copy. Verifying it proves the copy is internally "
+        "consistent, not that the live log was untouched — run "
+        "verify_audit_integrity against the log itself for that."
+    )
+    return ExportAuditBundleResult(
+        out_path=str(written),
+        start_date=input_data.start_date,
+        end_date=input_data.end_date,
+        size_bytes=size,
+        notes=notes,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Panel indicators, and follow-ups on a run that already happened
 # ──────────────────────────────────────────────────────────────────
 
@@ -5386,6 +5724,31 @@ def get_agent_tools(
             ImpliedVolatilityInput,
         ),
         (
+            "explain_decision",
+            "What one recorded tool call did: inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python), timing, and the git commit and package version it ran under.",
+            ExplainDecisionInput,
+        ),
+        (
+            "replay_decision",
+            "Re-run a recorded call and classify the result: reproduced, data_changed (the inputs were revised, so a different answer is expected), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.",
+            ReplayDecisionInput,
+        ),
+        (
+            "compare_decisions",
+            "Diff two recorded calls — tool, inputs, output hash, git commit — and say which of the candidate causes the evidence supports.",
+            CompareDecisionsInput,
+        ),
+        (
+            "verify_audit_integrity",
+            "Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. Read-only.",
+            VerifyAuditIntegrityInput,
+        ),
+        (
+            "export_audit_bundle",
+            "Package a date range of the audit log plus its chain index and manifest into one zip. Writes a new file; modifies no existing record.",
+            ExportAuditBundleInput,
+        ),
+        (
             "get_technical_panel",
             "Indicators (RSI/ADX/ATR/Bollinger/Stochastic) for a whole ticker universe in one native call, reported at the latest bar. Use instead of one get_technical_analysis call per ticker when screening.",
             TechnicalPanelInput,
@@ -5516,6 +5879,14 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
     "get_option_pricing": (get_option_pricing, OptionPricingInput),
     "get_implied_volatility": (get_implied_volatility, ImpliedVolatilityInput),
+    "explain_decision": (explain_decision, ExplainDecisionInput),
+    "replay_decision": (replay_decision, ReplayDecisionInput),
+    "compare_decisions": (compare_decisions, CompareDecisionsInput),
+    "verify_audit_integrity": (
+        verify_audit_integrity,
+        VerifyAuditIntegrityInput,
+    ),
+    "export_audit_bundle": (export_audit_bundle, ExportAuditBundleInput),
     "get_technical_panel": (get_technical_panel, TechnicalPanelInput),
     "describe_artifact": (describe_artifact, DescribeArtifactInput),
     "get_drawdown_table": (get_drawdown_table, DrawdownTableInput),
@@ -5595,6 +5966,13 @@ TOOL_CATEGORY: Dict[str, str] = {
     "run_stress_test": "portfolio_risk",
     "get_liquidity_metrics": "portfolio_risk",
     "run_portfolio_optimization": "portfolio_risk",
+    # provenance — read and verify the decision log. Retention operations
+    # that could destroy evidence stay CLI-only; see the models module.
+    "explain_decision": "provenance",
+    "replay_decision": "provenance",
+    "compare_decisions": "provenance",
+    "verify_audit_integrity": "provenance",
+    "export_audit_bundle": "provenance",
     "get_technical_panel": "analysis",
     "describe_artifact": "analysis",
     "get_drawdown_table": "backtest_validation",

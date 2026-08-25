@@ -152,6 +152,7 @@ class TestWorkerToolCoverage:
             "custom_signal",
             "portfolio_risk",
             "discovery",
+            "provenance",
             "model_research",
             "model_builder",
         }

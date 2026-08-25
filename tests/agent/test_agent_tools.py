@@ -214,6 +214,7 @@ class TestToolCategoryCoverage:
             "custom_signal",
             "portfolio_risk",
             "discovery",
+            "provenance",
         }
         assert set(TOOL_CATEGORY.values()) <= known_categories
 

@@ -89,6 +89,17 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "— for one ticker or a multi-ticker signal panel."
         ),
     },
+    "provenance": {
+        "label": "Provenance & Audit",
+        "description": (
+            "Read and verify the decision log: what a recorded tool call "
+            "did and on what data, whether re-running it still reproduces "
+            "the same answer (and whether a difference is the data's fault "
+            "or the code's), how two runs differ, and whether the log's "
+            "tamper-evident hash chain is intact. Read-only — nothing here "
+            "alters a record."
+        ),
+    },
     "discovery": {
         "label": "Discovery",
         "description": (

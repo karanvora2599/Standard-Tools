@@ -3516,3 +3516,222 @@ class DrawdownTableResult(BaseModel):
         ...,
         description="Fraction of bars spent below a prior peak, across all episodes.",
     )
+
+
+# ──────────────────────────────────────────────
+# Provenance — reading and verifying the decision log
+#
+# Every dispatch() call already writes a tamper-evident record: the tool,
+# its inputs, content hashes of the market data it read, which execution
+# path ran, and the output hash, chained so that editing a past line breaks
+# every line after it. Thirteen CLI commands operate on that log and no
+# tool did, which meant the one participant who could not check its own
+# work was the agent whose work it was.
+#
+# READ AND VERIFY ONLY. Retention is deliberately absent: `gc`, `seal`,
+# `hold`, `release-hold` and `keygen` stay CLI-only, because handing the
+# agent whose decisions are logged the power to seal, hold or delete them
+# defeats the reason the log exists. Nothing here can alter a record.
+# export_audit_bundle writes a new zip and touches no existing file.
+# ──────────────────────────────────────────────
+
+
+class ExplainDecisionInput(BaseModel):
+    request_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "The request id of a recorded tool call. Every dispatch() writes "
+            "one; it appears in the audit log and in log records correlated "
+            "by RequestIdFilter."
+        ),
+    )
+
+
+class DataSourceRef(BaseModel):
+    """One market-data input a recorded call actually read."""
+
+    symbol: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    rows: Optional[int] = None
+    content_hash: Optional[str] = Field(
+        None,
+        description=(
+            "Hash of the data as it was AT THE TIME. A later fetch that "
+            "disagrees is what distinguishes a revised dataset from a code "
+            "change."
+        ),
+    )
+
+
+class ExplainDecisionResult(BaseModel):
+    request_id: str
+    timestamp_utc: str
+    tool_name: str
+    status: str
+    input: Dict[str, Any]
+    data_sources: List[DataSourceRef] = Field(default_factory=list)
+    duration_ms: float
+    execution_path: str = Field(
+        ...,
+        description=(
+            "'C++' or 'Python/Numba' — which implementation actually ran. "
+            "The fallback chain is transparent at call time and is exactly "
+            "the kind of thing that is impossible to reconstruct afterwards "
+            "without a record."
+        ),
+    )
+    output_hash: Optional[str] = None
+    git_commit_sha: Optional[str] = None
+    package_version: Optional[str] = None
+    random_seed: Optional[int] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    record_hash: Optional[str] = None
+
+
+class ReplayDecisionInput(BaseModel):
+    request_id: str = Field(
+        ..., min_length=1, description="The recorded call to re-run and compare."
+    )
+
+
+class DataSourceMatch(BaseModel):
+    symbol: Optional[str] = None
+    matches: Optional[bool] = Field(
+        None,
+        description=(
+            "True when re-fetching that input reproduces the recorded hash. "
+            "False means the DATA changed underneath the decision. None "
+            "means it could not be checked."
+        ),
+    )
+    detail: Optional[str] = None
+
+
+class ReplayDecisionResult(BaseModel):
+    request_id: str
+    tool_name: str
+    output_match: Optional[bool] = Field(
+        None,
+        description=(
+            "True when re-running reproduces the recorded output hash. "
+            "None when the record predates comparable hashing, which is "
+            "reported as 'not comparable' rather than as a mismatch."
+        ),
+    )
+    data_source_matches: List[DataSourceMatch] = Field(default_factory=list)
+    verdict: Literal[
+        "reproduced", "data_changed", "code_changed", "not_comparable", "failed"
+    ] = Field(
+        ...,
+        description=(
+            "'reproduced' output and data both match. 'data_changed' the "
+            "inputs no longer hash the same, so a different output is "
+            "EXPECTED and says nothing about the code. 'code_changed' the "
+            "data still matches but the output does not — the only "
+            "combination that implicates the library. 'not_comparable' the "
+            "record cannot be checked. 'failed' the replay itself errored."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class CompareDecisionsInput(BaseModel):
+    request_id_a: str = Field(..., min_length=1)
+    request_id_b: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _distinct(self) -> "CompareDecisionsInput":
+        if self.request_id_a == self.request_id_b:
+            raise ValueError(
+                "request_id_a and request_id_b are the same record; a diff "
+                "against itself is always empty."
+            )
+        return self
+
+
+class CompareDecisionsResult(BaseModel):
+    request_id_a: str
+    request_id_b: str
+    same_tool: bool
+    same_input: bool
+    same_output: bool
+    diff: str = Field(
+        ..., description="Unified diff of the two records, as the CLI renders it."
+    )
+    summary: List[str] = Field(
+        default_factory=list,
+        description="Plain-language statement of what differs and what that implies.",
+    )
+
+
+class VerifyAuditIntegrityInput(BaseModel):
+    date: Optional[str] = Field(
+        None,
+        description=(
+            "YYYY-MM-DD to verify one day's file in isolation. None (the "
+            "default) verifies the whole trail, which also catches a missing "
+            "day that a per-file check cannot see."
+        ),
+    )
+    public_key_path: Optional[str] = Field(
+        None,
+        description=(
+            "Verify the Ed25519-signed checkpoint for `date` as well as the "
+            "hash chain. Requires `date`. The chain alone detects partial "
+            "tampering; only a signature detects a wholesale rewrite."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _key_needs_a_date(self) -> "VerifyAuditIntegrityInput":
+        if self.public_key_path is not None and self.date is None:
+            raise ValueError(
+                "public_key_path needs a date — checkpoints are signed per "
+                "calendar day, so there is no trail-wide signature to check."
+            )
+        return self
+
+
+class VerifyAuditIntegrityResult(BaseModel):
+    scope: str = Field(..., description="'trail' or the single date verified.")
+    intact: bool
+    problems: List[str] = Field(
+        default_factory=list,
+        description="Every broken link found, in the order encountered.",
+    )
+    checkpoint_signature_valid: Optional[bool] = Field(
+        None, description="None when no public key was supplied."
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class ExportAuditBundleInput(BaseModel):
+    start_date: str = Field(..., description="YYYY-MM-DD, inclusive.")
+    end_date: str = Field(..., description="YYYY-MM-DD, inclusive.")
+    out_path: str = Field(
+        ...,
+        description=(
+            "Destination .zip path. This tool WRITES a new file; it never "
+            "modifies or removes anything in the audit log."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> "ExportAuditBundleInput":
+        if self.end_date < self.start_date:
+            raise ValueError(
+                f"end_date ({self.end_date}) precedes start_date "
+                f"({self.start_date})"
+            )
+        return self
+
+
+class ExportAuditBundleResult(BaseModel):
+    out_path: str
+    start_date: str
+    end_date: str
+    size_bytes: int
+    notes: List[str] = Field(default_factory=list)
