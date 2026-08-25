@@ -3245,6 +3245,19 @@ class BacktestResultV2(BaseModel):
     costs: CostSummary
     equity_curve_uri: str
     trades_uri: Optional[str] = None  # None when the strategy never traded
+    equity_curve_ref: Optional[str] = Field(
+        None,
+        description=(
+            "Typed handoff reference for the same equity curve "
+            "(sqt://equity_curve/...). Prefer this over equity_curve_uri "
+            "when passing the curve to another tool: it carries a content "
+            "kind, so a tool expecting something else refuses it by name "
+            "rather than failing on a missing column."
+        ),
+    )
+    trades_ref: Optional[str] = Field(
+        None, description="Typed handoff reference for the trade log."
+    )
     warnings: List[str] = []
     validation_status: str  # "ok" | "warning"
 

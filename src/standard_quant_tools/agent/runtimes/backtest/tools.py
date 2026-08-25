@@ -1731,6 +1731,33 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         save_artifact(trade_log, run_id, "trades") if not trade_log.empty else None
     )
 
+    # The same bytes, addressed by KIND as well as by path. The raw URIs
+    # above stay for existing callers and the MCP resource layer; these are
+    # what every reference-taking tool in every runtime accepts, and what
+    # lets a mismatched handoff fail by name instead of as a missing column.
+    from standard_quant_tools.agent.runtimes import handoff
+
+    equity_curve_ref = handoff.publish(
+        equity_curve,
+        "equity_curve",
+        run_id,
+        "equity_curve_ref",
+        producer="backtest.run_backtest_compact",
+        overwrite=True,
+    )
+    trades_ref = (
+        handoff.publish(
+            trade_log,
+            "trade_log",
+            run_id,
+            "trades_ref",
+            producer="backtest.run_backtest_compact",
+            overwrite=True,
+        )
+        if not trade_log.empty
+        else None
+    )
+
     warnings: List[str] = []
     validation_status = "ok"
     if int(results["num_trades"]) < 5:
@@ -1772,6 +1799,8 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         ),
         equity_curve_uri=equity_curve_uri,
         trades_uri=trades_uri,
+        equity_curve_ref=equity_curve_ref,
+        trades_ref=trades_ref,
         warnings=warnings,
         validation_status=validation_status,
     )

@@ -58,15 +58,27 @@ from .models import (
     AnalyzeFeaturesResult,
     BuildModelDatasetInput,
     BuildModelDatasetResult,
+    CheckLeakageInput,
+    CheckLeakageResult,
+    CompareModelsInput,
+    CompareModelsResult,
+    DatasetSummary,
     EvaluateModelPortfolioInput,
     EvaluateModelPortfolioResult,
     FeatureCatalogEntry,
     InspectModelInput,
     InspectModelResult,
+    LeakageFinding,
+    ListDatasetsInput,
+    ListDatasetsResult,
     ListFeaturesInput,
     ListFeaturesResult,
     ListModelingCapabilitiesInput,
     ListModelingCapabilitiesResult,
+    ListModelsInput,
+    ListModelsResult,
+    ModelComparison,
+    ModelSummary,
     RunModelExperimentInput,
     RunModelExperimentResult,
     ScoreModelInput,
@@ -260,6 +272,22 @@ def run_model_experiment(
         "warnings": meta.get("warnings", []),
     }
     result = _run_experiment(dataset, input_data.spec, dataset_id=input_data.dataset_id)
+    # Republished with a content kind so the rest of the interconnect can
+    # type-check it. Same rows, addressed as `predictions` rather than as
+    # a path that says nothing about what it holds.
+    from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.backtest.artifacts import load_artifact
+
+    predictions_ref = handoff.publish(
+        load_artifact(result["oos_predictions_uri"]),
+        "predictions",
+        result["model_id"],
+        "oos_predictions_ref",
+        producer="modeling.run_model_experiment",
+        overwrite=True,
+    )
+
+    result["oos_predictions_ref"] = predictions_ref
     return RunModelExperimentResult(**result)
 
 
@@ -348,6 +376,225 @@ def evaluate_model_portfolio(
     return EvaluateModelPortfolioResult(**result)
 
 
+#: Metric each task is ranked by when the caller names none. Ranking a
+#: regression R2 against a classification AUC would produce an ordering
+#: that looks meaningful and is not, so tasks are ranked separately.
+_HEADLINE_METRIC = {
+    "regression": ("ic", "spearman_ic", "r2"),
+    "classification": ("auc", "roc_auc", "accuracy"),
+    "ranking": ("ndcg_at_10", "ndcg", "ic"),
+}
+
+
+def _headline(task: str, metrics: dict, preferred=None):
+    """(metric name, value) for one model, or (None, None)."""
+    candidates = (preferred,) if preferred else _HEADLINE_METRIC.get(task, ())
+    for name in candidates:
+        if name and name in metrics:
+            return name, float(metrics[name])
+    return None, None
+
+
+def list_models(input_data: ListModelsInput) -> ListModelsResult:
+    """
+    Every registered model, newest first.
+
+    `inspect_model` and `score_model` both require a model_id the caller
+    already holds, and nothing enumerated them — so a session that lost the
+    id, or any new session, could not find a model it had trained. The
+    registry has been on disk the whole time; this reads it.
+
+    Manifests that fail to load are skipped rather than failing the call: a
+    half-written run should not make the other twenty models unfindable.
+    """
+    directory = _artifacts._runs_dir()
+    summaries = []
+    for path in sorted(directory.glob("mdl_*/manifest.json")):
+        try:
+            manifest = load_manifest(path.parent.name)
+        except Exception:  # a partial or corrupt run, not a reason to fail
+            continue
+        if input_data.task and manifest.task != input_data.task:
+            continue
+        metric, value = _headline(manifest.task, manifest.oos_metrics)
+        summaries.append(
+            ModelSummary(
+                model_id=manifest.model_id,
+                task=manifest.task,
+                estimator=manifest.estimator_type,
+                created_at=manifest.created_at_utc,
+                n_features=len(manifest.feature_ids),
+                n_folds=manifest.n_folds,
+                headline_metric=metric,
+                headline_value=value,
+                dataset_id=manifest.dataset_id,
+            )
+        )
+    summaries.sort(key=lambda s: s.created_at or "", reverse=True)
+    return ListModelsResult(
+        models=summaries[: input_data.limit],
+        n_total=len(summaries),
+        registry_dir=str(directory),
+    )
+
+
+def list_datasets(input_data: ListDatasetsInput) -> ListDatasetsResult:
+    """
+    Every built dataset panel, newest first.
+
+    Same gap as `list_models`: `run_model_experiment` needs a dataset_id
+    and nothing could produce the list of them.
+    """
+    directory = _artifacts._runs_dir()
+    summaries = []
+    for path in sorted(directory.glob("ds_*/dataset_meta.json")):
+        try:
+            meta = _artifacts.load_json(str(path))
+        except Exception:
+            continue
+        summaries.append(
+            DatasetSummary(
+                dataset_id=path.parent.name,
+                rows=meta.get("rows"),
+                entities=len(meta.get("entities", []) or []) or None,
+                features=len(meta.get("feature_ids", []) or []) or None,
+                start_date=meta.get("start_date"),
+                end_date=meta.get("end_date"),
+            )
+        )
+    summaries.sort(key=lambda s: s.end_date or "", reverse=True)
+    return ListDatasetsResult(
+        datasets=summaries[: input_data.limit],
+        n_total=len(summaries),
+        runs_dir=str(directory),
+    )
+
+
+def compare_models(input_data: CompareModelsInput) -> CompareModelsResult:
+    """
+    Rank several registered models side by side.
+
+    Models are ranked WITHIN their task, never across it. A regression IC
+    and a classification AUC are both "about 0.6" on the same scale and
+    mean entirely different things, so a combined ordering would look
+    authoritative while being arithmetic on incomparable quantities.
+    """
+    comparisons = []
+    tasks = {}
+    for model_id in input_data.model_ids:
+        manifest = load_manifest(model_id)
+        metric, value = _headline(
+            manifest.task, manifest.oos_metrics, input_data.metric
+        )
+        comparisons.append(
+            ModelComparison(
+                model_id=model_id,
+                task=manifest.task,
+                metric=metric,
+                value=value,
+                n_features=len(manifest.feature_ids),
+                dataset_id=manifest.dataset_id,
+            )
+        )
+        tasks.setdefault(manifest.task, []).append(comparisons[-1])
+
+    notes = []
+    best = {}
+    for task, group in tasks.items():
+        scored = [c for c in group if c.value is not None]
+        scored.sort(key=lambda c: c.value, reverse=True)
+        for position, comparison in enumerate(scored, start=1):
+            comparison.rank = position
+        if scored:
+            best[task] = scored[0].model_id
+        missing = [c.model_id for c in group if c.value is None]
+        if missing:
+            notes.append(
+                f"{task}: {missing} carry no usable metric and are unranked. "
+                "Pass `metric` explicitly if the manifest records one under "
+                "a different name."
+            )
+    if len(tasks) > 1:
+        notes.append(
+            f"These models span {sorted(tasks)}. They are ranked separately "
+            "because their metrics are not on a common scale — comparing "
+            "across tasks here would be arithmetic on incomparable numbers."
+        )
+
+    return CompareModelsResult(comparisons=comparisons, best_by_task=best, notes=notes)
+
+
+def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
+    """
+    Ask whether a set of features is safe to fit on before fitting on it.
+
+    `check_point_in_time_safety` runs implicitly inside dataset building;
+    this makes it a question a caller can ask directly, which is the
+    agent-shaped version — the answer changes which features you pick, and
+    finding out during a build means the build already happened.
+
+    With a `dataset_id`, also reports that panel's point-in-time coverage:
+    how much of it is genuinely as-of rather than back-filled.
+    """
+    from standard_quant_tools.modeling.dataset.leakage import (
+        PointInTimeViolation,
+        check_point_in_time_safety,
+    )
+    from standard_quant_tools.modeling.features.registry import get_feature
+
+    ids = input_data.feature_ids
+    if ids is None:
+        from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY
+
+        ids = sorted(FEATURE_REGISTRY)
+
+    definitions, findings, notes = [], [], []
+    for feature_id in ids:
+        try:
+            definitions.append(get_feature(feature_id))
+        except Exception as exc:
+            findings.append(
+                LeakageFinding(
+                    feature_id=feature_id,
+                    temporal_support="unknown",
+                    problem=f"not in the feature registry: {exc}",
+                )
+            )
+
+    try:
+        check_point_in_time_safety(definitions)
+    except PointInTimeViolation as exc:
+        findings.append(
+            LeakageFinding(
+                feature_id="(set)",
+                temporal_support="violation",
+                problem=str(exc),
+            )
+        )
+
+    coverage = {}
+    if input_data.dataset_id is not None:
+        _panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
+        coverage = {
+            key: meta[key]
+            for key in ("rows", "start_date", "end_date", "warnings")
+            if key in meta
+        }
+        notes.append(
+            "Dataset coverage is what the build RECORDED. It confirms the "
+            "panel is the one that was built; it does not re-derive whether "
+            "each value was available on its own date."
+        )
+
+    return CheckLeakageResult(
+        n_features_checked=len(ids),
+        safe=not findings,
+        findings=findings,
+        dataset_coverage=coverage,
+        notes=notes,
+    )
+
+
 # ── Registration (mirrors agent.tools.get_agent_tools()/_TOOL_DISPATCH,
 # but a separate registry — never merged into that one) ────────────────
 
@@ -392,6 +639,33 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Use this to choose features; use inspect_model(view='feature_importance') "
         "to see what one fitted model then leaned on.",
         AnalyzeFeaturesInput,
+    ),
+    (
+        "list_models",
+        "Every registered model, newest first, with its task, estimator, "
+        "headline out-of-sample metric and source dataset. Call this when "
+        "you need a model_id you do not already hold.",
+        ListModelsInput,
+    ),
+    (
+        "list_datasets",
+        "Every built dataset panel, newest first, with row/entity/feature "
+        "counts and date span.",
+        ListDatasetsInput,
+    ),
+    (
+        "compare_models",
+        "Rank registered models side by side on their out-of-sample "
+        "metrics. Models are ranked within their own task, never across "
+        "tasks, because those metrics are not on a common scale.",
+        CompareModelsInput,
+    ),
+    (
+        "check_leakage",
+        "Ask whether a set of features is temporally safe to fit on — "
+        "before building a dataset with them. Optionally reports a built "
+        "dataset's recorded point-in-time coverage too.",
+        CheckLeakageInput,
     ),
     (
         "evaluate_model_portfolio",
@@ -480,6 +754,10 @@ MODELING_TOOL_DISPATCH = {
         evaluate_model_portfolio,
         EvaluateModelPortfolioInput,
     ),
+    "list_models": (list_models, ListModelsInput),
+    "list_datasets": (list_datasets, ListDatasetsInput),
+    "compare_models": (compare_models, CompareModelsInput),
+    "check_leakage": (check_leakage, CheckLeakageInput),
     "analyze_features": (analyze_features, AnalyzeFeaturesInput),
     "list_modeling_capabilities": (
         list_modeling_capabilities,
