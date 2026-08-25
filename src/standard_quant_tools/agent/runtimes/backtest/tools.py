@@ -92,6 +92,7 @@ from standard_quant_tools.agent.models import (
     DrawdownTableResult,
     ExposureDiagnostics,
     ExposureSummary,
+    MatrixCell,
     MonteCarloSimulationInput,
     MonteCarloSimulationResult,
     OptimizationRun,
@@ -113,6 +114,8 @@ from standard_quant_tools.agent.models import (
     SignalPanelBacktestResult,
     SignalType,
     StrategyComparison,
+    StrategyMatrixInput,
+    StrategyMatrixResult,
     Trade,
     TradeDiagnostics,
     WalkForwardInput,
@@ -2117,5 +2120,127 @@ def compare_cost_models(
         scenarios=rows,
         breakeven_commission_pct=breakeven,
         survives_all_scenarios=survives,
+        notes=notes,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Strategy matrix — every strategy against every ticker, in one call
+# ──────────────────────────────────────────────────────────────────
+
+
+def run_strategy_matrix(input_data: StrategyMatrixInput) -> StrategyMatrixResult:
+    """
+    Every requested strategy against every requested ticker, ranked.
+
+    The comparison an agent otherwise assembles from N x M separate calls,
+    each with its own fetch. This fetches once per ticker and reuses the
+    bars across every strategy, so the cost is one fetch per name rather
+    than one per cell — and, more usefully, every cell is priced on exactly
+    the same bars, which N separate calls cannot promise once a provider
+    revises anything between them.
+
+    A cell that cannot run is reported in `failures` rather than dropped. A
+    silently missing cell reads as a strategy that was tested and lost,
+    which is the opposite of what happened.
+    """
+    logger.debug(
+        "[strategy_matrix] %d tickers x %d strategies",
+        len(input_data.tickers),
+        len(input_data.strategies),
+    )
+    unknown = sorted(set(input_data.strategies) - set(STRATEGY_REGISTRY))
+    if unknown:
+        raise ValidationError(
+            f"unknown strategies {unknown}. Available: "
+            f"{sorted(STRATEGY_REGISTRY)}. Call list_strategies for each "
+            "one's parameters."
+        )
+
+    provider = DataFactory.get_provider()
+    cells: List[MatrixCell] = []
+    failures: Dict[str, str] = {}
+
+    for ticker in input_data.tickers:
+        try:
+            bars = provider.get_ohlcv(
+                ticker, input_data.start_date, input_data.end_date
+            )
+        except Exception as exc:
+            for strategy in input_data.strategies:
+                failures[f"{ticker}/{strategy}"] = f"no data: {exc}"
+            continue
+        if bars is None or bars.empty:
+            for strategy in input_data.strategies:
+                failures[f"{ticker}/{strategy}"] = "no bars returned"
+            continue
+
+        for strategy in input_data.strategies:
+            parameters = input_data.parameters.get(strategy, {})
+            try:
+                signals = STRATEGY_REGISTRY[strategy](bars, **parameters)
+                result = run_strategy(
+                    bars,
+                    signals,
+                    input_data.initial_capital,
+                    commission_pct=input_data.commission_pct,
+                    slippage_pct=input_data.slippage_pct,
+                    fill_price=input_data.fill_price,
+                )
+            except Exception as exc:
+                failures[f"{ticker}/{strategy}"] = str(exc)
+                continue
+            cells.append(
+                MatrixCell(
+                    ticker=ticker,
+                    strategy=strategy,
+                    total_return=round(float(result["total_return"]), 6),
+                    sharpe_ratio=round(float(result["sharpe_ratio"]), 4),
+                    max_drawdown=round(float(result["max_drawdown"]), 6),
+                    num_trades=int(result["num_trades"]),
+                    win_rate=round(float(result["win_rate"]), 4),
+                )
+            )
+
+    if not cells:
+        raise ValidationError(
+            f"no cell in the matrix could be evaluated. Failures: {failures}"
+        )
+
+    key = input_data.sort_by
+    if not hasattr(cells[0], key):
+        raise ValidationError(
+            f"sort_by={key!r} is not a reported metric; expected one of "
+            f"{sorted(MatrixCell.model_fields)}"
+        )
+    cells.sort(key=lambda c: getattr(c, key), reverse=True)
+
+    best_per_ticker: Dict[str, str] = {}
+    for cell in cells:
+        best_per_ticker.setdefault(cell.ticker, cell.strategy)
+
+    notes: List[str] = []
+    if failures:
+        notes.append(
+            f"{len(failures)} of {len(input_data.tickers) * len(input_data.strategies)} "
+            "cell(s) could not be evaluated and are listed in `failures`, "
+            "not omitted."
+        )
+    thin = [c for c in cells if c.num_trades < 5]
+    if thin:
+        notes.append(
+            f"{len(thin)} cell(s) traded fewer than 5 times. Their ranking "
+            "is noise — a Sharpe from three trades orders the table without "
+            "meaning anything."
+        )
+
+    return StrategyMatrixResult(
+        tickers=input_data.tickers,
+        strategies=input_data.strategies,
+        n_backtests=len(cells),
+        cells=cells,
+        best_overall=cells[0],
+        best_per_ticker=best_per_ticker,
+        failures=failures,
         notes=notes,
     )

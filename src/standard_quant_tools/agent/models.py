@@ -4862,3 +4862,81 @@ class ValidateToolCallResult(BaseModel):
         ),
     )
     notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Strategy matrix — every strategy against every ticker, in one call
+# ──────────────────────────────────────────────
+
+
+class StrategyMatrixInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: List[str] = Field(
+        ..., min_length=1, max_length=50, description="Universe to test across."
+    )
+    strategies: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=8,
+        description=(
+            "Registry strategy names. Call list_strategies for the set and "
+            "each one's parameters."
+        ),
+    )
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    parameters: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "strategy name -> its parameters. A strategy left out runs on "
+            "its declared defaults."
+        ),
+    )
+    initial_capital: float = Field(10_000.0, gt=0, le=1e15)
+    commission_pct: float = Field(0.001, ge=0, le=1)
+    slippage_pct: float = Field(0.0005, ge=0, le=1)
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field("close")
+    sort_by: str = Field(
+        "sharpe_ratio",
+        description="Metric the ranked table is ordered by, best first.",
+    )
+
+    @field_validator("tickers", "strategies")
+    @classmethod
+    def _no_duplicates(cls, values: List[str]) -> List[str]:
+        duplicates = sorted({v for v in values if values.count(v) > 1})
+        if duplicates:
+            raise ValueError(f"contains duplicates {duplicates}")
+        return values
+
+
+class MatrixCell(BaseModel):
+    ticker: str
+    strategy: str
+    total_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    num_trades: int
+    win_rate: float
+
+
+class StrategyMatrixResult(BaseModel):
+    tickers: List[str]
+    strategies: List[str]
+    n_backtests: int
+    cells: List[MatrixCell]
+    best_overall: Optional[MatrixCell] = None
+    best_per_ticker: Dict[str, str] = Field(
+        default_factory=dict, description="ticker -> best strategy name."
+    )
+    failures: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "'ticker/strategy' -> why it could not run. Reported rather than "
+            "dropped: a silently missing cell reads as a strategy that was "
+            "tested and lost."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)

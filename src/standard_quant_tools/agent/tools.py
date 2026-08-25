@@ -54,6 +54,7 @@ from standard_quant_tools.agent.runtimes.backtest import (
     run_rsi_backtest,
     run_signal_panel_backtest,
     run_sma_backtest,
+    run_strategy_matrix,
     run_walk_forward_backtest,
 )
 from standard_quant_tools.agent.runtimes.meta import (
@@ -250,6 +251,7 @@ _sanitize_for_json = sanitize_for_json
 # module silently stops being a facade -- which is exactly what happened
 # the first time this file was generated.
 __all__ = [
+    "run_strategy_matrix",
     "describe_tool",
     "validate_tool_call",
     "convert_reference",

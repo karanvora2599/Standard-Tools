@@ -641,3 +641,151 @@ class CheckLeakageResult(BaseModel):
         description="Point-in-time coverage, when a dataset_id was supplied.",
     )
     notes: List[str] = Field(default_factory=list)
+
+
+# ── validate_model_spec ─────────────────────────────────────────────────
+#
+# run_model_experiment is the most expensive call in the library: it fetches
+# a universe, builds a panel, and fits once per walk-forward fold. A bad
+# estimator parameter surfaced only after all of that. The registry has
+# always known the answer in microseconds.
+
+
+class ValidateModelSpecInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    spec: ModelSpec = Field(
+        ..., description="The ModelSpec you intend to pass to run_model_experiment."
+    )
+    dataset_id: Optional[str] = Field(
+        None,
+        description=(
+            "Also check the spec against a built dataset: that its features "
+            "exist in the panel and that the target is present. Omit to "
+            "check the spec alone."
+        ),
+    )
+
+
+class SpecProblem(BaseModel):
+    where: str = Field(
+        ...,
+        description="Which part of the spec — 'estimator', 'features', 'target', ...",
+    )
+    problem: str
+    suggestion: Optional[str] = None
+
+
+class ValidateModelSpecResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    valid: bool
+    task: str
+    estimator: str
+    problems: List[SpecProblem] = Field(default_factory=list)
+    allowed_estimator_params: List[str] = Field(
+        default_factory=list,
+        description="Every parameter this estimator accepts, from the registry.",
+    )
+    estimated_fits: Optional[int] = Field(
+        None,
+        description=(
+            "Fits this spec implies: folds, times the search grid if one is "
+            "set. The number that decides whether the experiment takes "
+            "seconds or an afternoon."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ── score_predictions ───────────────────────────────────────────────────
+
+
+class ScorePredictionsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    predictions_ref: str = Field(
+        ...,
+        description=(
+            "A 'predictions' handoff reference — from run_model_experiment, "
+            "or published by anything at all. Predictions computed entirely "
+            "outside this library score the same way."
+        ),
+    )
+    task: Literal["regression", "classification", "ranking"] = Field(
+        ...,
+        description=(
+            "How to read the prediction column. Scoring a raw forward-return "
+            "prediction as a probability produces numbers that look like "
+            "metrics and are not."
+        ),
+    )
+    target_column: str = Field(
+        "target",
+        description="Column holding the realized outcome each prediction is scored against.",
+    )
+    prediction_column: str = Field(
+        "prediction", description="Column holding the prediction."
+    )
+    ic_method: Literal["spearman", "pearson"] = Field(
+        "spearman",
+        description=(
+            "Rank correlation (default) or linear. Spearman is the usual "
+            "choice for a cross-sectional alpha, where the ORDER is the "
+            "claim and the magnitude is not."
+        ),
+    )
+    ndcg_cutoffs: List[int] = Field(
+        [5, 10], description="task='ranking' only: the k values for NDCG@k."
+    )
+
+
+class ScorePredictionsResult(BaseModel):
+    task: str
+    n_observations: int
+    n_dates: int
+    n_entities: int
+    metrics: Dict[str, float] = Field(
+        ..., description="Task-appropriate accuracy metrics."
+    )
+    cross_sectional_ic: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Mean IC, its standard deviation, ICIR and hit rate across "
+            "dates. For a cross-sectional model this matters more than any "
+            "pooled metric, which can look strong purely from time-series "
+            "level differences."
+        ),
+    )
+    baseline: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "The same metrics for predicting the training mean. A model that "
+            "does not beat this has not learned anything, and a good-looking "
+            "R2 next to a good-looking baseline usually means the target was "
+            "easy rather than the model clever."
+        ),
+    )
+    beats_baseline: Optional[bool] = None
+    effective_sample_size: Optional[float] = Field(
+        None,
+        description=(
+            "Observations adjusted for overlapping forward-return windows. "
+            "A 20-day target sampled daily has far fewer independent "
+            "observations than rows, and every t-statistic computed from the "
+            "raw count is overstated."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)

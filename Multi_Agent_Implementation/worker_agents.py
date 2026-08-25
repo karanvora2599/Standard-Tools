@@ -74,6 +74,7 @@ _MODEL_RESEARCH_TOOLS = [
     "analyze_features",
     "list_datasets",
     "check_leakage",
+    "validate_model_spec",
 ]
 _MODEL_BUILDER_TOOLS = [
     "run_model_experiment",
@@ -82,6 +83,7 @@ _MODEL_BUILDER_TOOLS = [
     "evaluate_model_portfolio",
     "list_models",
     "compare_models",
+    "score_predictions",
 ]
 
 

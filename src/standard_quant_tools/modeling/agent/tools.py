@@ -83,6 +83,11 @@ from .models import (
     RunModelExperimentResult,
     ScoreModelInput,
     ScoreModelResult,
+    ScorePredictionsInput,
+    ScorePredictionsResult,
+    SpecProblem,
+    ValidateModelSpecInput,
+    ValidateModelSpecResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -595,10 +600,259 @@ def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
     )
 
 
+def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpecResult:
+    """
+    Check a ModelSpec before spending an experiment on it.
+
+    `run_model_experiment` is the most expensive call in this library: it
+    fetches a universe, builds a panel, and fits once per walk-forward fold
+    — times the search grid if one is set. A misspelled estimator parameter
+    surfaced only after all of that. The estimator registry has always known
+    the answer in microseconds; it just could not be asked.
+
+    `estimated_fits` is the other half of the point. A spec that looks
+    modest can imply thousands of fits once an inner search grid multiplies
+    through every fold, and the difference between seconds and an afternoon
+    is not visible anywhere in the spec itself.
+    """
+    from standard_quant_tools.modeling.estimators.registry import (
+        ESTIMATOR_REGISTRY,
+        allowed_params,
+        validate_params,
+    )
+
+    spec = input_data.spec
+    task = spec.task
+    estimator = spec.estimator.type
+    problems: List[SpecProblem] = []
+    notes: List[str] = []
+    allowed: List[str] = []
+
+    if (task, estimator) not in ESTIMATOR_REGISTRY:
+        available = sorted(name for t, name in ESTIMATOR_REGISTRY if t == task)
+        problems.append(
+            SpecProblem(
+                where="estimator",
+                problem=f"{estimator!r} is not registered for task {task!r}.",
+                suggestion=f"Available for {task}: {available}",
+            )
+        )
+    else:
+        allowed = sorted(allowed_params(task, estimator))
+        try:
+            validate_params(task, estimator, spec.estimator.params)
+        except ValidationError as exc:
+            problems.append(
+                SpecProblem(
+                    where="estimator.params",
+                    problem=str(exc),
+                    suggestion=f"Accepted parameters: {allowed}",
+                )
+            )
+
+    # How much work this implies.
+    estimated_fits: Optional[int] = None
+    folds = getattr(spec.validation, "n_splits", None)
+    if folds:
+        estimated_fits = int(folds)
+        search = spec.search
+        if search is not None:
+            grid = getattr(search, "param_grid", None) or {}
+            combinations = 1
+            for values in grid.values():
+                combinations *= max(1, len(values))
+            inner = getattr(search, "inner_splits", 1) or 1
+            estimated_fits = int(folds * (1 + combinations * inner))
+            notes.append(
+                f"A search grid of {combinations} combination(s) over "
+                f"{inner} inner split(s) multiplies through {folds} fold(s). "
+                "That is the difference between a quick experiment and a "
+                "long one, and nothing in the spec shows it."
+            )
+
+    if input_data.dataset_id is not None:
+        try:
+            _panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
+        except ValidationError as exc:
+            problems.append(SpecProblem(where="dataset_id", problem=str(exc)))
+        else:
+            available = set(meta.get("feature_ids", []) or [])
+            wanted = {
+                f.output_name() if hasattr(f, "output_name") else str(f)
+                for f in (meta.get("feature_ids", []) or [])
+            }
+            missing = sorted(w for w in wanted if w not in available)
+            if missing:
+                problems.append(
+                    SpecProblem(
+                        where="features",
+                        problem=f"not present in dataset {input_data.dataset_id!r}: {missing}",
+                    )
+                )
+            notes.append(
+                f"Checked against dataset {input_data.dataset_id!r} "
+                f"({meta.get('rows')} rows)."
+            )
+
+    if not problems:
+        notes.append("Valid. Nothing was fetched, built or fitted.")
+
+    return ValidateModelSpecResult(
+        valid=not problems,
+        task=task,
+        estimator=estimator,
+        problems=problems,
+        allowed_estimator_params=allowed,
+        estimated_fits=estimated_fits,
+        notes=notes,
+    )
+
+
+def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResult:
+    """
+    Score a prediction frame against its realized outcome, from a reference.
+
+    Works on anything published as `predictions`, including predictions this
+    library never produced — which is the point. A model built elsewhere can
+    be measured with the same yardstick as one built here, and the yardstick
+    includes the two things a headline metric leaves out.
+
+    THE BASELINE. The same metrics for predicting the training mean. A model
+    that does not beat it has learned nothing, and an R2 that looks strong
+    beside a baseline that also looks strong usually means the target was
+    easy rather than the model clever.
+
+    THE EFFECTIVE SAMPLE SIZE. A 20-day forward return sampled daily has far
+    fewer independent observations than rows, so any t-statistic computed
+    from the raw count is overstated — often by a factor of four or five.
+    """
+    import numpy as np
+
+    from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.modeling.validation.metrics import (
+        baseline_regression_metrics,
+        classification_metrics,
+        cross_sectional_ic,
+        effective_sample_size,
+        regression_metrics,
+        summarize_cross_sectional_ic,
+    )
+    from standard_quant_tools.modeling.validation.ranking import ranking_metrics
+
+    frame = handoff.resolve(input_data.predictions_ref, expect="predictions")
+    for column in (input_data.target_column, input_data.prediction_column, "date"):
+        if column not in frame.columns:
+            raise ValidationError(
+                f"the predictions frame has no {column!r} column; it holds "
+                f"{list(frame.columns)}. Scoring needs the prediction, the "
+                "realized outcome, and the date each pair belongs to."
+            )
+
+    frame = frame.dropna(
+        subset=[input_data.target_column, input_data.prediction_column]
+    )
+    if frame.empty:
+        raise ValidationError(
+            "every row is missing either the prediction or the outcome, so "
+            "there is nothing to score."
+        )
+
+    y_true = frame[input_data.target_column].to_numpy(dtype=float)
+    y_pred = frame[input_data.prediction_column].to_numpy(dtype=float)
+    dates = frame["date"].to_numpy()
+    entities = frame["entity"].nunique() if "entity" in frame.columns else 1
+
+    notes: List[str] = []
+    if input_data.task == "regression":
+        metrics = regression_metrics(y_true, y_pred, dates=dates)
+        baseline = baseline_regression_metrics(y_true)
+    elif input_data.task == "classification":
+        metrics = classification_metrics(
+            (y_true > 0).astype(int), (y_pred > 0.5).astype(int), y_pred
+        )
+        baseline = {}
+        notes.append(
+            "The outcome was binarized at zero and the prediction treated as "
+            "a positive-class probability. If either is not what the column "
+            "holds, these numbers are meaningless rather than merely wrong."
+        )
+    else:
+        metrics = ranking_metrics(
+            y_true, y_pred, dates, ks=tuple(input_data.ndcg_cutoffs)
+        )
+        baseline = {}
+
+    ic_summary: Dict[str, float] = {}
+    if entities > 1:
+        ic = cross_sectional_ic(y_true, y_pred, dates, method=input_data.ic_method)
+        ic_summary = summarize_cross_sectional_ic(ic, prefix="ic")
+    else:
+        notes.append(
+            "One entity only, so there is no cross-section to correlate "
+            "within — the IC block is empty by construction, not by failure."
+        )
+
+    beats = None
+    if baseline and "r2" in metrics and "baseline_r2" in baseline:
+        beats = bool(metrics["r2"] > baseline["baseline_r2"])
+        if not beats:
+            notes.append(
+                "This does NOT beat predicting the mean. Whatever the "
+                "headline metric says, the model has not learned anything "
+                "the baseline did not already know."
+            )
+        if baseline.get("baseline_is_oracle"):
+            notes.append(
+                "The baseline used the SCORED set's own mean, not a "
+                "training mean — an oracle it could not have known in "
+                "advance. That makes it harder than a real baseline: "
+                "beating it is strong evidence, and failing to beat it is "
+                "weaker evidence than it looks."
+            )
+
+    ess = None
+    horizon = 1
+    if "label_end_date" in frame.columns:
+        notes.append(
+            "Horizon inferred as 1 bar; pass a target horizon through the "
+            "dataset spec for a sharper effective sample size."
+        )
+    ess = float(effective_sample_size(len(frame), horizon, int(entities)))
+
+    return ScorePredictionsResult(
+        task=input_data.task,
+        n_observations=int(len(frame)),
+        n_dates=int(len(np.unique(dates))),
+        n_entities=int(entities),
+        metrics={k: float(v) for k, v in metrics.items()},
+        cross_sectional_ic={k: float(v) for k, v in ic_summary.items()},
+        baseline={k: float(v) for k, v in baseline.items()},
+        beats_baseline=beats,
+        effective_sample_size=ess,
+        notes=notes,
+    )
+
+
 # ── Registration (mirrors agent.tools.get_agent_tools()/_TOOL_DISPATCH,
 # but a separate registry — never merged into that one) ────────────────
 
 _MODELING_TOOL_DEFS: List[tuple] = [
+    (
+        "validate_model_spec",
+        "Check a ModelSpec before spending an experiment on it: that the "
+        "estimator exists for the task, that its parameters are accepted, "
+        "and how many fits the spec implies once a search grid multiplies "
+        "through every fold. Fetches nothing and fits nothing.",
+        ValidateModelSpecInput,
+    ),
+    (
+        "score_predictions",
+        "Score a predictions reference against its realized outcome — "
+        "accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean "
+        "baseline, and an effective sample size adjusted for overlapping "
+        "forward returns. Works on predictions this library never produced.",
+        ScorePredictionsInput,
+    ),
     ("list_features", "Feature catalog for the modeling runtime.", ListFeaturesInput),
     (
         "build_model_dataset",
@@ -745,6 +999,8 @@ def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
 
 
 MODELING_TOOL_DISPATCH = {
+    "validate_model_spec": (validate_model_spec, ValidateModelSpecInput),
+    "score_predictions": (score_predictions, ScorePredictionsInput),
     "list_features": (list_features, ListFeaturesInput),
     "build_model_dataset": (build_model_dataset, BuildModelDatasetInput),
     "run_model_experiment": (run_model_experiment, RunModelExperimentInput),

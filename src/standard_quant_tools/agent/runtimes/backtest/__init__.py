@@ -12,6 +12,7 @@ from standard_quant_tools.agent.models import (
     CompareStrategiesInput,
     CustomSignalBacktestInput,
     DrawdownTableInput,
+    MatrixCell,
     MonteCarloSimulationInput,
     PairTradeBacktestInput,
     PortfolioSimulationInput,
@@ -19,6 +20,8 @@ from standard_quant_tools.agent.models import (
     RegimeAdaptiveWalkForwardInput,
     RobustnessDiagnosticsInput,
     SignalPanelBacktestInput,
+    StrategyMatrixInput,
+    StrategyMatrixResult,
     WalkForwardInput,
 )
 
@@ -42,12 +45,21 @@ from .tools import (
     run_rsi_backtest,
     run_signal_panel_backtest,
     run_sma_backtest,
+    run_strategy_matrix,
     run_walk_forward_backtest,
 )
 
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "run_strategy_matrix",
+        "Every requested strategy against every requested ticker in one "
+        "call, ranked. Fetches once per ticker and reuses the bars across "
+        "strategies, so every cell is priced on identical data — which N "
+        "separate calls cannot promise.",
+        StrategyMatrixInput,
+    ),
     (
         "run_sma_backtest",
         "SMA crossover backtest.",
@@ -154,6 +166,7 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
+    "run_strategy_matrix": "backtest_execution",
     "run_sma_backtest": "backtest_execution",
     "run_rsi_backtest": "backtest_execution",
     "run_macd_backtest": "backtest_execution",
@@ -177,6 +190,7 @@ TOOL_CATEGORY = {
 }
 
 __all__ = [
+    "run_strategy_matrix",
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",
