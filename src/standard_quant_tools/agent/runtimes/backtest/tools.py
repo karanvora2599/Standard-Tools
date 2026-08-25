@@ -1028,6 +1028,18 @@ def run_signal_panel_backtest(
     Fetches OHLCV internally and reuses run_strategy per ticker plus the
     existing portfolio module for the combination — no new backtest math.
     """
+    # A reference is resolved to the same shape the inline field carries,
+    # so everything downstream is identical either way -- the two entry
+    # points must not be two code paths.
+    if input_data.signal_panel_ref is not None:
+        from standard_quant_tools.agent.runtimes import handoff
+
+        resolved_panel = handoff.resolve(
+            input_data.signal_panel_ref, expect="signal_panel"
+        )
+        input_data = input_data.model_copy(
+            update={"signal_panel": resolved_panel, "signal_panel_ref": None}
+        )
     logger.debug(
         "[signal_panel_backtest] tickers=%d  %s → %s",
         len(input_data.tickers),
@@ -1190,6 +1202,27 @@ def run_portfolio_simulation(
     (backtest/sizing.py: rank_weighted, equal_weight_top_bottom,
     zscore_normalized, vol_scaled) before simulation.
     """
+    # Resolved to the identical shape the inline field carries, so the two
+    # entry points stay one code path. The kind is checked against
+    # signal_type: a score panel simulated as target weights would size
+    # every position at an alpha score, which is a plausible-looking
+    # disaster rather than an error.
+    if input_data.target_weights_ref is not None:
+        from standard_quant_tools.agent.runtimes import handoff
+
+        expected = (
+            "score_panel"
+            if input_data.signal_type == SignalType.SCORE
+            else "weight_panel"
+        )
+        input_data = input_data.model_copy(
+            update={
+                "target_weights": handoff.resolve(
+                    input_data.target_weights_ref, expect=expected
+                ),
+                "target_weights_ref": None,
+            }
+        )
     logger.debug(
         "[portfolio_simulation] tickers=%d  %s → %s  max_gross_leverage=%.2f",
         len(input_data.tickers),

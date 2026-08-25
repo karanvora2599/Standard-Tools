@@ -174,3 +174,30 @@ class TestCombine:
     def test_combining_nothing_is_an_error(self):
         with pytest.raises(ValueError):
             combine([])
+
+
+class TestFacadeStaysAFacade:
+    """agent/tools.py re-exports every tool by name, and the package
+    re-exports both the tools and their models. Both lists are written by
+    hand, so both drift the moment a runtime gains a tool -- and the
+    failure is an ImportError in somebody else's code, far from the cause."""
+
+    def test_every_tool_is_importable_from_the_facade(self):
+        from standard_quant_tools.agent import tools as facade
+
+        missing = [n for n in facade._TOOL_DISPATCH if not hasattr(facade, n)]
+        assert not missing, f"tools the facade does not re-export: {missing}"
+
+    def test_every_tool_is_exported_from_the_package(self):
+        import standard_quant_tools.agent as package
+        from standard_quant_tools.agent.tools import _TOOL_DISPATCH
+
+        missing = [n for n in _TOOL_DISPATCH if n not in package.__all__]
+        assert not missing, f"tools missing from agent.__all__: {missing}"
+
+    def test_the_facade_advertises_exactly_the_runtimes_combined(self):
+        from standard_quant_tools.agent.tools import get_agent_tools
+
+        advertised = {t["function"]["name"] for t in get_agent_tools()}
+        owned = {n for rt in all_runtimes().values() for n in rt.tool_names}
+        assert advertised == owned

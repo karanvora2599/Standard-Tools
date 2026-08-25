@@ -42,11 +42,17 @@ from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
 
 MCP_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
-#: Ceiling for the full 54-tool surface, in bytes. Measured at ~122 KB with
-#: output schemas omitted. This is a budget, not a fact: a tool that doubles
-#: it should fail here and be argued for, because every byte is spent from
-#: every client's context at connect.
-FULL_SURFACE_CEILING = 150_000
+#: Ceiling for the full tool surface, in bytes. This is a budget, not a
+#: fact: a tool that doubles it should fail here and be argued for, because
+#: every byte is spent from every client's context at connect.
+#:
+#: Raised from 150,000 when the surface went from 54 tools to 73. The
+#: argument for raising it rather than trimming: the per-tool average FELL
+#: over that growth, from about 2.26 KB to 2.06 KB, so this is tool count
+#: rather than schema bloat -- and the number that actually reaches a
+#: typical client is DEFAULT_CATEGORIES, which is 29 tools and ~26 KB. A
+#: client only pays this ceiling by asking for every category at once.
+FULL_SURFACE_CEILING = 180_000
 
 
 @pytest.fixture(scope="module")

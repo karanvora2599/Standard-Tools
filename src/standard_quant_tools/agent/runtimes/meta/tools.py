@@ -26,20 +26,27 @@ import pandas as pd
 from standard_quant_tools.agent.models import (
     CompareDecisionsInput,
     CompareDecisionsResult,
+    ConvertReferenceInput,
+    ConvertReferenceResult,
     DataCapabilitiesInput,
     DataCapabilitiesResult,
     DataSourceMatch,
     DataSourceRef,
     DescribeArtifactInput,
     DescribeArtifactResult,
+    DescribeReferenceInput,
+    DescribeReferenceResult,
     ExplainDecisionInput,
     ExplainDecisionResult,
     ExportAuditBundleInput,
     ExportAuditBundleResult,
+    ListReferenceKindsInput,
+    ListReferenceKindsResult,
     ListStrategiesInput,
     ListStrategiesResult,
     ListStressScenariosInput,
     ListStressScenariosResult,
+    ReferenceKind,
     ReplayDecisionInput,
     ReplayDecisionResult,
     StrategyDescriptor,
@@ -665,5 +672,113 @@ def describe_data_capabilities(
         supported_intervals=sorted(intervals) if intervals else None,
         guarantees=guarantees,
         cache_dir=str(_CACHE_ROOT),
+        notes=notes,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Handoff references — inspecting and converting the interconnect
+# ──────────────────────────────────────────────────────────────────
+
+
+def describe_reference(
+    input_data: DescribeReferenceInput,
+) -> DescribeReferenceResult:
+    """
+    What a handoff reference points at, from any runtime.
+
+    A reference is the unit of exchange between runtimes, so being able to
+    ask what one holds without loading it into the conversation is what
+    makes passing them around safe. The KIND is the useful part: it says
+    which tools will accept this value, and it is checked on resolve so a
+    mismatch fails by name rather than as a missing column three frames
+    down.
+    """
+    from standard_quant_tools.agent.runtimes import handoff
+
+    described = handoff.describe(input_data.ref)
+    return DescribeReferenceResult(
+        ref=described["ref"],
+        kind=described["kind"],
+        kind_description=described["description"],
+        producer=described["producer"],
+        rows=described["rows"],
+        columns=described["columns"],
+        index_start=described["index_start"],
+        index_end=described["index_end"],
+    )
+
+
+def list_reference_kinds(
+    input_data: ListReferenceKindsInput,
+) -> ListReferenceKindsResult:
+    """
+    Every content kind a reference can carry, and what converts to what.
+
+    This is the map of the interconnect: it says which producer outputs can
+    reach which consumer inputs, and by what route. Offline.
+    """
+    from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.agent.runtimes.meta.convert import CONVERSIONS
+
+    targets: Dict[str, List[str]] = {}
+    for source, destination in CONVERSIONS:
+        targets.setdefault(source, []).append(destination)
+    return ListReferenceKindsResult(
+        kinds=[
+            ReferenceKind(
+                kind=kind,
+                description=description,
+                convertible_to=sorted(targets.get(kind, [])),
+            )
+            for kind, description in sorted(handoff.kinds().items())
+        ]
+    )
+
+
+def convert_reference(input_data: ConvertReferenceInput) -> ConvertReferenceResult:
+    """
+    Turn one kind of published value into another, and publish the result.
+
+    This is the general form of what would otherwise be a bridge tool per
+    producer/consumer pair. With N producers and M consumers, bridges cost
+    N x M and every one of them has to be kept in step with both ends;
+    conversion between KINDS costs N + M, and a producer never has to know
+    which consumer will eventually read it.
+
+    The conversions are the ones that are genuinely well defined. Turning
+    raw predictions into a signal panel discards magnitude on purpose,
+    because the engine that consumes a signal panel reads a value as a
+    leverage multiplier — a 0.02 forward-return prediction passed through
+    unchanged would size a 2%-leveraged position. Turning a score panel
+    into weights goes through backtest.sizing rather than reimplementing
+    it, so a converted panel is the same object that tool would have built.
+    """
+    from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.agent.runtimes.meta.convert import convert
+
+    source = handoff.parse(input_data.ref)
+    converted, notes = convert(input_data, source)
+
+    ref = handoff.publish(
+        converted,
+        input_data.to_kind,
+        input_data.run_id,
+        input_data.name,
+        producer="meta.convert_reference",
+    )
+    entities = len(converted) if isinstance(converted, dict) else len(converted.columns)
+    rows = (
+        len({date for per_entity in converted.values() for date in per_entity})
+        if isinstance(converted, dict)
+        else len(converted)
+    )
+    return ConvertReferenceResult(
+        source_ref=input_data.ref,
+        source_kind=source.kind,
+        ref=ref,
+        kind=input_data.to_kind,
+        rows=rows,
+        entities=entities,
         notes=notes,
     )

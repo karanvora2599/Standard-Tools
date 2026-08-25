@@ -4,22 +4,32 @@ advertised without being dispatchable or the reverse."""
 
 from standard_quant_tools.agent.models import (
     CompareDecisionsInput,
+    ConvertReferenceInput,
+    ConvertReferenceResult,
     DataCapabilitiesInput,
     DescribeArtifactInput,
+    DescribeReferenceInput,
+    DescribeReferenceResult,
     ExplainDecisionInput,
     ExportAuditBundleInput,
+    ListReferenceKindsInput,
+    ListReferenceKindsResult,
     ListStrategiesInput,
     ListStressScenariosInput,
+    ReferenceKind,
     ReplayDecisionInput,
     VerifyAuditIntegrityInput,
 )
 
 from .tools import (
     compare_decisions,
+    convert_reference,
     describe_artifact,
     describe_data_capabilities,
+    describe_reference,
     explain_decision,
     export_audit_bundle,
+    list_reference_kinds,
     list_strategies,
     list_stress_scenarios,
     replay_decision,
@@ -29,6 +39,21 @@ from .tools import (
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "describe_reference",
+        "What a handoff reference points at — its content kind, shape, date span and which runtime published it. References are how bulk values cross runtimes without passing through the conversation.",
+        DescribeReferenceInput,
+    ),
+    (
+        "list_reference_kinds",
+        "Every content kind a handoff reference can carry and what converts to what — the map of which producer outputs can reach which consumer inputs. Offline.",
+        ListReferenceKindsInput,
+    ),
+    (
+        "convert_reference",
+        "Turn one kind of published value into another and publish the result: raw model predictions into a signal panel, scores into portfolio weights. This is what lets a producer and a consumer that were never written for each other compose.",
+        ConvertReferenceInput,
+    ),
     (
         "explain_decision",
         "What one recorded tool call did: inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python), timing, and the git commit and package version it ran under.",
@@ -80,6 +105,9 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
+    "describe_reference": "discovery",
+    "list_reference_kinds": "discovery",
+    "convert_reference": "discovery",
     "explain_decision": "provenance",
     "replay_decision": "provenance",
     "compare_decisions": "provenance",
@@ -92,6 +120,9 @@ TOOL_CATEGORY = {
 }
 
 __all__ = [
+    "describe_reference",
+    "list_reference_kinds",
+    "convert_reference",
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",

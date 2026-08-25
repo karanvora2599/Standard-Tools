@@ -58,10 +58,13 @@ from standard_quant_tools.agent.runtimes.backtest import (
 )
 from standard_quant_tools.agent.runtimes.meta import (
     compare_decisions,
+    convert_reference,
     describe_artifact,
     describe_data_capabilities,
+    describe_reference,
     explain_decision,
     export_audit_bundle,
+    list_reference_kinds,
     list_strategies,
     list_stress_scenarios,
     replay_decision,
@@ -245,6 +248,9 @@ _sanitize_for_json = sanitize_for_json
 # module silently stops being a facade -- which is exactly what happened
 # the first time this file was generated.
 __all__ = [
+    "convert_reference",
+    "describe_reference",
+    "list_reference_kinds",
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "dispatch",

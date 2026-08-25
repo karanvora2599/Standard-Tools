@@ -1878,15 +1878,37 @@ class SignalPanelBacktestInput(BaseModel):
     )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    signal_panel: Dict[str, Dict[str, float]] = Field(
-        ...,
+    signal_panel: Optional[Dict[str, Dict[str, float]]] = Field(
+        None,
         description=(
             "Per-ticker signal map: {ticker: {date: value}}, value in "
             "{1=long, 0=flat, -1=short}. Computed entirely outside this library "
             "(e.g. a cross-sectional alpha model) — this tool only backtests it "
-            "and combines the per-ticker results into portfolio-level metrics."
+            "and combines the per-ticker results into portfolio-level metrics. "
+            "Supply this OR signal_panel_ref."
         ),
     )
+    signal_panel_ref: Optional[str] = Field(
+        None,
+        description=(
+            "A 'signal_panel' handoff reference (sqt://signal_panel/...) "
+            "instead of the panel inline. Any runtime can publish one, so a "
+            "model's predictions reach this tool without being transcribed "
+            "through the conversation — see convert_reference for turning "
+            "raw predictions into a signal panel."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_signal_source(self) -> "SignalPanelBacktestInput":
+        if (self.signal_panel is None) == (self.signal_panel_ref is None):
+            raise ValueError(
+                "supply exactly one of signal_panel or signal_panel_ref. "
+                "Both would leave it ambiguous which one was backtested, "
+                "and neither leaves nothing to backtest."
+            )
+        return self
+
     weights: Optional[Dict[str, float]] = Field(
         None,
         description="Per-ticker portfolio weight, must sum to 1.0. Defaults to equal weight across tickers.",
@@ -1936,6 +1958,14 @@ class SignalPanelBacktestInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_panel_and_weights(self) -> "SignalPanelBacktestInput":
+        # A reference carries the panel, so there is nothing to check yet.
+        # The weights checks below still run, and the panel-shape checks
+        # run against the RESOLVED panel inside the tool -- deferring is
+        # about WHEN they happen, never about whether.
+        if self.signal_panel is None:
+            if self.weights is not None and set(self.weights) != set(self.tickers):
+                raise ValueError("weights keys must exactly match tickers")
+            return self
         missing = [t for t in self.tickers if t not in self.signal_panel]
         if missing:
             raise ValueError(f"signal_panel is missing entries for: {missing}")
@@ -1981,8 +2011,16 @@ class PortfolioSimulationInput(BaseModel):
     )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    target_weights_ref: Optional[str] = Field(
+        None,
+        description=(
+            "A 'weight_panel' or 'score_panel' handoff reference instead of "
+            "target_weights inline. The kind must match signal_type: a "
+            "weight_panel for 'target_weight', a score_panel for 'score'."
+        ),
+    )
     target_weights: Dict[str, Dict[str, float]] = Field(
-        ...,
+        default_factory=dict,
         description=(
             "Per-ticker map: {ticker: {date: value}}. When signal_type='target_weight' "
             "(default), value = fraction of account equity (negative for short), and "
@@ -2132,6 +2170,23 @@ class PortfolioSimulationInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_weights_panel(self) -> "PortfolioSimulationInput":
+        # A reference carries the panel, so there is nothing to validate
+        # yet -- the same checks run against the RESOLVED panel inside the
+        # tool. Validating an empty dict here would reject every
+        # reference-based call for missing every ticker.
+        if self.target_weights_ref is not None:
+            if self.target_weights:
+                raise ValueError(
+                    "supply exactly one of target_weights or "
+                    "target_weights_ref; both leaves it ambiguous which "
+                    "panel was simulated."
+                )
+            return self
+        if not self.target_weights:
+            raise ValueError(
+                "supply target_weights inline, or a target_weights_ref "
+                "pointing at a published weight_panel or score_panel."
+            )
         missing = [t for t in self.tickers if t not in self.target_weights]
         if missing:
             raise ValueError(f"target_weights is missing entries for: {missing}")
@@ -3951,4 +4006,116 @@ class SpreadProxyCheckResult(BaseModel):
             "low, so reported returns are optimistic."
         ),
     )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Handoff references — the interconnect between runtimes
+# ──────────────────────────────────────────────
+
+
+class DescribeReferenceInput(BaseModel):
+    ref: str = Field(
+        ...,
+        description=(
+            "A handoff reference (sqt://<kind>/<run_id>/<name>) returned by "
+            "any tool in any runtime."
+        ),
+    )
+
+
+class DescribeReferenceResult(BaseModel):
+    ref: str
+    kind: str
+    kind_description: str
+    producer: Optional[str] = Field(
+        None, description="Runtime that published it, when it was recorded."
+    )
+    rows: int
+    columns: List[str]
+    index_start: Optional[str] = None
+    index_end: Optional[str] = None
+
+
+class ListReferenceKindsInput(BaseModel):
+    """No arguments — the kind table is a module constant."""
+
+
+class ReferenceKind(BaseModel):
+    kind: str
+    description: str
+    convertible_to: List[str] = Field(
+        default_factory=list,
+        description="Kinds convert_reference can turn this one into.",
+    )
+
+
+class ListReferenceKindsResult(BaseModel):
+    kinds: List[ReferenceKind]
+
+
+class ConvertReferenceInput(BaseModel):
+    ref: str = Field(..., description="The reference to convert.")
+    to_kind: str = Field(
+        ...,
+        description=(
+            "Target content kind. Call list_reference_kinds for the "
+            "conversions that exist."
+        ),
+    )
+    run_id: str = Field(
+        ...,
+        description=(
+            "Run id to publish the converted value under. Letters, digits, "
+            "'_' and '-' only."
+        ),
+    )
+    name: str = Field(..., description="Artifact name for the converted value.")
+    deadband: float = Field(
+        0.0,
+        ge=0.0,
+        description=(
+            "predictions -> signal_panel, regression: predictions within "
+            "+/- this become flat rather than a full-size position on what "
+            "is probably noise."
+        ),
+    )
+    proba_threshold: float = Field(
+        0.5,
+        gt=0.0,
+        lt=1.0,
+        description="predictions -> signal_panel, classification: long above this.",
+    )
+    long_only: bool = Field(
+        True,
+        description=(
+            "predictions -> signal_panel, classification: treat the negative "
+            "class as flat rather than short."
+        ),
+    )
+    task: Optional[Literal["regression", "classification"]] = Field(
+        None,
+        description=(
+            "predictions -> signal_panel: how to read the prediction "
+            "column. Required unless the reference carries a model_id."
+        ),
+    )
+    construction_method: str = Field(
+        "rank_weighted",
+        description=(
+            "score_panel -> weight_panel: which backtest.sizing " "constructor to use."
+        ),
+    )
+    gross_leverage: float = Field(
+        1.0, gt=0, description="score_panel -> weight_panel: target sum(|weight|)."
+    )
+
+
+class ConvertReferenceResult(BaseModel):
+    source_ref: str
+    source_kind: str
+    ref: str = Field(..., description="The converted value's new reference.")
+    kind: str
+    rows: int
+    entities: int
     notes: List[str] = Field(default_factory=list)
