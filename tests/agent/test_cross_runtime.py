@@ -150,14 +150,13 @@ class TestResultsCrossRuntimes:
         """No artifact involved: the first runtime's plain JSON output is
         the second runtime's input."""
         research = resolve("research")
+        # `period`, not start_date/end_date. This test used to pass the
+        # latter, which the input silently dropped -- so it had been
+        # measuring the default window all along. Forbidding unknown
+        # arguments is what surfaced it.
         analysis = research.dispatch(
             "analyze_stock_risk",
-            {
-                "symbol": "TEST",
-                "start_date": "2022-01-01",
-                "end_date": "2023-01-01",
-                "benchmark": "TEST",
-            },
+            {"symbol": "TEST", "benchmark": "TEST", "period": "1y"},
         )
         assert "cvar_95" in analysis and "beta" in analysis
 
@@ -168,7 +167,7 @@ class TestResultsCrossRuntimes:
                 "start_date": "2022-01-01",
                 "end_date": "2023-01-01",
                 "account_equity": 100_000.0,
-                "risk_pct": 0.01,
+                "risk_per_trade_pct": 0.01,
             },
         )
         assert sized["recommended_shares"] >= 0

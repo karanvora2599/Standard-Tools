@@ -3,6 +3,7 @@ can execute. The two are built from one list, so a tool cannot be
 advertised without being dispatchable or the reverse."""
 
 from standard_quant_tools.agent.models import (
+    ArgumentProblem,
     CompareDecisionsInput,
     ConvertReferenceInput,
     ConvertReferenceResult,
@@ -10,6 +11,8 @@ from standard_quant_tools.agent.models import (
     DescribeArtifactInput,
     DescribeReferenceInput,
     DescribeReferenceResult,
+    DescribeToolInput,
+    DescribeToolResult,
     ExplainDecisionInput,
     ExportAuditBundleInput,
     ListReferenceKindsInput,
@@ -18,6 +21,8 @@ from standard_quant_tools.agent.models import (
     ListStressScenariosInput,
     ReferenceKind,
     ReplayDecisionInput,
+    ValidateToolCallInput,
+    ValidateToolCallResult,
     VerifyAuditIntegrityInput,
 )
 
@@ -27,18 +32,30 @@ from .tools import (
     describe_artifact,
     describe_data_capabilities,
     describe_reference,
+    describe_tool,
     explain_decision,
     export_audit_bundle,
     list_reference_kinds,
     list_strategies,
     list_stress_scenarios,
     replay_decision,
+    validate_tool_call,
     verify_audit_integrity,
 )
 
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "describe_tool",
+        "One tool's full contract — arguments, result fields, owning runtime, and whether calling it fetches data or writes an artifact. Works for tools this caller is not scoped to; describing a tool is not calling it.",
+        DescribeToolInput,
+    ),
+    (
+        "validate_tool_call",
+        "Check arguments against a tool's schema WITHOUT calling it, including the strategy parameter contract that the JSON schema cannot express. Catches a hallucinated or out-of-range argument before it costs a fetch and a run.",
+        ValidateToolCallInput,
+    ),
     (
         "describe_reference",
         "What a handoff reference points at — its content kind, shape, date span and which runtime published it. References are how bulk values cross runtimes without passing through the conversation.",
@@ -105,6 +122,8 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
+    "describe_tool": "discovery",
+    "validate_tool_call": "discovery",
     "describe_reference": "discovery",
     "list_reference_kinds": "discovery",
     "convert_reference": "discovery",
@@ -120,6 +139,8 @@ TOOL_CATEGORY = {
 }
 
 __all__ = [
+    "describe_tool",
+    "validate_tool_call",
     "describe_reference",
     "list_reference_kinds",
     "convert_reference",

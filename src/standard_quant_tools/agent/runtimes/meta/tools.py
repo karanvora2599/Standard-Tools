@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.agent.models import (
+    ArgumentProblem,
     CompareDecisionsInput,
     CompareDecisionsResult,
     ConvertReferenceInput,
@@ -36,6 +37,8 @@ from standard_quant_tools.agent.models import (
     DescribeArtifactResult,
     DescribeReferenceInput,
     DescribeReferenceResult,
+    DescribeToolInput,
+    DescribeToolResult,
     ExplainDecisionInput,
     ExplainDecisionResult,
     ExportAuditBundleInput,
@@ -53,6 +56,8 @@ from standard_quant_tools.agent.models import (
     StrategyParameter,
     StrategyRelation,
     StressScenario,
+    ValidateToolCallInput,
+    ValidateToolCallResult,
     VerifyAuditIntegrityInput,
     VerifyAuditIntegrityResult,
 )
@@ -68,6 +73,7 @@ from standard_quant_tools.backtest.strategy_params import (
     _MAX_WINDOW_BARS,
     _RELATIONS,
     STRATEGY_PARAM_SCHEMA,
+    resolve_strategy_params,
 )
 from standard_quant_tools.backtest.stress_test import (
     list_stress_scenarios as _library_stress_scenarios,
@@ -780,5 +786,177 @@ def convert_reference(input_data: ConvertReferenceInput) -> ConvertReferenceResu
         kind=input_data.to_kind,
         rows=rows,
         entities=entities,
+        notes=notes,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Pre-flight — describe one tool, and check a call before making it
+# ──────────────────────────────────────────────────────────────────
+
+
+def describe_tool(input_data: DescribeToolInput) -> DescribeToolResult:
+    """
+    One tool's contract: what it takes, what it returns, which runtime can
+    run it, and whether calling it will go and fetch data.
+
+    The alternative was loading all 73 schemas, which is exactly what the
+    MCP category budget exists to avoid — so an agent given a narrow tool
+    list had no way to find out about a tool it had heard of without
+    paying for every tool it had not.
+
+    Describing a tool is not calling it, so this answers for tools in any
+    runtime, including ones the caller is not scoped to. That is the point:
+    the answer to "why was that refused" is a description, not a wider
+    scope.
+    """
+    from standard_quant_tools.mcp.catalog import build_catalog
+
+    catalog = build_catalog()
+    entry = catalog.get(input_data.tool_name)
+    if entry is None:
+        from difflib import get_close_matches
+
+        near = get_close_matches(input_data.tool_name, sorted(catalog), n=3)
+        suggestion = f" Did you mean: {near}?" if near else ""
+        raise ValidationError(
+            f"no tool named {input_data.tool_name!r} in any runtime.{suggestion}"
+        )
+
+    schema = entry.input_schema
+    properties = schema.get("properties", {}) or {}
+    required = set(schema.get("required", []) or [])
+    result_fields: List[str] = []
+    if entry.output_schema:
+        result_fields = sorted((entry.output_schema.get("properties", {}) or {}))
+
+    return DescribeToolResult(
+        tool_name=entry.name,
+        runtime=entry.runtime,
+        category=entry.category,
+        description=entry.description,
+        required_arguments=sorted(required),
+        optional_arguments=sorted(set(properties) - required),
+        reads_market_data=entry.reads_market_data,
+        persists_artifact=entry.persists_artifact,
+        input_schema=schema if input_data.include_schema else None,
+        result_fields=result_fields,
+    )
+
+
+#: Tools whose `parameters` dict is validated by the strategy contract
+#: rather than by the JSON schema. The schema types it as an open dict, so
+#: a bad window passes schema validation and fails only once the data has
+#: been fetched -- which is the round trip this tool exists to save.
+_STRATEGY_PARAM_TOOLS = ("strategy_type", "parameters")
+
+
+def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallResult:
+    """
+    Check arguments against a tool's contract WITHOUT calling it.
+
+    A wrong argument is otherwise discovered by making the call: at best a
+    round trip, and for anything that fetches, a network fetch and possibly
+    a full backtest before the error appears. Worse, an unknown argument
+    name — the usual shape of a hallucinated one — is the cheapest mistake
+    to make and among the more expensive to diagnose from a stack trace.
+
+    Two layers are checked, because the library has two. The Pydantic
+    schema catches missing, unknown and out-of-range arguments. Then, for
+    tools that carry a strategy `parameters` dict, the strategy's own
+    contract is checked as well — that layer is invisible to the JSON
+    schema, which types `parameters` as an open dict, so `lookback=-20`
+    would pass a schema check and still be look-ahead by construction.
+
+    Nothing here fetches, runs or writes.
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    from standard_quant_tools.agent.tools import _TOOL_DISPATCH
+    from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+
+    every = {**_TOOL_DISPATCH, **MODELING_TOOL_DISPATCH}
+    entry = every.get(input_data.tool_name)
+    if entry is None:
+        from difflib import get_close_matches
+
+        near = get_close_matches(input_data.tool_name, sorted(every), n=3)
+        suggestion = f" Did you mean: {near}?" if near else ""
+        raise ValidationError(
+            f"no tool named {input_data.tool_name!r} in any runtime.{suggestion}"
+        )
+
+    _fn, model_cls = entry
+    problems: List[ArgumentProblem] = []
+    notes: List[str] = []
+    normalized: Dict[str, Any] = {}
+
+    try:
+        instance = model_cls(**input_data.arguments)
+        normalized = instance.model_dump()
+    except PydanticValidationError as exc:
+        for error in exc.errors():
+            location = ".".join(str(part) for part in error["loc"]) or "(tool)"
+            kind = {
+                "missing": "missing",
+                "extra_forbidden": "unknown",
+            }.get(error["type"], "invalid")
+            if error["type"] == "value_error" and not error["loc"]:
+                kind = "relation"
+            problems.append(
+                ArgumentProblem(
+                    field=location, problem=error["msg"], kind=kind  # type: ignore[arg-type]
+                )
+            )
+    except Exception as exc:  # a validator that raises something else
+        problems.append(
+            ArgumentProblem(field="(tool)", problem=str(exc), kind="invalid")
+        )
+
+    # Second layer: the strategy parameter contract.
+    checked_strategy = False
+    fields = set(model_cls.model_fields)
+    if all(name in fields for name in _STRATEGY_PARAM_TOOLS) and not problems:
+        strategy = normalized.get("strategy_type")
+        parameters = normalized.get("parameters") or {}
+        if strategy in STRATEGY_PARAM_SCHEMA:
+            checked_strategy = True
+            try:
+                resolve_strategy_params(strategy, parameters)
+            except ValidationError as exc:
+                # Only a ValidationError is the CALLER's problem. A broader
+                # catch here would report an internal failure as a bad
+                # argument, sending the caller to fix something that is not
+                # wrong -- the worst possible advice from a validator.
+                problems.append(
+                    ArgumentProblem(
+                        field="parameters", problem=str(exc), kind="invalid"
+                    )
+                )
+        elif strategy is not None:
+            notes.append(
+                f"strategy_type={strategy!r} takes no parameters, so the "
+                "`parameters` dict was not checked against a contract."
+            )
+
+    if not problems:
+        notes.append(
+            "Valid. normalized_arguments shows what the tool would actually "
+            "receive, defaults included — worth reading, since it is often "
+            "not quite what was written."
+        )
+
+    logger.debug(
+        "[validate_tool_call] %s valid=%s problems=%d",
+        input_data.tool_name,
+        not problems,
+        len(problems),
+    )
+    return ValidateToolCallResult(
+        tool_name=input_data.tool_name,
+        valid=not problems,
+        problems=problems,
+        normalized_arguments=normalized if not problems else {},
+        checked_strategy_parameters=checked_strategy,
         notes=notes,
     )

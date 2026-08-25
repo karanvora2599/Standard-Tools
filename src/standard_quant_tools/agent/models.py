@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ──────────────────────────────────────────────
 # Backtest
@@ -41,6 +41,14 @@ def _validate_param_grid(grid: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
 
 
 class BacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -160,6 +168,14 @@ class BacktestResult(BaseModel):
 
 
 class AnalysisInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Target asset symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol.")
     period: str = Field("1y", description="Analysis period (e.g. '1y', '2y', '6mo').")
@@ -198,6 +214,14 @@ class AnalysisResult(BaseModel):
 
 
 class TechnicalInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -240,6 +264,14 @@ class TechnicalResult(BaseModel):
 
 
 class PortfolioInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="List of ticker symbols.")
     weights: List[float] = Field(
         ..., description="Portfolio weights (must sum to 1.0)."
@@ -323,6 +355,14 @@ class BLViewInput(BaseModel):
 
 
 class PortfolioOptimizationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Universe of tickers to optimize over.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -444,6 +484,14 @@ class PortfolioOptimizationResult(BaseModel):
 
 
 class ScreenerInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Universe of tickers to screen.")
     filters: Dict[str, Any] = Field(
         ...,
@@ -509,6 +557,14 @@ class ScreenerResult(BaseModel):
 
 
 class FactorRegressionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Asset to analyse (e.g. 'AAPL').")
     factor_tickers: List[str] = Field(
         ...,
@@ -555,6 +611,14 @@ class FactorRegressionResult(BaseModel):
 
 
 class CointegrationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol_a: str = Field(..., description="First asset symbol (the 'long' leg).")
     symbol_b: str = Field(..., description="Second asset symbol (the 'short' leg).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -589,6 +653,14 @@ class CointegrationResult(BaseModel):
 
 
 class KalmanHedgeRatioInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     observation_noise: float = Field(
         0.001,
         gt=0.0,
@@ -650,6 +722,14 @@ class KalmanHedgeRatioResult(BaseModel):
 
 
 class PCAInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     standardize: bool = Field(
         True,
         description=(
@@ -702,6 +782,14 @@ class PCAResult(BaseModel):
 
 
 class CorrelationAnalysisInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Universe of tickers (>= 2).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -748,6 +836,14 @@ class CorrelationAnalysisResult(BaseModel):
 
 
 class HurstInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     min_window: int = Field(
         10,
         gt=1,
@@ -802,6 +898,14 @@ class HurstResult(BaseModel):
 
 
 class RallyDetectionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -877,6 +981,14 @@ class RallyDetectionResult(BaseModel):
 
 
 class VolatilityEstimatorsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -901,6 +1013,14 @@ class VolatilityEstimatorsResult(BaseModel):
 
 
 class GarchVolatilityForecastInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -931,6 +1051,14 @@ class GarchVolatilityForecastResult(BaseModel):
 
 
 class RegimeAdaptiveInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -987,6 +1115,14 @@ class RegimeAdaptiveResult(BaseModel):
 
 
 class PairScannerInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Universe of tickers to test for cointegration."
     )
@@ -1043,6 +1179,14 @@ class PairScannerResult(BaseModel):
 
 
 class WalkForwardInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1166,6 +1310,14 @@ class WalkForwardResult(BaseModel):
 
 
 class RegimeAdaptiveWalkForwardInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1275,6 +1427,13 @@ class RegimeAdaptiveWalkForwardResult(BaseModel):
 
 
 class RiskAttributionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
 
     tickers: List[str] = Field(..., description="Portfolio asset symbols.")
     weights: List[float] = Field(..., description="Portfolio weights summing to 1.0.")
@@ -1347,6 +1506,14 @@ class RiskAttributionResult(BaseModel):
 
 
 class StressTestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Portfolio asset symbols.")
     weights: Optional[List[float]] = Field(
         None,
@@ -1407,6 +1574,14 @@ class StressTestResult(BaseModel):
 
 
 class PositionSizerInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(
         ..., description="Start date YYYY-MM-DD (for ATR calculation)."
@@ -1492,6 +1667,14 @@ class PositionSizerResult(BaseModel):
 
 
 class BuyAndHoldInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1535,6 +1718,14 @@ class StrategyComparison(BaseModel):
 
 
 class CompareStrategiesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1601,6 +1792,14 @@ class CompareStrategiesResult(BaseModel):
 
 
 class FundamentalsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
 
 
@@ -1627,6 +1826,14 @@ class FundamentalsResult(BaseModel):
 
 
 class BacktestOptInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     strategy: Literal[
         "sma_crossover",
@@ -1730,6 +1937,14 @@ class BacktestOptResult(BaseModel):
 
 
 class AdvancedIndicatorsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1774,6 +1989,14 @@ class AdvancedIndicatorsResult(BaseModel):
 
 
 class RollingBetaInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Asset ticker symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol (default SPY).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1804,6 +2027,14 @@ class RollingBetaResult(BaseModel):
 
 
 class ExtendedRiskInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Asset ticker symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol (default SPY).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1829,6 +2060,14 @@ class ExtendedRiskResult(BaseModel):
 
 
 class TailRiskInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1920,6 +2159,14 @@ def _validate_signal_values(
 
 
 class CustomSignalBacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1986,6 +2233,14 @@ class CustomSignalBacktestInput(BaseModel):
 
 
 class SignalPanelBacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Ticker universe. Must match signal_panel's outer keys."
     )
@@ -2119,6 +2374,14 @@ _CONSTRUCTION_METHODS = (
 
 
 class PortfolioSimulationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Ticker universe. Must match target_weights' outer keys."
     )
@@ -2378,6 +2641,14 @@ class PortfolioSimulationResult(BaseModel):
 
 
 class PairTradeBacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol_a: str = Field(..., description="First leg ticker.")
     symbol_b: str = Field(..., description="Second leg ticker.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -2453,6 +2724,14 @@ class PairTradeBacktestResult(BaseModel):
 
 
 class BacktestDiagnosticsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2537,6 +2816,14 @@ class BacktestDiagnosticsResult(BaseModel):
 
 
 class RobustnessDiagnosticsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2635,6 +2922,14 @@ class RobustnessDiagnosticsResult(BaseModel):
 
 
 class MonteCarloSimulationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Portfolio tickers.")
     weights: Optional[List[float]] = Field(
         None,
@@ -2714,6 +3009,14 @@ class MonteCarloSimulationResult(BaseModel):
 
 
 class CapacityReportInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Ticker universe. Must match target_weights' keys."
     )
@@ -2767,6 +3070,14 @@ class CapacityReportResult(BaseModel):
 
 
 class LiquidityAnalysisInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Tickers to analyze.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2789,6 +3100,14 @@ class LiquidityAnalysisResult(BaseModel):
 
 
 class DataQualityReportInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2876,6 +3195,14 @@ class CostSummary(BaseModel):
 
 
 class BacktestCompactInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2929,6 +3256,14 @@ class BacktestResultV2(BaseModel):
 
 
 class OptionPricingInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     spot: float = Field(..., gt=0, description="Current underlying price.")
     strike: float = Field(..., gt=0, description="Option strike price.")
     time_to_expiry: float = Field(
@@ -2972,6 +3307,14 @@ class OptionPricingResult(BaseModel):
 
 
 class ImpliedVolatilityInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     option_price: float = Field(
         ..., gt=0, description="Observed market price of the option."
     )
@@ -3048,6 +3391,14 @@ class StrategyDescriptor(BaseModel):
 
 
 class ListStrategiesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     strategy_type: Optional[str] = Field(
         None,
         description=(
@@ -3080,6 +3431,14 @@ class ListStrategiesResult(BaseModel):
 class ListStressScenariosInput(BaseModel):
     """No arguments — the scenario table is a fixed, offline constant."""
 
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
 
 class StressScenario(BaseModel):
     name: str
@@ -3099,6 +3458,14 @@ class ListStressScenariosResult(BaseModel):
 
 
 class DataCapabilitiesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     source: str = Field(
         "yfinance",
         description=(
@@ -3180,6 +3547,14 @@ class TradeCostLeg(BaseModel):
 
 
 class EstimateTradeCostInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     notional: float = Field(
         ...,
         gt=0,
@@ -3394,6 +3769,14 @@ class CostScenarioResult(BaseModel):
 
 
 class CompareCostModelsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -3488,6 +3871,14 @@ class CompareCostModelsResult(BaseModel):
 
 
 class TechnicalPanelInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ...,
         min_length=1,
@@ -3594,6 +3985,14 @@ class TechnicalPanelResult(BaseModel):
 
 
 class DescribeArtifactInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     uri: str = Field(
         ...,
         description=(
@@ -3637,6 +4036,14 @@ class DescribeArtifactResult(BaseModel):
 
 
 class DrawdownTableInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     equity_curve_uri: str = Field(
         ...,
         description=(
@@ -3705,6 +4112,14 @@ class DrawdownTableResult(BaseModel):
 
 
 class ExplainDecisionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     request_id: str = Field(
         ...,
         min_length=1,
@@ -3760,6 +4175,14 @@ class ExplainDecisionResult(BaseModel):
 
 
 class ReplayDecisionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     request_id: str = Field(
         ..., min_length=1, description="The recorded call to re-run and compare."
     )
@@ -3807,6 +4230,14 @@ class ReplayDecisionResult(BaseModel):
 
 
 class CompareDecisionsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     request_id_a: str = Field(..., min_length=1)
     request_id_b: str = Field(..., min_length=1)
 
@@ -3836,6 +4267,14 @@ class CompareDecisionsResult(BaseModel):
 
 
 class VerifyAuditIntegrityInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     date: Optional[str] = Field(
         None,
         description=(
@@ -3877,6 +4316,14 @@ class VerifyAuditIntegrityResult(BaseModel):
 
 
 class ExportAuditBundleInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     start_date: str = Field(..., description="YYYY-MM-DD, inclusive.")
     end_date: str = Field(..., description="YYYY-MM-DD, inclusive.")
     out_path: str = Field(
@@ -3926,6 +4373,14 @@ class ExportAuditBundleResult(BaseModel):
 
 
 class MicrostructureInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start: str = Field(
         ...,
@@ -4016,6 +4471,14 @@ class MicrostructureResult(BaseModel):
 
 
 class TradeProfileInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start: str = Field(..., description="Start timestamp.")
     end: str = Field(..., description="End timestamp.")
@@ -4069,6 +4532,14 @@ class TradeProfileResult(BaseModel):
 
 
 class SpreadProxyCheckInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start: str = Field(..., description="Start timestamp for the tick window.")
     end: str = Field(..., description="End timestamp for the tick window.")
@@ -4128,6 +4599,14 @@ class SpreadProxyCheckResult(BaseModel):
 
 
 class DescribeReferenceInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     ref: str = Field(
         ...,
         description=(
@@ -4153,6 +4632,14 @@ class DescribeReferenceResult(BaseModel):
 class ListReferenceKindsInput(BaseModel):
     """No arguments — the kind table is a module constant."""
 
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
 
 class ReferenceKind(BaseModel):
     kind: str
@@ -4168,6 +4655,14 @@ class ListReferenceKindsResult(BaseModel):
 
 
 class ConvertReferenceInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     ref: str = Field(..., description="The reference to convert.")
     to_kind: str = Field(
         ...,
@@ -4231,4 +4726,126 @@ class ConvertReferenceResult(BaseModel):
     kind: str
     rows: int
     entities: int
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Pre-flight — ask about a tool, and check a call before making it
+#
+# Two questions an agent could not previously ask. "What does this one tool
+# take?" was answerable only by loading all 73 schemas, which is what the
+# MCP category budget exists to avoid. "Are these arguments right?" was
+# answerable only by making the call and reading the error -- which costs a
+# network round trip, and for a backtest costs a fetch and a full run
+# before a bad `lookback` surfaces.
+# ──────────────────────────────────────────────
+
+
+class DescribeToolInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(
+        ...,
+        description=(
+            "Any tool in any runtime, including ones this caller is not "
+            "scoped to — describing a tool is not calling it."
+        ),
+    )
+    include_schema: bool = Field(
+        True,
+        description=(
+            "Include the full JSON input schema. False returns the summary "
+            "alone, which is enough to decide whether the tool is the one "
+            "you want."
+        ),
+    )
+
+
+class DescribeToolResult(BaseModel):
+    tool_name: str
+    runtime: str = Field(
+        ..., description="Which runtime can execute it. Others will refuse by name."
+    )
+    category: str
+    description: str
+    required_arguments: List[str]
+    optional_arguments: List[str]
+    reads_market_data: bool = Field(
+        ...,
+        description=(
+            "Whether calling it will go and fetch. Offline tools are free "
+            "to call speculatively; these are not."
+        ),
+    )
+    persists_artifact: bool = Field(
+        ...,
+        description="Whether a call writes a new artifact, and so is not idempotent.",
+    )
+    input_schema: Optional[Dict[str, Any]] = None
+    result_fields: List[str] = Field(
+        default_factory=list, description="Top-level fields the result carries."
+    )
+
+
+class ValidateToolCallInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(..., description="The tool the arguments are for.")
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The arguments you intend to pass. Nothing is executed.",
+    )
+
+
+class ArgumentProblem(BaseModel):
+    field: str = Field(
+        ...,
+        description="Dotted path to the offending field, or '(tool)' for the call itself.",
+    )
+    problem: str
+    kind: Literal["missing", "unknown", "invalid", "relation"] = Field(
+        ...,
+        description=(
+            "'missing' a required argument. 'unknown' a name this tool does "
+            "not take — the usual shape of a hallucinated argument. "
+            "'invalid' a value out of range or of the wrong type. "
+            "'relation' individually valid values that are nonsense together."
+        ),
+    )
+
+
+class ValidateToolCallResult(BaseModel):
+    tool_name: str
+    valid: bool
+    problems: List[ArgumentProblem] = Field(default_factory=list)
+    normalized_arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "The arguments as the tool would actually see them, with "
+            "defaults filled in. Present only when valid — it is what you "
+            "would be running, which is often not quite what you wrote."
+        ),
+    )
+    checked_strategy_parameters: bool = Field(
+        False,
+        description=(
+            "True when the tool carries a strategy `parameters` dict and "
+            "that dict was checked against the strategy's own contract too. "
+            "That layer is invisible to the JSON schema — `parameters` is "
+            "an open dict — so a bad window would otherwise pass here and "
+            "fail only after the data had been fetched."
+        ),
+    )
     notes: List[str] = Field(default_factory=list)

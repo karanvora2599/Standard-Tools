@@ -28,6 +28,14 @@ _NO_PROTECTED_NAMESPACES = ConfigDict(protected_namespaces=())
 
 
 class ListFeaturesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     category: Optional[str] = Field(
         None,
         description="Filter to one category, e.g. 'technical' or 'factors'. Omit for the full catalog.",
@@ -52,6 +60,14 @@ class ListFeaturesResult(BaseModel):
 
 
 class BuildModelDatasetInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     spec: DatasetSpec
 
 
@@ -103,6 +119,14 @@ class BuildModelDatasetResult(BaseModel):
 
 
 class RunModelExperimentInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     dataset_id: str = Field(..., description="An id returned by build_model_dataset.")
     spec: ModelSpec
 
@@ -146,7 +170,13 @@ class RunModelExperimentResult(BaseModel):
 
 
 class ScoreModelInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     model_id: str = Field(..., description="An id returned by run_model_experiment.")
     as_of: str = Field(..., description="Date YYYY-MM-DD to score as of.")
@@ -240,7 +270,13 @@ class ScoreModelResult(BaseModel):
 
 
 class InspectModelInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     model_id: str
     view: Literal["summary", "feature_importance", "validation", "lineage"] = Field(
@@ -260,7 +296,13 @@ class InspectModelResult(BaseModel):
 
 
 class ListModelingCapabilitiesInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     include_estimators: bool = Field(
         True,
@@ -277,7 +319,13 @@ class ListModelingCapabilitiesResult(BaseModel):
 
 
 class AnalyzeFeaturesInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
@@ -331,7 +379,13 @@ class AnalyzeFeaturesResult(BaseModel):
 
 
 class EvaluateModelPortfolioInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     model_id: str = Field(
         ..., description="A model_id returned by run_model_experiment."
