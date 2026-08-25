@@ -150,6 +150,15 @@ class TestModelingDispatch:
             "check_leakage",
             "validate_model_spec",
             "score_predictions",
+            # Typed, single-question counterparts to analyze_features,
+            # which returns an untyped `report` blob an agent has to parse
+            # by guessing key names. These compute nothing new -- every
+            # number already came out of feature_report.py -- so they are
+            # three decisions an agent can now make separately rather than
+            # three it had to extract from one answer.
+            "analyze_feature",
+            "get_feature_redundancy",
+            "get_feature_ic_decay",
         }
         assert len(tools) == len({t["function"]["name"] for t in tools})
 

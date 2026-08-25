@@ -57,6 +57,19 @@ from standard_quant_tools.mcp.catalog import (
 #: reported in every truncated result so nothing is ever silently dropped.
 DEFAULT_INLINE_LIMIT = 4096
 
+#: The context a client can be expected to hold for a whole session, in
+#: bytes. Not a protocol limit -- a judgement about what is reasonable to
+#: spend before an agent has done anything.
+#:
+#: This used to be enforced only by a test, which was adequate while the
+#: whole surface fit under it. It no longer does: at 85 tools the eager
+#: surface is ~183 KB. That was the predicted outcome rather than a
+#: regression -- `--tool-detail auto` exists precisely so the surface can
+#: keep growing -- but a user who types `--categories all` and gets a
+#: silently oversized listing deserves to be told at startup rather than to
+#: discover it as degraded model behaviour three turns in.
+CONTEXT_CEILING_BYTES = 180_000
+
 _ENV_DIRS = (
     ("runs_dir", "SQT_RUNS_DIR", "artifact store"),
     ("audit_dir", "SQT_AUDIT_DIR", "audit trail"),
@@ -551,6 +564,32 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
     )
 
 
+def check_context_budget(
+    config: "ServerConfig", schema_bytes_total: int
+) -> Optional[str]:
+    """
+    A warning when this configuration costs more context than it should.
+
+    Returns None when it fits. The suggestion is specific on purpose: the
+    fix is almost always one flag, and a warning that says "too big" without
+    saying what to do about it just moves the problem to the reader.
+    """
+    if schema_bytes_total < CONTEXT_CEILING_BYTES:
+        return None
+    over = schema_bytes_total - CONTEXT_CEILING_BYTES
+    remedy = (
+        "narrow with --runtime, or lower --detail-budget"
+        if config.tool_detail == "auto"
+        else "serve one runtime with --runtime, or add --tool-detail auto"
+    )
+    return (
+        f"this configuration costs {schema_bytes_total:,} bytes of context "
+        f"(~{schema_bytes_total // 4:,} tokens), {over:,} over the "
+        f"{CONTEXT_CEILING_BYTES:,} budget. Every byte is held for the whole "
+        f"session, before the agent has done anything. To fix: {remedy}."
+    )
+
+
 def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> None:
     """Say what was configured, once, on stderr."""
     lines = [
@@ -610,6 +649,9 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
             "  NOTE: one instance, one artifact store, one audit trail. Every "
             "connected client can read every sqt:// result any of them produced."
         )
+    budget_warning = check_context_budget(config, schema_bytes_total)
+    if budget_warning:
+        lines.append(f"  WARNING: {budget_warning}")
     for warning in config.warnings:
         lines.append(f"  WARNING: {warning}")
     print("\n".join(lines), file=sys.stderr, flush=True)

@@ -27,6 +27,7 @@ from standard_quant_tools.mcp.catalog import (
     ALL_CATEGORIES,
     DEFAULT_CATEGORIES,
     build_catalog,
+    categories_for_runtimes,
     category_costs,
     dispatch_for,
     select,
@@ -147,20 +148,64 @@ class TestSchemas:
 class TestBudget:
     """The context cost is the constraint the whole design exists to manage."""
 
-    def test_full_surface_stays_under_the_ceiling(self):
-        # Measured on what actually goes over the wire, not on what the
-        # catalog happens to know: output schemas are always computed and
-        # only sent when asked for.
+    def test_the_whole_surface_is_still_servable(self):
+        """
+        Every tool in one session, under the ceiling.
+
+        This used to assert the same thing about the EAGER surface, and that
+        assertion has now been retired rather than relaxed. At 85 tools the
+        eager surface is ~183 KB and does not fit -- which is the outcome
+        `--tool-detail auto` was built for, and was predicted to the tool
+        before it happened: 2,184 bytes a tool against a 180,000 ceiling
+        buys 82.4 tools, and the library passed 82.
+
+        What must stay true is that a client CAN still be served everything
+        if it asks. That is this test. It is a stronger claim than the old
+        one, because it has to keep holding at 151 tools rather than failing
+        the moment one more is added.
+        """
         _server, handlers = build_server(
-            ServerConfig(categories=ALL_CATEGORIES, enable_long_running=True)
+            ServerConfig(
+                categories=ALL_CATEGORIES,
+                enable_long_running=True,
+                tool_detail="auto",
+                detail_budget=131_072,
+            )
         )
         total = handlers.context_bytes()
         assert total < FULL_SURFACE_CEILING, (
-            f"the full tool surface is {total:,} bytes (~{total // 4:,} tokens), "
-            f"over the {FULL_SURFACE_CEILING:,} ceiling. Every byte is spent "
-            "from every client's context at connect -- either shrink a schema "
-            "or argue the ceiling up deliberately."
+            f"the whole surface is {total:,} bytes (~{total // 4:,} tokens) "
+            f"even in auto mode, over the {FULL_SURFACE_CEILING:,} ceiling. "
+            "auto thins the most expensive tools until it fits, so this "
+            "failing means the CHEAP tools now exceed the budget on their "
+            "own -- shrink schemas, do not raise the ceiling."
         )
+        assert len(handlers.tools) >= len(build_catalog()) - len(LONG_RUNNING), (
+            "auto dropped tools instead of thinning them; thinning must "
+            "change the advertisement and never the surface"
+        )
+
+    def test_an_oversized_configuration_warns_at_startup(self):
+        """The eager whole surface is a thing a user can still type. It must
+        say so rather than silently costing 45k tokens."""
+        from standard_quant_tools.mcp.config import check_context_budget
+
+        config = ServerConfig(categories=ALL_CATEGORIES, enable_long_running=True)
+        _server, handlers = build_server(config)
+        warning = check_context_budget(config, handlers.context_bytes())
+        assert warning is not None, (
+            "the eager whole surface is over the ceiling and said nothing"
+        )
+        assert "--tool-detail auto" in warning, "the warning must name the fix"
+
+    def test_a_scoped_configuration_does_not_warn(self):
+        from standard_quant_tools.mcp.config import check_context_budget
+
+        config = ServerConfig(
+            categories=categories_for_runtimes(["backtest"]), runtimes=("backtest",)
+        )
+        _server, handlers = build_server(config)
+        assert check_context_budget(config, handlers.context_bytes()) is None
 
     def test_declaring_output_schemas_is_the_expensive_option(self):
         _s1, off = build_server(ServerConfig(categories=ALL_CATEGORIES))

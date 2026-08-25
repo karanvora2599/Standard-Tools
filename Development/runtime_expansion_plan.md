@@ -219,10 +219,14 @@ more conditions belong alongside it.
 1. **Build the domain inside its current home first.** A runtime is created
    by *moving* a mature cluster out, never by declaring an empty one.
 2. **The new runtime lands at ≥ 8 tools.** Already enforced.
-3. **The donor stays at ≥ 8 too.** *Nothing currently checks this.* Moving
-   the three microstructure tools out of `portfolio` today leaves it at 7 —
-   a floor violation produced by a legal-looking move. Extend the test to
-   both sides of a split.
+3. **The donor stays at ≥ 8 too.** ~~*Nothing currently checks this.*~~
+   **Correction: it already does.**
+   `test_no_runtime_is_too_small_to_be_worth_a_boundary` iterates
+   `all_runtimes()` and asserts the floor on every one of them, and a donor
+   is still a runtime after a split. Simulated: moving the three
+   microstructure tools out of `portfolio` leaves it at 7 and fails that
+   test today, with no change needed. The original note assumed the test
+   checked only newly declared runtimes. No work here.
 4. **A split is a breaking change.** Anyone scoped to the donor loses the
    tool.
 
@@ -233,6 +237,9 @@ research-scoped agent calling it should not get a bare refusal. The runtime
 error already names the owning runtime; add a *moved-from* record so it can
 say "this used to be in `research` and now lives in `derivatives`" for one
 minor version. That turns a break into an instruction.
+
+The sequencing consequence below is unaffected — the constraint is real,
+it is simply already enforced rather than needing to be added.
 
 ### Consequence for sequencing
 

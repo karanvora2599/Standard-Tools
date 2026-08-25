@@ -41,6 +41,12 @@ from typing import Any, Dict, List
 
 from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.agent.feature_models import (
+    AnalyzeFeatureInput,
+    FeatureICDecayInput,
+    FeatureRedundancyInput,
+)
+from standard_quant_tools.modeling.agent.feature_tools import FEATURE_TOOL_DISPATCH
 
 from .. import artifacts as _artifacts
 from ..analysis import build_feature_report
@@ -838,6 +844,37 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
 
 _MODELING_TOOL_DEFS: List[tuple] = [
     (
+        "analyze_feature",
+        "Profile ONE feature of a built dataset: coverage, turnover, "
+        "autocorrelation, cross-sectional IC and ICIR, quantile spread and "
+        "monotonicity. The single-feature counterpart to analyze_features — "
+        "reach for it when a specific feature is in question, since it costs "
+        "one feature's work instead of the whole panel's and returns every "
+        "number named rather than nested in a report dict.",
+        AnalyzeFeatureInput,
+    ),
+    (
+        "get_feature_redundancy",
+        "Which features are restatements of one another, and which one to "
+        "keep. RSI, 20-day momentum, MACD and stochastic are one momentum "
+        "cluster, not four independent sources of alpha. Returns each "
+        "cluster with a representative chosen by strongest rank IC, the drop "
+        "list already worked out, and the collinearity diagnostics (VIF, "
+        "condition number) that say whether linear coefficients on this "
+        "panel mean anything.",
+        FeatureRedundancyInput,
+    ),
+    (
+        "get_feature_ic_decay",
+        "How one feature's IC behaves when the feature is displaced in time. "
+        "Answers two questions: whether it leaks (an IC that spikes at shift "
+        "0 and collapses on both sides already contains the answer) and "
+        "whether it is tradeable (how much IC survives one bar of "
+        "staleness). Returns the curve as ordered points with the peak "
+        "named.",
+        FeatureICDecayInput,
+    ),
+    (
         "validate_model_spec",
         "Check a ModelSpec before spending an experiment on it: that the "
         "estimator exists for the task, that its parameters are accepted, "
@@ -957,6 +994,37 @@ def list_modeling_capabilities(
     return ListModelingCapabilitiesResult(capabilities=capabilities)
 
 
+def _json_safe(value):
+    """
+    Recursively replace non-finite floats with None.
+
+    `analyze_features` returns the report dict verbatim, and that dict
+    carries NaN wherever a cross-sectional statistic was undefined -- a
+    single entity per date, a constant feature. `json.dumps` writes those as
+    a bare `NaN` token, which is not valid JSON per RFC 8259 and is rejected
+    by strict parsers, including JSON-RPC clients. Measured on a legal
+    panel: twelve of them in one report.
+
+    `null` is both valid and more truthful. A consumer that reads 0.0 for a
+    monotonicity that was never calculable concludes "no relationship" when
+    the answer is "no measurement".
+
+    Done here, at the tool boundary, rather than in `feature_report.py`:
+    NaN is the right in-memory representation for a numpy pipeline, and
+    Python callers of `build_feature_report` should keep getting it. It is
+    only wrong once it has to cross a wire.
+    """
+    import math
+
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
     """
     Score the FEATURES of a built dataset, before any model is fitted.
@@ -994,11 +1062,14 @@ def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
     # change what it does next.
     warnings = list(report.pop("warnings", []))
     return AnalyzeFeaturesResult(
-        dataset_id=input_data.dataset_id, report=report, warnings=warnings
+        dataset_id=input_data.dataset_id,
+        report=_json_safe(report),
+        warnings=warnings,
     )
 
 
 MODELING_TOOL_DISPATCH = {
+    **FEATURE_TOOL_DISPATCH,
     "validate_model_spec": (validate_model_spec, ValidateModelSpecInput),
     "score_predictions": (score_predictions, ScorePredictionsInput),
     "list_features": (list_features, ListFeaturesInput),

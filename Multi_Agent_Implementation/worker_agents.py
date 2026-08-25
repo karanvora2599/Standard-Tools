@@ -92,6 +92,13 @@ _MODEL_RESEARCH_TOOLS = [
     "list_features",
     "build_model_dataset",
     "analyze_features",
+    # The typed, single-question counterparts. analyze_features is the
+    # overview; these three are what to reach for once there is a specific
+    # question, and they return named fields rather than a nested report
+    # this agent would otherwise have to describe in prose.
+    "analyze_feature",
+    "get_feature_redundancy",
+    "get_feature_ic_decay",
     "list_datasets",
     "check_leakage",
     "validate_model_spec",
@@ -468,7 +475,17 @@ HANDOFF — report it verbatim, because the Model Builder Agent cannot fit
 anything without it.
 analyze_features: score a BUILT dataset's features before any model is
 fitted — coverage, dispersion, IC and rank IC, autocorrelation, a lead-lag
-IC curve, a redundancy matrix, and a leakage screen.
+IC curve, a redundancy matrix, and a leakage screen. The overview; it
+returns one nested report.
+analyze_feature: the same profile for ONE feature, with every number named
+rather than nested. Cheaper, and the right call once a specific feature is
+in question.
+get_feature_redundancy: which features are restatements of one another, and
+which one to KEEP. Returns a representative per cluster and the drop list
+already worked out — prefer this over reading a correlation matrix yourself.
+get_feature_ic_decay: how one feature's IC behaves as the feature is shifted
+in time. Answers both "does this leak" and "does it survive a bar of
+staleness".
 
 Your job ends at "here is the dataset, and here is what its features look
 like". You cannot fit, validate, register or score a model — those tools
@@ -477,7 +494,15 @@ had measured it.
 
 Two judgements are the reason this agent exists, and you should make them
 explicitly rather than only reporting numbers: whether two features are the
-same feature twice, and whether the leakage screen flagged anything. A
+same feature twice, and whether the leakage screen flagged anything. For the
+first, get_feature_redundancy has already done the arithmetic — say which
+feature you would keep and why, do not just report that a cluster exists.
+
+A statistic that comes back as null was not computed, and that is not the
+same as zero. Say "could not be measured" rather than treating it as a
+weak result: a panel with too few entities per date has no cross-section,
+and an IC of null there means the question was unanswerable, not that the
+feature is useless. A
 flagged feature is a claim you should check against the lead-lag curve
 before repeating it — a slow-moving state feature is not a leak.
 
