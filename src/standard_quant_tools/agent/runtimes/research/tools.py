@@ -223,8 +223,8 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
         alpha=round(beta_metrics["alpha"], 6),
         beta=round(beta_metrics["beta"], 4),
         r_squared=round(beta_metrics["r_squared"], 4),
-        sharpe_ratio=round(sharpe_ratio(asset_ret), 4),
-        sortino_ratio=round(sortino_ratio(asset_ret), 4),
+        sharpe_ratio=round(sharpe_ratio(asset_ret, input_data.risk_free_rate), 4),
+        sortino_ratio=round(sortino_ratio(asset_ret, input_data.risk_free_rate), 4),
         max_drawdown=round(max_drawdown(equity_curve), 6),
         var_95=round(var_historical(asset_ret, 0.95), 6),
         cvar_95=round(cvar(asset_ret, 0.95), 6),
@@ -439,7 +439,10 @@ def get_portfolio_analysis(input_data: PortfolioInput) -> PortfolioResult:
     aligned_bench = bench_returns.loc[common_idx]
 
     metrics = portfolio_metrics(
-        aligned_returns, input_data.weights, benchmark_returns=aligned_bench
+        aligned_returns,
+        input_data.weights,
+        risk_free_rate=input_data.risk_free_rate,
+        benchmark_returns=aligned_bench,
     )
 
     return PortfolioResult(
@@ -649,7 +652,13 @@ def run_kalman_hedge_ratio(input_data: KalmanHedgeRatioInput) -> KalmanHedgeRati
         input_data.symbol_b, input_data.start_date, input_data.end_date
     )["Close"]
 
-    kf = kalman_hedge_ratio(prices_a, prices_b, delta=input_data.delta)
+    kf = kalman_hedge_ratio(
+        prices_a,
+        prices_b,
+        delta=input_data.delta,
+        observation_noise=input_data.observation_noise,
+        include_intercept=input_data.include_intercept,
+    )
     z = spread_zscore(kf["Spread"], window=input_data.zscore_window)
     valid_z = z.dropna()
     current_z = round(float(valid_z.iloc[-1]), 4) if not valid_z.empty else 0.0
@@ -696,7 +705,12 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
         }
     ).dropna()
 
-    result = pca_returns(returns, n_components=input_data.n_components)
+    result = pca_returns(
+        returns,
+        n_components=input_data.n_components,
+        standardize=input_data.standardize,
+        method=input_data.method,
+    )
     contrib = factor_contributions(returns, n_components=input_data.n_components)
 
     evr = {k: round(float(v), 4) for k, v in result["explained_variance_ratio"].items()}
@@ -788,13 +802,21 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
     )
     returns = df["Close"].pct_change().dropna()
 
-    result = hurst_exponent(returns, method=input_data.method)
+    result = hurst_exponent(
+        returns,
+        method=input_data.method,
+        min_window=input_data.min_window,
+        max_window=input_data.max_window,
+    )
 
     rolling_current = None
     rolling_regime_fractions = None
     if input_data.rolling_window:
         rolling = rolling_hurst(
-            returns, window=input_data.rolling_window, method=input_data.method
+            returns,
+            window=input_data.rolling_window,
+            method=input_data.method,
+            min_window=input_data.min_window,
         )
         valid = rolling.dropna()
         if not valid.empty:
@@ -1182,7 +1204,11 @@ def get_advanced_indicators(
     last_close = float(close.iloc[-1])
 
     sar_df = parabolic_sar(
-        high, low, af_start=input_data.sar_af_start, af_max=input_data.sar_af_max
+        high,
+        low,
+        af_start=input_data.sar_af_start,
+        af_step=input_data.sar_af_step,
+        af_max=input_data.sar_af_max,
     )
     sar_val = float(sar_df["SAR"].iloc[-1])
     sar_trend_int = int(sar_df["Trend"].iloc[-1])

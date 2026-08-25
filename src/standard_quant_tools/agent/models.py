@@ -163,6 +163,19 @@ class AnalysisInput(BaseModel):
     symbol: str = Field(..., description="Target asset symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol.")
     period: str = Field("1y", description="Analysis period (e.g. '1y', '2y', '6mo').")
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate as a decimal fraction (0.045 = "
+            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
+            "0.0, which means those ratios measure total return per unit "
+            "of risk rather than EXCESS return — at a 4-5% short rate that "
+            "is most of the ratio for a low-volatility strategy, so set it "
+            "when the number is going to be compared with anything."
+        ),
+    )
 
 
 class AnalysisResult(BaseModel):
@@ -245,6 +258,20 @@ class PortfolioInput(BaseModel):
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
         return self
+
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate as a decimal fraction (0.045 = "
+            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
+            "0.0, which means those ratios measure total return per unit "
+            "of risk rather than EXCESS return — at a 4-5% short rate that "
+            "is most of the ratio for a low-volatility strategy, so set it "
+            "when the number is going to be compared with anything."
+        ),
+    )
 
 
 class PortfolioResult(BaseModel):
@@ -562,6 +589,26 @@ class CointegrationResult(BaseModel):
 
 
 class KalmanHedgeRatioInput(BaseModel):
+    observation_noise: float = Field(
+        0.001,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Measurement-noise variance. Together with `delta` this sets "
+            "how fast the hedge ratio is allowed to move: a large value "
+            "trusts the model over the data and produces a ratio that "
+            "barely responds, a small one chases every print."
+        ),
+    )
+    include_intercept: bool = Field(
+        True,
+        description=(
+            "Estimate a time-varying intercept alongside the hedge ratio. "
+            "False forces the spread through the origin, which is only "
+            "right when the two legs genuinely have no level difference."
+        ),
+    )
+
     symbol_a: str = Field(..., description="First asset symbol (the 'long' leg).")
     symbol_b: str = Field(..., description="Second asset symbol (the 'short' leg).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -603,6 +650,25 @@ class KalmanHedgeRatioResult(BaseModel):
 
 
 class PCAInput(BaseModel):
+    standardize: bool = Field(
+        True,
+        description=(
+            "Z-score each asset's returns before decomposing. True (the "
+            "default) makes the components describe CORRELATION structure; "
+            "False leaves them driven by whichever asset happens to be "
+            "most volatile, which is a different question and usually not "
+            "the one being asked."
+        ),
+    )
+    method: Literal["svd", "power_iteration"] = Field(
+        "svd",
+        description=(
+            "'svd' (default) is exact. 'power_iteration' is iterative and "
+            "cheaper on a wide universe when only the leading components "
+            "matter."
+        ),
+    )
+
     tickers: List[str] = Field(..., description="Universe of tickers to decompose.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -682,6 +748,27 @@ class CorrelationAnalysisResult(BaseModel):
 
 
 class HurstInput(BaseModel):
+    min_window: int = Field(
+        10,
+        gt=1,
+        le=10_000,
+        description=(
+            "Smallest scale in the log-log fit. The exponent is the SLOPE "
+            "across scales, so the window range is not a detail: too small "
+            "a floor lets microstructure noise flatten it toward 0.5, and "
+            "the regime call downstream reads that as 'random walk'."
+        ),
+    )
+    max_window: Optional[int] = Field(
+        None,
+        gt=1,
+        le=100_000,
+        description=(
+            "Largest scale in the fit. None lets the estimator choose from "
+            "the series length."
+        ),
+    )
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1188,6 +1275,7 @@ class RegimeAdaptiveWalkForwardResult(BaseModel):
 
 
 class RiskAttributionInput(BaseModel):
+
     tickers: List[str] = Field(..., description="Portfolio asset symbols.")
     weights: List[float] = Field(..., description="Portfolio weights summing to 1.0.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1212,6 +1300,20 @@ class RiskAttributionInput(BaseModel):
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
         return self
+
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate as a decimal fraction (0.045 = "
+            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
+            "0.0, which means those ratios measure total return per unit "
+            "of risk rather than EXCESS return — at a 4-5% short rate that "
+            "is most of the ratio for a low-volatility strategy, so set it "
+            "when the number is going to be compared with anything."
+        ),
+    )
 
 
 class RiskAttributionResult(BaseModel):
@@ -1637,6 +1739,17 @@ class AdvancedIndicatorsInput(BaseModel):
     )
     sar_af_start: float = Field(
         0.02, description="Parabolic SAR initial acceleration factor (default 0.02)."
+    )
+    sar_af_step: float = Field(
+        0.02,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Acceleration increment applied at each new extreme. With "
+            "af_start and af_max already exposed, this was the one knob of "
+            "the three that could not be set — and it governs how quickly "
+            "the stop tightens into a trend."
+        ),
     )
     sar_af_max: float = Field(
         0.2, description="Parabolic SAR maximum acceleration factor (default 0.2)."

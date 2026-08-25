@@ -333,8 +333,8 @@ def get_portfolio_risk_attribution(
     # ── Portfolio-level metrics ────────────────────────────────────
     ann_ret = float(cagr(port_equity))
     ann_vol = float(annualized_volatility(port_ret))
-    sr = float(sharpe_ratio(port_ret))
-    sort_r = float(sortino_ratio(port_ret))
+    sr = float(sharpe_ratio(port_ret, input_data.risk_free_rate))
+    sort_r = float(sortino_ratio(port_ret, input_data.risk_free_rate))
     mdd = float(max_drawdown(port_equity))
     v95 = float(var_historical(port_ret, 0.95))
     cv95 = float(cvar(port_ret, 0.95))
