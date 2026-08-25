@@ -234,6 +234,59 @@ categories belong to research and meta, so inheriting them under
 `--runtime backtest` would have served zero tools, and an empty server reads
 as a broken install rather than as two flags disagreeing.
 
+### Paying for schemas only when you need them
+
+`--runtime` decides *which* tools; `--tool-detail` decides how much of each
+one is sent at connect.
+
+```bash
+sqt-mcp --runtime backtest                       # 65 KB, every schema
+sqt-mcp --runtime backtest --tool-detail auto    # 40 KB, 8 tools thinned
+sqt-mcp --runtime backtest --tool-detail thin    # 12 KB, all thinned
+```
+
+A **thinned** tool is still listed and still callable. What it loses is its
+argument schema: the listing carries the name, one line of purpose, and an
+instruction to call `describe_tool` for the rest. Measured, that is 531
+bytes against 2,184 — **76% smaller**.
+
+`auto` is the mode worth using. It thins the **most expensive** tools and
+stops as soon as the runtime fits `--detail-budget` (32 KB by default):
+
+| runtime | full | `auto` | thinned | thin |
+|---|---:|---:|---:|---:|
+| `research` | 32 KB | 32 KB | 0 | 12 KB |
+| `backtest` | 65 KB | 40 KB | 7 | 12 KB |
+| `portfolio` | 22 KB | 22 KB | 0 | 6 KB |
+| `meta` | 12 KB | 12 KB | 0 | 8 KB |
+| `modeling` | 44 KB | 35 KB | 1 | 8 KB |
+
+Three runtimes already fit and pay nothing. That ordering is deliberate: a
+runtime's cost is concentrated in a few large schemas — `modeling`'s top
+three are 65% of it — so thinning three tools buys what thinning fifteen
+cheap ones would not, and **every tool left described is one an agent calls
+without a round trip.** Minimising bytes and minimising round trips turn
+out to be the same instruction.
+
+**Thinning changes the advertisement and nothing else.** The arguments are
+unchanged, validated by the same model, and `extra="forbid"` still rejects a
+guessed name rather than defaulting it. What thinning costs is one
+`describe_tool` call before the first use of a thinned tool — and what it
+would cost to skip that call is a rejected call, which is why the
+instruction appears in both the description and the schema. A client may
+show a model only one of them, and a model shown an empty `{}` schema
+concludes the tool takes no arguments.
+
+Because a thin entry tells an agent to call `describe_tool`, and
+`describe_tool` belongs to `meta`, **the server adds it whenever anything is
+thinned** and never thins it. Under `--runtime backtest --tool-detail thin`
+the instruction would otherwise be unfollowable and every thinned tool
+uncallable. It is the one place scope widens automatically, and it is
+reported at startup.
+
+`--tool-detail full` is the default, so nothing changes for an existing
+invocation.
+
 Naming a category the runtime does not own is refused at startup, by name:
 
 ```
@@ -325,6 +378,8 @@ own decisions is not audited by it.
 |---|---|---|
 | `--runtime` | every runtime | The coarse scope: which runtimes can be served **or executed**. One name, or several joined with `+`, or `all`. Given alone, serves all of that runtime's categories. |
 | `--categories` | `screener,analysis,quant_research,discovery` | Narrows which tools are advertised *within* the chosen runtimes. `all` for everything. A category outside the chosen runtime is refused at startup. |
+| `--tool-detail` | `full` | How much of each tool to advertise. `auto` thins the most expensive schemas until the runtime fits `--detail-budget`; `thin` thins everything. A thinned tool is still callable — its arguments come from `describe_tool`. |
+| `--detail-budget` | `32768` | Byte target for `--tool-detail auto`. |
 | `--inline-limit` | `4096` | Results larger than this are stored and returned as a summary plus a `sqt://result/...` link. |
 | `--output-schemas` | off | Declare `outputSchema` per tool. **Roughly doubles the context cost.** `structuredContent` is returned either way, so this only helps clients that validate against the schema. |
 | `--enable-long-running` | off | Expose `scan_pairs` and `run_backtest_optimization`. |

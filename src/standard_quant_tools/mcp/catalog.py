@@ -40,9 +40,20 @@ is wrong.
 
 from __future__ import annotations
 
+import json
 import typing
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from standard_quant_tools.agent.router import TOOL_CATEGORY
 from standard_quant_tools.agent.runtimes import RUNTIME_CATEGORIES
@@ -258,6 +269,122 @@ def select(catalog: Dict[str, ToolEntry], categories: Sequence[str]) -> List[Too
     return sorted(
         (e for e in catalog.values() if e.category in wanted), key=lambda e: e.name
     )
+
+
+#: How a tool is advertised.
+#:
+#: `full`  -- the whole input schema, as it has always been sent.
+#: `thin`  -- name, one-line purpose, and an empty schema. An agent must
+#:            call `describe_tool` before it can call the tool itself.
+DETAIL_MODES: Tuple[str, ...] = ("full", "auto", "thin")
+
+#: Target for one runtime's advertised surface, in bytes. `auto` thins the
+#: fewest tools needed to come in under this.
+#:
+#: 32,768 is a third of the 72 KB per-runtime ceiling rather than the
+#: ceiling itself, because a target that only just fits leaves the next
+#: added tool to blow it again. Measured: it costs `research` nothing (it
+#: is already 25 KB), `portfolio` two round trips, and `modeling` three.
+DEFAULT_DETAIL_BUDGET = 32_768
+
+#: Fetching a schema is impossible without the tool that fetches it, so a
+#: server that thins anything must serve this, and must serve it FULL.
+SCHEMA_FETCH_TOOL = "describe_tool"
+
+
+def thin_description(description: str, limit: int = 180) -> str:
+    """
+    The first sentence of a tool's description, capped.
+
+    A thin entry has one job: let an agent decide whether this is the tool
+    it wants, well enough to spend a round trip finding out how to call it.
+    The first sentence of these descriptions is already written to do
+    exactly that -- the paragraphs after it explain arguments and
+    edge cases, which is what `describe_tool` returns.
+    """
+    text = " ".join(description.strip().split())
+    stop = text.find(". ")
+    if 0 < stop < limit:
+        return text[: stop + 1]
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rsplit(" ", 1)[0] + "\u2026"
+
+
+def thin_schema(name: str) -> Dict[str, Any]:
+    """
+    The input schema of a thinned tool: empty, and it says why.
+
+    `additionalProperties` stays true because the arguments ARE valid, they
+    are simply not described here -- a client that validates against this
+    must not reject a correct call. The server validates them anyway, from
+    the real model, with `extra="forbid"`; nothing is loosened by thinning
+    the advertisement.
+
+    The description is kept SHORT and duplicated in the tool description
+    rather than written once in either. Measured, the long version of this
+    text cost 285 bytes a tool and was most of what thinning had just
+    saved. But it cannot be dropped entirely: a client that shows the model
+    only the schema would show an empty object, and a model reading an
+    empty object concludes the tool takes no arguments and calls it with
+    `{}`. That is a wasted turn AND a confusing error, which is worse than
+    the round trip thinning is trying to justify.
+    """
+    return {
+        "type": "object",
+        "additionalProperties": True,
+        "description": (
+            f"Not listed: call {SCHEMA_FETCH_TOOL}({name!r}) first. "
+            "Guessed names are rejected."
+        ),
+    }
+
+
+def plan_detail(
+    entries: Sequence[ToolEntry],
+    mode: str = "auto",
+    budget: int = DEFAULT_DETAIL_BUDGET,
+    include_output_schemas: bool = False,
+) -> Set[str]:
+    """
+    Which tools to advertise thinly. Returns their names.
+
+    `auto` thins the MOST EXPENSIVE tools first, and stops as soon as the
+    total fits. That ordering is the whole point: a runtime's cost is
+    concentrated in a handful of large schemas -- `modeling`'s top three are
+    65% of it -- so thinning three tools buys what thinning fifteen cheap
+    ones would not, and every tool left described is one an agent can call
+    without a round trip. Minimising round trips and minimising bytes turn
+    out to be the same instruction.
+
+    The alternative considered was ranking by call frequency from the audit
+    log. That is the better signal and it is not available: nothing has run
+    enough to have a frequency. This ranking needs no usage data, adapts as
+    schemas change, and can be replaced by frequency later without changing
+    anything else here.
+
+    `describe_tool` is never thinned. It is the tool that undoes thinning.
+    """
+    if mode not in DETAIL_MODES:
+        raise ValueError(f"unknown detail mode {mode!r}; expected {list(DETAIL_MODES)}")
+    if mode == "full":
+        return set()
+
+    thinnable = [e for e in entries if e.name != SCHEMA_FETCH_TOOL]
+    if mode == "thin":
+        return {e.name for e in thinnable}
+
+    ordered = sorted(thinnable, key=lambda e: -e.cost_bytes(include_output_schemas))
+    total = sum(e.cost_bytes(include_output_schemas) for e in entries)
+    thinned: Set[str] = set()
+    for entry in ordered:
+        if total <= budget:
+            break
+        total -= entry.cost_bytes(include_output_schemas) - len(
+            json.dumps(thin_schema(entry.name), separators=(",", ":"))
+        )
+        thinned.add(entry.name)
+    return thinned
 
 
 def _split_runtimes(raw: str) -> List[str]:

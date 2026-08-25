@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 try:
     # NOTE: absolute imports, so this is the MCP SDK on sys.path and not the
@@ -64,12 +64,16 @@ from standard_quant_tools.error import QuantError
 from standard_quant_tools.mcp import prompts as _prompts
 from standard_quant_tools.mcp import resources as _resources
 from standard_quant_tools.mcp.catalog import (
+    SCHEMA_FETCH_TOOL,
     ToolEntry,
     build_catalog,
     category_costs,
     dispatch_for,
+    plan_detail,
     runtime_costs,
     select,
+    thin_description,
+    thin_schema,
 )
 from standard_quant_tools.mcp.config import ServerConfig, report, resolve
 
@@ -110,8 +114,26 @@ def _annotations(entry: ToolEntry) -> types.ToolAnnotations:
     )
 
 
-def _to_mcp_tool(entry: ToolEntry, include_output_schema: bool) -> types.Tool:
+def _to_mcp_tool(
+    entry: ToolEntry, include_output_schema: bool, thin: bool = False
+) -> types.Tool:
     description = entry.description
+    if thin:
+        # One line of purpose, and an explicit instruction to go and fetch
+        # the rest. An agent that skips that step and guesses gets a clean
+        # rejection from `extra="forbid"` rather than a silent default, but
+        # a rejected call is still a wasted turn -- so the instruction is in
+        # the description AND in the schema, not only one of them.
+        return types.Tool(
+            name=entry.name,
+            description=(
+                f"{thin_description(description)} "
+                f"[args: {SCHEMA_FETCH_TOOL}({entry.name!r})]"
+            ),
+            inputSchema=thin_schema(entry.name),
+            outputSchema=None,
+            annotations=_annotations(entry),
+        )
     if entry.name in LONG_RUNNING or entry.name in SCALES_WITH_INPUT:
         description = (
             f"{description}\n\nRUNTIME: this tool can take minutes on a large "
@@ -143,9 +165,29 @@ class StandardToolsServer:
         ]
         if not config.enable_long_running:
             selected = [e for e in selected if e.name not in LONG_RUNNING]
+
+        self.thinned: Set[str] = plan_detail(
+            selected,
+            mode=config.tool_detail,
+            budget=config.detail_budget,
+            include_output_schemas=config.include_output_schemas,
+        )
+        if self.thinned and SCHEMA_FETCH_TOOL not in {e.name for e in selected}:
+            # A thin entry says "call describe_tool for the schema". If the
+            # chosen scope does not contain describe_tool, that instruction
+            # is unfollowable and every thinned tool becomes uncallable. It
+            # is 700 bytes and it belongs to `meta`, so rather than force
+            # every scoped deployment to remember `+meta`, the server adds
+            # it and says so at startup. Scope is still real: this is the
+            # one tool whose absence would make the listing itself a lie.
+            fetch = catalog.get(SCHEMA_FETCH_TOOL)
+            if fetch is not None:
+                selected = sorted(selected + [fetch], key=lambda e: e.name)
+
         self.entries: Dict[str, ToolEntry] = {e.name: e for e in selected}
         self.tools: List[types.Tool] = [
-            _to_mcp_tool(e, config.include_output_schemas) for e in selected
+            _to_mcp_tool(e, config.include_output_schemas, thin=e.name in self.thinned)
+            for e in selected
         ]
         self.catalog = catalog
 

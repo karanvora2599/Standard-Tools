@@ -44,6 +44,8 @@ from standard_quant_tools.mcp.catalog import (
     ALL_CATEGORIES,
     ALL_RUNTIMES,
     DEFAULT_CATEGORIES,
+    DEFAULT_DETAIL_BUDGET,
+    DETAIL_MODES,
     RUNTIME_CATEGORY_MAP,
     categories_for_runtimes,
 )
@@ -92,6 +94,13 @@ class ServerConfig:
     cache_dir: Optional[Path] = None
     inline_limit_bytes: int = DEFAULT_INLINE_LIMIT
     include_output_schemas: bool = False
+    #: How tools are advertised: 'full' sends every schema up
+    #: front, 'auto' thins the most expensive until the surface
+    #: fits `detail_budget`, 'thin' thins everything. A thinned
+    #: tool is listed and callable; its ARGUMENTS come from
+    #: describe_tool instead of from the listing.
+    tool_detail: str = "full"
+    detail_budget: int = DEFAULT_DETAIL_BUDGET
     enable_long_running: bool = False
     transport: str = "stdio"
     host: str = "127.0.0.1"
@@ -150,6 +159,31 @@ def build_parser() -> argparse.ArgumentParser:
             "narrow further WITHIN the chosen runtime. Scoping here also "
             "scopes execution -- the server refuses to dispatch a tool it "
             "does not serve. Default: every runtime."
+        ),
+    )
+    parser.add_argument(
+        "--tool-detail",
+        choices=DETAIL_MODES,
+        default="full",
+        help=(
+            "How much of each tool to advertise. 'full' (default) sends "
+            "every input schema at connect, which is what this server has "
+            "always done. 'auto' sends the whole schema for most tools and "
+            "thins the most expensive ones until the surface fits "
+            "--detail-budget; a thinned tool is still listed and still "
+            "callable, but an agent must call describe_tool for its "
+            "arguments first. 'thin' thins everything, which is the "
+            "cheapest and the least safe -- a schema an agent has not read "
+            "is one it will guess at."
+        ),
+    )
+    parser.add_argument(
+        "--detail-budget",
+        type=int,
+        default=DEFAULT_DETAIL_BUDGET,
+        help=(
+            "Byte target for --tool-detail auto. Default: "
+            f"{DEFAULT_DETAIL_BUDGET:,}."
         ),
     )
     parser.add_argument(
@@ -508,6 +542,8 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
         runtimes=tuple(runtimes),
         inline_limit_bytes=args.inline_limit,
         include_output_schemas=bool(args.output_schemas),
+        tool_detail=args.tool_detail,
+        detail_budget=args.detail_budget,
         enable_long_running=bool(args.enable_long_running),
         warnings=tuple(warnings),
         **transport,
@@ -554,6 +590,12 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
         f"  tools exposed     : {tool_count}",
         f"  context cost      : {schema_bytes_total / 1024:.1f} KB "
         f"(~{schema_bytes_total // 4:,} tokens at connect)",
+        f"  tool detail       : {config.tool_detail}"
+        + (
+            f" (budget {config.detail_budget:,} B)"
+            if config.tool_detail == "auto"
+            else ""
+        ),
         f"  output schemas    : {'declared' if config.include_output_schemas else 'omitted (structuredContent still sent)'}",
         f"  inline limit      : {config.inline_limit_bytes} bytes",
         f"  long-running tools: {'enabled' if config.enable_long_running else 'hidden'}",

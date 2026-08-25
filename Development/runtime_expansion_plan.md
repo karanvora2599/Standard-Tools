@@ -95,7 +95,8 @@ boundary too, because no single client ever needs more than one or two.
   actually pays. Set it at **72 KB**, which clears the largest projected
   runtime (`research`, 30 tools, ~64 KB eager) with real headroom while
   still refusing a runtime that has quietly become the whole library again.
-  Phase 0b lowers what that cap binds on — the same runtime is 21 KB tiered
+  Phase 0b lowers what that cap binds on — `auto` holds every runtime
+  under its own byte target
   — so treat 72 KB as the guard on the eager path and re-derive it once
   tiering ships. Note the direction either way: a *per-runtime* cap
   constrains sprawl inside a runtime and no longer constrains the number of
@@ -140,38 +141,72 @@ needs one is built and tested; the MCP server simply does not use it, and
 instead ships all 82 schemas up front on the assumption the agent will need
 every one. It will not. A session calls a handful.
 
-Three exposure models, at the 151 tools of section 9:
+Three exposure models, at the 151 tools of section 9. **These are measured
+now, not projected** — Phase 0b shipped, and the numbers below come from the
+implementation rather than from an estimate:
 
-| model | 64 KB | **21 KB** |
+| model | `research` (30) | all nine (151) |
 |---|---:|---:|
-| eager — every schema up front (today) | 64 KB | 322 KB |
-| **tiered** — 8 full, the tail thin | **21 KB** | **168 KB** |
-| thin — name + one line, `describe_tool` on use | 6 KB | 28 KB |
+| eager — every schema up front | 64 KB | 322 KB |
+| tiered — a fixed 8 full, the rest thin | 28 KB | 195 KB |
+| **`auto` — thin the most expensive until it fits** | **≤32 KB** | n/a |
+| thin — everything thin | 16 KB | 78 KB |
 
-A thin entry is ~165 B against ~1,869 B eager: **91% smaller**. The whole
-151-tool surface, every runtime at once, fits in 28 KB — comfortably inside
-a ceiling that today's 82 tools already strain.
+A thin entry measures **531 bytes against 2,184 eager: 76% smaller.**
 
-**Take the tiered row, not the cheapest one.** The thin column is the better
-number and the worse design. Runtimes exist to stop an agent inventing a
-tool; a schema an agent has not read is a schema it will guess at, and
-guessing arguments is the same failure one layer down — `extra="forbid"`
-turns it into a clean rejection rather than a silent default, but a rejected
-call is still a wasted turn. Tiering bounds that: the tools a runtime is
-*for* stay fully described and zero-round-trip, and only the long tail costs
-a lookup before first use. 168 KB is then the whole projected library inside
-the existing ceiling, with runtime scoping cutting the actual session to 21.
+> **Correction.** This section originally projected 165 B per thin entry and
+> concluded that a fixed 8-tool tier put the whole library inside the
+> ceiling at 168 KB. Both were wrong. 165 B counted a name and one line of
+> text and ignored the MCP envelope — annotations are 125 B a tool on their
+> own, and the "call `describe_tool`" instruction has to appear in the
+> description *and* the schema, because a client may show the model only
+> one of them. The real figure is 531 B, and a fixed 8-tool tier lands at
+> 195 KB, still 11% **over** the ceiling rather than inside it.
 
-Two things to settle with measurement rather than argument:
+That correction is why the shipped mode is **`auto` rather than a fixed
+tier**. A fixed 8 is a guess that happens to be wrong at this surface size
+and would be wrong again at a different one. `auto` takes a byte target and
+thins the most expensive tools until the runtime fits, which:
 
-- **Which eight are the primary tier** should come from `explain_decision`
-  call frequency, not from taste. The audit log already records it.
-- **Whether the tail costs accuracy** needs an eval — thin-listed tools
-  called correctly on first attempt versus fully-described ones. If the tail
-  degrades, the tier grows; if it does not, it shrinks. Do not ship a fixed
-  split and call the question answered.
+- **minimises round trips rather than bytes.** A runtime's cost is
+  concentrated in a few large schemas — `modeling`'s top three are 65% of
+  it — so thinning three tools buys what thinning fifteen cheap ones would
+  not. Every tool left described is one an agent calls without a lookup.
+- **costs nothing where nothing is needed.** `research`, `portfolio` and
+  `meta` already fit the 32 KB target, so `auto` thins **zero** tools in
+  them. `backtest` thins 8 and `modeling` 1.
+- **stays correct as the surface grows.** The total across nine runtimes is
+  not a number to optimise, because no client is served it. The per-runtime
+  number is, and `auto` holds that by construction.
+
+**Take `auto`, not `thin`.** The thin column is the better number and the
+worse design. Runtimes exist to stop an agent inventing a tool; a schema an
+agent has not read is one it will guess at, and guessing arguments is the
+same failure one layer down — `extra="forbid"` turns it into a clean
+rejection rather than a silent default, but a rejected call is still a
+wasted turn.
+
+One thing the implementation had to add that the plan did not anticipate: a
+thin entry says *call `describe_tool` for the arguments*, and `describe_tool`
+lives in `meta`. Under `--runtime backtest --tool-detail thin` that
+instruction is unfollowable and every thinned tool becomes uncallable. The
+server therefore **injects `describe_tool` whenever anything is thinned**,
+and never thins it. That is the one place scope is widened automatically,
+and it is justified by the alternative being a listing that lies.
+
+Still to settle with measurement rather than argument:
+
+- **Whether the tail costs accuracy** needs an eval — thinned tools called
+  correctly on first attempt versus fully-described ones. If the tail
+  degrades, lower the budget; if it does not, raise it. The mechanism is now
+  a single number rather than a code change.
+- **Call frequency would be a better ranking than cost.** The audit log
+  records it and nothing has run enough to have one yet. `plan_detail` takes
+  the ranking as an ordering step, so frequency can replace cost later
+  without touching anything else.
 
 This is the only work in the plan that makes the *existing* surface cheaper
+
 rather than just accommodating a larger one. It should ship with Phase 0.
 
 ---
@@ -652,7 +687,7 @@ domain.
 | `list_execution_backends` | **Cut** | Already covered. `explain_decision` reports the execution path per call — the form that actually matters — and `describe_data_capabilities` covers the rest. |
 | One tool per pricing model | **Cut** | Declarative spec, one tool. Same rule as estimators and strategies. |
 | 20 reference kinds up front | **Trim** | Ship each kind with its producer. A kind with no producer documents an intention, not a capability. |
-| Thin-everything exposure (28 KB) | **Rejected** | The cheapest number and the worst design. A schema an agent has not read is one it will guess at — the same failure runtimes exist to prevent, one layer down. Take the tiered row at 168 KB. |
+| Thin-everything exposure | **Rejected** | The cheapest number and the worst design. A schema an agent has not read is one it will guess at — the same failure runtimes exist to prevent, one layer down. `--tool-detail auto` thins only what the budget requires. |
 | Raising the MCP ceiling a third time | **No** | Argued up once (150k → 180k) and trimmed against twice. A limit that moves whenever it binds is not a limit, and §2 removes the need. |
 | `streaming` as a firm phase | **Defer** | Keep it last and optional. The only phase that requires changing an invariant the rest of the architecture rests on. |
 
@@ -664,26 +699,31 @@ Nine runtimes, `streaming` optional as a tenth, and **151 tools** — none of
 which any single agent ever sees, because exposure moved to the runtime in
 Phase 0.
 
-| runtime | now | new | out | in | after | eager | tiered |
+| runtime | now | new | out | in | after | eager | `auto` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `research` | 23 | +9 | −2 | — | **30** | 64 KB | **21 KB** |
-| `backtest` | 21 | +7 | — | — | **28** | 60 KB | 21 KB |
-| `meta` | 14 | +4 | — | — | **18** | 38 KB | 19 KB |
-| `modeling` | 14 | +2 | −2 | — | **14** | 30 KB | 18 KB |
-| `data` | — | +13 | — | — | **13** | 28 KB | 18 KB |
-| `portfolio` | 10 | +5 | −3 | — | **12** | 26 KB | 18 KB |
-| `feature_lab` | — | +10 | — | +2 | **12** | 26 KB | 18 KB |
-| `microstructure` | — | +9 | — | +3 | **12** | 26 KB | 18 KB |
-| `derivatives` | — | +10 | — | +2 | **12** | 26 KB | 18 KB |
-| | **82** | **+69** | −7 | +7 | **151** | 322 KB | 168 KB |
+| `research` | 23 | +9 | −2 | — | **30** | 64 KB | ≤32 KB |
+| `backtest` | 21 | +7 | — | — | **28** | 60 KB | ≤32 KB |
+| `meta` | 14 | +4 | — | — | **18** | 38 KB | ≤32 KB |
+| `modeling` | 14 | +2 | −2 | — | **14** | 30 KB | ≤32 KB |
+| `data` | — | +13 | — | — | **13** | 28 KB | ≤32 KB |
+| `portfolio` | 10 | +5 | −3 | — | **12** | 26 KB | ≤32 KB |
+| `feature_lab` | — | +10 | — | +2 | **12** | 26 KB | ≤32 KB |
+| `microstructure` | — | +9 | — | +3 | **12** | 26 KB | ≤32 KB |
+| `derivatives` | — | +10 | — | +2 | **12** | 26 KB | ≤32 KB |
+| | **82** | **+69** | −7 | +7 | **151** | 322 KB | — |
 
-Read the tiered column down the page: **18–21 KB regardless of whether the
-runtime holds 12 tools or 30.** That is not a coincidence — under tiering
-the fixed primary tier dominates and the tail is nearly free, so session
-cost decouples from runtime size. It is the property that makes a 30-tool
-`research` and a 12-tool `derivatives` cost the same to hold, and it is why
-the coarse-runtime rule in section 3 can stay a design judgement instead of
-becoming a budget negotiation.
+The `auto` column has no total, and that is the point rather than an
+omission. `auto` takes a per-runtime byte target and thins the most
+expensive tools until that runtime fits, so **every row is under the target
+by construction, whatever the row holds.** A 30-tool `research` and a
+12-tool `derivatives` both come in under 32 KB; the first pays a few
+lookups for it and the second pays none. Session cost decouples from
+runtime size, which is why the coarse-runtime rule in section 3 stays a
+design judgement instead of becoming a budget negotiation.
+
+The `thin` column is the floor, if every schema were fetched on demand: 78
+KB for the whole projected library, against a ceiling of 176. Nobody is
+served that either.
 
 The number that matters is not the total. It is the **average runtime: 16.4
 tools today, 16.8 after.** It holds flat, and that is the whole test of
@@ -701,12 +741,13 @@ Two consequences worth stating plainly:
   `--categories screener` has always been for. A 30-tool runtime an agent
   can further narrow is a different thing from a 30-tool flat list it
   cannot.
-- **151 tools is 322 KB eagerly, 83% past the ceiling — or 168 KB tiered,
-  inside it.** The eager ceiling is 82.4 tools and the library has 82, so
-  the eager path has already run out: the 83rd tool fails the budget test.
-  The tiered number is what Phase 0b buys: the entire projected library fits the
-  existing ceiling, and runtime scoping then cuts a real session to 21 KB.
-  Phase 0 makes the surface safe to grow; Phase 0b makes it affordable.
+- **151 tools is 322 KB eagerly, 83% past the ceiling.** The eager ceiling
+  is 82.4 tools and the library has 82, so the eager path has already run
+  out: the 83rd tool fails the budget test. Phase 0b removes that as the
+  binding constraint — not by making the total fit, which no client pays
+  anyway, but by making each *runtime* fit a target it holds by
+  construction. Phase 0 makes the surface safe to grow; Phase 0b makes it
+  affordable, and neither one is about the total.
 
 **Start with three, in this order:**
 

@@ -9,6 +9,51 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — `--tool-detail`: send the schema when the agent needs it
+
+`sqt-mcp --runtime backtest --tool-detail auto` serves the same 21 tools for
+40 KB instead of 65. A **thinned** tool is listed and callable; what it
+loses is its argument schema, replaced by one line of purpose and an
+instruction to call `describe_tool`. Measured: 531 bytes against 2,184,
+**76% smaller**.
+
+The observation this rests on is that nothing new was needed.
+`describe_tool` already existed in `meta`, already answered for tools in any
+runtime, and already returned exactly the schema a thin listing omits. The
+server was shipping all 82 schemas at connect on the assumption an agent
+would need every one; a session calls a handful.
+
+`auto` thins the **most expensive** tools and stops as soon as the runtime
+fits `--detail-budget` (32 KB default). A runtime's cost is concentrated in
+a few large schemas — `modeling`'s top three are 65% of it — so this thins
+one tool in modeling and seven in backtest where a uniform policy would thin
+all of them, and every tool left
+described is one an agent calls without a round trip. `research`,
+`portfolio` and `meta` already fit and are left entirely alone.
+
+- `--tool-detail {full,auto,thin}`, default `full` — nothing changes for an
+  existing invocation, and a test asserts that.
+- `--detail-budget BYTES` for `auto`.
+- `catalog.plan_detail()`, `thin_schema()`, `thin_description()`.
+- The server injects `describe_tool` whenever anything is thinned, and never
+  thins it. A thin entry says "call `describe_tool`"; under
+  `--runtime backtest` that tool is not in scope, so without this the
+  instruction is unfollowable and every thinned tool is uncallable.
+
+**Thinning changes the advertisement and nothing else.** Arguments are
+unchanged and validated by the same model, and `extra="forbid"` still
+rejects a guessed name rather than defaulting it. The "call `describe_tool`"
+instruction is deliberately duplicated in the description and the schema: a
+client may show a model only one of them, and a model shown an empty `{}`
+schema concludes the tool takes no arguments and burns a turn proving
+otherwise.
+
+`auto` rather than a fixed primary tier because the fixed tier was measured
+and found wrong — 8-full-plus-thin lands the projected 151-tool library at
+195 KB, still over the ceiling, where a budget-driven rule holds every
+runtime under its target by construction.
+
+
 ### Added — the MCP server is scoped by runtime, not just by category
 
 `sqt-mcp --runtime research` serves one runtime. `--runtime research+meta`
