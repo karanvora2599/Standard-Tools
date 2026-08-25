@@ -3024,7 +3024,9 @@ class EstimateTradeCostInput(BaseModel):
             "buy/sell rates) — every other model is side-agnostic."
         ),
     )
-    commission_model: Literal["pct", "per_share", "directional", "maker_taker", "none"] = Field(
+    commission_model: Literal[
+        "pct", "per_share", "directional", "maker_taker", "none"
+    ] = Field(
         "pct",
         description=(
             "'pct' rate x notional | 'per_share' rate x shares floored at a "
@@ -3048,7 +3050,9 @@ class EstimateTradeCostInput(BaseModel):
         1.0, ge=0, description="commission_model='per_share': floor per trade."
     )
     buy_rate: float = Field(
-        0.001, ge=0, description="commission_model='directional': fraction charged on buys."
+        0.001,
+        ge=0,
+        description="commission_model='directional': fraction charged on buys.",
     )
     sell_rate: float = Field(
         0.001,
@@ -3059,7 +3063,9 @@ class EstimateTradeCostInput(BaseModel):
         ),
     )
     taker_rate: float = Field(
-        0.0005, ge=0, description="commission_model='maker_taker': fraction taken when crossing."
+        0.0005,
+        ge=0,
+        description="commission_model='maker_taker': fraction taken when crossing.",
     )
     maker_rate: float = Field(
         -0.0001,
@@ -3070,7 +3076,8 @@ class EstimateTradeCostInput(BaseModel):
         ),
     )
     is_maker: bool = Field(
-        False, description="commission_model='maker_taker': did this order provide liquidity?"
+        False,
+        description="commission_model='maker_taker': did this order provide liquidity?",
     )
     spread_model: Literal["fixed_bps", "pct_of_range", "none"] = Field(
         "fixed_bps",
@@ -3109,14 +3116,18 @@ class EstimateTradeCostInput(BaseModel):
     volatility: Optional[float] = Field(
         None, ge=0, description="Per-period return volatility for the impact model."
     )
-    impact_coefficient: float = Field(1.0, ge=0, description="Impact model coefficient.")
+    impact_coefficient: float = Field(
+        1.0, ge=0, description="Impact model coefficient."
+    )
     short_borrow_bps: float = Field(
         0.0,
         ge=0,
         description="Annualized basis points on a short's notional, accrued over holding_days.",
     )
     holding_days: float = Field(
-        1.0, ge=0, description="Days the position is held, for borrow and margin accrual."
+        1.0,
+        ge=0,
+        description="Days the position is held, for borrow and margin accrual.",
     )
     margin_cash: float = Field(
         0.0,
@@ -3289,3 +3300,219 @@ class CompareCostModelsResult(BaseModel):
         ..., description="True when every submitted scenario keeps total_return > 0."
     )
     notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Panel indicators, and follow-ups on a run that already happened
+#
+# Two costs this section removes. The first is per-ticker round trips:
+# get_technical_analysis answers for one symbol, so a 50-name screen was 50
+# calls, while indicators/panel.py already computes the whole universe in
+# one native call and was reachable from no tool.
+#
+# The second is recomputation. run_backtest_compact persists its equity
+# curve and trade log and hands back URIs, but every follow-up tool took a
+# symbol and a strategy and RE-RAN the backtest to answer a question about
+# a run that was already on disk. That is slower, and it is not the same
+# run -- a provider revision between the two calls silently diagnoses
+# something other than what was reported.
+# ──────────────────────────────────────────────
+
+
+class TechnicalPanelInput(BaseModel):
+    tickers: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description=(
+            "Universe to compute across. One fetch and one native call for "
+            "the whole set, so this is much cheaper than a "
+            "get_technical_analysis call per ticker."
+        ),
+    )
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    indicators: List[
+        Literal["rsi", "adx", "atr", "bollinger_bands", "stochastic_oscillator"]
+    ] = Field(
+        ["rsi"],
+        min_length=1,
+        description=(
+            "Any of rsi, adx, atr, bollinger_bands, stochastic_oscillator — "
+            "the set indicators/panel.py computes natively."
+        ),
+    )
+    rsi_period: int = Field(14, gt=0, le=1000)
+    adx_period: int = Field(14, gt=0, le=1000)
+    atr_period: int = Field(14, gt=0, le=1000)
+    bollinger_period: int = Field(20, gt=0, le=1000)
+    bollinger_num_std: float = Field(2.0, gt=0, le=100)
+    stoch_k_period: int = Field(14, gt=0, le=1000)
+    stoch_d_period: int = Field(3, gt=0, le=1000)
+    persist_run_id: Optional[str] = Field(
+        None,
+        description=(
+            "Persist the FULL panel (every bar, not just the latest) as "
+            "Parquet artifacts under this run id and return their URIs. "
+            "Letters, digits, '_' and '-' only. Omit to get the latest-bar "
+            "snapshot alone — the full panel is far too large to return "
+            "inline for any real universe."
+        ),
+    )
+
+    @field_validator("tickers")
+    @classmethod
+    def _no_duplicates(cls, tickers: List[str]) -> List[str]:
+        duplicates = sorted({t for t in tickers if tickers.count(t) > 1})
+        if duplicates:
+            raise ValueError(
+                f"tickers contains duplicates {duplicates}; the panel is keyed "
+                "by ticker, so a repeat collapses and the result would report "
+                "fewer columns than were asked for."
+            )
+        return tickers
+
+
+class TechnicalPanelResult(BaseModel):
+    tickers: List[str]
+    indicators: List[str]
+    as_of: str = Field(..., description="Date of the latest bar in the panel.")
+    n_bars: int
+    latest: Dict[str, Dict[str, float]] = Field(
+        ...,
+        description=(
+            "ticker -> {field: value} at the latest bar. Field names match "
+            "the per-ticker tools exactly (RSI, ADX, DI_Plus, BB_Upper, "
+            "Stoch_K, ...), so nothing new has to be learned to read this."
+        ),
+    )
+    incomplete_tickers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Tickers whose latest value is NaN for at least one requested "
+            "indicator — usually too few bars for the lookback. Reported "
+            "rather than dropped: a silently missing ticker looks like a "
+            "screen that legitimately excluded it."
+        ),
+    )
+    calendar_start: str = Field(
+        ...,
+        description=(
+            "First bar of the SHARED calendar the panel was computed on — "
+            "the intersection of every ticker's history, not the requested "
+            "start date. They differ whenever one ticker is younger than "
+            "the window."
+        ),
+    )
+    calendar_limited_by: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Tickers whose own first bar is later than the earliest "
+            "available in the universe, and which therefore truncate the "
+            "shared calendar for EVERY ticker. A recent listing here can "
+            "collapse a multi-year request to a handful of bars and turn "
+            "every other ticker's indicator to NaN — drop it, or shorten "
+            "the window deliberately."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+    artifact_uris: Dict[str, str] = Field(
+        default_factory=dict,
+        description="indicator -> Parquet URI, when persist_run_id was given.",
+    )
+    execution_path: str = Field(
+        ..., description="'C++' or 'per-ticker' — which panel path actually ran."
+    )
+
+
+class DescribeArtifactInput(BaseModel):
+    uri: str = Field(
+        ...,
+        description=(
+            "An artifact URI returned by a tool (equity_curve_uri, "
+            "trades_uri, ...). Must resolve inside SQT_RUNS_DIR."
+        ),
+    )
+    preview_rows: int = Field(
+        5,
+        ge=0,
+        le=50,
+        description=(
+            "Rows to include from each end. The middle is never returned — "
+            "an equity curve has thousands of bars and this tool exists to "
+            "describe one, not to move it into the conversation."
+        ),
+    )
+
+
+class DescribeArtifactResult(BaseModel):
+    uri: str
+    rows: int
+    columns: List[str]
+    index_name: Optional[str] = None
+    index_start: Optional[str] = None
+    index_end: Optional[str] = None
+    content_hash: str = Field(
+        ...,
+        description=(
+            "SHA-256 of the file's bytes. Two tools reading the same URI "
+            "can confirm they saw the same artifact, and a re-run that "
+            "changed it is visible without diffing the contents."
+        ),
+    )
+    head: List[Dict[str, Any]] = Field(default_factory=list)
+    tail: List[Dict[str, Any]] = Field(default_factory=list)
+    column_summary: Dict[str, Dict[str, float]] = Field(
+        default_factory=dict,
+        description="Per numeric column: min, max, mean, and the NaN count.",
+    )
+
+
+class DrawdownTableInput(BaseModel):
+    equity_curve_uri: str = Field(
+        ...,
+        description=(
+            "URI of a persisted equity curve — run_backtest_compact's "
+            "equity_curve_uri. Reading the run that happened is both cheaper "
+            "and more honest than re-running the backtest to describe it."
+        ),
+    )
+    min_depth: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Drop episodes shallower than this fraction (0.05 = 5%). 0 keeps "
+            "every episode, including the one-bar noise that dominates a "
+            "long curve by count while contributing nothing to risk."
+        ),
+    )
+    max_episodes: int = Field(
+        50,
+        gt=0,
+        le=500,
+        description="Cap on returned episodes, deepest first.",
+    )
+
+
+class DrawdownTableResult(BaseModel):
+    equity_curve_uri: str
+    n_bars: int
+    n_episodes_total: int = Field(
+        ..., description="Episodes found before min_depth and max_episodes filtering."
+    )
+    n_episodes_returned: int
+    max_drawdown: float
+    episodes: List[DrawdownEpisode]
+    currently_underwater: bool = Field(
+        ...,
+        description=(
+            "True when the curve ends inside a drawdown that never "
+            "recovered. That last episode's recovery_bars is null, and its "
+            "duration is a floor rather than a measurement."
+        ),
+    )
+    time_underwater_pct: float = Field(
+        ...,
+        description="Fraction of bars spent below a prior peak, across all episodes.",
+    )

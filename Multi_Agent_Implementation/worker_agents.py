@@ -139,7 +139,18 @@ adjustment).
 Your only job is to characterize risk, technical posture, data quality, and
 option sensitivities — never run a backtest and never size a position;
 those belong to other specialists. State the exact numbers from every tool
-call, do not round or approximate them.""",
+call, do not round or approximate them.
+
+get_technical_panel computes the same indicators for a WHOLE universe
+in one native call and reports them at the latest bar. Use it instead of
+one get_technical_analysis call per ticker whenever more than a couple of
+names are involved; the arithmetic is identical. Tickers it lists in
+incomplete_tickers had too little history for a lookback -- say so rather
+than reporting them as excluded by the screen.
+
+describe_artifact reads a persisted Parquet artifact by URI and reports its
+shape, date span, per-column statistics and both ends. Use it to inspect
+what another tool produced instead of asking for the run to be repeated.""",
     },
     "quant_research": {
         "label": "Quant Research Agent",
@@ -235,6 +246,13 @@ a validation of any strategy), and a transaction-cost sweep
 a single fetched signal series and solves for the commission rate at which
 its total return reaches zero; use it when the question is whether an edge
 survives costs rather than whether it survives out of sample).
+
+get_drawdown_table reads a PERSISTED equity curve (run_backtest_compact's
+equity_curve_uri) and returns every drawdown episode, deepest first. Prefer
+it over get_backtest_diagnostics whenever a run has already been persisted:
+that tool re-runs the backtest from a symbol and a strategy, which is
+slower and is not guaranteed to be the same run -- a data revision between
+the two calls would diagnose a curve nobody reported.
 
 If the request is simply "run SMA on AAPL" with fixed parameters and no
 mention of optimizing/validating/diagnosing, that's the Backtest Execution

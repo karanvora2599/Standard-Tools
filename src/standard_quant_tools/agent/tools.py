@@ -4,6 +4,7 @@ All inputs/outputs use Pydantic models for clean JSON serialization.
 """
 
 import datetime
+import hashlib
 import logging
 import math
 import numbers
@@ -12,6 +13,7 @@ import time
 import uuid
 from collections import Counter
 from itertools import combinations
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,11 @@ from standard_quant_tools.agent.models import (
     DataCapabilitiesResult,
     DataQualityReportInput,
     DataQualityReportResult,
+    DescribeArtifactInput,
+    DescribeArtifactResult,
     DrawdownEpisode,
+    DrawdownTableInput,
+    DrawdownTableResult,
     EstimateTradeCostInput,
     EstimateTradeCostResult,
     ExposureDiagnostics,
@@ -85,14 +91,14 @@ from standard_quant_tools.agent.models import (
     OptionGreeks,
     OptionPricingInput,
     OptionPricingResult,
-    PCAInput,
-    PCAResult,
     PairFailure,
     PairResult,
     PairScannerInput,
     PairScannerResult,
     PairTradeBacktestInput,
     PairTradeBacktestResult,
+    PCAInput,
+    PCAResult,
     PerformanceSummary,
     PortfolioInput,
     PortfolioOptimizationInput,
@@ -134,6 +140,8 @@ from standard_quant_tools.agent.models import (
     TailRiskInput,
     TailRiskResult,
     TechnicalInput,
+    TechnicalPanelInput,
+    TechnicalPanelResult,
     TechnicalResult,
     Trade,
     TradeCostLeg,
@@ -170,7 +178,16 @@ from standard_quant_tools.analysis.options import (
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
-from standard_quant_tools.backtest.artifacts import save_artifact
+from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
+from standard_quant_tools.backtest.constraints import (
+    capacity_report as _capacity_report,
+)
+from standard_quant_tools.backtest.constraints import (
+    days_to_liquidate as _days_to_liquidate,
+)
+from standard_quant_tools.backtest.constraints import (
+    sector_exposure as _sector_exposure,
+)
 from standard_quant_tools.backtest.costs import (
     directional_commission,
     fixed_bps_spread,
@@ -181,15 +198,6 @@ from standard_quant_tools.backtest.costs import (
     per_share_commission,
     percentage_commission,
     short_borrow_cost,
-)
-from standard_quant_tools.backtest.constraints import (
-    capacity_report as _capacity_report,
-)
-from standard_quant_tools.backtest.constraints import (
-    days_to_liquidate as _days_to_liquidate,
-)
-from standard_quant_tools.backtest.constraints import (
-    sector_exposure as _sector_exposure,
 )
 from standard_quant_tools.backtest.engine import backtest_grid, run_strategy
 from standard_quant_tools.backtest.liquidity import (
@@ -250,6 +258,9 @@ from standard_quant_tools.data.quality import (
 from standard_quant_tools.data.yfinance_provider import YFinanceProvider
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
+from standard_quant_tools.indicators.panel import (
+    technical_indicators_panel as _technical_indicators_panel,
+)
 from standard_quant_tools.indicators.trend import (
     adx,
     ema,
@@ -261,6 +272,7 @@ from standard_quant_tools.indicators.trend import (
 from standard_quant_tools.indicators.volatility import atr, bollinger_bands, wilder_atr
 from standard_quant_tools.indicators.volume import mfi, obv, vwap
 from standard_quant_tools.metrics.diagnostics import (
+    drawdown_periods,
     exposure_stats,
     top_n_drawdowns,
     trade_excursions,
@@ -270,6 +282,7 @@ from standard_quant_tools.metrics.return_metrics import annualized_volatility, c
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     cvar,
+    drawdown_series,
     evt_tail_risk,
     information_ratio,
     max_drawdown,
@@ -316,6 +329,27 @@ except ImportError:
 # while the fused call's ATR field is Wilder-smoothed -- a different
 # algorithm, not just a faster path to the same numbers.
 _FUSABLE_INDICATORS = {"rsi", "adx", "bollinger", "stochastic"}
+
+
+def _jsonable(value: Any) -> Any:
+    """One artifact cell as a JSON-safe scalar.
+
+    Parquet round trips Timestamps and numpy scalars, neither of which
+    survives json.dumps. Stringifying timestamps rather than converting to
+    epoch keeps the preview readable, which is the only thing a preview is
+    for.
+    """
+    if isinstance(value, pd.Timestamp):
+        return str(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if value is not None and isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 #: Provider classes by source name, for describing one that cannot be
@@ -4315,6 +4349,322 @@ def get_backtest_diagnostics(
 
 
 # ──────────────────────────────────────────────────────────────────
+# Panel indicators, and follow-ups on a run that already happened
+# ──────────────────────────────────────────────────────────────────
+
+
+def get_technical_panel(input_data: TechnicalPanelInput) -> TechnicalPanelResult:
+    """
+    Indicators for a whole universe in one call, reported at the latest bar.
+
+    `get_technical_analysis` answers for one symbol, so screening fifty
+    names cost fifty round trips while `indicators/panel.py` was already
+    computing the entire universe in a single native call and was reachable
+    from no tool. The arithmetic is identical to looping the per-ticker
+    functions — the panel path feeds the same kernels — so this is the same
+    answer, not an approximation of it.
+
+    Only the LATEST bar is returned inline. A universe times a history is a
+    matrix, and returning it would put megabytes into a conversation that
+    then carries them for every subsequent turn; pass `persist_run_id` to
+    write the full panel to Parquet and get URIs back instead.
+
+    Tickers whose latest value is NaN for a requested indicator are listed
+    in `incomplete_tickers` rather than dropped. Dropping them would make a
+    ticker with too little history look identical to one a screen
+    legitimately excluded.
+    """
+    logger.debug(
+        "[technical_panel] tickers=%d indicators=%s",
+        len(input_data.tickers),
+        input_data.indicators,
+    )
+    panel = fetch_ohlcv_panel_sync(
+        input_data.tickers, input_data.start_date, input_data.end_date
+    )
+    missing = [t for t in input_data.tickers if t not in panel or panel[t].empty]
+    if missing:
+        raise ValidationError(
+            f"no OHLCV returned for {missing}. The panel needs bars for every "
+            "requested ticker — a partial panel would silently change which "
+            "universe the indicators describe."
+        )
+
+    frames = _technical_indicators_panel(
+        panel,
+        input_data.indicators,
+        rsi_period=input_data.rsi_period,
+        adx_period=input_data.adx_period,
+        atr_period=input_data.atr_period,
+        bollinger_period=input_data.bollinger_period,
+        bollinger_num_std=input_data.bollinger_num_std,
+        stoch_k_period=input_data.stoch_k_period,
+        stoch_d_period=input_data.stoch_d_period,
+    )
+
+    # The panel is computed on the bars every ticker SHARES, so one young
+    # ticker silently shortens the window for all of them. Work out who
+    # bounds it before the indicators come back as unexplained NaNs.
+    first_bars = {t: panel[t].index[0] for t in input_data.tickers}
+    earliest = min(first_bars.values())
+    shared_start = max(first_bars.values())
+    limited_by = sorted(t for t, first in first_bars.items() if first > earliest)
+    notes: List[str] = []
+
+    latest: Dict[str, Dict[str, float]] = {t: {} for t in input_data.tickers}
+    incomplete: set = set()
+    n_bars = 0
+    as_of = ""
+    for name, frame in frames.items():
+        if frame.empty:
+            continue
+        n_bars = max(n_bars, int(len(frame)))
+        as_of = (
+            str(frame.index[-1].date())
+            if hasattr(frame.index[-1], "date")
+            else str(frame.index[-1])
+        )
+        row = frame.iloc[-1]
+        if isinstance(frame.columns, pd.MultiIndex):
+            for ticker, field in frame.columns:
+                value = row[(ticker, field)]
+                if pd.isna(value):
+                    incomplete.add(str(ticker))
+                    continue
+                latest.setdefault(str(ticker), {})[str(field)] = round(float(value), 6)
+        else:
+            # Single-column indicators are one column per ticker; label the
+            # field with the indicator's own uppercase name so "rsi" reads
+            # as RSI, matching get_technical_analysis's vocabulary.
+            field = name.upper()
+            for ticker in frame.columns:
+                value = row[ticker]
+                if pd.isna(value):
+                    incomplete.add(str(ticker))
+                    continue
+                latest.setdefault(str(ticker), {})[field] = round(float(value), 6)
+
+    artifact_uris: Dict[str, str] = {}
+    if input_data.persist_run_id is not None:
+        for name, frame in frames.items():
+            if frame.empty:
+                continue
+            to_save = frame
+            if isinstance(frame.columns, pd.MultiIndex):
+                # Parquet has no MultiIndex column concept; flatten to
+                # "TICKER::FIELD" so the round trip is lossless and the
+                # separator cannot collide with a ticker or a field name.
+                to_save = frame.copy()
+                to_save.columns = [f"{t}::{f}" for t, f in frame.columns]
+            artifact_uris[name] = save_artifact(
+                to_save, input_data.persist_run_id, f"panel_{name}", overwrite=True
+            )
+
+    from standard_quant_tools.indicators import panel as _panel_module
+
+    execution_path = (
+        "C++"
+        if (_panel_module.HAS_CPP and _panel_module._cpp_core is not None)
+        else "per-ticker"
+    )
+    longest_lookback = max(
+        (
+            input_data.rsi_period if "rsi" in input_data.indicators else 0,
+            input_data.adx_period if "adx" in input_data.indicators else 0,
+            input_data.atr_period if "atr" in input_data.indicators else 0,
+            (
+                input_data.bollinger_period
+                if "bollinger_bands" in input_data.indicators
+                else 0
+            ),
+            (
+                input_data.stoch_k_period + input_data.stoch_d_period
+                if "stochastic_oscillator" in input_data.indicators
+                else 0
+            ),
+        )
+    )
+    if limited_by:
+        notes.append(
+            f"The shared calendar starts {str(shared_start.date())}, later "
+            f"than the earliest bar available in this universe, because "
+            f"{limited_by} have shorter histories. Indicators are computed "
+            "on the intersection, so those tickers shorten the window for "
+            "every other one too."
+        )
+    if n_bars <= longest_lookback:
+        notes.append(
+            f"The shared calendar is {n_bars} bars but the longest requested "
+            f"lookback is {longest_lookback}, so no indicator can have "
+            "warmed up. Every value here is NaN for a reason that is about "
+            "the calendar, not the tickers."
+        )
+
+    return TechnicalPanelResult(
+        tickers=input_data.tickers,
+        indicators=list(input_data.indicators),
+        as_of=as_of,
+        n_bars=n_bars,
+        latest=latest,
+        incomplete_tickers=sorted(incomplete),
+        calendar_start=(
+            str(shared_start.date())
+            if hasattr(shared_start, "date")
+            else str(shared_start)
+        ),
+        calendar_limited_by=limited_by,
+        notes=notes,
+        artifact_uris=artifact_uris,
+        execution_path=execution_path,
+    )
+
+
+def describe_artifact(input_data: DescribeArtifactInput) -> DescribeArtifactResult:
+    """
+    What is in a persisted artifact, without moving it into the conversation.
+
+    Tools that write Parquet hand back a URI, and until now nothing could
+    read one: the only way to learn what a run produced was to re-run it.
+    This reports the shape, the date span, per-column summary statistics and
+    the two ends of the frame — enough to decide what to do next.
+
+    The middle is never returned. `preview_rows` caps each end because the
+    failure mode this tool exists to avoid is a five-year equity curve
+    entering a client's context and taxing every turn after it.
+
+    `content_hash` is over the file's bytes, so two tools reading the same
+    URI can confirm they saw the same artifact and a re-run that changed it
+    is visible without diffing anything.
+    """
+    frame = load_artifact(input_data.uri)
+    path = Path(input_data.uri)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _edge(rows: pd.DataFrame) -> List[Dict[str, Any]]:
+        records = rows.reset_index().to_dict(orient="records")
+        return [{str(k): _jsonable(v) for k, v in row.items()} for row in records]
+
+    n = input_data.preview_rows
+    head = _edge(frame.head(n)) if n else []
+    tail = _edge(frame.tail(n)) if n and len(frame) > n else []
+
+    summary: Dict[str, Dict[str, float]] = {}
+    for column in frame.columns:
+        series = frame[column]
+        if not pd.api.types.is_numeric_dtype(series):
+            continue
+        valid = series.dropna()
+        summary[str(column)] = {
+            "min": round(float(valid.min()), 6) if not valid.empty else float("nan"),
+            "max": round(float(valid.max()), 6) if not valid.empty else float("nan"),
+            "mean": round(float(valid.mean()), 6) if not valid.empty else float("nan"),
+            "nan_count": float(int(series.isna().sum())),
+        }
+
+    index_start = str(frame.index[0]) if len(frame) else None
+    index_end = str(frame.index[-1]) if len(frame) else None
+    logger.debug(
+        "[describe_artifact] %s rows=%d cols=%d",
+        input_data.uri,
+        len(frame),
+        len(frame.columns),
+    )
+    return DescribeArtifactResult(
+        uri=input_data.uri,
+        rows=int(len(frame)),
+        columns=[str(c) for c in frame.columns],
+        index_name=str(frame.index.name) if frame.index.name is not None else None,
+        index_start=index_start,
+        index_end=index_end,
+        content_hash=digest,
+        head=head,
+        tail=tail,
+        column_summary=summary,
+    )
+
+
+def get_drawdown_table(input_data: DrawdownTableInput) -> DrawdownTableResult:
+    """
+    Every drawdown episode in a persisted equity curve, deepest first.
+
+    `get_backtest_diagnostics` reports the top N episodes but re-runs the
+    backtest to do it, from a symbol and a strategy rather than from the run
+    that actually happened. That is slower and it is not necessarily the
+    same run: a provider revision between the two calls diagnoses a curve
+    nobody reported. This reads the artifact.
+
+    `min_depth` exists because episode COUNT is dominated by one-bar noise
+    on any long curve — a hundred 0.1% dips crowd out the four that mattered
+    — while `n_episodes_total` still reports how many there were before
+    filtering, so the cap is never silent.
+    """
+    frame = load_artifact(input_data.equity_curve_uri)
+    equity = frame.squeeze("columns")
+    if isinstance(equity, pd.DataFrame):
+        raise ValidationError(
+            f"{input_data.equity_curve_uri} has {len(frame.columns)} columns "
+            f"({list(frame.columns)[:5]}); an equity curve is a single series. "
+            "Pass a curve artifact, not a trade log or a panel."
+        )
+    if equity.empty:
+        raise ValidationError(f"{input_data.equity_curve_uri} is empty")
+
+    episodes_frame = drawdown_periods(equity)
+    total = int(len(episodes_frame))
+
+    kept = episodes_frame
+    if input_data.min_depth > 0 and not kept.empty:
+        kept = kept[kept["depth"].abs() >= input_data.min_depth]
+    kept = kept.sort_values("depth").head(input_data.max_episodes)
+
+    episodes = [
+        DrawdownEpisode(
+            start=str(row["start"]),
+            trough=str(row["trough"]),
+            end=(
+                str(row["end"])
+                if row["end"] is not None and not pd.isna(row["end"])
+                else None
+            ),
+            depth=round(float(row["depth"]), 6),
+            duration_bars=int(row["duration_bars"]),
+            recovery_bars=(
+                int(row["recovery_bars"])
+                if row["recovery_bars"] is not None
+                and not pd.isna(row["recovery_bars"])
+                else None
+            ),
+        )
+        for row in kept.to_dict(orient="records")
+    ]
+
+    dd = drawdown_series(equity)
+    underwater_bars = int((dd < 0).sum())
+    unrecovered = not episodes_frame.empty and pd.isna(
+        episodes_frame.iloc[-1]["recovery_bars"]
+    )
+
+    logger.debug(
+        "[drawdown_table] episodes=%d/%d underwater=%.1f%%",
+        len(episodes),
+        total,
+        underwater_bars / len(equity) * 100 if len(equity) else 0.0,
+    )
+    return DrawdownTableResult(
+        equity_curve_uri=input_data.equity_curve_uri,
+        n_bars=int(len(equity)),
+        n_episodes_total=total,
+        n_episodes_returned=len(episodes),
+        max_drawdown=round(float(max_drawdown(equity)), 6),
+        episodes=episodes,
+        currently_underwater=bool(unrecovered),
+        time_underwater_pct=(
+            round(underwater_bars / len(equity), 6) if len(equity) else 0.0
+        ),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Transaction costs — priced directly, and swept across a backtest
 # ──────────────────────────────────────────────────────────────────
 
@@ -5036,6 +5386,21 @@ def get_agent_tools(
             ImpliedVolatilityInput,
         ),
         (
+            "get_technical_panel",
+            "Indicators (RSI/ADX/ATR/Bollinger/Stochastic) for a whole ticker universe in one native call, reported at the latest bar. Use instead of one get_technical_analysis call per ticker when screening.",
+            TechnicalPanelInput,
+        ),
+        (
+            "describe_artifact",
+            "Shape, date span, per-column statistics and both ends of a persisted Parquet artifact, by URI. Read what a run produced instead of re-running it.",
+            DescribeArtifactInput,
+        ),
+        (
+            "get_drawdown_table",
+            "Every drawdown episode in a persisted equity curve (peak, trough, recovery, depth, duration), deepest first, from an equity_curve_uri rather than by re-running the backtest.",
+            DrawdownTableInput,
+        ),
+        (
             "estimate_trade_cost",
             "Itemized cost of one hypothetical trade under a composed cost model: commission (pct/per-share/directional/maker-taker), spread (fixed bps or a fraction of the bar's range), square-root market impact, short borrow and margin interest. No market data needed.",
             EstimateTradeCostInput,
@@ -5151,6 +5516,9 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
     "get_option_pricing": (get_option_pricing, OptionPricingInput),
     "get_implied_volatility": (get_implied_volatility, ImpliedVolatilityInput),
+    "get_technical_panel": (get_technical_panel, TechnicalPanelInput),
+    "describe_artifact": (describe_artifact, DescribeArtifactInput),
+    "get_drawdown_table": (get_drawdown_table, DrawdownTableInput),
     "estimate_trade_cost": (estimate_trade_cost, EstimateTradeCostInput),
     "compare_cost_models": (compare_cost_models, CompareCostModelsInput),
     "list_strategies": (list_strategies, ListStrategiesInput),
@@ -5227,6 +5595,9 @@ TOOL_CATEGORY: Dict[str, str] = {
     "run_stress_test": "portfolio_risk",
     "get_liquidity_metrics": "portfolio_risk",
     "run_portfolio_optimization": "portfolio_risk",
+    "get_technical_panel": "analysis",
+    "describe_artifact": "analysis",
+    "get_drawdown_table": "backtest_validation",
     "estimate_trade_cost": "portfolio_risk",
     "compare_cost_models": "backtest_validation",
     # discovery — what the library accepts and what the provider can serve,
