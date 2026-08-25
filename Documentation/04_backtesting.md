@@ -142,6 +142,7 @@ result = run_strategy(
     initial_capital=10_000,
     commission_pct=0.001,    # 0.1% per trade side
     slippage_pct=0.0005,     # 0.05% per trade side
+    risk_free_rate=0.045,    # 4.5% annual — see "The risk-free rate" below
     include_trade_log=True,
 )
 
@@ -348,6 +349,53 @@ result_close = run_strategy(df, signals, fill_price="close")             # defau
 result_next_open = run_strategy(df, signals, fill_price="next_open")     # more conservative
 result_hl2 = run_strategy(df, signals, fill_price="hl2_exploratory")     # exploratory only — see above
 ```
+
+### The risk-free rate
+
+`run_strategy` and `backtest_grid` take `risk_free_rate` — an annualized
+decimal fraction, subtracted per period before Sharpe and Sortino. It
+defaults to `0.0`, which is what this engine always assumed, so an unset
+rate cannot move a number that was already reported.
+
+It is worth setting. At a 4–5% short rate the difference is not a rounding
+error. One 400-bar SMA-crossover run, measured:
+
+```python
+run_strategy(df, signals)                        # Sharpe 1.58
+run_strategy(df, signals, risk_free_rate=0.045)  # Sharpe 1.22
+```
+
+Same trades, same equity curve — a 23% lower Sharpe, because the first
+number was never measuring excess return.
+
+**It is a scoring convention, not a cash flow.** `total_return`,
+`final_equity`, `max_drawdown` and `num_trades` are identical either way —
+the rate changes what the ratios are measured *against*, and nothing about
+what the strategy did.
+
+**Both execution paths honour it identically.** The rate reaches the C++
+kernel and the pure-Python fallback through the same argument, so the
+answer does not depend on whether the native extension happens to be built.
+Parity is asserted at five different rates, in both directions:
+`tests/agent/test_risk_free_rate.py` compares the two Python paths, and
+`tests/cpp/test_backtest.cpp` compares the two kernel implementations.
+
+Two details of the arithmetic, because they are easy to get subtly wrong:
+
+- **Sharpe's denominator does not move.** Subtracting a constant from every
+  return shifts the mean and leaves the standard deviation untouched, so
+  only the numerator changes.
+- **Sortino's does.** The rate decides which bars count as downside at all,
+  so it moves the semi-deviation as well. In the kernel's allocation-free
+  summary path — the one every grid reads from — bar 0's implicit return of
+  `0.0` has an excess of `-rate/periods_per_year` and contributes to the
+  downside sum. That term is invisible at `rate = 0`, which is exactly why
+  the parity tests run at several rates.
+
+`backtest_grid` takes it too, through all three of its execution paths. A
+grid that ranked on a zero-rate Sharpe while the single run it is compared
+against used a real one would pick a different winner, and nothing in
+either result would say why.
 
 `backtest_grid` accepts the same `fill_price` argument and forces the
 Python execution path when it isn't `"close"` — the compiled C++ kernel

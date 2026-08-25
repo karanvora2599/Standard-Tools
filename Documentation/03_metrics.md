@@ -44,6 +44,12 @@ print(f"Sortino : {srt:.2f}")  # Sortino ≥ Sharpe when returns are right-skewe
 
 **Formulas:**
 - `sharpe_ratio` = `mean(returns - risk_free_rate/periods_per_year) / std(returns) * sqrt(periods_per_year)`. `std` is computed on the raw `returns` (equivalent to the std of the excess returns, since subtracting a constant doesn't change dispersion).
+
+> These are the definitions the backtest engine uses too. `run_strategy`,
+> `backtest_grid` and every Sharpe-reporting tool take a `risk_free_rate`
+> and apply it exactly as above — in the C++ kernel as well as in Python,
+> with parity asserted at several rates. See
+> [04_backtesting.md](04_backtesting.md#the-risk-free-rate).
 - `sortino_ratio` = `(mean(excess_returns) * periods_per_year) / downside_deviation`, where `excess_returns = returns - risk_free_rate/periods_per_year` and `downside_deviation = sqrt(mean(min(excess_returns, 0)**2)) * sqrt(periods_per_year)`. Note the denominator is the RMS of `min(excess_return, 0)` averaged over **all** N periods (zero contribution from winning bars), not just the subset of losing periods — the Sortino & Price (1994) convention. This gives a larger, more conservative denominator than dividing by the count of negative-return bars only, which some other libraries do. Returns `inf` when downside deviation is zero or `nan`.
 
 **Sortino vs Sharpe:** Sortino only penalizes downside deviation, making it more appropriate for strategies with asymmetric returns.
