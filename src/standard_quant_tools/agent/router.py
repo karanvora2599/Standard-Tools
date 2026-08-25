@@ -89,6 +89,16 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "— for one ticker or a multi-ticker signal panel."
         ),
     },
+    "discovery": {
+        "label": "Discovery",
+        "description": (
+            "What the library itself accepts and what the data provider can "
+            "serve: every built-in strategy's parameter contract, the named "
+            "historical stress windows, and whether the active provider has "
+            "tick trades, quotes, or async OHLCV. Offline, cheap, and about "
+            "the tools rather than about a market."
+        ),
+    },
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing",
         "description": (

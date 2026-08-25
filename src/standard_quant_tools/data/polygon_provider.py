@@ -446,6 +446,8 @@ class PolygonProvider(DataProvider):
         APIError: no API key found anywhere (see _resolve_polygon_api_key).
     """
 
+    SUPPORTED_INTERVALS = frozenset(_TIMESPAN_MAP)
+
     def __init__(self, api_key: Optional[str] = None) -> None:
         self._api_key = _resolve_polygon_api_key(api_key)
         # Stable per-instance token for the session cache -- deliberately

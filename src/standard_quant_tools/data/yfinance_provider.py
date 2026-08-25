@@ -88,6 +88,8 @@ _EXCHANGE_SUFFIX_TIMEZONES = {
 
 class YFinanceProvider(DataProvider):
 
+    SUPPORTED_INTERVALS = _VALID_INTERVALS
+
     def __init__(self) -> None:
         # A stable per-instance token for scoping the session cache (see
         # get_ohlcv below) — deliberately NOT id(self): CPython reuses an

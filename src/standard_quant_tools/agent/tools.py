@@ -45,6 +45,8 @@ from standard_quant_tools.agent.models import (
     CorrelationAnalysisResult,
     CostSummary,
     CustomSignalBacktestInput,
+    DataCapabilitiesInput,
+    DataCapabilitiesResult,
     DataQualityReportInput,
     DataQualityReportResult,
     DrawdownEpisode,
@@ -66,6 +68,10 @@ from standard_quant_tools.agent.models import (
     KalmanHedgeRatioResult,
     LiquidityAnalysisInput,
     LiquidityAnalysisResult,
+    ListStrategiesInput,
+    ListStrategiesResult,
+    ListStressScenariosInput,
+    ListStressScenariosResult,
     MissingBar,
     MonteCarloSimulationInput,
     MonteCarloSimulationResult,
@@ -113,6 +119,10 @@ from standard_quant_tools.agent.models import (
     SignalType,
     StalePriceRun,
     StrategyComparison,
+    StrategyDescriptor,
+    StrategyParameter,
+    StrategyRelation,
+    StressScenario,
     StressTestInput,
     StressTestResult,
     TailRiskInput,
@@ -193,6 +203,14 @@ from standard_quant_tools.backtest.sizing import (
     zscore_normalized,
 )
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+from standard_quant_tools.backtest.strategy_params import (
+    _MAX_WINDOW_BARS,
+    _RELATIONS,
+    STRATEGY_PARAM_SCHEMA,
+)
+from standard_quant_tools.backtest.stress_test import (
+    list_stress_scenarios as _library_stress_scenarios,
+)
 from standard_quant_tools.backtest.stress_test import (
     replay_stress_scenario,
     scenario_dates,
@@ -201,12 +219,17 @@ from standard_quant_tools.backtest.walk_forward import (
     longest_losing_streak,
     parameter_turnover,
 )
+from standard_quant_tools.data._cache import _CACHE_ROOT
+from standard_quant_tools.data.base import DataProvider
+from standard_quant_tools.data.bloomberg_provider import BloombergProvider
 from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.data.polygon_provider import PolygonProvider
 from standard_quant_tools.data.quality import (
     detect_missing_bars,
     detect_price_jumps,
     detect_stale_prices,
 )
+from standard_quant_tools.data.yfinance_provider import YFinanceProvider
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
 from standard_quant_tools.indicators.trend import (
@@ -275,6 +298,17 @@ except ImportError:
 # while the fused call's ATR field is Wilder-smoothed -- a different
 # algorithm, not just a faster path to the same numbers.
 _FUSABLE_INDICATORS = {"rsi", "adx", "bollinger", "stochastic"}
+
+
+#: Provider classes by source name, for describing one that cannot be
+#: constructed here (no API key, SDK absent). DataFactory raises in that
+#: case rather than returning an instance, and "you would need a key" is a
+#: more useful answer than the raise.
+_PROVIDER_CLASSES: Dict[str, type] = {
+    "yfinance": YFinanceProvider,
+    "polygon": PolygonProvider,
+    "bloomberg": BloombergProvider,
+}
 
 
 _PERIOD_PATTERN = re.compile(r"^(\d+)(d|w|mo|y)$")
@@ -4261,6 +4295,202 @@ def get_backtest_diagnostics(
 # ──────────────────────────────────────────────────────────────────
 
 
+# ──────────────────────────────────────────────────────────────────
+# Discovery — the contracts this library already holds in data, made
+# askable instead of described in prose
+# ──────────────────────────────────────────────────────────────────
+
+
+#: Accepted `strategy_type` values that are not in STRATEGY_REGISTRY and
+#: take no parameters. Kept beside the tool that reports them rather than
+#: derived from BacktestInput's Literal, because that Literal mixes the two
+#: kinds together and the difference is exactly what a caller needs to know.
+_SYNTHETIC_STRATEGY_LABELS = ("buy_and_hold", "custom_signal")
+
+
+def list_strategies(input_data: ListStrategiesInput) -> ListStrategiesResult:
+    """
+    Every built-in strategy and its parameter contract: names, kinds,
+    defaults, bounds, and the cross-parameter relations that must hold.
+
+    This reports STRATEGY_PARAM_SCHEMA itself, so it cannot drift from what
+    the backtest engine will actually accept. Before this tool the same
+    contract was available only as prose inside BacktestInput's field
+    description — which meant a caller guessing `lookback=-20` learned the
+    rule from a ValidationError after a round trip, if at all. The bounds
+    are not stylistic: a negative window makes pandas look FORWARD, so it
+    is look-ahead rather than a rejected input.
+    """
+    wanted = input_data.strategy_type
+    if wanted is not None and wanted not in STRATEGY_PARAM_SCHEMA:
+        raise ValidationError(
+            f"Unknown strategy_type {wanted!r}. Available: "
+            f"{sorted(STRATEGY_PARAM_SCHEMA)} (plus the parameterless labels "
+            f"{list(_SYNTHETIC_STRATEGY_LABELS)})."
+        )
+
+    descriptors: List[StrategyDescriptor] = []
+    for name, schema in STRATEGY_PARAM_SCHEMA.items():
+        if wanted is not None and name != wanted:
+            continue
+        descriptors.append(
+            StrategyDescriptor(
+                name=name,
+                parameters=[
+                    StrategyParameter(
+                        name=param,
+                        kind=spec.kind,
+                        default=spec.default,
+                        minimum=1.0 if spec.kind == "window" else spec.minimum,
+                        maximum=(
+                            float(_MAX_WINDOW_BARS)
+                            if spec.kind == "window"
+                            else spec.maximum
+                        ),
+                    )
+                    for param, spec in schema.items()
+                ],
+                relations=[
+                    StrategyRelation(
+                        left=left,
+                        right=right,
+                        requirement=f"{left} < {right}",
+                        why=why,
+                    )
+                    for left, right, why in _RELATIONS.get(name, ())
+                ],
+            )
+        )
+
+    logger.debug("[list_strategies] returned %d strategies", len(descriptors))
+    return ListStrategiesResult(
+        strategies=descriptors,
+        max_window_bars=_MAX_WINDOW_BARS,
+        synthetic_labels=list(_SYNTHETIC_STRATEGY_LABELS),
+    )
+
+
+def list_stress_scenarios(
+    input_data: ListStressScenariosInput,
+) -> ListStressScenariosResult:
+    """
+    The named historical crash windows `run_stress_test` accepts.
+
+    Offline and free — the table is a module constant. The windows are
+    informal, widely-cited market-history dates rather than research-grade
+    event-study boundaries, which is a reason to report them explicitly
+    rather than have a caller infer them from a scenario's name.
+    """
+    scenarios = []
+    for name, window in sorted(_library_stress_scenarios().items()):
+        start = datetime.date.fromisoformat(window["start"])
+        end = datetime.date.fromisoformat(window["end"])
+        scenarios.append(
+            StressScenario(
+                name=name,
+                start=window["start"],
+                end=window["end"],
+                calendar_days=(end - start).days,
+            )
+        )
+    return ListStressScenariosResult(scenarios=scenarios)
+
+
+def describe_data_capabilities(
+    input_data: DataCapabilitiesInput,
+) -> DataCapabilitiesResult:
+    """
+    What one data provider can actually serve — before a tool that needs it
+    fails partway through an analysis.
+
+    Capability is probed by asking whether the provider's class OVERRIDES
+    the base method, not by calling it: `DataProvider.get_trades` raises
+    NotImplementedError by design, so "does this provider have ticks" was
+    otherwise only answerable by triggering that error. No market data is
+    fetched. A provider that cannot even be constructed (no API key, SDK
+    not installed) reports `available=False` with the reason, and the
+    capability flags below it then describe the class rather than a live
+    connection — which is still the right answer to "could I use ticks if I
+    configured this?"
+    """
+    source = input_data.source.lower()
+    notes: List[str] = []
+
+    provider: Optional[DataProvider] = None
+    available = True
+    unavailable_reason: Optional[str] = None
+    try:
+        provider = DataFactory.get_provider(source)
+    except (NotImplementedError, ValueError) as exc:
+        # An unknown or unimplemented source is a caller error, not a
+        # configuration state to report — there is no class to describe.
+        raise ValidationError(str(exc)) from exc
+    except Exception as exc:  # missing API key, uninstalled SDK
+        available = False
+        unavailable_reason = str(exc)
+
+    provider_cls = type(provider) if provider is not None else _PROVIDER_CLASSES[source]
+
+    def _overrides(method: str) -> bool:
+        return getattr(provider_cls, method, None) is not getattr(
+            DataProvider, method, None
+        )
+
+    trades = _overrides("get_trades")
+    quotes = _overrides("get_quotes")
+    if not trades:
+        notes.append(
+            "No tick feed: the microstructure tools cannot run on this "
+            "provider. Bar data is not a substitute — spreads and signed "
+            "order flow are not recoverable from an OHLCV row, and nothing "
+            "here synthesizes them."
+        )
+    if quotes:
+        notes.append(
+            "Quotes are TOP OF BOOK only. No shipped provider offers depth, "
+            "so queue position and resting size at a level are out of reach."
+        )
+
+    intervals = getattr(provider_cls, "SUPPORTED_INTERVALS", None)
+
+    if provider is not None:
+        metadata = provider.get_metadata("AAPL")
+        guarantees = {
+            "adjusted": metadata.adjusted,
+            "survivorship_free": metadata.survivorship_free,
+            "point_in_time": metadata.point_in_time,
+        }
+        if not metadata.point_in_time:
+            notes.append(
+                "point_in_time=False: historical values may be silently "
+                "revised after the fact, so a backtest re-run on a later "
+                "date can legitimately differ. verify_replay distinguishes "
+                "that from a code change."
+            )
+    else:
+        guarantees = {}
+        notes.append(
+            "Guarantees are unknown because the provider could not be "
+            "constructed; they are reported by an instance, not the class."
+        )
+
+    return DataCapabilitiesResult(
+        provider=provider_cls.__name__,
+        available=available,
+        unavailable_reason=unavailable_reason,
+        ohlcv=True,
+        ohlcv_async=_overrides("get_ohlcv_async"),
+        ticker_info=_overrides("get_ticker_info") or provider is not None,
+        financial_ratios=_overrides("get_financial_ratios") or provider is not None,
+        trades=trades,
+        quotes=quotes,
+        supported_intervals=sorted(intervals) if intervals else None,
+        guarantees=guarantees,
+        cache_dir=str(_CACHE_ROOT),
+        notes=notes,
+    )
+
+
 def get_agent_tools(
     categories: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -4494,6 +4724,21 @@ def get_agent_tools(
             "Solve for Black-Scholes-Merton implied volatility from an observed European option price.",
             ImpliedVolatilityInput,
         ),
+        (
+            "list_strategies",
+            "Every built-in strategy's parameter contract: names, kinds, defaults, bounds and cross-parameter relations. Offline. Call this before guessing a strategy's parameters.",
+            ListStrategiesInput,
+        ),
+        (
+            "list_stress_scenarios",
+            "The named historical crash windows run_stress_test accepts, with each window's dates. Offline.",
+            ListStressScenariosInput,
+        ),
+        (
+            "describe_data_capabilities",
+            "What a data provider can serve — tick trades, top-of-book quotes, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Fetches no market data. Call this before a tool that needs a capability the active provider may not have.",
+            DataCapabilitiesInput,
+        ),
     ]
 
     if categories is not None:
@@ -4585,6 +4830,12 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
     "get_option_pricing": (get_option_pricing, OptionPricingInput),
     "get_implied_volatility": (get_implied_volatility, ImpliedVolatilityInput),
+    "list_strategies": (list_strategies, ListStrategiesInput),
+    "list_stress_scenarios": (list_stress_scenarios, ListStressScenariosInput),
+    "describe_data_capabilities": (
+        describe_data_capabilities,
+        DataCapabilitiesInput,
+    ),
 }
 
 
@@ -4653,6 +4904,12 @@ TOOL_CATEGORY: Dict[str, str] = {
     "run_stress_test": "portfolio_risk",
     "get_liquidity_metrics": "portfolio_risk",
     "run_portfolio_optimization": "portfolio_risk",
+    # discovery — what the library accepts and what the provider can serve,
+    # all offline and all cheap. Answers questions a caller would otherwise
+    # answer by guessing and reading the resulting error.
+    "list_strategies": "discovery",
+    "list_stress_scenarios": "discovery",
+    "describe_data_capabilities": "discovery",
 }
 
 

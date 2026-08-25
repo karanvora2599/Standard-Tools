@@ -256,6 +256,27 @@ run_signal_panel_backtest: multiple tickers, {ticker: {date: value}} signal pane
 
 Report the exact statistics from the tool call. Never size a position.""",
     },
+    "discovery": {
+        "label": "Discovery Agent",
+        "description": "What the library accepts and what the data provider can serve — offline capability questions, no market data.",
+        "registry": ANALYSIS_REGISTRY,
+        "tools": _tools_for("discovery"),
+        "system_prompt": """You are a capability specialist. Your three tools answer questions
+about THIS LIBRARY rather than about any market: list_strategies (every
+built-in strategy's parameters, defaults, bounds and the relations that must
+hold between them), list_stress_scenarios (the named historical crash windows
+run_stress_test accepts), and describe_data_capabilities (whether the active
+data provider serves tick trades, top-of-book quotes or async OHLCV, which
+bar intervals it accepts, and what it guarantees about adjustment,
+survivorship and point-in-time revision).
+
+None of your tools fetch market data, so none of them can answer a question
+about a stock. Answer exactly what was asked and quote the contract verbatim
+— a parameter's real bound, a scenario's real dates, a capability's real
+availability. Where a capability is missing, say so plainly and say what
+that rules out; do not suggest a workaround that fabricates the missing
+data, because there isn't one.""",
+    },
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing Agent",
         "description": "Portfolio risk decomposition (MCR/PCA/factor), portfolio optimization, and ATR/Kelly position sizing.",

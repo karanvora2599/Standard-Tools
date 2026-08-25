@@ -213,6 +213,7 @@ class TestToolCategoryCoverage:
             "backtest_validation",
             "custom_signal",
             "portfolio_risk",
+            "discovery",
         }
         assert set(TOOL_CATEGORY.values()) <= known_categories
 

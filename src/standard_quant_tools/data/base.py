@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, Optional, Union
+from typing import Dict, FrozenSet, Optional, Union
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -74,6 +74,12 @@ class DataProvider(ABC):
     Abstract Base Class for Data Providers.
     Ensures all providers return data in a standard format.
     """
+
+    #: Bar intervals this provider accepts, or None when it declares no
+    #: set. Every provider already validates `interval` against its own
+    #: private module constant; this makes that vocabulary askable without
+    #: a caller reaching into another module's underscore-prefixed global.
+    SUPPORTED_INTERVALS: Optional[FrozenSet[str]] = None
 
     @abstractmethod
     def get_ohlcv(

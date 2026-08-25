@@ -2810,3 +2810,162 @@ class ImpliedVolatilityResult(BaseModel):
     converged: bool
     iterations: int
     method: str  # "newton" | "bisection"
+
+
+# ──────────────────────────────────────────────
+# Discovery — what this library can do, asked rather than assumed
+#
+# The modeling runtime has had `list_features` and
+# `list_modeling_capabilities` since it shipped; this 46-tool surface had
+# nothing equivalent. A caller learned the strategy vocabulary from prose
+# inside a Field description, the stress-scenario names from a sentence in
+# a tool description, and whether a tick feed existed by calling something
+# that raised NotImplementedError. Each of those is a contract the library
+# already holds in a data structure — STRATEGY_PARAM_SCHEMA, _SCENARIOS,
+# the provider classes — and prose is a lossy copy of a data structure that
+# drifts from it silently.
+# ──────────────────────────────────────────────
+
+
+class StrategyParameter(BaseModel):
+    """One strategy parameter's declared contract, from
+    backtest/strategy_params.py's STRATEGY_PARAM_SCHEMA."""
+
+    name: str
+    kind: Literal["window", "number"] = Field(
+        ...,
+        description=(
+            "'window' is a positive whole number of BARS (rejected below 1: "
+            "pandas reads a negative period as a forward window, which is "
+            "look-ahead by construction). 'number' is any finite float "
+            "within the bounds below."
+        ),
+    )
+    default: Any = Field(..., description="Value used when the caller omits this.")
+    minimum: Optional[float] = Field(None, description="Inclusive lower bound, if any.")
+    maximum: Optional[float] = Field(None, description="Inclusive upper bound, if any.")
+
+
+class StrategyRelation(BaseModel):
+    """A constraint BETWEEN two parameters. Each value can be individually
+    valid while the pair is nonsense, so these are checked separately."""
+
+    left: str
+    right: str
+    requirement: str = Field(..., description="Always of the form 'left < right'.")
+    why: str = Field(
+        ..., description="What breaks when the relation is violated, in plain terms."
+    )
+
+
+class StrategyDescriptor(BaseModel):
+    name: str
+    parameters: List[StrategyParameter]
+    relations: List[StrategyRelation] = Field(
+        default_factory=list,
+        description="Empty for strategies whose parameters are independent.",
+    )
+
+
+class ListStrategiesInput(BaseModel):
+    strategy_type: Optional[str] = Field(
+        None,
+        description=(
+            "Return only this strategy's contract. None (the default) "
+            "returns all eight."
+        ),
+    )
+
+
+class ListStrategiesResult(BaseModel):
+    strategies: List[StrategyDescriptor]
+    max_window_bars: int = Field(
+        ...,
+        description=(
+            "Upper bound on any 'window' parameter. A longer window is more "
+            "likely a units mix-up (days vs minutes) than an intent."
+        ),
+    )
+    synthetic_labels: List[str] = Field(
+        ...,
+        description=(
+            "Accepted strategy_type values that are NOT in the registry and "
+            "take no parameters: 'buy_and_hold' constructs an always-long "
+            "series directly and 'custom_signal' carries a caller-supplied "
+            "one."
+        ),
+    )
+
+
+class ListStressScenariosInput(BaseModel):
+    """No arguments — the scenario table is a fixed, offline constant."""
+
+
+class StressScenario(BaseModel):
+    name: str
+    start: str
+    end: str
+    calendar_days: int = Field(
+        ...,
+        description=(
+            "Length of the window in calendar days, not trading days — this "
+            "is computed from the dates alone and involves no market data."
+        ),
+    )
+
+
+class ListStressScenariosResult(BaseModel):
+    scenarios: List[StressScenario]
+
+
+class DataCapabilitiesInput(BaseModel):
+    source: str = Field(
+        "yfinance",
+        description=(
+            "Provider to describe: 'yfinance', 'polygon', or 'bloomberg'. "
+            "Describing a provider does NOT fetch any market data."
+        ),
+    )
+
+
+class DataCapabilitiesResult(BaseModel):
+    provider: str
+    available: bool = Field(
+        ...,
+        description=(
+            "False when the provider could not even be constructed — a "
+            "missing API key, an uninstalled SDK. Everything below is then "
+            "the class's declared capability, not a working connection."
+        ),
+    )
+    unavailable_reason: Optional[str] = Field(
+        None, description="Why construction failed, verbatim, when available is False."
+    )
+    ohlcv: bool
+    ohlcv_async: bool
+    ticker_info: bool
+    financial_ratios: bool
+    trades: bool = Field(
+        ...,
+        description=(
+            "Tick-level trades. False means the microstructure tools cannot "
+            "run on this provider AT ALL — bar data is not a substitute, and "
+            "nothing here synthesizes one."
+        ),
+    )
+    quotes: bool = Field(
+        ..., description="Top-of-book bid/offer. No shipped provider offers depth."
+    )
+    supported_intervals: Optional[List[str]] = Field(
+        None, description="Bar intervals this provider accepts, if it declares a set."
+    )
+    guarantees: Dict[str, bool] = Field(
+        ...,
+        description=(
+            "adjusted / survivorship_free / point_in_time, as the provider "
+            "itself reports them — what it actually promises, not what would "
+            "be ideal."
+        ),
+    )
+    cache_dir: str = Field(..., description="Where the persistent OHLCV cache lives.")
+    notes: List[str] = Field(default_factory=list)

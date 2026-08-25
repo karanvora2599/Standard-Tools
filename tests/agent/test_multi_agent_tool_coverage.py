@@ -137,7 +137,7 @@ class TestWorkerToolCoverage:
         assert "evaluate_model_portfolio" in builder
         assert research.isdisjoint(builder)
 
-    def test_there_are_nine_workers(self, worker_agents):
+    def test_the_worker_set_is_exactly_the_declared_one(self, worker_agents):
         """Regression guard for the backtest_execution/backtest_validation
         split and the model_research/model_builder split -- catches an
         accidental re-merge or an accidental further split just as easily as
@@ -151,6 +151,22 @@ class TestWorkerToolCoverage:
             "backtest_validation",
             "custom_signal",
             "portfolio_risk",
+            "discovery",
             "model_research",
             "model_builder",
         }
+
+    def test_every_analysis_category_has_exactly_one_worker(self, worker_agents):
+        """The analysis workers ARE the TOOL_CATEGORY taxonomy, one worker
+        per category. A new category with no worker means its tools are
+        unreachable through the multi-agent example; a worker with no
+        category means it lists tools by hand."""
+        from standard_quant_tools.agent.tools import TOOL_CATEGORY
+
+        categories = set(TOOL_CATEGORY.values())
+        workers = {
+            key
+            for key, worker in worker_agents.items()
+            if worker["registry"] == "analysis"
+        }
+        assert workers == categories

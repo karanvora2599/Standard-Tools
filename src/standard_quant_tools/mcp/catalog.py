@@ -1,8 +1,8 @@
 """
 The tool catalog: which tools this server exposes, and what each one costs.
 
-WHY EXPOSURE IS A POLICY AND NOT A LIST. The two registries hold 54 tools
-whose input schemas and descriptions total about 102 KB. An MCP client
+WHY EXPOSURE IS A POLICY AND NOT A LIST. The two registries hold 57 tools
+whose input schemas and descriptions total about 103 KB. An MCP client
 fetches the tool list once at connect and carries it for the whole session,
 so exposing everything spends roughly 26,000 tokens of every conversation
 before the user has asked anything.
@@ -15,14 +15,16 @@ exactly one place.
 
 Tool count and cost turn out to be almost unrelated, which is why the
 selection is by measured size rather than by intuition: `analysis` carries
-13 tools in 11.9 KB while `custom_signal` carries 2 tools in 6.1 KB, and
-`backtest_execution` alone is a quarter of the whole surface. Run
-`sqt-mcp --print-budget` for the current table; `category_costs()` computes
-it and the budget test pins the ceiling.
+13 tools in 11.7 KB while `custom_signal` carries 2 tools in 6.0 KB, and
+`backtest_execution` alone is a quarter of the whole surface. At the other
+end, `discovery` is 3 tools in 1.2 KB -- cheaper than any single tool in
+`backtest_execution`, which is why it is on by default despite being the
+newest category. Run `sqt-mcp --print-budget` for the current table;
+`category_costs()` computes it and the budget test pins the ceiling.
 
 THE TWO REGISTRIES STAY APART. Each entry records which registry it came
 from, and `dispatch_for()` returns that registry's dispatch function. The
-names happen not to collide (54 tools, 54 unique names), so one flat lookup
+names happen not to collide (57 tools, 57 unique names), so one flat lookup
 would work -- and would be exactly the merge the library declined to make.
 """
 
@@ -58,12 +60,24 @@ ALL_CATEGORIES: Tuple[str, ...] = tuple(
     sorted(set(TOOL_CATEGORY.values())) + [MODELING_CATEGORY]
 )
 
-#: The default. Measured at 22 tools / 20.5 KB / ~5k tokens: screening, risk
-#: and technical snapshots, and the factor/cointegration/Hurst research path.
-#: It deliberately omits `backtest_execution` (24.3 KB) and `modeling`
-#: (26.6 KB) -- the two heaviest categories, both better switched on for a
-#: session that needs them than paid for by every session that does not.
-DEFAULT_CATEGORIES: Tuple[str, ...] = ("screener", "analysis", "quant_research")
+#: The default. Measured at 25 tools / 21.2 KB / ~5k tokens: screening, risk
+#: and technical snapshots, the factor/cointegration/Hurst research path,
+#: and discovery. It deliberately omits `backtest_execution` (23.7 KB) and
+#: `modeling` (26.0 KB) -- the two heaviest categories, both better switched
+#: on for a session that needs them than paid for by every session that does
+#: not.
+#:
+#: `discovery` earns its place by being the only category that makes the
+#: OTHERS cheaper to use: it is 1.2 KB, and the questions it answers --
+#: which parameters a strategy takes, which stress windows exist, whether
+#: this provider has ticks -- were otherwise answered by a failed call and
+#: an error round trip, which costs more than the category does.
+DEFAULT_CATEGORIES: Tuple[str, ...] = (
+    "screener",
+    "analysis",
+    "quant_research",
+    "discovery",
+)
 
 #: Property names that mean "this tool will go and fetch market data".
 #: Matched as substrings against every property anywhere in the input
