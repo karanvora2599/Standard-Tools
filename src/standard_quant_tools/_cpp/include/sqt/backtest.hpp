@@ -255,6 +255,12 @@ enum PortfolioFill : int {
 struct PortfolioCosts {
     double initial_capital     = 10'000.0;
     double commission_pct      = 0.001;
+    // Commission charged on SALES. Defaults equal to commission_pct, which
+    // is the symmetric behaviour every caller had before this field existed
+    // -- so an unset value cannot change a number. The Python side resolves
+    // its own Optional to a concrete rate before calling, so exactly one
+    // place decides what "unset" means.
+    double sell_commission_pct = 0.001;
     double slippage_pct        = 0.0005;
     double max_gross_leverage  = 1.0;
     double max_position_pct    = 1.0;
@@ -300,6 +306,11 @@ std::size_t run_portfolio_simulation(
     double* out_gross,
     double* out_net,
     double* out_rebal,
+    // Peak |single position value| across every bar, in currency. A scalar
+    // out-param rather than an (n_bars,) curve: the peak is what a
+    // concentration limit is written against, and the per-bar series would
+    // cost every caller a payload it reduces immediately. May be null.
+    double* out_peak_position,
     PortfolioSimError* err);
 
 

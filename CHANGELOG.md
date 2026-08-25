@@ -9,6 +9,95 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added (direction-aware costs, peak-exposure diagnostics, a tick contract)
+
+Three small, independent additions. Each closes a gap the code itself had
+already named.
+
+**Commission can differ by side.** `costs.py` gains `directional_commission`
+and `maker_taker_cost`. The first exists because US equity execution is not
+symmetric — the SEC Section 31 fee and the FINRA TAF are levied on SALES
+only, so a round trip charged at one blended rate undercharges any strategy
+whose turnover is sell-heavy.
+
+The second is the function `_cost_rate`'s own docstring had been asking for.
+It rejects negative rates everywhere with "if a genuine rebate is intended
+it should be modelled explicitly rather than arriving as a sign error";
+`maker_taker_cost` is that explicit model, and it is the only function in
+the module that may return a credit — confined to the maker side, so a
+negative taker rate is still the sign error every other function refuses.
+
+`run_portfolio_simulation` gains `sell_commission_pct`. `None` charges
+`commission_pct` both ways, which is exactly what it did before.
+
+**The change had to land in three places at once, and did.** That simulator
+picks among a scalar loop, a vectorized branch and a native kernel by
+configuration — and the DEFAULT configuration takes the native path. A rate
+added to Python alone would have been silently ignored on every machine with
+`_sqt_core` built: two users, same spec, different numbers. That is the
+`clip_sigma` defect exactly, so `PortfolioCosts` gained the field, the
+kernel selects on the sign of `delta`, and a parity test asserts the two
+backends agree rather than asserting either alone. Measured: bit-identical
+on the equity curve, symmetric and asymmetric.
+
+Direction stays vectorizable — the side is an element-wise select on the
+sign of the trade, not a per-element decision that would force the loop —
+so nothing falls off the fast path to get it.
+
+**Four peak-exposure diagnostics.** `run_portfolio_simulation` now reports
+`max_leverage`, `max_gross_exposure`, `peak_position_value` and
+`return_over_rebalance` beside the existing `avg_gross_exposure`. The curves
+answered "what did this portfolio look like typically"; nothing answered
+"how bad did it get", which is the question a risk limit is written against.
+An average gross exposure of 0.9 is perfectly compatible with a single day
+at 2.4, and only one of those breaches a mandate.
+
+None of them costs a pass over the data. `peak_position_value` was the only
+one needing new state, and it rides the loop that already forms the position
+vector for net and gross — one comparison per element, in both backends.
+They are scalars rather than curves: returning four more `(n_bars,)` series
+would tax every consumer with a payload it reduces immediately.
+
+`return_over_rebalance`'s `None` branch turned out to be defensive rather
+than reachable — the engine already rejects both routes to an empty
+rebalance log — and the test pins that it keeps doing so, so relaxing either
+guard cannot silently produce a ZeroDivisionError.
+
+**A tick-data capability on the provider contract.** `DataProvider` gains
+`get_trades` and `get_quotes`, implemented by `PolygonProvider` against
+`/v3/trades` and `/v3/quotes`.
+
+Concrete-with-raise, not abstract: marking them abstract would break
+yfinance and Bloomberg at import time to express something better said at
+the point of use. The base implementation names the provider, names the one
+that does work, and refuses to offer bars as a substitute — a "trade"
+derived from an OHLCV row is a fiction every microstructure measure
+downstream would treat as fact.
+
+Two details that are easy to get wrong and are pinned by tests. The v3
+endpoints return NANOSECOND timestamps while the aggregates endpoint in the
+same module returns milliseconds — parsing one with the other's unit dates
+every tick to 1970 while leaving the frame structurally plausible. And the
+range is half-open `[start, end)`, because a closed range on a nanosecond
+clock either double-counts the boundary tick when two windows are
+concatenated or drops it, and which one is invisible until someone
+concatenates.
+
+These are also the only endpoints in that module not on Polygon's free tier.
+`_polygon_get` turns 403 into "check your key", which is right for an
+expired key and misleading for a valid one on the wrong plan, so both
+methods re-raise naming the real cause.
+
+Single page per call, like `get_ohlcv`: Polygon paginates ticks by cursor
+and a liquid name produces millions of trades a day, so following `next_url`
+would turn one call into an unbounded download.
+
+Not added, deliberately: anything reading depth. No shipped provider offers
+an order book, so queue position and resting size stay out of reach rather
+than approximated.
+
+37 new tests. 3298 -> 3335 Python tests; 10 C++ suites unchanged and green.
+
 ### Added (an MCP server for the whole library)
 
 `standard_quant_tools.mcp` serves both tool registries over the Model

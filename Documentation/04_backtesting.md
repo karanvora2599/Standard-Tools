@@ -796,6 +796,10 @@ result = run_portfolio_simulation(
     price_data, target_weights,
     initial_capital=100_000.0,
     max_gross_leverage=1.0,   # reject any rebalance date requesting more than fully invested
+    # Optional: charge sales at a different rate from buys. The SEC Section
+    # 31 fee and the FINRA TAF are levied on sales only, so a round trip is
+    # not symmetric. None (the default) charges commission_pct both ways.
+    sell_commission_pct=0.0012,
 )
 
 print(f"Final equity : ${result['final_equity']:,.2f}")
@@ -803,6 +807,25 @@ print(f"Final cash   : ${result['final_cash']:,.2f}")
 print(result["rebalance_log"])           # date, turnover_pct, gross_leverage_after, n_positions
 print(result["equity_curve"].tail())      # drifts between rebalances, doesn't jump
 ```
+
+**Commission may differ by side.** `sell_commission_pct` overrides the
+sell-side rate; `None` charges `commission_pct` both ways, which is what
+this function did before the parameter existed. It applies to commission
+only — the spread is crossed whichever way you go, so `slippage_pct` stays
+symmetric.
+
+The direction is an element-wise select on the sign of the trade, not a
+per-element decision, so this stays on the vectorized and native fast paths
+rather than falling back to the scalar loop to get it. All three paths carry
+the rate and a parity test asserts they agree: the default configuration
+takes the native kernel, so a rate applied to Python alone would have been
+silently ignored wherever `_sqt_core` is built.
+
+For side-dependent costs outside the simulator, `backtest/costs.py` has
+`directional_commission` and `maker_taker_cost`. The latter is the only
+function in that module that may return a credit — a maker rebate is a real
+one — and it is deliberately separate so a negative rate can only ever
+arrive on purpose.
 
 **Why this is a different engine, not a flag on `run_signal_panel_backtest`:**
 between rebalance dates, share counts stay fixed but `equity_curve` still
@@ -816,7 +839,35 @@ all.
 is `gross_exposure_curve / equity_curve`, the continuous version of
 `rebalance_log`'s point-in-time `gross_leverage_after`), `rebalance_log`
 (`pd.DataFrame`: `date`, `turnover_pct`, `gross_leverage_after`,
-`n_positions`), `final_equity`, `final_cash`, `warnings` (`list[str]`).
+`n_positions`), `final_equity`, `final_cash`, four peak diagnostics
+(below), and `warnings` (`list[str]`).
+
+### Peaks, not just averages
+
+`max_leverage`, `max_gross_exposure`, `peak_position_value` and
+`return_over_rebalance` are scalars reported alongside the curves.
+
+The curves answer "what did this portfolio look like typically". These
+answer "how bad did it get", which is the question a risk limit is actually
+written against — an average gross exposure of 0.9 is perfectly compatible
+with a single day at 2.4, and only one of those breaches a mandate.
+
+| Field | Meaning |
+|---|---|
+| `max_leverage` | Highest point of `leverage_curve` |
+| `max_gross_exposure` | Highest gross market value held on any bar |
+| `peak_position_value` | Largest **single** position, in currency, on any bar |
+| `return_over_rebalance` | Total return divided by executed rebalances |
+
+`return_over_rebalance` is not a per-trade P&L — one rebalance trades many
+tickers — but it is the honest read on "what did each turn of the portfolio
+earn", which is what says whether the costs were worth paying.
+
+None of these costs a pass over the data: every input was already being
+computed, and `peak_position_value` rides the loop that already forms the
+position vector for net and gross exposure. They are scalars rather than
+curves because returning four more `(n_bars,)` series would tax every
+consumer with a payload it reduces immediately.
 `warnings` **always** includes a look-ahead-bias notice when `fill_price`
 is left at its default `"close"` and at least one rebalance occurs — each
 rebalance executes at the same bar's own Close that its target weight is

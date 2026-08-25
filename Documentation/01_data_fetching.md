@@ -495,6 +495,52 @@ than silently guessing a mapping.
 
 ---
 
+## Tick data (`get_trades` / `get_quotes`)
+
+The first optional capability on the provider contract. **Only
+`PolygonProvider` implements it**, and only on a plan tier that includes
+tick data — the free tier serves bars and fundamentals but returns 403 here.
+
+```python
+trades = provider.get_trades("AAPL", "2024-01-02", "2024-01-03")
+# price  size  exchange, indexed by nanosecond SIP timestamp
+
+quotes = provider.get_quotes("AAPL", "2024-01-02", "2024-01-03")
+# bid_price  bid_size  ask_price  ask_size
+```
+
+Four things worth knowing before you use them:
+
+**They are not abstract methods.** yfinance and Bloomberg inherit a base
+implementation that raises `NotImplementedError` naming the provider, naming
+the one that does work, and refusing to offer bars as a substitute. Making
+them abstract would break those two providers at *import* time to express
+something better said at the point of use — and the substitution is the real
+hazard: a "trade" derived from an OHLCV row is a fiction every
+microstructure measure downstream would treat as fact.
+
+**Timestamps are nanoseconds.** The aggregates endpoint used by `get_ohlcv`
+returns milliseconds. Parsing one with the other's unit dates every tick to
+1970 while leaving the frame structurally plausible, so the two paths are
+kept deliberately separate.
+
+**The range is half-open, `[start, end)`.** A closed range on a nanosecond
+clock either double-counts the boundary tick when two windows are
+concatenated or drops it, and which one is invisible until someone
+concatenates.
+
+**One page per call.** Polygon paginates ticks by cursor and a liquid name
+produces millions of trades a day, so following `next_url` automatically
+would turn one call into an unbounded download. `limit` caps the page
+(50,000 is Polygon's own maximum); narrow the time range for more.
+
+**No depth.** `get_quotes` is top of book. No shipped provider offers an
+order book, so nothing in this library sees resting size below the touch —
+which is why `get_liquidity_metrics` estimates spread with Corwin-Schultz
+and Amihud and says plainly that they are proxies.
+
+---
+
 ## Dataset Provenance and Data Quality
 
 Every `DataProvider` also implements `get_metadata(symbol, interval)`,

@@ -74,13 +74,21 @@ def _native_portfolio_sim(
     max_adv_participation: Optional[float],
     initial_capital: float,
     commission_pct: float,
+    sell_commission_rate: float,
     slippage_pct: float,
     max_gross_leverage: float,
     max_position_pct: float,
     borrow_fee_bps: float,
     margin_interest_rate: float,
 ) -> Optional[
-    Tuple[List[float], List[float], List[float], List[float], List[Dict[str, Any]]]
+    Tuple[
+        List[float],
+        List[float],
+        List[float],
+        List[float],
+        List[Dict[str, Any]],
+        float,
+    ]
 ]:
     """Run the bar loop natively, or return None if this configuration is not covered.
 
@@ -139,6 +147,7 @@ def _native_portfolio_sim(
         day_gaps,
         initial_capital,
         commission_pct,
+        sell_commission_rate,
         slippage_pct,
         max_gross_leverage,
         max_position_pct,
@@ -186,6 +195,7 @@ def _native_portfolio_sim(
         res["gross"].tolist(),
         res["net"].tolist(),
         rebalance_log,
+        float(res["peak_position"]),
     )
 
 
@@ -242,6 +252,7 @@ def run_portfolio_simulation(
     target_weights: pd.DataFrame,
     initial_capital: float = 10_000.0,
     commission_pct: float = 0.001,
+    sell_commission_pct: Optional[float] = None,
     slippage_pct: float = 0.0005,
     max_gross_leverage: float = 1.0,
     max_position_pct: float = 1.0,
@@ -274,6 +285,16 @@ def run_portfolio_simulation(
         initial_capital: Starting cash.
         commission_pct: Commission per trade notional (fraction) when
             commission_model="pct" (default — today's existing behavior).
+            Charged on BOTH sides unless sell_commission_pct overrides the
+            sell side.
+        sell_commission_pct: Optional separate commission rate for SALES.
+            None (the default) charges commission_pct both ways, which is
+            what this function did before this parameter existed. Set it
+            when the two sides genuinely differ — the SEC Section 31 fee and
+            the FINRA TAF are levied on sales only, so a round trip is not
+            symmetric and a sell-heavy strategy is undercharged by one
+            blended rate. Applies to commission only: the spread is crossed
+            whichever way you go, so slippage_pct stays symmetric.
         slippage_pct: Spread cost per trade notional (fraction), applied
             regardless of commission_model.
         max_gross_leverage: Reject (raise ValidationError) any rebalance date
@@ -400,8 +421,19 @@ def run_portfolio_simulation(
         "margin_interest_rate": margin_interest_rate,
         "impact_coefficient": impact_coefficient,
     }
+    if sell_commission_pct is not None:
+        # Added conditionally: None means "not supplied", not "a rate of
+        # None", and the loop below would reject it as a non-number.
+        _cost_params["sell_commission_pct"] = sell_commission_pct
     for name, value in _cost_params.items():
         _cost_rate(name, value)
+
+    # Resolved to a concrete rate once, here, so the scalar loop, the
+    # vectorized branch and the native kernel all read the same number
+    # rather than each re-deciding what None means.
+    sell_commission_rate = (
+        commission_pct if sell_commission_pct is None else sell_commission_pct
+    )
     if impact_lookback <= 0:
         raise ValidationError(f"impact_lookback must be > 0, got {impact_lookback}")
 
@@ -690,6 +722,11 @@ def run_portfolio_simulation(
     gross_records: List[float] = []
     net_records: List[float] = []
     rebalance_log: List[Dict[str, Any]] = []
+    # Running peak of the largest single position, in currency. A scalar
+    # rather than a curve: the peak is what a concentration limit is written
+    # against, and returning another (n_bars,) series would cost every
+    # consumer the payload for a number they reduce anyway.
+    peak_position_value = 0.0
 
     def _valid_dollar_volume(
         t: str, pos: int, trigger_bar: int, exec_date: Any
@@ -746,7 +783,9 @@ def run_portfolio_simulation(
             # positive on every bar of the master calendar, and a delta
             # derived from an equity the insolvency check already proved
             # positive. There is no path by which it arrives non-finite.
-            commission = abs(trade_notional) * commission_pct
+            commission = abs(trade_notional) * (
+                sell_commission_rate if delta_shares < 0.0 else commission_pct
+            )
         spread = abs(trade_notional) * slippage_pct
         impact = 0.0
         if use_impact_model:
@@ -815,7 +854,16 @@ def run_portfolio_simulation(
             traded = np.abs(delta) > 1e-9
             notional = np.abs(delta) * prices_v
             turnover_notional = float(np.sum(np.where(traded, notional, 0.0)))
-            costs = np.where(traded, notional * (commission_pct + slippage_pct), 0.0)
+            # Direction-aware commission stays vectorized: the side is an
+            # element-wise select on the sign of delta, not a per-element
+            # decision that would force the loop. A sale is delta < 0 --
+            # reducing a long or extending a short both pay the sell rate.
+            rate = np.where(
+                delta < 0.0,
+                sell_commission_rate + slippage_pct,
+                commission_pct + slippage_pct,
+            )
+            costs = np.where(traded, notional * rate, 0.0)
             cash -= float(np.sum(np.where(traded, delta * prices_v, 0.0)))
             cash -= float(np.sum(costs))
             shares_vec[:] = target
@@ -1000,6 +1048,7 @@ def run_portfolio_simulation(
         max_adv_participation=max_adv_participation,
         initial_capital=initial_capital,
         commission_pct=commission_pct,
+        sell_commission_rate=sell_commission_rate,
         slippage_pct=slippage_pct,
         max_gross_leverage=max_gross_leverage,
         max_position_pct=max_position_pct,
@@ -1007,9 +1056,14 @@ def run_portfolio_simulation(
         margin_interest_rate=margin_interest_rate,
     )
     if _native is not None:
-        equity_records, cash_records, gross_records, net_records, rebalance_log = (
-            _native
-        )
+        (
+            equity_records,
+            cash_records,
+            gross_records,
+            net_records,
+            rebalance_log,
+            peak_position_value,
+        ) = _native
     else:
         # (trigger_date, trigger_bar, weights_arr) awaiting execution at the
         # *next* bar's Open
@@ -1089,8 +1143,16 @@ def run_portfolio_simulation(
 
             equity_records.append(equity)
             cash_records.append(cash)
-            gross_records.append(float(np.abs(position_values).sum()))
+            abs_position_values = np.abs(position_values)
+            gross_records.append(float(abs_position_values.sum()))
             net_records.append(position_value)
+            # The largest single position held on this bar, in currency. Rides
+            # the vector already formed above -- one more reduction over it,
+            # not another pass over the book.
+            if abs_position_values.size:
+                peak_position_value = max(
+                    peak_position_value, float(abs_position_values.max())
+                )
             prev_date = date
 
     warnings: List[str] = []
@@ -1152,6 +1214,44 @@ def run_portfolio_simulation(
         ),
         "final_cash": (
             float(cash_curve.iloc[-1]) if not cash_curve.empty else initial_capital
+        ),
+        # ── Peak-exposure diagnostics ────────────────────────────────────
+        # The curves above answer "what did this portfolio look like
+        # typically"; these four answer "how bad did it get", which is the
+        # question a risk limit is actually written against. An average
+        # gross exposure of 0.9 is perfectly compatible with a single day at
+        # 2.4, and only one of those two numbers breaches a mandate.
+        #
+        # All four are scalars, not curves. Every input is already computed,
+        # so none of them costs a pass over the data, and returning them as
+        # series would tax every consumer with a payload it reduces anyway.
+        "max_leverage": (
+            round(float(leverage_curve.max()), 6) if not leverage_curve.empty else 0.0
+        ),
+        "max_gross_exposure": (
+            round(float(gross_exposure_curve.max()), 6)
+            if not gross_exposure_curve.empty
+            else 0.0
+        ),
+        "peak_position_value": round(float(peak_position_value), 6),
+        # Total return divided by the number of rebalances that actually
+        # executed. Not a per-trade P&L -- a rebalance trades many tickers at
+        # once -- but the honest read is "what did each turn of the portfolio
+        # earn", which is what says whether the costs above were worth
+        # paying. None when nothing executed, because 0 rebalances earning
+        # 0.0 is a different statement from a flat result -- a DEFENSIVE
+        # branch, not a reachable one: the engine already rejects both
+        # routes to an empty log (empty target_weights, and a next_open
+        # rebalance with no following bar). Kept, and pinned by a test, so
+        # that relaxing either guard cannot silently produce a ZeroDivision.
+        "return_over_rebalance": (
+            round(
+                (float(equity_curve.iloc[-1]) / initial_capital - 1.0)
+                / len(rebalance_log),
+                6,
+            )
+            if rebalance_log and not equity_curve.empty
+            else None
         ),
         "warnings": warnings,
     }

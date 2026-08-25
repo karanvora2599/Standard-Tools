@@ -193,3 +193,77 @@ def margin_interest(cash: float, annual_rate: float, days: float = 1.0) -> float
     if cash >= 0:
         return 0.0
     return abs(cash) * annual_rate * (days / 365.0)
+
+
+def directional_commission(
+    notional: float, buy_rate: float, sell_rate: float, is_buy: bool
+) -> float:
+    """
+    Commission that differs by side.
+
+    `percentage_commission` charges the same rate whichever way the trade
+    goes, which is not what US equity execution actually costs. The SEC
+    Section 31 fee and the FINRA TAF are levied on SALES only, so a
+    round trip is not symmetric and a strategy whose turnover is
+    sell-heavy is undercharged by a single blended rate. The same asymmetry
+    shows up wherever a venue prices the two sides differently.
+
+    Both rates must be >= 0: this is a commission on either side, and a
+    negative one is the credit `_cost_rate` exists to reject. For a genuine
+    rebate use `maker_taker_cost`, which takes it deliberately.
+
+    Args:
+        notional:  Trade notional. Signed or unsigned -- the magnitude is
+                   used, and `is_buy` carries the direction, because
+                   inferring side from the sign of a notional is how a
+                   short sale gets charged as a buy.
+        buy_rate:  Fraction of notional charged when buying.
+        sell_rate: Fraction of notional charged when selling.
+        is_buy:    True for a buy, False for a sell.
+    """
+    _cost_rate("notional", notional, allow_negative=True)
+    _cost_rate("buy_rate", buy_rate)
+    _cost_rate("sell_rate", sell_rate)
+    return abs(notional) * (buy_rate if is_buy else sell_rate)
+
+
+def maker_taker_cost(
+    notional: float, taker_rate: float, maker_rate: float, is_maker: bool
+) -> float:
+    """
+    Maker/taker pricing, where the maker rate MAY be a rebate.
+
+    This is the one function in this module that accepts a negative rate,
+    and it is separate from the others precisely so that a negative cost
+    can only arrive on purpose. `_cost_rate` rejects negatives everywhere
+    else because a credit flatters exactly the strategies that turn over
+    most; a maker rebate is a real credit, so it is modelled here rather
+    than smuggled in as a sign error somewhere that reads it as a cost.
+
+    Two things this does not do, deliberately:
+
+    * It does not decide whether a fill was passive. Nothing in an OHLCV
+      bar knows that. The caller asserts `is_maker`, and asserting it for
+      every fill is a claim about queue behaviour this library cannot
+      check -- see the note in Documentation/04_backtesting.md.
+    * It does not bound the rebate. A venue schedule is a fact, not a
+      parameter to tune, and clamping it would hide a mis-entered one.
+
+    Args:
+        notional:    Trade notional; the magnitude is used.
+        taker_rate:  Fraction charged when removing liquidity. Must be >= 0.
+        maker_rate:  Fraction charged when adding liquidity. NEGATIVE means
+                     a rebate -- the venue pays you.
+        is_maker:    Which side of the schedule this fill lands on.
+    """
+    _cost_rate("notional", notional, allow_negative=True)
+    _cost_rate("taker_rate", taker_rate)
+    _cost_rate("maker_rate", maker_rate, allow_negative=True)
+    rate = maker_rate if is_maker else taker_rate
+    if is_maker and maker_rate < 0:
+        logger.debug(
+            "[maker_taker_cost] maker rebate applied: %.6f of notional. This "
+            "is a credit -- verify it against the venue's published schedule.",
+            -maker_rate,
+        )
+    return abs(notional) * rate

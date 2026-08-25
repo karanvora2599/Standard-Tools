@@ -583,18 +583,24 @@ std::size_t run_portfolio_simulation(
     double* out_gross,
     double* out_net,
     double* out_rebal,
+    double* out_peak_position,
     PortfolioSimError* err)
 {
     if (err) *err = PortfolioSimError{};
+    if (out_peak_position) *out_peak_position = 0.0;
     if (n_bars == 0) return 0;
 
-    const double cost_rate = costs.commission_pct + costs.slippage_pct;
+    // Two rates, selected per order by the sign of delta. The spread is
+    // crossed whichever way the trade goes, so slippage is in both.
+    const double buy_cost_rate  = costs.commission_pct + costs.slippage_pct;
+    const double sell_cost_rate = costs.sell_commission_pct + costs.slippage_pct;
     double cash = costs.initial_capital;
     std::vector<double> shares(n_tickers, 0.0);
     std::vector<double> position_values(n_tickers, 0.0);
 
     std::size_t next_rebal = 0;   // index into rebal_bars / weights
     std::size_t n_executed = 0;
+    double      peak_position = 0.0;
 
     // For kFillNextOpen a rebalance decided at bar b executes at bar b+1.
     bool        pending        = false;
@@ -634,7 +640,11 @@ std::size_t run_portfolio_simulation(
                 const double notional = std::abs(delta) * price;
                 turnover_notional += notional;
                 cash_delta        += delta * price;
-                cost_total        += notional * cost_rate;
+                // delta < 0 is a sale: reducing a long and extending a short
+                // both pay the sell rate. Same rule as the Python, which
+                // selects on the same sign.
+                cost_total        += notional
+                                   * (delta < 0.0 ? sell_cost_rate : buy_cost_rate);
             }
             shares[i] = target;
         }
@@ -746,7 +756,11 @@ std::size_t run_portfolio_simulation(
         for (std::size_t i = 0; i < n_tickers; ++i) {
             const double v = shares[i] * cp[i];
             position_value += v;
-            gross += std::abs(v);
+            const double av = std::abs(v);
+            gross += av;
+            // One comparison per element on a loop that already runs, rather
+            // than a second pass over the book.
+            if (av > peak_position) peak_position = av;
         }
         const double equity = cash + position_value;
 
@@ -758,10 +772,12 @@ std::size_t run_portfolio_simulation(
             out_cash[bar]   = cash;
             out_gross[bar]  = gross;
             out_net[bar]    = position_value;
+            if (out_peak_position) *out_peak_position = peak_position;
             fail(kPortfolioInsolventAtBar, bar, -1, equity);
             return n_executed;
         }
 
+        if (out_peak_position) *out_peak_position = peak_position;
         out_equity[bar] = equity;
         out_cash[bar]   = cash;
         out_gross[bar]  = gross;

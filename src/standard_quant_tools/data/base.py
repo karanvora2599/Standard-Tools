@@ -155,3 +155,74 @@ class DataProvider(ABC):
         provider must answer honestly, not aspirationally.
         """
         pass
+
+    # ── Tick-level data (optional capability) ────────────────────────────
+    #
+    # Not abstract, deliberately. Every method above is something all three
+    # shipped providers can do; these two are not. Marking them abstract
+    # would break yfinance and Bloomberg at import time to express a fact
+    # better expressed by a clear error at the point of use -- the same
+    # choice the modeling runtime makes for lightgbm/xgboost, where a
+    # missing capability is reported rather than fatal.
+    #
+    # The bar methods above are the library's whole world today. These exist
+    # so that a caller who needs the microstructure layer gets a specific
+    # answer about THIS provider rather than an AttributeError, and so that
+    # a provider gaining the capability has an obvious place to put it.
+
+    def get_trades(
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Individual trades (ticks) for one symbol over a time range.
+
+        Returns a DataFrame indexed by timestamp with at least `price` and
+        `size` columns; providers may add exchange and condition codes.
+
+        Raises:
+            NotImplementedError: this provider has no tick feed. Bars are
+                not a substitute and this deliberately does not synthesize
+                one -- a "trade" derived from an OHLCV row is a fiction that
+                every downstream microstructure measure would treat as fact.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not provide tick-level trades. "
+            "Only PolygonProvider does, and it needs a plan tier that "
+            "includes trades (see Documentation/01_data_fetching.md). Bar "
+            "data cannot substitute: spreads and signed order flow are not "
+            "recoverable from an OHLCV row."
+        )
+
+    def get_quotes(
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Best bid/offer quotes for one symbol over a time range.
+
+        Returns a DataFrame indexed by timestamp with at least `bid_price`,
+        `bid_size`, `ask_price` and `ask_size`.
+
+        This is TOP OF BOOK only. No shipped provider offers depth, so
+        nothing in this library sees the order book, and anything needing
+        queue position or resting size at a level is out of reach rather
+        than approximated.
+
+        Raises:
+            NotImplementedError: this provider has no quote feed.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not provide quotes. Only "
+            "PolygonProvider does, and it needs a plan tier that includes "
+            "quotes (see Documentation/01_data_fetching.md). The "
+            "Corwin-Schultz and Amihud estimators in "
+            "`analysis`/`get_liquidity_metrics` exist precisely because this "
+            "data is usually absent -- they are proxies, and they say so."
+        )

@@ -192,6 +192,96 @@ def _polygon_get(path: str, params: Dict[str, Any], api_key: str) -> Dict[str, A
     return payload
 
 
+# ── Tick endpoints (v3) ──────────────────────────────────────────────────
+#
+# These are the only endpoints in this module that are NOT on Polygon's free
+# tier. A key that works for every function above will return HTTP 403 here,
+# which _polygon_get already turns into a NonRetryableAPIError naming the
+# key -- correct for an expired key, misleading for a valid one on the wrong
+# plan. `_require_tick_access` re-raises with the actual cause.
+#
+# Timestamps come back as integer NANOSECONDS since the epoch (not
+# milliseconds, as the aggregates endpoint uses), and mixing the two units
+# silently places every tick in 1970.
+_TICK_LIMIT = 50_000  # Polygon's documented per-page maximum
+
+
+def _normalize_ticker(symbol: str) -> str:
+    """Same URL-safe form get_ohlcv builds, kept in one place."""
+    return _urlquote(symbol.strip().upper(), safe=":")
+
+
+def _tick_range_ns(
+    start_date: Union[str, datetime], end_date: Union[str, datetime]
+) -> tuple:
+    """
+    Half-open [start, end) range as integer nanoseconds.
+
+    Half-open, not inclusive: a closed range on a nanosecond clock either
+    double-counts the boundary tick across consecutive calls or drops it,
+    and which one is invisible until someone concatenates two windows.
+    """
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    if end_ts <= start_ts:
+        raise ValidationError(
+            f"end_date ({end_ts}) must be after start_date ({start_ts}); "
+            "the tick range is half-open [start, end)."
+        )
+    return int(start_ts.value), int(end_ts.value)
+
+
+def _require_tick_access(exc: Exception, what: str) -> None:
+    """Re-raise a 403 as the plan problem it almost always is here."""
+    if isinstance(exc, NonRetryableAPIError):
+        raise NonRetryableAPIError(
+            f"Polygon.io refused {what}. These endpoints are not on the free "
+            "tier — a key that works for bars and fundamentals will still be "
+            "rejected here without a plan that includes tick data. "
+            f"(original: {exc})"
+        ) from exc
+
+
+def _parse_ticks(
+    results: List[Dict[str, Any]],
+    columns: Dict[str, str],
+    symbol: str,
+    what: str,
+) -> pd.DataFrame:
+    """
+    Shape a v3 tick payload into a timestamp-indexed frame.
+
+    `columns` maps Polygon's single-letter field names to ours. Rows missing
+    the SIP timestamp are dropped rather than defaulted: a tick with no time
+    cannot be ordered against the others, and every microstructure measure
+    built on this data is an ordering.
+    """
+    if not results:
+        raise DataNotFoundError(
+            f"Polygon.io returned no {what} for {symbol!r} in this range. "
+            "Tick history is shorter than bar history on most plans."
+        )
+    rows = []
+    index = []
+    for item in results:
+        ts = item.get("sip_timestamp") or item.get("participant_timestamp")
+        if ts is None:
+            continue
+        index.append(int(ts))
+        rows.append({ours: item.get(theirs) for theirs, ours in columns.items()})
+    if not rows:
+        raise DataNotFoundError(
+            f"Polygon.io returned {len(results)} {what} row(s) for {symbol!r}, "
+            "none carrying a usable timestamp."
+        )
+    frame = pd.DataFrame(rows)
+    # NANOSECONDS. The aggregates endpoint in this same module uses
+    # milliseconds; passing that unit here would date every tick to 1970.
+    frame.index = pd.to_datetime(pd.Index(index), unit="ns")
+    frame.index.name = "timestamp"
+    return frame.sort_index()
+
+
 def _parse_aggs(
     results: List[Dict[str, Any]], symbol: str, timespan: str
 ) -> pd.DataFrame:
@@ -569,4 +659,88 @@ class PolygonProvider(DataProvider):
             point_in_time=False,
             frequency=interval,
             timezone="America/New_York",
+        )
+
+    def get_trades(
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Individual trades from Polygon's `/v3/trades/{ticker}` endpoint.
+
+        Returns a nanosecond-resolution frame indexed by SIP timestamp, with
+        `price`, `size` and `exchange`.
+
+        One page only, like `get_ohlcv`. Polygon paginates tick data with a
+        cursor and a liquid name produces millions of trades per day, so
+        silently following `next_url` would turn one call into an unbounded
+        download. `limit` caps the page (Polygon's own maximum is 50,000)
+        and the caller narrows the time range to get the rest.
+        """
+        ticker = _normalize_ticker(symbol)
+        start_ns, end_ns = _tick_range_ns(start_date, end_date)
+        params: Dict[str, Any] = {
+            "timestamp.gte": start_ns,
+            "timestamp.lt": end_ns,
+            "limit": min(int(limit), _TICK_LIMIT) if limit else _TICK_LIMIT,
+            "order": "asc",
+            "sort": "timestamp",
+        }
+        try:
+            payload = _polygon_get(f"/v3/trades/{ticker}", params, self._api_key)
+        except Exception as exc:
+            _require_tick_access(exc, f"trades for {symbol!r}")
+            raise
+        return _parse_ticks(
+            payload.get("results") or [],
+            {"price": "price", "size": "size", "exchange": "exchange"},
+            symbol,
+            "trades",
+        )
+
+    def get_quotes(
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        NBBO quotes from Polygon's `/v3/quotes/{ticker}` endpoint.
+
+        Returns a nanosecond-resolution frame with `bid_price`, `bid_size`,
+        `ask_price` and `ask_size`.
+
+        Top of book only. Polygon's standard plans carry no depth, so this
+        cannot answer anything about resting size below the touch — see the
+        note on `DataProvider.get_quotes`. Same single-page rule as
+        `get_trades`, and quotes are the higher-volume feed of the two.
+        """
+        ticker = _normalize_ticker(symbol)
+        start_ns, end_ns = _tick_range_ns(start_date, end_date)
+        params: Dict[str, Any] = {
+            "timestamp.gte": start_ns,
+            "timestamp.lt": end_ns,
+            "limit": min(int(limit), _TICK_LIMIT) if limit else _TICK_LIMIT,
+            "order": "asc",
+            "sort": "timestamp",
+        }
+        try:
+            payload = _polygon_get(f"/v3/quotes/{ticker}", params, self._api_key)
+        except Exception as exc:
+            _require_tick_access(exc, f"quotes for {symbol!r}")
+            raise
+        return _parse_ticks(
+            payload.get("results") or [],
+            {
+                "bid_price": "bid_price",
+                "bid_size": "bid_size",
+                "ask_price": "ask_price",
+                "ask_size": "ask_size",
+            },
+            symbol,
+            "quotes",
         )
