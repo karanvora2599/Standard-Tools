@@ -10,6 +10,15 @@ already carry bulk values between them without bespoke bridges. The
 question is no longer *how to stop one agent seeing 82 tools* — it is how
 to grow past 82 without reintroducing that problem.
 
+**Except that we cannot currently grow past 82 at all.** The measurement
+that came out of writing this plan is the thing to read first: at 2,184
+bytes per tool over the wire, the MCP context ceiling buys 82.4 tools, and
+the library has 82. The remaining headroom is 912 bytes — 0.42 of one tool.
+The 83rd tool fails the budget test whatever it is. Every phase below is
+blocked behind an exposure change (§2) that is not a scaling optimization
+for a hypothetical future surface, but the precondition for adding one more
+tool to this one.
+
 The target is **9 substantial runtimes averaging ~17 tools each**, not 20
 micro-runtimes. Execution (broker writes) is deliberately out of scope for
 this plan.
@@ -227,6 +236,14 @@ sequenced before the microstructure split**, not after it.
 ---
 
 ## 5. The phases
+
+Numbering starts at 1 here because **Phases 0 and 0b are in §2**, where the
+constraint that motivates them is measured. They are not preliminaries to
+this list — they gate all of it, and neither is large.
+
+Phases 1, 2 and 6 are ready to start once §2 ships. Phase 3 is gated on a
+provider project, Phase 5 on the donor floor, and Phase 7 on a contract that
+does not exist yet.
 
 ### Phase 1 — Feature Lab
 
@@ -565,6 +582,56 @@ Tolerable at five runtimes. At nine it is a reliable source of exactly the
 drift the existing tests were written to catch. **Write a `new_runtime`
 scaffold before Phase 3**, not after the third time it is done by hand.
 
+### Schema prose is a budget line — and a drift detector
+
+43% of every input schema is field-description text, and 19% of the whole
+surface is the same field descriptions retransmitted per tool. §2 explains
+why `$ref` cannot reach those bytes; what remains is editing.
+
+Measuring it turned up something more useful than a byte count.
+**Nineteen shared field names have drifted into multiple distinct
+schemas**, because each input model re-types its own copy:
+
+```
+tickers          15 uses,  14 variants   <- essentially all hand-written
+fill_price       17 uses,   7 variants
+start_date       45 uses,   6 variants
+commission_pct   19 uses,   6 variants
+symbol           32 uses,   5 variants
+slippage_pct     18 uses,   5 variants
+initial_capital  20 uses,   5 variants
+```
+
+Some of that variance is *correct*. Two of `risk_free_rate`'s four variants
+are the Black-Scholes discount rate — a different quantity that is
+deliberately required rather than defaulted, and
+`test_risk_free_rate.py::test_the_option_pricing_rate_stays_required`
+exists to keep the two apart. The rule is therefore not "make them
+identical".
+
+The rest is not correct, and one case is a live agent-facing problem.
+`commission_pct` has a single default — `0.001` in all nineteen tools that
+take it — but only **eight** descriptions say so; the other **eleven** read
+*"Commission per trade (fraction)"* and leave the caller to guess. Two
+`initial_capital` variants carry an **empty** description. An agent choosing
+between those tools reads different documentation for identical behaviour,
+which is precisely the class of thing that produces a confidently wrong
+argument — and it is invisible to every test we have, because each model is
+individually valid.
+
+Two rules, cheap to enforce:
+
+- **One canonical `Field(...)` per concept**, imported by every input model
+  that uses it. A variant is then something a model does on purpose, in one
+  place, with a reason — not the default outcome of re-typing.
+- **A per-field description cap, tested**, the way the total is pinned now.
+  The existing budget test caught two overruns during this work; a per-field
+  cap catches the cause rather than the symptom.
+
+Expect ~15% of the bytes. Not the lever — Phase 0b is — but it compounds
+with it, since a thin listing still pays full price for whichever schemas
+get fetched, and the correctness win lands whether or not 0b ships.
+
 ### Provider capability as a hard gate
 
 `describe_data_capabilities` already probes by class override rather than by
@@ -585,6 +652,8 @@ domain.
 | `list_execution_backends` | **Cut** | Already covered. `explain_decision` reports the execution path per call — the form that actually matters — and `describe_data_capabilities` covers the rest. |
 | One tool per pricing model | **Cut** | Declarative spec, one tool. Same rule as estimators and strategies. |
 | 20 reference kinds up front | **Trim** | Ship each kind with its producer. A kind with no producer documents an intention, not a capability. |
+| Thin-everything exposure (28 KB) | **Rejected** | The cheapest number and the worst design. A schema an agent has not read is one it will guess at — the same failure runtimes exist to prevent, one layer down. Take the tiered row at 168 KB. |
+| Raising the MCP ceiling a third time | **No** | Argued up once (150k → 180k) and trimmed against twice. A limit that moves whenever it binds is not a limit, and §2 removes the need. |
 | `streaming` as a firm phase | **Defer** | Keep it last and optional. The only phase that requires changing an invariant the rest of the architecture rests on. |
 
 ---
@@ -646,7 +715,12 @@ Two consequences worth stating plainly:
 3. **Microstructure** — gated on a provider project *and* on Phase 5
    clearing the donor floor.
 
-Phase 0 is not optional and is not large. It should ship before any of them.
+**Phases 0 and 0b ship first, and neither is optional.** Phase 0 is what
+keeps a nine-runtime surface from re-becoming the flat list runtimes were
+built to prevent. Phase 0b is what makes it fit at all — and it is the only
+work in this document that makes the *existing* 82 tools cheaper rather than
+just accommodating more. Together they are the smallest phase here and the
+only one whose absence blocks everything else.
 
 ---
 
