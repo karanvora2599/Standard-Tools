@@ -201,6 +201,11 @@ class TestNativePathIsSkippedWhenUnsupported:
                 max_adv_participation=None,
                 initial_capital=1000.0,
                 commission_pct=0.0,
+                # Required, not defaulted: there is exactly one production
+                # call site and a default would let a future one silently
+                # get symmetric commission on a spec that asked for two
+                # rates.
+                sell_commission_rate=0.0,
                 slippage_pct=0.0,
                 max_gross_leverage=1.0,
                 max_position_pct=1.0,

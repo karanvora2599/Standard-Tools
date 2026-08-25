@@ -778,7 +778,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            py::array_t<double, py::array::c_style | py::array::forcecast> weights,
            py::array_t<long long, py::array::c_style | py::array::forcecast> rebal_bars,
            py::array_t<double, py::array::c_style | py::array::forcecast> day_gaps,
-           double initial_capital, double commission_pct, double slippage_pct,
+           double initial_capital, double commission_pct,
+           double sell_commission_pct, double slippage_pct,
            double max_gross_leverage, double max_position_pct,
            double borrow_fee_bps, double margin_interest_rate,
            int fill) -> py::dict
@@ -815,6 +816,7 @@ PYBIND11_MODULE(_sqt_core, m) {
             sqt::PortfolioCosts costs;
             costs.initial_capital      = initial_capital;
             costs.commission_pct       = commission_pct;
+            costs.sell_commission_pct  = sell_commission_pct;
             costs.slippage_pct         = slippage_pct;
             costs.max_gross_leverage   = max_gross_leverage;
             costs.max_position_pct     = max_position_pct;
@@ -840,12 +842,14 @@ PYBIND11_MODULE(_sqt_core, m) {
 
             sqt::PortfolioSimError err;
             std::size_t n_executed = 0;
+            double peak_position = 0.0;
             {
                 py::gil_scoped_release release;
                 n_executed = sqt::run_portfolio_simulation(
                     c_ptr, x_ptr, w_ptr, r_ptr, g_ptr,
                     n_bars, n_tickers, n_rebal, costs,
-                    eq_ptr, csh_ptr, grs_ptr, net_ptr, reb_ptr, &err);
+                    eq_ptr, csh_ptr, grs_ptr, net_ptr, reb_ptr,
+                    &peak_position, &err);
             }
 
             py::dict d;
@@ -855,6 +859,7 @@ PYBIND11_MODULE(_sqt_core, m) {
             d["net"]         = net;
             d["rebalances"]  = reb;
             d["n_executed"]  = static_cast<py::ssize_t>(n_executed);
+            d["peak_position"] = peak_position;
             d["status"]      = err.status;
             d["bar"]         = static_cast<py::ssize_t>(err.bar);
             d["ticker"]      = err.ticker;
@@ -868,6 +873,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("day_gaps"),
         py::arg("initial_capital")      = 10'000.0,
         py::arg("commission_pct")       = 0.001,
+        py::arg("sell_commission_pct")  = 0.001,
         py::arg("slippage_pct")         = 0.0005,
         py::arg("max_gross_leverage")   = 1.0,
         py::arg("max_position_pct")     = 1.0,
