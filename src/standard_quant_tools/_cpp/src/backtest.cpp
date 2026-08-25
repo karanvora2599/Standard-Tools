@@ -168,7 +168,8 @@ BacktestResult run_strategy(
     double commission_pct,
     double slippage_pct,
     double periods_per_year,
-    const double* ref_prices)
+    const double* ref_prices,
+    double risk_free_rate)
 {
     BacktestResult r{};
     r.equity_curve.resize(n, initial_capital);
@@ -289,21 +290,34 @@ BacktestResult run_strategy(
         sum_sq += d * d;
     }
 
+    // The risk-free rate enters per period, exactly as
+    // metrics/risk_metrics.py does it.
+    const double rf_per_period = risk_free_rate / periods_per_year;
+    const double mean_excess   = mean_r - rf_per_period;
+
     const double sample_std = (n > 1) ? std::sqrt(sum_sq / (n_d - 1.0)) : 0.0;
     r.annualized_vol = sample_std * std::sqrt(periods_per_year);
+    // sum_sq above is the dispersion of RAW returns, and that is correct
+    // for the excess series too: subtracting a constant from every element
+    // shifts the mean and leaves the standard deviation untouched. Only the
+    // numerator moves.
     r.sharpe_ratio   = (sample_std > 0.0)
-        ? (mean_r / sample_std) * std::sqrt(periods_per_year) : 0.0;
+        ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : 0.0;
 
-    // Sortino: semi-deviation = sqrt(mean(min(r, 0)^2)) across ALL periods.
-    // Sortino & Price (1994) definition — zero contribution from profitable bars.
+    // Sortino: semi-deviation = sqrt(mean(min(excess, 0)^2)) across ALL
+    // periods. Sortino & Price (1994) — zero contribution from bars that
+    // beat the risk-free rate. Unlike Sharpe, the rate moves the
+    // DENOMINATOR here too, because it decides which bars count as
+    // downside at all.
     {
         double down_sq_sum = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
-            const double d = std::min(strat_ret[i], 0.0);
+            const double d = std::min(strat_ret[i] - rf_per_period, 0.0);
             down_sq_sum += d * d;
         }
         const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
-        r.sortino_ratio = (down_dev > 0.0) ? (mean_r * periods_per_year) / down_dev : kInf;
+        r.sortino_ratio =
+            (down_dev > 0.0) ? (mean_excess * periods_per_year) / down_dev : kInf;
     }
 
     // ── Calmar: CAGR / |max_drawdown|  (CAGR = (final/initial)^(252/n) - 1) ──
@@ -390,7 +404,8 @@ BacktestResult run_strategy_summary(
     double commission_pct,
     double slippage_pct,
     double periods_per_year,
-    const double* ref_prices)
+    const double* ref_prices,
+    double risk_free_rate)
 {
     BacktestResult r{};
     r.final_equity         = initial_capital;
@@ -512,8 +527,16 @@ BacktestResult run_strategy_summary(
     //    iterations -- exec_i/prev_exec are both directly index-derivable)
     //    to get variance and downside deviation now that mean_r is known.
     //    Seeded with index 0's implicit strat_ret[0]=0.0 term. ────────────
-    double sum_sq      = mean_r * mean_r;
-    double down_sq_sum = 0.0;
+    const double rf_per_period = risk_free_rate / periods_per_year;
+    const double mean_excess   = mean_r - rf_per_period;
+
+    double sum_sq = mean_r * mean_r;
+    // Bar 0's strat_ret is identically 0.0, so its EXCESS is -rf_per_period
+    // and it contributes rf_per_period^2 to the downside sum. The loop below
+    // starts at i=1, so that term has to be seeded here -- it is the one
+    // piece of this function that is invisible at rf = 0 and makes the two
+    // execution paths disagree the moment a rate is set.
+    double down_sq_sum = rf_per_period * rf_per_period;
 
     for (std::size_t i = 1; i < n; ++i) {
         const double exec_i      = signals[i - 1];
@@ -526,17 +549,18 @@ BacktestResult run_strategy_summary(
         const double d = strat_ret_i - mean_r;
         sum_sq += d * d;
 
-        const double down_d = std::min(strat_ret_i, 0.0);
+        const double down_d = std::min(strat_ret_i - rf_per_period, 0.0);
         down_sq_sum += down_d * down_d;
     }
 
     const double sample_std = (n > 1) ? std::sqrt(sum_sq / (n_d - 1.0)) : 0.0;
     r.annualized_vol = sample_std * std::sqrt(periods_per_year);
     r.sharpe_ratio   = (sample_std > 0.0)
-        ? (mean_r / sample_std) * std::sqrt(periods_per_year) : 0.0;
+        ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : 0.0;
 
     const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
-    r.sortino_ratio = (down_dev > 0.0) ? (mean_r * periods_per_year) / down_dev : kInf;
+    r.sortino_ratio =
+        (down_dev > 0.0) ? (mean_excess * periods_per_year) / down_dev : kInf;
 
     // ── Trade statistics ──────────────────────────────────────────────────────
     r.num_trades = numerics::checked_narrow_to_int(
@@ -811,7 +835,8 @@ std::vector<BacktestResult> batch_backtest_crossover(
     double commission_pct,
     double slippage_pct,
     double periods_per_year,
-    const double* ref_prices)
+    const double* ref_prices,
+    double risk_free_rate)
 {
     std::vector<BacktestResult> results(num_combos);
     if (n == 0 || num_combos == 0) return results;
@@ -892,7 +917,7 @@ std::vector<BacktestResult> batch_backtest_crossover(
                 results[ti] = run_strategy_summary(
                     prices, signal.data(), n,
                     initial_capital, commission_pct, slippage_pct,
-                    periods_per_year, ref_prices);
+                    periods_per_year, ref_prices, risk_free_rate);
             } catch (...) {
                 region_error = true;
             }
@@ -911,7 +936,7 @@ std::vector<BacktestResult> batch_backtest_crossover(
         results[ti] = run_strategy_summary(
             prices, signal.data(), n,
             initial_capital, commission_pct, slippage_pct,
-            periods_per_year, ref_prices);
+            periods_per_year, ref_prices, risk_free_rate);
     }
 #endif
     if (region_error) {
@@ -933,7 +958,8 @@ std::vector<BacktestResult> batch_run_strategy(
     double commission_pct,
     double slippage_pct,
     double periods_per_year,
-    const double* ref_prices)
+    const double* ref_prices,
+    double risk_free_rate)
 {
     std::vector<BacktestResult> results(num_tests);
 
@@ -969,7 +995,8 @@ std::vector<BacktestResult> batch_run_strategy(
             commission_pct,
             slippage_pct,
             periods_per_year,
-            ref_prices);
+            ref_prices,
+            risk_free_rate);
     }
     return results;
 }

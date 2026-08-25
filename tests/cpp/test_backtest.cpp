@@ -803,6 +803,68 @@ static void test_crossover_empty_inputs() {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+// ── Risk-free rate ────────────────────────────────────────────────────────────
+
+static void test_risk_free_rate_defaults_to_zero() {
+    // The rate is the last defaulted parameter, so every call site that
+    // predates it must keep reporting exactly what it always reported.
+    const std::vector<double> prices  = {100.0, 101.0, 99.0, 103.0, 102.0, 105.0};
+    const std::vector<double> signals = {1.0, 1.0, 0.0, 1.0, 1.0, 0.0};
+    auto implicit_rate = sqt::run_strategy(prices.data(), signals.data(),
+                                           prices.size());
+    auto explicit_zero = sqt::run_strategy(prices.data(), signals.data(),
+                                           prices.size(), 10'000.0, 0.001,
+                                           0.0005, 252.0, nullptr, 0.0);
+    CHECK_NEAR(implicit_rate.sharpe_ratio,  explicit_zero.sharpe_ratio,  0.0);
+    CHECK_NEAR(implicit_rate.sortino_ratio, explicit_zero.sortino_ratio, 0.0);
+}
+
+static void test_risk_free_rate_lowers_the_ratios() {
+    const std::vector<double> prices  = {100.0, 101.0, 102.5, 101.5, 104.0, 106.0};
+    const std::vector<double> signals = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+    auto at_zero = sqt::run_strategy(prices.data(), signals.data(), prices.size(),
+                                     10'000.0, 0.0, 0.0, 252.0, nullptr, 0.0);
+    auto at_high = sqt::run_strategy(prices.data(), signals.data(), prices.size(),
+                                     10'000.0, 0.0, 0.0, 252.0, nullptr, 0.25);
+    CHECK_TRUE(at_high.sharpe_ratio < at_zero.sharpe_ratio);
+    // ...and it is a scoring convention, not a cash flow: the equity curve
+    // and every return-based field must be untouched.
+    CHECK_NEAR(at_high.total_return, at_zero.total_return, 0.0);
+    CHECK_NEAR(at_high.final_equity, at_zero.final_equity, 0.0);
+    CHECK_NEAR(at_high.max_drawdown, at_zero.max_drawdown, 0.0);
+}
+
+static void test_summary_matches_run_strategy_under_a_rate() {
+    // The divergence this guards: run_strategy_summary loops from i=1 and
+    // seeds the downside sum with bar 0's implicit strat_ret of 0.0, whose
+    // EXCESS is -rf/ppy. That seed contributes nothing at rf = 0, so a
+    // missing one is invisible until a rate is set -- and every batch entry
+    // point reads its numbers from this function.
+    std::uint64_t state = 4242;
+    const double rates[] = {0.0, 0.01, 0.045, 0.10, 0.25};
+    for (double rf : rates) {
+        for (int trial = 0; trial < 15; ++trial) {
+            const int n = 5 + static_cast<int>(std::abs(pseudo_random(state)) * 200);
+            std::vector<double> prices(n), signals(n);
+            for (int i = 0; i < n; ++i) {
+                prices[i]  = 50.0 + pseudo_random(state) * 40.0;
+                signals[i] = pseudo_random(state) * 2.0;
+            }
+            const double commission = std::abs(pseudo_random(state)) * 0.01;
+            const double slippage   = std::abs(pseudo_random(state)) * 0.01;
+
+            auto full = sqt::run_strategy(prices.data(), signals.data(), n,
+                                          10'000.0, commission, slippage,
+                                          252.0, nullptr, rf);
+            auto summ = sqt::run_strategy_summary(prices.data(), signals.data(), n,
+                                                  10'000.0, commission, slippage,
+                                                  252.0, nullptr, rf);
+            check_all_fields_match(full, summ);
+        }
+    }
+}
+
+
 int main() {
     test_flat_signal_zero_return();
     test_empty_input();
@@ -825,6 +887,9 @@ int main() {
     test_trade_log_cost_scales_with_leveraged_position_size();
     test_trade_log_resize_cost_is_weighted_cost_basis();
     test_trade_log_cost_matches_equity_curve_cost_property();
+    test_risk_free_rate_defaults_to_zero();
+    test_risk_free_rate_lowers_the_ratios();
+    test_summary_matches_run_strategy_under_a_rate();
     test_run_strategy_summary_matches_run_strategy_random();
     test_run_strategy_summary_edge_cases();
     test_run_strategy_summary_multi_trade_count();

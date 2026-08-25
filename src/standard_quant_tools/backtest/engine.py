@@ -277,6 +277,7 @@ def run_strategy(
     slippage_pct: float = 0.0005,
     include_trade_log: bool = False,
     fill_price: str = "close",
+    risk_free_rate: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Vectorized backtesting engine with transaction costs.
@@ -288,6 +289,13 @@ def run_strategy(
         commission_pct: Commission per unit of position changed (default 0.1%).
         slippage_pct: Slippage per unit of position changed (default 0.05%).
         include_trade_log: If True, build and return per-trade log.
+        risk_free_rate: Annualized risk-free rate as a decimal fraction
+            (0.045 = 4.5%), subtracted per period before Sharpe and
+            Sortino. Defaults to 0.0 — the value this engine always
+            assumed — so an unset rate cannot move a number that was
+            already reported. Passed identically to the native kernel and
+            the Python fallback: a machine with the C++ extension built
+            must not report a different ratio from one without it.
         fill_price: "close" (default) — a signal known at bar t-1's close is
             assumed filled at that same close, earning bar t's full
             close-to-close return. "next_open" — decomposes each bar into
@@ -474,6 +482,7 @@ def run_strategy(
             slippage_pct,
             252.0,
             ref_arr,
+            risk_free_rate,
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
         # win_rate/profit_factor/num_trades/avg_trade_return_pct: read
@@ -584,8 +593,8 @@ def run_strategy(
 
     total_ret = cumulative_return(equity_curve)
     annual_vol = annualized_volatility(strategy_returns)
-    sr = sharpe_ratio(strategy_returns)
-    srt = sortino_ratio(strategy_returns)
+    sr = sharpe_ratio(strategy_returns, risk_free_rate)
+    srt = sortino_ratio(strategy_returns, risk_free_rate)
     mdd = max_drawdown(equity_curve)
     cal = calmar_ratio(equity_curve)
     final_eq = (
@@ -633,6 +642,7 @@ def _fused_crossover_metrics(
     commission_pct: float,
     slippage_pct: float,
     ref_arr: Optional[np.ndarray],
+    risk_free_rate: float = 0.0,
 ) -> Optional[np.ndarray]:
     """
     Fused path for two-moving-average crossover grids.
@@ -688,6 +698,7 @@ def _fused_crossover_metrics(
         slippage_pct,
         252.0,
         ref_arr,
+        risk_free_rate,
     )
 
 
@@ -712,6 +723,10 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
         commission_pct=job["commission_pct"],
         slippage_pct=job["slippage_pct"],
         fill_price=job.get("fill_price", "close"),
+        # A grid that ranked on a zero-rate Sharpe while the single run it
+        # is compared against used a real one would pick a different
+        # winner, and nothing in either result would say why.
+        risk_free_rate=job.get("risk_free_rate", 0.0),
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -759,6 +774,7 @@ def backtest_grid(
     ascending: bool = False,
     n_workers: Optional[int] = None,
     fill_price: str = "close",
+    risk_free_rate: float = 0.0,
 ) -> pd.DataFrame:
     """
     Run a backtest across every parameter combination in param_grid in parallel.
@@ -911,6 +927,7 @@ def backtest_grid(
                     commission_pct,
                     slippage_pct,
                     grid_ref_arr,
+                    risk_free_rate,
                 )
 
             if metrics_arr is None:
@@ -953,6 +970,7 @@ def backtest_grid(
                     slippage_pct,
                     252.0,
                     grid_ref_arr,
+                    risk_free_rate,
                 )
             metrics_df = pd.DataFrame(metrics_arr, columns=_BATCH_METRIC_COLUMNS)
             metrics_df["num_trades"] = metrics_df["num_trades"].astype(int)
@@ -1051,6 +1069,7 @@ def backtest_grid(
                 "commission_pct": commission_pct,
                 "slippage_pct": slippage_pct,
                 "fill_price": fill_price,
+                "risk_free_rate": risk_free_rate,
             }
             for combo in combos
         ]

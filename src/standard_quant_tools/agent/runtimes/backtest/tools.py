@@ -428,6 +428,7 @@ def run_regime_adaptive_backtest(
         sort_by="sharpe_ratio",
         ascending=False,
         n_workers=input_data.n_workers,
+        risk_free_rate=input_data.risk_free_rate,
     )
 
     best_row = grid_df.iloc[0]
@@ -580,6 +581,7 @@ def run_regime_adaptive_walkforward_backtest(
                 ascending=False,
                 n_workers=1,
                 fill_price=input_data.fill_price,
+                risk_free_rate=input_data.risk_free_rate,
             )
             best_row = grid_df.iloc[0]
             metric_val = float(best_row.get(input_data.sort_by, float("-inf")))
@@ -620,6 +622,7 @@ def run_regime_adaptive_walkforward_backtest(
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
+            risk_free_rate=input_data.risk_free_rate,
         )
 
         windows.append(
@@ -666,6 +669,7 @@ def run_regime_adaptive_walkforward_backtest(
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
     worst_window = min(windows, key=lambda w: w.out_of_sample_return)
 
@@ -779,6 +783,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             ascending=False,
             n_workers=1,
             fill_price=input_data.fill_price,
+            risk_free_rate=input_data.risk_free_rate,
         )
 
         best_row = grid_df.iloc[0]
@@ -814,6 +819,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
+            risk_free_rate=input_data.risk_free_rate,
         )
 
         windows.append(
@@ -859,6 +865,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
     avg_is_sharpe = float(np.mean([w.in_sample_sharpe for w in windows]))
     avg_is_return = float(np.mean([w.in_sample_return for w in windows]))
@@ -924,6 +931,7 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         ascending=False,
         n_workers=input_data.n_workers,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
 
     n_combinations = len(grid_df)
@@ -1527,6 +1535,7 @@ def get_robustness_diagnostics(
         slippage_pct=input_data.slippage_pct,
         sort_by=input_data.sort_by,
         ascending=False,
+        risk_free_rate=input_data.risk_free_rate,
     )
     sensitivity = _parameter_sensitivity(grid_df, metric_col=input_data.sort_by)
 
@@ -1568,6 +1577,7 @@ def get_robustness_diagnostics(
         initial_capital=input_data.initial_capital,
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
+        risk_free_rate=input_data.risk_free_rate,
     )
     best_returns = best_result["equity_curve"].pct_change().fillna(0.0)
 
@@ -1716,6 +1726,7 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         slippage_pct=input_data.slippage_pct,
         include_trade_log=True,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
     equity_curve = results["equity_curve"]
     returns = equity_curve.pct_change().fillna(0.0)
@@ -1847,6 +1858,7 @@ def get_backtest_diagnostics(
         slippage_pct=input_data.slippage_pct,
         include_trade_log=True,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
     equity_curve = results["equity_curve"]
     trade_log = results.get("trade_log", pd.DataFrame())
@@ -2049,6 +2061,7 @@ def compare_cost_models(
             slippage_pct=slippage_pct,
             include_trade_log=True,
             fill_price=input_data.fill_price,
+            risk_free_rate=input_data.risk_free_rate,
         )
 
     gross = _run(0.0, 0.0)
@@ -2186,6 +2199,7 @@ def run_strategy_matrix(input_data: StrategyMatrixInput) -> StrategyMatrixResult
                     commission_pct=input_data.commission_pct,
                     slippage_pct=input_data.slippage_pct,
                     fill_price=input_data.fill_price,
+                    risk_free_rate=input_data.risk_free_rate,
                 )
             except Exception as exc:
                 failures[f"{ticker}/{strategy}"] = str(exc)

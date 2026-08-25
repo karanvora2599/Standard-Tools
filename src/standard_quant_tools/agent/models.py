@@ -114,6 +114,16 @@ class BacktestInput(BaseModel):
             "overnight/intraday decomposition); more conservative and realistic."
         ),
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
 
 class Trade(BaseModel):
@@ -184,12 +194,9 @@ class AnalysisInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate as a decimal fraction (0.045 = "
-            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
-            "0.0, which means those ratios measure total return per unit "
-            "of risk rather than EXCESS return — at a 4-5% short rate that "
-            "is most of the ratio for a low-volatility strategy, so set it "
-            "when the number is going to be compared with anything."
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
         ),
     )
 
@@ -296,12 +303,9 @@ class PortfolioInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate as a decimal fraction (0.045 = "
-            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
-            "0.0, which means those ratios measure total return per unit "
-            "of risk rather than EXCESS return — at a 4-5% short rate that "
-            "is most of the ratio for a low-volatility strategy, so set it "
-            "when the number is going to be compared with anything."
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
         ),
     )
 
@@ -1096,6 +1100,16 @@ class RegimeAdaptiveInput(BaseModel):
         le=256,
         description="Worker processes for grid search (default 1 for agent use).",
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
 
 class RegimeAdaptiveResult(BaseModel):
@@ -1254,6 +1268,16 @@ class WalkForwardInput(BaseModel):
         "close",
         description="'close' (default), 'next_open', or 'hl2_exploratory' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
     @field_validator("param_grid")
     @classmethod
@@ -1381,6 +1405,16 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
         "close",
         description="'close' (default), 'next_open', or 'hl2_exploratory' — applied to the out-of-sample leg of every window (see BacktestInput.fill_price).",
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
 
 class RegimeAdaptiveWalkForwardWindow(BaseModel):
@@ -1465,12 +1499,9 @@ class RiskAttributionInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate as a decimal fraction (0.045 = "
-            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
-            "0.0, which means those ratios measure total return per unit "
-            "of risk rather than EXCESS return — at a 4-5% short rate that "
-            "is most of the ratio for a low-volatility strategy, so set it "
-            "when the number is going to be compared with anything."
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
         ),
     )
 
@@ -1697,6 +1728,16 @@ class BuyAndHoldInput(BaseModel):
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
 
 # ──────────────────────────────────────────────
@@ -1901,6 +1942,16 @@ class BacktestOptInput(BaseModel):
     fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
     )
 
     @field_validator("param_grid")
@@ -2219,6 +2270,16 @@ class CustomSignalBacktestInput(BaseModel):
     fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
     )
 
     @model_validator(mode="after")
@@ -2543,6 +2604,16 @@ class PortfolioSimulationInput(BaseModel):
     benchmark: Optional[str] = Field(
         None, description="Optional benchmark ticker — adds information_ratio."
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_weights_panel(self) -> "PortfolioSimulationInput":
@@ -2694,6 +2765,16 @@ class PairTradeBacktestInput(BaseModel):
             "be look-ahead. Pass 'close' only for explicit same-bar/exploratory analysis."
         ),
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
 
 class PairTradeBacktestResult(BaseModel):
@@ -2762,6 +2843,16 @@ class BacktestDiagnosticsInput(BaseModel):
     fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
     )
 
 
@@ -2891,6 +2982,16 @@ class RobustnessDiagnosticsInput(BaseModel):
     kurtosis: float = Field(
         3.0,
         description="Return-distribution kurtosis for the Deflated Sharpe Ratio's standard-error formula (3.0 = normal).",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
     )
 
     @field_validator("param_grid")
@@ -3233,6 +3334,16 @@ class BacktestCompactInput(BaseModel):
     run_id: Optional[str] = Field(
         None,
         description="Identifier for the saved artifacts. Auto-generated (a UUID) when not supplied.",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
     )
 
 
@@ -3821,6 +3932,16 @@ class CompareCostModelsInput(BaseModel):
             "Solve for the commission rate at which total return reaches "
             "zero. Costs are monotone in the rate for a fixed signal series, "
             "so this is a bisection, not a search."
+        ),
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
         ),
     )
 
@@ -4901,6 +5022,16 @@ class StrategyMatrixInput(BaseModel):
     sort_by: str = Field(
         "sharpe_ratio",
         description="Metric the ranked table is ordered by, best first.",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
     )
 
     @field_validator("tickers", "strategies")

@@ -60,6 +60,7 @@ def _run_backtest(
         slippage_pct=input_data.slippage_pct,
         include_trade_log=True,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
 
     trade_log_raw = results.get("trade_log", pd.DataFrame())

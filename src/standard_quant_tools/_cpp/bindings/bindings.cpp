@@ -427,7 +427,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, double commission_pct, double slippage_pct,
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
-               ref_prices)
+               ref_prices,
+           double risk_free_rate)
         -> py::dict {
             require_1d(prices, "prices");
             require_1d(signals, "signals");
@@ -455,7 +456,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 r = sqt::run_strategy(
                     prices_ptr, signals_ptr, n,
                     initial_capital, commission_pct, slippage_pct, periods_per_year,
-                    ref_ptr);
+                    ref_ptr, risk_free_rate);
             }
 
             py::array_t<double> eq(static_cast<py::ssize_t>(r.equity_curve.size()));
@@ -492,6 +493,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         // next_open / hl2_exploratory, so the more realistic execution
         // model is no longer confined to the Python path.
         py::arg("ref_prices") = py::none(),
+        // Annualized risk-free rate. Subtracted per period from every
+        // return before Sharpe and Sortino, matching
+        // metrics/risk_metrics.py. Defaults to 0.0 -- the value this
+        // kernel always assumed -- so no existing result moves.
+        py::arg("risk_free_rate") = 0.0,
         "Vectorized backtest kernel — identical algorithm to run_strategy in engine.py.\n\n"
         "One-bar lag execution: executed[i] = signals[i-1].\n"
         "Returns a dict with keys: final_equity, total_return, annualized_volatility,\n"
@@ -508,7 +514,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, double commission_pct, double slippage_pct,
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
-               ref_prices)
+               ref_prices,
+           double risk_free_rate)
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
@@ -559,7 +566,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 const auto results = sqt::batch_backtest_crossover(
                     p_ptr, i_ptr, n, n_unique, pair_ptr, num_combos,
                     initial_capital, commission_pct, slippage_pct,
-                    periods_per_year, ref_ptr);
+                    periods_per_year, ref_ptr, risk_free_rate);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -586,6 +593,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("slippage_pct")     = 0.0005,
         py::arg("periods_per_year") = 252.0,
         py::arg("ref_prices")       = py::none(),
+        // Annualized risk-free rate. Subtracted per period from every
+        // return before Sharpe and Sortino, matching
+        // metrics/risk_metrics.py. Defaults to 0.0 -- the value this
+        // kernel always assumed -- so no existing result moves.
+        py::arg("risk_free_rate") = 0.0,
         "Fused crossover grid: builds each combination's signal from two rows "
         "of `indicators` and backtests it immediately, so no (num_combos x "
         "n_bars) signal matrix is ever materialized. "
@@ -600,7 +612,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, double commission_pct, double slippage_pct,
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
-               ref_prices)
+               ref_prices,
+           double risk_free_rate)
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
@@ -645,7 +658,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
                     initial_capital, commission_pct, slippage_pct, periods_per_year,
-                    ref_ptr);
+                    ref_ptr, risk_free_rate);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -680,6 +693,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         // next_open / hl2_exploratory, so the more realistic execution
         // model is no longer confined to the Python path.
         py::arg("ref_prices") = py::none(),
+        // Annualized risk-free rate. Subtracted per period from every
+        // return before Sharpe and Sortino, matching
+        // metrics/risk_metrics.py. Defaults to 0.0 -- the value this
+        // kernel always assumed -- so no existing result moves.
+        py::arg("risk_free_rate") = 0.0,
         "Batch vectorized backtest — run all parameter combinations in one C++ call.\n\n"
         "signals must be a 2-D float64 array of shape (num_tests, n_bars).\n"
         "Returns a 2-D float64 array of shape (num_tests, 11), one row per\n"
@@ -695,7 +713,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            double initial_capital, double commission_pct, double slippage_pct,
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
-               ref_prices)
+               ref_prices,
+           double risk_free_rate)
         -> py::array_t<double>
         {
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
@@ -731,7 +750,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
                     initial_capital, commission_pct, slippage_pct, periods_per_year,
-                    ref_ptr);
+                    ref_ptr, risk_free_rate);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -766,6 +785,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         // next_open / hl2_exploratory, so the more realistic execution
         // model is no longer confined to the Python path.
         py::arg("ref_prices") = py::none(),
+        // Annualized risk-free rate. Subtracted per period from every
+        // return before Sharpe and Sortino, matching
+        // metrics/risk_metrics.py. Defaults to 0.0 -- the value this
+        // kernel always assumed -- so no existing result moves.
+        py::arg("risk_free_rate") = 0.0,
         "Strict/zero-copy variant of batch_run_strategy() -- `prices`/"
         "`signals` must already be C-contiguous float64 arrays (raises "
         "instead of implicitly copying on a mismatch). Same "

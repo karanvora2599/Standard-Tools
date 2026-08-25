@@ -102,18 +102,49 @@ Measured before changing: forcing it across the suite broke exactly two
 tests and **both were wrong** — one passed `start_date`/`end_date` to a tool
 that takes `period`, so it had been measuring the default window all along.
 
-### Fixed — the risk-free rate was silently zero
+### Fixed — the risk-free rate was silently zero, everywhere
 
 Seventeen tools report a Sharpe ratio and exactly one took a rate. The rest
 measured total return per unit of risk; at a 4–5% short rate that is most of
-the number for a low-volatility strategy. `analyze_stock_risk`,
-`get_portfolio_analysis` and `get_portfolio_risk_attribution` now take
-`risk_free_rate`, defaulting to 0.0 so nothing that exists changes.
+the number for a low-volatility strategy.
 
-The other fourteen get theirs from `run_strategy`, which fixes the rate at
-zero in the Python path **and** the C++ kernel. They deliberately do NOT
-advertise the field — an argument accepted and discarded reads as support —
-and a test asserts both halves of that.
+**All 23 Sharpe-reporting tools now take `risk_free_rate`**, defaulting to
+0.0 so nothing that already exists moves. That required threading it through
+the backtest engine itself — the Python path, the C++ kernel's two
+computation sites, and all three of `backtest_grid`'s execution paths — so
+the number does not depend on whether the native extension happens to be
+built, and a grid cannot rank on a different rate than the single run it is
+compared against.
+
+Two details the arithmetic turns on:
+
+- **Sharpe's denominator does not move.** Subtracting a constant from every
+  return shifts the mean and leaves the standard deviation untouched, so the
+  kernel's existing sum-of-squares needed no change at all.
+- **Sortino's does.** Python clips EXCESS returns, so the rate decides which
+  bars count as downside. In the kernel's allocation-free summary path — the
+  one every batch entry point reads from — bar 0's implicit return of 0.0
+  has an excess of `-rf/ppy` and contributes to the downside sum. That term
+  is invisible at rf = 0, so a missing seed would have made grids disagree
+  with single runs only once a rate was set. Deleting the seed and rebuilding
+  confirms the native parity test catches it: 60 failures, all on
+  `sortino_ratio`.
+
+The tests replaced, not relaxed: the two that asserted the engine hard-codes
+zero are gone, and in their place are cross-path parity checks at five rates,
+kernel-level parity between `run_strategy` and `run_strategy_summary`, grid
+agreement on both the fused and batch paths, and an invariant that every
+Sharpe-reporting tool exposes a rate.
+
+The `risk_free_rate` on the option-pricing tools is a different quantity —
+the Black-Scholes discount rate — and stays REQUIRED, since there is no
+defensible default for discounting a cash flow. A test pins that distinction
+so the Sharpe-scoped assertion cannot silently start covering it.
+
+Schema descriptions for the new field are deliberately terse: 17 verbatim
+copies of a long one cost ~7 KB of context that every MCP client holds for
+a whole session. Trimming them kept the full surface under its existing
+budget ceiling rather than moving it.
 
 ### Added — 28 tools
 

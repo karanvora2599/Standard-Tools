@@ -93,7 +93,13 @@ BacktestResult run_strategy(
     double periods_per_year = 252.0,
     // Last and defaulted so every existing positional call site -- the C++
     // benchmarks and gtest suites among them -- keeps compiling unchanged.
-    const double* ref_prices = nullptr
+    const double* ref_prices = nullptr,
+    // Annualized risk-free rate, as a decimal fraction. Subtracted per
+    // period (rate / periods_per_year) from every return before Sharpe and
+    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // which is what this kernel always assumed -- so an unset value cannot
+    // change a number that was already reported.
+    double risk_free_rate = 0.0
 );
 
 /**
@@ -129,7 +135,13 @@ BacktestResult run_strategy_summary(
     double periods_per_year = 252.0,
     // Last and defaulted so every existing positional call site -- the C++
     // benchmarks and gtest suites among them -- keeps compiling unchanged.
-    const double* ref_prices = nullptr
+    const double* ref_prices = nullptr,
+    // Annualized risk-free rate, as a decimal fraction. Subtracted per
+    // period (rate / periods_per_year) from every return before Sharpe and
+    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // which is what this kernel always assumed -- so an unset value cannot
+    // change a number that was already reported.
+    double risk_free_rate = 0.0
 );
 
 /**
@@ -179,7 +191,13 @@ std::vector<BacktestResult> batch_backtest_crossover(
     double commission_pct   = 0.001,
     double slippage_pct     = 0.0005,
     double periods_per_year = 252.0,
-    const double* ref_prices = nullptr
+    const double* ref_prices = nullptr,
+    // Annualized risk-free rate, as a decimal fraction. Subtracted per
+    // period (rate / periods_per_year) from every return before Sharpe and
+    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // which is what this kernel always assumed -- so an unset value cannot
+    // change a number that was already reported.
+    double risk_free_rate = 0.0
 );
 
 /**
@@ -325,7 +343,13 @@ std::vector<BacktestResult> batch_run_strategy(
     double periods_per_year = 252.0,
     // Last and defaulted so every existing positional call site -- the C++
     // benchmarks and gtest suites among them -- keeps compiling unchanged.
-    const double* ref_prices = nullptr
+    const double* ref_prices = nullptr,
+    // Annualized risk-free rate, as a decimal fraction. Subtracted per
+    // period (rate / periods_per_year) from every return before Sharpe and
+    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // which is what this kernel always assumed -- so an unset value cannot
+    // change a number that was already reported.
+    double risk_free_rate = 0.0
 );
 
 }  // namespace sqt
