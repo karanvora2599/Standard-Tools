@@ -13,32 +13,33 @@ The agent:
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 PORTFOLIO = {
     "tickers": ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA"],
-    "weights": [0.25,   0.25,   0.20,   0.20,   0.10],
+    "weights": [0.25, 0.25, 0.20, 0.20, 0.10],
 }
 START_DATE = "2023-01-01"
-END_DATE   = "2024-12-31"
-BENCHMARK  = "SPY"
+END_DATE = "2024-12-31"
+BENCHMARK = "SPY"
 
 # Risk thresholds — agent will flag any breach
 THRESHOLDS = {
-    "max_drawdown_pct":        15.0,   # alert if drawdown > 15%
-    "portfolio_var95_pct":      3.0,   # alert if daily VaR95 > 3%
-    "sharpe_ratio_min":         0.5,   # alert if Sharpe < 0.5
-    "single_asset_risk_pct":   35.0,   # alert if any asset > 35% of portfolio variance
-    "pc1_variance_pct":        65.0,   # alert if PC1 explains > 65% (hidden concentration)
-    "beta_max":                 1.5,   # alert if any holding has beta > 1.5
-    "rsi_overbought":          70.0,   # alert if RSI > 70 on any holding
-    "rsi_oversold":            30.0,   # alert if RSI < 30 on any holding
+    "max_drawdown_pct": 15.0,  # alert if drawdown > 15%
+    "portfolio_var95_pct": 3.0,  # alert if daily VaR95 > 3%
+    "sharpe_ratio_min": 0.5,  # alert if Sharpe < 0.5
+    "single_asset_risk_pct": 35.0,  # alert if any asset > 35% of portfolio variance
+    "pc1_variance_pct": 65.0,  # alert if PC1 explains > 65% (hidden concentration)
+    "beta_max": 1.5,  # alert if any holding has beta > 1.5
+    "rsi_overbought": 70.0,  # alert if RSI > 70 on any holding
+    "rsi_oversold": 30.0,  # alert if RSI < 30 on any holding
 }
 
 SYSTEM_PROMPT = """You are a risk officer performing a real-time portfolio risk audit.
@@ -129,9 +130,9 @@ if __name__ == "__main__":
     log_file = setup_logging("agent_risk_monitor")
 
     _header("Agentic Risk Monitor — Claude Haiku")
-    _log("Log file",   str(log_file))
-    _log("Portfolio",  tickers_str)
-    _log("Period",     f"{START_DATE} → {END_DATE}")
+    _log("Log file", str(log_file))
+    _log("Portfolio", tickers_str)
+    _log("Period", f"{START_DATE} → {END_DATE}")
     _log("Thresholds", str(THRESHOLDS))
 
     result = run_agent(
@@ -140,6 +141,10 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=25,
+        # this agent profiles risk; it never runs a strategy.
+        # A tool outside this runtime is refused by name rather than
+        # run. See Documentation/19_runtimes.md.
+        registry="research+portfolio",
     )
 
     _header("RISK AUDIT REPORT")

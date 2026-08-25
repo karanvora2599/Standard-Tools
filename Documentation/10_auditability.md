@@ -384,7 +384,7 @@ x`
 ### Replaying modeling records
 
 The modeling runtime is a second tool registry (`MODELING_TOOL_DISPATCH`, 6
-entries) deliberately kept separate from the 46-tool analysis surface — see
+entries) deliberately kept separate from the 68-tool analysis surface — see
 [15_modeling.md](15_modeling.md). `verify_replay` resolves the record's
 `tool_name` against **both** registries, so a `run_model_experiment` or
 `build_model_dataset` record replays like any other. An earlier version

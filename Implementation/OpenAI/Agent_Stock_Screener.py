@@ -100,6 +100,11 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=25,
         categories=routed_categories,
+        # screening and profiling are both `research`; a backtest tool here would be a mistake, and is now refused as one.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="research+backtest+portfolio",
     )
 
     _header("FINAL WATCHLIST")

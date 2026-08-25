@@ -94,6 +94,11 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=25,
         categories=routed_categories,
+        # fundamentals and risk profiling both live in `research`.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="research+backtest",
     )
 
     _header("RESEARCH NOTE")

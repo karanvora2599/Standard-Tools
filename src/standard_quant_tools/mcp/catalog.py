@@ -1,8 +1,8 @@
 """
 The tool catalog: which tools this server exposes, and what each one costs.
 
-WHY EXPOSURE IS A POLICY AND NOT A LIST. The two registries hold 54 tools
-whose input schemas and descriptions total about 102 KB. An MCP client
+WHY EXPOSURE IS A POLICY AND NOT A LIST. The two registries hold 57 tools
+whose input schemas and descriptions total about 103 KB. An MCP client
 fetches the tool list once at connect and carries it for the whole session,
 so exposing everything spends roughly 26,000 tokens of every conversation
 before the user has asked anything.
@@ -15,15 +15,27 @@ exactly one place.
 
 Tool count and cost turn out to be almost unrelated, which is why the
 selection is by measured size rather than by intuition: `analysis` carries
-13 tools in 11.9 KB while `custom_signal` carries 2 tools in 6.1 KB, and
-`backtest_execution` alone is a quarter of the whole surface. Run
-`sqt-mcp --print-budget` for the current table; `category_costs()` computes
-it and the budget test pins the ceiling.
+13 tools in 11.7 KB while `custom_signal` carries 2 tools in 6.0 KB, and
+`backtest_execution` alone is a quarter of the whole surface. At the other
+end, `discovery` is 3 tools in 1.2 KB -- cheaper than any single tool in
+`backtest_execution`, which is why it is on by default despite being the
+newest category. Run `sqt-mcp --print-budget` for the current table;
+`category_costs()` computes it and the budget test pins the ceiling.
 
-THE TWO REGISTRIES STAY APART. Each entry records which registry it came
-from, and `dispatch_for()` returns that registry's dispatch function. The
-names happen not to collide (54 tools, 54 unique names), so one flat lookup
-would work -- and would be exactly the merge the library declined to make.
+THE RUNTIMES STAY APART. Each entry records which RUNTIME it came from, and
+`dispatch_for()` returns that runtime's dispatch function. The names happen
+not to collide (70 tools, 70 unique names), so one flat lookup would work --
+and would be exactly the merge the library declined to make.
+
+There were two registries when this module was written and there are five
+runtimes now (research, backtest, portfolio, meta, modeling). Nothing here
+changed in kind: a runtime is a dispatch table that refuses what it does not
+own, which is what the modeling registry always was. The server pairs each
+tool with its owning runtime's dispatcher for the same reason it always
+did -- the dispatchers have identical signatures, so nothing structural
+stops a caller pairing a tool from one with the dispatcher of another, and
+that failure reads like the model chose badly rather than like the wiring
+is wrong.
 """
 
 from __future__ import annotations
@@ -33,7 +45,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from standard_quant_tools.agent.router import TOOL_CATEGORY
-from standard_quant_tools.agent.tools import dispatch as analysis_dispatch
+from standard_quant_tools.agent.runtimes import RUNTIME_CATEGORIES
+from standard_quant_tools.agent.runtimes import resolve as resolve_runtime
 from standard_quant_tools.agent.tools import get_agent_tools
 from standard_quant_tools.mcp.schemas import (
     dereference,
@@ -46,8 +59,21 @@ from standard_quant_tools.modeling.agent import (
     modeling_dispatch,
 )
 
+#: Retained under their original names because `ToolEntry.registry` is a
+#: public field and the MCP tests, the server and downstream callers all
+#: read it. ANALYSIS_REGISTRY is no longer a single dispatch table -- it is
+#: the four non-modeling runtimes -- so it survives only as the answer to
+#: "is this tool from the modeling side or the rest of the library".
 ANALYSIS_REGISTRY = "analysis"
 MODELING_REGISTRY = "modeling"
+
+#: category -> owning runtime, inverted from the runtimes' own declaration
+#: so this module never holds a second copy of the grouping.
+_CATEGORY_RUNTIME = {
+    category: runtime
+    for runtime, categories in RUNTIME_CATEGORIES.items()
+    for category in categories
+}
 
 #: The modeling runtime has no category taxonomy -- it is one ordered
 #: pipeline -- so it is a single category whose name matches its registry.
@@ -58,12 +84,24 @@ ALL_CATEGORIES: Tuple[str, ...] = tuple(
     sorted(set(TOOL_CATEGORY.values())) + [MODELING_CATEGORY]
 )
 
-#: The default. Measured at 22 tools / 20.5 KB / ~5k tokens: screening, risk
-#: and technical snapshots, and the factor/cointegration/Hurst research path.
-#: It deliberately omits `backtest_execution` (24.3 KB) and `modeling`
-#: (26.6 KB) -- the two heaviest categories, both better switched on for a
-#: session that needs them than paid for by every session that does not.
-DEFAULT_CATEGORIES: Tuple[str, ...] = ("screener", "analysis", "quant_research")
+#: The default. Measured at 25 tools / 21.2 KB / ~5k tokens: screening, risk
+#: and technical snapshots, the factor/cointegration/Hurst research path,
+#: and discovery. It deliberately omits `backtest_execution` (23.7 KB) and
+#: `modeling` (26.0 KB) -- the two heaviest categories, both better switched
+#: on for a session that needs them than paid for by every session that does
+#: not.
+#:
+#: `discovery` earns its place by being the only category that makes the
+#: OTHERS cheaper to use: it is 1.2 KB, and the questions it answers --
+#: which parameters a strategy takes, which stress windows exist, whether
+#: this provider has ticks -- were otherwise answered by a failed call and
+#: an error round trip, which costs more than the category does.
+DEFAULT_CATEGORIES: Tuple[str, ...] = (
+    "screener",
+    "analysis",
+    "quant_research",
+    "discovery",
+)
 
 #: Property names that mean "this tool will go and fetch market data".
 #: Matched as substrings against every property anywhere in the input
@@ -79,6 +117,7 @@ class ToolEntry:
     name: str
     category: str
     registry: str
+    runtime: str
     description: str
     input_schema: Dict[str, Any]
     output_schema: Optional[Dict[str, Any]]
@@ -154,10 +193,12 @@ def _entries_for_registry(
         annotation = typing.get_type_hints(fn).get("return")
         if annotation is not None:
             result_fields = set(getattr(annotation, "model_fields", {}) or {})
+        category = category_of(name)
         yield ToolEntry(
             name=name,
-            category=category_of(name),
+            category=category,
             registry=registry,
+            runtime=_CATEGORY_RUNTIME.get(category, MODELING_REGISTRY),
             description=fn_schema["description"],
             input_schema=input_schema,
             output_schema=output_schema,
@@ -225,17 +266,20 @@ def category_costs(
 
 def dispatch_for(entry: ToolEntry) -> Callable[[str, Dict[str, Any]], Dict[str, Any]]:
     """
-    The dispatch function belonging to this tool's registry.
+    The dispatch function belonging to this tool's RUNTIME.
 
     Paired with the tool rather than chosen separately, for the same reason
-    `_agent_utils.py` pairs them: the two dispatchers have identical
-    signatures, so nothing structural stops a caller pairing a tool from one
-    registry with the dispatcher from the other. That fails at the call with
-    an "unknown tool" error naming the model's choice, which reads like the
-    model picked badly rather than like the wiring is wrong.
+    `_agent_utils.py` pairs them: every dispatcher has the same signature,
+    so nothing structural stops a caller pairing a tool from one runtime
+    with the dispatcher of another. That fails at the call with an error
+    naming the model's choice, which reads like the model picked badly
+    rather than like the wiring is wrong.
+
+    Returning the RUNTIME's dispatcher rather than one union dispatcher is
+    what makes the server's scoping real all the way down: a tool served
+    from the research runtime is executed by a table that holds only
+    research tools.
     """
-    if entry.registry == ANALYSIS_REGISTRY:
-        return analysis_dispatch
     if entry.registry == MODELING_REGISTRY:
         return modeling_dispatch
-    raise ValueError(f"unknown registry {entry.registry!r}")  # pragma: no cover
+    return resolve_runtime(entry.runtime).dispatch

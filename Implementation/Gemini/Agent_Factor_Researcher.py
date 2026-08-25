@@ -92,6 +92,11 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=30,
         categories=routed_categories,
+        # factor, cointegration and PCA structure are `research`.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="research",
     )
 
     _header("FACTOR RESEARCH NOTE")

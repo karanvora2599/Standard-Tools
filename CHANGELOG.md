@@ -9,6 +9,199 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Changed — tool scoping is now enforced, not advertised
+
+`get_agent_tools(categories=[...])` could always narrow the schema list
+handed to a model. `dispatch()` never honoured it:
+
+```python
+>>> {t["function"]["name"] for t in get_agent_tools(categories=["screener"])}
+{'run_screener', 'get_stock_fundamentals'}
+>>> dispatch("list_stress_scenarios", {})    # never advertised to this agent
+{'scenarios': [...]}                         # ...and it ran anyway
+```
+
+An agent scoped to two screener tools that hallucinated a backtest tool got
+a **successful result**. The narrowing was advisory at the schema layer and
+absent at the execution layer, so a wrong guess was rewarded. The MCP server
+enforced its own selection; nothing else did, which meant every
+`Implementation/*` script and the whole multi-agent orchestrator ran with a
+boundary that was not there.
+
+The 82 tools are now grouped into **five parallel runtimes**, each with its
+own dispatch table:
+
+| Runtime | Tools | Categories |
+|---|---|---|
+| `research` | 23 | `screener`, `analysis`, `quant_research` |
+| `backtest` | 21 | `backtest_execution`, `backtest_validation`, `custom_signal` |
+| `portfolio` | 10 | `portfolio_risk`, `microstructure` |
+| `meta` | 14 | `discovery`, `provenance` |
+| `modeling` | 14 | (unchanged, in `modeling/agent`) |
+
+A name from another runtime is unroutable, and the refusal says where it
+actually lives — "unknown tool" alone cannot be told apart from a
+hallucinated name, and a model receiving one guesses again. The grouping is
+deliberately coarse: a runtime holding two tools is overhead rather than
+isolation, so nothing has fewer than eight and a test pins that.
+
+`TOOL_CATEGORY` is unchanged and still drives the router, the MCP
+`--categories` flag and the twelve workers. A category hints at which tools
+suit a request; a runtime states which tools may execute.
+
+`agent/tools.py` went from 6,453 lines to a 314-line facade over the runtime
+packages. Every existing import still works, and its `dispatch()` is
+documented as UNSCOPED by construction — an agent meant to be scoped should
+be handed a runtime.
+
+### Added — the handoff interconnect
+
+Moving a model's predictions into a backtest used to need a bridge tool that
+knew about both sides. With N producers and M consumers that costs N × M
+bridges. A typed reference makes it N + M:
+
+```
+sqt://<kind>/<run_id>/<name>
+```
+
+Ten content kinds (`equity_curve`, `signal_panel`, `weight_panel`,
+`score_panel`, `predictions`, ...). The kind is checked on resolve, so a
+wrong handoff between two tool calls fails naming both kinds instead of
+surfacing as a missing column deep in pandas. One `convert_reference` tool
+covers every well-defined conversion; there is deliberately no best-effort
+path, because a handoff that guesses is worse than one that refuses.
+
+Producers publish typed references beside their existing URIs
+(`equity_curve_ref`, `trades_ref`, `oos_predictions_ref`), so the chain
+`run_model_experiment → convert_reference → run_signal_panel_backtest` works
+with no code anywhere in it that knows about both ends. Consumers gained
+optional `signal_panel_ref` / `target_weights_ref` beside their inline
+fields.
+
+Built for many agents rather than one session: one sidecar file per artifact
+(a shared per-`run_id` catalogue races), `publish()` refuses to overwrite by
+default (a reference promises the same value twice), and `describe_reference`
+returns a content hash so a consumer can prove it read what the producer
+wrote.
+
+### Changed — unknown tool arguments are rejected
+
+None of the tool inputs forbade extras, so this succeeded:
+
+```python
+BacktestInput(..., comission_pct=0.05)   # note the typo
+```
+
+The typo was dropped, the backtest ran at the 0.001 default, and the caller
+believed it had set 5% commission — the same failure
+`backtest/strategy_params.py` exists to stop one layer down, open at the
+boundary where a *model* chooses the argument names. Every tool input now
+sets `extra="forbid"`. Result models stay permissive.
+
+Measured before changing: forcing it across the suite broke exactly two
+tests and **both were wrong** — one passed `start_date`/`end_date` to a tool
+that takes `period`, so it had been measuring the default window all along.
+
+### Fixed — the risk-free rate was silently zero
+
+Seventeen tools report a Sharpe ratio and exactly one took a rate. The rest
+measured total return per unit of risk; at a 4–5% short rate that is most of
+the number for a low-volatility strategy. `analyze_stock_risk`,
+`get_portfolio_analysis` and `get_portfolio_risk_attribution` now take
+`risk_free_rate`, defaulting to 0.0 so nothing that exists changes.
+
+The other fourteen get theirs from `run_strategy`, which fixes the rate at
+zero in the Python path **and** the C++ kernel. They deliberately do NOT
+advertise the field — an argument accepted and discarded reads as support —
+and a test asserts both halves of that.
+
+### Added — 28 tools
+
+**`discovery` (8)** — `list_strategies`, `list_stress_scenarios`,
+`describe_data_capabilities`, `describe_tool`, `validate_tool_call`,
+`describe_reference`, `list_reference_kinds`, `convert_reference`. Contracts
+the library already held in data, made askable instead of described in
+prose. `validate_tool_call` checks arguments *without* calling, including
+the strategy parameter contract that JSON Schema cannot express.
+
+**`provenance` (6)** — `explain_decision`, `replay_decision`,
+`compare_decisions`, `verify_audit_integrity`, `export_audit_bundle`,
+`describe_artifact`. Read and verify only: retention (`gc`, `seal`, `hold`)
+stays CLI-only, because an agent that can delete the record of its own
+decisions is not audited by it. `replay_decision` classifies a mismatch as
+`data_changed` or `code_changed` — checking input hashes first, so a
+provider revision is not reported as a library bug.
+
+**`microstructure` (3)** — `get_microstructure_metrics`,
+`get_trade_profile`, `check_spread_proxy`, over a new
+`analysis/microstructure.py`. `get_trades`/`get_quotes` had been on the data
+interface with nothing consuming them. `check_spread_proxy` measures the
+spread from ticks and reports which way the OHLCV proxy errs — understating
+it means every backtest priced from it has been charging too little.
+Nothing synthesizes ticks from bars.
+
+**Elsewhere** — `get_technical_panel` (whole universe, one native call),
+`run_strategy_matrix`, `compare_cost_models` (solves for the commission at
+which the edge disappears), `estimate_trade_cost`, `get_drawdown_table`,
+plus `list_models`, `list_datasets`, `compare_models`, `check_leakage`,
+`validate_model_spec` and `score_predictions` in the modeling runtime.
+
+### Added — options that were silently fixed
+
+`risk_free_rate` (above), `standardize`/`method` on `run_pca_analysis`,
+`min_window`/`max_window` on `run_hurst_analysis`,
+`observation_noise`/`include_intercept` on `run_kalman_hedge_ratio`,
+`sar_af_step` on `get_advanced_indicators`, and `sell_commission_pct` on
+`run_portfolio_simulation` — the engine had supported an asymmetric rate
+since it was added; no tool passed one. Every new field defaults to the
+value the tool previously hard-coded.
+
+### Changed — the example implementations are scoped
+
+`registry=` in every provider's `_agent_utils.py` now accepts a RUNTIME
+name, joinable with `+`, alongside the two whole-surface views. Naming a
+runtime hands the script a dispatch table holding only that runtime's
+tools; naming `"analysis"` still hands back the union, which knows every
+tool regardless of what was advertised.
+
+All 55 example scripts across `Implementation/`, its three provider folders
+and `Multi_Agent_Implementation/` are scoped. Each script's runtime set is
+DERIVED from the tools its own prompt mentions rather than chosen by hand —
+a prompt that instructs the agent to call a tool the runtime will refuse is
+worse than no scoping, because it walks the model into a wall it was told
+to walk into. That derivation immediately caught seven scripts whose
+prompts relied on the full surface, and one comment of mine that described
+a backtest step its script does not take.
+
+The twelve workers dispatch through their category's runtime. Each already
+declared a fixed, non-overlapping tool subset; dispatching through the
+union had made that subset advisory.
+
+`modeling` is now resolvable and combinable like every other runtime.
+Writing an example that walks modeling → meta → backtest showed that
+excluding it was a gap in the abstraction rather than a deliberate limit.
+It is wrapped BY REFERENCE — the Runtime holds `MODELING_TOOL_DISPATCH`
+itself — so there is still exactly one definition of that boundary.
+
+### Added — three example scripts
+
+| Script | Runtimes | Shows |
+|---|---|---|
+| `Agent_Model_Backtester.py` | `backtest+meta+modeling` | The handoff interconnect end to end. The agent never sees a prediction; a reference crosses three runtimes and the panel never enters the conversation. |
+| `Agent_Provenance_Auditor.py` | `meta` | Reconstructing a past decision and classifying a mismatch as the data's fault or the code's. Retention is unroutable, not merely discouraged. |
+| `Agent_Execution_Analyst.py` | `portfolio+meta` | Measured spreads versus the OHLCV proxies, and which way the proxy errs. |
+
+Each is mirrored across all three provider folders, because a capability
+demonstrated for one provider only is a capability half-demonstrated.
+
+### Documentation
+
+New [`Documentation/19_runtimes.md`](Documentation/19_runtimes.md). Updated
+`13_agent_orchestration.md`, `18_mcp.md` (category budget re-measured at 82
+tools / 146 KB; `discovery` added to the default), `00_module_reference.md`,
+`07_agent_tools.md`, `10_auditability.md`, `15_modeling.md` and the README.
+
+
 ### Added (direction-aware costs, peak-exposure diagnostics, a tick contract)
 
 Three small, independent additions. Each closes a gap the code itself had

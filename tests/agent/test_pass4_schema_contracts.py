@@ -165,13 +165,13 @@ class TestPeriodStringsAreParsedStrictly:
 
     @pytest.mark.parametrize("period", ["1y", "6mo", "30d", "4w"])
     def test_supported_forms_parse(self, period):
-        from standard_quant_tools.agent.tools import _parse_period
+        from standard_quant_tools.agent.runtimes.research.tools import _parse_period
 
         assert _parse_period(period) is not None
 
     @pytest.mark.parametrize("period", ["6m", "1yr", "ytd", "", "abc", "0d"])
     def test_malformed_period_no_longer_becomes_one_year(self, period):
-        from standard_quant_tools.agent.tools import _parse_period
+        from standard_quant_tools.agent.runtimes.research.tools import _parse_period
         from standard_quant_tools.error import ValidationError
 
         with pytest.raises(ValidationError):
@@ -181,7 +181,7 @@ class TestPeriodStringsAreParsedStrictly:
         """Guards against a parser that accepts the forms and ignores them."""
         import datetime
 
-        from standard_quant_tools.agent.tools import _parse_period
+        from standard_quant_tools.agent.runtimes.research.tools import _parse_period
 
         now = datetime.datetime.now()
         days_30 = (now - _parse_period("30d")).days

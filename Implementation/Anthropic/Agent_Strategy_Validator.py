@@ -134,6 +134,11 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=20,
         categories=routed_categories,
+        # optimize/walk-forward/robustness all live in `backtest`.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="research+backtest+portfolio",
     )
 
     _header("VALIDATION VERDICT")

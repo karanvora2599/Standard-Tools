@@ -58,19 +58,36 @@ from .models import (
     AnalyzeFeaturesResult,
     BuildModelDatasetInput,
     BuildModelDatasetResult,
+    CheckLeakageInput,
+    CheckLeakageResult,
+    CompareModelsInput,
+    CompareModelsResult,
+    DatasetSummary,
     EvaluateModelPortfolioInput,
     EvaluateModelPortfolioResult,
     FeatureCatalogEntry,
     InspectModelInput,
     InspectModelResult,
+    LeakageFinding,
+    ListDatasetsInput,
+    ListDatasetsResult,
     ListFeaturesInput,
     ListFeaturesResult,
     ListModelingCapabilitiesInput,
     ListModelingCapabilitiesResult,
+    ListModelsInput,
+    ListModelsResult,
+    ModelComparison,
+    ModelSummary,
     RunModelExperimentInput,
     RunModelExperimentResult,
     ScoreModelInput,
     ScoreModelResult,
+    ScorePredictionsInput,
+    ScorePredictionsResult,
+    SpecProblem,
+    ValidateModelSpecInput,
+    ValidateModelSpecResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -260,6 +277,22 @@ def run_model_experiment(
         "warnings": meta.get("warnings", []),
     }
     result = _run_experiment(dataset, input_data.spec, dataset_id=input_data.dataset_id)
+    # Republished with a content kind so the rest of the interconnect can
+    # type-check it. Same rows, addressed as `predictions` rather than as
+    # a path that says nothing about what it holds.
+    from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.backtest.artifacts import load_artifact
+
+    predictions_ref = handoff.publish(
+        load_artifact(result["oos_predictions_uri"]),
+        "predictions",
+        result["model_id"],
+        "oos_predictions_ref",
+        producer="modeling.run_model_experiment",
+        overwrite=True,
+    )
+
+    result["oos_predictions_ref"] = predictions_ref
     return RunModelExperimentResult(**result)
 
 
@@ -348,10 +381,478 @@ def evaluate_model_portfolio(
     return EvaluateModelPortfolioResult(**result)
 
 
+#: Metric each task is ranked by when the caller names none. Ranking a
+#: regression R2 against a classification AUC would produce an ordering
+#: that looks meaningful and is not, so tasks are ranked separately.
+_HEADLINE_METRIC = {
+    "regression": ("ic", "spearman_ic", "r2"),
+    "classification": ("auc", "roc_auc", "accuracy"),
+    "ranking": ("ndcg_at_10", "ndcg", "ic"),
+}
+
+
+def _headline(task: str, metrics: dict, preferred=None):
+    """(metric name, value) for one model, or (None, None)."""
+    candidates = (preferred,) if preferred else _HEADLINE_METRIC.get(task, ())
+    for name in candidates:
+        if name and name in metrics:
+            return name, float(metrics[name])
+    return None, None
+
+
+def list_models(input_data: ListModelsInput) -> ListModelsResult:
+    """
+    Every registered model, newest first.
+
+    `inspect_model` and `score_model` both require a model_id the caller
+    already holds, and nothing enumerated them — so a session that lost the
+    id, or any new session, could not find a model it had trained. The
+    registry has been on disk the whole time; this reads it.
+
+    Manifests that fail to load are skipped rather than failing the call: a
+    half-written run should not make the other twenty models unfindable.
+    """
+    directory = _artifacts._runs_dir()
+    summaries = []
+    for path in sorted(directory.glob("mdl_*/manifest.json")):
+        try:
+            manifest = load_manifest(path.parent.name)
+        except Exception:  # a partial or corrupt run, not a reason to fail
+            continue
+        if input_data.task and manifest.task != input_data.task:
+            continue
+        metric, value = _headline(manifest.task, manifest.oos_metrics)
+        summaries.append(
+            ModelSummary(
+                model_id=manifest.model_id,
+                task=manifest.task,
+                estimator=manifest.estimator_type,
+                created_at=manifest.created_at_utc,
+                n_features=len(manifest.feature_ids),
+                n_folds=manifest.n_folds,
+                headline_metric=metric,
+                headline_value=value,
+                dataset_id=manifest.dataset_id,
+            )
+        )
+    summaries.sort(key=lambda s: s.created_at or "", reverse=True)
+    return ListModelsResult(
+        models=summaries[: input_data.limit],
+        n_total=len(summaries),
+        registry_dir=str(directory),
+    )
+
+
+def list_datasets(input_data: ListDatasetsInput) -> ListDatasetsResult:
+    """
+    Every built dataset panel, newest first.
+
+    Same gap as `list_models`: `run_model_experiment` needs a dataset_id
+    and nothing could produce the list of them.
+    """
+    directory = _artifacts._runs_dir()
+    summaries = []
+    for path in sorted(directory.glob("ds_*/dataset_meta.json")):
+        try:
+            meta = _artifacts.load_json(str(path))
+        except Exception:
+            continue
+        summaries.append(
+            DatasetSummary(
+                dataset_id=path.parent.name,
+                rows=meta.get("rows"),
+                entities=len(meta.get("entities", []) or []) or None,
+                features=len(meta.get("feature_ids", []) or []) or None,
+                start_date=meta.get("start_date"),
+                end_date=meta.get("end_date"),
+            )
+        )
+    summaries.sort(key=lambda s: s.end_date or "", reverse=True)
+    return ListDatasetsResult(
+        datasets=summaries[: input_data.limit],
+        n_total=len(summaries),
+        runs_dir=str(directory),
+    )
+
+
+def compare_models(input_data: CompareModelsInput) -> CompareModelsResult:
+    """
+    Rank several registered models side by side.
+
+    Models are ranked WITHIN their task, never across it. A regression IC
+    and a classification AUC are both "about 0.6" on the same scale and
+    mean entirely different things, so a combined ordering would look
+    authoritative while being arithmetic on incomparable quantities.
+    """
+    comparisons = []
+    tasks = {}
+    for model_id in input_data.model_ids:
+        manifest = load_manifest(model_id)
+        metric, value = _headline(
+            manifest.task, manifest.oos_metrics, input_data.metric
+        )
+        comparisons.append(
+            ModelComparison(
+                model_id=model_id,
+                task=manifest.task,
+                metric=metric,
+                value=value,
+                n_features=len(manifest.feature_ids),
+                dataset_id=manifest.dataset_id,
+            )
+        )
+        tasks.setdefault(manifest.task, []).append(comparisons[-1])
+
+    notes = []
+    best = {}
+    for task, group in tasks.items():
+        scored = [c for c in group if c.value is not None]
+        scored.sort(key=lambda c: c.value, reverse=True)
+        for position, comparison in enumerate(scored, start=1):
+            comparison.rank = position
+        if scored:
+            best[task] = scored[0].model_id
+        missing = [c.model_id for c in group if c.value is None]
+        if missing:
+            notes.append(
+                f"{task}: {missing} carry no usable metric and are unranked. "
+                "Pass `metric` explicitly if the manifest records one under "
+                "a different name."
+            )
+    if len(tasks) > 1:
+        notes.append(
+            f"These models span {sorted(tasks)}. They are ranked separately "
+            "because their metrics are not on a common scale — comparing "
+            "across tasks here would be arithmetic on incomparable numbers."
+        )
+
+    return CompareModelsResult(comparisons=comparisons, best_by_task=best, notes=notes)
+
+
+def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
+    """
+    Ask whether a set of features is safe to fit on before fitting on it.
+
+    `check_point_in_time_safety` runs implicitly inside dataset building;
+    this makes it a question a caller can ask directly, which is the
+    agent-shaped version — the answer changes which features you pick, and
+    finding out during a build means the build already happened.
+
+    With a `dataset_id`, also reports that panel's point-in-time coverage:
+    how much of it is genuinely as-of rather than back-filled.
+    """
+    from standard_quant_tools.modeling.dataset.leakage import (
+        PointInTimeViolation,
+        check_point_in_time_safety,
+    )
+    from standard_quant_tools.modeling.features.registry import get_feature
+
+    ids = input_data.feature_ids
+    if ids is None:
+        from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY
+
+        ids = sorted(FEATURE_REGISTRY)
+
+    definitions, findings, notes = [], [], []
+    for feature_id in ids:
+        try:
+            definitions.append(get_feature(feature_id))
+        except Exception as exc:
+            findings.append(
+                LeakageFinding(
+                    feature_id=feature_id,
+                    temporal_support="unknown",
+                    problem=f"not in the feature registry: {exc}",
+                )
+            )
+
+    try:
+        check_point_in_time_safety(definitions)
+    except PointInTimeViolation as exc:
+        findings.append(
+            LeakageFinding(
+                feature_id="(set)",
+                temporal_support="violation",
+                problem=str(exc),
+            )
+        )
+
+    coverage = {}
+    if input_data.dataset_id is not None:
+        _panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
+        coverage = {
+            key: meta[key]
+            for key in ("rows", "start_date", "end_date", "warnings")
+            if key in meta
+        }
+        notes.append(
+            "Dataset coverage is what the build RECORDED. It confirms the "
+            "panel is the one that was built; it does not re-derive whether "
+            "each value was available on its own date."
+        )
+
+    return CheckLeakageResult(
+        n_features_checked=len(ids),
+        safe=not findings,
+        findings=findings,
+        dataset_coverage=coverage,
+        notes=notes,
+    )
+
+
+def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpecResult:
+    """
+    Check a ModelSpec before spending an experiment on it.
+
+    `run_model_experiment` is the most expensive call in this library: it
+    fetches a universe, builds a panel, and fits once per walk-forward fold
+    — times the search grid if one is set. A misspelled estimator parameter
+    surfaced only after all of that. The estimator registry has always known
+    the answer in microseconds; it just could not be asked.
+
+    `estimated_fits` is the other half of the point. A spec that looks
+    modest can imply thousands of fits once an inner search grid multiplies
+    through every fold, and the difference between seconds and an afternoon
+    is not visible anywhere in the spec itself.
+    """
+    from standard_quant_tools.modeling.estimators.registry import (
+        ESTIMATOR_REGISTRY,
+        allowed_params,
+        validate_params,
+    )
+
+    spec = input_data.spec
+    task = spec.task
+    estimator = spec.estimator.type
+    problems: List[SpecProblem] = []
+    notes: List[str] = []
+    allowed: List[str] = []
+
+    if (task, estimator) not in ESTIMATOR_REGISTRY:
+        available = sorted(name for t, name in ESTIMATOR_REGISTRY if t == task)
+        problems.append(
+            SpecProblem(
+                where="estimator",
+                problem=f"{estimator!r} is not registered for task {task!r}.",
+                suggestion=f"Available for {task}: {available}",
+            )
+        )
+    else:
+        allowed = sorted(allowed_params(task, estimator))
+        try:
+            validate_params(task, estimator, spec.estimator.params)
+        except ValidationError as exc:
+            problems.append(
+                SpecProblem(
+                    where="estimator.params",
+                    problem=str(exc),
+                    suggestion=f"Accepted parameters: {allowed}",
+                )
+            )
+
+    # How much work this implies.
+    estimated_fits: Optional[int] = None
+    folds = getattr(spec.validation, "n_splits", None)
+    if folds:
+        estimated_fits = int(folds)
+        search = spec.search
+        if search is not None:
+            grid = getattr(search, "param_grid", None) or {}
+            combinations = 1
+            for values in grid.values():
+                combinations *= max(1, len(values))
+            inner = getattr(search, "inner_splits", 1) or 1
+            estimated_fits = int(folds * (1 + combinations * inner))
+            notes.append(
+                f"A search grid of {combinations} combination(s) over "
+                f"{inner} inner split(s) multiplies through {folds} fold(s). "
+                "That is the difference between a quick experiment and a "
+                "long one, and nothing in the spec shows it."
+            )
+
+    if input_data.dataset_id is not None:
+        try:
+            _panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
+        except ValidationError as exc:
+            problems.append(SpecProblem(where="dataset_id", problem=str(exc)))
+        else:
+            available = set(meta.get("feature_ids", []) or [])
+            wanted = {
+                f.output_name() if hasattr(f, "output_name") else str(f)
+                for f in (meta.get("feature_ids", []) or [])
+            }
+            missing = sorted(w for w in wanted if w not in available)
+            if missing:
+                problems.append(
+                    SpecProblem(
+                        where="features",
+                        problem=f"not present in dataset {input_data.dataset_id!r}: {missing}",
+                    )
+                )
+            notes.append(
+                f"Checked against dataset {input_data.dataset_id!r} "
+                f"({meta.get('rows')} rows)."
+            )
+
+    if not problems:
+        notes.append("Valid. Nothing was fetched, built or fitted.")
+
+    return ValidateModelSpecResult(
+        valid=not problems,
+        task=task,
+        estimator=estimator,
+        problems=problems,
+        allowed_estimator_params=allowed,
+        estimated_fits=estimated_fits,
+        notes=notes,
+    )
+
+
+def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResult:
+    """
+    Score a prediction frame against its realized outcome, from a reference.
+
+    Works on anything published as `predictions`, including predictions this
+    library never produced — which is the point. A model built elsewhere can
+    be measured with the same yardstick as one built here, and the yardstick
+    includes the two things a headline metric leaves out.
+
+    THE BASELINE. The same metrics for predicting the training mean. A model
+    that does not beat it has learned nothing, and an R2 that looks strong
+    beside a baseline that also looks strong usually means the target was
+    easy rather than the model clever.
+
+    THE EFFECTIVE SAMPLE SIZE. A 20-day forward return sampled daily has far
+    fewer independent observations than rows, so any t-statistic computed
+    from the raw count is overstated — often by a factor of four or five.
+    """
+    import numpy as np
+
+    from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.modeling.validation.metrics import (
+        baseline_regression_metrics,
+        classification_metrics,
+        cross_sectional_ic,
+        effective_sample_size,
+        regression_metrics,
+        summarize_cross_sectional_ic,
+    )
+    from standard_quant_tools.modeling.validation.ranking import ranking_metrics
+
+    frame = handoff.resolve(input_data.predictions_ref, expect="predictions")
+    for column in (input_data.target_column, input_data.prediction_column, "date"):
+        if column not in frame.columns:
+            raise ValidationError(
+                f"the predictions frame has no {column!r} column; it holds "
+                f"{list(frame.columns)}. Scoring needs the prediction, the "
+                "realized outcome, and the date each pair belongs to."
+            )
+
+    frame = frame.dropna(
+        subset=[input_data.target_column, input_data.prediction_column]
+    )
+    if frame.empty:
+        raise ValidationError(
+            "every row is missing either the prediction or the outcome, so "
+            "there is nothing to score."
+        )
+
+    y_true = frame[input_data.target_column].to_numpy(dtype=float)
+    y_pred = frame[input_data.prediction_column].to_numpy(dtype=float)
+    dates = frame["date"].to_numpy()
+    entities = frame["entity"].nunique() if "entity" in frame.columns else 1
+
+    notes: List[str] = []
+    if input_data.task == "regression":
+        metrics = regression_metrics(y_true, y_pred, dates=dates)
+        baseline = baseline_regression_metrics(y_true)
+    elif input_data.task == "classification":
+        metrics = classification_metrics(
+            (y_true > 0).astype(int), (y_pred > 0.5).astype(int), y_pred
+        )
+        baseline = {}
+        notes.append(
+            "The outcome was binarized at zero and the prediction treated as "
+            "a positive-class probability. If either is not what the column "
+            "holds, these numbers are meaningless rather than merely wrong."
+        )
+    else:
+        metrics = ranking_metrics(
+            y_true, y_pred, dates, ks=tuple(input_data.ndcg_cutoffs)
+        )
+        baseline = {}
+
+    ic_summary: Dict[str, float] = {}
+    if entities > 1:
+        ic = cross_sectional_ic(y_true, y_pred, dates, method=input_data.ic_method)
+        ic_summary = summarize_cross_sectional_ic(ic, prefix="ic")
+    else:
+        notes.append(
+            "One entity only, so there is no cross-section to correlate "
+            "within — the IC block is empty by construction, not by failure."
+        )
+
+    beats = None
+    if baseline and "r2" in metrics and "baseline_r2" in baseline:
+        beats = bool(metrics["r2"] > baseline["baseline_r2"])
+        if not beats:
+            notes.append(
+                "This does NOT beat predicting the mean. Whatever the "
+                "headline metric says, the model has not learned anything "
+                "the baseline did not already know."
+            )
+        if baseline.get("baseline_is_oracle"):
+            notes.append(
+                "The baseline used the SCORED set's own mean, not a "
+                "training mean — an oracle it could not have known in "
+                "advance. That makes it harder than a real baseline: "
+                "beating it is strong evidence, and failing to beat it is "
+                "weaker evidence than it looks."
+            )
+
+    ess = None
+    horizon = 1
+    if "label_end_date" in frame.columns:
+        notes.append(
+            "Horizon inferred as 1 bar; pass a target horizon through the "
+            "dataset spec for a sharper effective sample size."
+        )
+    ess = float(effective_sample_size(len(frame), horizon, int(entities)))
+
+    return ScorePredictionsResult(
+        task=input_data.task,
+        n_observations=int(len(frame)),
+        n_dates=int(len(np.unique(dates))),
+        n_entities=int(entities),
+        metrics={k: float(v) for k, v in metrics.items()},
+        cross_sectional_ic={k: float(v) for k, v in ic_summary.items()},
+        baseline={k: float(v) for k, v in baseline.items()},
+        beats_baseline=beats,
+        effective_sample_size=ess,
+        notes=notes,
+    )
+
+
 # ── Registration (mirrors agent.tools.get_agent_tools()/_TOOL_DISPATCH,
 # but a separate registry — never merged into that one) ────────────────
 
 _MODELING_TOOL_DEFS: List[tuple] = [
+    (
+        "validate_model_spec",
+        "Check a ModelSpec before spending an experiment on it: that the "
+        "estimator exists for the task, that its parameters are accepted, "
+        "and how many fits the spec implies once a search grid multiplies "
+        "through every fold. Fetches nothing and fits nothing.",
+        ValidateModelSpecInput,
+    ),
+    (
+        "score_predictions",
+        "Score a predictions reference against its realized outcome — "
+        "accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean "
+        "baseline, and an effective sample size adjusted for overlapping "
+        "forward returns. Works on predictions this library never produced.",
+        ScorePredictionsInput,
+    ),
     ("list_features", "Feature catalog for the modeling runtime.", ListFeaturesInput),
     (
         "build_model_dataset",
@@ -392,6 +893,33 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Use this to choose features; use inspect_model(view='feature_importance') "
         "to see what one fitted model then leaned on.",
         AnalyzeFeaturesInput,
+    ),
+    (
+        "list_models",
+        "Every registered model, newest first, with its task, estimator, "
+        "headline out-of-sample metric and source dataset. Call this when "
+        "you need a model_id you do not already hold.",
+        ListModelsInput,
+    ),
+    (
+        "list_datasets",
+        "Every built dataset panel, newest first, with row/entity/feature "
+        "counts and date span.",
+        ListDatasetsInput,
+    ),
+    (
+        "compare_models",
+        "Rank registered models side by side on their out-of-sample "
+        "metrics. Models are ranked within their own task, never across "
+        "tasks, because those metrics are not on a common scale.",
+        CompareModelsInput,
+    ),
+    (
+        "check_leakage",
+        "Ask whether a set of features is temporally safe to fit on — "
+        "before building a dataset with them. Optionally reports a built "
+        "dataset's recorded point-in-time coverage too.",
+        CheckLeakageInput,
     ),
     (
         "evaluate_model_portfolio",
@@ -471,6 +999,8 @@ def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
 
 
 MODELING_TOOL_DISPATCH = {
+    "validate_model_spec": (validate_model_spec, ValidateModelSpecInput),
+    "score_predictions": (score_predictions, ScorePredictionsInput),
     "list_features": (list_features, ListFeaturesInput),
     "build_model_dataset": (build_model_dataset, BuildModelDatasetInput),
     "run_model_experiment": (run_model_experiment, RunModelExperimentInput),
@@ -480,6 +1010,10 @@ MODELING_TOOL_DISPATCH = {
         evaluate_model_portfolio,
         EvaluateModelPortfolioInput,
     ),
+    "list_models": (list_models, ListModelsInput),
+    "list_datasets": (list_datasets, ListDatasetsInput),
+    "compare_models": (compare_models, CompareModelsInput),
+    "check_leakage": (check_leakage, CheckLeakageInput),
     "analyze_features": (analyze_features, AnalyzeFeaturesInput),
     "list_modeling_capabilities": (
         list_modeling_capabilities,

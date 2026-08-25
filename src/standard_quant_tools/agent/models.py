@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ──────────────────────────────────────────────
 # Backtest
@@ -41,6 +41,14 @@ def _validate_param_grid(grid: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
 
 
 class BacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -160,9 +168,30 @@ class BacktestResult(BaseModel):
 
 
 class AnalysisInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Target asset symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol.")
     period: str = Field("1y", description="Analysis period (e.g. '1y', '2y', '6mo').")
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate as a decimal fraction (0.045 = "
+            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
+            "0.0, which means those ratios measure total return per unit "
+            "of risk rather than EXCESS return — at a 4-5% short rate that "
+            "is most of the ratio for a low-volatility strategy, so set it "
+            "when the number is going to be compared with anything."
+        ),
+    )
 
 
 class AnalysisResult(BaseModel):
@@ -185,6 +214,14 @@ class AnalysisResult(BaseModel):
 
 
 class TechnicalInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -227,6 +264,14 @@ class TechnicalResult(BaseModel):
 
 
 class PortfolioInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="List of ticker symbols.")
     weights: List[float] = Field(
         ..., description="Portfolio weights (must sum to 1.0)."
@@ -245,6 +290,20 @@ class PortfolioInput(BaseModel):
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
         return self
+
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate as a decimal fraction (0.045 = "
+            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
+            "0.0, which means those ratios measure total return per unit "
+            "of risk rather than EXCESS return — at a 4-5% short rate that "
+            "is most of the ratio for a low-volatility strategy, so set it "
+            "when the number is going to be compared with anything."
+        ),
+    )
 
 
 class PortfolioResult(BaseModel):
@@ -296,6 +355,14 @@ class BLViewInput(BaseModel):
 
 
 class PortfolioOptimizationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Universe of tickers to optimize over.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -417,6 +484,14 @@ class PortfolioOptimizationResult(BaseModel):
 
 
 class ScreenerInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Universe of tickers to screen.")
     filters: Dict[str, Any] = Field(
         ...,
@@ -482,6 +557,14 @@ class ScreenerResult(BaseModel):
 
 
 class FactorRegressionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Asset to analyse (e.g. 'AAPL').")
     factor_tickers: List[str] = Field(
         ...,
@@ -528,6 +611,14 @@ class FactorRegressionResult(BaseModel):
 
 
 class CointegrationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol_a: str = Field(..., description="First asset symbol (the 'long' leg).")
     symbol_b: str = Field(..., description="Second asset symbol (the 'short' leg).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -562,6 +653,34 @@ class CointegrationResult(BaseModel):
 
 
 class KalmanHedgeRatioInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    observation_noise: float = Field(
+        0.001,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Measurement-noise variance. Together with `delta` this sets "
+            "how fast the hedge ratio is allowed to move: a large value "
+            "trusts the model over the data and produces a ratio that "
+            "barely responds, a small one chases every print."
+        ),
+    )
+    include_intercept: bool = Field(
+        True,
+        description=(
+            "Estimate a time-varying intercept alongside the hedge ratio. "
+            "False forces the spread through the origin, which is only "
+            "right when the two legs genuinely have no level difference."
+        ),
+    )
+
     symbol_a: str = Field(..., description="First asset symbol (the 'long' leg).")
     symbol_b: str = Field(..., description="Second asset symbol (the 'short' leg).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -603,6 +722,33 @@ class KalmanHedgeRatioResult(BaseModel):
 
 
 class PCAInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    standardize: bool = Field(
+        True,
+        description=(
+            "Z-score each asset's returns before decomposing. True (the "
+            "default) makes the components describe CORRELATION structure; "
+            "False leaves them driven by whichever asset happens to be "
+            "most volatile, which is a different question and usually not "
+            "the one being asked."
+        ),
+    )
+    method: Literal["svd", "power_iteration"] = Field(
+        "svd",
+        description=(
+            "'svd' (default) is exact. 'power_iteration' is iterative and "
+            "cheaper on a wide universe when only the leading components "
+            "matter."
+        ),
+    )
+
     tickers: List[str] = Field(..., description="Universe of tickers to decompose.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -636,6 +782,14 @@ class PCAResult(BaseModel):
 
 
 class CorrelationAnalysisInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Universe of tickers (>= 2).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -682,6 +836,35 @@ class CorrelationAnalysisResult(BaseModel):
 
 
 class HurstInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    min_window: int = Field(
+        10,
+        gt=1,
+        le=10_000,
+        description=(
+            "Smallest scale in the log-log fit. The exponent is the SLOPE "
+            "across scales, so the window range is not a detail: too small "
+            "a floor lets microstructure noise flatten it toward 0.5, and "
+            "the regime call downstream reads that as 'random walk'."
+        ),
+    )
+    max_window: Optional[int] = Field(
+        None,
+        gt=1,
+        le=100_000,
+        description=(
+            "Largest scale in the fit. None lets the estimator choose from "
+            "the series length."
+        ),
+    )
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -715,6 +898,14 @@ class HurstResult(BaseModel):
 
 
 class RallyDetectionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -790,6 +981,14 @@ class RallyDetectionResult(BaseModel):
 
 
 class VolatilityEstimatorsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -814,6 +1013,14 @@ class VolatilityEstimatorsResult(BaseModel):
 
 
 class GarchVolatilityForecastInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -844,6 +1051,14 @@ class GarchVolatilityForecastResult(BaseModel):
 
 
 class RegimeAdaptiveInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -900,6 +1115,14 @@ class RegimeAdaptiveResult(BaseModel):
 
 
 class PairScannerInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Universe of tickers to test for cointegration."
     )
@@ -956,6 +1179,14 @@ class PairScannerResult(BaseModel):
 
 
 class WalkForwardInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1079,6 +1310,14 @@ class WalkForwardResult(BaseModel):
 
 
 class RegimeAdaptiveWalkForwardInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1188,6 +1427,14 @@ class RegimeAdaptiveWalkForwardResult(BaseModel):
 
 
 class RiskAttributionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Portfolio asset symbols.")
     weights: List[float] = Field(..., description="Portfolio weights summing to 1.0.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1212,6 +1459,20 @@ class RiskAttributionInput(BaseModel):
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
         return self
+
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate as a decimal fraction (0.045 = "
+            "4.5%), used for the Sharpe and Sortino ratios. Defaults to "
+            "0.0, which means those ratios measure total return per unit "
+            "of risk rather than EXCESS return — at a 4-5% short rate that "
+            "is most of the ratio for a low-volatility strategy, so set it "
+            "when the number is going to be compared with anything."
+        ),
+    )
 
 
 class RiskAttributionResult(BaseModel):
@@ -1245,6 +1506,14 @@ class RiskAttributionResult(BaseModel):
 
 
 class StressTestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Portfolio asset symbols.")
     weights: Optional[List[float]] = Field(
         None,
@@ -1305,6 +1574,14 @@ class StressTestResult(BaseModel):
 
 
 class PositionSizerInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(
         ..., description="Start date YYYY-MM-DD (for ATR calculation)."
@@ -1390,6 +1667,14 @@ class PositionSizerResult(BaseModel):
 
 
 class BuyAndHoldInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1433,6 +1718,14 @@ class StrategyComparison(BaseModel):
 
 
 class CompareStrategiesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1499,6 +1792,14 @@ class CompareStrategiesResult(BaseModel):
 
 
 class FundamentalsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
 
 
@@ -1525,6 +1826,14 @@ class FundamentalsResult(BaseModel):
 
 
 class BacktestOptInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     strategy: Literal[
         "sma_crossover",
@@ -1628,6 +1937,14 @@ class BacktestOptResult(BaseModel):
 
 
 class AdvancedIndicatorsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1637,6 +1954,17 @@ class AdvancedIndicatorsInput(BaseModel):
     )
     sar_af_start: float = Field(
         0.02, description="Parabolic SAR initial acceleration factor (default 0.02)."
+    )
+    sar_af_step: float = Field(
+        0.02,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Acceleration increment applied at each new extreme. With "
+            "af_start and af_max already exposed, this was the one knob of "
+            "the three that could not be set — and it governs how quickly "
+            "the stop tightens into a trend."
+        ),
     )
     sar_af_max: float = Field(
         0.2, description="Parabolic SAR maximum acceleration factor (default 0.2)."
@@ -1661,6 +1989,14 @@ class AdvancedIndicatorsResult(BaseModel):
 
 
 class RollingBetaInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Asset ticker symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol (default SPY).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1691,6 +2027,14 @@ class RollingBetaResult(BaseModel):
 
 
 class ExtendedRiskInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Asset ticker symbol.")
     benchmark: str = Field("SPY", description="Benchmark symbol (default SPY).")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -1716,6 +2060,14 @@ class ExtendedRiskResult(BaseModel):
 
 
 class TailRiskInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1807,6 +2159,14 @@ def _validate_signal_values(
 
 
 class CustomSignalBacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -1873,20 +2233,50 @@ class CustomSignalBacktestInput(BaseModel):
 
 
 class SignalPanelBacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Ticker universe. Must match signal_panel's outer keys."
     )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    signal_panel: Dict[str, Dict[str, float]] = Field(
-        ...,
+    signal_panel: Optional[Dict[str, Dict[str, float]]] = Field(
+        None,
         description=(
             "Per-ticker signal map: {ticker: {date: value}}, value in "
             "{1=long, 0=flat, -1=short}. Computed entirely outside this library "
             "(e.g. a cross-sectional alpha model) — this tool only backtests it "
-            "and combines the per-ticker results into portfolio-level metrics."
+            "and combines the per-ticker results into portfolio-level metrics. "
+            "Supply this OR signal_panel_ref."
         ),
     )
+    signal_panel_ref: Optional[str] = Field(
+        None,
+        description=(
+            "A 'signal_panel' handoff reference (sqt://signal_panel/...) "
+            "instead of the panel inline. Any runtime can publish one, so a "
+            "model's predictions reach this tool without being transcribed "
+            "through the conversation — see convert_reference for turning "
+            "raw predictions into a signal panel."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_signal_source(self) -> "SignalPanelBacktestInput":
+        if (self.signal_panel is None) == (self.signal_panel_ref is None):
+            raise ValueError(
+                "supply exactly one of signal_panel or signal_panel_ref. "
+                "Both would leave it ambiguous which one was backtested, "
+                "and neither leaves nothing to backtest."
+            )
+        return self
+
     weights: Optional[Dict[str, float]] = Field(
         None,
         description="Per-ticker portfolio weight, must sum to 1.0. Defaults to equal weight across tickers.",
@@ -1936,6 +2326,14 @@ class SignalPanelBacktestInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_panel_and_weights(self) -> "SignalPanelBacktestInput":
+        # A reference carries the panel, so there is nothing to check yet.
+        # The weights checks below still run, and the panel-shape checks
+        # run against the RESOLVED panel inside the tool -- deferring is
+        # about WHEN they happen, never about whether.
+        if self.signal_panel is None:
+            if self.weights is not None and set(self.weights) != set(self.tickers):
+                raise ValueError("weights keys must exactly match tickers")
+            return self
         missing = [t for t in self.tickers if t not in self.signal_panel]
         if missing:
             raise ValueError(f"signal_panel is missing entries for: {missing}")
@@ -1976,13 +2374,29 @@ _CONSTRUCTION_METHODS = (
 
 
 class PortfolioSimulationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Ticker universe. Must match target_weights' outer keys."
     )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    target_weights_ref: Optional[str] = Field(
+        None,
+        description=(
+            "A 'weight_panel' or 'score_panel' handoff reference instead of "
+            "target_weights inline. The kind must match signal_type: a "
+            "weight_panel for 'target_weight', a score_panel for 'score'."
+        ),
+    )
     target_weights: Dict[str, Dict[str, float]] = Field(
-        ...,
+        default_factory=dict,
         description=(
             "Per-ticker map: {ticker: {date: value}}. When signal_type='target_weight' "
             "(default), value = fraction of account equity (negative for short), and "
@@ -2043,6 +2457,18 @@ class PortfolioSimulationInput(BaseModel):
     )
     commission_pct: float = Field(
         0.001, le=1, ge=0, description="Commission per trade notional (fraction)."
+    )
+    sell_commission_pct: Optional[float] = Field(
+        None,
+        le=1,
+        ge=0,
+        description=(
+            "Separate commission rate for SALES. None (the default) charges "
+            "commission_pct on both sides. Real venues are frequently "
+            "asymmetric — regulatory fees in several markets are sell-side "
+            "only — and a symmetric rate understates the cost of a strategy "
+            "that turns over in one direction more than the other."
+        ),
     )
     slippage_pct: float = Field(
         0.0005, le=1, ge=0, description="Slippage per trade notional (fraction)."
@@ -2120,6 +2546,23 @@ class PortfolioSimulationInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_weights_panel(self) -> "PortfolioSimulationInput":
+        # A reference carries the panel, so there is nothing to validate
+        # yet -- the same checks run against the RESOLVED panel inside the
+        # tool. Validating an empty dict here would reject every
+        # reference-based call for missing every ticker.
+        if self.target_weights_ref is not None:
+            if self.target_weights:
+                raise ValueError(
+                    "supply exactly one of target_weights or "
+                    "target_weights_ref; both leaves it ambiguous which "
+                    "panel was simulated."
+                )
+            return self
+        if not self.target_weights:
+            raise ValueError(
+                "supply target_weights inline, or a target_weights_ref "
+                "pointing at a published weight_panel or score_panel."
+            )
         missing = [t for t in self.tickers if t not in self.target_weights]
         if missing:
             raise ValueError(f"target_weights is missing entries for: {missing}")
@@ -2198,6 +2641,14 @@ class PortfolioSimulationResult(BaseModel):
 
 
 class PairTradeBacktestInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol_a: str = Field(..., description="First leg ticker.")
     symbol_b: str = Field(..., description="Second leg ticker.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
@@ -2273,6 +2724,14 @@ class PairTradeBacktestResult(BaseModel):
 
 
 class BacktestDiagnosticsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2357,6 +2816,14 @@ class BacktestDiagnosticsResult(BaseModel):
 
 
 class RobustnessDiagnosticsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2455,6 +2922,14 @@ class RobustnessDiagnosticsResult(BaseModel):
 
 
 class MonteCarloSimulationInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Portfolio tickers.")
     weights: Optional[List[float]] = Field(
         None,
@@ -2534,6 +3009,14 @@ class MonteCarloSimulationResult(BaseModel):
 
 
 class CapacityReportInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(
         ..., description="Ticker universe. Must match target_weights' keys."
     )
@@ -2587,6 +3070,14 @@ class CapacityReportResult(BaseModel):
 
 
 class LiquidityAnalysisInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     tickers: List[str] = Field(..., description="Tickers to analyze.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2609,6 +3100,14 @@ class LiquidityAnalysisResult(BaseModel):
 
 
 class DataQualityReportInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2696,6 +3195,14 @@ class CostSummary(BaseModel):
 
 
 class BacktestCompactInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -2738,6 +3245,19 @@ class BacktestResultV2(BaseModel):
     costs: CostSummary
     equity_curve_uri: str
     trades_uri: Optional[str] = None  # None when the strategy never traded
+    equity_curve_ref: Optional[str] = Field(
+        None,
+        description=(
+            "Typed handoff reference for the same equity curve "
+            "(sqt://equity_curve/...). Prefer this over equity_curve_uri "
+            "when passing the curve to another tool: it carries a content "
+            "kind, so a tool expecting something else refuses it by name "
+            "rather than failing on a missing column."
+        ),
+    )
+    trades_ref: Optional[str] = Field(
+        None, description="Typed handoff reference for the trade log."
+    )
     warnings: List[str] = []
     validation_status: str  # "ok" | "warning"
 
@@ -2749,6 +3269,14 @@ class BacktestResultV2(BaseModel):
 
 
 class OptionPricingInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     spot: float = Field(..., gt=0, description="Current underlying price.")
     strike: float = Field(..., gt=0, description="Option strike price.")
     time_to_expiry: float = Field(
@@ -2792,6 +3320,14 @@ class OptionPricingResult(BaseModel):
 
 
 class ImpliedVolatilityInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     option_price: float = Field(
         ..., gt=0, description="Observed market price of the option."
     )
@@ -2810,3 +3346,1597 @@ class ImpliedVolatilityResult(BaseModel):
     converged: bool
     iterations: int
     method: str  # "newton" | "bisection"
+
+
+# ──────────────────────────────────────────────
+# Discovery — what this library can do, asked rather than assumed
+#
+# The modeling runtime has had `list_features` and
+# `list_modeling_capabilities` since it shipped; this 46-tool surface had
+# nothing equivalent. A caller learned the strategy vocabulary from prose
+# inside a Field description, the stress-scenario names from a sentence in
+# a tool description, and whether a tick feed existed by calling something
+# that raised NotImplementedError. Each of those is a contract the library
+# already holds in a data structure — STRATEGY_PARAM_SCHEMA, _SCENARIOS,
+# the provider classes — and prose is a lossy copy of a data structure that
+# drifts from it silently.
+# ──────────────────────────────────────────────
+
+
+class StrategyParameter(BaseModel):
+    """One strategy parameter's declared contract, from
+    backtest/strategy_params.py's STRATEGY_PARAM_SCHEMA."""
+
+    name: str
+    kind: Literal["window", "number"] = Field(
+        ...,
+        description=(
+            "'window' is a positive whole number of BARS (rejected below 1: "
+            "pandas reads a negative period as a forward window, which is "
+            "look-ahead by construction). 'number' is any finite float "
+            "within the bounds below."
+        ),
+    )
+    default: Any = Field(..., description="Value used when the caller omits this.")
+    minimum: Optional[float] = Field(None, description="Inclusive lower bound, if any.")
+    maximum: Optional[float] = Field(None, description="Inclusive upper bound, if any.")
+
+
+class StrategyRelation(BaseModel):
+    """A constraint BETWEEN two parameters. Each value can be individually
+    valid while the pair is nonsense, so these are checked separately."""
+
+    left: str
+    right: str
+    requirement: str = Field(..., description="Always of the form 'left < right'.")
+    why: str = Field(
+        ..., description="What breaks when the relation is violated, in plain terms."
+    )
+
+
+class StrategyDescriptor(BaseModel):
+    name: str
+    parameters: List[StrategyParameter]
+    relations: List[StrategyRelation] = Field(
+        default_factory=list,
+        description="Empty for strategies whose parameters are independent.",
+    )
+
+
+class ListStrategiesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_type: Optional[str] = Field(
+        None,
+        description=(
+            "Return only this strategy's contract. None (the default) "
+            "returns all eight."
+        ),
+    )
+
+
+class ListStrategiesResult(BaseModel):
+    strategies: List[StrategyDescriptor]
+    max_window_bars: int = Field(
+        ...,
+        description=(
+            "Upper bound on any 'window' parameter. A longer window is more "
+            "likely a units mix-up (days vs minutes) than an intent."
+        ),
+    )
+    synthetic_labels: List[str] = Field(
+        ...,
+        description=(
+            "Accepted strategy_type values that are NOT in the registry and "
+            "take no parameters: 'buy_and_hold' constructs an always-long "
+            "series directly and 'custom_signal' carries a caller-supplied "
+            "one."
+        ),
+    )
+
+
+class ListStressScenariosInput(BaseModel):
+    """No arguments — the scenario table is a fixed, offline constant."""
+
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+
+class StressScenario(BaseModel):
+    name: str
+    start: str
+    end: str
+    calendar_days: int = Field(
+        ...,
+        description=(
+            "Length of the window in calendar days, not trading days — this "
+            "is computed from the dates alone and involves no market data."
+        ),
+    )
+
+
+class ListStressScenariosResult(BaseModel):
+    scenarios: List[StressScenario]
+
+
+class DataCapabilitiesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(
+        "yfinance",
+        description=(
+            "Provider to describe: 'yfinance', 'polygon', or 'bloomberg'. "
+            "Describing a provider does NOT fetch any market data."
+        ),
+    )
+
+
+class DataCapabilitiesResult(BaseModel):
+    provider: str
+    available: bool = Field(
+        ...,
+        description=(
+            "False when the provider could not even be constructed — a "
+            "missing API key, an uninstalled SDK. Everything below is then "
+            "the class's declared capability, not a working connection."
+        ),
+    )
+    unavailable_reason: Optional[str] = Field(
+        None, description="Why construction failed, verbatim, when available is False."
+    )
+    ohlcv: bool
+    ohlcv_async: bool
+    ticker_info: bool
+    financial_ratios: bool
+    trades: bool = Field(
+        ...,
+        description=(
+            "Tick-level trades. False means the microstructure tools cannot "
+            "run on this provider AT ALL — bar data is not a substitute, and "
+            "nothing here synthesizes one."
+        ),
+    )
+    quotes: bool = Field(
+        ..., description="Top-of-book bid/offer. No shipped provider offers depth."
+    )
+    supported_intervals: Optional[List[str]] = Field(
+        None, description="Bar intervals this provider accepts, if it declares a set."
+    )
+    guarantees: Dict[str, bool] = Field(
+        ...,
+        description=(
+            "adjusted / survivorship_free / point_in_time, as the provider "
+            "itself reports them — what it actually promises, not what would "
+            "be ideal."
+        ),
+    )
+    cache_dir: str = Field(..., description="Where the persistent OHLCV cache lives.")
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Transaction costs — priced on their own, and swept
+#
+# backtest/costs.py is ten pure functions, and until now every one of them
+# was reachable only by running a whole portfolio simulation that happened
+# to compose the subset you wanted. Two of them (maker_taker_cost,
+# pct_of_range_spread) were reachable from no tool at all.
+#
+# The question a cost model actually gets asked is "does this strategy
+# survive it", and that question was previously answered by running the
+# same backtest N times with different commission_pct and comparing by
+# hand. compare_cost_models does the sweep in one call on one fetch, and
+# solves for the rate at which the edge disappears -- which is the number
+# the N-call version was groping toward.
+# ──────────────────────────────────────────────
+
+
+class TradeCostLeg(BaseModel):
+    """One priced component of a trade's cost."""
+
+    component: Literal["commission", "spread", "impact", "borrow", "margin_interest"]
+    model: str = Field(
+        ..., description="Which backtest/costs.py function priced this leg."
+    )
+    cost: float = Field(..., description="Currency units.")
+    bps_of_notional: float
+
+
+class EstimateTradeCostInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    notional: float = Field(
+        ...,
+        gt=0,
+        description="Trade size in currency units. Cost is charged on |notional|.",
+    )
+    side: Literal["buy", "sell"] = Field(
+        "buy",
+        description=(
+            "Only matters for commission_model='directional' (separate "
+            "buy/sell rates) — every other model is side-agnostic."
+        ),
+    )
+    commission_model: Literal[
+        "pct", "per_share", "directional", "maker_taker", "none"
+    ] = Field(
+        "pct",
+        description=(
+            "'pct' rate x notional | 'per_share' rate x shares floored at a "
+            "minimum | 'directional' separate buy and sell rates | "
+            "'maker_taker' where the maker rate MAY be a rebate (negative) | "
+            "'none' to price the other components alone."
+        ),
+    )
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="commission_model='pct': fraction of notional."
+    )
+    shares: Optional[float] = Field(
+        None,
+        gt=0,
+        description="commission_model='per_share': share count. Required for that model.",
+    )
+    per_share_rate: float = Field(
+        0.005, ge=0, description="commission_model='per_share': currency per share."
+    )
+    min_commission: float = Field(
+        1.0, ge=0, description="commission_model='per_share': floor per trade."
+    )
+    buy_rate: float = Field(
+        0.001,
+        ge=0,
+        description="commission_model='directional': fraction charged on buys.",
+    )
+    sell_rate: float = Field(
+        0.001,
+        ge=0,
+        description=(
+            "commission_model='directional': fraction charged on sells. Often "
+            "the higher of the two — regulatory fees are typically sell-side."
+        ),
+    )
+    taker_rate: float = Field(
+        0.0005,
+        ge=0,
+        description="commission_model='maker_taker': fraction taken when crossing.",
+    )
+    maker_rate: float = Field(
+        -0.0001,
+        description=(
+            "commission_model='maker_taker': fraction when providing "
+            "liquidity. MAY be negative — that is a rebate, and it is the "
+            "one cost input here that is allowed below zero."
+        ),
+    )
+    is_maker: bool = Field(
+        False,
+        description="commission_model='maker_taker': did this order provide liquidity?",
+    )
+    spread_model: Literal["fixed_bps", "pct_of_range", "none"] = Field(
+        "fixed_bps",
+        description=(
+            "'fixed_bps' a flat basis-point haircut | 'pct_of_range' a "
+            "fraction of the bar's own High-Low range, which widens the "
+            "estimate on volatile bars | 'none'."
+        ),
+    )
+    spread_bps: float = Field(
+        1.0, ge=0, description="spread_model='fixed_bps': basis points of notional."
+    )
+    bar_high: Optional[float] = Field(
+        None, gt=0, description="spread_model='pct_of_range': the bar's High."
+    )
+    bar_low: Optional[float] = Field(
+        None, gt=0, description="spread_model='pct_of_range': the bar's Low."
+    )
+    bar_close: Optional[float] = Field(
+        None, gt=0, description="spread_model='pct_of_range': the bar's Close."
+    )
+    range_pct: float = Field(
+        0.1,
+        ge=0,
+        description="spread_model='pct_of_range': fraction of the High-Low range to charge.",
+    )
+    avg_dollar_volume: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Supply this together with `volatility` to add a square-root "
+            "market-impact leg. Omit either one and impact is not priced — "
+            "impact is never guessed from notional alone."
+        ),
+    )
+    volatility: Optional[float] = Field(
+        None, ge=0, description="Per-period return volatility for the impact model."
+    )
+    impact_coefficient: float = Field(
+        1.0, ge=0, description="Impact model coefficient."
+    )
+    short_borrow_bps: float = Field(
+        0.0,
+        ge=0,
+        description="Annualized basis points on a short's notional, accrued over holding_days.",
+    )
+    holding_days: float = Field(
+        1.0,
+        ge=0,
+        description="Days the position is held, for borrow and margin accrual.",
+    )
+    margin_cash: float = Field(
+        0.0,
+        description=(
+            "Account cash. Only a NEGATIVE value accrues margin interest — "
+            "there is nothing borrowed to charge on a positive balance."
+        ),
+    )
+    margin_annual_rate: float = Field(
+        0.0, ge=0, description="Annualized rate on negative cash."
+    )
+
+    @model_validator(mode="after")
+    def _check_model_inputs(self) -> "EstimateTradeCostInput":
+        if self.commission_model == "per_share" and self.shares is None:
+            raise ValueError(
+                "commission_model='per_share' needs `shares` — a per-share "
+                "rate cannot be derived from notional without a price."
+            )
+        if self.spread_model == "pct_of_range":
+            missing = [
+                name
+                for name, value in (
+                    ("bar_high", self.bar_high),
+                    ("bar_low", self.bar_low),
+                    ("bar_close", self.bar_close),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"spread_model='pct_of_range' needs {missing} — the "
+                    "estimate is a fraction of that bar's own range."
+                )
+            if self.bar_high is not None and self.bar_low is not None:
+                if self.bar_high < self.bar_low:
+                    raise ValueError(
+                        f"bar_high ({self.bar_high}) is below bar_low "
+                        f"({self.bar_low})"
+                    )
+        impact_inputs = (self.avg_dollar_volume, self.volatility)
+        if any(v is not None for v in impact_inputs) and not all(
+            v is not None for v in impact_inputs
+        ):
+            raise ValueError(
+                "the impact model needs BOTH avg_dollar_volume and "
+                "volatility. Pricing impact from notional alone would be a "
+                "number with no model behind it."
+            )
+        return self
+
+
+class EstimateTradeCostResult(BaseModel):
+    notional: float
+    side: str
+    legs: List[TradeCostLeg]
+    total_cost: float
+    total_bps: float = Field(
+        ..., description="Total one-way cost in basis points of notional."
+    )
+    breakeven_move_bps: float = Field(
+        ...,
+        description=(
+            "How far the price must move in your favour to cover a ROUND "
+            "TRIP at this cost — two times total_bps. The one-way figure "
+            "understates what an entry actually has to earn."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class CostScenario(BaseModel):
+    """One point in the cost sweep."""
+
+    label: str = Field(..., min_length=1, max_length=64)
+    commission_pct: float = Field(..., ge=0, le=1)
+    slippage_pct: float = Field(0.0, ge=0, le=1)
+
+
+class CostScenarioResult(BaseModel):
+    label: str
+    commission_pct: float
+    slippage_pct: float
+    total_return: float
+    annualized_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    n_trades: int
+    cost_drag_vs_gross: float = Field(
+        ...,
+        description=(
+            "total_return under this scenario minus the zero-cost "
+            "total_return — always <= 0, and the amount costs took."
+        ),
+    )
+
+
+class CompareCostModelsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    strategy_type: str = Field(
+        ...,
+        description=(
+            "One of the eight registry strategies — call list_strategies for "
+            "the names and their parameters."
+        ),
+    )
+    parameters: Dict[str, Any] = Field(
+        default_factory=dict, description="Strategy parameters, validated as usual."
+    )
+    scenarios: List[CostScenario] = Field(
+        ...,
+        min_length=1,
+        max_length=12,
+        description=(
+            "Cost assumptions to price the SAME signal series under. The "
+            "signal is computed once, so these differ only in what the "
+            "trading cost."
+        ),
+    )
+    initial_capital: float = Field(10_000.0, gt=0, le=1e15)
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field("close")
+    solve_breakeven: bool = Field(
+        True,
+        description=(
+            "Solve for the commission rate at which total return reaches "
+            "zero. Costs are monotone in the rate for a fixed signal series, "
+            "so this is a bisection, not a search."
+        ),
+    )
+
+    @field_validator("scenarios")
+    @classmethod
+    def _unique_labels(cls, scenarios: List[CostScenario]) -> List[CostScenario]:
+        labels = [s.label for s in scenarios]
+        duplicates = sorted({label for label in labels if labels.count(label) > 1})
+        if duplicates:
+            raise ValueError(
+                f"scenario labels must be unique; got duplicates {duplicates}. "
+                "Two rows with the same label are indistinguishable in the result."
+            )
+        return scenarios
+
+
+class CompareCostModelsResult(BaseModel):
+    symbol: str
+    strategy_type: str
+    n_bars: int
+    gross_total_return: float = Field(
+        ...,
+        description=(
+            "Total return with ZERO costs — the ceiling every scenario is "
+            "measured against. Always computed, never one of the submitted "
+            "scenarios."
+        ),
+    )
+    gross_sharpe_ratio: float
+    scenarios: List[CostScenarioResult]
+    breakeven_commission_pct: Optional[float] = Field(
+        None,
+        description=(
+            "Commission rate at which total return crosses zero, holding "
+            "slippage at the first scenario's value. None when the strategy "
+            "loses money even at zero cost (nothing to break even from) or "
+            "still profits at a 100% commission (no crossing exists)."
+        ),
+    )
+    survives_all_scenarios: bool = Field(
+        ..., description="True when every submitted scenario keeps total_return > 0."
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Panel indicators, and follow-ups on a run that already happened
+#
+# Two costs this section removes. The first is per-ticker round trips:
+# get_technical_analysis answers for one symbol, so a 50-name screen was 50
+# calls, while indicators/panel.py already computes the whole universe in
+# one native call and was reachable from no tool.
+#
+# The second is recomputation. run_backtest_compact persists its equity
+# curve and trade log and hands back URIs, but every follow-up tool took a
+# symbol and a strategy and RE-RAN the backtest to answer a question about
+# a run that was already on disk. That is slower, and it is not the same
+# run -- a provider revision between the two calls silently diagnoses
+# something other than what was reported.
+# ──────────────────────────────────────────────
+
+
+class TechnicalPanelInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description=(
+            "Universe to compute across. One fetch and one native call for "
+            "the whole set, so this is much cheaper than a "
+            "get_technical_analysis call per ticker."
+        ),
+    )
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    indicators: List[
+        Literal["rsi", "adx", "atr", "bollinger_bands", "stochastic_oscillator"]
+    ] = Field(
+        ["rsi"],
+        min_length=1,
+        description=(
+            "Any of rsi, adx, atr, bollinger_bands, stochastic_oscillator — "
+            "the set indicators/panel.py computes natively."
+        ),
+    )
+    rsi_period: int = Field(14, gt=0, le=1000)
+    adx_period: int = Field(14, gt=0, le=1000)
+    atr_period: int = Field(14, gt=0, le=1000)
+    bollinger_period: int = Field(20, gt=0, le=1000)
+    bollinger_num_std: float = Field(2.0, gt=0, le=100)
+    stoch_k_period: int = Field(14, gt=0, le=1000)
+    stoch_d_period: int = Field(3, gt=0, le=1000)
+    persist_run_id: Optional[str] = Field(
+        None,
+        description=(
+            "Persist the FULL panel (every bar, not just the latest) as "
+            "Parquet artifacts under this run id and return their URIs. "
+            "Letters, digits, '_' and '-' only. Omit to get the latest-bar "
+            "snapshot alone — the full panel is far too large to return "
+            "inline for any real universe."
+        ),
+    )
+
+    @field_validator("tickers")
+    @classmethod
+    def _no_duplicates(cls, tickers: List[str]) -> List[str]:
+        duplicates = sorted({t for t in tickers if tickers.count(t) > 1})
+        if duplicates:
+            raise ValueError(
+                f"tickers contains duplicates {duplicates}; the panel is keyed "
+                "by ticker, so a repeat collapses and the result would report "
+                "fewer columns than were asked for."
+            )
+        return tickers
+
+
+class TechnicalPanelResult(BaseModel):
+    tickers: List[str]
+    indicators: List[str]
+    as_of: str = Field(..., description="Date of the latest bar in the panel.")
+    n_bars: int
+    latest: Dict[str, Dict[str, float]] = Field(
+        ...,
+        description=(
+            "ticker -> {field: value} at the latest bar. Field names match "
+            "the per-ticker tools exactly (RSI, ADX, DI_Plus, BB_Upper, "
+            "Stoch_K, ...), so nothing new has to be learned to read this."
+        ),
+    )
+    incomplete_tickers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Tickers whose latest value is NaN for at least one requested "
+            "indicator — usually too few bars for the lookback. Reported "
+            "rather than dropped: a silently missing ticker looks like a "
+            "screen that legitimately excluded it."
+        ),
+    )
+    calendar_start: str = Field(
+        ...,
+        description=(
+            "First bar of the SHARED calendar the panel was computed on — "
+            "the intersection of every ticker's history, not the requested "
+            "start date. They differ whenever one ticker is younger than "
+            "the window."
+        ),
+    )
+    calendar_limited_by: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Tickers whose own first bar is later than the earliest "
+            "available in the universe, and which therefore truncate the "
+            "shared calendar for EVERY ticker. A recent listing here can "
+            "collapse a multi-year request to a handful of bars and turn "
+            "every other ticker's indicator to NaN — drop it, or shorten "
+            "the window deliberately."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+    artifact_uris: Dict[str, str] = Field(
+        default_factory=dict,
+        description="indicator -> Parquet URI, when persist_run_id was given.",
+    )
+    execution_path: str = Field(
+        ..., description="'C++' or 'per-ticker' — which panel path actually ran."
+    )
+
+
+class DescribeArtifactInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    uri: str = Field(
+        ...,
+        description=(
+            "An artifact URI returned by a tool (equity_curve_uri, "
+            "trades_uri, ...). Must resolve inside SQT_RUNS_DIR."
+        ),
+    )
+    preview_rows: int = Field(
+        5,
+        ge=0,
+        le=50,
+        description=(
+            "Rows to include from each end. The middle is never returned — "
+            "an equity curve has thousands of bars and this tool exists to "
+            "describe one, not to move it into the conversation."
+        ),
+    )
+
+
+class DescribeArtifactResult(BaseModel):
+    uri: str
+    rows: int
+    columns: List[str]
+    index_name: Optional[str] = None
+    index_start: Optional[str] = None
+    index_end: Optional[str] = None
+    content_hash: str = Field(
+        ...,
+        description=(
+            "SHA-256 of the file's bytes. Two tools reading the same URI "
+            "can confirm they saw the same artifact, and a re-run that "
+            "changed it is visible without diffing the contents."
+        ),
+    )
+    head: List[Dict[str, Any]] = Field(default_factory=list)
+    tail: List[Dict[str, Any]] = Field(default_factory=list)
+    column_summary: Dict[str, Dict[str, float]] = Field(
+        default_factory=dict,
+        description="Per numeric column: min, max, mean, and the NaN count.",
+    )
+
+
+class DrawdownTableInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    equity_curve_uri: str = Field(
+        ...,
+        description=(
+            "URI of a persisted equity curve — run_backtest_compact's "
+            "equity_curve_uri. Reading the run that happened is both cheaper "
+            "and more honest than re-running the backtest to describe it."
+        ),
+    )
+    min_depth: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Drop episodes shallower than this fraction (0.05 = 5%). 0 keeps "
+            "every episode, including the one-bar noise that dominates a "
+            "long curve by count while contributing nothing to risk."
+        ),
+    )
+    max_episodes: int = Field(
+        50,
+        gt=0,
+        le=500,
+        description="Cap on returned episodes, deepest first.",
+    )
+
+
+class DrawdownTableResult(BaseModel):
+    equity_curve_uri: str
+    n_bars: int
+    n_episodes_total: int = Field(
+        ..., description="Episodes found before min_depth and max_episodes filtering."
+    )
+    n_episodes_returned: int
+    max_drawdown: float
+    episodes: List[DrawdownEpisode]
+    currently_underwater: bool = Field(
+        ...,
+        description=(
+            "True when the curve ends inside a drawdown that never "
+            "recovered. That last episode's recovery_bars is null, and its "
+            "duration is a floor rather than a measurement."
+        ),
+    )
+    time_underwater_pct: float = Field(
+        ...,
+        description="Fraction of bars spent below a prior peak, across all episodes.",
+    )
+
+
+# ──────────────────────────────────────────────
+# Provenance — reading and verifying the decision log
+#
+# Every dispatch() call already writes a tamper-evident record: the tool,
+# its inputs, content hashes of the market data it read, which execution
+# path ran, and the output hash, chained so that editing a past line breaks
+# every line after it. Thirteen CLI commands operate on that log and no
+# tool did, which meant the one participant who could not check its own
+# work was the agent whose work it was.
+#
+# READ AND VERIFY ONLY. Retention is deliberately absent: `gc`, `seal`,
+# `hold`, `release-hold` and `keygen` stay CLI-only, because handing the
+# agent whose decisions are logged the power to seal, hold or delete them
+# defeats the reason the log exists. Nothing here can alter a record.
+# export_audit_bundle writes a new zip and touches no existing file.
+# ──────────────────────────────────────────────
+
+
+class ExplainDecisionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "The request id of a recorded tool call. Every dispatch() writes "
+            "one; it appears in the audit log and in log records correlated "
+            "by RequestIdFilter."
+        ),
+    )
+
+
+class DataSourceRef(BaseModel):
+    """One market-data input a recorded call actually read."""
+
+    symbol: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    rows: Optional[int] = None
+    content_hash: Optional[str] = Field(
+        None,
+        description=(
+            "Hash of the data as it was AT THE TIME. A later fetch that "
+            "disagrees is what distinguishes a revised dataset from a code "
+            "change."
+        ),
+    )
+
+
+class ExplainDecisionResult(BaseModel):
+    request_id: str
+    timestamp_utc: str
+    tool_name: str
+    status: str
+    input: Dict[str, Any]
+    data_sources: List[DataSourceRef] = Field(default_factory=list)
+    duration_ms: float
+    execution_path: str = Field(
+        ...,
+        description=(
+            "'C++' or 'Python/Numba' — which implementation actually ran. "
+            "The fallback chain is transparent at call time and is exactly "
+            "the kind of thing that is impossible to reconstruct afterwards "
+            "without a record."
+        ),
+    )
+    output_hash: Optional[str] = None
+    git_commit_sha: Optional[str] = None
+    package_version: Optional[str] = None
+    random_seed: Optional[int] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    record_hash: Optional[str] = None
+
+
+class ReplayDecisionInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(
+        ..., min_length=1, description="The recorded call to re-run and compare."
+    )
+
+
+class DataSourceMatch(BaseModel):
+    symbol: Optional[str] = None
+    matches: Optional[bool] = Field(
+        None,
+        description=(
+            "True when re-fetching that input reproduces the recorded hash. "
+            "False means the DATA changed underneath the decision. None "
+            "means it could not be checked."
+        ),
+    )
+    detail: Optional[str] = None
+
+
+class ReplayDecisionResult(BaseModel):
+    request_id: str
+    tool_name: str
+    output_match: Optional[bool] = Field(
+        None,
+        description=(
+            "True when re-running reproduces the recorded output hash. "
+            "None when the record predates comparable hashing, which is "
+            "reported as 'not comparable' rather than as a mismatch."
+        ),
+    )
+    data_source_matches: List[DataSourceMatch] = Field(default_factory=list)
+    verdict: Literal[
+        "reproduced", "data_changed", "code_changed", "not_comparable", "failed"
+    ] = Field(
+        ...,
+        description=(
+            "'reproduced' output and data both match. 'data_changed' the "
+            "inputs no longer hash the same, so a different output is "
+            "EXPECTED and says nothing about the code. 'code_changed' the "
+            "data still matches but the output does not — the only "
+            "combination that implicates the library. 'not_comparable' the "
+            "record cannot be checked. 'failed' the replay itself errored."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class CompareDecisionsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    request_id_a: str = Field(..., min_length=1)
+    request_id_b: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _distinct(self) -> "CompareDecisionsInput":
+        if self.request_id_a == self.request_id_b:
+            raise ValueError(
+                "request_id_a and request_id_b are the same record; a diff "
+                "against itself is always empty."
+            )
+        return self
+
+
+class CompareDecisionsResult(BaseModel):
+    request_id_a: str
+    request_id_b: str
+    same_tool: bool
+    same_input: bool
+    same_output: bool
+    diff: str = Field(
+        ..., description="Unified diff of the two records, as the CLI renders it."
+    )
+    summary: List[str] = Field(
+        default_factory=list,
+        description="Plain-language statement of what differs and what that implies.",
+    )
+
+
+class VerifyAuditIntegrityInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    date: Optional[str] = Field(
+        None,
+        description=(
+            "YYYY-MM-DD to verify one day's file in isolation. None (the "
+            "default) verifies the whole trail, which also catches a missing "
+            "day that a per-file check cannot see."
+        ),
+    )
+    public_key_path: Optional[str] = Field(
+        None,
+        description=(
+            "Verify the Ed25519-signed checkpoint for `date` as well as the "
+            "hash chain. Requires `date`. The chain alone detects partial "
+            "tampering; only a signature detects a wholesale rewrite."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _key_needs_a_date(self) -> "VerifyAuditIntegrityInput":
+        if self.public_key_path is not None and self.date is None:
+            raise ValueError(
+                "public_key_path needs a date — checkpoints are signed per "
+                "calendar day, so there is no trail-wide signature to check."
+            )
+        return self
+
+
+class VerifyAuditIntegrityResult(BaseModel):
+    scope: str = Field(..., description="'trail' or the single date verified.")
+    intact: bool
+    problems: List[str] = Field(
+        default_factory=list,
+        description="Every broken link found, in the order encountered.",
+    )
+    checkpoint_signature_valid: Optional[bool] = Field(
+        None, description="None when no public key was supplied."
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class ExportAuditBundleInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    start_date: str = Field(..., description="YYYY-MM-DD, inclusive.")
+    end_date: str = Field(..., description="YYYY-MM-DD, inclusive.")
+    out_path: str = Field(
+        ...,
+        description=(
+            "Destination .zip path. This tool WRITES a new file; it never "
+            "modifies or removes anything in the audit log."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> "ExportAuditBundleInput":
+        if self.end_date < self.start_date:
+            raise ValueError(
+                f"end_date ({self.end_date}) precedes start_date "
+                f"({self.start_date})"
+            )
+        return self
+
+
+class ExportAuditBundleResult(BaseModel):
+    out_path: str
+    start_date: str
+    end_date: str
+    size_bytes: int
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Microstructure — what the tick feed buys
+#
+# get_trades and get_quotes have been on the data interface since the tick
+# capability was added, and nothing consumed them. Meanwhile
+# get_liquidity_metrics estimates the spread from OHLCV bars and says in
+# its own docstring that those are proxies, present because the real data
+# is usually absent.
+#
+# These tools are what the real data buys: the spread stops being
+# estimated and starts being measured, and the proxies become checkable
+# against it -- which is the one thing a proxy cannot do for itself.
+#
+# Every tool here requires a provider with a tick feed and says so by name
+# when there isn't one. Nothing synthesizes ticks from bars; a "trade"
+# derived from an OHLCV row is a fiction that each measure would then treat
+# as fact. Call describe_data_capabilities first.
+# ──────────────────────────────────────────────
+
+
+class MicrostructureInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker symbol.")
+    start: str = Field(
+        ...,
+        description=(
+            "Start timestamp. A date works, but tick volume is enormous — "
+            "prefer an explicit intraday range like '2024-03-01 14:30:00'."
+        ),
+    )
+    end: str = Field(..., description="End timestamp.")
+    realized_horizon_seconds: Optional[float] = Field(
+        300.0,
+        gt=0,
+        description=(
+            "Horizon for the realized-spread decomposition: the midpoint "
+            "this many seconds after each trade. Null skips the split and "
+            "reports the effective spread alone."
+        ),
+    )
+    limit: Optional[int] = Field(
+        50_000,
+        gt=0,
+        description=(
+            "Cap on ticks fetched per side. A liquid name produces millions "
+            "of trades a day, and the provider paginates — this bounds one "
+            "call to one page rather than an unbounded crawl."
+        ),
+    )
+    source: str = Field(
+        "polygon",
+        description=(
+            "Provider to fetch from. Only a provider with a tick feed can "
+            "serve this — describe_data_capabilities reports which do."
+        ),
+    )
+
+
+class MicrostructureResult(BaseModel):
+    symbol: str
+    start: str
+    end: str
+    n_trades: int
+    n_quotes: Optional[int] = None
+    n_signed: int = Field(
+        ...,
+        description=(
+            "Trades that could be classified as buyer- or seller-initiated. "
+            "Unclassifiable trades are dropped rather than defaulted — "
+            "assigning a side by coin flip would put noise into every mean."
+        ),
+    )
+    total_volume: float
+    vwap: float = Field(..., description="Size-weighted average trade price.")
+    buy_volume_fraction: float = Field(
+        ...,
+        description=(
+            "Share of signed volume that was buyer-initiated. Far from 0.5 "
+            "means directional order flow over the window."
+        ),
+    )
+    quoted_spread_bps_mean: Optional[float] = None
+    quoted_spread_bps_median: Optional[float] = None
+    quote_imbalance_mean: Optional[float] = Field(
+        None,
+        description="Mean (bid_size - ask_size)/(bid_size + ask_size). Positive = more resting size on the bid.",
+    )
+    effective_spread_bps_mean: Optional[float] = None
+    effective_spread_bps_size_weighted: Optional[float] = Field(
+        None,
+        description=(
+            "What a typical SHARE paid, not what a typical print paid. The "
+            "count-weighted mean above is dominated by the odd-lot tail; "
+            "this is the one a strategy sizing a position should read."
+        ),
+    )
+    realized_spread_bps_size_weighted: Optional[float] = Field(
+        None, description="What the liquidity provider kept after the horizon."
+    )
+    price_impact_bps_size_weighted: Optional[float] = Field(
+        None,
+        description=(
+            "Effective minus realized: what the trade moved the market. A "
+            "wide spread that is mostly impact means trading smaller helps "
+            "and switching venue does not; mostly realized means the "
+            "opposite."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class TradeProfileInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker symbol.")
+    start: str = Field(..., description="Start timestamp.")
+    end: str = Field(..., description="End timestamp.")
+    size_buckets: int = Field(
+        5, ge=2, le=20, description="Number of trade-size quantile buckets."
+    )
+    intraday_freq: str = Field(
+        "30min",
+        description="Bucket width for the time-of-day volume profile (e.g. '15min', '1h').",
+    )
+    limit: Optional[int] = Field(50_000, gt=0, description="Cap on ticks fetched.")
+    source: str = Field("polygon", description="Provider with a tick feed.")
+
+
+class SizeBucket(BaseModel):
+    lower: float
+    upper: float
+    n_trades: int
+    volume_fraction: float
+
+
+class TimeBucket(BaseModel):
+    time: str
+    volume_fraction: float
+
+
+class TradeProfileResult(BaseModel):
+    symbol: str
+    n_trades: int
+    total_volume: float
+    median_size: float
+    size_buckets: List[SizeBucket] = Field(
+        ...,
+        description=(
+            "Quantile buckets, not a fixed share grid — a grid that suits "
+            "one symbol misreads another by orders of magnitude."
+        ),
+    )
+    largest_bucket_volume_fraction: float = Field(
+        ...,
+        description=(
+            "Share of volume in the largest size bucket. A book where "
+            "volume arrives in a few large prints behaves nothing like one "
+            "where the same total arrives in thousands of small ones."
+        ),
+    )
+    intraday_buckets: List[TimeBucket]
+    peak_time: str
+    peak_volume_fraction: float
+    notes: List[str] = Field(default_factory=list)
+
+
+class SpreadProxyCheckInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker symbol.")
+    start: str = Field(..., description="Start timestamp for the tick window.")
+    end: str = Field(..., description="End timestamp for the tick window.")
+    bar_start_date: str = Field(
+        ...,
+        description=(
+            "Start date for the daily OHLCV the proxies are computed from. "
+            "Corwin-Schultz needs a rolling window of bars, so this normally "
+            "reaches further back than the tick window."
+        ),
+    )
+    bar_end_date: str = Field(..., description="End date for the OHLCV window.")
+    window: int = Field(
+        20, gt=0, description="Rolling window (bars) for the OHLCV proxies."
+    )
+    limit: Optional[int] = Field(50_000, gt=0, description="Cap on ticks fetched.")
+    source: str = Field("polygon", description="Provider with a tick feed.")
+
+
+class SpreadProxyCheckResult(BaseModel):
+    symbol: str
+    measured_effective_spread_bps: float = Field(
+        ..., description="Size-weighted, from ticks. The thing being compared against."
+    )
+    measured_quoted_spread_bps: float
+    corwin_schultz_spread_bps: float = Field(
+        ..., description="The OHLCV proxy get_liquidity_metrics reports."
+    )
+    proxy_error_bps: float = Field(
+        ..., description="corwin_schultz minus measured_effective. Signed."
+    )
+    proxy_ratio: float = Field(
+        ...,
+        description=(
+            "corwin_schultz / measured_effective. Above 1 means the proxy "
+            "overstates trading cost; below 1 means a backtest using it has "
+            "been charging too little."
+        ),
+    )
+    amihud_illiquidity: float = Field(
+        ..., description="Reported for context; it measures impact, not spread."
+    )
+    verdict: Literal["proxy_close", "proxy_overstates", "proxy_understates"] = Field(
+        ...,
+        description=(
+            "'proxy_close' within 25%. 'proxy_understates' is the one that "
+            "matters for a backtest: costs charged from the proxy were too "
+            "low, so reported returns are optimistic."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Handoff references — the interconnect between runtimes
+# ──────────────────────────────────────────────
+
+
+class DescribeReferenceInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(
+        ...,
+        description=(
+            "A handoff reference (sqt://<kind>/<run_id>/<name>) returned by "
+            "any tool in any runtime."
+        ),
+    )
+
+
+class DescribeReferenceResult(BaseModel):
+    ref: str
+    kind: str
+    kind_description: str
+    producer: Optional[str] = Field(
+        None, description="Runtime that published it, when it was recorded."
+    )
+    rows: int
+    columns: List[str]
+    index_start: Optional[str] = None
+    index_end: Optional[str] = None
+
+
+class ListReferenceKindsInput(BaseModel):
+    """No arguments — the kind table is a module constant."""
+
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+
+class ReferenceKind(BaseModel):
+    kind: str
+    description: str
+    convertible_to: List[str] = Field(
+        default_factory=list,
+        description="Kinds convert_reference can turn this one into.",
+    )
+
+
+class ListReferenceKindsResult(BaseModel):
+    kinds: List[ReferenceKind]
+
+
+class ConvertReferenceInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(..., description="The reference to convert.")
+    to_kind: str = Field(
+        ...,
+        description=(
+            "Target content kind. Call list_reference_kinds for the "
+            "conversions that exist."
+        ),
+    )
+    run_id: str = Field(
+        ...,
+        description=(
+            "Run id to publish the converted value under. Letters, digits, "
+            "'_' and '-' only."
+        ),
+    )
+    name: str = Field(..., description="Artifact name for the converted value.")
+    deadband: float = Field(
+        0.0,
+        ge=0.0,
+        description=(
+            "predictions -> signal_panel, regression: predictions within "
+            "+/- this become flat rather than a full-size position on what "
+            "is probably noise."
+        ),
+    )
+    proba_threshold: float = Field(
+        0.5,
+        gt=0.0,
+        lt=1.0,
+        description="predictions -> signal_panel, classification: long above this.",
+    )
+    long_only: bool = Field(
+        True,
+        description=(
+            "predictions -> signal_panel, classification: treat the negative "
+            "class as flat rather than short."
+        ),
+    )
+    task: Optional[Literal["regression", "classification"]] = Field(
+        None,
+        description=(
+            "predictions -> signal_panel: how to read the prediction "
+            "column. Required unless the reference carries a model_id."
+        ),
+    )
+    construction_method: str = Field(
+        "rank_weighted",
+        description=(
+            "score_panel -> weight_panel: which backtest.sizing " "constructor to use."
+        ),
+    )
+    gross_leverage: float = Field(
+        1.0, gt=0, description="score_panel -> weight_panel: target sum(|weight|)."
+    )
+
+
+class ConvertReferenceResult(BaseModel):
+    source_ref: str
+    source_kind: str
+    ref: str = Field(..., description="The converted value's new reference.")
+    kind: str
+    rows: int
+    entities: int
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Pre-flight — ask about a tool, and check a call before making it
+#
+# Two questions an agent could not previously ask. "What does this one tool
+# take?" was answerable only by loading all 73 schemas, which is what the
+# MCP category budget exists to avoid. "Are these arguments right?" was
+# answerable only by making the call and reading the error -- which costs a
+# network round trip, and for a backtest costs a fetch and a full run
+# before a bad `lookback` surfaces.
+# ──────────────────────────────────────────────
+
+
+class DescribeToolInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(
+        ...,
+        description=(
+            "Any tool in any runtime, including ones this caller is not "
+            "scoped to — describing a tool is not calling it."
+        ),
+    )
+    include_schema: bool = Field(
+        True,
+        description=(
+            "Include the full JSON input schema. False returns the summary "
+            "alone, which is enough to decide whether the tool is the one "
+            "you want."
+        ),
+    )
+
+
+class DescribeToolResult(BaseModel):
+    tool_name: str
+    runtime: str = Field(
+        ..., description="Which runtime can execute it. Others will refuse by name."
+    )
+    category: str
+    description: str
+    required_arguments: List[str]
+    optional_arguments: List[str]
+    reads_market_data: bool = Field(
+        ...,
+        description=(
+            "Whether calling it will go and fetch. Offline tools are free "
+            "to call speculatively; these are not."
+        ),
+    )
+    persists_artifact: bool = Field(
+        ...,
+        description="Whether a call writes a new artifact, and so is not idempotent.",
+    )
+    input_schema: Optional[Dict[str, Any]] = None
+    result_fields: List[str] = Field(
+        default_factory=list, description="Top-level fields the result carries."
+    )
+
+
+class ValidateToolCallInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(..., description="The tool the arguments are for.")
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The arguments you intend to pass. Nothing is executed.",
+    )
+
+
+class ArgumentProblem(BaseModel):
+    field: str = Field(
+        ...,
+        description="Dotted path to the offending field, or '(tool)' for the call itself.",
+    )
+    problem: str
+    kind: Literal["missing", "unknown", "invalid", "relation"] = Field(
+        ...,
+        description=(
+            "'missing' a required argument. 'unknown' a name this tool does "
+            "not take — the usual shape of a hallucinated argument. "
+            "'invalid' a value out of range or of the wrong type. "
+            "'relation' individually valid values that are nonsense together."
+        ),
+    )
+
+
+class ValidateToolCallResult(BaseModel):
+    tool_name: str
+    valid: bool
+    problems: List[ArgumentProblem] = Field(default_factory=list)
+    normalized_arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "The arguments as the tool would actually see them, with "
+            "defaults filled in. Present only when valid — it is what you "
+            "would be running, which is often not quite what you wrote."
+        ),
+    )
+    checked_strategy_parameters: bool = Field(
+        False,
+        description=(
+            "True when the tool carries a strategy `parameters` dict and "
+            "that dict was checked against the strategy's own contract too. "
+            "That layer is invisible to the JSON schema — `parameters` is "
+            "an open dict — so a bad window would otherwise pass here and "
+            "fail only after the data had been fetched."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Strategy matrix — every strategy against every ticker, in one call
+# ──────────────────────────────────────────────
+
+
+class StrategyMatrixInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: List[str] = Field(
+        ..., min_length=1, max_length=50, description="Universe to test across."
+    )
+    strategies: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=8,
+        description=(
+            "Registry strategy names. Call list_strategies for the set and "
+            "each one's parameters."
+        ),
+    )
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    parameters: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "strategy name -> its parameters. A strategy left out runs on "
+            "its declared defaults."
+        ),
+    )
+    initial_capital: float = Field(10_000.0, gt=0, le=1e15)
+    commission_pct: float = Field(0.001, ge=0, le=1)
+    slippage_pct: float = Field(0.0005, ge=0, le=1)
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field("close")
+    sort_by: str = Field(
+        "sharpe_ratio",
+        description="Metric the ranked table is ordered by, best first.",
+    )
+
+    @field_validator("tickers", "strategies")
+    @classmethod
+    def _no_duplicates(cls, values: List[str]) -> List[str]:
+        duplicates = sorted({v for v in values if values.count(v) > 1})
+        if duplicates:
+            raise ValueError(f"contains duplicates {duplicates}")
+        return values
+
+
+class MatrixCell(BaseModel):
+    ticker: str
+    strategy: str
+    total_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    num_trades: int
+    win_rate: float
+
+
+class StrategyMatrixResult(BaseModel):
+    tickers: List[str]
+    strategies: List[str]
+    n_backtests: int
+    cells: List[MatrixCell]
+    best_overall: Optional[MatrixCell] = None
+    best_per_ticker: Dict[str, str] = Field(
+        default_factory=dict, description="ticker -> best strategy name."
+    )
+    failures: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "'ticker/strategy' -> why it could not run. Reported rather than "
+            "dropped: a silently missing cell reads as a strategy that was "
+            "tested and lost."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)

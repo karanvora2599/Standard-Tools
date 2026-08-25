@@ -89,6 +89,38 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "— for one ticker or a multi-ticker signal panel."
         ),
     },
+    "microstructure": {
+        "label": "Microstructure",
+        "description": (
+            "Spreads MEASURED from tick data rather than estimated from "
+            "bars: quoted and effective spread, the realized/impact "
+            "decomposition, signed order flow, trade-size and intraday "
+            "volume profiles, and a check of the OHLCV spread proxy against "
+            "the real thing. Requires a data provider with a tick feed; "
+            "nothing here works from bars."
+        ),
+    },
+    "provenance": {
+        "label": "Provenance & Audit",
+        "description": (
+            "Read and verify the decision log: what a recorded tool call "
+            "did and on what data, whether re-running it still reproduces "
+            "the same answer (and whether a difference is the data's fault "
+            "or the code's), how two runs differ, and whether the log's "
+            "tamper-evident hash chain is intact. Read-only — nothing here "
+            "alters a record."
+        ),
+    },
+    "discovery": {
+        "label": "Discovery",
+        "description": (
+            "What the library itself accepts and what the data provider can "
+            "serve: every built-in strategy's parameter contract, the named "
+            "historical stress windows, and whether the active provider has "
+            "tick trades, quotes, or async OHLCV. Offline, cheap, and about "
+            "the tools rather than about a market."
+        ),
+    },
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing",
         "description": (

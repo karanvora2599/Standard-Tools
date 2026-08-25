@@ -28,6 +28,14 @@ _NO_PROTECTED_NAMESPACES = ConfigDict(protected_namespaces=())
 
 
 class ListFeaturesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     category: Optional[str] = Field(
         None,
         description="Filter to one category, e.g. 'technical' or 'factors'. Omit for the full catalog.",
@@ -52,6 +60,14 @@ class ListFeaturesResult(BaseModel):
 
 
 class BuildModelDatasetInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     spec: DatasetSpec
 
 
@@ -103,6 +119,14 @@ class BuildModelDatasetResult(BaseModel):
 
 
 class RunModelExperimentInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
     dataset_id: str = Field(..., description="An id returned by build_model_dataset.")
     spec: ModelSpec
 
@@ -130,6 +154,16 @@ class RunModelExperimentResult(BaseModel):
         "means the target horizon consumes a real fraction of each training "
         "window — relevant when reading the OOS metrics.",
     )
+    oos_predictions_ref: Optional[str] = Field(
+        None,
+        description=(
+            "Typed handoff reference for the same predictions "
+            "(sqt://predictions/...). This is the one to pass onward: "
+            "convert_reference turns it into a signal_panel or a "
+            "score_panel, and any runtime can resolve it without the "
+            "predictions ever passing through the conversation."
+        ),
+    )
     oos_predictions_uri: str = Field(
         ...,
         description="Walk-forward out-of-sample predictions (date, entity, prediction). "
@@ -146,7 +180,13 @@ class RunModelExperimentResult(BaseModel):
 
 
 class ScoreModelInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     model_id: str = Field(..., description="An id returned by run_model_experiment.")
     as_of: str = Field(..., description="Date YYYY-MM-DD to score as of.")
@@ -240,7 +280,13 @@ class ScoreModelResult(BaseModel):
 
 
 class InspectModelInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     model_id: str
     view: Literal["summary", "feature_importance", "validation", "lineage"] = Field(
@@ -260,7 +306,13 @@ class InspectModelResult(BaseModel):
 
 
 class ListModelingCapabilitiesInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     include_estimators: bool = Field(
         True,
@@ -277,7 +329,13 @@ class ListModelingCapabilitiesResult(BaseModel):
 
 
 class AnalyzeFeaturesInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
@@ -331,7 +389,13 @@ class AnalyzeFeaturesResult(BaseModel):
 
 
 class EvaluateModelPortfolioInput(BaseModel):
-    model_config = _NO_PROTECTED_NAMESPACES
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     model_id: str = Field(
         ..., description="A model_id returned by run_model_experiment."
@@ -401,3 +465,327 @@ class EvaluateModelPortfolioResult(BaseModel):
         "the dataset coverage warnings carried from the model manifest and any "
         "raised by the simulator itself (insolvency, negative cash).",
     )
+
+
+# ── list_models / list_datasets / compare_models ────────────────────────
+#
+# inspect_model and score_model both require a model_id the caller already
+# holds. Nothing enumerated them, so a session that lost the id -- or a new
+# session entirely -- could not find a model it had trained.
+
+
+class ListModelsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    task: Optional[Literal["regression", "classification", "ranking"]] = Field(
+        None, description="Only models trained for this task."
+    )
+    limit: int = Field(50, gt=0, le=500, description="Most recent first.")
+
+
+class ModelSummary(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    task: str
+    estimator: Optional[str] = None
+    created_at: Optional[str] = None
+    n_features: Optional[int] = None
+    n_folds: Optional[int] = None
+    headline_metric: Optional[str] = Field(
+        None, description="Which metric `headline_value` reports."
+    )
+    headline_value: Optional[float] = None
+    dataset_id: Optional[str] = None
+
+
+class ListModelsResult(BaseModel):
+    models: List[ModelSummary]
+    n_total: int = Field(
+        ..., description="Registered models before `limit` was applied."
+    )
+    registry_dir: str
+
+
+class ListDatasetsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(50, gt=0, le=500)
+
+
+class DatasetSummary(BaseModel):
+    dataset_id: str
+    rows: Optional[int] = None
+    entities: Optional[int] = None
+    features: Optional[int] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+class ListDatasetsResult(BaseModel):
+    datasets: List[DatasetSummary]
+    n_total: int
+    runs_dir: str
+
+
+class CompareModelsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    model_ids: List[str] = Field(
+        ...,
+        min_length=2,
+        max_length=20,
+        description="Models to rank side by side.",
+    )
+    metric: Optional[str] = Field(
+        None,
+        description=(
+            "Metric to rank by. None picks each task's usual headline. "
+            "Models trained for different tasks are reported but NOT ranked "
+            "against each other — the metrics are not comparable."
+        ),
+    )
+
+    @field_validator("model_ids")
+    @classmethod
+    def _distinct(cls, ids: List[str]) -> List[str]:
+        duplicates = sorted({i for i in ids if ids.count(i) > 1})
+        if duplicates:
+            raise ValueError(
+                f"model_ids contains duplicates {duplicates}; a model "
+                "compared against itself contributes nothing to a ranking."
+            )
+        return ids
+
+
+class ModelComparison(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    task: str
+    metric: Optional[str] = None
+    value: Optional[float] = None
+    rank: Optional[int] = Field(
+        None, description="Within its own task. None when the metric is missing."
+    )
+    n_features: Optional[int] = None
+    dataset_id: Optional[str] = None
+
+
+class CompareModelsResult(BaseModel):
+    comparisons: List[ModelComparison]
+    best_by_task: Dict[str, str] = Field(
+        default_factory=dict, description="task -> winning model_id."
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ── check_leakage ───────────────────────────────────────────────────────
+
+
+class CheckLeakageInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    feature_ids: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Feature ids to check for temporal safety. Omit to check every "
+            "feature in the registry."
+        ),
+    )
+    dataset_id: Optional[str] = Field(
+        None,
+        description=(
+            "Also report that dataset's point-in-time coverage — how much "
+            "of the panel is genuinely as-of rather than back-filled."
+        ),
+    )
+
+
+class LeakageFinding(BaseModel):
+    feature_id: str
+    temporal_support: str
+    problem: str
+
+
+class CheckLeakageResult(BaseModel):
+    n_features_checked: int
+    safe: bool
+    findings: List[LeakageFinding] = Field(default_factory=list)
+    dataset_coverage: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Point-in-time coverage, when a dataset_id was supplied.",
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ── validate_model_spec ─────────────────────────────────────────────────
+#
+# run_model_experiment is the most expensive call in the library: it fetches
+# a universe, builds a panel, and fits once per walk-forward fold. A bad
+# estimator parameter surfaced only after all of that. The registry has
+# always known the answer in microseconds.
+
+
+class ValidateModelSpecInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    spec: ModelSpec = Field(
+        ..., description="The ModelSpec you intend to pass to run_model_experiment."
+    )
+    dataset_id: Optional[str] = Field(
+        None,
+        description=(
+            "Also check the spec against a built dataset: that its features "
+            "exist in the panel and that the target is present. Omit to "
+            "check the spec alone."
+        ),
+    )
+
+
+class SpecProblem(BaseModel):
+    where: str = Field(
+        ...,
+        description="Which part of the spec — 'estimator', 'features', 'target', ...",
+    )
+    problem: str
+    suggestion: Optional[str] = None
+
+
+class ValidateModelSpecResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    valid: bool
+    task: str
+    estimator: str
+    problems: List[SpecProblem] = Field(default_factory=list)
+    allowed_estimator_params: List[str] = Field(
+        default_factory=list,
+        description="Every parameter this estimator accepts, from the registry.",
+    )
+    estimated_fits: Optional[int] = Field(
+        None,
+        description=(
+            "Fits this spec implies: folds, times the search grid if one is "
+            "set. The number that decides whether the experiment takes "
+            "seconds or an afternoon."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+# ── score_predictions ───────────────────────────────────────────────────
+
+
+class ScorePredictionsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    predictions_ref: str = Field(
+        ...,
+        description=(
+            "A 'predictions' handoff reference — from run_model_experiment, "
+            "or published by anything at all. Predictions computed entirely "
+            "outside this library score the same way."
+        ),
+    )
+    task: Literal["regression", "classification", "ranking"] = Field(
+        ...,
+        description=(
+            "How to read the prediction column. Scoring a raw forward-return "
+            "prediction as a probability produces numbers that look like "
+            "metrics and are not."
+        ),
+    )
+    target_column: str = Field(
+        "target",
+        description="Column holding the realized outcome each prediction is scored against.",
+    )
+    prediction_column: str = Field(
+        "prediction", description="Column holding the prediction."
+    )
+    ic_method: Literal["spearman", "pearson"] = Field(
+        "spearman",
+        description=(
+            "Rank correlation (default) or linear. Spearman is the usual "
+            "choice for a cross-sectional alpha, where the ORDER is the "
+            "claim and the magnitude is not."
+        ),
+    )
+    ndcg_cutoffs: List[int] = Field(
+        [5, 10], description="task='ranking' only: the k values for NDCG@k."
+    )
+
+
+class ScorePredictionsResult(BaseModel):
+    task: str
+    n_observations: int
+    n_dates: int
+    n_entities: int
+    metrics: Dict[str, float] = Field(
+        ..., description="Task-appropriate accuracy metrics."
+    )
+    cross_sectional_ic: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Mean IC, its standard deviation, ICIR and hit rate across "
+            "dates. For a cross-sectional model this matters more than any "
+            "pooled metric, which can look strong purely from time-series "
+            "level differences."
+        ),
+    )
+    baseline: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "The same metrics for predicting the training mean. A model that "
+            "does not beat this has not learned anything, and a good-looking "
+            "R2 next to a good-looking baseline usually means the target was "
+            "easy rather than the model clever."
+        ),
+    )
+    beats_baseline: Optional[bool] = None
+    effective_sample_size: Optional[float] = Field(
+        None,
+        description=(
+            "Observations adjusted for overlapping forward-return windows. "
+            "A 20-day target sampled daily has far fewer independent "
+            "observations than rows, and every t-statistic computed from the "
+            "raw count is overstated."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)

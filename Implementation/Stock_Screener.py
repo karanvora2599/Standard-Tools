@@ -29,8 +29,10 @@ _LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOGS_DIR.mkdir(exist_ok=True)
 _ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-_fmt = logging.Formatter("%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
-                         datefmt="%H:%M:%S")
+_fmt = logging.Formatter(
+    "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 _fh = logging.FileHandler(_LOGS_DIR / f"stock_screener_{_ts}.log", encoding="utf-8")
 _fh.setFormatter(_fmt)
 _sh = logging.StreamHandler()
@@ -44,23 +46,40 @@ _lib.addHandler(_sh)
 # ── Configuration ──────────────────────────────────────────────────
 # Mid/large-cap US tech + consumer universe
 UNIVERSE = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX",
-    "ADBE", "CRM", "NOW", "SNOW", "SHOP", "UBER", "LYFT", "ABNB",
-    "PYPL", "SQ", "INTC", "AMD",
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "NVDA",
+    "TSLA",
+    "NFLX",
+    "ADBE",
+    "CRM",
+    "NOW",
+    "SNOW",
+    "SHOP",
+    "UBER",
+    "LYFT",
+    "ABNB",
+    "PYPL",
+    "SQ",
+    "INTC",
+    "AMD",
 ]
 
-ACCOUNT    = 500_000.0
+ACCOUNT = 500_000.0
 START_DATE = "2023-01-01"
-END_DATE   = datetime.date.today().isoformat()
+END_DATE = datetime.date.today().isoformat()
 
 # ── Screen filters ─────────────────────────────────────────────────
 # Look for quality growth names that aren't overbought
 FILTERS = {
-    "rsi_max":          60,    # not overbought (RSI < 60)
-    "rsi_min":          30,    # not in free-fall (RSI > 30)
-    "price_above_sma":  50,    # price above 50-day SMA (uptrend)
-    "beta_max":         1.8,   # not excessively volatile vs market
-    "beta_min":         0.5,   # has meaningful market correlation
+    "rsi_max": 60,  # not overbought (RSI < 60)
+    "rsi_min": 30,  # not in free-fall (RSI > 30)
+    "price_above_sma": 50,  # price above 50-day SMA (uptrend)
+    "beta_max": 1.8,  # not excessively volatile vs market
+    "beta_min": 0.5,  # has meaningful market correlation
 }
 
 # ── Step 1: Screen universe ────────────────────────────────────────
@@ -76,7 +95,7 @@ screen = run_screener(
         start_date=START_DATE,
         end_date=END_DATE,
         sort_by="rsi_14",
-        ascending=True,   # lowest RSI first (most room to run)
+        ascending=True,  # lowest RSI first (most room to run)
     )
 )
 
@@ -91,10 +110,10 @@ print(f"  {'Ticker':<8}{'Close':>8}{'RSI':>7}{'SMA50':>9}{'Beta':>7}")
 print("  " + "─" * 44)
 for row in screen.results:
     ticker = str(row.get("ticker", ""))
-    close  = row.get("last_close", float("nan"))
-    rsi    = row.get("rsi_14",     float("nan"))
-    sma    = row.get("sma_50",     float("nan"))
-    beta   = row.get("beta",       float("nan"))
+    close = row.get("last_close", float("nan"))
+    rsi = row.get("rsi_14", float("nan"))
+    sma = row.get("sma_50", float("nan"))
+    beta = row.get("beta", float("nan"))
     print(
         f"  {ticker:<8}"
         f"${close:>7.2f}"
@@ -107,12 +126,16 @@ for row in screen.results:
 print(f"\n{'═'*65}")
 print(f"  Risk Profile (2-year vs SPY)")
 print(f"{'═'*65}")
-print(f"\n  {'Ticker':<8}{'Beta':>7}{'Alpha(ann)':>11}{'Sharpe':>8}{'VaR95':>8}{'MaxDD':>9}")
+print(
+    f"\n  {'Ticker':<8}{'Beta':>7}{'Alpha(ann)':>11}{'Sharpe':>8}{'VaR95':>8}{'MaxDD':>9}"
+)
 print("  " + "─" * 55)
 
 passing_risk = {}
 for ticker in screen.tickers_passed:
-    risk = analyze_stock_risk(AnalysisInput(symbol=ticker, benchmark="SPY", period="2y"))
+    risk = analyze_stock_risk(
+        AnalysisInput(symbol=ticker, benchmark="SPY", period="2y")
+    )
     passing_risk[ticker] = risk
     print(
         f"  {ticker:<8}"
@@ -127,7 +150,9 @@ for ticker in screen.tickers_passed:
 print(f"\n{'═'*65}")
 print(f"  Position Sizing  (1% risk per trade, ATR(14) × 2 stop)")
 print(f"{'═'*65}")
-print(f"\n  {'Ticker':<8}{'Close':>8}{'ATR%':>7}{'Shares':>8}{'Pos$':>10}{'Port%':>7}{'MaxLoss':>9}")
+print(
+    f"\n  {'Ticker':<8}{'Close':>8}{'ATR%':>7}{'Shares':>8}{'Pos$':>10}{'Port%':>7}{'MaxLoss':>9}"
+)
 print("  " + "─" * 62)
 
 for ticker in screen.tickers_passed:
@@ -142,7 +167,7 @@ for ticker in screen.tickers_passed:
             atr_period=14,
             atr_multiplier=2.0,
             # Optional Kelly inputs from risk profile
-            win_rate=None,     # set to e.g. risk.win_rate if available from backtest
+            win_rate=None,  # set to e.g. risk.win_rate if available from backtest
             avg_win_pct=None,
             avg_loss_pct=None,
         )
@@ -171,5 +196,7 @@ total_deployed = sum(
     ).recommended_position_value
     for t in screen.tickers_passed
 )
-print(f"  Total deployed if all entered: ${total_deployed:,.0f} "
-      f"({100*total_deployed/ACCOUNT:.1f}% of account)\n")
+print(
+    f"  Total deployed if all entered: ${total_deployed:,.0f} "
+    f"({100*total_deployed/ACCOUNT:.1f}% of account)\n"
+)

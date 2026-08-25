@@ -144,6 +144,12 @@ class TestModelingDispatch:
             "score_model",
             "inspect_model",
             "evaluate_model_portfolio",
+            "list_models",
+            "list_datasets",
+            "compare_models",
+            "check_leakage",
+            "validate_model_spec",
+            "score_predictions",
         }
         assert len(tools) == len({t["function"]["name"] for t in tools})
 

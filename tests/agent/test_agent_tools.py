@@ -213,6 +213,9 @@ class TestToolCategoryCoverage:
             "backtest_validation",
             "custom_signal",
             "portfolio_risk",
+            "discovery",
+            "provenance",
+            "microstructure",
         }
         assert set(TOOL_CATEGORY.values()) <= known_categories
 
@@ -224,8 +227,14 @@ class TestToolCategoryCoverage:
         execution = {n for n, c in TOOL_CATEGORY.items() if c == "backtest_execution"}
         validation = {n for n, c in TOOL_CATEGORY.items() if c == "backtest_validation"}
         assert execution.isdisjoint(validation)
-        assert len(execution) == 9
-        assert len(validation) == 7
+        # Derived rather than two magic numbers: the counts had to be edited
+        # by hand on every addition, which makes the guard read as a
+        # tripwire for growth rather than for a re-merge. What the split
+        # actually promises is that every backtest_* tool lands in exactly
+        # one of the two, and that neither side is empty.
+        both = {n for n, c in TOOL_CATEGORY.items() if c.startswith("backtest_")}
+        assert execution | validation == both
+        assert execution and validation
 
     def test_run_backtest_optimization_and_run_sma_backtest_are_separated(self):
         """The exact kind of confusable-tool pair this category split exists
@@ -458,12 +467,19 @@ class TestGetTechnicalAnalysis:
         )
         fused_result = get_technical_analysis(inp)
 
-        original_has_cpp = tools_module.HAS_CPP
-        tools_module.HAS_CPP = False
+        # Patched on the RESEARCH runtime, which is where
+        # get_technical_analysis now lives. `from _shared import HAS_CPP`
+        # binds a copy, so flipping it on the facade or on _shared would
+        # leave this module's own reference untouched and the test would
+        # silently compare the fused path against itself.
+        from standard_quant_tools.agent.runtimes.research import tools as research_tools
+
+        original_has_cpp = research_tools.HAS_CPP
+        research_tools.HAS_CPP = False
         try:
             fallback_result = get_technical_analysis(inp)
         finally:
-            tools_module.HAS_CPP = original_has_cpp
+            research_tools.HAS_CPP = original_has_cpp
 
         assert fused_result.last_values == fallback_result.last_values
         assert fused_result.signals == fallback_result.signals

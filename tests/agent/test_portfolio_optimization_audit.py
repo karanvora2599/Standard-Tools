@@ -28,7 +28,9 @@ def _patched(tickers, n=600):
     def _fake(req_tickers, start, end, interval="1d"):
         return _returns(req_tickers, n)
 
-    return patch("standard_quant_tools.agent.tools.fetch_returns_sync", _fake)
+    return patch(
+        "standard_quant_tools.agent.runtimes.portfolio.tools.fetch_returns_sync", _fake
+    )
 
 
 class TestDuplicateTickers:

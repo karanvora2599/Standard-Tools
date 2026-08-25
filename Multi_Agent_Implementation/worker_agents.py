@@ -55,6 +55,26 @@ def _tools_for(category: str) -> List[str]:
     return sorted(name for name, cat in TOOL_CATEGORY.items() if cat == category)
 
 
+def _runtime_for(category: str) -> str:
+    """The runtime that OWNS a category, so a worker dispatches through a
+    table holding only its own tools.
+
+    Each worker already declares a fixed, non-overlapping tool subset --
+    that is the architecture. But dispatching through the union meant the
+    subset was advisory: a worker that hallucinated a tool outside its list
+    got a RESULT rather than an error. Naming the runtime makes the subset
+    the architecture already claimed into one the code enforces."""
+    from standard_quant_tools.agent.runtimes import RUNTIME_CATEGORIES
+
+    for runtime, categories in RUNTIME_CATEGORIES.items():
+        if category in categories:
+            return runtime
+    raise KeyError(
+        f"category {category!r} belongs to no runtime; every category must, "
+        "or its worker cannot be scoped."
+    )
+
+
 # The modeling runtime has no category taxonomy to derive a split from --
 # it is eight tools in ONE ordered pipeline, so the split below is by
 # pipeline STAGE instead. Named here rather than written inline so the
@@ -72,12 +92,18 @@ _MODEL_RESEARCH_TOOLS = [
     "list_features",
     "build_model_dataset",
     "analyze_features",
+    "list_datasets",
+    "check_leakage",
+    "validate_model_spec",
 ]
 _MODEL_BUILDER_TOOLS = [
     "run_model_experiment",
     "inspect_model",
     "score_model",
     "evaluate_model_portfolio",
+    "list_models",
+    "compare_models",
+    "score_predictions",
 ]
 
 
@@ -87,6 +113,7 @@ WORKER_AGENTS: Dict[str, Dict[str, Any]] = {
         "description": "Filter a ticker universe by fundamental/technical criteria and fetch company fundamentals.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("screener"),
+        "runtime": _runtime_for("screener"),
         "system_prompt": """You are a stock screening specialist. You have exactly two tools:
 run_screener (filter a ticker universe by fundamental/technical criteria) and
 get_stock_fundamentals (company metadata and financial ratios for one ticker).
@@ -102,6 +129,7 @@ requesting agent can hand them to a different specialist.""",
         "description": "Single-asset risk profiling, technical indicator snapshots, and multi-asset portfolio metrics.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("analysis"),
+        "runtime": _runtime_for("analysis"),
         "system_prompt": """You are a risk and technical analysis specialist. Your tools cover
 single-asset risk profiling (analyze_stock_risk, get_extended_risk_metrics),
 technical indicator snapshots (get_technical_analysis, get_advanced_indicators,
@@ -139,13 +167,25 @@ adjustment).
 Your only job is to characterize risk, technical posture, data quality, and
 option sensitivities — never run a backtest and never size a position;
 those belong to other specialists. State the exact numbers from every tool
-call, do not round or approximate them.""",
+call, do not round or approximate them.
+
+get_technical_panel computes the same indicators for a WHOLE universe
+in one native call and reports them at the latest bar. Use it instead of
+one get_technical_analysis call per ticker whenever more than a couple of
+names are involved; the arithmetic is identical. Tickers it lists in
+incomplete_tickers had too little history for a lookback -- say so rather
+than reporting them as excluded by the screen.
+
+describe_artifact reads a persisted Parquet artifact by URI and reports its
+shape, date span, per-column statistics and both ends. Use it to inspect
+what another tool produced instead of asking for the run to be repeated.""",
     },
     "quant_research": {
         "label": "Quant Research Agent",
         "description": "Factor regression, cointegration/pairs testing, PCA, and Hurst regime detection.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("quant_research"),
+        "runtime": _runtime_for("quant_research"),
         "system_prompt": """You are a quantitative research specialist covering factor models
 (run_factor_regression), cointegration and pairs screening (run_cointegration_test,
 scan_pairs), a time-varying alternative to run_cointegration_test's static
@@ -171,6 +211,7 @@ Hurst exponents from your tool calls.""",
         "description": "Run the library's built-in named strategies (SMA/RSI/MACD/Bollinger, portfolio simulation, pair trades) once, with fixed parameters.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("backtest_execution"),
+        "runtime": _runtime_for("backtest_execution"),
         "system_prompt": """You are a backtest execution specialist for the library's BUILT-IN
 indicator strategies: SMA crossover, RSI mean-reversion, MACD crossover,
 Bollinger reversion, and buy-and-hold baselines — run one, or compare all
@@ -210,6 +251,7 @@ the backtest statistics and stop.""",
         "description": "Optimize, out-of-sample validate, and diagnose the library's built-in strategies (grid search, walk-forward, regime-adaptive, robustness, Monte Carlo).",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("backtest_validation"),
+        "runtime": _runtime_for("backtest_validation"),
         "system_prompt": """You are a backtest validation specialist: optimizing, validating out
 of sample, and diagnosing the library's BUILT-IN indicator strategies —
 never running one once from scratch with fixed parameters (that's the
@@ -230,7 +272,18 @@ equity paths via moving-block bootstrap of a portfolio's historical
 returns; unlike get_robustness_diagnostics (same-sample confidence check)
 or run_walk_forward_backtest (tests actual historical decisions), this is a
 forward-looking projection from historical statistics, not a prediction or
-a validation of any strategy).
+a validation of any strategy), and a transaction-cost sweep
+(compare_cost_models -- runs one strategy under several cost assumptions on
+a single fetched signal series and solves for the commission rate at which
+its total return reaches zero; use it when the question is whether an edge
+survives costs rather than whether it survives out of sample).
+
+get_drawdown_table reads a PERSISTED equity curve (run_backtest_compact's
+equity_curve_uri) and returns every drawdown episode, deepest first. Prefer
+it over get_backtest_diagnostics whenever a run has already been persisted:
+that tool re-runs the backtest from a symbol and a strategy, which is
+slower and is not guaranteed to be the same run -- a data revision between
+the two calls would diagnose a curve nobody reported.
 
 If the request is simply "run SMA on AAPL" with fixed parameters and no
 mention of optimizing/validating/diagnosing, that's the Backtest Execution
@@ -244,6 +297,7 @@ strategies. Never size a position — report the statistics and stop.""",
         "description": "Backtest a signal computed outside this library — never generate one of your own.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("custom_signal"),
+        "runtime": _runtime_for("custom_signal"),
         "system_prompt": """You are a custom-signal backtesting specialist. You exist for exactly
 one reason: the user (or an upstream model) has ALREADY computed a trading
 signal, and your job is to backtest it exactly as given — never generate,
@@ -256,11 +310,104 @@ run_signal_panel_backtest: multiple tickers, {ticker: {date: value}} signal pane
 
 Report the exact statistics from the tool call. Never size a position.""",
     },
+    "microstructure": {
+        "label": "Microstructure Agent",
+        "description": "Spreads and order flow measured from tick data, and a check of the OHLCV proxies against them.",
+        "registry": ANALYSIS_REGISTRY,
+        "tools": _tools_for("microstructure"),
+        "runtime": _runtime_for("microstructure"),
+        "system_prompt": """You are a market microstructure specialist working from TICK data —
+individual trades and top-of-book quotes — not from bars.
+get_microstructure_metrics measures quoted and effective spreads, signs
+order flow via Lee-Ready, and splits the effective spread into what the
+liquidity provider kept and what the trade moved. get_trade_profile shows
+how volume is distributed across trade sizes and times of day.
+check_spread_proxy measures the spread from ticks and compares it against
+the Corwin-Schultz estimate that get_liquidity_metrics reports.
+
+Your first obligation is to check that the data exists. Every one of your
+tools needs a provider with a tick feed, and most environments do not have
+one. Call describe_data_capabilities when in doubt, and when the feed is
+absent say so plainly and point at get_liquidity_metrics' OHLCV proxies —
+do NOT approximate ticks from bars. Spreads and signed order flow are not
+recoverable from an OHLCV row, and a number invented that way would be
+treated as a measurement by everything downstream.
+
+Distinguish the three spreads when you report them. QUOTED is what
+crossing costs at an instant. EFFECTIVE is what trades actually paid
+against the prevailing midpoint, and it is the one a backtest should be
+charging. The IMPACT half of the effective spread and the REALIZED half
+imply opposite remedies: impact says trade smaller, realized says trade
+somewhere else. Prefer the size-weighted averages when the question is
+about sizing a position, and say which you are quoting.
+
+Quotes are top of book only. No provider here exposes depth, so queue
+position and resting size at a level are out of reach — say that rather
+than estimating them.""",
+    },
+    "provenance": {
+        "label": "Provenance Agent",
+        "description": "Read and verify the decision log — what a recorded call did, whether it still reproduces, and whether the log is intact.",
+        "registry": ANALYSIS_REGISTRY,
+        "tools": _tools_for("provenance"),
+        "runtime": _runtime_for("provenance"),
+        "system_prompt": """You are an audit and provenance specialist. Every dispatch() in this
+library writes a tamper-evident record — the tool, its inputs, content
+hashes of the market data it read, which execution path ran, the output
+hash — chained so that editing a past line breaks every line after it.
+Your tools read and verify those records: explain_decision (what one call
+did), replay_decision (does it still reproduce), compare_decisions (why
+two runs differ), verify_audit_integrity (is the chain intact), and
+export_audit_bundle (package a date range for someone outside this
+process).
+
+The distinction you exist to make is between the data changing and the
+code changing. A backtest that returns a different number today is not
+evidence of a bug: this library's default provider guarantees neither
+point-in-time values nor stable adjusted prices, so revisions are normal.
+replay_decision checks the input hashes FIRST, and only "the inputs still
+hash identically and the output does not" implicates the library. Report
+that verdict explicitly rather than reporting a mismatch as a defect.
+
+Say plainly what a check does NOT prove. A hash chain detects partial or
+accidental tampering; a wholesale rewrite can recompute it, and only a
+signed checkpoint catches that. A single day verified alone cannot detect
+a missing day. An exported bundle verifying cleanly proves the copy is
+consistent, not that the live log was untouched.
+
+You cannot delete, seal or hold anything — those operations are
+deliberately CLI-only, because an agent able to destroy the record of its
+own decisions is not audited by it. If asked to do any of them, say so and
+explain why.""",
+    },
+    "discovery": {
+        "label": "Discovery Agent",
+        "description": "What the library accepts and what the data provider can serve — offline capability questions, no market data.",
+        "registry": ANALYSIS_REGISTRY,
+        "tools": _tools_for("discovery"),
+        "runtime": _runtime_for("discovery"),
+        "system_prompt": """You are a capability specialist. Your three tools answer questions
+about THIS LIBRARY rather than about any market: list_strategies (every
+built-in strategy's parameters, defaults, bounds and the relations that must
+hold between them), list_stress_scenarios (the named historical crash windows
+run_stress_test accepts), and describe_data_capabilities (whether the active
+data provider serves tick trades, top-of-book quotes or async OHLCV, which
+bar intervals it accepts, and what it guarantees about adjustment,
+survivorship and point-in-time revision).
+
+None of your tools fetch market data, so none of them can answer a question
+about a stock. Answer exactly what was asked and quote the contract verbatim
+— a parameter's real bound, a scenario's real dates, a capability's real
+availability. Where a capability is missing, say so plainly and say what
+that rules out; do not suggest a workaround that fabricates the missing
+data, because there isn't one.""",
+    },
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing Agent",
         "description": "Portfolio risk decomposition (MCR/PCA/factor), portfolio optimization, and ATR/Kelly position sizing.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("portfolio_risk"),
+        "runtime": _runtime_for("portfolio_risk"),
         "system_prompt": """You are a portfolio risk decomposition and position sizing specialist.
 get_portfolio_risk_attribution: marginal risk contribution, PCA variance
 decomposition, optional factor model for a weighted multi-asset portfolio.
@@ -287,6 +434,13 @@ estimator per ticker — OHLCV-derived proxies for how much a given trade
 size would move the price and how wide the effective bid/ask spread likely
 is, since no real bid/ask data exists in this library. Higher Amihud value
 = less liquid.
+estimate_trade_cost: itemized cost of ONE hypothetical trade — commission
+(percentage, per-share with a floor, separate buy/sell rates, or maker/taker
+where the maker rate may be a rebate), spread (flat basis points or a
+fraction of the bar's own range), square-root market impact, short borrow
+and margin interest. Needs no market data: you supply the numbers. Report
+breakeven_move_bps when asked what a trade has to earn — it is the round
+trip, which is what the position actually has to cover.
 
 Your only job is risk decomposition, portfolio construction, position
 sizing, capacity analysis, historical stress-test replay, and liquidity
@@ -298,6 +452,7 @@ it's out of scope for this agent.""",
         "description": "Assemble a modeling dataset and judge its features BEFORE anything is fitted: catalog, coverage, predictive strength, redundancy, leakage.",
         "registry": MODELING_REGISTRY,
         "tools": _MODEL_RESEARCH_TOOLS,
+        "runtime": "modeling",
         "system_prompt": """You are a feature research specialist for the modeling runtime. You own
 the first half of one ordered pipeline and nothing else.
 
@@ -334,6 +489,7 @@ numbers rather than a summary of them.""",
         "description": "Fit, walk-forward validate, register, inspect and score a model from an ALREADY-BUILT dataset, and evaluate its predictions as a portfolio.",
         "registry": MODELING_REGISTRY,
         "tools": _MODEL_BUILDER_TOOLS,
+        "runtime": "modeling",
         "system_prompt": """You are a model construction specialist. You own the second half of one
 ordered pipeline: everything from a built dataset to a scored model.
 
@@ -376,7 +532,7 @@ def run_worker_agent(
 
     worker = WORKER_AGENTS[worker_key]
     _header(f"→ DELEGATING TO: {worker['label']}")
-    _log("Registry", worker["registry"])
+    _log("Runtime", worker["runtime"])
     _log("Tools available", ", ".join(worker["tools"]))
     _section("SUB-REQUEST")
     print(f"  {request}")
@@ -388,7 +544,11 @@ def run_worker_agent(
         model=model,
         max_iterations=max_iterations,
         tool_names=worker["tools"],
-        registry=worker["registry"],
+        # The RUNTIME, not the registry. `tool_names` narrows what this
+        # worker is shown; the runtime is what makes that narrowing
+        # enforceable -- a worker that hallucinates a tool outside its
+        # subset is now refused by name instead of getting a result.
+        registry=worker["runtime"],
     )
 
     _section(f"← {worker['label']} RESULT")

@@ -155,12 +155,43 @@ _REGISTRIES = {
 
 
 def _registry(registry: str):
-    """The (load_tools, dispatch) pair for a registry name."""
-    if registry not in _REGISTRIES:
-        raise ValueError(
-            f"Unknown registry {registry!r}; expected one of {sorted(_REGISTRIES)}."
-        )
-    return _REGISTRIES[registry]
+    """
+    The (load_tools, dispatch) pair for a registry OR a runtime name.
+
+    NAMING A RUNTIME IS THE SAFER CHOICE, and usually the right one. The
+    two entries in _REGISTRIES above are the whole-surface views:
+    "analysis" hands back `dispatch`, which knows every tool in the library
+    regardless of which ones were advertised to the model. That is fine for
+    a script that means to offer everything, and wrong for one that
+    narrowed the list -- a model that hallucinates a tool it was never
+    shown gets a RESULT rather than an error, and a wrong guess that
+    succeeds is the worst possible feedback.
+
+    Naming "research", "backtest", "portfolio" or "meta" instead returns
+    that runtime's own dispatch table, which holds only its tools and
+    refuses the rest by name, saying which runtime actually owns them. See
+    Documentation/19_runtimes.md.
+
+    A workflow that genuinely spans runtimes joins them explicitly with a
+    "+" -- "research+backtest" -- so the widening is visible in the code
+    that asked for it rather than being the silent default.
+    """
+    if registry in _REGISTRIES:
+        return _REGISTRIES[registry]
+
+    from standard_quant_tools.agent.runtimes import all_runtimes, combine, resolve
+
+    names = [part.strip() for part in registry.split("+") if part.strip()]
+    known = set(all_runtimes())
+    if names and set(names) <= known:
+        runtime = resolve(names[0]) if len(names) == 1 else combine(names)
+        return (runtime.get_tools, runtime.dispatch)
+
+    raise ValueError(
+        f"Unknown registry or runtime {registry!r}; expected one of "
+        f"{sorted(_REGISTRIES)} (whole-surface views) or "
+        f"{sorted(known)} (scoped runtimes, joinable with '+')."
+    )
 
 
 def _scoped_tools(

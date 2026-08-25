@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.agent.runtimes import _shared as shared_tools
 from standard_quant_tools.error import AuditIntegrityError, ValidationError
 
 
@@ -279,10 +280,10 @@ class TestLookAheadWarningReachesTheAgent:
             strategy_type="sma_crossover",
             fill_price="close",
         )
-        result = T._run_backtest(inp, df, signals)
+        result = shared_tools._run_backtest(inp, df, signals)
         assert any("look" in w.lower() or "fill_price" in w for w in result.warnings)
 
-        conservative = T._run_backtest(
+        conservative = shared_tools._run_backtest(
             inp.model_copy(update={"fill_price": "next_open"}), df, signals
         )
         assert conservative.warnings == [], "next_open carries no such caveat"

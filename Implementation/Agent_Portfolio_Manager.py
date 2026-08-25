@@ -13,21 +13,22 @@ The agent:
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 PORTFOLIO = {
     "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"],
-    "weights": [0.20,   0.20,   0.20,   0.20,   0.20],
+    "weights": [0.20, 0.20, 0.20, 0.20, 0.20],
 }
 START_DATE = "2022-01-01"
-END_DATE   = "2024-12-31"
-BENCHMARK  = "SPY"
+END_DATE = "2024-12-31"
+BENCHMARK = "SPY"
 
 SYSTEM_PROMPT = """You are a senior portfolio manager with expertise in quantitative risk management.
 
@@ -75,7 +76,7 @@ if __name__ == "__main__":
     _header("Agentic Portfolio Manager — Claude Haiku")
     _log("Log file", str(log_file))
     _log("Portfolio", tickers_str)
-    _log("Period",    f"{START_DATE} → {END_DATE}")
+    _log("Period", f"{START_DATE} → {END_DATE}")
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -83,6 +84,10 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=20,
+        # weights, sizing, capacity and stress are `portfolio`.
+        # A tool outside this runtime is refused by name rather than
+        # run. See Documentation/19_runtimes.md.
+        registry="research+portfolio",
     )
 
     _header("FINAL REPORT")

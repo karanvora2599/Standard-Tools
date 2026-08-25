@@ -17,8 +17,10 @@ _LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOGS_DIR.mkdir(exist_ok=True)
 _ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-_fmt = logging.Formatter("%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
-                         datefmt="%H:%M:%S")
+_fmt = logging.Formatter(
+    "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 _fh = logging.FileHandler(_LOGS_DIR / f"strategy_backtest_{_ts}.log", encoding="utf-8")
 _fh.setFormatter(_fmt)
 _sh = logging.StreamHandler()
@@ -30,11 +32,11 @@ _lib.addHandler(_fh)
 _lib.addHandler(_sh)
 
 # ── Configuration ──────────────────────────────────────────────────
-SYMBOL     = "AAPL"
+SYMBOL = "AAPL"
 START_DATE = "2020-01-01"
-END_DATE   = "2024-12-31"
-CAPITAL    = 100_000.0
-SORT_BY    = "sharpe_ratio"   # also try "total_return" or "calmar_ratio"
+END_DATE = "2024-12-31"
+CAPITAL = 100_000.0
+SORT_BY = "sharpe_ratio"  # also try "total_return" or "calmar_ratio"
 
 # ── Run ────────────────────────────────────────────────────────────
 print(f"\n{'═'*65}")

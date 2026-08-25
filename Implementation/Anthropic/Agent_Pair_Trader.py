@@ -75,7 +75,16 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=20,
         categories=routed_categories,
+        # Spans two runtimes: it finds cointegrated pairs (`research`) and
+        # sizes both legs (`portfolio`). The scope is derived from the tools
+        # this prompt actually names -- it does NOT backtest the spread, so
+        # `backtest` is deliberately absent.
+        registry="research+portfolio",
     )
 
     _header("FINAL TRADE PLAN")
     print(result)
+
+
+if __name__ == "__main__":
+    main()

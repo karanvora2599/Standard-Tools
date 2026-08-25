@@ -33,12 +33,12 @@ from standard_quant_tools.modeling.agent import (
 )
 
 # ── Constants ──────────────────────────────────────────────────────
-_LOGS_DIR     = Path(__file__).resolve().parent.parent / "logs"
-_DIVIDER      = "═" * 70
+_LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
+_DIVIDER = "═" * 70
 _THIN_DIVIDER = "─" * 70
 
 _fmt_console = logging.Formatter("  %(levelname)-7s  %(name)s  %(message)s")
-_fmt_file    = logging.Formatter(
+_fmt_file = logging.Formatter(
     "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -57,7 +57,7 @@ def setup_logging(name: str) -> Path:
     name: short identifier used in the filename, e.g. "agent_portfolio"
     """
     _LOGS_DIR.mkdir(exist_ok=True)
-    ts       = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     log_file = _LOGS_DIR / f"{name}_{ts}.log"
 
     lib = logging.getLogger("standard_quant_tools")
@@ -84,19 +84,23 @@ def setup_logging(name: str) -> Path:
 
 # ── Console helpers ─────────────────────────────────────────────────
 
+
 def _header(title: str) -> None:
     print(f"\n{_DIVIDER}")
     print(f"  {title}")
     print(_DIVIDER)
+
 
 def _section(title: str) -> None:
     print(f"\n{_THIN_DIVIDER}")
     print(f"  {title}")
     print(_THIN_DIVIDER)
 
+
 def _log(label: str, value: str = "", indent: int = 2) -> None:
     prefix = " " * indent
     print(f"{prefix}{label}: {value}" if value else f"{prefix}{label}")
+
 
 def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
     raw = json.dumps(data, indent=2, default=str)
@@ -107,6 +111,7 @@ def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
 
 
 # ── Tool format conversion ──────────────────────────────────────────
+
 
 def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
     """Convert get_agent_tools() OpenAI format → Anthropic native format."""
@@ -127,8 +132,14 @@ def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
 # This library exposes TWO agent-tool registries and deliberately does not
 # merge them (see Documentation/15_modeling.md):
 #
-#   "analysis"  standard_quant_tools.agent           46 tools, 7 categories
-#   "modeling"  standard_quant_tools.modeling.agent   8 tools, one pipeline
+#   "analysis"  standard_quant_tools.agent           68 tools, 10 categories
+#   "modeling"  standard_quant_tools.modeling.agent  14 tools, one pipeline
+#
+# The analysis surface is itself divided into four RUNTIMES -- research,
+# backtest, portfolio, meta -- and naming one of those instead gives a
+# dispatch table that refuses anything it does not own. That is the
+# difference between narrowing what a model is shown and enforcing what it
+# can run. See Documentation/19_runtimes.md.
 #
 # Their shapes are identical -- same OpenAI-format schema, same
 # dispatch(tool_name, arguments) signature -- which is exactly why keeping
@@ -144,12 +155,43 @@ _REGISTRIES = {
 
 
 def _registry(registry: str):
-    """The (load_tools, dispatch) pair for a registry name."""
-    if registry not in _REGISTRIES:
-        raise ValueError(
-            f"Unknown registry {registry!r}; expected one of {sorted(_REGISTRIES)}."
-        )
-    return _REGISTRIES[registry]
+    """
+    The (load_tools, dispatch) pair for a registry OR a runtime name.
+
+    NAMING A RUNTIME IS THE SAFER CHOICE, and usually the right one. The
+    two entries in _REGISTRIES above are the whole-surface views:
+    "analysis" hands back `dispatch`, which knows every tool in the library
+    regardless of which ones were advertised to the model. That is fine for
+    a script that means to offer everything, and wrong for one that
+    narrowed the list -- a model that hallucinates a tool it was never
+    shown gets a RESULT rather than an error, and a wrong guess that
+    succeeds is the worst possible feedback.
+
+    Naming "research", "backtest", "portfolio" or "meta" instead returns
+    that runtime's own dispatch table, which holds only its tools and
+    refuses the rest by name, saying which runtime actually owns them. See
+    Documentation/19_runtimes.md.
+
+    A workflow that genuinely spans runtimes joins them explicitly with a
+    "+" -- "research+backtest" -- so the widening is visible in the code
+    that asked for it rather than being the silent default.
+    """
+    if registry in _REGISTRIES:
+        return _REGISTRIES[registry]
+
+    from standard_quant_tools.agent.runtimes import all_runtimes, combine, resolve
+
+    names = [part.strip() for part in registry.split("+") if part.strip()]
+    known = set(all_runtimes())
+    if names and set(names) <= known:
+        runtime = resolve(names[0]) if len(names) == 1 else combine(names)
+        return (runtime.get_tools, runtime.dispatch)
+
+    raise ValueError(
+        f"Unknown registry or runtime {registry!r}; expected one of "
+        f"{sorted(_REGISTRIES)} (whole-surface views) or "
+        f"{sorted(known)} (scoped runtimes, joinable with '+')."
+    )
 
 
 def _registry_tools(registry: str, categories=None):
@@ -164,14 +206,17 @@ def _registry_tools(registry: str, categories=None):
     -- accepting it silently would hide that the request was never narrowed.
     """
     load_tools, _ = _registry(registry)
-    if registry != "analysis":
+    if registry == "modeling":
         if categories:
             raise ValueError(
                 f"categories={categories!r} was given for the {registry!r} "
-                "registry, which has no category taxonomy to route across. "
-                "Only the analysis registry can be narrowed this way."
+                "runtime, which has no category taxonomy to route across. "
+                "It is one ordered pipeline, so there is nothing to narrow."
             )
         return load_tools()
+    # "analysis" and every scoped runtime take a category filter. Inside a
+    # runtime the filter can only narrow further -- a category that runtime
+    # does not own contributes nothing rather than reaching past it.
     return load_tools(categories=categories)
 
 
@@ -209,26 +254,30 @@ def run_agent(
     Returns the final text response from the model.
     """
     client = Anthropic(api_key=api_key, timeout=request_timeout_s)
-    tools  = _to_anthropic_tools(_registry_tools(registry))
+    tools = _to_anthropic_tools(_registry_tools(registry))
     _, tool_dispatch = _registry(registry)
 
     _header("AGENT SESSION STARTED")
-    _log("Model",          model)
-    _log("Max tokens",     str(max_tokens))
+    _log("Model", model)
+    _log("Max tokens", str(max_tokens))
     _log("Max iterations", str(max_iterations))
-    _log("Tools loaded",   str(len(tools)))
-    _log("Tool names",     ", ".join(t["name"] for t in tools))
+    _log("Tools loaded", str(len(tools)))
+    _log("Tool names", ", ".join(t["name"] for t in tools))
     if verbose:
         _section("USER REQUEST")
-        print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+        print(
+            textwrap.fill(
+                user_request, width=68, initial_indent="  ", subsequent_indent="  "
+            )
+        )
 
     messages: list[MessageParam] = [
         cast(MessageParam, {"role": "user", "content": user_request})
     ]
-    session_start        = time.perf_counter()
-    total_input_tokens   = 0
-    total_output_tokens  = 0
-    iteration            = 0
+    session_start = time.perf_counter()
+    total_input_tokens = 0
+    total_output_tokens = 0
+    iteration = 0
     # Accumulate text chunks across continuation turns so the final
     # answer is always the complete uninterrupted text.
     accumulated_text: list[str] = []
@@ -249,28 +298,32 @@ def run_agent(
             ),
         )
 
-        elapsed              = time.perf_counter() - iter_start
-        total_input_tokens  += response.usage.input_tokens
+        elapsed = time.perf_counter() - iter_start
+        total_input_tokens += response.usage.input_tokens
         total_output_tokens += response.usage.output_tokens
 
         _section("API RESPONSE METADATA")
-        _log("Stop reason",   response.stop_reason or "—")
-        _log("Input tokens",  str(response.usage.input_tokens))
+        _log("Stop reason", response.stop_reason or "—")
+        _log("Input tokens", str(response.usage.input_tokens))
         _log("Output tokens", str(response.usage.output_tokens))
-        _log("Latency",       f"{elapsed:.2f}s")
+        _log("Latency", f"{elapsed:.2f}s")
 
         _section(f"MODEL OUTPUT  ({len(response.content)} block(s))")
         for i, block in enumerate(response.content):
             print(f"\n  [Block {i+1}]  type={block.type}")
             if block.type == "text":
                 if verbose:
-                    print(textwrap.fill(
-                        block.text, width=68,
-                        initial_indent="    ", subsequent_indent="    ",
-                    ))
+                    print(
+                        textwrap.fill(
+                            block.text,
+                            width=68,
+                            initial_indent="    ",
+                            subsequent_indent="    ",
+                        )
+                    )
             elif block.type == "tool_use":
                 _log(f"  Tool call → {block.name}", indent=4)
-                _log(f"  Call ID   → {block.id}",   indent=4)
+                _log(f"  Call ID   → {block.id}", indent=4)
                 if verbose:
                     print(_pretty_json(block.input, indent=6))
 
@@ -279,7 +332,9 @@ def run_agent(
             if block.type == "text" and block.text:
                 accumulated_text.append(block.text)  # type: ignore[attr-defined]
 
-        messages.append(cast(MessageParam, {"role": "assistant", "content": response.content}))
+        messages.append(
+            cast(MessageParam, {"role": "assistant", "content": response.content})
+        )
 
         # ── Finished normally ────────────────────────────────────────
         if response.stop_reason == "end_turn":
@@ -295,10 +350,15 @@ def run_agent(
                 # Claude was writing its final answer and ran out of tokens.
                 # Append a continuation prompt so it picks up exactly where it stopped.
                 _log("max_tokens hit mid-text — sending continuation prompt ...")
-                messages.append(cast(MessageParam, {
-                    "role": "user",
-                    "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
-                }))
+                messages.append(
+                    cast(
+                        MessageParam,
+                        {
+                            "role": "user",
+                            "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
+                        },
+                    )
+                )
                 continue  # next iteration will get the rest
 
             # If tool_use blocks are present alongside max_tokens the API
@@ -331,9 +391,7 @@ def run_agent(
             # immediately while the orphaned thread runs out on its own.
             ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                result = ex.submit(
-                    tool_dispatch, block.name, block.input
-                ).result(
+                result = ex.submit(tool_dispatch, block.name, block.input).result(
                     timeout=tool_timeout_s
                 )
                 ms = (time.perf_counter() - t0) * 1000
@@ -345,29 +403,35 @@ def run_agent(
                 # if a non-finite float ever slipped past dispatch()'s own
                 # sanitization.
                 content = json.dumps(result, default=str, allow_nan=False)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": content,
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": content,
+                    }
+                )
             except concurrent.futures.TimeoutError:
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✗  TIMED OUT after {ms:.0f}ms (limit {tool_timeout_s}s)")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: tool call timed out after {tool_timeout_s}s",
-                    "is_error": True,
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Error: tool call timed out after {tool_timeout_s}s",
+                        "is_error": True,
+                    }
+                )
             except Exception as exc:
                 ms = (time.perf_counter() - t0) * 1000
                 print(f"  │  ✗  FAILED in {ms:.0f}ms — {exc}")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: {exc}",
-                    "is_error": True,
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Error: {exc}",
+                        "is_error": True,
+                    }
+                )
             finally:
                 ex.shutdown(wait=False)
             print("  └" + "─" * 50)
@@ -377,10 +441,10 @@ def run_agent(
     # ── Session summary ──────────────────────────────────────────────
     total_elapsed = time.perf_counter() - session_start
     _header("SESSION SUMMARY")
-    _log("Iterations used",     f"{iteration} / {max_iterations}")
-    _log("Total input tokens",  str(total_input_tokens))
+    _log("Iterations used", f"{iteration} / {max_iterations}")
+    _log("Total input tokens", str(total_input_tokens))
     _log("Total output tokens", str(total_output_tokens))
-    _log("Total tokens",        str(total_input_tokens + total_output_tokens))
-    _log("Total wall time",     f"{total_elapsed:.2f}s")
+    _log("Total tokens", str(total_input_tokens + total_output_tokens))
+    _log("Total wall time", f"{total_elapsed:.2f}s")
 
     return "".join(accumulated_text) or "Max iterations reached."

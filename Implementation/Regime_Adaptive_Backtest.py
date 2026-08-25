@@ -32,8 +32,10 @@ _LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOGS_DIR.mkdir(exist_ok=True)
 _ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-_fmt = logging.Formatter("%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
-                         datefmt="%H:%M:%S")
+_fmt = logging.Formatter(
+    "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 _fh = logging.FileHandler(_LOGS_DIR / f"regime_adaptive_{_ts}.log", encoding="utf-8")
 _fh.setFormatter(_fmt)
 _sh = logging.StreamHandler()
@@ -45,10 +47,10 @@ _lib.addHandler(_fh)
 _lib.addHandler(_sh)
 
 # ── Configuration ──────────────────────────────────────────────────
-SYMBOL     = "QQQ"
+SYMBOL = "QQQ"
 START_DATE = "2019-01-01"
-END_DATE   = "2024-12-31"
-CAPITAL    = 100_000.0
+END_DATE = "2024-12-31"
+CAPITAL = 100_000.0
 
 # ── Step 1: Hurst regime snapshot ─────────────────────────────────
 print(f"\n{'═'*65}")
@@ -61,7 +63,7 @@ hurst = run_hurst_analysis(
         start_date=START_DATE,
         end_date=END_DATE,
         method="dfa",
-        rolling_window=63,   # ~1 quarter
+        rolling_window=63,  # ~1 quarter
     )
 )
 
@@ -116,13 +118,15 @@ print(f"{'═'*65}\n")
 
 # Build the param grid from the best parameters found above
 strategy = result.selected_strategy
-best_p   = result.best_parameters
+best_p = result.best_parameters
+
 
 # Expand each best param into a 3-value grid centred on it
 def _small_grid(val, step, n=3):
     if isinstance(val, int):
         return [max(1, val + step * (i - n // 2)) for i in range(n)]
     return [round(val + step * (i - n // 2), 1) for i in range(n)]
+
 
 if strategy == "sma_crossover":
     param_grid = {
@@ -131,19 +135,19 @@ if strategy == "sma_crossover":
     }
 elif strategy == "rsi_mean_reversion":
     param_grid = {
-        "period":      _small_grid(best_p["period"], 3),
-        "oversold":    _small_grid(best_p["oversold"], 5),
-        "overbought":  _small_grid(best_p["overbought"], 5),
+        "period": _small_grid(best_p["period"], 3),
+        "oversold": _small_grid(best_p["oversold"], 5),
+        "overbought": _small_grid(best_p["overbought"], 5),
     }
 elif strategy == "macd_crossover":
     param_grid = {
-        "fast":   _small_grid(best_p["fast"], 2),
-        "slow":   _small_grid(best_p["slow"], 3),
+        "fast": _small_grid(best_p["fast"], 2),
+        "slow": _small_grid(best_p["slow"], 3),
         "signal": _small_grid(best_p["signal"], 1),
     }
 else:  # bollinger_reversion
     param_grid = {
-        "period":  _small_grid(best_p["period"], 5),
+        "period": _small_grid(best_p["period"], 5),
         "num_std": _small_grid(best_p.get("num_std", 2.0), 0.25),
     }
 
@@ -167,7 +171,9 @@ print(f"  Avg OOS max DD     : {wf.avg_oos_max_drawdown*100:>7.1f}%")
 print(f"  Profitable windows : {wf.pct_windows_profitable*100:>5.0f}%")
 
 print("\n  ── Per-Window Results ─────────────────────────────────")
-print(f"  {'Win':<5}{'Period':<26}{'IS Sharpe':>10}{'OOS Sharpe':>11}{'OOS Ret':>9}{'Params'}")
+print(
+    f"  {'Win':<5}{'Period':<26}{'IS Sharpe':>10}{'OOS Sharpe':>11}{'OOS Ret':>9}{'Params'}"
+)
 print("  " + "─" * 80)
 for w in wf.windows:
     period = f"{w.test_start} → {w.test_end}"
@@ -182,6 +188,8 @@ for w in wf.windows:
 
 print("\n  ── Parameter Stability ─────────────────────────────────")
 for param, info in wf.param_stability.items():
-    print(f"  {param:<20}  most common = {info['most_common']}  "
-          f"({info['frequency']*100:.0f}% of windows)")
+    print(
+        f"  {param:<20}  most common = {info['most_common']}  "
+        f"({info['frequency']*100:.0f}% of windows)"
+    )
 print()
