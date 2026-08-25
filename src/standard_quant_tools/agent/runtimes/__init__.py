@@ -34,6 +34,26 @@ THE ERROR HAS TO BE RECOVERABLE. When a caller asks a runtime for a tool
 that exists elsewhere, the failure names the runtime that actually owns it.
 "Unknown tool" alone would leave a model unable to tell a hallucination
 from a scoping mistake, and it would guess again.
+
+RUNTIMES ISOLATE EXECUTION, NOT DATA. This is the distinction that keeps
+the boundary usable. Every real workflow spans runtimes -- screen in
+`research`, backtest in `backtest`, size in `portfolio`, hand a model's
+predictions from `modeling` to a backtest -- and a boundary that also
+blocked RESULTS would make the multi-agent orchestrator impossible.
+
+So results cross by VALUE, never by shared dispatch table: an artifact URI
+written by one runtime and read by another, an identifier (dataset_id,
+model_id, request_id), or the plain JSON dict every tool already returns.
+That is strictly better than sharing a table, for three reasons. A value is
+serializable, so it survives the process boundary between two agents in the
+orchestrator. It is auditable, because the handoff shows up in the decision
+log as an input to the second call. And it cannot smuggle execution rights:
+holding an equity-curve URI lets you DESCRIBE that curve from `meta`, and
+still does not let you run `get_drawdown_table`, which lives in `backtest`.
+
+An agent that genuinely needs two runtimes uses `combine()`. The widening
+is then visible in the code that asked for it, rather than being the
+silent default it used to be.
 """
 
 from __future__ import annotations
@@ -103,6 +123,7 @@ class Runtime:
     description: str
     categories: Tuple[str, ...]
     dispatch_table: Mapping[str, Tuple[Callable[..., Any], type]]
+    tool_defs: Tuple[Tuple[str, str, type], ...]
 
     @property
     def tool_names(self) -> List[str]:
@@ -124,7 +145,7 @@ class Runtime:
         runtime does not own contributes nothing rather than reaching into
         another runtime.
         """
-        from standard_quant_tools.agent.tools import TOOL_CATEGORY, get_agent_tools
+        from standard_quant_tools.agent.tools import TOOL_CATEGORY
 
         wanted = (
             set(categories) & set(self.categories)
@@ -132,10 +153,16 @@ class Runtime:
             else set(self.categories)
         )
         return [
-            tool
-            for tool in get_agent_tools()
-            if tool["function"]["name"] in self.dispatch_table
-            and TOOL_CATEGORY.get(tool["function"]["name"]) in wanted
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": model.model_json_schema(),
+                },
+            }
+            for name, description, model in self.tool_defs
+            if TOOL_CATEGORY.get(name) in wanted
         ]
 
     def dispatch(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -176,21 +203,25 @@ class Runtime:
 
 
 def _build() -> Dict[str, Runtime]:
-    from standard_quant_tools.agent.tools import _TOOL_DISPATCH, TOOL_CATEGORY
+    """Assemble each Runtime from its own package's declaration.
+
+    Imported here rather than at module scope because the packages import
+    this module for nothing -- but the FACADE (agent/tools.py) imports the
+    packages, and building at import time would order those two against
+    each other.
+    """
+    import importlib
 
     runtimes: Dict[str, Runtime] = {}
     for name, categories in RUNTIME_CATEGORIES.items():
-        table = {
-            tool: entry
-            for tool, entry in _TOOL_DISPATCH.items()
-            if TOOL_CATEGORY.get(tool) in categories
-        }
+        package = importlib.import_module(f"standard_quant_tools.agent.runtimes.{name}")
         runtimes[name] = Runtime(
             name=name,
             label=RUNTIME_LABELS[name],
             description=RUNTIME_DESCRIPTIONS[name],
             categories=categories,
-            dispatch_table=table,
+            dispatch_table=package.TOOL_DISPATCH,
+            tool_defs=tuple(package.TOOL_DEFS),
         )
     return runtimes
 
@@ -250,9 +281,11 @@ def combine(names: Sequence[str], label: Optional[str] = None) -> Runtime:
     parts = [resolve(name) for name in names]
     table: Dict[str, Tuple[Callable[..., Any], type]] = {}
     categories: List[str] = []
+    defs: List[Tuple[str, str, type]] = []
     for part in parts:
         table.update(part.dispatch_table)
         categories.extend(part.categories)
+        defs.extend(part.tool_defs)
     joined = "+".join(part.name for part in parts)
     return Runtime(
         name=joined,
@@ -260,6 +293,7 @@ def combine(names: Sequence[str], label: Optional[str] = None) -> Runtime:
         description=" ".join(part.description for part in parts),
         categories=tuple(categories),
         dispatch_table=table,
+        tool_defs=tuple(defs),
     )
 
 

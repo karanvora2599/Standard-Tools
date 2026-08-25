@@ -49,7 +49,7 @@ def _ohlcv(seed: int, n: int = 120) -> pd.DataFrame:
 def universe(monkeypatch):
     panel = {"AAA": _ohlcv(1), "BBB": _ohlcv(2), "CCC": _ohlcv(3)}
     monkeypatch.setattr(
-        "standard_quant_tools.agent.tools.fetch_ohlcv_panel_sync",
+        "standard_quant_tools.agent.runtimes.research.tools.fetch_ohlcv_panel_sync",
         lambda tickers, start, end, interval="1d": {t: panel[t] for t in tickers},
     )
     return panel
@@ -118,7 +118,7 @@ class TestTechnicalPanel:
         young.index = universe["AAA"].index[-8:]
         short = {**universe, "DDD": young}
         monkeypatch.setattr(
-            "standard_quant_tools.agent.tools.fetch_ohlcv_panel_sync",
+            "standard_quant_tools.agent.runtimes.research.tools.fetch_ohlcv_panel_sync",
             lambda tickers, start, end, interval="1d": {t: short[t] for t in tickers},
         )
         result = dispatch(
@@ -143,7 +143,7 @@ class TestTechnicalPanel:
         disjoint.index = pd.bdate_range("2025-01-02", periods=20)
         short = {**universe, "ZZZ": disjoint}
         monkeypatch.setattr(
-            "standard_quant_tools.agent.tools.fetch_ohlcv_panel_sync",
+            "standard_quant_tools.agent.runtimes.research.tools.fetch_ohlcv_panel_sync",
             lambda tickers, start, end, interval="1d": {t: short[t] for t in tickers},
         )
         with pytest.raises(ValidationError) as exc:
@@ -174,7 +174,7 @@ class TestTechnicalPanel:
 
     def test_a_missing_ticker_is_an_error_not_a_smaller_universe(self, monkeypatch):
         monkeypatch.setattr(
-            "standard_quant_tools.agent.tools.fetch_ohlcv_panel_sync",
+            "standard_quant_tools.agent.runtimes.research.tools.fetch_ohlcv_panel_sync",
             lambda tickers, start, end, interval="1d": {"AAA": _ohlcv(1)},
         )
         with pytest.raises(ValidationError) as exc:

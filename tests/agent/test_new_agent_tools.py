@@ -26,6 +26,8 @@ from standard_quant_tools.agent.models import (
     RobustnessDiagnosticsInput,
     WalkForwardInput,
 )
+from standard_quant_tools.agent.runtimes.backtest import tools as backtest_tools
+from standard_quant_tools.agent.runtimes.research import tools as research_tools
 from standard_quant_tools.agent.tools import (
     _TOOL_DISPATCH,
     compare_strategies,
@@ -479,13 +481,13 @@ class TestRegimeAdaptiveWalkForwardBacktest:
 
         train_bars, test_bars = 252, 63
         call_lengths: list = []
-        real_run_strategy = tools_mod.run_strategy
+        real_run_strategy = backtest_tools.run_strategy
 
         def spy(price_data, signal_series, **kwargs):
             call_lengths.append(len(price_data))
             return real_run_strategy(price_data, signal_series, **kwargs)
 
-        monkeypatch.setattr(tools_mod, "run_strategy", spy)
+        monkeypatch.setattr(backtest_tools, "run_strategy", spy)
 
         inp = RegimeAdaptiveWalkForwardInput(
             symbol="AAPL",
@@ -709,7 +711,7 @@ class TestScanPairs:
         """
         import standard_quant_tools.agent.tools as tools_module
 
-        provider = tools_module.DataFactory.get_provider()
+        provider = research_tools.DataFactory.get_provider()
         original = provider.get_ohlcv
         calls = {"n": 0}
 
@@ -1104,13 +1106,13 @@ class TestWalkForwardBacktest:
 
         train_bars, test_bars = 252, 63
         call_lengths: list = []
-        real_run_strategy = tools_mod.run_strategy
+        real_run_strategy = backtest_tools.run_strategy
 
         def spy(price_data, signal_series, **kwargs):
             call_lengths.append(len(price_data))
             return real_run_strategy(price_data, signal_series, **kwargs)
 
-        monkeypatch.setattr(tools_mod, "run_strategy", spy)
+        monkeypatch.setattr(backtest_tools, "run_strategy", spy)
 
         inp = WalkForwardInput(
             symbol="AAPL",

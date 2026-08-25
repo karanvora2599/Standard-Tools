@@ -467,12 +467,19 @@ class TestGetTechnicalAnalysis:
         )
         fused_result = get_technical_analysis(inp)
 
-        original_has_cpp = tools_module.HAS_CPP
-        tools_module.HAS_CPP = False
+        # Patched on the RESEARCH runtime, which is where
+        # get_technical_analysis now lives. `from _shared import HAS_CPP`
+        # binds a copy, so flipping it on the facade or on _shared would
+        # leave this module's own reference untouched and the test would
+        # silently compare the fused path against itself.
+        from standard_quant_tools.agent.runtimes.research import tools as research_tools
+
+        original_has_cpp = research_tools.HAS_CPP
+        research_tools.HAS_CPP = False
         try:
             fallback_result = get_technical_analysis(inp)
         finally:
-            tools_module.HAS_CPP = original_has_cpp
+            research_tools.HAS_CPP = original_has_cpp
 
         assert fused_result.last_values == fallback_result.last_values
         assert fused_result.signals == fallback_result.signals

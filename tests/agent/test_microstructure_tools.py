@@ -76,7 +76,7 @@ def tick_provider(monkeypatch):
     def _install(trades, quotes, bars=None):
         provider = _TickProvider(trades, quotes, bars)
         monkeypatch.setattr(
-            "standard_quant_tools.agent.tools.DataFactory.get_provider",
+            "standard_quant_tools.agent.runtimes.portfolio.tools.DataFactory.get_provider",
             staticmethod(lambda *a, **k: provider),
         )
         return provider

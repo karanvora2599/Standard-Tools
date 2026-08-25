@@ -19,6 +19,7 @@ import json
 
 import pytest
 
+from standard_quant_tools.agent.runtimes.meta import tools as meta_tools
 from standard_quant_tools.agent.tools import dispatch
 from standard_quant_tools.audit.paths import _audit_dir, _iter_day_files
 from standard_quant_tools.error import ValidationError
@@ -83,7 +84,7 @@ class TestReplayDecision:
         untouched."""
         request_id = _record_a_call()
 
-        real = dispatch.__globals__["_verify_replay"]
+        real = meta_tools._verify_replay
 
         def _mismatch(record):
             result = real(record)
@@ -91,7 +92,7 @@ class TestReplayDecision:
             result.data_source_matches = []
             return result
 
-        monkeypatch.setitem(dispatch.__globals__, "_verify_replay", _mismatch)
+        monkeypatch.setattr(meta_tools, "_verify_replay", _mismatch)
         result = dispatch("replay_decision", {"request_id": request_id})
         assert result["verdict"] == "code_changed"
         assert any("points at the code" in note for note in result["notes"])
@@ -101,7 +102,7 @@ class TestReplayDecision:
         EXPECTED. Reporting that as a code problem would turn every
         provider revision into a false bug report."""
         request_id = _record_a_call()
-        real = dispatch.__globals__["_verify_replay"]
+        real = meta_tools._verify_replay
 
         def _data_moved(record):
             result = real(record)
@@ -117,21 +118,21 @@ class TestReplayDecision:
             ]
             return result
 
-        monkeypatch.setitem(dispatch.__globals__, "_verify_replay", _data_moved)
+        monkeypatch.setattr(meta_tools, "_verify_replay", _data_moved)
         result = dispatch("replay_decision", {"request_id": request_id})
         assert result["verdict"] == "data_changed"
         assert any("says nothing about the library" in n for n in result["notes"])
 
     def test_a_missing_output_hash_is_not_comparable_not_a_mismatch(self, monkeypatch):
         request_id = _record_a_call()
-        real = dispatch.__globals__["_verify_replay"]
+        real = meta_tools._verify_replay
 
         def _uncomparable(record):
             result = real(record)
             result.output_match = None
             return result
 
-        monkeypatch.setitem(dispatch.__globals__, "_verify_replay", _uncomparable)
+        monkeypatch.setattr(meta_tools, "_verify_replay", _uncomparable)
         result = dispatch("replay_decision", {"request_id": request_id})
         assert result["verdict"] == "not_comparable"
 
@@ -141,7 +142,7 @@ class TestReplayDecision:
         def _explode(record):
             raise RuntimeError("provider unreachable")
 
-        monkeypatch.setitem(dispatch.__globals__, "_verify_replay", _explode)
+        monkeypatch.setattr(meta_tools, "_verify_replay", _explode)
         result = dispatch("replay_decision", {"request_id": request_id})
         assert result["verdict"] == "failed"
         assert "provider unreachable" in result["notes"][0]

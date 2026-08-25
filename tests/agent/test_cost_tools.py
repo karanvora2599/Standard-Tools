@@ -51,7 +51,7 @@ def stub_provider(monkeypatch, trending_prices):
             return trending_prices
 
     monkeypatch.setattr(
-        "standard_quant_tools.agent.tools.DataFactory.get_provider",
+        "standard_quant_tools.agent.runtimes.backtest.tools.DataFactory.get_provider",
         staticmethod(lambda *a, **k: _Stub()),
     )
     return trending_prices
@@ -316,7 +316,7 @@ class TestCompareCostModels:
                 return falling
 
         monkeypatch.setattr(
-            "standard_quant_tools.agent.tools.DataFactory.get_provider",
+            "standard_quant_tools.agent.runtimes.backtest.tools.DataFactory.get_provider",
             staticmethod(lambda *a, **k: _Stub()),
         )
         result = dispatch(
