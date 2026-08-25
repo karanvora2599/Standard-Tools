@@ -6371,7 +6371,10 @@ TOOL_CATEGORY: Dict[str, str] = {
     "verify_audit_integrity": "provenance",
     "export_audit_bundle": "provenance",
     "get_technical_panel": "analysis",
-    "describe_artifact": "analysis",
+    # Not "analysis": this reads a persisted artifact by URI and knows
+    # nothing about markets. It belongs with the tools that answer
+    # questions about the session rather than about an asset.
+    "describe_artifact": "provenance",
     "get_drawdown_table": "backtest_validation",
     "estimate_trade_cost": "portfolio_risk",
     "compare_cost_models": "backtest_validation",

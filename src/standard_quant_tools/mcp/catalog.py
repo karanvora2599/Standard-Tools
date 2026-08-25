@@ -22,10 +22,20 @@ end, `discovery` is 3 tools in 1.2 KB -- cheaper than any single tool in
 newest category. Run `sqt-mcp --print-budget` for the current table;
 `category_costs()` computes it and the budget test pins the ceiling.
 
-THE TWO REGISTRIES STAY APART. Each entry records which registry it came
-from, and `dispatch_for()` returns that registry's dispatch function. The
-names happen not to collide (57 tools, 57 unique names), so one flat lookup
-would work -- and would be exactly the merge the library declined to make.
+THE RUNTIMES STAY APART. Each entry records which RUNTIME it came from, and
+`dispatch_for()` returns that runtime's dispatch function. The names happen
+not to collide (70 tools, 70 unique names), so one flat lookup would work --
+and would be exactly the merge the library declined to make.
+
+There were two registries when this module was written and there are five
+runtimes now (research, backtest, portfolio, meta, modeling). Nothing here
+changed in kind: a runtime is a dispatch table that refuses what it does not
+own, which is what the modeling registry always was. The server pairs each
+tool with its owning runtime's dispatcher for the same reason it always
+did -- the dispatchers have identical signatures, so nothing structural
+stops a caller pairing a tool from one with the dispatcher of another, and
+that failure reads like the model chose badly rather than like the wiring
+is wrong.
 """
 
 from __future__ import annotations
@@ -35,7 +45,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from standard_quant_tools.agent.router import TOOL_CATEGORY
-from standard_quant_tools.agent.tools import dispatch as analysis_dispatch
+from standard_quant_tools.agent.runtimes import RUNTIME_CATEGORIES
+from standard_quant_tools.agent.runtimes import resolve as resolve_runtime
 from standard_quant_tools.agent.tools import get_agent_tools
 from standard_quant_tools.mcp.schemas import (
     dereference,
@@ -48,8 +59,21 @@ from standard_quant_tools.modeling.agent import (
     modeling_dispatch,
 )
 
+#: Retained under their original names because `ToolEntry.registry` is a
+#: public field and the MCP tests, the server and downstream callers all
+#: read it. ANALYSIS_REGISTRY is no longer a single dispatch table -- it is
+#: the four non-modeling runtimes -- so it survives only as the answer to
+#: "is this tool from the modeling side or the rest of the library".
 ANALYSIS_REGISTRY = "analysis"
 MODELING_REGISTRY = "modeling"
+
+#: category -> owning runtime, inverted from the runtimes' own declaration
+#: so this module never holds a second copy of the grouping.
+_CATEGORY_RUNTIME = {
+    category: runtime
+    for runtime, categories in RUNTIME_CATEGORIES.items()
+    for category in categories
+}
 
 #: The modeling runtime has no category taxonomy -- it is one ordered
 #: pipeline -- so it is a single category whose name matches its registry.
@@ -93,6 +117,7 @@ class ToolEntry:
     name: str
     category: str
     registry: str
+    runtime: str
     description: str
     input_schema: Dict[str, Any]
     output_schema: Optional[Dict[str, Any]]
@@ -168,10 +193,12 @@ def _entries_for_registry(
         annotation = typing.get_type_hints(fn).get("return")
         if annotation is not None:
             result_fields = set(getattr(annotation, "model_fields", {}) or {})
+        category = category_of(name)
         yield ToolEntry(
             name=name,
-            category=category_of(name),
+            category=category,
             registry=registry,
+            runtime=_CATEGORY_RUNTIME.get(category, MODELING_REGISTRY),
             description=fn_schema["description"],
             input_schema=input_schema,
             output_schema=output_schema,
@@ -239,17 +266,20 @@ def category_costs(
 
 def dispatch_for(entry: ToolEntry) -> Callable[[str, Dict[str, Any]], Dict[str, Any]]:
     """
-    The dispatch function belonging to this tool's registry.
+    The dispatch function belonging to this tool's RUNTIME.
 
     Paired with the tool rather than chosen separately, for the same reason
-    `_agent_utils.py` pairs them: the two dispatchers have identical
-    signatures, so nothing structural stops a caller pairing a tool from one
-    registry with the dispatcher from the other. That fails at the call with
-    an "unknown tool" error naming the model's choice, which reads like the
-    model picked badly rather than like the wiring is wrong.
+    `_agent_utils.py` pairs them: every dispatcher has the same signature,
+    so nothing structural stops a caller pairing a tool from one runtime
+    with the dispatcher of another. That fails at the call with an error
+    naming the model's choice, which reads like the model picked badly
+    rather than like the wiring is wrong.
+
+    Returning the RUNTIME's dispatcher rather than one union dispatcher is
+    what makes the server's scoping real all the way down: a tool served
+    from the research runtime is executed by a table that holds only
+    research tools.
     """
-    if entry.registry == ANALYSIS_REGISTRY:
-        return analysis_dispatch
     if entry.registry == MODELING_REGISTRY:
         return modeling_dispatch
-    raise ValueError(f"unknown registry {entry.registry!r}")  # pragma: no cover
+    return resolve_runtime(entry.runtime).dispatch
