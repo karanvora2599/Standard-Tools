@@ -46,6 +46,103 @@ not writable.
 
 ---
 
+## Running as a service (HTTP)
+
+stdio ties one server to one client that launches it. That is right for a
+person running an editor and wrong for a team: four analysts, a scheduler
+and an internal agent cannot share a configured instance, because there is
+no instance, only a command line each of them runs separately.
+
+`--transport http` serves the same tools over streamable HTTP, so the server
+becomes something you configure once and point clients at.
+
+```bash
+pip install 'standard_quant_tools[mcp-http]'
+
+export SQT_MCP_TOKEN=$(openssl rand -base64 32)
+export SQT_RUNS_DIR=/var/lib/sqt/runs
+export SQT_AUDIT_DIR=/var/lib/sqt/audit
+export SQT_CACHE_DIR=/var/lib/sqt/cache
+
+sqt-mcp --transport http --categories all --port 8765
+```
+
+Clients connect to `http://host:8765/mcp` and send the token as a bearer
+credential:
+
+```jsonc
+{
+  "mcpServers": {
+    "standard-tools": {
+      "type": "http",
+      "url": "http://sqt.internal:8765/mcp",
+      "headers": { "Authorization": "Bearer <SQT_MCP_TOKEN>" }
+    }
+  }
+}
+```
+
+`GET /healthz` answers without a token, so a load balancer does not need the
+secret to decide whether the process is alive. It returns the version, the
+categories loaded and the tool count, and nothing a caller could not learn
+by watching the port answer at all.
+
+### What it refuses to do
+
+All four are startup failures, not runtime ones. A server reachable by more
+callers than you meant does not show up in a log line; it shows up as
+somebody else's tool call in your audit trail.
+
+| Situation | What happens |
+|---|---|
+| `--transport http` with no `SQT_MCP_TOKEN` | Refuses to start. Pass `--no-auth` to serve without one deliberately. |
+| `SQT_MCP_TOKEN` set **and** `--no-auth` passed | Refuses to start. The two ask for opposite things and guessing fails open. |
+| A non-loopback `--host` with no `--allow-host` | Refuses to start. The Host check cannot be derived from a wildcard bind. |
+| `--no-auth` on a non-loopback host | Starts, with a warning naming exactly what is now reachable. |
+
+The token is read from the environment and never from a flag, because a
+command line is visible in the process table to every user on the box.
+
+### Security notes
+
+**A shared token is not an authorization server.** It is one secret for
+every caller, so it cannot say who did what, and revoking it revokes
+everyone. That is the right primitive when something in front already
+terminates identity (an OAuth proxy, mTLS, a service mesh) and the wrong one
+when nothing does. The SDK ships `mcp.server.auth` for the latter; wiring it
+needs an issuer and a client registry, which is a decision rather than a
+default.
+
+**DNS rebinding protection is on.** Host and Origin headers are validated.
+On a loopback bind the allowed hosts are derived from the address; on any
+other bind you name them with `--allow-host` (`name:*` matches any port).
+Browser clients need `--allow-origin` as well; a client that sends no Origin
+header, which is most of them, is unaffected.
+
+**Run it behind TLS.** The server speaks plain HTTP. The token and every
+result crosses the network in cleartext without a terminating proxy in
+front.
+
+**One instance means one store.** `sqt://` URIs resolve against
+`SQT_RUNS_DIR` for every connected client, so a result link handed to one
+client is readable by all of them. Over stdio each client had its own
+process and therefore its own store. The startup report says so.
+
+### Scaling
+
+`--stateless` handles every request without server-side session state, so
+any replica can serve any request and no load balancer needs affinity. The
+cost is server-initiated messages: no progress notifications, no resumable
+streams. `--json-response` returns a single JSON body instead of an SSE
+stream, which some proxies and simple clients prefer.
+
+Streams are not resumable in either mode. Resumability means replaying
+events a client missed, which needs durable storage; an in-memory event
+store would look like the feature while losing everything on the restart
+that most often causes the disconnect.
+
+---
+
 ## Choosing categories
 
 The 82 tools cost about **146 KB of schema, ~37,000 tokens**, held for the
@@ -151,6 +248,15 @@ own decisions is not audited by it.
 | `--output-schemas` | off | Declare `outputSchema` per tool. **Roughly doubles the context cost.** `structuredContent` is returned either way, so this only helps clients that validate against the schema. |
 | `--enable-long-running` | off | Expose `scan_pairs` and `run_backtest_optimization`. |
 | `--print-budget` | — | Print the table above and exit. |
+| `--transport` | `stdio` | `stdio` or `http`. See [Running as a service](#running-as-a-service-http). |
+| `--host` | `127.0.0.1` | Bind address. Anything else needs a token and `--allow-host`. |
+| `--port` | `8765` | Bind port. |
+| `--path` | `/mcp` | Path the endpoint is mounted at. |
+| `--stateless` | off | No server-side session state, so any replica serves any request. Costs progress notifications. |
+| `--json-response` | off | Single JSON body instead of an SSE stream. |
+| `--allow-host` | — | Host header to accept, repeatable. Required on a non-loopback bind. |
+| `--allow-origin` | — | Origin header to accept, repeatable. Only browser clients need it. |
+| `--no-auth` | off | Serve without a bearer token. Only when something in front authenticates. |
 
 ### Why `--output-schemas` is off
 
@@ -267,6 +373,13 @@ hand: `openWorldHint` is true when a tool's input schema names a symbol,
 ticker or universe anywhere (including nested specs — `build_model_dataset`
 hides its universe two levels down), and `idempotentHint` is false for the
 four tools that persist a new artifact per call.
+
+Read-only is a statement about what the tools do, not about who may call
+them. Over stdio the only caller is the process that launched the server;
+over HTTP it is anything that can route to the port, and a caller who can
+run a 2,000-ticker `scan_pairs` can spend your CPU and your data provider's
+rate limit whether or not anything is mutated. See
+[the security notes](#security-notes).
 
 ---
 

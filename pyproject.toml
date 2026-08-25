@@ -97,6 +97,17 @@ mcp = [
     "mcp>=2.0.0"
 ]
 
+# The HTTP transport. Split from [mcp] because a client that launches the
+# server over stdio has no use for a web server, and this is the extra that
+# makes `--transport http` runnable. Both are already transitive
+# dependencies of the SDK today; pinning them here is what keeps the
+# transport working if that stops being true.
+mcp-http = [
+    "mcp>=2.0.0",
+    "starlette>=0.37.0",
+    "uvicorn>=0.30.0"
+]
+
 [tool.scikit-build]
 # The package lives under src/; without this the backend would look for a
 # top-level standard_quant_tools/ directory and build an empty wheel.

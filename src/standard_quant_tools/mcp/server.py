@@ -1,5 +1,5 @@
 """
-The MCP server: tools, resources and prompts over stdio.
+The MCP server: tools, resources and prompts, over stdio or HTTP.
 
 WHAT THIS FILE IS ALLOWED TO DO. Convert protocol shapes, route to a
 dispatcher, convert back. Nothing else. Every tool it serves already exists
@@ -17,6 +17,12 @@ returns the dispatch function belonging to that tool's registry, so the
 schemas and the executor are never chosen separately. The two dispatchers
 have identical signatures, which is exactly why the pairing has to be
 deliberate.
+
+THE TRANSPORT IS NOT THIS FILE'S BUSINESS. `build_server()` returns a
+configured `Server` that knows nothing about how bytes reach it; stdio is
+wired below and streamable HTTP in `http.py`, which is imported lazily
+because it needs starlette and uvicorn and a stdio user should not be
+stopped from starting for want of a web server.
 
 THE AUDIT TRAIL COMES FOR FREE, AND MUST NOT BE BROKEN. Both dispatchers
 already route through `audit._run_and_record`, so every call made through
@@ -361,9 +367,7 @@ def build_server(config: ServerConfig) -> tuple[Server[Any], StandardToolsServer
     return server, handlers
 
 
-async def _serve(config: ServerConfig) -> None:
-    server, handlers = build_server(config)
-    report(config, len(handlers.tools), handlers.context_bytes())
+async def _serve_stdio(server: Server[Any]) -> None:
     options = InitializationOptions(
         server_name=SERVER_NAME,
         server_version=_sqt_version,
@@ -402,7 +406,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         print_budget()
         return
     config = resolve(argv)
-    anyio.run(_serve, config)
+
+    # Built and reported once, whichever transport carries it: the tool
+    # surface and its context cost are properties of the configuration, not
+    # of the socket, and a reader comparing two deployments should be able
+    # to compare the same lines.
+    server, handlers = build_server(config)
+    report(config, len(handlers.tools), handlers.context_bytes())
+
+    if config.transport == "http":
+        from standard_quant_tools.mcp.http import serve_http
+
+        serve_http(config, server, len(handlers.tools))
+        return
+
+    anyio.run(_serve_stdio, server)
 
 
 if __name__ == "__main__":  # pragma: no cover

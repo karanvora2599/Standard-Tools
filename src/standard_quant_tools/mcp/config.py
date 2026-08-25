@@ -16,6 +16,19 @@ STDERR, NEVER STDOUT. stdio transport puts JSON-RPC on stdout. A single
 stray write corrupts the stream in a way that surfaces as an unintelligible
 protocol error, so this module logs to stderr and `tests/mcp/` asserts that
 importing the library writes nothing to stdout.
+
+THE HTTP TRANSPORT INHERITS ALL OF THAT AND ADDS A REFUSAL. Over stdio the
+only caller is the process that launched the server; over HTTP it is
+anything that can route to the port. So `--transport http` will not start
+on a non-loopback address without either SQT_MCP_TOKEN or an explicit
+`--no-auth`, and it will not start on one without being told which Host
+headers to accept. Both are failures at startup rather than at the first
+request, for the same reason as everything else here: the alternative is a
+tool error three turns into somebody else's conversation.
+
+NO SDK IMPORTS. This module is parsed by tests that do not install the MCP
+SDK, and `http.py` imports the loopback helper from here rather than the
+other way round.
 """
 
 from __future__ import annotations
@@ -43,6 +56,23 @@ _ENV_DIRS = (
 )
 
 
+#: Addresses reachable only from the machine itself. Binding to one of
+#: these is what makes a missing token acceptable rather than negligent.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+#: The bearer token is read from the environment and never from a flag. A
+#: command line is visible in the process table to every user on the box,
+#: and a shared secret that leaks to `ps` is not one.
+TOKEN_ENV_VAR = "SQT_MCP_TOKEN"
+
+DEFAULT_HTTP_PORT = 8765
+DEFAULT_HTTP_PATH = "/mcp"
+
+
+def is_loopback(host: str) -> bool:
+    return host.strip().strip("[]").lower() in LOOPBACK_HOSTS
+
+
 @dataclass(frozen=True)
 class ServerConfig:
     categories: Tuple[str, ...] = DEFAULT_CATEGORIES
@@ -52,6 +82,15 @@ class ServerConfig:
     inline_limit_bytes: int = DEFAULT_INLINE_LIMIT
     include_output_schemas: bool = False
     enable_long_running: bool = False
+    transport: str = "stdio"
+    host: str = "127.0.0.1"
+    port: int = DEFAULT_HTTP_PORT
+    path: str = DEFAULT_HTTP_PATH
+    stateless: bool = False
+    json_response: bool = False
+    auth_token: Optional[str] = None
+    allowed_hosts: Tuple[str, ...] = field(default=())
+    allowed_origins: Tuple[str, ...] = field(default=())
     warnings: Tuple[str, ...] = field(default=())
 
 
@@ -65,9 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sqt-mcp",
         description=(
-            "Serve Standard Tools over the Model Context Protocol (stdio). "
-            "Tools are selected by category because the full set of 54 costs "
-            "roughly 30,000 tokens of a client's context at connect."
+            "Serve Standard Tools over the Model Context Protocol, on stdio "
+            "or over streamable HTTP. Tools are selected by category because "
+            "the full set of 54 costs roughly 30,000 tokens of a client's "
+            "context at connect."
         ),
     )
     parser.add_argument(
@@ -114,17 +154,113 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the per-category context cost and exit.",
     )
+
+    http_group = parser.add_argument_group(
+        "http transport",
+        "Options for --transport http. Ignored on stdio.",
+    )
+    http_group.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default="stdio",
+        help=(
+            "stdio: the client launches this process and owns it. "
+            "http: run as a service that many clients, on this machine or "
+            "elsewhere, connect to. Default: stdio."
+        ),
+    )
+    http_group.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind address. Default 127.0.0.1, which is reachable only from "
+            "this machine. Any other value needs a token and --allow-host."
+        ),
+    )
+    http_group.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_HTTP_PORT,
+        help=f"Bind port. Default: {DEFAULT_HTTP_PORT}.",
+    )
+    http_group.add_argument(
+        "--path",
+        default=DEFAULT_HTTP_PATH,
+        help=f"Path the MCP endpoint is mounted at. Default: {DEFAULT_HTTP_PATH}.",
+    )
+    http_group.add_argument(
+        "--stateless",
+        action="store_true",
+        help=(
+            "Handle every request without server-side session state, so any "
+            "replica can serve any request and no load balancer needs "
+            "affinity. Costs server-initiated messages: no progress "
+            "notifications and no resumable streams."
+        ),
+    )
+    http_group.add_argument(
+        "--json-response",
+        action="store_true",
+        help=(
+            "Answer with a single JSON body instead of an SSE stream. Easier "
+            "for proxies and simple clients; gives up incremental delivery "
+            "on the long-running tools."
+        ),
+    )
+    http_group.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST[:PORT]",
+        help=(
+            "Host header value to accept, repeatable. 'name:*' matches any "
+            "port. Required on a non-loopback bind: the check is what stops "
+            "a browser being used to reach this port from a page the user "
+            "did not open."
+        ),
+    )
+    http_group.add_argument(
+        "--allow-origin",
+        action="append",
+        default=[],
+        metavar="ORIGIN",
+        help=(
+            "Origin header value to accept, repeatable. Only needed for "
+            "browser clients; a request with no Origin is unaffected."
+        ),
+    )
+    http_group.add_argument(
+        "--no-auth",
+        action="store_true",
+        help=(
+            "Serve without a bearer token. Only meaningful when something "
+            "in front already authenticates callers. Required to be "
+            "explicit, so an unauthenticated server is never the result of "
+            "forgetting to set " + TOKEN_ENV_VAR + "."
+        ),
+    )
     return parser
 
 
-def _resolve_dir(env_var: str, purpose: str, warnings: List[str]) -> Optional[Path]:
+def _resolve_dir(
+    env_var: str,
+    purpose: str,
+    warnings: List[str],
+    transport: str = "stdio",
+) -> Optional[Path]:
     raw = os.environ.get(env_var)
     if not raw:
+        chose = (
+            "which the MCP client chose, not you. Set it in the client's "
+            "server config."
+            if transport == "stdio"
+            else "which is wherever this service happened to be started from. "
+            "Set it in the unit file or the container spec."
+        )
         warnings.append(
             f"{env_var} is not set, so the {purpose} will use its default "
-            "location relative to this server's working directory -- which "
-            "the MCP client chose, not you. Artifacts and resource URIs may "
-            "not survive a restart. Set it in the client's server config."
+            f"location relative to this server's working directory -- {chose} "
+            "Artifacts and resource URIs may not survive a restart."
         )
         return None
     path = Path(raw).expanduser()
@@ -140,6 +276,91 @@ def _resolve_dir(env_var: str, purpose: str, warnings: List[str]) -> Optional[Pa
             "permissions in the client's server configuration."
         )
     return path
+
+
+def _resolve_transport(args: argparse.Namespace, warnings: List[str]) -> dict:
+    """Everything the transport choice implies, checked before the port opens.
+
+    The refusals here are all the same refusal: a server reachable by more
+    callers than the operator meant is not a condition that shows up in a log
+    line. It shows up as somebody else's tool call in your audit trail. Each
+    check is cheap to satisfy now and expensive to discover later.
+    """
+    token = (os.environ.get(TOKEN_ENV_VAR) or "").strip() or None
+    http_options_given = (
+        args.host != "127.0.0.1"
+        or args.port != DEFAULT_HTTP_PORT
+        or args.path != DEFAULT_HTTP_PATH
+        or args.stateless
+        or args.json_response
+        or bool(args.allow_host)
+        or bool(args.allow_origin)
+        or args.no_auth
+    )
+
+    if args.transport == "stdio":
+        if http_options_given:
+            warnings.append(
+                "HTTP options were passed but the transport is stdio, so they "
+                "do nothing. Add --transport http if a service was intended."
+            )
+        if token:
+            warnings.append(
+                f"{TOKEN_ENV_VAR} is set, but stdio has no request to "
+                "authenticate: the client already owns this process. Ignored."
+            )
+        return {"transport": "stdio", "auth_token": None}
+
+    if not 1 <= args.port <= 65535:
+        raise SystemExit("sqt-mcp: --port must be between 1 and 65535")
+
+    path = args.path if args.path.startswith("/") else "/" + args.path
+    path = path.rstrip("/") or "/"
+
+    if token and args.no_auth:
+        raise SystemExit(
+            f"sqt-mcp: {TOKEN_ENV_VAR} is set and --no-auth was passed. Those "
+            "ask for opposite things, and guessing which was meant is the one "
+            "mistake here that fails open. Unset the variable or drop the flag."
+        )
+    if not token and not args.no_auth:
+        raise SystemExit(
+            f"sqt-mcp: --transport http needs a bearer token. Set {TOKEN_ENV_VAR} "
+            "to a secret that clients will send as 'Authorization: Bearer ...':\n\n"
+            "    export SQT_MCP_TOKEN=$(openssl rand -base64 32)\n\n"
+            "If something in front of this server already authenticates callers "
+            "(an OAuth proxy, mTLS, a service mesh), pass --no-auth to say so "
+            "deliberately."
+        )
+
+    loopback = is_loopback(args.host)
+    if not loopback and not args.allow_host:
+        raise SystemExit(
+            f"sqt-mcp: binding to {args.host} needs at least one --allow-host. "
+            "The Host header check is what stops a page in somebody's browser "
+            "from reaching this port, and it cannot be derived from a wildcard "
+            "bind address. Pass the names clients will actually use, for "
+            f"example: --allow-host sqt.internal:{args.port}"
+        )
+    if not loopback and args.no_auth:
+        warnings.append(
+            f"serving UNAUTHENTICATED on {args.host}:{args.port}. Every caller "
+            "that can route to this port can run every exposed tool and read "
+            "every stored result. Only correct if something in front of this "
+            "server authenticates."
+        )
+
+    return {
+        "transport": "http",
+        "host": args.host,
+        "port": int(args.port),
+        "path": path,
+        "stateless": bool(args.stateless),
+        "json_response": bool(args.json_response),
+        "auth_token": token,
+        "allowed_hosts": tuple(args.allow_host),
+        "allowed_origins": tuple(args.allow_origin),
+    }
 
 
 def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
@@ -159,8 +380,9 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
         raise SystemExit("sqt-mcp: --inline-limit must be >= 0")
 
     warnings: List[str] = []
+    transport = _resolve_transport(args, warnings)
     dirs = {
-        attr: _resolve_dir(env_var, purpose, warnings)
+        attr: _resolve_dir(env_var, purpose, warnings, transport["transport"])
         for attr, env_var, purpose in _ENV_DIRS
     }
 
@@ -170,6 +392,7 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
         include_output_schemas=bool(args.output_schemas),
         enable_long_running=bool(args.enable_long_running),
         warnings=tuple(warnings),
+        **transport,
         **dirs,
     )
 
@@ -178,6 +401,28 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
     """Say what was configured, once, on stderr."""
     lines = [
         "sqt-mcp starting",
+        f"  transport         : {'streamable-http' if config.transport == 'http' else 'stdio'}",
+    ]
+    if config.transport == "http":
+        # A wildcard bind is not a name a client can dial, so show one that is.
+        display_host = "127.0.0.1" if config.host in ("0.0.0.0", "::") else config.host
+        auth = f"Bearer token from {TOKEN_ENV_VAR}" if config.auth_token else "NONE (--no-auth)"
+        hosts = ", ".join(config.allowed_hosts) if config.allowed_hosts else "loopback defaults"
+        origins = (
+            ", ".join(config.allowed_origins)
+            if config.allowed_origins
+            else "(none; browser clients rejected)"
+        )
+        lines += [
+            f"  bind              : {config.host}:{config.port}",
+            f"  endpoint          : http://{display_host}:{config.port}{config.path}",
+            f"  authorization     : {auth}",
+            f"  sessions          : {'stateless' if config.stateless else 'stateful'}",
+            f"  responses         : {'json' if config.json_response else 'sse stream'}",
+            f"  allowed hosts     : {hosts}",
+            f"  allowed origins   : {origins}",
+        ]
+    lines += [
         f"  categories        : {', '.join(config.categories)}",
         f"  tools exposed     : {tool_count}",
         f"  context cost      : {schema_bytes_total / 1024:.1f} KB "
@@ -189,6 +434,13 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
     for attr, env_var, _purpose in _ENV_DIRS:
         value = getattr(config, attr)
         lines.append(f"  {env_var:<18}: {value if value else '(unset)'}")
+    if config.transport == "http":
+        # Worth saying to anyone moving over from stdio, where each client got
+        # its own process and therefore its own store.
+        lines.append(
+            "  NOTE: one instance, one artifact store, one audit trail. Every "
+            "connected client can read every sqt:// result any of them produced."
+        )
     for warning in config.warnings:
         lines.append(f"  WARNING: {warning}")
     print("\n".join(lines), file=sys.stderr, flush=True)
