@@ -137,6 +137,11 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=25,
         categories=routed_categories,
+        # risk and technical profiling are `research`; this agent never runs a strategy.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="research+portfolio",
     )
 
     _header("RISK AUDIT REPORT")

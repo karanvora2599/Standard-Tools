@@ -48,6 +48,11 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=15,
         categories=routed_categories,
+        # running a strategy is `backtest`; portfolio construction is not, and asking for it here is refused by name.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="backtest",
     )
 
     _header("FINAL REPORT")

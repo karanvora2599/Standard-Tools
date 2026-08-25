@@ -231,10 +231,20 @@ class TestModelingHandoff:
     def test_modeling_and_analysis_names_never_collide(self):
         """The handoff is by name, so a collision would make a value
         ambiguous about which runtime should consume it."""
-        from standard_quant_tools.agent.runtimes import all_runtimes
+        from standard_quant_tools.agent.runtimes import (
+            MODELING_RUNTIME,
+            all_runtimes,
+        )
         from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
 
+        # all_runtimes() includes modeling now, so the analysis side has to
+        # be named rather than assumed -- the point of the test is that the
+        # two REGISTRIES share no name, and a set containing both would
+        # trivially overlap itself.
         analysis_names = {
-            name for rt in all_runtimes().values() for name in rt.tool_names
+            name
+            for runtime_name, rt in all_runtimes().items()
+            if runtime_name != MODELING_RUNTIME
+            for name in rt.tool_names
         }
         assert analysis_names.isdisjoint(MODELING_TOOL_DISPATCH)

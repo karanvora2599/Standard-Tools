@@ -13,24 +13,42 @@ The agent:
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 # Large-cap tech + growth universe
 UNIVERSE = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX",
-    "ADBE", "CRM",  "NOW",   "SNOW", "SHOP", "UBER", "ABNB",
-    "PYPL", "AMD",  "INTC",  "QCOM", "TXN",
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "NVDA",
+    "TSLA",
+    "NFLX",
+    "ADBE",
+    "CRM",
+    "NOW",
+    "SNOW",
+    "SHOP",
+    "UBER",
+    "ABNB",
+    "PYPL",
+    "AMD",
+    "INTC",
+    "QCOM",
+    "TXN",
 ]
-START_DATE   = "2023-01-01"
-END_DATE     = "2024-12-31"
-ACCOUNT      = 500_000.0
-MAX_POSITION = 0.10   # max 10% of account in any single name
+START_DATE = "2023-01-01"
+END_DATE = "2024-12-31"
+ACCOUNT = 500_000.0
+MAX_POSITION = 0.10  # max 10% of account in any single name
 
 SYSTEM_PROMPT = """You are a quantitative equity analyst responsible for building a momentum watchlist.
 
@@ -86,8 +104,8 @@ if __name__ == "__main__":
     _header("Agentic Stock Screener — Claude Haiku")
     _log("Log file", str(log_file))
     _log("Universe", f"{len(UNIVERSE)} stocks")
-    _log("Period",   f"{START_DATE} → {END_DATE}")
-    _log("Account",  f"${ACCOUNT:,.0f}")
+    _log("Period", f"{START_DATE} → {END_DATE}")
+    _log("Account", f"${ACCOUNT:,.0f}")
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -95,6 +113,10 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=25,
+        # screening and profiling are both `research`.
+        # A tool outside this runtime is refused by name rather than
+        # run. See Documentation/19_runtimes.md.
+        registry="research+backtest+portfolio",
     )
 
     _header("FINAL WATCHLIST")

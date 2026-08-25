@@ -69,6 +69,10 @@ from standard_quant_tools.audit.dispatch import _run_and_record
 #: is why screening sits with analysis (you screen in order to analyze) and
 #: why the OHLCV liquidity proxies sit with the tick measurements (they are
 #: the same question at two data fidelities).
+#: Modeling is absent here on purpose: it has no category taxonomy to own,
+#: being one ordered pipeline rather than a set of interchangeable tools.
+#: It is still a runtime, and `all_runtimes()` includes it -- it just has
+#: nothing to contribute to a mapping FROM categories.
 RUNTIME_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "research": ("screener", "analysis", "quant_research"),
     "backtest": ("backtest_execution", "backtest_validation", "custom_signal"),
@@ -81,6 +85,7 @@ RUNTIME_LABELS: Dict[str, str] = {
     "backtest": "Backtest",
     "portfolio": "Portfolio & Execution",
     "meta": "Discovery & Provenance",
+    "modeling": "Modeling",
 }
 
 RUNTIME_DESCRIPTIONS: Dict[str, str] = {
@@ -105,11 +110,20 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
         "serve, and what a past tool call did and whether it still "
         "reproduces."
     ),
+    "modeling": (
+        "Build, validate and score a statistical model from this library's "
+        "own features: dataset construction, leakage-purged walk-forward "
+        "fitting, the model registry, and evaluation of out-of-sample "
+        "predictions. One ordered pipeline rather than a set of "
+        "interchangeable tools."
+    ),
 }
 
-#: The modeling runtime lives in `modeling/agent` and is referenced by name
-#: rather than rebuilt here. It predates this module and its separation is
-#: the precedent this one generalizes.
+#: The modeling runtime lives in `modeling/agent`. It predates this module
+#: and its separation is the precedent this one generalizes, so it is
+#: wrapped BY REFERENCE below rather than rebuilt -- the Runtime holds
+#: MODELING_TOOL_DISPATCH itself, and this module never becomes a second
+#: place where the modeling surface is described.
 MODELING_RUNTIME = "modeling"
 
 
@@ -152,6 +166,13 @@ class Runtime:
             if categories
             else set(self.categories)
         )
+
+        def _category_of(name: str) -> str:
+            # The modeling runtime has no entry in TOOL_CATEGORY -- it is
+            # one pipeline, not a taxonomy -- so its tools answer with the
+            # runtime's own name, which is the category it declares.
+            return TOOL_CATEGORY.get(name, self.name)
+
         return [
             {
                 "type": "function",
@@ -162,7 +183,7 @@ class Runtime:
                 },
             }
             for name, description, model in self.tool_defs
-            if TOOL_CATEGORY.get(name) in wanted
+            if _category_of(name) in wanted
         ]
 
     def dispatch(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -223,6 +244,35 @@ def _build() -> Dict[str, Runtime]:
             dispatch_table=package.TOOL_DISPATCH,
             tool_defs=tuple(package.TOOL_DEFS),
         )
+
+    # The modeling runtime, wrapped rather than rebuilt. Its dispatch table
+    # is the SAME object modeling_dispatch routes through, so resolving it
+    # here cannot drift from calling it there.
+    from standard_quant_tools.modeling.agent import (
+        MODELING_TOOL_DISPATCH,
+        get_modeling_tools,
+    )
+
+    runtimes[MODELING_RUNTIME] = Runtime(
+        name=MODELING_RUNTIME,
+        label=RUNTIME_LABELS[MODELING_RUNTIME],
+        description=RUNTIME_DESCRIPTIONS[MODELING_RUNTIME],
+        categories=(MODELING_RUNTIME,),
+        dispatch_table=MODELING_TOOL_DISPATCH,
+        # Keyed by NAME, never zipped: get_modeling_tools() iterates its
+        # own ordered def list while MODELING_TOOL_DISPATCH is a separate
+        # dict, and the two orders do not match. Zipping them paired each
+        # description with another tool's input model -- schemas that
+        # looked plausible and described the wrong tool.
+        tool_defs=tuple(
+            (
+                tool["function"]["name"],
+                tool["function"]["description"],
+                MODELING_TOOL_DISPATCH[tool["function"]["name"]][1],
+            )
+            for tool in get_modeling_tools()
+        ),
+    )
     return runtimes
 
 
@@ -246,11 +296,8 @@ def resolve(name: str) -> Runtime:
     """One runtime by name."""
     runtimes = all_runtimes()
     if name not in runtimes:
-        available = sorted(runtimes) + [MODELING_RUNTIME]
         raise ValueError(
-            f"unknown runtime {name!r}; expected one of {available}. The "
-            f"{MODELING_RUNTIME!r} runtime lives in "
-            "standard_quant_tools.modeling.agent and is imported from there."
+            f"unknown runtime {name!r}; expected one of {sorted(runtimes)}."
         )
     return runtimes[name]
 
@@ -260,10 +307,6 @@ def owner_of(tool_name: str) -> Optional[str]:
     for name, runtime in all_runtimes().items():
         if tool_name in runtime:
             return name
-    from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
-
-    if tool_name in MODELING_TOOL_DISPATCH:
-        return MODELING_RUNTIME
     return None
 
 

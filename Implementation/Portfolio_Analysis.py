@@ -29,8 +29,10 @@ _LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOGS_DIR.mkdir(exist_ok=True)
 _ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-_fmt = logging.Formatter("%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
-                         datefmt="%H:%M:%S")
+_fmt = logging.Formatter(
+    "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 _fh = logging.FileHandler(_LOGS_DIR / f"portfolio_analysis_{_ts}.log", encoding="utf-8")
 _fh.setFormatter(_fmt)
 _sh = logging.StreamHandler()
@@ -42,15 +44,15 @@ _lib.addHandler(_fh)
 _lib.addHandler(_sh)
 
 # ── Configuration ──────────────────────────────────────────────────
-TICKERS    = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
-WEIGHTS    = [0.20,   0.20,   0.20,   0.20,   0.20]    # equal-weight
+TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
+WEIGHTS = [0.20, 0.20, 0.20, 0.20, 0.20]  # equal-weight
 START_DATE = "2022-01-01"
-END_DATE   = "2024-12-31"
-BENCHMARK  = "SPY"
+END_DATE = "2024-12-31"
+BENCHMARK = "SPY"
 
 # Factor proxies: market (SPY), small-cap (IWM), value (IWD)
 FACTOR_TICKERS = ["SPY", "IWM", "IWD"]
-FACTOR_NAMES   = ["market", "size", "value"]
+FACTOR_NAMES = ["market", "size", "value"]
 
 # ── Portfolio-level metrics ─────────────────────────────────────────
 print(f"\n{'═'*65}")
@@ -139,7 +141,9 @@ print(f"\n  {'Ticker':<8}{'Beta':>7}{'Alpha':>9}{'Sharpe':>8}{'VaR95':>8}{'MaxDD
 print("  " + "─" * 50)
 
 for ticker in TICKERS:
-    risk = analyze_stock_risk(AnalysisInput(symbol=ticker, benchmark=BENCHMARK, period="2y"))
+    risk = analyze_stock_risk(
+        AnalysisInput(symbol=ticker, benchmark=BENCHMARK, period="2y")
+    )
     print(
         f"  {ticker:<8}"
         f"{risk.beta:>7.3f}"

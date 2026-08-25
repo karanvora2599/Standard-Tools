@@ -35,7 +35,9 @@ class TestPartition:
             for tool in runtime.tool_names:
                 assert tool not in seen, f"{tool} is in both {seen[tool]} and {name}"
                 seen[tool] = name
-        assert set(seen) == set(_TOOL_DISPATCH)
+        from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+
+        assert set(seen) == set(_TOOL_DISPATCH) | set(MODELING_TOOL_DISPATCH)
 
     def test_every_category_belongs_to_exactly_one_runtime(self):
         owners: dict = {}
@@ -43,6 +45,8 @@ class TestPartition:
             for category in categories:
                 assert category not in owners
                 owners[category] = name
+        # Modeling declares no categories -- it is one pipeline, not a
+        # taxonomy -- so it contributes nothing to this mapping.
         assert set(owners) == set(TOOL_CATEGORY.values())
 
     def test_no_runtime_is_too_small_to_be_worth_a_boundary(self):
@@ -51,12 +55,31 @@ class TestPartition:
         for name, runtime in all_runtimes().items():
             assert len(runtime) >= 8, f"{name} has only {len(runtime)} tools"
 
-    def test_the_modeling_runtime_is_not_rebuilt_here(self):
-        """It predates this module and lives in modeling/agent. Rebuilding
-        it would create a second definition of a boundary that already
-        exists."""
-        assert MODELING_RUNTIME not in all_runtimes()
+    def test_the_modeling_runtime_is_wrapped_not_rebuilt(self):
+        """It predates this module and lives in modeling/agent. It is
+        resolvable and combinable like every other runtime -- writing an
+        example that walks modeling -> meta -> backtest showed that
+        excluding it was a gap in the abstraction, not a deliberate limit.
+
+        What must NOT happen is a second definition of its surface, so the
+        Runtime holds MODELING_TOOL_DISPATCH itself rather than a copy."""
+        from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+
+        runtime = resolve(MODELING_RUNTIME)
+        assert runtime.dispatch_table is MODELING_TOOL_DISPATCH
         assert owner_of("run_model_experiment") == MODELING_RUNTIME
+
+    def test_modeling_composes_with_the_analysis_runtimes(self):
+        """The workflow Agent_Model_Backtester walks: score a model, convert
+        its predictions, backtest them. Three runtimes, none of which can
+        call the others' tools."""
+        wide = combine(["modeling", "meta", "backtest"])
+        assert "run_model_experiment" in wide
+        assert "convert_reference" in wide
+        assert "run_signal_panel_backtest" in wide
+        with pytest.raises(ValueError) as exc:
+            wide.dispatch("run_screener", {})
+        assert "'research' runtime" in str(exc.value)
 
 
 class TestScopeIsEnforced:
@@ -96,6 +119,7 @@ class TestScopeIsEnforced:
         with pytest.raises(ValueError) as exc:
             resolve("quant_stuff")
         assert "modeling" in str(exc.value)
+        assert "research" in str(exc.value)
 
 
 class TestSchemas:
@@ -119,12 +143,19 @@ class TestSchemas:
         }
 
     def test_every_runtime_schema_is_the_same_one_the_union_advertises(self):
+        """Each ANALYSIS runtime's schemas must be byte-identical to what
+        get_agent_tools() advertises. Modeling is excluded because it has
+        its own union (get_modeling_tools) -- the two registries stay
+        apart, and this test would quietly merge them."""
         from standard_quant_tools.agent.tools import get_agent_tools
+        from standard_quant_tools.modeling.agent import get_modeling_tools
 
         union = {t["function"]["name"]: t for t in get_agent_tools()}
-        for runtime in all_runtimes().values():
+        modeling_union = {t["function"]["name"]: t for t in get_modeling_tools()}
+        for name, runtime in all_runtimes().items():
+            expected = modeling_union if name == MODELING_RUNTIME else union
             for tool in runtime.get_tools():
-                assert tool == union[tool["function"]["name"]]
+                assert tool == expected[tool["function"]["name"]]
 
 
 class TestExecution:
@@ -195,9 +226,18 @@ class TestFacadeStaysAFacade:
         missing = [n for n in _TOOL_DISPATCH if n not in package.__all__]
         assert not missing, f"tools missing from agent.__all__: {missing}"
 
-    def test_the_facade_advertises_exactly_the_runtimes_combined(self):
+    def test_the_facade_advertises_exactly_the_analysis_runtimes_combined(self):
+        """The facade is the ANALYSIS union. Modeling is reachable as a
+        runtime but is not in get_agent_tools(), and must not become so --
+        merging the two registries is the thing this library declined to
+        do."""
         from standard_quant_tools.agent.tools import get_agent_tools
 
         advertised = {t["function"]["name"] for t in get_agent_tools()}
-        owned = {n for rt in all_runtimes().values() for n in rt.tool_names}
+        owned = {
+            n
+            for name, rt in all_runtimes().items()
+            if name != MODELING_RUNTIME
+            for n in rt.tool_names
+        }
         assert advertised == owned

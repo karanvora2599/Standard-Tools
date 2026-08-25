@@ -12,16 +12,16 @@ from pathlib import Path
 from typing import Any, cast
 from anthropic import Anthropic
 from anthropic.types import Message, MessageParam, ToolParam
-from standard_quant_tools.agent.tools import get_agent_tools, dispatch
+from standard_quant_tools.agent.runtimes import resolve
 
 # ── Logging setup ──────────────────────────────────────────────────
 _LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOGS_DIR.mkdir(exist_ok=True)
-_run_ts  = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+_run_ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
 _log_file = _LOGS_DIR / f"agent_backtest_{_run_ts}.log"
 
 _fmt_console = logging.Formatter("  %(levelname)-7s  %(name)s  %(message)s")
-_fmt_file    = logging.Formatter(
+_fmt_file = logging.Formatter(
     "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -55,18 +55,21 @@ the most appropriate strategies. Compare results against buy-and-hold and provid
 
 # ── Logging helpers ────────────────────────────────────────────────
 
-_DIVIDER      = "═" * 70
+_DIVIDER = "═" * 70
 _THIN_DIVIDER = "─" * 70
+
 
 def _header(title: str) -> None:
     print(f"\n{_DIVIDER}")
     print(f"  {title}")
     print(_DIVIDER)
 
+
 def _section(title: str) -> None:
     print(f"\n{_THIN_DIVIDER}")
     print(f"  {title}")
     print(_THIN_DIVIDER)
+
 
 def _log(label: str, value: str = "", indent: int = 2) -> None:
     prefix = " " * indent
@@ -74,6 +77,7 @@ def _log(label: str, value: str = "", indent: int = 2) -> None:
         print(f"{prefix}{label}: {value}")
     else:
         print(f"{prefix}{label}")
+
 
 def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
     raw = json.dumps(data, indent=2, default=str)
@@ -85,6 +89,7 @@ def _pretty_json(data: Any, indent: int = 4, max_len: int = 2000) -> str:
 
 
 # ── Tool format conversion ─────────────────────────────────────────
+
 
 def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
     """Convert OpenAI-format tool defs returned by get_agent_tools() to Anthropic native format."""
@@ -100,23 +105,39 @@ def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
 
 # ── Agent loop ─────────────────────────────────────────────────────
 
+
 def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
-    tools = _to_anthropic_tools(get_agent_tools())
+
+    # A RUNTIME, not the whole surface. `resolve("backtest")` hands back a
+    # tool list and a dispatch table that agree with each other: this loop
+    # advertises 21 tools and can execute exactly those 21. Calling
+    # get_agent_tools()/dispatch() instead would advertise a subset and
+    # execute anything, so a tool the model invented would come back with a
+    # result rather than an error. See Documentation/19_runtimes.md.
+    runtime = resolve("backtest")
+    tools = _to_anthropic_tools(runtime.get_tools())
 
     _header("AGENT SESSION STARTED")
-    _log("Model",          "claude-haiku-4-5")
+    _log("Model", "claude-haiku-4-5")
     _log("Max iterations", str(max_iterations))
-    _log("Tools loaded",   str(len(tools)))
-    _log("Tool names",     ", ".join(t["name"] for t in tools))
+    _log("Runtime", runtime.name)
+    _log("Tools loaded", str(len(tools)))
+    _log("Tool names", ", ".join(t["name"] for t in tools))
     _section("USER REQUEST")
-    print(textwrap.fill(user_request, width=68, initial_indent="  ", subsequent_indent="  "))
+    print(
+        textwrap.fill(
+            user_request, width=68, initial_indent="  ", subsequent_indent="  "
+        )
+    )
 
-    messages: list[MessageParam] = [cast(MessageParam, {"role": "user", "content": user_request})]
+    messages: list[MessageParam] = [
+        cast(MessageParam, {"role": "user", "content": user_request})
+    ]
     session_start = time.perf_counter()
-    total_input_tokens  = 0
+    total_input_tokens = 0
     total_output_tokens = 0
-    iteration           = 0
+    iteration = 0
     accumulated_text: list[str] = []
 
     for iteration in range(1, max_iterations + 1):
@@ -136,35 +157,39 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
         )
 
         elapsed = time.perf_counter() - iter_start
-        total_input_tokens  += response.usage.input_tokens
+        total_input_tokens += response.usage.input_tokens
         total_output_tokens += response.usage.output_tokens
 
         _section("API RESPONSE METADATA")
-        _log("Stop reason",    response.stop_reason or "—")
-        _log("Input tokens",   str(response.usage.input_tokens))
-        _log("Output tokens",  str(response.usage.output_tokens))
-        _log("Latency",        f"{elapsed:.2f}s")
+        _log("Stop reason", response.stop_reason or "—")
+        _log("Input tokens", str(response.usage.input_tokens))
+        _log("Output tokens", str(response.usage.output_tokens))
+        _log("Latency", f"{elapsed:.2f}s")
 
         _section(f"MODEL OUTPUT  ({len(response.content)} block(s))")
         for i, block in enumerate(response.content):
             print(f"\n  [Block {i+1}]  type={block.type}")
             if block.type == "text":
                 wrapped = textwrap.fill(
-                    block.text, width=68,
-                    initial_indent="    ", subsequent_indent="    ",
+                    block.text,
+                    width=68,
+                    initial_indent="    ",
+                    subsequent_indent="    ",
                 )
                 print(wrapped)
             elif block.type == "tool_use":
-                _log(f"  Tool call   → {block.name}",  indent=4)
-                _log(f"  Call ID     → {block.id}",    indent=4)
-                _log("  Arguments",                    indent=4)
+                _log(f"  Tool call   → {block.name}", indent=4)
+                _log(f"  Call ID     → {block.id}", indent=4)
+                _log("  Arguments", indent=4)
                 print(_pretty_json(block.input, indent=6))
 
         for block in response.content:
             if block.type == "text" and block.text:
                 accumulated_text.append(block.text)  # type: ignore[attr-defined]
 
-        messages.append(cast(MessageParam, {"role": "assistant", "content": response.content}))
+        messages.append(
+            cast(MessageParam, {"role": "assistant", "content": response.content})
+        )
 
         # ── Done ──────────────────────────────────────────────────
         if response.stop_reason == "end_turn":
@@ -177,10 +202,15 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
             has_tool = any(b.type == "tool_use" for b in response.content)
             if has_text and not has_tool:
                 _log("max_tokens hit mid-text — sending continuation prompt ...")
-                messages.append(cast(MessageParam, {
-                    "role": "user",
-                    "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
-                }))
+                messages.append(
+                    cast(
+                        MessageParam,
+                        {
+                            "role": "user",
+                            "content": "Please continue your response from exactly where you left off. Do not repeat anything already written.",
+                        },
+                    )
+                )
                 continue
             _log("max_tokens with tool_use content — stopping")
             break
@@ -203,25 +233,29 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
 
             t_start = time.perf_counter()
             try:
-                result = dispatch(block.name, block.input)
+                result = runtime.dispatch(block.name, block.input)
                 t_ms = (time.perf_counter() - t_start) * 1000
                 print(f"  │  ✓  completed in {t_ms:.0f}ms")
                 _log("│  result", indent=3)
                 print(_pretty_json(result, indent=5))
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result),
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result),
+                    }
+                )
             except Exception as e:
                 t_ms = (time.perf_counter() - t_start) * 1000
                 print(f"  │  ✗  FAILED in {t_ms:.0f}ms — {e}")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: {e}",
-                    "is_error": True,
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Error: {e}",
+                        "is_error": True,
+                    }
+                )
             print("  └" + "─" * 50)
 
         accumulated_text.clear()
@@ -230,11 +264,11 @@ def run_agent_backtest(user_request: str, max_iterations: int = 10) -> str:
     # ── Session summary ────────────────────────────────────────────
     total_elapsed = time.perf_counter() - session_start
     _header("SESSION SUMMARY")
-    _log("Iterations used",    f"{iteration} / {max_iterations}")
-    _log("Total input tokens",  str(total_input_tokens))
+    _log("Iterations used", f"{iteration} / {max_iterations}")
+    _log("Total input tokens", str(total_input_tokens))
     _log("Total output tokens", str(total_output_tokens))
-    _log("Total tokens",        str(total_input_tokens + total_output_tokens))
-    _log("Total wall time",     f"{total_elapsed:.2f}s")
+    _log("Total tokens", str(total_input_tokens + total_output_tokens))
+    _log("Total wall time", f"{total_elapsed:.2f}s")
 
     return "".join(accumulated_text) or "Max iterations reached."
 

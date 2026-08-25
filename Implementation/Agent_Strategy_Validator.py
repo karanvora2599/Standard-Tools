@@ -32,25 +32,26 @@ so the agent can use it if asked about a pairs strategy instead.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 # Candidate strategy under review (Steps 1-3)
 STRATEGY_SYMBOL = "AAPL"
-STRATEGY_TYPE   = "sma_crossover"
-PARAM_GRID      = {"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]}
-START_DATE      = "2021-01-01"
-END_DATE        = "2024-12-31"
+STRATEGY_TYPE = "sma_crossover"
+PARAM_GRID = {"fast_period": [5, 10, 20], "slow_period": [30, 50, 100]}
+START_DATE = "2021-01-01"
+END_DATE = "2024-12-31"
 
 # Target deployment (Steps 4-5)
 PORTFOLIO_TICKERS = ["AAPL", "MSFT"]
 PORTFOLIO_WEIGHTS = [0.5, 0.5]
-ACCOUNT_SIZE      = 250_000.0
+ACCOUNT_SIZE = 250_000.0
 
 SYSTEM_PROMPT = """You are a quantitative strategy validator. Your job is to decide whether a
 candidate strategy is actually ready for real capital — never trust a single
@@ -148,7 +149,7 @@ if __name__ == "__main__":
     _log("Log file", str(log_file))
     _log("Candidate", f"{STRATEGY_TYPE} on {STRATEGY_SYMBOL}")
     _log("Portfolio", tickers_str)
-    _log("Account",   f"${ACCOUNT_SIZE:,.0f}")
+    _log("Account", f"${ACCOUNT_SIZE:,.0f}")
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -156,6 +157,10 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=20,
+        # optimize/walk-forward/robustness all live in `backtest`.
+        # A tool outside this runtime is refused by name rather than
+        # run. See Documentation/19_runtimes.md.
+        registry="research+backtest+portfolio",
     )
 
     _header("VALIDATION VERDICT")

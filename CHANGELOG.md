@@ -156,6 +156,44 @@ plus `list_models`, `list_datasets`, `compare_models`, `check_leakage`,
 since it was added; no tool passed one. Every new field defaults to the
 value the tool previously hard-coded.
 
+### Changed — the example implementations are scoped
+
+`registry=` in every provider's `_agent_utils.py` now accepts a RUNTIME
+name, joinable with `+`, alongside the two whole-surface views. Naming a
+runtime hands the script a dispatch table holding only that runtime's
+tools; naming `"analysis"` still hands back the union, which knows every
+tool regardless of what was advertised.
+
+All 55 example scripts across `Implementation/`, its three provider folders
+and `Multi_Agent_Implementation/` are scoped. Each script's runtime set is
+DERIVED from the tools its own prompt mentions rather than chosen by hand —
+a prompt that instructs the agent to call a tool the runtime will refuse is
+worse than no scoping, because it walks the model into a wall it was told
+to walk into. That derivation immediately caught seven scripts whose
+prompts relied on the full surface, and one comment of mine that described
+a backtest step its script does not take.
+
+The twelve workers dispatch through their category's runtime. Each already
+declared a fixed, non-overlapping tool subset; dispatching through the
+union had made that subset advisory.
+
+`modeling` is now resolvable and combinable like every other runtime.
+Writing an example that walks modeling → meta → backtest showed that
+excluding it was a gap in the abstraction rather than a deliberate limit.
+It is wrapped BY REFERENCE — the Runtime holds `MODELING_TOOL_DISPATCH`
+itself — so there is still exactly one definition of that boundary.
+
+### Added — three example scripts
+
+| Script | Runtimes | Shows |
+|---|---|---|
+| `Agent_Model_Backtester.py` | `backtest+meta+modeling` | The handoff interconnect end to end. The agent never sees a prediction; a reference crosses three runtimes and the panel never enters the conversation. |
+| `Agent_Provenance_Auditor.py` | `meta` | Reconstructing a past decision and classifying a mismatch as the data's fault or the code's. Retention is unroutable, not merely discouraged. |
+| `Agent_Execution_Analyst.py` | `portfolio+meta` | Measured spreads versus the OHLCV proxies, and which way the proxy errs. |
+
+Each is mirrored across all three provider folders, because a capability
+demonstrated for one provider only is a capability half-demonstrated.
+
 ### Documentation
 
 New [`Documentation/19_runtimes.md`](Documentation/19_runtimes.md). Updated

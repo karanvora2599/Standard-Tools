@@ -55,6 +55,26 @@ def _tools_for(category: str) -> List[str]:
     return sorted(name for name, cat in TOOL_CATEGORY.items() if cat == category)
 
 
+def _runtime_for(category: str) -> str:
+    """The runtime that OWNS a category, so a worker dispatches through a
+    table holding only its own tools.
+
+    Each worker already declares a fixed, non-overlapping tool subset --
+    that is the architecture. But dispatching through the union meant the
+    subset was advisory: a worker that hallucinated a tool outside its list
+    got a RESULT rather than an error. Naming the runtime makes the subset
+    the architecture already claimed into one the code enforces."""
+    from standard_quant_tools.agent.runtimes import RUNTIME_CATEGORIES
+
+    for runtime, categories in RUNTIME_CATEGORIES.items():
+        if category in categories:
+            return runtime
+    raise KeyError(
+        f"category {category!r} belongs to no runtime; every category must, "
+        "or its worker cannot be scoped."
+    )
+
+
 # The modeling runtime has no category taxonomy to derive a split from --
 # it is eight tools in ONE ordered pipeline, so the split below is by
 # pipeline STAGE instead. Named here rather than written inline so the
@@ -93,6 +113,7 @@ WORKER_AGENTS: Dict[str, Dict[str, Any]] = {
         "description": "Filter a ticker universe by fundamental/technical criteria and fetch company fundamentals.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("screener"),
+        "runtime": _runtime_for("screener"),
         "system_prompt": """You are a stock screening specialist. You have exactly two tools:
 run_screener (filter a ticker universe by fundamental/technical criteria) and
 get_stock_fundamentals (company metadata and financial ratios for one ticker).
@@ -108,6 +129,7 @@ requesting agent can hand them to a different specialist.""",
         "description": "Single-asset risk profiling, technical indicator snapshots, and multi-asset portfolio metrics.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("analysis"),
+        "runtime": _runtime_for("analysis"),
         "system_prompt": """You are a risk and technical analysis specialist. Your tools cover
 single-asset risk profiling (analyze_stock_risk, get_extended_risk_metrics),
 technical indicator snapshots (get_technical_analysis, get_advanced_indicators,
@@ -163,6 +185,7 @@ what another tool produced instead of asking for the run to be repeated.""",
         "description": "Factor regression, cointegration/pairs testing, PCA, and Hurst regime detection.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("quant_research"),
+        "runtime": _runtime_for("quant_research"),
         "system_prompt": """You are a quantitative research specialist covering factor models
 (run_factor_regression), cointegration and pairs screening (run_cointegration_test,
 scan_pairs), a time-varying alternative to run_cointegration_test's static
@@ -188,6 +211,7 @@ Hurst exponents from your tool calls.""",
         "description": "Run the library's built-in named strategies (SMA/RSI/MACD/Bollinger, portfolio simulation, pair trades) once, with fixed parameters.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("backtest_execution"),
+        "runtime": _runtime_for("backtest_execution"),
         "system_prompt": """You are a backtest execution specialist for the library's BUILT-IN
 indicator strategies: SMA crossover, RSI mean-reversion, MACD crossover,
 Bollinger reversion, and buy-and-hold baselines — run one, or compare all
@@ -227,6 +251,7 @@ the backtest statistics and stop.""",
         "description": "Optimize, out-of-sample validate, and diagnose the library's built-in strategies (grid search, walk-forward, regime-adaptive, robustness, Monte Carlo).",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("backtest_validation"),
+        "runtime": _runtime_for("backtest_validation"),
         "system_prompt": """You are a backtest validation specialist: optimizing, validating out
 of sample, and diagnosing the library's BUILT-IN indicator strategies —
 never running one once from scratch with fixed parameters (that's the
@@ -272,6 +297,7 @@ strategies. Never size a position — report the statistics and stop.""",
         "description": "Backtest a signal computed outside this library — never generate one of your own.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("custom_signal"),
+        "runtime": _runtime_for("custom_signal"),
         "system_prompt": """You are a custom-signal backtesting specialist. You exist for exactly
 one reason: the user (or an upstream model) has ALREADY computed a trading
 signal, and your job is to backtest it exactly as given — never generate,
@@ -289,6 +315,7 @@ Report the exact statistics from the tool call. Never size a position.""",
         "description": "Spreads and order flow measured from tick data, and a check of the OHLCV proxies against them.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("microstructure"),
+        "runtime": _runtime_for("microstructure"),
         "system_prompt": """You are a market microstructure specialist working from TICK data —
 individual trades and top-of-book quotes — not from bars.
 get_microstructure_metrics measures quoted and effective spreads, signs
@@ -323,6 +350,7 @@ than estimating them.""",
         "description": "Read and verify the decision log — what a recorded call did, whether it still reproduces, and whether the log is intact.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("provenance"),
+        "runtime": _runtime_for("provenance"),
         "system_prompt": """You are an audit and provenance specialist. Every dispatch() in this
 library writes a tamper-evident record — the tool, its inputs, content
 hashes of the market data it read, which execution path ran, the output
@@ -357,6 +385,7 @@ explain why.""",
         "description": "What the library accepts and what the data provider can serve — offline capability questions, no market data.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("discovery"),
+        "runtime": _runtime_for("discovery"),
         "system_prompt": """You are a capability specialist. Your three tools answer questions
 about THIS LIBRARY rather than about any market: list_strategies (every
 built-in strategy's parameters, defaults, bounds and the relations that must
@@ -378,6 +407,7 @@ data, because there isn't one.""",
         "description": "Portfolio risk decomposition (MCR/PCA/factor), portfolio optimization, and ATR/Kelly position sizing.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("portfolio_risk"),
+        "runtime": _runtime_for("portfolio_risk"),
         "system_prompt": """You are a portfolio risk decomposition and position sizing specialist.
 get_portfolio_risk_attribution: marginal risk contribution, PCA variance
 decomposition, optional factor model for a weighted multi-asset portfolio.
@@ -422,6 +452,7 @@ it's out of scope for this agent.""",
         "description": "Assemble a modeling dataset and judge its features BEFORE anything is fitted: catalog, coverage, predictive strength, redundancy, leakage.",
         "registry": MODELING_REGISTRY,
         "tools": _MODEL_RESEARCH_TOOLS,
+        "runtime": "modeling",
         "system_prompt": """You are a feature research specialist for the modeling runtime. You own
 the first half of one ordered pipeline and nothing else.
 
@@ -458,6 +489,7 @@ numbers rather than a summary of them.""",
         "description": "Fit, walk-forward validate, register, inspect and score a model from an ALREADY-BUILT dataset, and evaluate its predictions as a portfolio.",
         "registry": MODELING_REGISTRY,
         "tools": _MODEL_BUILDER_TOOLS,
+        "runtime": "modeling",
         "system_prompt": """You are a model construction specialist. You own the second half of one
 ordered pipeline: everything from a built dataset to a scored model.
 
@@ -500,7 +532,7 @@ def run_worker_agent(
 
     worker = WORKER_AGENTS[worker_key]
     _header(f"→ DELEGATING TO: {worker['label']}")
-    _log("Registry", worker["registry"])
+    _log("Runtime", worker["runtime"])
     _log("Tools available", ", ".join(worker["tools"]))
     _section("SUB-REQUEST")
     print(f"  {request}")
@@ -512,7 +544,11 @@ def run_worker_agent(
         model=model,
         max_iterations=max_iterations,
         tool_names=worker["tools"],
-        registry=worker["registry"],
+        # The RUNTIME, not the registry. `tool_names` narrows what this
+        # worker is shown; the runtime is what makes that narrowing
+        # enforceable -- a worker that hallucinates a tool outside its
+        # subset is now refused by name instead of getting a result.
+        registry=worker["runtime"],
     )
 
     _section(f"← {worker['label']} RESULT")

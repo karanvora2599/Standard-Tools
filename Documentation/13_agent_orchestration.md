@@ -58,6 +58,32 @@ run_agent(..., registry="modeling")     # 14 tools, modeling_dispatch
 run_agent(..., registry="analysis")     # 68 tools, dispatch   (the default)
 ```
 
+`registry=` also accepts a RUNTIME name, and that is the safer choice:
+
+```python
+run_agent(..., registry="research")             # 23 tools, scoped dispatch
+run_agent(..., registry="research+portfolio")   # joined explicitly
+```
+
+The difference is what happens on a wrong guess. `"analysis"` hands back
+the union dispatcher, which knows every tool regardless of what was
+advertised — so a model that invents a tool it was never shown gets a
+RESULT. A runtime hands back a table holding only its own tools, and the
+refusal names the runtime that actually owns what was asked for.
+
+Every `Implementation/*/Agent_*.py` script now names a runtime, and each
+one's scope is derived from the tools its own prompt mentions rather than
+chosen by hand — a prompt that instructs the agent to call a tool the
+runtime will refuse is worse than no scoping, because it walks the model
+into a wall it was told to walk into. Several of these genuinely span two
+or three runtimes; that is what a real workflow looks like, and the value
+is that the span is now written down instead of being an accident.
+
+The twelve workers dispatch through their category's runtime for the same
+reason. Each already declared a fixed, non-overlapping tool subset — that
+is the architecture — but dispatching through the union made the subset
+advisory.
+
 The analysis registry is itself divided into four **runtimes** —
 `research`, `backtest`, `portfolio`, `meta` — which are the same idea one
 level down: a dispatch table that refuses what it does not own. The

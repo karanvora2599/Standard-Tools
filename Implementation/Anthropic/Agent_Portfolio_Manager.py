@@ -80,6 +80,11 @@ if __name__ == "__main__":
         model=MODEL,
         max_iterations=20,
         categories=routed_categories,
+        # weights, sizing, capacity and stress are `portfolio`.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="research+portfolio",
     )
 
     _header("FINAL REPORT")

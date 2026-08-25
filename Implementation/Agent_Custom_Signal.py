@@ -11,6 +11,7 @@ second-guesses the signal itself, it only backtests and combines it.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
@@ -19,16 +20,16 @@ from standard_quant_tools.data.factory import DataFactory
 from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
-SYMBOL     = "AAPL"
+SYMBOL = "AAPL"
 START_DATE = "2022-06-01"
-END_DATE   = "2023-06-01"
+END_DATE = "2023-06-01"
 
 PANEL_TICKERS = ["AAPL", "MSFT", "GOOGL"]
-PANEL_START   = "2023-01-01"
-PANEL_END     = "2023-06-01"
+PANEL_START = "2023-01-01"
+PANEL_END = "2023-06-01"
 
 
 def _acceleration_signal(close: pd.Series) -> pd.Series:
@@ -79,8 +80,8 @@ if __name__ == "__main__":
     single_signal = _signal_dict(SYMBOL, START_DATE, END_DATE)
     panel_signal = {t: _signal_dict(t, PANEL_START, PANEL_END) for t in PANEL_TICKERS}
 
-    _log("Symbol",               f"{SYMBOL}  |  {START_DATE} to {END_DATE}")
-    _log("Panel tickers",        ", ".join(PANEL_TICKERS))
+    _log("Symbol", f"{SYMBOL}  |  {START_DATE} to {END_DATE}")
+    _log("Panel tickers", ", ".join(PANEL_TICKERS))
     _log("Signal points (single)", str(len(single_signal)))
 
     user_request = f"""
@@ -111,6 +112,10 @@ Report all three results clearly, with the exact numbers from each tool call.
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=10,
+        # a caller-supplied signal is still a backtest.
+        # A tool outside this runtime is refused by name rather than
+        # run. See Documentation/19_runtimes.md.
+        registry="backtest+portfolio",
     )
 
     _header("FINAL REPORT")

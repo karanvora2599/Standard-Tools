@@ -13,19 +13,20 @@ The agent:
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 # US energy sector — historically good for pairs trading
-UNIVERSE   = ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX", "VLO", "OXY", "HAL"]
+UNIVERSE = ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX", "VLO", "OXY", "HAL"]
 START_DATE = "2021-01-01"
-END_DATE   = "2024-12-31"
-ACCOUNT    = 500_000.0
+END_DATE = "2024-12-31"
+ACCOUNT = 500_000.0
 
 SYSTEM_PROMPT = """You are a quantitative pairs trader specialising in statistical arbitrage.
 
@@ -67,10 +68,10 @@ if __name__ == "__main__":
     log_file = setup_logging("agent_pair_trader")
 
     _header("Agentic Pair Trader — Claude Haiku")
-    _log("Log file",  str(log_file))
-    _log("Universe",  ", ".join(UNIVERSE))
-    _log("Period",    f"{START_DATE} → {END_DATE}")
-    _log("Account",   f"${ACCOUNT:,.0f}")
+    _log("Log file", str(log_file))
+    _log("Universe", ", ".join(UNIVERSE))
+    _log("Period", f"{START_DATE} → {END_DATE}")
+    _log("Account", f"${ACCOUNT:,.0f}")
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -78,7 +79,16 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=20,
+        # Spans two runtimes: it finds cointegrated pairs (`research`) and
+        # sizes both legs (`portfolio`). The scope is derived from the tools
+        # this prompt actually names -- it does NOT backtest the spread, so
+        # `backtest` is deliberately absent.
+        registry="research+portfolio",
     )
 
     _header("FINAL TRADE PLAN")
     print(result)
+
+
+if __name__ == "__main__":
+    main()

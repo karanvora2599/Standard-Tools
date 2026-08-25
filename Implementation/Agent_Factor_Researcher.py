@@ -15,26 +15,27 @@ The agent:
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _agent_utils import setup_logging, run_agent, _header, _log
 
 # ── Configuration ──────────────────────────────────────────────────
-ANTHROPIC_API_KEY = ""   # Replace with your key
-MODEL             = "claude-haiku-4-5"
+ANTHROPIC_API_KEY = ""  # Replace with your key
+MODEL = "claude-haiku-4-5"
 
 # Semiconductor sector
-ASSETS     = ["NVDA", "AMD", "INTC", "QCOM", "AMAT", "LRCX", "KLAC"]
+ASSETS = ["NVDA", "AMD", "INTC", "QCOM", "AMAT", "LRCX", "KLAC"]
 START_DATE = "2020-01-01"
-END_DATE   = "2024-12-31"
+END_DATE = "2024-12-31"
 
 # Factor proxies
 FACTORS = {
-    "market":   "SPY",   # broad market
-    "size":     "IWM",   # small-cap premium (size factor)
-    "value":    "IWD",   # value premium
+    "market": "SPY",  # broad market
+    "size": "IWM",  # small-cap premium (size factor)
+    "value": "IWD",  # value premium
     "momentum": "MTUM",  # momentum factor ETF
-    "quality":  "QUAL",  # quality factor ETF
+    "quality": "QUAL",  # quality factor ETF
 }
 
 SYSTEM_PROMPT = """You are a quantitative factor researcher studying return attribution across a sector.
@@ -87,7 +88,7 @@ Step 5 — Write the factor research note
 
 Be rigorous. Cite exact p-values, factor loadings, R², and Hurst values."""
 
-factor_names_str   = ", ".join(FACTORS.keys())
+factor_names_str = ", ".join(FACTORS.keys())
 factor_tickers_str = ", ".join(FACTORS.values())
 
 USER_REQUEST = f"""
@@ -117,9 +118,9 @@ if __name__ == "__main__":
 
     _header("Agentic Factor Researcher — Claude Haiku")
     _log("Log file", str(log_file))
-    _log("Assets",   ", ".join(ASSETS))
-    _log("Factors",  factor_names_str)
-    _log("Period",   f"{START_DATE} → {END_DATE}")
+    _log("Assets", ", ".join(ASSETS))
+    _log("Factors", factor_names_str)
+    _log("Period", f"{START_DATE} → {END_DATE}")
 
     result = run_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -127,6 +128,10 @@ if __name__ == "__main__":
         api_key=ANTHROPIC_API_KEY,
         model=MODEL,
         max_iterations=30,
+        # factor, cointegration and PCA structure are `research`.
+        # A tool outside this runtime is refused by name rather than
+        # run. See Documentation/19_runtimes.md.
+        registry="research",
     )
 
     _header("FACTOR RESEARCH NOTE")

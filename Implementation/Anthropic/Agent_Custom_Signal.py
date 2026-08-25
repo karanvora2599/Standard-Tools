@@ -119,6 +119,11 @@ Report all three results clearly, with the exact numbers from each tool call.
         model=MODEL,
         max_iterations=10,
         categories=routed_categories,
+        # a caller-supplied signal is still a backtest.
+        # The router still narrows WITHIN the runtime; the runtime
+        # is what makes the narrowing enforceable rather than
+        # advisory. See Documentation/19_runtimes.md.
+        registry="backtest+portfolio",
     )
 
     _header("FINAL REPORT")
