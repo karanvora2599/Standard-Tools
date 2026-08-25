@@ -89,6 +89,17 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "— for one ticker or a multi-ticker signal panel."
         ),
     },
+    "microstructure": {
+        "label": "Microstructure",
+        "description": (
+            "Spreads MEASURED from tick data rather than estimated from "
+            "bars: quoted and effective spread, the realized/impact "
+            "decomposition, signed order flow, trade-size and intraday "
+            "volume profiles, and a check of the OHLCV spread proxy against "
+            "the real thing. Requires a data provider with a tick feed; "
+            "nothing here works from bars."
+        ),
+    },
     "provenance": {
         "label": "Provenance & Audit",
         "description": (

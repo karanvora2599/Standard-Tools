@@ -215,6 +215,7 @@ class TestToolCategoryCoverage:
             "portfolio_risk",
             "discovery",
             "provenance",
+            "microstructure",
         }
         assert set(TOOL_CATEGORY.values()) <= known_categories
 

@@ -92,6 +92,8 @@ from standard_quant_tools.agent.models import (
     ListStrategiesResult,
     ListStressScenariosInput,
     ListStressScenariosResult,
+    MicrostructureInput,
+    MicrostructureResult,
     MissingBar,
     MonteCarloSimulationInput,
     MonteCarloSimulationResult,
@@ -139,6 +141,9 @@ from standard_quant_tools.agent.models import (
     SignalPanelBacktestInput,
     SignalPanelBacktestResult,
     SignalType,
+    SizeBucket,
+    SpreadProxyCheckInput,
+    SpreadProxyCheckResult,
     StalePriceRun,
     StrategyComparison,
     StrategyDescriptor,
@@ -153,9 +158,12 @@ from standard_quant_tools.agent.models import (
     TechnicalPanelInput,
     TechnicalPanelResult,
     TechnicalResult,
+    TimeBucket,
     Trade,
     TradeCostLeg,
     TradeDiagnostics,
+    TradeProfileInput,
+    TradeProfileResult,
     VerifyAuditIntegrityInput,
     VerifyAuditIntegrityResult,
     VolatilityEstimatorsInput,
@@ -176,6 +184,16 @@ from standard_quant_tools.analysis.correlation import (
 )
 from standard_quant_tools.analysis.garch import garch_volatility_forecast
 from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
+from standard_quant_tools.analysis.microstructure import (
+    intraday_volume_profile as _intraday_volume_profile,
+)
+from standard_quant_tools.analysis.microstructure import (
+    microstructure_summary as _microstructure_summary,
+)
+from standard_quant_tools.analysis.microstructure import quoted_spread as _quoted_spread
+from standard_quant_tools.analysis.microstructure import (
+    trade_size_profile as _trade_size_profile,
+)
 from standard_quant_tools.analysis.multi_factor import (
     multi_factor_regression,
     rolling_factor_loadings,
@@ -348,6 +366,21 @@ except ImportError:
 # while the fused call's ATR field is Wilder-smoothed -- a different
 # algorithm, not just a faster path to the same numbers.
 _FUSABLE_INDICATORS = {"rsi", "adx", "bollinger", "stochastic"}
+
+
+def _rounded(value: Any, digits: int = 4) -> Optional[float]:
+    """Round an optional float, keeping None as None.
+
+    Non-finite values become None rather than NaN: these summaries are
+    JSON, and a NaN token is rejected by strict parsers. None reads as
+    "not measurable here", which is what it means.
+    """
+    if value is None:
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return round(number, digits)
 
 
 def _jsonable(value: Any) -> Any:
@@ -4368,6 +4401,344 @@ def get_backtest_diagnostics(
 
 
 # ──────────────────────────────────────────────────────────────────
+# Microstructure — what the tick feed buys
+#
+# Nothing here synthesizes ticks from bars. A provider without a tick feed
+# gets an error naming the missing capability, because a "trade" derived
+# from an OHLCV row is a fiction every measure below would treat as fact.
+# ──────────────────────────────────────────────────────────────────
+
+
+def _tick_provider(source: str) -> Any:
+    """A provider that actually serves ticks, or an error saying who does.
+
+    DataProvider.get_trades raises NotImplementedError with a good message
+    already; this fires FIRST so the failure names the tool's own
+    precondition and points at describe_data_capabilities, rather than
+    surfacing from three frames deep after a fetch has been attempted.
+    """
+    try:
+        provider = DataFactory.get_provider(source)
+    except (NotImplementedError, ValueError) as exc:
+        raise ValidationError(str(exc)) from exc
+    except Exception as exc:
+        raise ValidationError(
+            f"the {source!r} provider could not be constructed: {exc}. Call "
+            "describe_data_capabilities to see what this environment can "
+            "actually reach."
+        ) from exc
+
+    if type(provider).get_trades is DataProvider.get_trades:
+        raise ValidationError(
+            f"the {source!r} provider has no tick feed, so this tool cannot "
+            "run on it. Bar data is not a substitute — spreads and signed "
+            "order flow are not recoverable from an OHLCV row, and nothing "
+            "here will invent them. Call describe_data_capabilities to see "
+            "which provider serves trades, or use get_liquidity_metrics for "
+            "the OHLCV-derived proxies."
+        )
+    return provider
+
+
+def _fetch_ticks(provider: Any, symbol: str, start: str, end: str, limit: Any):
+    """Trades, and quotes when the provider has them."""
+    trades = provider.get_trades(symbol, start, end, limit=limit)
+    quotes = None
+    if type(provider).get_quotes is not DataProvider.get_quotes:
+        try:
+            quotes = provider.get_quotes(symbol, start, end, limit=limit)
+        except NotImplementedError:
+            quotes = None
+    return trades, quotes
+
+
+def get_microstructure_metrics(
+    input_data: MicrostructureInput,
+) -> MicrostructureResult:
+    """
+    Measured spreads and signed order flow from tick data.
+
+    This is what `get_liquidity_metrics` estimates. That tool derives a
+    spread from OHLCV bars via Corwin-Schultz and says plainly that the
+    result is a proxy; this one reads the trades and quotes and measures it.
+
+    Three numbers matter and they are not interchangeable. The QUOTED
+    spread is what crossing the book costs at an instant. The EFFECTIVE
+    spread is what trades actually paid relative to the prevailing
+    midpoint, which differs whenever fills happen inside the quotes or
+    sweep through them — that is, most of the time, which is why a backtest
+    charging the quoted spread is not charging what trading costs. With a
+    realized horizon, the effective spread splits into what the liquidity
+    provider KEPT and what the trade MOVED, and those two halves imply
+    opposite fixes: impact says trade smaller, realized says trade
+    elsewhere.
+
+    Averages are size-weighted as well as count-weighted. The count-weighted
+    figure answers "what did a typical print cost" and is dominated by the
+    odd-lot tail; the size-weighted one answers "what did a typical share
+    cost", which is the question a strategy sizing a position is asking.
+    """
+    provider = _tick_provider(input_data.source)
+    trades, quotes = _fetch_ticks(
+        provider,
+        input_data.symbol,
+        input_data.start,
+        input_data.end,
+        input_data.limit,
+    )
+    if trades is None or trades.empty:
+        raise ValidationError(
+            f"no trades returned for {input_data.symbol} between "
+            f"{input_data.start} and {input_data.end}. Check the window is "
+            "inside market hours and that the plan tier includes trades."
+        )
+
+    horizon = (
+        pd.Timedelta(seconds=input_data.realized_horizon_seconds)
+        if input_data.realized_horizon_seconds is not None
+        else None
+    )
+    summary = _microstructure_summary(trades, quotes, horizon)
+
+    notes: List[str] = list(summary.get("notes", []))
+    if input_data.limit is not None and len(trades) >= input_data.limit:
+        notes.append(
+            f"Exactly {input_data.limit} trades came back, which is the "
+            "limit — this is one page, not the whole window, and the "
+            "measures below describe the part that was fetched. Narrow the "
+            "window rather than raising the limit."
+        )
+    dropped = int(len(trades)) - int(summary.get("n_signed", 0))
+    if dropped > 0:
+        notes.append(
+            f"{dropped} trade(s) could not be classified as buyer- or "
+            "seller-initiated and are excluded from the spread measures. "
+            "They are dropped rather than defaulted: a coin-flip side would "
+            "put noise into every average."
+        )
+    if (
+        quotes is not None
+        and summary.get("effective_spread_bps_size_weighted") is not None
+    ):
+        effective = summary["effective_spread_bps_size_weighted"]
+        quoted = summary.get("quoted_spread_bps_mean")
+        if quoted and effective > quoted * 1.2:
+            notes.append(
+                "The effective spread exceeds the quoted spread, so trades "
+                "were sweeping through the top of book rather than filling "
+                "inside it. Top-of-book depth is the binding constraint "
+                "here, and no shipped provider exposes the rest of it."
+            )
+
+    return MicrostructureResult(
+        symbol=input_data.symbol,
+        start=input_data.start,
+        end=input_data.end,
+        n_trades=int(summary["n_trades"]),
+        n_quotes=summary.get("n_quotes"),
+        n_signed=int(summary.get("n_signed", 0)),
+        total_volume=float(summary["total_volume"]),
+        vwap=round(float(summary["vwap"]), 6),
+        buy_volume_fraction=round(float(summary["buy_volume_fraction"]), 6),
+        quoted_spread_bps_mean=_rounded(summary.get("quoted_spread_bps_mean")),
+        quoted_spread_bps_median=_rounded(summary.get("quoted_spread_bps_median")),
+        quote_imbalance_mean=_rounded(summary.get("quote_imbalance_mean")),
+        effective_spread_bps_mean=_rounded(summary.get("effective_spread_bps_mean")),
+        effective_spread_bps_size_weighted=_rounded(
+            summary.get("effective_spread_bps_size_weighted")
+        ),
+        realized_spread_bps_size_weighted=_rounded(
+            summary.get("realized_spread_bps_size_weighted")
+        ),
+        price_impact_bps_size_weighted=_rounded(
+            summary.get("price_impact_bps_size_weighted")
+        ),
+        notes=notes,
+    )
+
+
+def get_trade_profile(input_data: TradeProfileInput) -> TradeProfileResult:
+    """
+    How a symbol's volume is distributed across trade sizes and times of day.
+
+    Both distributions change what a given order actually is. A book where
+    most volume arrives in a few large prints behaves nothing like one where
+    the same daily total arrives in thousands of small ones, at an identical
+    ADV — so an ADV-participation limit means different things in the two.
+    And US equity volume is U-shaped, so a fixed-time order is a much larger
+    share of the available liquidity at midday than at the close.
+
+    Size buckets are quantiles rather than a fixed share grid, because a
+    grid that suits one symbol misreads another by orders of magnitude.
+    """
+    provider = _tick_provider(input_data.source)
+    trades = provider.get_trades(
+        input_data.symbol, input_data.start, input_data.end, limit=input_data.limit
+    )
+    if trades is None or trades.empty:
+        raise ValidationError(
+            f"no trades returned for {input_data.symbol} between "
+            f"{input_data.start} and {input_data.end}."
+        )
+
+    sizes = _trade_size_profile(trades, buckets=input_data.size_buckets)
+    times = _intraday_volume_profile(trades, freq=input_data.intraday_freq)
+
+    notes: List[str] = []
+    if input_data.limit is not None and len(trades) >= input_data.limit:
+        notes.append(
+            f"Exactly {input_data.limit} trades came back, which is the "
+            "limit — this profile describes one page, not the whole window."
+        )
+    if sizes["largest_bucket_volume_fraction"] > 0.5:
+        notes.append(
+            "Over half the volume is in the largest size bucket: this name "
+            "trades in blocks. An ADV-based capacity limit assumes volume "
+            "you can actually join, and most of this is not that."
+        )
+
+    return TradeProfileResult(
+        symbol=input_data.symbol,
+        n_trades=int(sizes["n_trades"]),
+        total_volume=float(sizes["total_volume"]),
+        median_size=float(sizes["median_size"]),
+        size_buckets=[SizeBucket(**bucket) for bucket in sizes["buckets"]],
+        largest_bucket_volume_fraction=float(sizes["largest_bucket_volume_fraction"]),
+        intraday_buckets=[TimeBucket(**bucket) for bucket in times["buckets"]],
+        peak_time=times["peak_time"],
+        peak_volume_fraction=float(times["peak_volume_fraction"]),
+        notes=notes,
+    )
+
+
+#: Within this ratio of the measured spread, the OHLCV proxy is close
+#: enough that a backtest using it is not materially mispriced. Wide
+#: because Corwin-Schultz is a bar-derived estimator and was never meant to
+#: be exact -- the useful question is which SIDE it errs on.
+_PROXY_CLOSE_BAND = 0.25
+
+
+def check_spread_proxy(input_data: SpreadProxyCheckInput) -> SpreadProxyCheckResult:
+    """
+    Measure the spread from ticks, compute the OHLCV proxy for the same
+    name, and report which way the proxy is wrong.
+
+    `get_liquidity_metrics` exists because tick data is usually absent, and
+    its docstring says its numbers are proxies. A proxy cannot check
+    itself. This tool does, and the direction of the error is what matters:
+    a proxy that OVERSTATES the spread makes a backtest pessimistic, which
+    is safe. One that UNDERSTATES it means every backtest charging costs
+    from it has been reporting returns that are too good, and by roughly
+    the ratio reported here.
+
+    The two windows are separate on purpose. Corwin-Schultz needs a rolling
+    window of daily bars, so the bar window normally reaches much further
+    back than the tick window it is being checked against.
+    """
+    provider = _tick_provider(input_data.source)
+    trades, quotes = _fetch_ticks(
+        provider,
+        input_data.symbol,
+        input_data.start,
+        input_data.end,
+        input_data.limit,
+    )
+    if trades is None or trades.empty:
+        raise ValidationError(
+            f"no trades returned for {input_data.symbol}; there is nothing "
+            "to check the proxy against."
+        )
+    if quotes is None or quotes.empty:
+        raise ValidationError(
+            "no quotes returned, so the effective spread cannot be measured "
+            "and there is no ground truth to compare the proxy with."
+        )
+
+    summary = _microstructure_summary(trades, quotes, None)
+    measured = summary.get("effective_spread_bps_size_weighted")
+    if measured is None or not math.isfinite(measured):
+        raise ValidationError(
+            "the measured effective spread is not finite — too few "
+            "classifiable trades matched a prevailing quote to compare."
+        )
+
+    bars = provider.get_ohlcv(
+        input_data.symbol, input_data.bar_start_date, input_data.bar_end_date
+    )
+    if bars.empty:
+        raise ValidationError(
+            f"no OHLCV bars for {input_data.symbol} between "
+            f"{input_data.bar_start_date} and {input_data.bar_end_date}; the "
+            "proxy needs bars to be computed from."
+        )
+    cs = corwin_schultz_spread(bars["High"], bars["Low"], window=input_data.window)
+    cs_valid = cs.dropna()
+    if cs_valid.empty:
+        raise ValidationError(
+            f"Corwin-Schultz produced no value over {len(bars)} bars with "
+            f"window={input_data.window}; widen the bar window."
+        )
+    proxy_bps = float(cs_valid.mean()) * 10_000.0
+
+    returns = bars["Close"].pct_change()
+    dollar_volume = bars["Close"] * bars["Volume"]
+    amihud = amihud_illiquidity(returns, dollar_volume, window=input_data.window)
+    amihud_valid = amihud.dropna()
+
+    ratio = proxy_bps / measured if measured else float("nan")
+    if abs(ratio - 1.0) <= _PROXY_CLOSE_BAND:
+        verdict = "proxy_close"
+    elif ratio > 1.0:
+        verdict = "proxy_overstates"
+    else:
+        verdict = "proxy_understates"
+
+    notes = [
+        "The proxy is computed from daily bars over "
+        f"{input_data.bar_start_date}..{input_data.bar_end_date}; the "
+        f"measurement is from ticks over {input_data.start}..{input_data.end}. "
+        "They describe overlapping but not identical periods, which is "
+        "inherent to checking a bar estimator against tick data."
+    ]
+    if verdict == "proxy_understates":
+        notes.append(
+            f"The proxy charges roughly {ratio:.2f}x the measured spread, so "
+            "a backtest priced from it has been charging too little. Returns "
+            "computed that way are optimistic, and by more the more it "
+            "trades."
+        )
+    elif verdict == "proxy_overstates":
+        notes.append(
+            "The proxy charges more than the spread actually measured, so a "
+            "backtest priced from it is pessimistic — safe, but it may be "
+            "rejecting strategies that would have cleared their costs."
+        )
+
+    logger.debug(
+        "[check_spread_proxy] %s measured=%.2fbps proxy=%.2fbps verdict=%s",
+        input_data.symbol,
+        measured,
+        proxy_bps,
+        verdict,
+    )
+    return SpreadProxyCheckResult(
+        symbol=input_data.symbol,
+        measured_effective_spread_bps=round(float(measured), 4),
+        measured_quoted_spread_bps=round(
+            float(summary.get("quoted_spread_bps_mean", float("nan"))), 4
+        ),
+        corwin_schultz_spread_bps=round(proxy_bps, 4),
+        proxy_error_bps=round(proxy_bps - float(measured), 4),
+        proxy_ratio=round(float(ratio), 4),
+        amihud_illiquidity=(
+            round(float(amihud_valid.iloc[-1]), 8) if not amihud_valid.empty else 0.0
+        ),
+        verdict=verdict,
+        notes=notes,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Provenance — reading and verifying the decision log
 #
 # Read and verify only. Retention (gc, seal, hold, release-hold, keygen)
@@ -5724,6 +6095,21 @@ def get_agent_tools(
             ImpliedVolatilityInput,
         ),
         (
+            "get_microstructure_metrics",
+            "Measured (not estimated) spreads from tick data: quoted and effective spread, the realized/impact decomposition, signed order flow and quote imbalance. Requires a provider with a tick feed — call describe_data_capabilities first.",
+            MicrostructureInput,
+        ),
+        (
+            "get_trade_profile",
+            "How a symbol's volume is distributed across trade sizes (quantile buckets) and times of day. Distinguishes a book that trades in blocks from one that trades in odd lots at the same ADV. Requires a tick feed.",
+            TradeProfileInput,
+        ),
+        (
+            "check_spread_proxy",
+            "Measure the spread from ticks, compute get_liquidity_metrics' OHLCV proxy for the same name, and report which way the proxy errs — understating it means backtests priced from it have been charging too little. Requires a tick feed.",
+            SpreadProxyCheckInput,
+        ),
+        (
             "explain_decision",
             "What one recorded tool call did: inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python), timing, and the git commit and package version it ran under.",
             ExplainDecisionInput,
@@ -5879,6 +6265,12 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
     "get_option_pricing": (get_option_pricing, OptionPricingInput),
     "get_implied_volatility": (get_implied_volatility, ImpliedVolatilityInput),
+    "get_microstructure_metrics": (
+        get_microstructure_metrics,
+        MicrostructureInput,
+    ),
+    "get_trade_profile": (get_trade_profile, TradeProfileInput),
+    "check_spread_proxy": (check_spread_proxy, SpreadProxyCheckInput),
     "explain_decision": (explain_decision, ExplainDecisionInput),
     "replay_decision": (replay_decision, ReplayDecisionInput),
     "compare_decisions": (compare_decisions, CompareDecisionsInput),
@@ -5966,6 +6358,11 @@ TOOL_CATEGORY: Dict[str, str] = {
     "run_stress_test": "portfolio_risk",
     "get_liquidity_metrics": "portfolio_risk",
     "run_portfolio_optimization": "portfolio_risk",
+    # microstructure — measured from ticks rather than estimated from
+    # bars. Every one requires a provider with a tick feed.
+    "get_microstructure_metrics": "microstructure",
+    "get_trade_profile": "microstructure",
+    "check_spread_proxy": "microstructure",
     # provenance — read and verify the decision log. Retention operations
     # that could destroy evidence stay CLI-only; see the models module.
     "explain_decision": "provenance",

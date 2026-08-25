@@ -153,6 +153,7 @@ class TestWorkerToolCoverage:
             "portfolio_risk",
             "discovery",
             "provenance",
+            "microstructure",
             "model_research",
             "model_builder",
         }

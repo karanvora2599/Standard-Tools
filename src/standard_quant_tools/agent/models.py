@@ -3735,3 +3735,220 @@ class ExportAuditBundleResult(BaseModel):
     end_date: str
     size_bytes: int
     notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Microstructure — what the tick feed buys
+#
+# get_trades and get_quotes have been on the data interface since the tick
+# capability was added, and nothing consumed them. Meanwhile
+# get_liquidity_metrics estimates the spread from OHLCV bars and says in
+# its own docstring that those are proxies, present because the real data
+# is usually absent.
+#
+# These tools are what the real data buys: the spread stops being
+# estimated and starts being measured, and the proxies become checkable
+# against it -- which is the one thing a proxy cannot do for itself.
+#
+# Every tool here requires a provider with a tick feed and says so by name
+# when there isn't one. Nothing synthesizes ticks from bars; a "trade"
+# derived from an OHLCV row is a fiction that each measure would then treat
+# as fact. Call describe_data_capabilities first.
+# ──────────────────────────────────────────────
+
+
+class MicrostructureInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start: str = Field(
+        ...,
+        description=(
+            "Start timestamp. A date works, but tick volume is enormous — "
+            "prefer an explicit intraday range like '2024-03-01 14:30:00'."
+        ),
+    )
+    end: str = Field(..., description="End timestamp.")
+    realized_horizon_seconds: Optional[float] = Field(
+        300.0,
+        gt=0,
+        description=(
+            "Horizon for the realized-spread decomposition: the midpoint "
+            "this many seconds after each trade. Null skips the split and "
+            "reports the effective spread alone."
+        ),
+    )
+    limit: Optional[int] = Field(
+        50_000,
+        gt=0,
+        description=(
+            "Cap on ticks fetched per side. A liquid name produces millions "
+            "of trades a day, and the provider paginates — this bounds one "
+            "call to one page rather than an unbounded crawl."
+        ),
+    )
+    source: str = Field(
+        "polygon",
+        description=(
+            "Provider to fetch from. Only a provider with a tick feed can "
+            "serve this — describe_data_capabilities reports which do."
+        ),
+    )
+
+
+class MicrostructureResult(BaseModel):
+    symbol: str
+    start: str
+    end: str
+    n_trades: int
+    n_quotes: Optional[int] = None
+    n_signed: int = Field(
+        ...,
+        description=(
+            "Trades that could be classified as buyer- or seller-initiated. "
+            "Unclassifiable trades are dropped rather than defaulted — "
+            "assigning a side by coin flip would put noise into every mean."
+        ),
+    )
+    total_volume: float
+    vwap: float = Field(..., description="Size-weighted average trade price.")
+    buy_volume_fraction: float = Field(
+        ...,
+        description=(
+            "Share of signed volume that was buyer-initiated. Far from 0.5 "
+            "means directional order flow over the window."
+        ),
+    )
+    quoted_spread_bps_mean: Optional[float] = None
+    quoted_spread_bps_median: Optional[float] = None
+    quote_imbalance_mean: Optional[float] = Field(
+        None,
+        description="Mean (bid_size - ask_size)/(bid_size + ask_size). Positive = more resting size on the bid.",
+    )
+    effective_spread_bps_mean: Optional[float] = None
+    effective_spread_bps_size_weighted: Optional[float] = Field(
+        None,
+        description=(
+            "What a typical SHARE paid, not what a typical print paid. The "
+            "count-weighted mean above is dominated by the odd-lot tail; "
+            "this is the one a strategy sizing a position should read."
+        ),
+    )
+    realized_spread_bps_size_weighted: Optional[float] = Field(
+        None, description="What the liquidity provider kept after the horizon."
+    )
+    price_impact_bps_size_weighted: Optional[float] = Field(
+        None,
+        description=(
+            "Effective minus realized: what the trade moved the market. A "
+            "wide spread that is mostly impact means trading smaller helps "
+            "and switching venue does not; mostly realized means the "
+            "opposite."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class TradeProfileInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start: str = Field(..., description="Start timestamp.")
+    end: str = Field(..., description="End timestamp.")
+    size_buckets: int = Field(
+        5, ge=2, le=20, description="Number of trade-size quantile buckets."
+    )
+    intraday_freq: str = Field(
+        "30min",
+        description="Bucket width for the time-of-day volume profile (e.g. '15min', '1h').",
+    )
+    limit: Optional[int] = Field(50_000, gt=0, description="Cap on ticks fetched.")
+    source: str = Field("polygon", description="Provider with a tick feed.")
+
+
+class SizeBucket(BaseModel):
+    lower: float
+    upper: float
+    n_trades: int
+    volume_fraction: float
+
+
+class TimeBucket(BaseModel):
+    time: str
+    volume_fraction: float
+
+
+class TradeProfileResult(BaseModel):
+    symbol: str
+    n_trades: int
+    total_volume: float
+    median_size: float
+    size_buckets: List[SizeBucket] = Field(
+        ...,
+        description=(
+            "Quantile buckets, not a fixed share grid — a grid that suits "
+            "one symbol misreads another by orders of magnitude."
+        ),
+    )
+    largest_bucket_volume_fraction: float = Field(
+        ...,
+        description=(
+            "Share of volume in the largest size bucket. A book where "
+            "volume arrives in a few large prints behaves nothing like one "
+            "where the same total arrives in thousands of small ones."
+        ),
+    )
+    intraday_buckets: List[TimeBucket]
+    peak_time: str
+    peak_volume_fraction: float
+    notes: List[str] = Field(default_factory=list)
+
+
+class SpreadProxyCheckInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start: str = Field(..., description="Start timestamp for the tick window.")
+    end: str = Field(..., description="End timestamp for the tick window.")
+    bar_start_date: str = Field(
+        ...,
+        description=(
+            "Start date for the daily OHLCV the proxies are computed from. "
+            "Corwin-Schultz needs a rolling window of bars, so this normally "
+            "reaches further back than the tick window."
+        ),
+    )
+    bar_end_date: str = Field(..., description="End date for the OHLCV window.")
+    window: int = Field(
+        20, gt=0, description="Rolling window (bars) for the OHLCV proxies."
+    )
+    limit: Optional[int] = Field(50_000, gt=0, description="Cap on ticks fetched.")
+    source: str = Field("polygon", description="Provider with a tick feed.")
+
+
+class SpreadProxyCheckResult(BaseModel):
+    symbol: str
+    measured_effective_spread_bps: float = Field(
+        ..., description="Size-weighted, from ticks. The thing being compared against."
+    )
+    measured_quoted_spread_bps: float
+    corwin_schultz_spread_bps: float = Field(
+        ..., description="The OHLCV proxy get_liquidity_metrics reports."
+    )
+    proxy_error_bps: float = Field(
+        ..., description="corwin_schultz minus measured_effective. Signed."
+    )
+    proxy_ratio: float = Field(
+        ...,
+        description=(
+            "corwin_schultz / measured_effective. Above 1 means the proxy "
+            "overstates trading cost; below 1 means a backtest using it has "
+            "been charging too little."
+        ),
+    )
+    amihud_illiquidity: float = Field(
+        ..., description="Reported for context; it measures impact, not spread."
+    )
+    verdict: Literal["proxy_close", "proxy_overstates", "proxy_understates"] = Field(
+        ...,
+        description=(
+            "'proxy_close' within 25%. 'proxy_understates' is the one that "
+            "matters for a backtest: costs charged from the proxy were too "
+            "low, so reported returns are optimistic."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
