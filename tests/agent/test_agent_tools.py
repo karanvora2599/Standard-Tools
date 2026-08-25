@@ -225,8 +225,14 @@ class TestToolCategoryCoverage:
         execution = {n for n, c in TOOL_CATEGORY.items() if c == "backtest_execution"}
         validation = {n for n, c in TOOL_CATEGORY.items() if c == "backtest_validation"}
         assert execution.isdisjoint(validation)
-        assert len(execution) == 9
-        assert len(validation) == 7
+        # Derived rather than two magic numbers: the counts had to be edited
+        # by hand on every addition, which makes the guard read as a
+        # tripwire for growth rather than for a re-merge. What the split
+        # actually promises is that every backtest_* tool lands in exactly
+        # one of the two, and that neither side is empty.
+        both = {n for n, c in TOOL_CATEGORY.items() if c.startswith("backtest_")}
+        assert execution | validation == both
+        assert execution and validation
 
     def test_run_backtest_optimization_and_run_sma_backtest_are_separated(self):
         """The exact kind of confusable-tool pair this category split exists

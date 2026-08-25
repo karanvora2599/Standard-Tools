@@ -39,10 +39,14 @@ from standard_quant_tools.agent.models import (
     CapacityReportResult,
     CointegrationInput,
     CointegrationResult,
+    CompareCostModelsInput,
+    CompareCostModelsResult,
     CompareStrategiesInput,
     CompareStrategiesResult,
     CorrelationAnalysisInput,
     CorrelationAnalysisResult,
+    CostScenario,
+    CostScenarioResult,
     CostSummary,
     CustomSignalBacktestInput,
     DataCapabilitiesInput,
@@ -50,6 +54,8 @@ from standard_quant_tools.agent.models import (
     DataQualityReportInput,
     DataQualityReportResult,
     DrawdownEpisode,
+    EstimateTradeCostInput,
+    EstimateTradeCostResult,
     ExposureDiagnostics,
     ExposureSummary,
     ExtendedRiskInput,
@@ -79,14 +85,14 @@ from standard_quant_tools.agent.models import (
     OptionGreeks,
     OptionPricingInput,
     OptionPricingResult,
+    PCAInput,
+    PCAResult,
     PairFailure,
     PairResult,
     PairScannerInput,
     PairScannerResult,
     PairTradeBacktestInput,
     PairTradeBacktestResult,
-    PCAInput,
-    PCAResult,
     PerformanceSummary,
     PortfolioInput,
     PortfolioOptimizationInput,
@@ -130,6 +136,7 @@ from standard_quant_tools.agent.models import (
     TechnicalInput,
     TechnicalResult,
     Trade,
+    TradeCostLeg,
     TradeDiagnostics,
     VolatilityEstimatorsInput,
     VolatilityEstimatorsResult,
@@ -164,6 +171,17 @@ from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.backtest.artifacts import save_artifact
+from standard_quant_tools.backtest.costs import (
+    directional_commission,
+    fixed_bps_spread,
+    impact_cost,
+    maker_taker_cost,
+    margin_interest,
+    pct_of_range_spread,
+    per_share_commission,
+    percentage_commission,
+    short_borrow_cost,
+)
 from standard_quant_tools.backtest.constraints import (
     capacity_report as _capacity_report,
 )
@@ -3396,6 +3414,7 @@ def run_portfolio_simulation(
         target_weights,
         initial_capital=input_data.initial_capital,
         commission_pct=input_data.commission_pct,
+        sell_commission_pct=input_data.sell_commission_pct,
         slippage_pct=input_data.slippage_pct,
         max_gross_leverage=input_data.max_gross_leverage,
         max_position_pct=input_data.max_position_pct,
@@ -4296,6 +4315,298 @@ def get_backtest_diagnostics(
 
 
 # ──────────────────────────────────────────────────────────────────
+# Transaction costs — priced directly, and swept across a backtest
+# ──────────────────────────────────────────────────────────────────
+
+
+def estimate_trade_cost(
+    input_data: EstimateTradeCostInput,
+) -> EstimateTradeCostResult:
+    """
+    Price one hypothetical trade under a composed cost model, itemized.
+
+    Every leg is one of backtest/costs.py's pure functions, called with the
+    caller's own numbers — this is the same arithmetic a backtest applies
+    per fill, made answerable without running one. Two of those functions
+    (`maker_taker_cost`, `pct_of_range_spread`) had no other agent-callable
+    path at all.
+
+    The result reports `breakeven_move_bps` as TWICE the one-way total,
+    because an entry has to earn its exit's cost as well as its own, and a
+    one-way figure quietly understates what the trade must make.
+    """
+    notional = input_data.notional
+    legs: List[TradeCostLeg] = []
+    notes: List[str] = []
+
+    def _add(component: str, model: str, cost: float) -> None:
+        legs.append(
+            TradeCostLeg(
+                component=component,
+                model=model,
+                cost=round(float(cost), 6),
+                bps_of_notional=round(float(cost) / notional * 10_000.0, 4),
+            )
+        )
+
+    if input_data.commission_model == "pct":
+        _add(
+            "commission",
+            "percentage_commission",
+            percentage_commission(notional, input_data.commission_pct),
+        )
+    elif input_data.commission_model == "per_share":
+        shares = input_data.shares
+        assert shares is not None  # guaranteed by the input model's validator
+        commission = per_share_commission(
+            shares, input_data.per_share_rate, input_data.min_commission
+        )
+        _add("commission", "per_share_commission", commission)
+        if commission <= input_data.min_commission + 1e-12:
+            notes.append(
+                f"Commission is at the {input_data.min_commission} minimum, "
+                "not the per-share rate — the trade is small enough that the "
+                "floor dominates, so cost does not scale with size here."
+            )
+    elif input_data.commission_model == "directional":
+        _add(
+            "commission",
+            "directional_commission",
+            directional_commission(
+                notional,
+                input_data.buy_rate,
+                input_data.sell_rate,
+                input_data.side == "buy",
+            ),
+        )
+    elif input_data.commission_model == "maker_taker":
+        cost = maker_taker_cost(
+            notional,
+            input_data.taker_rate,
+            input_data.maker_rate,
+            input_data.is_maker,
+        )
+        _add("commission", "maker_taker_cost", cost)
+        if cost < 0:
+            notes.append(
+                "Commission is NEGATIVE: this is a maker rebate, so the "
+                "exchange pays for the fill. It offsets the other legs "
+                "rather than being free money — check the total, not this leg."
+            )
+
+    if input_data.spread_model == "fixed_bps":
+        _add(
+            "spread",
+            "fixed_bps_spread",
+            fixed_bps_spread(notional, input_data.spread_bps),
+        )
+    elif input_data.spread_model == "pct_of_range":
+        _add(
+            "spread",
+            "pct_of_range_spread",
+            pct_of_range_spread(
+                notional,
+                float(input_data.bar_high),  # type: ignore[arg-type]
+                float(input_data.bar_low),  # type: ignore[arg-type]
+                float(input_data.bar_close),  # type: ignore[arg-type]
+                input_data.range_pct,
+            ),
+        )
+
+    if input_data.avg_dollar_volume is not None and input_data.volatility is not None:
+        participation = notional / input_data.avg_dollar_volume
+        _add(
+            "impact",
+            "impact_cost",
+            impact_cost(
+                notional,
+                input_data.avg_dollar_volume,
+                input_data.volatility,
+                input_data.impact_coefficient,
+            ),
+        )
+        if participation > 0.1:
+            notes.append(
+                f"This trade is {participation:.1%} of average dollar volume. "
+                "The square-root impact model is calibrated for small "
+                "participation rates; at this size the estimate is an "
+                "extrapolation, and the real constraint is probably capacity "
+                "rather than cost — see get_capacity_report."
+            )
+
+    if input_data.short_borrow_bps > 0:
+        _add(
+            "borrow",
+            "short_borrow_cost",
+            short_borrow_cost(
+                notional, input_data.short_borrow_bps, input_data.holding_days
+            ),
+        )
+    if input_data.margin_cash < 0 and input_data.margin_annual_rate > 0:
+        _add(
+            "margin_interest",
+            "margin_interest",
+            margin_interest(
+                input_data.margin_cash,
+                input_data.margin_annual_rate,
+                input_data.holding_days,
+            ),
+        )
+
+    total = float(sum(leg.cost for leg in legs))
+    total_bps = total / notional * 10_000.0
+    logger.debug(
+        "[estimate_trade_cost] notional=%.2f legs=%d total_bps=%.2f",
+        notional,
+        len(legs),
+        total_bps,
+    )
+    return EstimateTradeCostResult(
+        notional=notional,
+        side=input_data.side,
+        legs=legs,
+        total_cost=round(total, 6),
+        total_bps=round(total_bps, 4),
+        breakeven_move_bps=round(total_bps * 2.0, 4),
+        notes=notes,
+    )
+
+
+#: Bisection bounds and tolerance for the breakeven commission solve. The
+#: upper bound is a 100% commission, which no real venue charges -- it is
+#: there so a strategy that survives anything reports "no crossing" rather
+#: than a number pulled from the edge of the bracket.
+_BREAKEVEN_HI = 1.0
+_BREAKEVEN_TOL = 1e-6
+_BREAKEVEN_MAX_ITER = 60
+
+
+def compare_cost_models(
+    input_data: CompareCostModelsInput,
+) -> CompareCostModelsResult:
+    """
+    Run one strategy under several cost assumptions and report what each
+    costs — plus the commission rate at which the edge disappears.
+
+    The signal series is computed ONCE and priced repeatedly. That is not
+    only an efficiency: it is what makes the comparison mean anything.
+    Costs do not feed back into the signal (signals come from prices, never
+    from equity), so every scenario trades on identical dates and the
+    differences between rows are cost and nothing else. Running the same
+    comparison as N separate backtest calls re-derives the same signal N
+    times and invites a parameter to drift between them.
+
+    That same independence makes total return strictly decreasing in the
+    commission rate, so `breakeven_commission_pct` is found by BISECTION
+    rather than a search — there is exactly one crossing when one exists.
+    None is returned when the strategy loses money at zero cost (nothing to
+    break even from) or still profits at a 100% commission (no crossing in
+    the bracket).
+    """
+    if input_data.strategy_type not in STRATEGY_REGISTRY:
+        raise ValidationError(
+            f"Unknown strategy_type {input_data.strategy_type!r}. Available: "
+            f"{sorted(STRATEGY_REGISTRY)}. Call list_strategies for each "
+            "one's parameters."
+        )
+
+    logger.debug(
+        "[compare_cost_models] %s %s scenarios=%d",
+        input_data.symbol,
+        input_data.strategy_type,
+        len(input_data.scenarios),
+    )
+    provider = DataFactory.get_provider()
+    df = provider.get_ohlcv(
+        input_data.symbol, input_data.start_date, input_data.end_date
+    )
+    signals = STRATEGY_REGISTRY[input_data.strategy_type](df, **input_data.parameters)
+
+    def _run(commission_pct: float, slippage_pct: float) -> Dict[str, Any]:
+        return run_strategy(
+            df,
+            signals,
+            input_data.initial_capital,
+            commission_pct=commission_pct,
+            slippage_pct=slippage_pct,
+            include_trade_log=True,
+            fill_price=input_data.fill_price,
+        )
+
+    gross = _run(0.0, 0.0)
+    gross_return = float(gross["total_return"])
+
+    rows: List[CostScenarioResult] = []
+    for scenario in input_data.scenarios:
+        result = _run(scenario.commission_pct, scenario.slippage_pct)
+        rows.append(
+            CostScenarioResult(
+                label=scenario.label,
+                commission_pct=scenario.commission_pct,
+                slippage_pct=scenario.slippage_pct,
+                total_return=round(float(result["total_return"]), 6),
+                annualized_return=round(float(cagr(result["equity_curve"])), 6),
+                sharpe_ratio=round(float(result["sharpe_ratio"]), 4),
+                max_drawdown=round(float(result["max_drawdown"]), 6),
+                n_trades=int(result["num_trades"]),
+                cost_drag_vs_gross=round(
+                    float(result["total_return"]) - gross_return, 6
+                ),
+            )
+        )
+
+    notes: List[str] = []
+    breakeven: Optional[float] = None
+    if input_data.solve_breakeven:
+        slippage = input_data.scenarios[0].slippage_pct
+        if gross_return <= 0:
+            notes.append(
+                "No breakeven commission: the strategy loses money before "
+                "any costs are charged, so there is no edge for costs to "
+                "consume. Fix the strategy, not the cost assumption."
+            )
+        elif float(_run(_BREAKEVEN_HI, slippage)["total_return"]) > 0:
+            notes.append(
+                "No breakeven commission inside the bracket: total return is "
+                "still positive at a 100% commission. That normally means the "
+                "strategy barely trades — check n_trades before reading this "
+                "as robustness."
+            )
+        else:
+            lo, hi = 0.0, _BREAKEVEN_HI
+            for _ in range(_BREAKEVEN_MAX_ITER):
+                if hi - lo < _BREAKEVEN_TOL:
+                    break
+                mid = (lo + hi) / 2.0
+                if float(_run(mid, slippage)["total_return"]) > 0:
+                    lo = mid
+                else:
+                    hi = mid
+            breakeven = round((lo + hi) / 2.0, 6)
+            notes.append(
+                f"Breakeven solved at slippage_pct={slippage} (the first "
+                "scenario's). A different slippage moves this number."
+            )
+
+    survives = all(row.total_return > 0 for row in rows)
+    if not survives:
+        losing = [row.label for row in rows if row.total_return <= 0]
+        notes.append(f"Scenarios that lose money: {losing}.")
+
+    return CompareCostModelsResult(
+        symbol=input_data.symbol,
+        strategy_type=input_data.strategy_type,
+        n_bars=int(len(df)),
+        gross_total_return=round(gross_return, 6),
+        gross_sharpe_ratio=round(float(gross["sharpe_ratio"]), 4),
+        scenarios=rows,
+        breakeven_commission_pct=breakeven,
+        survives_all_scenarios=survives,
+        notes=notes,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # Discovery — the contracts this library already holds in data, made
 # askable instead of described in prose
 # ──────────────────────────────────────────────────────────────────
@@ -4725,6 +5036,16 @@ def get_agent_tools(
             ImpliedVolatilityInput,
         ),
         (
+            "estimate_trade_cost",
+            "Itemized cost of one hypothetical trade under a composed cost model: commission (pct/per-share/directional/maker-taker), spread (fixed bps or a fraction of the bar's range), square-root market impact, short borrow and margin interest. No market data needed.",
+            EstimateTradeCostInput,
+        ),
+        (
+            "compare_cost_models",
+            "Run one strategy under several cost assumptions on a single fetched signal series, and solve for the commission rate at which its total return reaches zero. Answers 'does this survive costs' in one call.",
+            CompareCostModelsInput,
+        ),
+        (
             "list_strategies",
             "Every built-in strategy's parameter contract: names, kinds, defaults, bounds and cross-parameter relations. Offline. Call this before guessing a strategy's parameters.",
             ListStrategiesInput,
@@ -4830,6 +5151,8 @@ _TOOL_DISPATCH: Dict[str, Any] = {
     "run_backtest_compact": (run_backtest_compact, BacktestCompactInput),
     "get_option_pricing": (get_option_pricing, OptionPricingInput),
     "get_implied_volatility": (get_implied_volatility, ImpliedVolatilityInput),
+    "estimate_trade_cost": (estimate_trade_cost, EstimateTradeCostInput),
+    "compare_cost_models": (compare_cost_models, CompareCostModelsInput),
     "list_strategies": (list_strategies, ListStrategiesInput),
     "list_stress_scenarios": (list_stress_scenarios, ListStressScenariosInput),
     "describe_data_capabilities": (
@@ -4904,6 +5227,8 @@ TOOL_CATEGORY: Dict[str, str] = {
     "run_stress_test": "portfolio_risk",
     "get_liquidity_metrics": "portfolio_risk",
     "run_portfolio_optimization": "portfolio_risk",
+    "estimate_trade_cost": "portfolio_risk",
+    "compare_cost_models": "backtest_validation",
     # discovery — what the library accepts and what the provider can serve,
     # all offline and all cheap. Answers questions a caller would otherwise
     # answer by guessing and reading the resulting error.

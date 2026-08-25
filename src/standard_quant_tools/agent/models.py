@@ -2044,6 +2044,18 @@ class PortfolioSimulationInput(BaseModel):
     commission_pct: float = Field(
         0.001, le=1, ge=0, description="Commission per trade notional (fraction)."
     )
+    sell_commission_pct: Optional[float] = Field(
+        None,
+        le=1,
+        ge=0,
+        description=(
+            "Separate commission rate for SALES. None (the default) charges "
+            "commission_pct on both sides. Real venues are frequently "
+            "asymmetric — regulatory fees in several markets are sell-side "
+            "only — and a symmetric rate understates the cost of a strategy "
+            "that turns over in one direction more than the other."
+        ),
+    )
     slippage_pct: float = Field(
         0.0005, le=1, ge=0, description="Slippage per trade notional (fraction)."
     )
@@ -2968,4 +2980,312 @@ class DataCapabilitiesResult(BaseModel):
         ),
     )
     cache_dir: str = Field(..., description="Where the persistent OHLCV cache lives.")
+    notes: List[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Transaction costs — priced on their own, and swept
+#
+# backtest/costs.py is ten pure functions, and until now every one of them
+# was reachable only by running a whole portfolio simulation that happened
+# to compose the subset you wanted. Two of them (maker_taker_cost,
+# pct_of_range_spread) were reachable from no tool at all.
+#
+# The question a cost model actually gets asked is "does this strategy
+# survive it", and that question was previously answered by running the
+# same backtest N times with different commission_pct and comparing by
+# hand. compare_cost_models does the sweep in one call on one fetch, and
+# solves for the rate at which the edge disappears -- which is the number
+# the N-call version was groping toward.
+# ──────────────────────────────────────────────
+
+
+class TradeCostLeg(BaseModel):
+    """One priced component of a trade's cost."""
+
+    component: Literal["commission", "spread", "impact", "borrow", "margin_interest"]
+    model: str = Field(
+        ..., description="Which backtest/costs.py function priced this leg."
+    )
+    cost: float = Field(..., description="Currency units.")
+    bps_of_notional: float
+
+
+class EstimateTradeCostInput(BaseModel):
+    notional: float = Field(
+        ...,
+        gt=0,
+        description="Trade size in currency units. Cost is charged on |notional|.",
+    )
+    side: Literal["buy", "sell"] = Field(
+        "buy",
+        description=(
+            "Only matters for commission_model='directional' (separate "
+            "buy/sell rates) — every other model is side-agnostic."
+        ),
+    )
+    commission_model: Literal["pct", "per_share", "directional", "maker_taker", "none"] = Field(
+        "pct",
+        description=(
+            "'pct' rate x notional | 'per_share' rate x shares floored at a "
+            "minimum | 'directional' separate buy and sell rates | "
+            "'maker_taker' where the maker rate MAY be a rebate (negative) | "
+            "'none' to price the other components alone."
+        ),
+    )
+    commission_pct: float = Field(
+        0.001, ge=0, le=1, description="commission_model='pct': fraction of notional."
+    )
+    shares: Optional[float] = Field(
+        None,
+        gt=0,
+        description="commission_model='per_share': share count. Required for that model.",
+    )
+    per_share_rate: float = Field(
+        0.005, ge=0, description="commission_model='per_share': currency per share."
+    )
+    min_commission: float = Field(
+        1.0, ge=0, description="commission_model='per_share': floor per trade."
+    )
+    buy_rate: float = Field(
+        0.001, ge=0, description="commission_model='directional': fraction charged on buys."
+    )
+    sell_rate: float = Field(
+        0.001,
+        ge=0,
+        description=(
+            "commission_model='directional': fraction charged on sells. Often "
+            "the higher of the two — regulatory fees are typically sell-side."
+        ),
+    )
+    taker_rate: float = Field(
+        0.0005, ge=0, description="commission_model='maker_taker': fraction taken when crossing."
+    )
+    maker_rate: float = Field(
+        -0.0001,
+        description=(
+            "commission_model='maker_taker': fraction when providing "
+            "liquidity. MAY be negative — that is a rebate, and it is the "
+            "one cost input here that is allowed below zero."
+        ),
+    )
+    is_maker: bool = Field(
+        False, description="commission_model='maker_taker': did this order provide liquidity?"
+    )
+    spread_model: Literal["fixed_bps", "pct_of_range", "none"] = Field(
+        "fixed_bps",
+        description=(
+            "'fixed_bps' a flat basis-point haircut | 'pct_of_range' a "
+            "fraction of the bar's own High-Low range, which widens the "
+            "estimate on volatile bars | 'none'."
+        ),
+    )
+    spread_bps: float = Field(
+        1.0, ge=0, description="spread_model='fixed_bps': basis points of notional."
+    )
+    bar_high: Optional[float] = Field(
+        None, gt=0, description="spread_model='pct_of_range': the bar's High."
+    )
+    bar_low: Optional[float] = Field(
+        None, gt=0, description="spread_model='pct_of_range': the bar's Low."
+    )
+    bar_close: Optional[float] = Field(
+        None, gt=0, description="spread_model='pct_of_range': the bar's Close."
+    )
+    range_pct: float = Field(
+        0.1,
+        ge=0,
+        description="spread_model='pct_of_range': fraction of the High-Low range to charge.",
+    )
+    avg_dollar_volume: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Supply this together with `volatility` to add a square-root "
+            "market-impact leg. Omit either one and impact is not priced — "
+            "impact is never guessed from notional alone."
+        ),
+    )
+    volatility: Optional[float] = Field(
+        None, ge=0, description="Per-period return volatility for the impact model."
+    )
+    impact_coefficient: float = Field(1.0, ge=0, description="Impact model coefficient.")
+    short_borrow_bps: float = Field(
+        0.0,
+        ge=0,
+        description="Annualized basis points on a short's notional, accrued over holding_days.",
+    )
+    holding_days: float = Field(
+        1.0, ge=0, description="Days the position is held, for borrow and margin accrual."
+    )
+    margin_cash: float = Field(
+        0.0,
+        description=(
+            "Account cash. Only a NEGATIVE value accrues margin interest — "
+            "there is nothing borrowed to charge on a positive balance."
+        ),
+    )
+    margin_annual_rate: float = Field(
+        0.0, ge=0, description="Annualized rate on negative cash."
+    )
+
+    @model_validator(mode="after")
+    def _check_model_inputs(self) -> "EstimateTradeCostInput":
+        if self.commission_model == "per_share" and self.shares is None:
+            raise ValueError(
+                "commission_model='per_share' needs `shares` — a per-share "
+                "rate cannot be derived from notional without a price."
+            )
+        if self.spread_model == "pct_of_range":
+            missing = [
+                name
+                for name, value in (
+                    ("bar_high", self.bar_high),
+                    ("bar_low", self.bar_low),
+                    ("bar_close", self.bar_close),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"spread_model='pct_of_range' needs {missing} — the "
+                    "estimate is a fraction of that bar's own range."
+                )
+            if self.bar_high is not None and self.bar_low is not None:
+                if self.bar_high < self.bar_low:
+                    raise ValueError(
+                        f"bar_high ({self.bar_high}) is below bar_low "
+                        f"({self.bar_low})"
+                    )
+        impact_inputs = (self.avg_dollar_volume, self.volatility)
+        if any(v is not None for v in impact_inputs) and not all(
+            v is not None for v in impact_inputs
+        ):
+            raise ValueError(
+                "the impact model needs BOTH avg_dollar_volume and "
+                "volatility. Pricing impact from notional alone would be a "
+                "number with no model behind it."
+            )
+        return self
+
+
+class EstimateTradeCostResult(BaseModel):
+    notional: float
+    side: str
+    legs: List[TradeCostLeg]
+    total_cost: float
+    total_bps: float = Field(
+        ..., description="Total one-way cost in basis points of notional."
+    )
+    breakeven_move_bps: float = Field(
+        ...,
+        description=(
+            "How far the price must move in your favour to cover a ROUND "
+            "TRIP at this cost — two times total_bps. The one-way figure "
+            "understates what an entry actually has to earn."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class CostScenario(BaseModel):
+    """One point in the cost sweep."""
+
+    label: str = Field(..., min_length=1, max_length=64)
+    commission_pct: float = Field(..., ge=0, le=1)
+    slippage_pct: float = Field(0.0, ge=0, le=1)
+
+
+class CostScenarioResult(BaseModel):
+    label: str
+    commission_pct: float
+    slippage_pct: float
+    total_return: float
+    annualized_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    n_trades: int
+    cost_drag_vs_gross: float = Field(
+        ...,
+        description=(
+            "total_return under this scenario minus the zero-cost "
+            "total_return — always <= 0, and the amount costs took."
+        ),
+    )
+
+
+class CompareCostModelsInput(BaseModel):
+    symbol: str = Field(..., description="Ticker symbol.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    strategy_type: str = Field(
+        ...,
+        description=(
+            "One of the eight registry strategies — call list_strategies for "
+            "the names and their parameters."
+        ),
+    )
+    parameters: Dict[str, Any] = Field(
+        default_factory=dict, description="Strategy parameters, validated as usual."
+    )
+    scenarios: List[CostScenario] = Field(
+        ...,
+        min_length=1,
+        max_length=12,
+        description=(
+            "Cost assumptions to price the SAME signal series under. The "
+            "signal is computed once, so these differ only in what the "
+            "trading cost."
+        ),
+    )
+    initial_capital: float = Field(10_000.0, gt=0, le=1e15)
+    fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field("close")
+    solve_breakeven: bool = Field(
+        True,
+        description=(
+            "Solve for the commission rate at which total return reaches "
+            "zero. Costs are monotone in the rate for a fixed signal series, "
+            "so this is a bisection, not a search."
+        ),
+    )
+
+    @field_validator("scenarios")
+    @classmethod
+    def _unique_labels(cls, scenarios: List[CostScenario]) -> List[CostScenario]:
+        labels = [s.label for s in scenarios]
+        duplicates = sorted({label for label in labels if labels.count(label) > 1})
+        if duplicates:
+            raise ValueError(
+                f"scenario labels must be unique; got duplicates {duplicates}. "
+                "Two rows with the same label are indistinguishable in the result."
+            )
+        return scenarios
+
+
+class CompareCostModelsResult(BaseModel):
+    symbol: str
+    strategy_type: str
+    n_bars: int
+    gross_total_return: float = Field(
+        ...,
+        description=(
+            "Total return with ZERO costs — the ceiling every scenario is "
+            "measured against. Always computed, never one of the submitted "
+            "scenarios."
+        ),
+    )
+    gross_sharpe_ratio: float
+    scenarios: List[CostScenarioResult]
+    breakeven_commission_pct: Optional[float] = Field(
+        None,
+        description=(
+            "Commission rate at which total return crosses zero, holding "
+            "slippage at the first scenario's value. None when the strategy "
+            "loses money even at zero cost (nothing to break even from) or "
+            "still profits at a 100% commission (no crossing exists)."
+        ),
+    )
+    survives_all_scenarios: bool = Field(
+        ..., description="True when every submitted scenario keeps total_return > 0."
+    )
     notes: List[str] = Field(default_factory=list)

@@ -230,7 +230,11 @@ equity paths via moving-block bootstrap of a portfolio's historical
 returns; unlike get_robustness_diagnostics (same-sample confidence check)
 or run_walk_forward_backtest (tests actual historical decisions), this is a
 forward-looking projection from historical statistics, not a prediction or
-a validation of any strategy).
+a validation of any strategy), and a transaction-cost sweep
+(compare_cost_models -- runs one strategy under several cost assumptions on
+a single fetched signal series and solves for the commission rate at which
+its total return reaches zero; use it when the question is whether an edge
+survives costs rather than whether it survives out of sample).
 
 If the request is simply "run SMA on AAPL" with fixed parameters and no
 mention of optimizing/validating/diagnosing, that's the Backtest Execution
@@ -308,6 +312,13 @@ estimator per ticker — OHLCV-derived proxies for how much a given trade
 size would move the price and how wide the effective bid/ask spread likely
 is, since no real bid/ask data exists in this library. Higher Amihud value
 = less liquid.
+estimate_trade_cost: itemized cost of ONE hypothetical trade — commission
+(percentage, per-share with a floor, separate buy/sell rates, or maker/taker
+where the maker rate may be a rebate), spread (flat basis points or a
+fraction of the bar's own range), square-root market impact, short borrow
+and margin interest. Needs no market data: you supply the numbers. Report
+breakeven_move_bps when asked what a trade has to earn — it is the round
+trip, which is what the position actually has to cover.
 
 Your only job is risk decomposition, portfolio construction, position
 sizing, capacity analysis, historical stress-test replay, and liquidity
