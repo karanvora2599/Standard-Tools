@@ -32,21 +32,46 @@ from typing import Any, Dict, List, Sequence
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.agent.feature_models import (
     AnalyzeFeatureInput,
+    CompareFeatureSetsInput,
+    CompareFeatureSetsResult,
     FeatureCluster,
     FeatureDistribution,
+    FeatureDriftInput,
+    FeatureDriftResult,
     FeatureICDecayInput,
     FeatureICDecayResult,
     FeaturePredictive,
     FeatureProfile,
     FeatureRedundancyInput,
     FeatureRedundancyResult,
+    FeatureStabilityInput,
+    FeatureStabilityResult,
     ICDecayPoint,
+    PermutationTestInput,
+    PermutationTestResult,
+    SelectFeaturesInput,
+    SelectFeaturesResult,
 )
 from standard_quant_tools.modeling.analysis.feature_report import (
     feature_distribution_stats,
     feature_predictive_stats,
     lead_lag_ic_curve,
     redundancy_report,
+)
+from standard_quant_tools.modeling.analysis.feature_selection import (
+    compare_feature_sets as _compare_feature_sets,
+)
+from standard_quant_tools.modeling.analysis.feature_selection import (
+    select_features as _select_features,
+)
+from standard_quant_tools.modeling.analysis.feature_stability import (
+    feature_drift as _feature_drift,
+)
+from standard_quant_tools.modeling.analysis.feature_stability import (
+    feature_stability as _feature_stability,
+)
+from standard_quant_tools.modeling.analysis.feature_stability import (
+    permutation_test_ic as _permutation_test_ic,
 )
 
 logger = logging.getLogger(__name__)
@@ -260,15 +285,210 @@ def get_feature_ic_decay(input_data: FeatureICDecayInput) -> FeatureICDecayResul
     )
 
 
+def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
+    """
+    Choose a feature set: drop the duplicates, drop what does not predict,
+    and give a reason for every exclusion.
+
+    Deliberately boring. There is no greedy search here, because a selector
+    scored on the same panel it selects from manufactures overfit that looks
+    like evidence -- and an agent handed that output has no way to tell. The
+    two criteria used instead, "this is the same feature twice" and "this has
+    no measurable relationship with the target", are the two a human can be
+    shown afterwards.
+
+    Redundancy is resolved BEFORE the IC floor. A cluster is one signal, so
+    the question is whether that signal clears the floor, asked once through
+    its representative -- not whether each restatement clears it separately.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+
+    logger.debug("[select_features] dataset_id=%s", input_data.dataset_id)
+    panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    features = _resolve_features(meta, input_data.features, input_data.dataset_id)
+    for feature in features:
+        _require_feature(panel, feature, input_data.dataset_id)
+
+    result = _select_features(
+        panel,
+        features,
+        cluster_threshold=input_data.cluster_threshold,
+        min_abs_rank_ic=input_data.min_abs_rank_ic,
+        max_features=input_data.max_features,
+    )
+    return SelectFeaturesResult(
+        dataset_id=input_data.dataset_id,
+        selected=result["selected"],
+        dropped=result["dropped"],
+        n_considered=result["n_considered"],
+        n_selected=result["n_selected"],
+        n_clusters=result["n_clusters"],
+    )
+
+
+def compare_feature_sets(
+    input_data: CompareFeatureSetsInput,
+) -> CompareFeatureSetsResult:
+    """
+    Two feature sets on the same panel, with the cost of the difference
+    attached.
+
+    Not a single score, on purpose. A larger set almost always has a higher
+    maximum IC and almost always carries more collinearity, so one number
+    hides half of the trade. What comes back is per-set diagnostics, what is
+    unique to each side, and the per-feature IC for everything in either --
+    including `n_independent_signals`, which is the honest count of ideas
+    where `n_features` is the count of columns.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+
+    logger.debug("[compare_feature_sets] dataset_id=%s", input_data.dataset_id)
+    panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    for feature in set(input_data.left) | set(input_data.right):
+        _require_feature(panel, feature, input_data.dataset_id)
+
+    result = _compare_feature_sets(
+        panel,
+        input_data.left,
+        input_data.right,
+        cluster_threshold=input_data.cluster_threshold,
+    )
+    return CompareFeatureSetsResult(dataset_id=input_data.dataset_id, **result)
+
+
+def get_feature_drift(input_data: FeatureDriftInput) -> FeatureDriftResult:
+    """
+    Whether a feature is still the same measurement, and still predicts, on
+    either side of a date.
+
+    Two failures that look alike in a full-sample report and need different
+    fixes. A feature can drift in DISTRIBUTION while keeping its IC, which is
+    a preprocessing problem -- rescale it. Or it can hold its distribution
+    while losing its IC, which means the edge is gone and no amount of
+    normalizing brings it back. Reporting only one invites fixing the wrong
+    one.
+
+    The full-sample IC averages across the break, and an average across a
+    break describes neither side of it.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+
+    logger.debug(
+        "[get_feature_drift] dataset_id=%s feature=%s",
+        input_data.dataset_id,
+        input_data.feature,
+    )
+    panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    _require_feature(panel, input_data.feature, input_data.dataset_id)
+
+    result = _feature_drift(
+        panel,
+        input_data.feature,
+        split_date=input_data.split_date,
+        method=input_data.method,
+    )
+    return FeatureDriftResult(dataset_id=input_data.dataset_id, **result)
+
+
+def get_feature_regime_stability(
+    input_data: FeatureStabilityInput,
+) -> FeatureStabilityResult:
+    """
+    The feature's IC inside each of several CONTIGUOUS time blocks.
+
+    Contiguous, never shuffled. A feature's usual problem is that it worked
+    in one regime and not others, and randomly interleaved folds average
+    exactly that away -- reproducing the failure this tool exists to expose.
+
+    Read `sign_consistency` first, then the block ICs. Consistency alone
+    misses decay: a feature going 0.44, 0.44, 0.01, 0.02 keeps a sign
+    consistency of 1.0 while its edge disappears.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+
+    logger.debug(
+        "[get_feature_regime_stability] dataset_id=%s feature=%s",
+        input_data.dataset_id,
+        input_data.feature,
+    )
+    panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    _require_feature(panel, input_data.feature, input_data.dataset_id)
+
+    result = _feature_stability(
+        panel,
+        input_data.feature,
+        n_blocks=input_data.n_blocks,
+        method=input_data.method,
+    )
+    return FeatureStabilityResult(dataset_id=input_data.dataset_id, **result)
+
+
+def run_feature_permutation_test(
+    input_data: PermutationTestInput,
+) -> PermutationTestResult:
+    """
+    How often noise on THIS panel produces an IC as large as the observed
+    one.
+
+    An IC of 0.03 over 60 dates and 20 entities is a number noise produces
+    routinely, and no amount of staring at it reveals that. The feature is
+    shuffled within each date, which states the null exactly: the feature
+    carries no cross-sectional information within a date.
+
+    The p-value is TWO-SIDED. A feature with an IC of -0.20 is a strong
+    feature with a sign, not a weak one, and a one-sided test would report
+    it as unremarkable.
+
+    `null_p95_abs` is the number to keep: it is the IC this panel yields from
+    noise alone 5% of the time, and it is the honest floor for
+    `select_features(min_abs_rank_ic=...)` on this data.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+
+    logger.debug(
+        "[run_feature_permutation_test] dataset_id=%s feature=%s n=%d",
+        input_data.dataset_id,
+        input_data.feature,
+        input_data.n_permutations,
+    )
+    panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    _require_feature(panel, input_data.feature, input_data.dataset_id)
+
+    result = _permutation_test_ic(
+        panel,
+        input_data.feature,
+        n_permutations=input_data.n_permutations,
+        method=input_data.method,
+        random_seed=input_data.random_seed,
+    )
+    return PermutationTestResult(dataset_id=input_data.dataset_id, **result)
+
+
 FEATURE_TOOL_DISPATCH = {
     "analyze_feature": (analyze_feature, AnalyzeFeatureInput),
     "get_feature_redundancy": (get_feature_redundancy, FeatureRedundancyInput),
     "get_feature_ic_decay": (get_feature_ic_decay, FeatureICDecayInput),
+    "select_features": (select_features, SelectFeaturesInput),
+    "compare_feature_sets": (compare_feature_sets, CompareFeatureSetsInput),
+    "get_feature_drift": (get_feature_drift, FeatureDriftInput),
+    "get_feature_regime_stability": (
+        get_feature_regime_stability,
+        FeatureStabilityInput,
+    ),
+    "run_feature_permutation_test": (
+        run_feature_permutation_test,
+        PermutationTestInput,
+    ),
 }
 
 __all__ = [
     "FEATURE_TOOL_DISPATCH",
     "analyze_feature",
+    "compare_feature_sets",
+    "get_feature_drift",
     "get_feature_ic_decay",
     "get_feature_redundancy",
+    "get_feature_regime_stability",
+    "run_feature_permutation_test",
+    "select_features",
 ]

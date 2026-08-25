@@ -31,14 +31,24 @@ from standard_quant_tools.modeling.agent import (
 )
 from standard_quant_tools.modeling.agent.feature_models import (
     AnalyzeFeatureInput,
+    CompareFeatureSetsInput,
+    FeatureDriftInput,
     FeatureICDecayInput,
     FeatureRedundancyInput,
+    FeatureStabilityInput,
+    PermutationTestInput,
+    SelectFeaturesInput,
 )
 from standard_quant_tools.modeling.agent.feature_tools import (
     _pick_representative,
     analyze_feature,
+    compare_feature_sets,
+    get_feature_drift,
     get_feature_ic_decay,
     get_feature_redundancy,
+    get_feature_regime_stability,
+    run_feature_permutation_test,
+    select_features,
 )
 from standard_quant_tools.modeling.specs import (
     DatasetSpec,
@@ -366,3 +376,194 @@ class TestNonFiniteStatisticsAreJsonSafe:
         assert stats.ic_mean is None
         assert stats.rank_ic_mean == 0.0
         assert stats.ic_mean is not stats.rank_ic_mean
+
+
+class TestSelectFeatures:
+    def test_selected_and_dropped_partition_the_candidates(self, dataset, features):
+        result = select_features(SelectFeaturesInput(dataset_id=dataset))
+        accounted = set(result.selected) | {d.feature for d in result.dropped}
+        assert accounted == set(
+            features
+        ), "a candidate was neither selected nor explained"
+        assert result.n_selected == len(result.selected)
+
+    def test_every_drop_carries_a_reason(self, dataset):
+        result = select_features(
+            SelectFeaturesInput(dataset_id=dataset, min_abs_rank_ic=0.9)
+        )
+        assert result.dropped
+        for dropped in result.dropped:
+            assert dropped.reason in {"redundant", "weak", "capped"}
+            assert dropped.detail.strip()
+
+    def test_an_impossible_floor_drops_everything(self, dataset):
+        result = select_features(
+            SelectFeaturesInput(dataset_id=dataset, min_abs_rank_ic=1.0)
+        )
+        assert result.selected == []
+        assert all(d.reason == "weak" for d in result.dropped)
+
+    def test_max_features_caps_and_says_so(self, dataset):
+        result = select_features(
+            SelectFeaturesInput(dataset_id=dataset, max_features=1)
+        )
+        assert len(result.selected) <= 1
+        if result.n_clusters > 1:
+            assert any(d.reason == "capped" for d in result.dropped)
+
+    def test_it_agrees_with_get_feature_redundancy(self, dataset):
+        """The two tools resolve the same clusters on the same panel. If
+        they disagreed about which member to keep, an agent following both
+        would get contradictory drop lists."""
+        selected = select_features(
+            SelectFeaturesInput(dataset_id=dataset, cluster_threshold=0.0)
+        )
+        redundancy = get_feature_redundancy(
+            FeatureRedundancyInput(dataset_id=dataset, cluster_threshold=0.0)
+        )
+        assert set(selected.selected) == {c.representative for c in redundancy.clusters}
+
+
+class TestCompareFeatureSets:
+    def test_it_reports_both_sides_and_the_difference(self, dataset, features):
+        result = compare_feature_sets(
+            CompareFeatureSetsInput(
+                dataset_id=dataset, left=features[:1], right=features
+            )
+        )
+        assert result.left.n_features == 1
+        assert result.right.n_features == len(features)
+        assert result.delta.n_features == len(features) - 1
+        assert result.only_in_right == sorted(set(features) - set(features[:1]))
+        assert result.shared == features[:1]
+
+    def test_identical_sets_have_a_zero_delta(self, dataset, features):
+        result = compare_feature_sets(
+            CompareFeatureSetsInput(dataset_id=dataset, left=features, right=features)
+        )
+        assert result.delta.n_features == 0
+        assert result.delta.n_independent_signals == 0
+        assert result.only_in_left == [] and result.only_in_right == []
+
+    def test_independent_signals_never_exceeds_features(self, dataset, features):
+        """The whole point of reporting it: it is the honest count of ideas
+        where n_features counts columns."""
+        result = compare_feature_sets(
+            CompareFeatureSetsInput(
+                dataset_id=dataset, left=features[:1], right=features
+            )
+        )
+        for side in (result.left, result.right):
+            assert side.n_independent_signals <= side.n_features
+
+    def test_an_empty_side_is_rejected_by_the_schema(self, dataset, features):
+        with pytest.raises(Exception):
+            CompareFeatureSetsInput(dataset_id=dataset, left=[], right=features)
+
+
+class TestDriftAndStabilityTools:
+    def test_drift_splits_the_panel(self, dataset, features):
+        result = get_feature_drift(
+            FeatureDriftInput(dataset_id=dataset, feature=features[0])
+        )
+        assert result.n_before > 0 and result.n_after > 0
+        assert result.psi_verdict in {"stable", "moderate", "significant"}
+
+    def test_drift_verdict_matches_its_own_thresholds(self, dataset, features):
+        from standard_quant_tools.modeling.analysis.feature_stability import (
+            PSI_MODERATE,
+            PSI_SIGNIFICANT,
+        )
+
+        result = get_feature_drift(
+            FeatureDriftInput(dataset_id=dataset, feature=features[0])
+        )
+        if result.psi is None:
+            return
+        expected = (
+            "significant"
+            if result.psi >= PSI_SIGNIFICANT
+            else "moderate" if result.psi >= PSI_MODERATE else "stable"
+        )
+        assert result.psi_verdict == expected
+
+    def test_stability_returns_the_blocks_it_was_asked_for(self, dataset, features):
+        result = get_feature_regime_stability(
+            FeatureStabilityInput(dataset_id=dataset, feature=features[0], n_blocks=3)
+        )
+        assert result.n_blocks == 3
+        assert len(result.blocks) == 3
+        assert [b.block for b in result.blocks] == [0, 1, 2]
+
+    def test_permutation_test_is_reproducible(self, dataset, features):
+        args = dict(dataset_id=dataset, feature=features[0], n_permutations=30)
+        first = run_feature_permutation_test(
+            PermutationTestInput(**args, random_seed=4)
+        )
+        second = run_feature_permutation_test(
+            PermutationTestInput(**args, random_seed=4)
+        )
+        assert first.p_value == second.p_value
+
+    def test_permutation_test_never_reports_p_zero(self, dataset, features):
+        result = run_feature_permutation_test(
+            PermutationTestInput(
+                dataset_id=dataset, feature=features[0], n_permutations=20
+            )
+        )
+        assert result.p_value > 0.0
+
+    def test_the_permutation_budget_is_bounded_by_the_schema(self, dataset, features):
+        """Cost is linear in n_permutations, so the ceiling is in the schema
+        rather than left to a caller who cannot see the runtime."""
+        with pytest.raises(Exception):
+            PermutationTestInput(
+                dataset_id=dataset, feature=features[0], n_permutations=1_000_000
+            )
+
+
+class TestAllEightAreRealTools:
+    FEATURE_TOOLS = [
+        "analyze_feature",
+        "get_feature_redundancy",
+        "get_feature_ic_decay",
+        "select_features",
+        "compare_feature_sets",
+        "get_feature_drift",
+        "get_feature_regime_stability",
+        "run_feature_permutation_test",
+    ]
+
+    def test_the_cluster_is_big_enough_to_carry_a_runtime(self):
+        """The splitting rule: a runtime lands at >= 8 tools. This cluster
+        is what `feature_lab` will be built from, so the count is pinned
+        here rather than discovered at the split."""
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
+        )
+
+        assert set(FEATURE_TOOL_DISPATCH) == set(self.FEATURE_TOOLS)
+        assert len(FEATURE_TOOL_DISPATCH) >= 8
+
+    def test_the_donor_stays_legal_after_the_split(self):
+        """The other half of the rule, checked BEFORE the move rather than
+        after: modeling must still hold >= 8 tools once these leave."""
+        from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+
+        remaining = set(MODELING_TOOL_DISPATCH) - set(self.FEATURE_TOOLS)
+        assert len(remaining) >= 8, (
+            f"moving the feature cluster out would leave modeling with "
+            f"{len(remaining)} tools, below the floor"
+        )
+
+    @pytest.mark.parametrize("name", FEATURE_TOOLS)
+    def test_each_is_advertised_and_dispatchable(self, name):
+        from standard_quant_tools.agent.runtimes import owner_of
+        from standard_quant_tools.modeling.agent import (
+            MODELING_TOOL_DISPATCH,
+            get_modeling_tools,
+        )
+
+        assert name in MODELING_TOOL_DISPATCH
+        assert name in {d["function"]["name"] for d in get_modeling_tools()}
+        assert owner_of(name) == "modeling"

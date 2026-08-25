@@ -43,8 +43,13 @@ from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.agent.feature_models import (
     AnalyzeFeatureInput,
+    CompareFeatureSetsInput,
+    FeatureDriftInput,
     FeatureICDecayInput,
     FeatureRedundancyInput,
+    FeatureStabilityInput,
+    PermutationTestInput,
+    SelectFeaturesInput,
 )
 from standard_quant_tools.modeling.agent.feature_tools import FEATURE_TOOL_DISPATCH
 
@@ -863,6 +868,60 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "condition number) that say whether linear coefficients on this "
         "panel mean anything.",
         FeatureRedundancyInput,
+    ),
+    (
+        "select_features",
+        "Choose a feature set from a built dataset: keep one feature per "
+        "redundancy cluster, drop what falls below an IC floor, and return a "
+        "reason for every exclusion. Deliberately has no greedy search -- a "
+        "selector scored on the panel it selects from manufactures overfit "
+        "that looks like evidence. Redundancy is resolved before the IC "
+        "floor, because a cluster is one signal and the question is whether "
+        "THAT signal clears the floor.",
+        SelectFeaturesInput,
+    ),
+    (
+        "compare_feature_sets",
+        "Two feature sets measured on the same panel, with the cost of the "
+        "difference attached: per-set IC, independent-signal count and "
+        "condition number, what is unique to each side, and the per-feature "
+        "IC table. Not a single score, because a larger set almost always "
+        "has a higher maximum IC and almost always more collinearity, and "
+        "one number hides half of that trade.",
+        CompareFeatureSetsInput,
+    ),
+    (
+        "get_feature_drift",
+        "Whether a feature is still the same measurement, and still "
+        "predicts, either side of a date. Returns PSI and a two-sample KS "
+        "for the distribution, plus the IC computed separately on each half. "
+        "The two fail differently and need different fixes: distribution "
+        "drift with a stable IC is a preprocessing problem, while a stable "
+        "distribution with a collapsed IC means the edge is gone.",
+        FeatureDriftInput,
+    ),
+    (
+        "get_feature_regime_stability",
+        "The feature's IC inside each of several CONTIGUOUS time blocks, "
+        "never shuffled -- a feature's usual problem is that it worked in "
+        "one regime, and interleaved folds average exactly that away. "
+        "Returns per-block IC plus sign consistency against the full-sample "
+        "IC. Read both: consistent sign with collapsing magnitude is decay, "
+        "and sign consistency stays at 1.0 through it.",
+        FeatureStabilityInput,
+    ),
+    (
+        "run_feature_permutation_test",
+        "How often noise on THIS panel produces an IC as large as the "
+        "observed one, in either direction. Shuffles the feature within each "
+        "date, which states the null exactly -- the feature carries no "
+        "cross-sectional information within a date -- and returns a "
+        "TWO-SIDED empirical p-value, so a strongly negative IC is "
+        "significant rather than ignored. null_p95_abs is the IC this panel "
+        "yields from noise alone 5% of the time, which is the defensible "
+        "floor for select_features(min_abs_rank_ic=...). Cost is linear in "
+        "n_permutations.",
+        PermutationTestInput,
     ),
     (
         "get_feature_ic_decay",

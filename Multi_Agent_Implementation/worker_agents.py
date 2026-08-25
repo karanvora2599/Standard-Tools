@@ -99,6 +99,11 @@ _MODEL_RESEARCH_TOOLS = [
     "analyze_feature",
     "get_feature_redundancy",
     "get_feature_ic_decay",
+    "get_feature_drift",
+    "get_feature_regime_stability",
+    "run_feature_permutation_test",
+    "select_features",
+    "compare_feature_sets",
     "list_datasets",
     "check_leakage",
     "validate_model_spec",
@@ -486,6 +491,20 @@ already worked out — prefer this over reading a correlation matrix yourself.
 get_feature_ic_decay: how one feature's IC behaves as the feature is shifted
 in time. Answers both "does this leak" and "does it survive a bar of
 staleness".
+get_feature_drift: whether a feature is still the same measurement, and
+still predicts, either side of a date. Distribution drift with a stable IC
+is a preprocessing problem; a stable distribution with a collapsed IC means
+the edge is gone. Say which one you are looking at.
+get_feature_regime_stability: the IC inside each of several contiguous time
+blocks. Read the block ICs, not just sign consistency — a feature decaying
+from 0.44 to 0.01 keeps perfect sign consistency the whole way down.
+run_feature_permutation_test: how often noise on THIS panel produces an IC
+this large. Use it before calling any IC "small but real". Its null_p95_abs
+is the defensible floor to pass to select_features.
+select_features: drop the duplicates and the unmeasurable, with a reason
+recorded for every exclusion.
+compare_feature_sets: two sets on the same panel, with the collinearity cost
+of the larger one attached.
 
 Your job ends at "here is the dataset, and here is what its features look
 like". You cannot fit, validate, register or score a model — those tools
@@ -497,6 +516,12 @@ explicitly rather than only reporting numbers: whether two features are the
 same feature twice, and whether the leakage screen flagged anything. For the
 first, get_feature_redundancy has already done the arithmetic — say which
 feature you would keep and why, do not just report that a cluster exists.
+
+Never call an IC "small but real" without running
+run_feature_permutation_test first. On a few hundred dates and a couple of
+dozen entities, an IC of 0.03 is inside the range noise produces routinely,
+and the test says so in one call. Reporting a number that has not cleared
+its own null is the single easiest way for this agent to mislead a human.
 
 A statistic that comes back as null was not computed, and that is not the
 same as zero. Say "could not be measured" rather than treating it as a

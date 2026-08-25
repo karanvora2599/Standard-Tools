@@ -159,6 +159,16 @@ class TestModelingDispatch:
             "analyze_feature",
             "get_feature_redundancy",
             "get_feature_ic_decay",
+            # Three questions a full-sample report structurally cannot
+            # answer: has the feature stopped being the same measurement,
+            # did its edge live in one regime, and is the IC bigger than
+            # what this panel's noise produces anyway.
+            "get_feature_drift",
+            "get_feature_regime_stability",
+            "run_feature_permutation_test",
+            # Acting on the answers: choose a set, or compare two.
+            "select_features",
+            "compare_feature_sets",
         }
         assert len(tools) == len({t["function"]["name"] for t in tools})
 

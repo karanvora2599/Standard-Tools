@@ -51,7 +51,15 @@ core stays one thing; only the agent-facing vocabulary is separate.
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback) |
 | `list_modeling_capabilities` | → tasks, estimators and what each supports, features, targets, validation schemes, preprocessing, weighting, and which optional libraries are installed |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
-| `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen |
+| `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
+| `analyze_feature` | `dataset_id` + `feature` → the same profile for ONE feature, every number named and typed |
+| `get_feature_redundancy` | `dataset_id` → clusters with a representative each, the drop list, VIF and condition number |
+| `get_feature_ic_decay` | `dataset_id` + `feature` → the lead-lag IC curve as ordered points, with the peak named |
+| `get_feature_drift` | `dataset_id` + `feature` → PSI, two-sample KS and the IC computed separately either side of a date |
+| `get_feature_regime_stability` | `dataset_id` + `feature` → IC per contiguous time block, plus sign consistency |
+| `run_feature_permutation_test` | `dataset_id` + `feature` → two-sided empirical p-value against a within-date shuffle null |
+| `select_features` | `dataset_id` → a chosen set, with a recorded reason for every exclusion |
+| `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta |
 | `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
@@ -89,6 +97,50 @@ signal fields in one call instead of six tools.
 
 The count has grown from five to eight, and the invariant was never the
 count — it is that **every tool is a decision the agent makes, not
+### The feature cluster
+
+`analyze_features` answers every question at once and returns an untyped
+`report` dict. That is the right tool for an overview and the wrong one for
+everything else — to find out whether one feature is worth keeping, a caller
+had to profile the whole panel and then guess at key names no schema
+promised.
+
+Eight tools now ask one question each, with typed answers. They compute
+almost nothing new; what changed is that the answers have a shape, and that
+the shape leaves room for a recommendation rather than a table:
+
+- **`get_feature_redundancy` names which feature to keep.** RSI, 20-day
+  momentum, MACD and stochastic are one momentum cluster, not four
+  independent sources of alpha — and a panel that treats them as four sizes
+  positions as though it had diversified. The representative is the member
+  with the strongest |rank IC|, tie-broken alphabetically so the drop list
+  is reproducible.
+- **`get_feature_drift` separates two failures that look alike.** A feature
+  can drift in distribution while keeping its IC (rescale it) or hold its
+  distribution while losing its IC (the edge is gone). Reporting one of them
+  invites fixing the wrong thing.
+- **`get_feature_regime_stability` never shuffles.** A feature's usual
+  problem is that it worked in one regime, and interleaved folds average
+  exactly that away. Read the block ICs, not only `sign_consistency`: a
+  feature decaying 0.44 → 0.44 → 0.01 → 0.02 holds perfect sign consistency
+  the whole way down.
+- **`run_feature_permutation_test` is the one to run before believing a
+  small IC.** On a few hundred dates and a couple of dozen entities, an IC
+  of 0.03 is inside the range noise produces routinely. The feature is
+  shuffled within each date, which states the null exactly, and the p-value
+  is two-sided so a strong negative IC counts as strong. Its `null_p95_abs`
+  is the defensible floor to pass to `select_features(min_abs_rank_ic=...)`.
+
+`select_features` deliberately has no greedy search. A selector scored on
+the panel it selects from manufactures overfit that looks like evidence, and
+an agent handed that output cannot tell. It drops duplicates and the
+unmeasurable, and records a reason for every exclusion.
+
+**A statistic that comes back as `null` was not computed.** That is not the
+same as zero: a panel with too few entities per date has no cross-section,
+and an IC of `null` there means the question was unanswerable, not that the
+feature is useless.
+
 plumbing**. Choosing features is a decision (`analyze_features`); so is
 choosing a model against what is actually installed
 (`list_modeling_capabilities`). The alternative to that second one was a

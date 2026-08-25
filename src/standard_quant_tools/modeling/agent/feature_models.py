@@ -355,7 +355,325 @@ class FeatureICDecayInput(BaseModel):
     )
 
 
+# ── selection ───────────────────────────────────────────────────────────
+
+
+class DroppedFeature(BaseModel):
+    """A feature that did not make the cut, and why."""
+
+    model_config = _NO_PROTECTED
+
+    feature: str
+    reason: str = Field(
+        ...,
+        description="'redundant' (the same signal as a kept feature), "
+        "'weak' (below the IC floor), or 'capped' (past max_features).",
+    )
+    detail: str = Field(..., description="The specific numbers behind the reason.")
+
+
+class SelectFeaturesInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    features: Optional[List[str]] = Field(
+        None,
+        description="Features to choose from. Defaults to every feature in "
+        "the dataset.",
+    )
+    cluster_threshold: float = Field(
+        0.9,
+        ge=0.0,
+        le=1.0,
+        description="Absolute correlation at or above which two features are "
+        "one signal, and only the strongest is kept.",
+    )
+    min_abs_rank_ic: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Drop a surviving feature whose |rank IC| is below this. "
+        "0.0 (default) keeps everything that is not redundant. A floor around "
+        "0.01-0.02 is where a cross-sectional signal stops being measurable "
+        "on a few hundred dates -- but set it from what THIS panel supports, "
+        "which run_feature_permutation_test answers directly.",
+    )
+    max_features: int = Field(
+        0,
+        ge=0,
+        description="Hard cap after both filters, by |rank IC|. 0 (default) "
+        "means no cap. A cap for a caller with a budget, not a ranking to "
+        "trust -- the gap between the 20th and 21st feature is usually noise.",
+    )
+
+
+class SelectFeaturesResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    selected: List[str] = Field(
+        ..., description="The kept features, strongest |rank IC| first."
+    )
+    dropped: List[DroppedFeature] = Field(
+        ...,
+        description="Every exclusion with its reason. Read this before "
+        "accepting the selection: a feature dropped as 'weak' may simply be "
+        "unmeasurable on this panel rather than useless.",
+    )
+    n_considered: int
+    n_selected: int
+    n_clusters: int = Field(
+        ...,
+        description="Independent signals found among the candidates. This, "
+        "not n_considered, is how many ideas the panel actually held.",
+    )
+
+
+class FeatureSetSummary(BaseModel):
+    model_config = _NO_PROTECTED
+
+    features: List[str]
+    n_features: int
+    n_independent_signals: int = Field(
+        ...,
+        description="Redundancy clusters. Twelve features in three clusters "
+        "carry three ideas; reporting twelve overstates the diversification.",
+    )
+    mean_abs_rank_ic: Stat
+    max_abs_rank_ic: Stat
+    condition_number: Stat
+
+
+class FeatureSetDelta(BaseModel):
+    model_config = _NO_PROTECTED
+
+    n_features: int
+    n_independent_signals: int
+    mean_abs_rank_ic: Stat
+    condition_number: Stat = Field(
+        ...,
+        description="Right minus left. A rise here is the COST of the extra "
+        "features -- more collinearity -- and is the half of the trade a "
+        "single score would hide.",
+    )
+
+
+class FeatureSetMembership(BaseModel):
+    model_config = _NO_PROTECTED
+
+    feature: str
+    in_left: bool
+    in_right: bool
+    abs_rank_ic: Stat
+
+
+class CompareFeatureSetsInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    left: List[str] = Field(..., min_length=1, description="The baseline feature set.")
+    right: List[str] = Field(
+        ..., min_length=1, description="The candidate feature set."
+    )
+    cluster_threshold: float = Field(
+        0.9, ge=0.0, le=1.0, description="Redundancy threshold for both sets."
+    )
+
+
+class CompareFeatureSetsResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    left: FeatureSetSummary
+    right: FeatureSetSummary
+    delta: FeatureSetDelta
+    only_in_left: List[str]
+    only_in_right: List[str]
+    shared: List[str]
+    features: List[FeatureSetMembership] = Field(
+        ..., description="Every feature in either set, strongest IC first."
+    )
+
+
+# ── drift ───────────────────────────────────────────────────────────────
+
+
+class FeatureDriftInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    feature: str = Field(..., description="The feature column to check.")
+    split_date: Optional[str] = Field(
+        None,
+        description="YYYY-MM-DD boundary between the two windows. Defaults to "
+        "the median date, which splits by TIME rather than row count.",
+    )
+    method: str = Field(
+        "spearman",
+        description="Correlation for the IC halves: 'spearman' or " "'pearson'.",
+    )
+
+
+class FeatureDriftResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    feature: str
+    split_date: str
+    n_before: int
+    n_after: int
+    psi: Stat = Field(
+        ...,
+        description="Population Stability Index. Below 0.10 is stable, "
+        "0.10-0.25 moderate, above 0.25 significant. These are conventions, "
+        "not a test -- there is no null distribution behind them.",
+    )
+    psi_bins: int
+    psi_verdict: str = Field(..., description="'stable', 'moderate' or 'significant'.")
+    ks_statistic: Stat = Field(
+        ..., description="Largest gap between the two empirical CDFs."
+    )
+    mean_before: Stat
+    mean_after: Stat
+    std_before: Stat
+    std_after: Stat
+    ic_before: Stat
+    ic_after: Stat
+    ic_flipped: bool = Field(
+        ...,
+        description="True when the IC changed SIGN across the split and was "
+        "non-trivial on both sides. Distribution drift and IC decay are "
+        "different failures: the first is a preprocessing problem, the second "
+        "means the edge is gone.",
+    )
+
+
+# ── stability ───────────────────────────────────────────────────────────
+
+
+class StabilityBlock(BaseModel):
+    model_config = _NO_PROTECTED
+
+    block: int
+    start: str
+    end: str
+    n_dates: int
+    ic_mean: Stat
+
+
+class FeatureStabilityInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    feature: str = Field(..., description="The feature column to check.")
+    n_blocks: int = Field(
+        4,
+        ge=2,
+        le=50,
+        description="Contiguous time blocks to split the panel into. Never "
+        "shuffled: a feature's usual problem is that it worked in one regime, "
+        "and interleaved folds average exactly that away.",
+    )
+    method: str = Field("spearman", description="'spearman' or 'pearson'.")
+
+
+class FeatureStabilityResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    feature: str
+    n_blocks: int
+    blocks: List[StabilityBlock]
+    ic_overall: Stat
+    ic_block_mean: Stat
+    ic_block_std: Stat
+    ic_block_min: Stat
+    ic_block_max: Stat
+    sign_consistency: Stat = Field(
+        ...,
+        description="Fraction of blocks whose IC has the same sign as the "
+        "full-sample IC. Read this first: a mean IC of 0.04 at 0.5 sign "
+        "consistency is a coin flip with a good average. But read the block "
+        "ICs too -- consistent sign with collapsing magnitude is decay, and "
+        "this number stays at 1.0 through it.",
+    )
+    worst_block: Optional[int] = None
+
+
+# ── permutation ─────────────────────────────────────────────────────────
+
+
+class PermutationTestInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    feature: str = Field(..., description="The feature column to test.")
+    n_permutations: int = Field(
+        200,
+        ge=20,
+        le=5000,
+        description="Shuffles used to build the null. 200 resolves a p-value "
+        "to about 0.005, which is enough to separate 'real' from 'noise' and "
+        "not enough to defend a 0.001 claim. Cost is linear in this.",
+    )
+    method: str = Field("spearman", description="'spearman' or 'pearson'.")
+    random_seed: int = Field(
+        0, ge=0, description="Seed, so the p-value is reproducible."
+    )
+
+
+class PermutationTestResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    feature: str
+    observed_ic: Stat
+    n_permutations: int
+    n_usable_permutations: int
+    null_mean: Stat
+    null_std: Stat
+    null_p95_abs: Stat = Field(
+        ...,
+        description="95th percentile of |IC| under the null: the IC this "
+        "panel produces from noise alone 5% of the time. An observed IC below "
+        "it is not evidence of anything.",
+    )
+    p_value: Stat = Field(
+        ...,
+        description="Two-sided empirical p-value, with the +1 correction in "
+        "numerator and denominator so an exact 0 is never claimed -- 200 "
+        "shuffles cannot tell 'p < 0.005' from 'p = 0'.",
+    )
+    significant_at_05: bool
+    random_seed: int
+
+
 __all__ = [
+    "StabilityBlock",
+    "SelectFeaturesResult",
+    "SelectFeaturesInput",
+    "PermutationTestResult",
+    "PermutationTestInput",
+    "FeatureStabilityResult",
+    "FeatureStabilityInput",
+    "FeatureSetSummary",
+    "FeatureSetMembership",
+    "FeatureSetDelta",
+    "FeatureDriftResult",
+    "FeatureDriftInput",
+    "DroppedFeature",
+    "CompareFeatureSetsResult",
+    "CompareFeatureSetsInput",
     "AnalyzeFeatureInput",
     "Stat",
     "FeatureCluster",

@@ -9,6 +9,52 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — eight feature tools, one question each
+
+`analyze_features` returns `report: Dict[str, Any]`. Every number in it is
+correct and none of it is promised by a schema, so an agent asking whether
+one feature is worth keeping had to profile the whole panel and then guess
+at key names. Eight typed tools now ask one question each:
+
+`analyze_feature`, `get_feature_redundancy`, `get_feature_ic_decay`,
+`get_feature_drift`, `get_feature_regime_stability`,
+`run_feature_permutation_test`, `select_features`, `compare_feature_sets`.
+
+The first three re-present analysis that already existed. The types leave
+room for a recommendation rather than a table: `get_feature_redundancy` names
+which feature to KEEP, picked by strongest |rank IC| and tie-broken
+alphabetically so the drop list is reproducible across identical calls.
+
+The rest answer questions a full-sample report structurally cannot.
+`get_feature_drift` separates distribution drift from IC decay, which look
+alike in an averaged report and need different fixes.
+`get_feature_regime_stability` splits into contiguous — never shuffled —
+time blocks, since interleaving averages away the regime structure it exists
+to expose. `run_feature_permutation_test` shuffles the feature within each
+date and returns a two-sided empirical p-value, so an IC of 0.03 on a small
+panel can be checked against what that panel's noise produces anyway.
+
+`select_features` has no greedy search, deliberately: a selector scored on
+the panel it selects from manufactures overfit that looks like evidence. It
+drops duplicates and the unmeasurable and records a reason for each.
+
+PSI and the two-sample KS are implemented in numpy rather than imported from
+scipy, which is not a declared dependency of this package.
+
+### Fixed — non-finite statistics no longer serialize as bare `NaN`
+
+`_safe()` in `feature_report.py` is documented as producing "a float that
+survives JSON" and maps non-finite values to NaN. NaN does not survive JSON:
+`json.dumps` writes a bare `NaN` token, invalid per RFC 8259 and rejected by
+strict parsers — which JSON-RPC clients are. Measured on a legal panel with
+one entity per date: twelve of them in a single `analyze_features` result.
+
+Now `null` in both the typed and untyped paths, and `null` rather than `0.0`
+because an IC that could not be computed is not an IC of zero. The
+conversion happens at the tool boundary; NaN remains correct inside the
+numpy pipeline.
+
+
 ### Added — `--tool-detail`: send the schema when the agent needs it
 
 `sqt-mcp --runtime backtest --tool-detail auto` serves the same 21 tools for
