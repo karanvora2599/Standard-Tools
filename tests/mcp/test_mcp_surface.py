@@ -449,18 +449,60 @@ class TestServerWiring:
             assert result.contents
             json.loads(result.contents[0].text)
 
-    def test_unknown_tool_returns_an_error_naming_the_categories(self):
+    def _call(self, config, name):
         import anyio
 
-        _server, handlers = build_server(ServerConfig(categories=("screener",)))
+        _server, handlers = build_server(config)
 
         async def call():
             import mcp.types as types
 
             return await handlers.call_tool(
-                None, types.CallToolRequestParams(name="not_a_tool", arguments={})
+                None, types.CallToolRequestParams(name=name, arguments={})
             )
 
-        result = anyio.run(call)
+        return anyio.run(call)
+
+    def test_an_out_of_scope_tool_is_refused_by_owner(self):
+        """A tool that exists elsewhere is a SCOPE problem, and the operator
+        can fix it -- so the error names the runtime that has it and the flag
+        that would serve it."""
+        result = self._call(
+            ServerConfig(categories=("screener",), runtimes=("research",)),
+            "run_sma_backtest",
+        )
         assert result.is_error is True
-        assert "screener" in result.content[0].text
+        text = result.content[0].text
+        assert "'backtest'" in text
+        assert "--runtime backtest" in text
+
+    def test_a_nonexistent_tool_is_not_blamed_on_scope(self):
+        """A name that exists nowhere is a hallucination, not a
+        misconfiguration. Naming categories here -- which this error used to
+        do for every unknown tool -- sends the caller to widen a scope that
+        cannot contain it, and the widened server refuses it again."""
+        result = self._call(
+            ServerConfig(categories=("screener",), runtimes=("research",)),
+            "not_a_tool",
+        )
+        assert result.is_error is True
+        text = result.content[0].text
+        assert "No tool by that name exists" in text
+        assert "--runtime" not in text
+        assert "screener" not in text
+
+    def test_an_out_of_category_tool_names_its_category(self):
+        """In scope by runtime, filtered out by category: the third case,
+        and the only one where --categories is the thing to change."""
+        result = self._call(
+            ServerConfig(
+                categories=("screener",),
+                runtimes=("research",),
+                enable_long_running=True,
+            ),
+            "analyze_stock_risk",
+        )
+        assert result.is_error is True
+        text = result.content[0].text
+        assert "analysis" in text
+        assert "screener" in text

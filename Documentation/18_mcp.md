@@ -143,31 +143,60 @@ that most often causes the disconnect.
 
 ---
 
-## Choosing categories
+## Choosing what to serve
 
-The 82 tools cost about **146 KB of schema, ~37,000 tokens**, held for the
-whole session. That is the constraint the whole design manages, so category
-selection is the first decision, not a tuning knob.
+The 82 tools cost about **150 KB of schema, ~38,000 tokens**, held for the
+whole session. That is the constraint the whole design manages, so this is
+the first decision, not a tuning knob.
+
+It is also, right now, a hard wall. Over the wire a tool averages 2,184
+bytes and the ceiling is 180,000, which buys 82.4 tools. There are 82. The
+remaining headroom is 912 bytes — under half a tool — so **the 83rd tool
+fails the budget test whatever it is**. Serving the whole surface stopped
+being a thing to avoid and became a thing that no longer fits.
+
+Two flags, and they are nested rather than alternative:
+
+- **`--runtime`** picks the coarse scope. A runtime owns its categories, so
+  this is the boundary a client is served at.
+- **`--categories`** narrows *within* the chosen runtime, as it always did.
 
 ```bash
 sqt-mcp --print-budget
 ```
 
 ```
+runtime              tools    bytes   ~tokens
+backtest                21   58,419    14,604
+modeling                14   40,309    10,077
+research                23   25,998     6,499
+portfolio               10   19,543     4,885
+meta                    14    8,997     2,249
+all                     82  153,266    38,316
+
+  a client is served ONE runtime: backtest is the most expensive at
+  58,419 bytes (38% of the total).
+
 category             tools    bytes   ~tokens
 modeling                14   40,309    10,077
-backtest_execution      10   26,963     6,740
-backtest_validation      9   20,542     5,135
-analysis                14   15,832     3,958
-portfolio_risk           7   15,752     3,938
+backtest_execution      10   29,231     7,307
+backtest_validation      9   22,306     5,576
+portfolio_risk           7   15,526     3,881
+analysis                14   15,380     3,845
 quant_research           7    8,583     2,145
-custom_signal            2    6,630     1,657
+custom_signal            2    6,882     1,720
 discovery                8    5,396     1,349
 microstructure           3    4,017     1,004
 provenance               6    3,601       900
 screener                 2    2,035       508
-all                     82  149,660    37,415
 ```
+
+**The total is a number nobody pays.** The row that matters is the runtime
+a client is actually served, and the most expensive of those is 58 KB —
+about a third of the full surface. `tests/mcp/test_runtime_scope.py` pins a
+72 KB per-runtime ceiling for exactly that reason, and it is deliberately
+tight: `backtest` sits at 66,437 bytes over the wire, roughly two tools of
+headroom.
 
 **Tool count and cost are barely related**, which is the useful thing to
 know when picking. `analysis` carries 14 tools for 15.5 KB; `custom_signal`
@@ -186,12 +215,33 @@ which stress windows exist, whether this provider has ticks, whether these
 arguments are even valid — were previously answered by a failed call and an
 error round trip, which costs more than the category does.
 
-Add what a session needs:
+Serve a runtime, or narrow inside one:
 
 ```bash
-sqt-mcp --categories screener,analysis,backtest_execution
-sqt-mcp --categories modeling
-sqt-mcp --categories all          # ~26k tokens, and it says so at startup
+sqt-mcp --runtime research                    # 23 tools, 32 KB
+sqt-mcp --runtime backtest                    # 21 tools, 65 KB
+sqt-mcp --runtime research+meta               # research plus discovery/provenance
+sqt-mcp --runtime research --categories screener
+sqt-mcp --runtime all                         # ~38k tokens, and it says so
+```
+
+`+` joins runtimes because that is how `combine()` names a joined runtime in
+the library itself — the flag and the code spell the same thing the same way.
+
+**`--runtime research` serves all of research**, not research narrowed by
+the `--categories` default. That matters more than it sounds: the default
+categories belong to research and meta, so inheriting them under
+`--runtime backtest` would have served zero tools, and an empty server reads
+as a broken install rather than as two flags disagreeing.
+
+Naming a category the runtime does not own is refused at startup, by name:
+
+```
+$ sqt-mcp --runtime research --categories modeling
+sqt-mcp: --categories ['modeling'] not served by --runtime research
+('modeling' belongs to 'modeling'). Either drop it, or widen --runtime
+deliberately -- serving the intersection would give you a surface neither
+flag describes.
 ```
 
 Categories come from `TOOL_CATEGORY`, the same taxonomy behind
@@ -204,15 +254,41 @@ A category is a slice of the tool list. A **runtime** is an execution
 boundary — see [19_runtimes.md](19_runtimes.md). The server uses both, and
 the distinction is what makes its scoping real rather than cosmetic:
 
-- `--categories` decides which tools are **advertised**.
+- `--runtime` decides which tools can be **served or executed at all**.
+- `--categories` narrows which of those are **advertised**.
 - Each tool is dispatched by its **owning runtime's** dispatcher, so a tool
   served from `research` is executed by a table holding only research
   tools.
 
 That matters because a client can send any tool name it likes. Before
 runtimes, a name the server never advertised would still have executed
-through the union dispatcher. Now the server rejects it by name, and the
+through the union dispatcher. Now there are three independent refusals: the
+server does not list it, the server rejects the call by name, and the
 underlying runtime would reject it again.
+
+The refusal says which of three situations you are actually in, because
+only one of them is fixable by changing a flag:
+
+```
+# exists, but in another runtime -> a scope problem, and the fix is named
+'run_sma_backtest' exists, but belongs to the 'backtest' runtime and this
+server is scoped to research. Restart with `--runtime backtest` to serve
+it -- widening scope is a decision, not a fallback.
+
+# exists nowhere -> a hallucination, and no flag will help
+unknown tool 'run_sma_backtestt'. No tool by that name exists in this
+library. This server serves 22 tools from the research runtime. Read
+sqt://catalog/categories for what exists, or call tools/list for what this
+server serves -- do not guess another name.
+
+# in this runtime, filtered out by category -> --categories is the fix
+'analyze_stock_risk' exists in the 'research' runtime but is not in the
+selected categories (screener). It belongs to 'analysis'.
+```
+
+The middle case is the one worth the extra code. This error used to name the
+loaded categories for *every* unknown tool, which told an agent that had
+invented a name to go and widen a scope that could never contain it.
 
 | Runtime | Categories it owns |
 |---|---|
@@ -223,8 +299,12 @@ underlying runtime would reject it again.
 | `modeling` | `modeling` |
 
 Selecting `--categories microstructure` is therefore not the same as
-selecting the `portfolio` runtime: it advertises three tools, and those
+`--runtime portfolio`: it advertises three tools rather than ten, and those
 three still execute inside `portfolio`.
+
+Naming a category outside the chosen runtime is refused at startup rather
+than quietly intersected, because serving the intersection would hand back a
+surface neither flag describes.
 
 ### Two categories worth knowing about
 
@@ -243,11 +323,12 @@ own decisions is not audited by it.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--categories` | `screener,analysis,quant_research` | Which tools to expose. `all` for everything. |
+| `--runtime` | every runtime | The coarse scope: which runtimes can be served **or executed**. One name, or several joined with `+`, or `all`. Given alone, serves all of that runtime's categories. |
+| `--categories` | `screener,analysis,quant_research,discovery` | Narrows which tools are advertised *within* the chosen runtimes. `all` for everything. A category outside the chosen runtime is refused at startup. |
 | `--inline-limit` | `4096` | Results larger than this are stored and returned as a summary plus a `sqt://result/...` link. |
 | `--output-schemas` | off | Declare `outputSchema` per tool. **Roughly doubles the context cost.** `structuredContent` is returned either way, so this only helps clients that validate against the schema. |
 | `--enable-long-running` | off | Expose `scan_pairs` and `run_backtest_optimization`. |
-| `--print-budget` | — | Print the table above and exit. |
+| `--print-budget` | — | Print the per-runtime and per-category tables above, and exit. |
 | `--transport` | `stdio` | `stdio` or `http`. See [Running as a service](#running-as-a-service-http). |
 | `--host` | `127.0.0.1` | Bind address. Anything else needs a token and `--allow-host`. |
 | `--port` | `8765` | Bind port. |

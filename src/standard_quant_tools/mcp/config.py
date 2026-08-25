@@ -40,7 +40,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
-from standard_quant_tools.mcp.catalog import ALL_CATEGORIES, DEFAULT_CATEGORIES
+from standard_quant_tools.mcp.catalog import (
+    ALL_CATEGORIES,
+    ALL_RUNTIMES,
+    DEFAULT_CATEGORIES,
+    RUNTIME_CATEGORY_MAP,
+    categories_for_runtimes,
+)
 
 #: Results larger than this are persisted and returned as a resource link
 #: instead of inlined. A five-year daily backtest carries ~1,250 equity
@@ -76,6 +82,11 @@ def is_loopback(host: str) -> bool:
 @dataclass(frozen=True)
 class ServerConfig:
     categories: Tuple[str, ...] = DEFAULT_CATEGORIES
+    #: The runtimes this server is scoped to. Defaults to all of them,
+    #: which is what `--categories` alone has always meant. Narrowing it
+    #: narrows the DISPATCH as well as the listing: a server scoped to
+    #: research cannot execute a backtest tool even if a client names one.
+    runtimes: Tuple[str, ...] = ALL_RUNTIMES
     runs_dir: Optional[Path] = None
     audit_dir: Optional[Path] = None
     cache_dir: Optional[Path] = None
@@ -92,6 +103,13 @@ class ServerConfig:
     allowed_hosts: Tuple[str, ...] = field(default=())
     allowed_origins: Tuple[str, ...] = field(default=())
     warnings: Tuple[str, ...] = field(default=())
+
+
+def _split_runtimes(raw: str) -> List[str]:
+    """Parse --runtime. Accepts `research`, `research+meta`, `a,b`, `all`."""
+    if raw.strip().lower() == "all":
+        return list(ALL_RUNTIMES)
+    return [p.strip() for p in raw.replace("+", ",").split(",") if p.strip()]
 
 
 def _split_categories(raw: str) -> List[str]:
@@ -112,11 +130,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--categories",
-        default=",".join(DEFAULT_CATEGORIES),
+        default=None,
         help=(
             "Comma-separated tool categories, or 'all'. "
             f"Available: {', '.join(ALL_CATEGORIES)}. "
             f"Default: {','.join(DEFAULT_CATEGORIES)}."
+        ),
+    )
+    parser.add_argument(
+        "--runtime",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Serve one runtime, or several joined with '+'. "
+            f"Available: {', '.join(ALL_RUNTIMES)}, or 'all'. "
+            "This is the coarse scope: a runtime owns its categories, so "
+            "--runtime research serves ALL of research rather than research "
+            "narrowed by the --categories default. Use --categories to "
+            "narrow further WITHIN the chosen runtime. Scoping here also "
+            "scopes execution -- the server refuses to dispatch a tool it "
+            "does not serve. Default: every runtime."
         ),
     )
     parser.add_argument(
@@ -363,19 +396,103 @@ def _resolve_transport(args: argparse.Namespace, warnings: List[str]) -> dict:
     }
 
 
+def _resolve_scope(
+    runtime_arg: Optional[str], category_arg: Optional[str]
+) -> Tuple[List[str], List[str]]:
+    """
+    Turn --runtime and --categories into the (runtimes, categories) pair the
+    server is scoped by.
+
+    The two flags are not alternatives, they are nested: a runtime owns
+    categories, so --runtime is the outer scope and --categories narrows
+    within it. That makes four cases, and the only interesting ones are the
+    two where a default would otherwise say something the caller did not
+    mean:
+
+    - **Neither given.** DEFAULT_CATEGORIES, every runtime. Exactly what
+      this server did before --runtime existed; adding a flag must not
+      change what happens when nobody passes it.
+    - **--runtime only.** ALL of that runtime's categories. If --categories
+      kept its old default here, `--runtime backtest` would serve nothing at
+      all -- the default categories belong to research and meta -- and the
+      failure would look like an empty server rather than like a flag
+      disagreeing with itself.
+    - **--categories only.** As given, across every runtime. The runtimes
+      are then derived from the categories, so the dispatch scope still
+      matches what is listed rather than silently staying wider.
+    - **Both.** Intersected, and REFUSED if a named category is not owned by
+      a named runtime. Serving the intersection silently would hand back a
+      surface neither flag describes.
+    """
+    runtimes = _split_runtimes(runtime_arg) if runtime_arg is not None else None
+    categories = _split_categories(category_arg) if category_arg is not None else None
+
+    if runtimes is not None:
+        unknown = [r for r in runtimes if r not in RUNTIME_CATEGORY_MAP]
+        if unknown:
+            raise ValueError(
+                f"unknown runtime{'s' if len(unknown) > 1 else ''} {unknown}. "
+                f"Available: {', '.join(ALL_RUNTIMES)}."
+            )
+        if not runtimes:
+            raise ValueError("--runtime selected nothing")
+
+    if categories is not None:
+        unknown = [c for c in categories if c not in ALL_CATEGORIES]
+        if unknown:
+            raise ValueError(
+                f"unknown categor{'y' if len(unknown) == 1 else 'ies'} "
+                f"{unknown}. Available: {', '.join(ALL_CATEGORIES)}."
+            )
+        if not categories:
+            raise ValueError("--categories selected nothing")
+
+    if runtimes is None and categories is None:
+        return list(ALL_RUNTIMES), list(DEFAULT_CATEGORIES)
+
+    if runtimes is not None and categories is None:
+        return runtimes, list(categories_for_runtimes(runtimes))
+
+    if runtimes is None and categories is not None:
+        owners = _owners_of(categories)
+        return owners, categories
+
+    # Both given: the categories must live inside the runtimes.
+    allowed = set(categories_for_runtimes(runtimes))
+    stray = [c for c in categories if c not in allowed]
+    if stray:
+        detail = "; ".join(f"{c!r} belongs to {_owner_of_category(c)!r}" for c in stray)
+        raise ValueError(
+            f"--categories {stray} not served by --runtime "
+            f"{'+'.join(runtimes)} ({detail}). Either drop "
+            f"{'them' if len(stray) > 1 else 'it'}, or widen --runtime "
+            "deliberately -- serving the intersection would give you a "
+            "surface neither flag describes."
+        )
+    return runtimes, categories
+
+
+def _owner_of_category(category: str) -> str:
+    for runtime, cats in RUNTIME_CATEGORY_MAP.items():
+        if category in cats:
+            return runtime
+    return "unknown"
+
+
+def _owners_of(categories: Sequence[str]) -> List[str]:
+    """The runtimes that own the given categories, in ALL_RUNTIMES order."""
+    owners = {_owner_of_category(c) for c in categories}
+    return [r for r in ALL_RUNTIMES if r in owners]
+
+
 def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
     """Parse arguments, resolve the environment, and fail fast if it is wrong."""
     args = build_parser().parse_args(argv)
 
-    categories = _split_categories(args.categories)
-    unknown = [c for c in categories if c not in ALL_CATEGORIES]
-    if unknown:
-        raise SystemExit(
-            f"sqt-mcp: unknown categor{'y' if len(unknown) == 1 else 'ies'} "
-            f"{unknown}. Available: {', '.join(ALL_CATEGORIES)}."
-        )
-    if not categories:
-        raise SystemExit("sqt-mcp: --categories selected nothing")
+    try:
+        runtimes, categories = _resolve_scope(args.runtime, args.categories)
+    except ValueError as exc:
+        raise SystemExit(f"sqt-mcp: {exc}") from None
     if args.inline_limit < 0:
         raise SystemExit("sqt-mcp: --inline-limit must be >= 0")
 
@@ -388,6 +505,7 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
 
     return ServerConfig(
         categories=tuple(categories),
+        runtimes=tuple(runtimes),
         inline_limit_bytes=args.inline_limit,
         include_output_schemas=bool(args.output_schemas),
         enable_long_running=bool(args.enable_long_running),
@@ -406,8 +524,16 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
     if config.transport == "http":
         # A wildcard bind is not a name a client can dial, so show one that is.
         display_host = "127.0.0.1" if config.host in ("0.0.0.0", "::") else config.host
-        auth = f"Bearer token from {TOKEN_ENV_VAR}" if config.auth_token else "NONE (--no-auth)"
-        hosts = ", ".join(config.allowed_hosts) if config.allowed_hosts else "loopback defaults"
+        auth = (
+            f"Bearer token from {TOKEN_ENV_VAR}"
+            if config.auth_token
+            else "NONE (--no-auth)"
+        )
+        hosts = (
+            ", ".join(config.allowed_hosts)
+            if config.allowed_hosts
+            else "loopback defaults"
+        )
         origins = (
             ", ".join(config.allowed_origins)
             if config.allowed_origins
@@ -423,6 +549,7 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
             f"  allowed origins   : {origins}",
         ]
     lines += [
+        f"  runtimes          : {'+'.join(config.runtimes)}",
         f"  categories        : {', '.join(config.categories)}",
         f"  tools exposed     : {tool_count}",
         f"  context cost      : {schema_bytes_total / 1024:.1f} KB "

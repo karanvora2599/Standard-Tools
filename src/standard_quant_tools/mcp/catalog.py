@@ -84,6 +84,18 @@ ALL_CATEGORIES: Tuple[str, ...] = tuple(
     sorted(set(TOOL_CATEGORY.values())) + [MODELING_CATEGORY]
 )
 
+#: Every selectable runtime, in the order they are declared. `modeling`
+#: is appended rather than read from RUNTIME_CATEGORIES because it has no
+#: category taxonomy of its own -- see MODELING_CATEGORY.
+ALL_RUNTIMES: Tuple[str, ...] = tuple(RUNTIME_CATEGORIES) + (MODELING_REGISTRY,)
+
+#: runtime -> the categories it owns. The inverse of `_CATEGORY_RUNTIME`,
+#: and the mapping `--runtime` is resolved through.
+RUNTIME_CATEGORY_MAP: Dict[str, Tuple[str, ...]] = {
+    **{runtime: tuple(cats) for runtime, cats in RUNTIME_CATEGORIES.items()},
+    MODELING_REGISTRY: (MODELING_CATEGORY,),
+}
+
 #: The default. Measured at 25 tools / 21.2 KB / ~5k tokens: screening, risk
 #: and technical snapshots, the factor/cointegration/Hurst research path,
 #: and discovery. It deliberately omits `backtest_execution` (23.7 KB) and
@@ -246,6 +258,77 @@ def select(catalog: Dict[str, ToolEntry], categories: Sequence[str]) -> List[Too
     return sorted(
         (e for e in catalog.values() if e.category in wanted), key=lambda e: e.name
     )
+
+
+def _split_runtimes(raw: str) -> List[str]:
+    """
+    Parse a --runtime value. Accepts `research`, `research+meta`,
+    `research,meta` and `all`.
+
+    `+` is accepted because that is how `combine()` names a joined runtime,
+    and a flag that spells the same thing differently from the library
+    would be one more thing to remember wrongly.
+    """
+    if raw.strip().lower() == "all":
+        return list(ALL_RUNTIMES)
+    parts = [p.strip() for p in raw.replace("+", ",").split(",")]
+    return [p for p in parts if p]
+
+
+def categories_for_runtimes(runtimes: Sequence[str]) -> Tuple[str, ...]:
+    """
+    Every category owned by the named runtimes, in ALL_CATEGORIES order.
+
+    This is what makes `--runtime research` mean *all of research* rather
+    than research narrowed by whatever `--categories` happens to default
+    to. Ordering follows ALL_CATEGORIES so the reported selection is
+    stable regardless of the order the runtimes were named in.
+    """
+    unknown = [r for r in runtimes if r not in RUNTIME_CATEGORY_MAP]
+    if unknown:
+        raise ValueError(
+            f"unknown runtime{'s' if len(unknown) > 1 else ''} {unknown}; "
+            f"expected some of {list(ALL_RUNTIMES)}"
+        )
+    wanted = {c for r in runtimes for c in RUNTIME_CATEGORY_MAP[r]}
+    return tuple(c for c in ALL_CATEGORIES if c in wanted)
+
+
+def select_runtimes(
+    catalog: Dict[str, ToolEntry], runtimes: Sequence[str]
+) -> List[ToolEntry]:
+    """The catalog narrowed to the named runtimes, name-sorted."""
+    wanted = set(runtimes)
+    unknown = [r for r in wanted if r not in RUNTIME_CATEGORY_MAP]
+    if unknown:
+        raise ValueError(
+            f"unknown runtime{'s' if len(unknown) > 1 else ''} {unknown}; "
+            f"expected some of {list(ALL_RUNTIMES)}"
+        )
+    return sorted(
+        (e for e in catalog.values() if e.runtime in wanted), key=lambda e: e.name
+    )
+
+
+def runtime_costs(
+    catalog: Optional[Dict[str, ToolEntry]] = None,
+    include_output_schemas: bool = False,
+) -> Dict[str, Tuple[int, int]]:
+    """runtime -> (tool count, schema bytes), for the budget report.
+
+    The number a client actually pays once exposure is runtime-scoped,
+    where `category_costs` reports the number it pays per filter WITHIN
+    that scope.
+    """
+    catalog = catalog or build_catalog()
+    costs: Dict[str, Tuple[int, int]] = {}
+    for entry in catalog.values():
+        count, size = costs.get(entry.runtime, (0, 0))
+        costs[entry.runtime] = (
+            count + 1,
+            size + entry.cost_bytes(include_output_schemas),
+        )
+    return costs
 
 
 def category_costs(

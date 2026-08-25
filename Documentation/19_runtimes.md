@@ -99,6 +99,30 @@ Every tool belongs to exactly one, and a test enforces it. Duplicating a
 convenient tool into a second runtime would dissolve the boundary at
 exactly the points where it matters most.
 
+### The runtime is also the serving boundary
+
+`sqt-mcp --runtime research` serves that runtime and nothing else — the
+same partition, over the protocol. This is not only a context-budget
+decision, though the budget forced it: at 2,184 bytes per tool over the
+wire the ceiling buys 82.4 tools and the library has 82, so the surface
+had reached the point where the 83rd tool could not be added at all.
+
+What it buys beyond the bytes is that the boundary now holds in three
+places at once, and each is independent of the others:
+
+1. The scoped server **lists** only its runtime's tools.
+2. `call_tool` **refuses** a name it does not serve, naming the runtime
+   that owns it.
+3. The owning runtime's `dispatch` would **refuse it again** underneath,
+   which is the refusal shown above.
+
+An agent that invents a tool name therefore gets the same answer whether it
+reached the library through Python or through MCP, and the answer says
+which runtime to construct rather than merely that something went wrong.
+
+See [18_mcp.md](18_mcp.md#choosing-what-to-serve) for the flags and the
+per-runtime budget.
+
 ---
 
 ## 2. Why the interconnect exists

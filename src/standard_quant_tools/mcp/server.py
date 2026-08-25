@@ -68,6 +68,7 @@ from standard_quant_tools.mcp.catalog import (
     build_catalog,
     category_costs,
     dispatch_for,
+    runtime_costs,
     select,
 )
 from standard_quant_tools.mcp.config import ServerConfig, report, resolve
@@ -131,7 +132,15 @@ class StandardToolsServer:
     def __init__(self, config: ServerConfig) -> None:
         self.config = config
         catalog = build_catalog()
-        selected = select(catalog, config.categories)
+        # Runtime first, then category. The order does not change the result
+        # -- a category is owned by exactly one runtime -- but it makes the
+        # scoping read the way it is documented: the runtime is the boundary,
+        # the category narrows within it.
+        selected = [
+            e
+            for e in select(catalog, config.categories)
+            if e.runtime in set(config.runtimes)
+        ]
         if not config.enable_long_running:
             selected = [e for e in selected if e.name not in LONG_RUNNING]
         self.entries: Dict[str, ToolEntry] = {e.name: e for e in selected}
@@ -155,6 +164,50 @@ class StandardToolsServer:
     ) -> types.ListToolsResult:
         return types.ListToolsResult(tools=self.tools)
 
+    def _refusal(self, name: str) -> str:
+        """
+        Why a tool this server does not serve was refused.
+
+        Three different situations, and an agent can only correct the one it
+        is actually in. A tool that exists in another runtime is a SCOPE
+        problem the operator can fix; a tool hidden by --enable-long-running
+        is a policy decision; a name that exists nowhere is a hallucination,
+        and saying so plainly is more useful than implying a flag would
+        help. This mirrors `Runtime.dispatch`'s refusal, which names the
+        owner for the same reason.
+        """
+        known = self.catalog.get(name)
+        if known is None:
+            return (
+                f"unknown tool {name!r}. No tool by that name exists in this "
+                f"library. This server serves {len(self.entries)} tools from "
+                f"the {'+'.join(self.config.runtimes)} runtime"
+                f"{'s' if len(self.config.runtimes) > 1 else ''}. "
+                "Read sqt://catalog/categories for what exists, or call "
+                "tools/list for what this server serves -- do not guess "
+                "another name."
+            )
+        if known.runtime not in set(self.config.runtimes):
+            return (
+                f"{name!r} exists, but belongs to the {known.runtime!r} "
+                f"runtime and this server is scoped to "
+                f"{'+'.join(self.config.runtimes)}. Restart with "
+                f"`--runtime {known.runtime}` to serve it -- widening scope "
+                "is a decision, not a fallback."
+            )
+        if name in LONG_RUNNING:
+            return (
+                f"{name!r} is served by this runtime but is hidden because it "
+                "can run for minutes. Restart with --enable-long-running to "
+                "expose it, and expect a client timeout to be the risk you "
+                "are taking on."
+            )
+        return (
+            f"{name!r} exists in the {known.runtime!r} runtime but is not in "
+            f"the selected categories ({', '.join(self.config.categories)}). "
+            f"It belongs to {known.category!r}."
+        )
+
     async def call_tool(
         self,
         _ctx: ServerRequestContext[Any],
@@ -162,11 +215,7 @@ class StandardToolsServer:
     ) -> types.CallToolResult:
         entry = self.entries.get(params.name)
         if entry is None:
-            return _error(
-                f"unknown tool {params.name!r}. This server was started with "
-                f"categories {', '.join(self.config.categories)}; the tool may "
-                "exist in a category that is not loaded."
-            )
+            return _error(self._refusal(params.name))
 
         dispatch = dispatch_for(entry)
         arguments = dict(params.arguments or {})
@@ -381,23 +430,48 @@ async def _serve_stdio(server: Server[Any]) -> None:
         await server.run(read_stream, write_stream, options)
 
 
-def print_budget() -> None:
-    """The per-category context cost, for choosing a --categories value."""
-    catalog = build_catalog()
-    rows = sorted(category_costs(catalog).items(), key=lambda kv: -kv[1][1])
-    width = max(len(name) for name, _ in rows)
-    print(f"{'category'.ljust(width)}  tools    bytes   ~tokens", file=sys.stderr)
+def _budget_table(title: str, rows, width: int) -> None:
+    print(f"{title.ljust(width)}  tools    bytes   ~tokens", file=sys.stderr)
     for name, (count, size) in rows:
         print(
             f"{name.ljust(width)}  {count:>5}  {size:>7,}  {size // 4:>8,}",
             file=sys.stderr,
         )
-    total = sum(size for _, (_, size) in rows)
+
+
+def print_budget() -> None:
+    """
+    The context cost, per runtime and per category.
+
+    Runtimes come first because they are the scope a client is served at:
+    `--runtime backtest` is one number a reader can act on, where the three
+    backtest categories are a sum they have to do themselves. Categories
+    stay because they are still the filter WITHIN a runtime.
+    """
+    catalog = build_catalog()
+    rt = sorted(runtime_costs(catalog).items(), key=lambda kv: -kv[1][1])
+    cat = sorted(category_costs(catalog).items(), key=lambda kv: -kv[1][1])
+    width = max(len(n) for n, _ in rt + cat)
+
+    _budget_table("runtime", rt, width)
+    total = sum(size for _, (_, size) in rt)
+    count = sum(c for _, (c, _) in rt)
     print(
-        f"{'all'.ljust(width)}  {sum(c for _, (c, _) in rows):>5}  "
-        f"{total:>7,}  {total // 4:>8,}",
+        f"{'all'.ljust(width)}  {count:>5}  {total:>7,}  {total // 4:>8,}",
         file=sys.stderr,
     )
+    # What a client pays is one row above, not the total. Say so, because
+    # the total is the number that looks alarming and is never paid.
+    heaviest, (_, worst) = rt[0]
+    print(
+        "\n"
+        f"  a client is served ONE runtime: {heaviest} is the most "
+        f"expensive at {worst:,} bytes ({worst / total:.0%} of the total).",
+        file=sys.stderr,
+    )
+
+    print(file=sys.stderr)
+    _budget_table("category", cat, width)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

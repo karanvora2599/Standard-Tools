@@ -9,6 +9,57 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — the MCP server is scoped by runtime, not just by category
+
+`sqt-mcp --runtime research` serves one runtime. `--runtime research+meta`
+serves two, spelled the way `combine()` spells a joined runtime in the
+library itself. `--categories` survives unchanged as the narrower filter
+*within* the chosen runtime.
+
+The reason is a measurement, not a preference. Over the wire a tool averages
+2,184 bytes and the context ceiling is 180,000, which buys 82.4 tools. The
+library has 82. The remaining headroom is 912 bytes — under half a tool — so
+**the 83rd tool would have failed the budget test whatever it was.** Serving
+the whole surface had stopped being a thing to avoid and become a thing that
+no longer fits.
+
+What a client is actually served now costs a third of that: the heaviest
+runtime (`backtest`) is 58 KB of the 150 KB total, and
+`tests/mcp/test_runtime_scope.py` pins a 72 KB per-runtime ceiling.
+Deliberately tight — `backtest` measures 66,437 bytes over the wire, about
+two tools of headroom — because the next answer is thin listings with
+schemas fetched on demand, not a third argued-up ceiling.
+
+Scope is enforced at three points rather than one: the runtime's tools are
+the only ones listed, the only ones `call_tool` will dispatch, and the
+owning runtime's table would refuse a stray name again underneath.
+
+- `--runtime NAME` on `sqt-mcp`, accepting `a+b`, `a,b` or `all`.
+- `ServerConfig.runtimes`, which narrows a directly-constructed server too —
+  not only one built from the command line.
+- `catalog.select_runtimes()`, `categories_for_runtimes()`,
+  `runtime_costs()`, `ALL_RUNTIMES` and `RUNTIME_CATEGORY_MAP`.
+- `--print-budget` now reports per-runtime first, then per-category, and
+  says which row a client actually pays.
+
+**Nothing changes for an existing invocation.** With neither flag the server
+serves what it always did, and a test asserts that rather than assuming it.
+Given `--runtime` alone the categories widen to that runtime's own, because
+inheriting the default under `--runtime backtest` would have served zero
+tools — and an empty server reads as a broken install, not as two flags
+disagreeing. Naming a category the runtime does not own is refused at
+startup, by name, rather than silently intersected.
+
+### Changed — an unknown tool error now says which of three problems it is
+
+The error named the loaded categories for every unrecognised name, including
+names that exist nowhere in the library. That told an agent which had
+invented a tool to go and widen a scope that could never contain it. The
+three cases are now distinguished: a tool in another runtime names the owner
+and the flag that would serve it; a tool filtered out by category names the
+category; a name that exists nowhere says so and suggests no flag at all.
+
+
 ### Changed — tool scoping is now enforced, not advertised
 
 `get_agent_tools(categories=[...])` could always narrow the schema list

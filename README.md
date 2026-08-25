@@ -227,7 +227,7 @@ NaN/Inf data contract is covered separately, in
 | `Documentation/15_modeling.md` | The separate 14-tool modeling runtime: feature catalog and feature report, regression/classification/ranking targets, leakage-purged walk-forward validation, sample weighting, the model adapters, point-in-time joins, the content-addressed model registry, the model→backtest bridge, portfolio evaluation of OOS predictions, and what's explicitly deferred |
 | `Documentation/16_performance.md` | Every measured C++ and Python-level performance figure, with methodology and the ports that did not pay off |
 | `Documentation/17_correctness.md` | The correctness audits and the backend-parity contract between the Python and C++ tiers |
-| `Documentation/18_mcp.md` | The MCP server: install, category budget, resources, prompts, and the audit trail over the protocol |
+| `Documentation/18_mcp.md` | The MCP server: install, runtime and category scoping, the context budget, resources, prompts, and the audit trail over the protocol |
 | `Documentation/19_runtimes.md` | The five parallel runtimes and why scoping is enforced at dispatch rather than advertised; the typed handoff references that carry bulk values between them; pre-flight tool validation |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
