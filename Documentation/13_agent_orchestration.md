@@ -1,8 +1,8 @@
 # Agent Orchestration
 
-`get_agent_tools()` returns 46 LLM-callable tools (see
+`get_agent_tools()` returns 68 LLM-callable tools (see
 [07_agent_tools.md](07_agent_tools.md) /
-[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 46 to
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 68 to
 one model on every call — the default behavior of every single-agent script
 in `Implementation/{Anthropic,OpenAI,Gemini}/` — is the largest untreated
 source of tool-selection error: similarly-named or similarly-scoped tools
@@ -10,26 +10,34 @@ source of tool-selection error: similarly-named or similarly-scoped tools
 vs `run_sma_backtest`) compete for the model's attention on every single
 turn, whether or not the request actually needs them.
 
-This page covers the two mechanisms this library provides to narrow that
-tool list before it reaches the model, and when to use which:
+This page covers three mechanisms, in increasing order of strictness:
 
 1. **The tool-category router** (`standard_quant_tools.agent.router`) — a
    single cheap classification call that narrows the tool list before the
    real completion call, without spinning up a separate agent session.
    Used by every `Implementation/*/Agent_*.py` script that draws on the
-   46-tool surface.
+   68-tool surface.
 2. **The multi-agent orchestrator** (`Multi_Agent_Implementation/`) — a lead
-   agent that delegates each sub-task to one of 9 specialist worker agents,
+   agent that delegates each sub-task to one of 12 specialist worker agents,
    each with its own independent session and system prompt scoped to a
    small, non-overlapping tool subset.
+3. **Runtimes** (`standard_quant_tools.agent.runtimes`) — the only one of
+   the three that is ENFORCED. See [19_runtimes.md](19_runtimes.md).
 
-Both are built on the same underlying taxonomy, so a tool's categorization
-only ever needs to be correct in one place.
+The first two build on the same underlying taxonomy, so a tool's
+categorization only ever needs to be correct in one place.
 
-## Two registries, not one
+> **Narrowing versus enforcing.** The router and the workers narrow what a
+> model is *shown*. Neither stops `dispatch()` from running something else,
+> because that function knows every tool. If an agent must be unable to
+> reach a tool — rather than merely unlikely to pick it — give it a runtime,
+> whose dispatch table holds only its own tools and refuses the rest by
+> name.
 
-Everything above concerns the 46-tool analysis and backtest surface. There
-is a second one: `standard_quant_tools.modeling.agent`, 8 tools, which the
+## Two registries, five runtimes
+
+Everything above concerns the 68-tool analysis and backtest surface. There
+is a second one: `standard_quant_tools.modeling.agent`, 14 tools, which the
 library deliberately never merges into the first — see
 [15_modeling.md](15_modeling.md) for why. The example implementations keep
 the same separation, and it shows up in three places:
@@ -37,18 +45,25 @@ the same separation, and it shows up in three places:
 | | Analysis registry | Modeling registry |
 |---|---|---|
 | Module | `standard_quant_tools.agent` | `standard_quant_tools.modeling.agent` |
-| Size | 46 tools, 7 categories | 8 tools, one ordered pipeline |
-| Narrowing | `route_request()` → `categories=` | nothing to narrow — every tool is used, in sequence |
+| Size | 68 tools, 10 categories, 4 runtimes | 14 tools, one ordered pipeline |
+| Narrowing | `route_request()` → `categories=` | nothing to narrow — the pipeline runs in sequence |
 | Single-agent script | `Agent_*.py` (eight of them) | `Agent_Model_Builder.py` |
-| Workers | 7 | 2 (`model_research`, `model_builder`) |
+| Workers | 10 | 2 (`model_research`, `model_builder`) |
 
 Each `_agent_utils.py` names a registry once and gets that registry's tool
 schemas **and** its dispatch function together:
 
 ```python
-run_agent(..., registry="modeling")     # 8 tools, modeling_dispatch
-run_agent(..., registry="analysis")     # 46 tools, dispatch   (the default)
+run_agent(..., registry="modeling")     # 14 tools, modeling_dispatch
+run_agent(..., registry="analysis")     # 68 tools, dispatch   (the default)
 ```
+
+The analysis registry is itself divided into four **runtimes** —
+`research`, `backtest`, `portfolio`, `meta` — which are the same idea one
+level down: a dispatch table that refuses what it does not own. The
+modeling registry was the first runtime; the other four generalize it.
+Results still cross freely between all five, by value rather than by shared
+dispatch. [19_runtimes.md](19_runtimes.md) is the whole story.
 
 That pairing is the whole point. The two registries have identical shapes —
 same OpenAI-format schema, same `dispatch(tool_name, arguments)` signature —
@@ -67,18 +82,21 @@ silently did not is worse off than one who gets an error.
 ## The category taxonomy (`TOOL_CATEGORY`)
 
 `standard_quant_tools.agent.tools.TOOL_CATEGORY: Dict[str, str]` is the
-single source of truth: every one of the 46 tool names mapped to exactly
-one of 7 category keys.
+single source of truth: every one of the 68 tool names mapped to exactly
+one of 10 category keys. Each category belongs to exactly one runtime.
 
-| Category | Tools | Covers |
-|---|---|---|
-| `screener` | 2 | Filter a universe, fetch fundamentals |
-| `analysis` | 12 | Single-asset risk/technical/volatility/option profiling, multi-asset portfolio metrics, data quality |
-| `quant_research` | 7 | Factor regression, cointegration/pairs, Kalman hedge ratio, PCA, Hurst, correlation |
-| `backtest_execution` | 9 | Run a built-in strategy / portfolio / pair trade **once**, fixed parameters |
-| `backtest_validation` | 7 | Optimize/validate/diagnose a built-in strategy — grid search, walk-forward, regime-adaptive, robustness, Monte Carlo |
-| `custom_signal` | 2 | Backtest a signal computed outside this library |
-| `portfolio_risk` | 6 | Risk decomposition, portfolio construction/optimization, sizing, capacity, stress testing, liquidity |
+| Category | Tools | Runtime | Covers |
+|---|---|---|---|
+| `screener` | 2 | `research` | Filter a universe, fetch fundamentals |
+| `analysis` | 14 | `research` | Single-asset risk/technical/volatility/option profiling, multi-asset portfolio metrics, panel indicators, data quality |
+| `quant_research` | 7 | `research` | Factor regression, cointegration/pairs, Kalman hedge ratio, PCA, Hurst, correlation |
+| `backtest_execution` | 10 | `backtest` | Run a built-in strategy / portfolio / pair trade / strategy matrix **once**, fixed parameters |
+| `backtest_validation` | 9 | `backtest` | Optimize/validate/diagnose — grid search, walk-forward, regime-adaptive, robustness, Monte Carlo, cost sweep, drawdown table |
+| `custom_signal` | 2 | `backtest` | Backtest a signal computed outside this library |
+| `portfolio_risk` | 7 | `portfolio` | Risk decomposition, portfolio construction/optimization, sizing, capacity, stress testing, liquidity, trade cost |
+| `microstructure` | 3 | `portfolio` | Spreads MEASURED from tick data, and a check of the OHLCV proxies against them. Needs a provider with a tick feed |
+| `discovery` | 8 | `meta` | What the library accepts and what the provider can serve; describe or validate a tool call before making it; the handoff reference map |
+| `provenance` | 6 | `meta` | Read and verify the decision log. Read-only by design |
 
 `backtest_execution`/`backtest_validation` is a deliberate split of what
 used to be one 16-tool `backtest` bucket: "run SMA on AAPL" and "find the
