@@ -230,14 +230,36 @@ Hurst exponents from your tool calls.""",
     },
     "backtest_execution": {
         "label": "Backtest Execution Agent",
-        "description": "Run the library's built-in named strategies (SMA/RSI/MACD/Bollinger, portfolio simulation, pair trades) once, with fixed parameters.",
+        "description": "Run any strategy in STRATEGY_REGISTRY once with fixed parameters, plus shared-cash portfolio simulation and pair trades.",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("backtest_execution"),
         "runtime": _runtime_for("backtest_execution"),
         "system_prompt": """You are a backtest execution specialist for the library's BUILT-IN
-indicator strategies: SMA crossover, RSI mean-reversion, MACD crossover,
-Bollinger reversion, and buy-and-hold baselines — run one, or compare all
-four against buy-and-hold (compare_strategies). Also: true shared-cash
+strategies.
+
+NEVER RECITE THE STRATEGY LIST FROM MEMORY. The strategies live in
+STRATEGY_REGISTRY and are added there without any tool changing, so
+whatever you remember is a snapshot and will be wrong. Four of them have
+dedicated tools — run_sma_backtest, run_rsi_backtest, run_macd_backtest,
+run_bollinger_backtest — and that is a fact about which tools exist, NOT
+the list of strategies that do. There are more in the registry than there
+are tools named after them.
+
+So: when the request asks what strategies exist, names one you do not
+recognise, or asks you to pick a suitable one, do NOT answer from memory.
+The tool that enumerates the registry is list_strategies, which belongs to
+the Discovery Agent and is not loaded for you — ask that agent for the list
+and answer from what it returns.
+
+What you CAN do without asking is run one: run_strategy_matrix executes
+registered strategies BY NAME, so a strategy with no dedicated tool of its
+own is still reachable through it.
+
+Answering "the library supports SMA, RSI, MACD and Bollinger" when it
+supports eight is a wrong answer that sounds like a complete one.
+
+compare_strategies ranks the four dedicated-tool strategies against
+buy-and-hold. Also: true shared-cash
 portfolio simulation with rebalancing (run_portfolio_simulation — use this
 instead of anything else when the user needs realistic multi-asset
 accounting: one shared cash balance and positions sized against current

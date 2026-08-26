@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from standard_quant_tools.audit.hashing import hash_dataframe
+from standard_quant_tools.data.bundle import DataBundle, validate_bundle
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import (
@@ -110,6 +111,41 @@ def _fetch_ohlcv(
             f"build_model_dataset: no OHLCV data returned for {symbol!r}"
         )
     return df
+
+
+def _provider_contract(provider: Any, frame_kind: str = "bars") -> Optional[Any]:
+    """
+    The provider's own declared temporal contract, or None.
+
+    Best-effort for the same reason as `_provider_metadata`: a duck-typed
+    or partially-stubbed provider need not implement
+    `get_temporal_contract`, and failing a dataset build because a
+    PROVENANCE note could not be read would be the wrong trade. Falling
+    back to None hands `DataBundle` the inference path, which is weaker but
+    honest about being weaker.
+    """
+    from standard_quant_tools.data.temporal import TemporalContract
+
+    getter = getattr(provider, "get_temporal_contract", None)
+    if getter is None:
+        return None
+    try:
+        contract = getter(frame_kind)
+    except Exception as exc:  # noqa: BLE001 -- provenance is not worth failing over
+        logger.debug("[modeling] temporal contract unavailable: %s", exc)
+        return None
+    # A duck-typed or mocked provider hands back something that is not a
+    # contract at all, and a MagicMock in particular answers every
+    # attribute truthily -- which would report a bundle as point-in-time
+    # safe because nothing said otherwise. Checking the type is what keeps
+    # the verdict from being vacuously clean.
+    if not isinstance(contract, TemporalContract):
+        logger.debug(
+            "[modeling] %r returned a non-contract from get_temporal_contract",
+            type(provider).__name__,
+        )
+        return None
+    return contract
 
 
 def _provider_metadata(provider: Any, symbol: str, interval: str) -> Optional[Any]:
@@ -284,6 +320,50 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         intersection_warnings(ohlcv_by_entity, returns_panel, has_universe_scope)
     )
 
+    # ── What this data can and cannot support, as one verdict ─────────────
+    # The panel is collected into a DataBundle and validated as a UNIT. A
+    # frame is only half the fact; the other half is what its source can
+    # say about WHEN each row became knowable, and the pairing is the thing
+    # worth carrying forward. `join_point_in_time` later attaches records
+    # to this panel, and the honest answer to "was that join safe" depends
+    # on the contract the bars arrived under, not on the join alone.
+    #
+    # `require_pit=False` is deliberate and is not a lowered bar. No shipped
+    # provider reports `point_in_time=True`, so requiring it would refuse
+    # every build this runtime has ever done. The verdict is recorded and
+    # surfaced as warnings instead, which is the difference between a
+    # caller who knows what they are joining onto and one who finds out
+    # from a model that looks prescient.
+    # ASK THE PROVIDER for its contract rather than inferring one from the
+    # frame. Inference reads COLUMNS, which can only say what is present --
+    # never what the source guarantees -- so a provider that genuinely
+    # serves point-in-time data would still have been reported as though it
+    # did not, and the caveat would fire on every build regardless of the
+    # truth. A warning that is always on carries no information, which is
+    # the property `tests/modeling/test_data_runtime_architecture.py` pins.
+    bundle = DataBundle(f"dataset:{dataset_spec_hash(spec)[:12]}")
+    bundle.add(
+        "bars",
+        returns_panel,
+        _provider_contract(provider, "bars"),
+        source=spec.provider,
+        entity_scoped=True,
+    )
+    # The verdict is PROVENANCE, not a warning, and the distinction is the
+    # point. `provider_guarantee_warnings` above already says whether the
+    # provider guarantees point-in-time data, which is the informative
+    # version of this fact; re-deriving it from a returns panel would add a
+    # caveat that fires on EVERY build, because a wide frame of returns
+    # structurally has no `available_time` column and never will. A warning
+    # that is always on carries no information -- the property
+    # `test_a_clean_provider_and_universe_produce_no_warnings` pins.
+    #
+    # So the bundle is recorded rather than shouted. It travels with the
+    # dataset, and `join_point_in_time` later attaches records to exactly
+    # this panel, where "was that join safe" depends on the contract these
+    # bars arrived under.
+    bundle_verdict = validate_bundle(bundle, require_pit=False)
+
     # Universe-scope features are computed once, over the shared panel —
     # not once per entity, since PCA needs every entity's returns at once.
     # Keyed on output_name, not id: the same feature can now appear more
@@ -449,6 +529,9 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         "feature_ids": [fs.output_name for fs in spec.features],
         "data_hash": data_hash,
         "spec_hash": dataset_spec_hash(spec),
+        # What the frames in this dataset can and cannot support, as one
+        # verdict from `data.bundle`. See the bundle construction above.
+        "temporal_bundle": bundle_verdict,
     }
     result["target_id"] = (
         f"{spec.target.type}:{spec.target.horizon}" if include_target else None

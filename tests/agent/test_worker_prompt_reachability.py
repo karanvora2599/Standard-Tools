@@ -51,7 +51,7 @@ from pathlib import Path
 
 import pytest
 
-from standard_quant_tools.agent.runtimes import all_runtimes
+from standard_quant_tools.agent.runtimes import all_runtimes, resolve
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "Multi_Agent_Implementation"))
@@ -245,4 +245,64 @@ class TestTheRuntimeAWorkerDispatchesThroughOwnsItsTools:
         assert not wrong, (
             f"{worker!r} dispatches through {runtime!r} but holds tools that "
             f"runtime does not own: {wrong}"
+        )
+
+
+class TestEveryRegistryIsFullyDiscoverable:
+    """
+    A registry entry nobody can enumerate is unreachable in practice.
+
+    This is the state the audit called REGISTRY CAPABILITY: a thing you
+    select declaratively through a generic tool rather than by its own
+    dedicated tool. `donchian_breakout` is a real strategy with no
+    `run_donchian_backtest` beside it, and that is the correct design --
+    thirty strategies must not mean thirty tools. What makes the design
+    work is the enumerator, so the enumerator has to be complete.
+
+    If it silently drops an entry, the capability exists, is tested, and is
+    invisible: an agent asking "what strategies are there" gets an answer
+    that looks authoritative and is short. These tests compare each
+    discovery tool against the registry it reports on.
+    """
+
+    def test_list_strategies_returns_the_whole_strategy_registry(self):
+        from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+
+        listed = {
+            s["name"] if isinstance(s, dict) else s
+            for s in resolve("meta").dispatch("list_strategies", {})["strategies"]
+        }
+        assert listed == set(STRATEGY_REGISTRY), (
+            "list_strategies disagrees with STRATEGY_REGISTRY. "
+            f"missing from the tool: {sorted(set(STRATEGY_REGISTRY) - listed)}; "
+            f"reported but unregistered: {sorted(listed - set(STRATEGY_REGISTRY))}"
+        )
+
+    def test_list_features_returns_the_whole_feature_registry(self):
+        from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY
+
+        listed = {
+            f["id"] if isinstance(f, dict) and "id" in f else f.get("name")
+            for f in resolve("modeling").dispatch("list_features", {})["features"]
+        }
+        assert listed == set(FEATURE_REGISTRY), (
+            "list_features disagrees with FEATURE_REGISTRY. "
+            f"missing from the tool: {sorted(set(FEATURE_REGISTRY) - listed)}; "
+            f"reported but unregistered: {sorted(listed - set(FEATURE_REGISTRY))}"
+        )
+
+    def test_list_modeling_capabilities_reports_every_estimator(self):
+        from standard_quant_tools.modeling.estimators.registry import ESTIMATOR_REGISTRY
+
+        capabilities = resolve("modeling").dispatch("list_modeling_capabilities", {})[
+            "capabilities"
+        ]
+        reported = {
+            (e["task"], e["name"]) if isinstance(e, dict) else e
+            for e in capabilities["estimators"]
+        }
+        assert reported == set(ESTIMATOR_REGISTRY), (
+            "list_modeling_capabilities disagrees with ESTIMATOR_REGISTRY. "
+            f"missing: {sorted(set(ESTIMATOR_REGISTRY) - reported)}; "
+            f"reported but unregistered: {sorted(reported - set(ESTIMATOR_REGISTRY))}"
         )

@@ -340,3 +340,70 @@ class TestCustomFeatureOutputContract:
                 build_dataset(_spec(features=[FeatureSpec(id=fid)]))
         finally:
             del FEATURE_REGISTRY[fid]
+
+
+class TestTheTemporalContractIsCarriedAsABundle:
+    """
+    `DataBundle` pairs each frame with what its source can say about WHEN
+    its rows became knowable, and `validate_bundle` turns that into a
+    verdict.
+
+    Both were built, tested and documented, and then called from nowhere.
+    Repo-wide search found `DataBundle(` only in its own module and its own
+    tests -- an abstraction in the state where it exists, passes, and
+    nobody knows why. `build_dataset` is the right home for it: this is
+    where frames and contracts first meet, and `join_point_in_time` later
+    attaches records to exactly this panel.
+
+    These tests pin the wiring rather than the verdict. The verdict itself
+    is `data/bundle.py`'s to test; what matters here is that the call
+    happens at all, because the failure mode being guarded against is
+    silence.
+    """
+
+    def test_build_dataset_validates_a_bundle(self, patched_multi_factory):
+        import standard_quant_tools.modeling.dataset.builder as builder
+
+        seen = {}
+        original = builder.validate_bundle
+
+        def _spy(bundle, **kwargs):
+            seen["bundle"] = bundle
+            seen["kwargs"] = kwargs
+            return original(bundle, **kwargs)
+
+        builder.validate_bundle = _spy
+        try:
+            build_dataset(_spec())
+        finally:
+            builder.validate_bundle = original
+
+        assert seen, (
+            "build_dataset no longer validates a DataBundle. That call is "
+            "the only production use of the abstraction -- without it, "
+            "DataBundle is an orphan again."
+        )
+        assert "bars" in seen["bundle"].kinds
+
+    def test_the_pit_requirement_is_relaxed_deliberately(self, patched_multi_factory):
+        """
+        No shipped provider reports `point_in_time=True`, so requiring it
+        here would refuse every build. The relaxation has to be explicit
+        and visible, not a default that drifted.
+        """
+        import standard_quant_tools.modeling.dataset.builder as builder
+
+        seen = {}
+        original = builder.validate_bundle
+
+        def _spy(bundle, **kwargs):
+            seen.update(kwargs)
+            return original(bundle, **kwargs)
+
+        builder.validate_bundle = _spy
+        try:
+            build_dataset(_spec())
+        finally:
+            builder.validate_bundle = original
+
+        assert seen.get("require_pit") is False
