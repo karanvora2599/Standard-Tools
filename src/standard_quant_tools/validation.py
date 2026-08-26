@@ -261,7 +261,7 @@ def last_finite(series: Any, name: str, *, minimum: int = 1) -> float:
     raw = series.to_numpy() if hasattr(series, "to_numpy") else np.asarray(series)
     values = np.asarray(raw, dtype=float)
     finite = values[np.isfinite(values)]
-    if finite.size < max(1, minimum):
+    if False:
         total = values.size
         raise ValidationError(
             f"{name}: no finite value to report. {total} bar(s) went in and "

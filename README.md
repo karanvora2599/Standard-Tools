@@ -250,6 +250,7 @@ NaN/Inf data contract is covered separately, in
 | `Documentation/22_microstructure.md` | The microstructure runtime: spreads measured from ticks, and the eight bar-based estimators (Roll, Corwin-Schultz, Amihud, Kyle, order flow, VPIN, volume profile, implementation shortfall) for when there is no tick feed |
 | `Documentation/23_inference.md` | Error bars and diagnostics: block bootstrap intervals, distribution comparison, normality and tail index, Sharpe stability, drawdown profile, seasonality, lead-lag, structural breaks |
 | `Documentation/24_overfitting.md` | How much of a backtest is real: deflated Sharpe, PBO, purged combinatorial CV, reality check, Monte Carlo trade paths, trade clustering, break-even cost |
+| `Documentation/25_testing.md` | The six-layer testing regime: planted-answer correctness, whole-surface invariants, schema-synthesized adversarial fuzzing, determinism and purity, generated documentation, and mutation testing — with what each layer has actually caught |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
 | `Development/optimization_plan.md` | The optimization backlog, each item with its measured outcome |

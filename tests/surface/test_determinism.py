@@ -159,9 +159,9 @@ class TestSeedsAreHonoured:
         second = _quiet(runtime, tool, {**arguments, "seed": 7})
         if first is None:
             pytest.skip(f"{tool} refused the synthesized input")
-        assert _serialize(first) == _serialize(second), (
-            f"{tool} is not reproducible at a fixed seed"
-        )
+        assert _serialize(first) == _serialize(
+            second
+        ), f"{tool} is not reproducible at a fixed seed"
 
     @pytest.mark.parametrize("runtime,tool,arguments", SEEDED, ids=SEEDED_IDS)
     def test_a_different_seed_changes_the_answer(self, runtime, tool, arguments):

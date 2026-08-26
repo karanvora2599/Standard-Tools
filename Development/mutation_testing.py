@@ -209,8 +209,17 @@ def run_tests(target: str) -> bool:
     """True when the named tests pass."""
     arguments = target.split()
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", *arguments, "-x", "-q", "--no-header",
-         "-p", "no:cacheprovider"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *arguments,
+            "-x",
+            "-q",
+            "--no-header",
+            "-p",
+            "no:cacheprovider",
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
