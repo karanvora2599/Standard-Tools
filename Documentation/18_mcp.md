@@ -150,7 +150,7 @@ whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
-1,615 bytes and the session ceiling is 180,000, which buys about 111 tools.
+1,561 bytes and the session ceiling is 180,000, which buys about 115 tools.
 There are 178. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
@@ -168,28 +168,29 @@ sqt-mcp --print-budget
 
 ```
 runtime              tools    bytes   ~tokens
-backtest                32   73,057    18,264
-modeling                16   46,651    11,662
-research                40   44,616    11,154
-portfolio               17   29,900     7,475
+backtest                33   75,248    18,812
+research                42   47,887    11,971
+modeling                17   47,323    11,830
+portfolio               18   32,065     8,016
+microstructure          15   18,992     4,748
 derivatives             12   17,878     4,469
-microstructure          12   15,523     3,880
 meta                    19   14,138     3,534
+data                    13   12,541     3,135
 feature_lab              9   11,745     2,936
-all                    157  253,508    63,377
+all                    178  277,817    69,454
 
-  a client is served ONE runtime: backtest is the most
-  expensive at 73,057 bytes (29% of the total).
+  a client is served ONE runtime: backtest is the most expensive at 75,248 bytes (27% of the total).
 
 category             tools    bytes   ~tokens
-modeling                16   46,651    11,662
-backtest_validation     20   35,582     8,895
+modeling                17   47,323    11,830
+backtest_validation     21   37,773     9,443
+portfolio_risk          18   32,065     8,016
 backtest_execution      10   30,593     7,648
-portfolio_risk          17   29,900     7,475
 quant_research          26   28,497     7,124
+microstructure          15   18,992     4,748
 derivatives             12   17,878     4,469
-microstructure          12   15,523     3,880
-analysis                12   14,084     3,521
+analysis                14   17,355     4,338
+data                    13   12,541     3,135
 feature_lab              9   11,745     2,936
 discovery               13   10,537     2,634
 custom_signal            2    6,882     1,720
@@ -556,13 +557,13 @@ rate limit whether or not anything is mutated. See
 
 ## Architecture notes
 
-**Eight runtimes, one server.** Eleven of the thirteen categories come from
-the 132-tool analysis surface, spread across six runtimes; the other two
-are the separate 16-tool `modeling` and 9-tool `feature_lab` runtimes. They
+**Nine runtimes, one server.** Twelve of the fourteen categories come from
+the 152-tool analysis surface, spread across seven runtimes; the other two
+are the separate 17-tool `modeling` and 9-tool `feature_lab` runtimes. They
 stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
 dispatcher, so schemas and executor are never chosen separately, and a tool
 served from `research` is executed by a table holding only research tools —
-but a user configures one server, not eight.
+but a user configures one server, not nine.
 
 **Schemas are dereferenced.** Seven tools carry `$ref`/`$defs` upstream, and
 they are the seven most complex tools in the library. The server inlines

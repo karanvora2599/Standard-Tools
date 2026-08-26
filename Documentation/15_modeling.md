@@ -1,6 +1,6 @@
 # Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent runtime alongside the 132-tool
+A second, independent runtime alongside the 152-tool
 `standard_quant_tools.agent` analysis/backtest surface — not tool #133.
 This document explains why that split exists, what's built in this first
 phase, and what's deliberately deferred.
@@ -12,7 +12,7 @@ phase, and what's deliberately deferred.
 `agent/tools.py`'s `TOOL_CATEGORY` router and `Multi_Agent_Implementation/`'s
 worker split (see
 [Documentation/13_agent_orchestration.md](13_agent_orchestration.md))
-exist specifically because handing an LLM 132 similarly-shaped tools on
+exist specifically because handing an LLM 152 similarly-shaped tools on
 every call causes selection ambiguity. Fitting/validating/registering a
 statistical model doesn't fit that surface's shape at all — it isn't a
 point-in-time snapshot (`analyze_stock_risk`) or a single backtest run
@@ -22,7 +22,7 @@ tool #133 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 16 tools, never merged into `agent.get_agent_tools()` /
+with exactly 17 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (132 tools, 6 runtimes)      (16 tools, one pipeline)
+    (152 tools, 7 runtimes)      (17 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 16 modeling tools
+## The 17 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -58,6 +58,7 @@ because the order is the point.
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
 | `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
+| `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing |
 | `validate_pit_records` | point-in-time records → whether they are joinable, checked before anything is joined |
 | `join_point_in_time` | `dataset_id` + records → each panel row gets the most recent record **available by then**, never the one describing that date |
 | `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold |
@@ -91,19 +92,19 @@ typed fields for **one** question:
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta |
 
 `feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table:
-16 + 9 is 25, and the whole library is 157. `Multi_Agent_Implementation/`
+17 + 9 is 26, and the whole library is 178. `Multi_Agent_Implementation/`
 gives it its own worker for the same reason.
 
 ### Driving these from an agent
 
 `Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
 whole pipeline as a single agent, on all three providers. It is the one
-example script that does not use the 132-tool surface: it passes
+example script that does not use the 152-tool surface: it passes
 `registry="modeling"` to `run_agent()`, which loads these sixteen schemas
 and `modeling_dispatch` together.
 
 It also skips the category router, deliberately. Routing exists to narrow
-132 similarly-shaped tools down to the relevant few; sixteen tools in one
+152 similarly-shaped tools down to the relevant few; seventeen tools in one
 ordered pipeline have nothing to narrow, since they are used in sequence. Passing `categories=` alongside `registry="modeling"` raises
 rather than being quietly ignored.
 
@@ -1575,7 +1576,7 @@ resolves.
 `run_model_experiment` answers "how did this model do out-of-sample."
 It doesn't answer "does this work as a trading strategy" — that requires
 an actual backtest, and this codebase already has one
-(`run_signal_panel_backtest`, in the *other* 132-tool surface).
+(`run_signal_panel_backtest`, in the *other* 152-tool surface).
 `modeling.bridge.oos_predictions_to_signal_panel` connects the two —
 a plain Python function, deliberately **not** a tool, because it only
 reshapes an artifact the caller already holds and hands it to a tool in
@@ -1905,13 +1906,13 @@ own `ValidationError`).
 
 Every modeling tool call routed through
 `modeling.agent.modeling_dispatch` writes a `DecisionRecord`, using the
-same `audit._run_and_record` the 132-tool surface uses — no parallel audit
+same `audit._run_and_record` the 152-tool surface uses — no parallel audit
 implementation.
 
 `audit.verify_replay` covers **both** surfaces: it resolves a record's tool
 against the agent registry and then the modeling registry. (Each is looked
 up lazily, since both tool packages import the audit package, and the
-modeling runtime is deliberately independent of the 132-tool surface rather
+modeling runtime is deliberately independent of the 152-tool surface rather
 than importable from it.)
 
 Replay comparison for modeling is **semantic**, not literal. Modeling mints

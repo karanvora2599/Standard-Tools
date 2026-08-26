@@ -2,7 +2,8 @@
 Synthesize a plausible input for any tool, from its Pydantic schema alone.
 
 WHY THIS EXISTS. The adversarial and contract tests need to call every tool
-in the library, and hand-writing 157 sets of arguments would mean the tools
+in the library, and hand-writing one set of arguments per tool would mean
+the tools
 added after those tests were written are the tools nobody fuzzes -- which is
 exactly backwards, since new code is where the bugs are.
 

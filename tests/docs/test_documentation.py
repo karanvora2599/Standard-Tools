@@ -265,7 +265,7 @@ class TestTheDescriptionsAreUsable:
                 if len(description) < 60:
                     thin.append(f"{name} ({len(description)} chars)")
         assert not thin, (
-            "descriptions too short to choose between 157 tools -- say when "
+            "descriptions too short to choose between this many tools -- say when "
             f"to reach for it and how it fails: {thin}"
         )
 

@@ -154,8 +154,8 @@ a changelog nobody reads, embedded in an error message everybody does.
 
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
-decision, though the budget forced it: at roughly 1,615 bytes per tool over
-the wire the session ceiling buys about 111 tools and the library has 178,
+decision, though the budget forced it: at roughly 1,561 bytes per tool over
+the wire the session ceiling buys about 115 tools and the library has 178,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 
@@ -230,6 +230,16 @@ trade log.
 | `predictions` | Long `(date, entity, prediction)` frame |
 | `feature_panel` | Computed features, entity by date |
 | `indicator_panel` | Indicator values across a universe |
+| `tick_tape` | Individual trades, `price` and `size`, timestamp-indexed |
+| `quote_panel` | Top-of-book quotes, `bid_price` and `ask_price` |
+| `data_bundle` | A MANIFEST of other references, one row per frame |
+
+The last three arrived with the `data` runtime. `tick_tape` and
+`quote_panel` name their required COLUMNS deliberately: the microstructure
+tools refuse without `price`/`size` and `bid_price`/`ask_price`, and a
+producer that never stated the contract is what turns that refusal into a
+surprise. `data_bundle` holds references rather than frames, which is what
+keeps a bundle immutable — it cannot diverge from what it names.
 
 `list_reference_kinds` returns this table plus what converts to what — the
 map of which producer outputs can reach which consumer inputs.

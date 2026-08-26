@@ -162,7 +162,7 @@ class TestTheBaselineHolds:
         which looks exactly like success.
         """
         assert len(TOOLS) >= 100, (
-            f"only {len(TOOLS)} of 157 tools could be synthesized; the "
+            f"only {len(TOOLS)} tools could be synthesized; the "
             "fuzzing surface has collapsed and these tests are now vacuous"
         )
 

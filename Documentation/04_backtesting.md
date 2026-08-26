@@ -1376,3 +1376,23 @@ trial in one call.
 | `avg_trade_return_pct` | float | Average trade P&L in % |
 | `equity_curve` | pd.Series | Day-by-day portfolio value |
 | `trade_log` | pd.DataFrame | Per-trade entry/exit details |
+
+
+## Two tools it is easy to miss
+
+`compare_cost_models` runs the same strategy under several cost
+assumptions and reports how much of the edge each one removes. An edge that
+survives a fixed-bps spread and dies under a percent-of-range one was never
+robust to execution; a single cost assumption cannot show that.
+
+`run_terminal_monte_carlo` keeps only where the simulated paths **ended**.
+`run_monte_carlo_simulation` returns the distribution of paths, which is
+the right answer when the question is about the journey — worst drawdown
+along the way, time underwater. It is the wrong shape when the question is
+only about the destination: a million paths over a year is roughly 2 GB of
+path matrix for a handful of terminal quantiles, and the memory caps the
+simulation count rather than the statistics.
+
+Same block bootstrap either way. The terminal variant says nothing about
+the path, and says so — a distribution of endpoints can look benign while
+every path reaching it was unholdable.

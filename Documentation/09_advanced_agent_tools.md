@@ -2,7 +2,7 @@
 
 Thirty-two high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 132), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 152), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 

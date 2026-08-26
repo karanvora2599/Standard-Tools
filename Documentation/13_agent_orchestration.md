@@ -1,8 +1,8 @@
 # Agent Orchestration
 
-`get_agent_tools()` returns 132 LLM-callable tools (see
+`get_agent_tools()` returns 152 LLM-callable tools (see
 [07_agent_tools.md](07_agent_tools.md) /
-[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 132 to
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 152 to
 one model on every call — the default behavior of every single-agent script
 in `Implementation/{Anthropic,OpenAI,Gemini}/` — is the largest untreated
 source of tool-selection error: similarly-named or similarly-scoped tools
@@ -16,9 +16,9 @@ This page covers three mechanisms, in increasing order of strictness:
    single cheap classification call that narrows the tool list before the
    real completion call, without spinning up a separate agent session.
    Used by every `Implementation/*/Agent_*.py` script that draws on the
-   132-tool surface.
+   152-tool surface.
 2. **The multi-agent orchestrator** (`Multi_Agent_Implementation/`) — a lead
-   agent that delegates each sub-task to one of 14 specialist worker agents,
+   agent that delegates each sub-task to one of 15 specialist worker agents,
    each with its own independent session and system prompt scoped to a
    small, non-overlapping tool subset.
 3. **Runtimes** (`standard_quant_tools.agent.runtimes`) — the only one of
@@ -36,19 +36,19 @@ categorization only ever needs to be correct in one place.
 
 ## Three registries, nine runtimes
 
-Everything above concerns the 132-tool analysis and backtest surface. There
+Everything above concerns the 152-tool analysis and backtest surface. There
 are two more: `standard_quant_tools.modeling.agent`, 16 tools, and the
 9-tool `feature_lab` runtime — neither of which the library merges into the
-first, see [15_modeling.md](15_modeling.md) for why. 132 + 16 + 9 is the
+first, see [15_modeling.md](15_modeling.md) for why. 152 + 17 + 9 is the
 178-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 
 | | Analysis registry | Modeling registry |
 |---|---|---|
 | Module | `standard_quant_tools.agent` | `standard_quant_tools.modeling.agent` |
-| Size | 132 tools, 11 categories, 6 runtimes | 16 tools, one ordered pipeline |
+| Size | 152 tools, 12 categories, 7 runtimes | 17 tools, one ordered pipeline |
 | Narrowing | `route_request()` → `categories=` | nothing to narrow — the pipeline runs in sequence |
-| Single-agent script | `Agent_*.py` (eleven of the thirteen) | `Agent_Model_Builder.py`; `Agent_Model_Backtester.py` spans both |
+| Single-agent script | `Agent_*.py` (eleven of the thirteen; the data runtime has no script of its own yet) | `Agent_Model_Builder.py`; `Agent_Model_Backtester.py` spans both |
 | Workers | 11 | 2 (`model_research`, `model_builder`), plus `feature_lab` on its own runtime |
 
 Each `_agent_utils.py` names a registry once and gets that registry's tool
@@ -56,7 +56,7 @@ schemas **and** its dispatch function together:
 
 ```python
 run_agent(..., registry="modeling")     # 16 tools, modeling_dispatch
-run_agent(..., registry="analysis")     # 132 tools, dispatch  (the default)
+run_agent(..., registry="analysis")     # 152 tools, dispatch  (the default)
 ```
 
 `registry=` also accepts a RUNTIME name, and that is the safer choice:
@@ -80,7 +80,7 @@ into a wall it was told to walk into. Several of these genuinely span two
 or three runtimes; that is what a real workflow looks like, and the value
 is that the span is now written down instead of being an accident.
 
-The fourteen workers dispatch through their category's runtime for the same
+The fifteen workers dispatch through their category's runtime for the same
 reason. Each already declared a fixed, non-overlapping tool subset — that
 is the architecture — but dispatching through the union made the subset
 advisory.
@@ -110,7 +110,7 @@ silently did not is worse off than one who gets an error.
 ## The category taxonomy (`TOOL_CATEGORY`)
 
 `standard_quant_tools.agent.tools.TOOL_CATEGORY: Dict[str, str]` is the
-single source of truth: every one of the 132 tool names mapped to exactly
+single source of truth: every one of the 152 tool names mapped to exactly
 one of 11 category keys. Each category belongs to exactly one runtime.
 
 | Category | Tools | Runtime | Covers |

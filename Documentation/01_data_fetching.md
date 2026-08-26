@@ -1,5 +1,11 @@
 # Data Fetching
 
+> **Fetching is also a RUNTIME.** This page is about the providers
+> themselves — how they are configured, what they guarantee, how retries
+> and caching behave. The agent-facing side, where a fetch publishes an
+> `sqt://` reference that every other runtime reads instead of refetching,
+> is [26_data.md](26_data.md).
+
 The data layer wraps yfinance (and, optionally, a Bloomberg Terminal via Desktop API, or Polygon.io's REST API) with caching, retry logic, and Pydantic-validated outputs. All providers implement the same `DataProvider` ABC so swapping sources requires zero changes to downstream code.
 
 ---

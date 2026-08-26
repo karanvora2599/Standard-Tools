@@ -458,3 +458,38 @@ knowing before it is presented as a worst case.
 
 - [22_microstructure.md](22_microstructure.md) — what it costs to get there
 - [24_overfitting.md](24_overfitting.md) — whether the signal driving the weights is real
+
+
+## Constructing weights, as a step you can stop at
+
+`construct_weights_from_scores` turns alpha scores into portfolio weights
+and stops. Rank, top/bottom, z-score or volatility-scaled construction,
+optionally dollar-neutralised, published as an `sqt://weight_panel`.
+
+This matters most between modeling and backtesting:
+
+```
+predictions ──> construct_weights_from_scores ──> LOOK AT THE WEIGHTS
+                                               ──> only then simulate
+```
+
+A model's predictions become weights become a P&L, and when the P&L looks
+wrong there is otherwise no way to tell whether the signal or the
+construction did it. The construction rules always existed in
+`backtest/sizing.py`; what was missing was a way to stop in the middle.
+
+**These are TARGET weights, not a P&L.** What they earn depends on costs,
+fills and rebalancing, which `run_portfolio_simulation` applies and this
+tool deliberately does not.
+
+`dollar_neutral=true` is applied AFTER the method, so it changes net
+exposure and leaves the cross-sectional ordering alone — gross may then
+differ from the leverage you asked for.
+
+## Covariance before optimization
+
+`estimate_covariance` produces the matrix an optimizer consumes, separately
+from consuming it. A sample covariance on a short window is badly
+conditioned, and feeding one straight into a mean-variance solver produces
+confident weights built on noise — inspecting the estimate first is what
+makes that visible rather than showing up as an implausible allocation.

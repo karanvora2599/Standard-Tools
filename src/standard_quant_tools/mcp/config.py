@@ -157,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Serve Standard Tools over the Model Context Protocol, on stdio "
             "or over streamable HTTP. Tools are selected by category because "
-            "the full set of 157 costs roughly 63,000 tokens of a client's "
+            "the full set of 178 costs roughly 69,000 tokens of a client's "
             "context at connect."
         ),
     )
@@ -224,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Declare outputSchema for every tool. Costs about 95%% more "
-            "context (235 KB across all 157 tools) and is off by default: "
+            "context (253 KB across all 178 tools) and is off by default: "
             "structuredContent is returned either way, and the declaration "
             "only helps clients that validate against it."
         ),

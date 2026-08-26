@@ -177,7 +177,7 @@ class ToolEntry:
         Serialized schema size -- what this tool costs a client's context.
 
         Output schemas are EXCLUDED by default because the server omits them
-        by default: declaring all 157 adds about 235 KB, a 95% increase, and
+        by default: declaring all 178 adds about 253 KB, a 93% increase, and
         `structuredContent` is returned either way. Counting them here
         regardless would report a cost no client actually pays and make the
         category budget useless for choosing a `--categories` value.
@@ -193,7 +193,7 @@ def _output_schema(fn: Callable[..., Any]) -> Optional[Dict[str, Any]]:
     The tool's result model as a flat JSON Schema, or None if it has no
     usable return annotation.
 
-    Every one of the 157 tools has a typed Pydantic return today (verified by
+    Every one of the 178 tools has a typed Pydantic return today (verified by
     the test suite), so this returns a schema for all of them -- which is
     what lets the server declare `outputSchema` and send
     `structuredContent` rather than untyped text.

@@ -1,5 +1,5 @@
 """
-Whole-surface invariants: properties that must hold for all 157 tools.
+Whole-surface invariants: properties that must hold for EVERY tool.
 
 Every other test file in this suite tests a tool, or a module. These test
 the SURFACE — the properties that stop being true when someone adds a tool

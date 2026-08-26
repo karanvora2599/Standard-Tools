@@ -156,3 +156,31 @@ report = {
 for k, v in report.items():
     print(f"{k:<22} {v}")
 ```
+
+
+## The same metrics on data this library did not fetch
+
+Every function above takes a pandas Series, so it works on anything. The
+agent surface did not, until `calculate_series_metrics`: it takes a
+`DataSource` — exactly one of a symbol, an `sqt://` reference, or values
+passed inline — so a model's out-of-sample returns, an external fund's
+monthly series, or a panel another agent published all reach the same
+arithmetic.
+
+```python
+calculate_series_metrics(
+    series={"ref": "sqt://returns_panel/study7/rets"},   # or {"symbol": ...}
+    metrics=["sharpe_ratio", "calmar_ratio", "max_drawdown"],
+    risk_free_rate=0.04,
+)
+```
+
+**The metric set is closed, not open.** It accepts names from a fixed list
+rather than an expression, because this surface is reachable from an agent
+and an arbitrary-expression argument would be a code path wearing a
+statistics costume.
+
+The alternative — `calculate_sharpe`, `calculate_sharpe_from_returns`,
+`calculate_sharpe_from_artifact` — is how a surface ends up answering one
+question under three names. The tool is the QUESTION; the input says where
+the bytes are.

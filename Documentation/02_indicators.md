@@ -392,3 +392,35 @@ df['MFI']  = mfi(df['High'], df['Low'], df['Close'], df['Volume'])
 
 print(df.tail())
 ```
+
+
+## Whole-universe indicators: the snapshot and the history
+
+Two tools compute indicators across a universe in one native call rather
+than one call per ticker, and they answer different questions:
+
+| Tool | Answers |
+|---|---|
+| `get_technical_panel` | What are the indicator values **now**, at the latest bar |
+| `compute_indicator_panel` | What have they **been** — the full history, published as an `sqt://` reference per indicator |
+
+The snapshot is what a screen wants. The history is what a signal, a
+feature or a custom backtest consumes, and returning it inline would put a
+universe-times-a-history matrix into the conversation, which is why it
+comes back as a reference instead.
+
+```python
+compute_indicator_panel(
+    tickers=[...], indicators=["rsi", "adx"],
+    price_panel_ref="sqt://price_panel/study7/bars",   # optional
+    run_id="study7", name="ind",
+)
+```
+
+Passing a `price_panel_ref` from the [data runtime](26_data.md) means
+**nothing is refetched** — the same bars are reused. Without it the tool
+fetches for itself.
+
+`get_technical_panel` lists tickers with too little history in
+`incomplete_tickers` rather than dropping them, because a ticker that could
+not be computed and one a screen legitimately excluded are different facts.
