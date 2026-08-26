@@ -24,11 +24,9 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.agent.models import (
+    ArgumentProblem,
     CompareDataSourcesInput,
     CompareDataSourcesResult,
-    DeclaredNote,
-    FieldDivergence,
-    ArgumentProblem,
     CompareDecisionsInput,
     CompareDecisionsResult,
     ConvertReferenceInput,
@@ -37,6 +35,7 @@ from standard_quant_tools.agent.models import (
     DataCapabilitiesResult,
     DataSourceMatch,
     DataSourceRef,
+    DeclaredNote,
     DescribeArtifactInput,
     DescribeArtifactResult,
     DescribeReferenceInput,
@@ -47,6 +46,7 @@ from standard_quant_tools.agent.models import (
     ExplainDecisionResult,
     ExportAuditBundleInput,
     ExportAuditBundleResult,
+    FieldDivergence,
     ListReferenceKindsInput,
     ListReferenceKindsResult,
     ListStrategiesInput,

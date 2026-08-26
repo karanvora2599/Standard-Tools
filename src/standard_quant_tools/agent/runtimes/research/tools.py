@@ -25,6 +25,9 @@ from standard_quant_tools.agent.models import (
     AdvancedIndicatorsResult,
     AnalysisInput,
     AnalysisResult,
+    ChangePoint,
+    ChangePointInput,
+    ChangePointResult,
     CointegrationInput,
     CointegrationResult,
     CorrelationAnalysisInput,
@@ -39,6 +42,9 @@ from standard_quant_tools.agent.models import (
     FundamentalsResult,
     GarchVolatilityForecastInput,
     GarchVolatilityForecastResult,
+    GrangerInput,
+    GrangerLag,
+    GrangerResult,
     HurstInput,
     HurstResult,
     ImpliedVolatilityInput,
@@ -53,6 +59,8 @@ from standard_quant_tools.agent.models import (
     PairResult,
     PairScannerInput,
     PairScannerResult,
+    PartialCorrelationInput,
+    PartialCorrelationResult,
     PCAInput,
     PCAResult,
     PortfolioInput,
@@ -60,17 +68,26 @@ from standard_quant_tools.agent.models import (
     PriceJump,
     RallyDetectionInput,
     RallyDetectionResult,
+    Regime,
+    RegimeDetectionInput,
+    RegimeDetectionResult,
+    RegimeSegment,
     RollingBetaInput,
     RollingBetaResult,
     ScreenerInput,
     ScreenerResult,
     StalePriceRun,
+    StationarityInput,
+    StationarityResult,
+    TailDependenceInput,
+    TailDependenceResult,
     TailRiskInput,
     TailRiskResult,
     TechnicalInput,
     TechnicalPanelInput,
     TechnicalPanelResult,
     TechnicalResult,
+    VarianceRatio,
     VolatilityEstimatorsInput,
     VolatilityEstimatorsResult,
 )
@@ -1758,4 +1775,219 @@ def get_technical_panel(input_data: TechnicalPanelInput) -> TechnicalPanelResult
         notes=notes,
         artifact_uris=artifact_uris,
         execution_path=execution_path,
+    )
+
+
+def _price_series(symbol: str, start_date: str, end_date: str, on: str = "price"):
+    """Close prices, or their returns, for one symbol."""
+    from standard_quant_tools.data.factory import DataFactory
+
+    frame = DataFactory.get_provider().get_ohlcv(symbol, start_date, end_date)
+    close = frame["Close"] if "Close" in frame.columns else frame["close"]
+    return close.pct_change().dropna() if on == "returns" else close
+
+
+def detect_change_points(input_data: ChangePointInput) -> ChangePointResult:
+    """
+    When the process generating this series CHANGED — not what kind of
+    process it is.
+
+    `run_hurst_analysis` answers "is this trending or mean-reverting". This
+    answers "and when did it stop being that", which the first cannot: a
+    single Hurst exponent over a sample containing a regime break describes
+    neither regime.
+
+    Uses binary segmentation, which finds the strongest break and recurses
+    either side. It can miss two breaks that cancel — a step up followed by
+    an equal step down — and that is the known cost rather than a surprise.
+    Read `gain` on each break: it is how much the split actually bought, so
+    a marginal call looks marginal instead of looking like a boundary.
+    """
+    from standard_quant_tools.analysis.structure import detect_change_points as _detect
+
+    logger.debug("[detect_change_points] %s", input_data.symbol)
+    series = _price_series(
+        input_data.symbol, input_data.start_date, input_data.end_date, input_data.on
+    )
+    result = _detect(
+        series,
+        max_breaks=input_data.max_breaks,
+        min_segment=input_data.min_segment,
+        penalty=input_data.penalty,
+    )
+    return ChangePointResult(
+        symbol=input_data.symbol,
+        n_observations=result["n_observations"],
+        n_breaks=result["n_breaks"],
+        breaks=[ChangePoint(**b) for b in result["breaks"]],
+        segments=[RegimeSegment(**s) for s in result["segments"]],
+        warnings=result["warnings"],
+    )
+
+
+def get_partial_correlation(
+    input_data: PartialCorrelationInput,
+) -> PartialCorrelationResult:
+    """
+    The correlation between two assets once the common drivers are removed
+    from both.
+
+    Two stocks in the same sector correlate at 0.7 and it says almost
+    nothing about their relationship — remove the market and the sector and
+    what is left is the part that is actually about those two companies.
+    That residual is what a pair trade lives on, and the raw correlation
+    systematically overstates it.
+    """
+    from standard_quant_tools.analysis.structure import partial_correlation as _partial
+
+    logger.debug("[get_partial_correlation] %s vs %s", input_data.x, input_data.y)
+    names = [input_data.x, input_data.y] + list(input_data.controlling_for)
+    frame = pd.concat(
+        {
+            name: _price_series(
+                name, input_data.start_date, input_data.end_date, "returns"
+            )
+            for name in dict.fromkeys(names)
+        },
+        axis=1,
+    )
+    result = _partial(frame, input_data.x, input_data.y, input_data.controlling_for)
+    return PartialCorrelationResult(**result)
+
+
+def test_granger_causality(input_data: GrangerInput) -> GrangerResult:
+    """
+    Does one series help predict another beyond that series' own past?
+
+    NOT CAUSALITY, whatever the name says. A common driver produces this. A
+    faster-updating proxy for the same information produces this. What it
+    establishes is temporal precedence in a linear model — necessary for a
+    tradeable lead and nowhere near sufficient.
+
+    Every lag up to `max_lag` is tested and the smallest p-value reported,
+    which is a multiple comparison. Treat the number as a screen rather than
+    a test result.
+    """
+    from standard_quant_tools.analysis.structure import granger_causality as _granger
+
+    logger.debug(
+        "[test_granger_causality] %s -> %s", input_data.cause, input_data.effect
+    )
+    cause = _price_series(
+        input_data.cause, input_data.start_date, input_data.end_date, "returns"
+    )
+    effect = _price_series(
+        input_data.effect, input_data.start_date, input_data.end_date, "returns"
+    )
+    result = _granger(cause, effect, max_lag=input_data.max_lag)
+    return GrangerResult(
+        cause=input_data.cause,
+        effect=input_data.effect,
+        best_lag=result["best_lag"],
+        p_value=result["p_value"],
+        uncorrected_p_value=result.get("uncorrected_p_value"),
+        n_tests=result.get("n_tests", 1),
+        significant_at_05=result["significant_at_05"],
+        by_lag=[GrangerLag(**r) for r in result["by_lag"]],
+        warnings=result["warnings"],
+    )
+
+
+def analyze_tail_dependence(
+    input_data: TailDependenceInput,
+) -> TailDependenceResult:
+    """
+    Whether two assets move together IN THE TAIL, which is the only regime a
+    diversification claim has to survive.
+
+    A full-sample correlation of 0.3 is perfectly compatible with two assets
+    that are independent day to day and fall together every time it matters.
+    This measures the conditional probability directly.
+
+    Read `n_tail_observations` alongside the estimate. At a 1% quantile on a
+    year of data that is two or three points, and an estimate from three
+    points has a confidence interval covering most of [0, 1].
+    """
+    from standard_quant_tools.analysis.structure import tail_dependence as _tail
+
+    logger.debug("[analyze_tail_dependence] %s vs %s", input_data.x, input_data.y)
+    x = _price_series(
+        input_data.x, input_data.start_date, input_data.end_date, "returns"
+    )
+    y = _price_series(
+        input_data.y, input_data.start_date, input_data.end_date, "returns"
+    )
+    result = _tail(x, y, quantile=input_data.quantile)
+    return TailDependenceResult(x=input_data.x, y=input_data.y, **result)
+
+
+def run_stationarity_tests(input_data: StationarityInput) -> StationarityResult:
+    """
+    ADF, KPSS and the variance ratio, with the four-way verdict spelled out.
+
+    ADF and KPSS have OPPOSITE nulls, which is the whole reason to run both.
+    Failing to reject ADF is not evidence of a unit root — it is a failure
+    to find evidence against one, and on a few hundred observations that
+    happens to genuinely mean-reverting series routinely. The verdict
+    separates "the data says non-stationary" from "the data says nothing",
+    and `inconclusive` is a statement about the sample size.
+
+    `contradictory` — both rejecting — usually means a structural break or
+    changing volatility rather than either answer. Run detect_change_points
+    before trusting either.
+    """
+    from standard_quant_tools.analysis.stationarity import (
+        run_stationarity_tests as _tests,
+    )
+
+    logger.debug("[run_stationarity_tests] %s", input_data.symbol)
+    series = _price_series(
+        input_data.symbol, input_data.start_date, input_data.end_date, input_data.on
+    )
+    result = _tests(series, lags=input_data.lags)
+    return StationarityResult(
+        symbol=input_data.symbol,
+        n_observations=result["n_observations"],
+        adf_statistic=result["adf_statistic"],
+        adf_critical_5pct=result["adf_critical_5pct"],
+        adf_rejects_unit_root=result["adf_rejects_unit_root"],
+        kpss_statistic=result["kpss_statistic"],
+        kpss_critical_5pct=result["kpss_critical_5pct"],
+        kpss_rejects_stationarity=result["kpss_rejects_stationarity"],
+        variance_ratios=[VarianceRatio(**v) for v in result["variance_ratios"]],
+        verdict=result["verdict"],
+        detail=result["detail"],
+        warnings=result["warnings"],
+    )
+
+
+def detect_regimes(input_data: RegimeDetectionInput) -> RegimeDetectionResult:
+    """
+    Label each observation with a volatility regime.
+
+    A Gaussian MIXTURE rather than a hidden Markov model, and the difference
+    matters: a mixture treats observations as independent draws, so it will
+    flip between regimes on a single observation where an HMM's transition
+    matrix would smooth. `persistence` reports how often it does — below
+    about 0.8 the labels are describing noise rather than regimes.
+
+    Regimes come back sorted by volatility, so regime 0 is always the calm
+    one. Without that the labels permute between runs and every downstream
+    comparison is meaningless.
+    """
+    from standard_quant_tools.analysis.stationarity import detect_regimes as _regimes
+
+    logger.debug("[detect_regimes] %s", input_data.symbol)
+    series = _price_series(
+        input_data.symbol, input_data.start_date, input_data.end_date, "returns"
+    )
+    result = _regimes(series, n_regimes=input_data.n_regimes, seed=input_data.seed)
+    return RegimeDetectionResult(
+        symbol=input_data.symbol,
+        n_regimes=result["n_regimes"],
+        regimes=[Regime(**g) for g in result["regimes"]],
+        current_regime=result["current_regime"],
+        persistence=result["persistence"],
+        n_switches=result["n_switches"],
+        warnings=result["warnings"],
     )

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.validation import require_finite_array
+from standard_quant_tools.validation import require_finite_array, validate_series
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ except ImportError:
     pass
 
 
+@validate_series()
 def bollinger_bands(
     series: pd.Series, period: int = 20, num_std: float = 2.0
 ) -> pd.DataFrame:
@@ -94,6 +95,7 @@ def bollinger_bands(
     return result
 
 
+@validate_series()
 def atr(
     high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
 ) -> pd.Series:
@@ -130,6 +132,7 @@ def atr(
     return result
 
 
+@validate_series()
 def wilder_atr(
     high: pd.Series,
     low: pd.Series,

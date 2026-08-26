@@ -4,6 +4,7 @@ advertised without being dispatchable or the reverse."""
 
 from standard_quant_tools.agent.models import (
     ArgumentProblem,
+    CompareDataSourcesInput,
     CompareDecisionsInput,
     ConvertReferenceInput,
     ConvertReferenceResult,
@@ -20,7 +21,6 @@ from standard_quant_tools.agent.models import (
     ListStrategiesInput,
     ListStressScenariosInput,
     ReferenceKind,
-    CompareDataSourcesInput,
     ReplayDecisionInput,
     TemporalContractInput,
     ValidateToolCallInput,

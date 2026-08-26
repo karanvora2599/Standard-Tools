@@ -100,10 +100,31 @@ class TestThePlan:
         ), "a cheap tool was thinned while an expensive one was kept"
 
     def test_a_runtime_that_already_fits_is_left_alone(self):
-        """`auto` is a budget, not a policy. research is 32 KB and pays
-        nothing."""
-        entries = select_runtimes(build_catalog(), ["research"])
-        assert plan_detail(entries, "auto") == set()
+        """
+        `auto` is a budget, not a policy: a runtime under the target pays
+        nothing at all.
+
+        Stated over WHICHEVER runtimes currently fit rather than naming one.
+        This test named `research` until it grew from 23 tools to 29 and
+        stopped fitting -- at which point the test failed for the right
+        reason and said the wrong thing, because the property it was
+        checking had moved to a different runtime.
+        """
+        catalog = build_catalog()
+        fitting = []
+        for runtime in ALL_RUNTIMES:
+            entries = select_runtimes(catalog, [runtime])
+            if sum(e.cost_bytes() for e in entries) <= DEFAULT_DETAIL_BUDGET:
+                fitting.append(runtime)
+                assert plan_detail(entries, "auto") == set(), (
+                    f"{runtime} is under the budget and auto thinned "
+                    "something anyway"
+                )
+        assert fitting, (
+            "every runtime now exceeds the detail budget, so this test is "
+            "vacuous. Either the budget needs revisiting or the surface has "
+            "outgrown it."
+        )
 
     def test_an_unknown_mode_is_refused(self):
         with pytest.raises(ValueError, match="unknown detail mode"):

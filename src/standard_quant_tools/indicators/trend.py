@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.validation import require_finite_array
+from standard_quant_tools.validation import require_finite_array, validate_series
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 
 
+@validate_series()
 def sma(series: pd.Series, period: int = 14) -> pd.Series:
     """Simple Moving Average."""
     if period <= 0:
@@ -42,6 +43,7 @@ def sma(series: pd.Series, period: int = 14) -> pd.Series:
     return series.rolling(window=period).mean()
 
 
+@validate_series()
 def ema(series: pd.Series, period: int = 14) -> pd.Series:
     """Exponential Moving Average."""
     if period <= 0:
@@ -49,6 +51,7 @@ def ema(series: pd.Series, period: int = 14) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
+@validate_series()
 def macd(
     series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
 ) -> pd.DataFrame:
@@ -174,6 +177,7 @@ def _adx_numba(
     return result
 
 
+@validate_series()
 def adx(
     high: pd.Series,
     low: pd.Series,
@@ -310,6 +314,7 @@ def _psar_numba(
     return result
 
 
+@validate_series()
 def parabolic_sar(
     high: pd.Series,
     low: pd.Series,
@@ -373,6 +378,7 @@ def parabolic_sar(
 # ──────────────────────────────────────────────
 
 
+@validate_series()
 def williams_r(
     high: pd.Series,
     low: pd.Series,

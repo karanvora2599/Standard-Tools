@@ -5,6 +5,7 @@ advertised without being dispatchable or the reverse."""
 from standard_quant_tools.agent.models import (
     AdvancedIndicatorsInput,
     AnalysisInput,
+    ChangePointInput,
     CointegrationInput,
     CorrelationAnalysisInput,
     DataQualityReportInput,
@@ -12,16 +13,21 @@ from standard_quant_tools.agent.models import (
     FactorRegressionInput,
     FundamentalsInput,
     GarchVolatilityForecastInput,
+    GrangerInput,
     HurstInput,
     ImpliedVolatilityInput,
     KalmanHedgeRatioInput,
     OptionPricingInput,
     PairScannerInput,
+    PartialCorrelationInput,
     PCAInput,
     PortfolioInput,
     RallyDetectionInput,
+    RegimeDetectionInput,
     RollingBetaInput,
     ScreenerInput,
+    StationarityInput,
+    TailDependenceInput,
     TailRiskInput,
     TechnicalInput,
     TechnicalPanelInput,
@@ -30,12 +36,16 @@ from standard_quant_tools.agent.models import (
 
 from .tools import (
     analyze_stock_risk,
+    analyze_tail_dependence,
+    detect_change_points,
+    detect_regimes,
     get_advanced_indicators,
     get_correlation_analysis,
     get_data_quality_report,
     get_extended_risk_metrics,
     get_implied_volatility,
     get_option_pricing,
+    get_partial_correlation,
     get_portfolio_analysis,
     get_rally_signal,
     get_rolling_beta,
@@ -51,12 +61,44 @@ from .tools import (
     run_kalman_hedge_ratio,
     run_pca_analysis,
     run_screener,
+    run_stationarity_tests,
     scan_pairs,
+    test_granger_causality,
 )
 
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "detect_change_points",
+        "When the process generating a series CHANGED, by binary segmentation on the mean. run_hurst_analysis says what KIND of process a series is; this says when it stopped being that one, which the first cannot -- a single Hurst exponent over a sample containing a break describes neither regime. Read `gain` on each break: a marginal call then looks marginal instead of looking like a boundary.",
+        ChangePointInput,
+    ),
+    (
+        "get_partial_correlation",
+        "The correlation between two assets once the common drivers are removed from BOTH. Two stocks in one sector correlate at 0.7 and it says almost nothing; take out the market and the sector and what is left is the part actually about those two companies. That residual is what a pair trade lives on, and the raw correlation systematically overstates it.",
+        PartialCorrelationInput,
+    ),
+    (
+        "test_granger_causality",
+        "Whether one series helps predict another beyond that series' own past. NOT causality: a common driver produces it and so does a faster-updating proxy for the same information. It establishes temporal precedence in a linear model, which is necessary for a tradeable lead and nowhere near sufficient. Every lag is tested and the smallest p-value reported, so treat it as a screen rather than a test result.",
+        GrangerInput,
+    ),
+    (
+        "analyze_tail_dependence",
+        "Whether two assets move together IN THE TAIL, which is the only regime a diversification claim has to survive. A full-sample correlation of 0.3 is compatible with two assets that are independent day to day and fall together every time it matters. Read n_tail_observations alongside the estimate: at a 1% quantile on a year of data that is two or three points.",
+        TailDependenceInput,
+    ),
+    (
+        "run_stationarity_tests",
+        "ADF, KPSS and the variance ratio, with the four-way verdict spelled out. The two tests have OPPOSITE nulls, which is the whole reason to run both: failing to reject ADF is not evidence of a unit root, and the verdict separates 'the data says non-stationary' from 'the data says nothing'. 'contradictory' usually means a structural break rather than either answer.",
+        StationarityInput,
+    ),
+    (
+        "detect_regimes",
+        "Label each observation with a volatility regime, by a Gaussian mixture. A MIXTURE rather than a hidden Markov model: it has no transition matrix, so it flips on single observations where an HMM would smooth, and `persistence` reports how often it does -- below about 0.8 the labels describe noise. Regimes come back sorted by volatility so regime 0 is always the calm one.",
+        RegimeDetectionInput,
+    ),
     (
         "analyze_stock_risk",
         "Full risk analysis: alpha, beta, Sharpe, VaR, CVaR.",
@@ -179,6 +221,12 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
     "analyze_stock_risk": "analysis",
+    "analyze_tail_dependence": "quant_research",
+    "detect_change_points": "quant_research",
+    "detect_regimes": "quant_research",
+    "get_partial_correlation": "quant_research",
+    "run_stationarity_tests": "quant_research",
+    "test_granger_causality": "quant_research",
     "get_technical_analysis": "analysis",
     "get_portfolio_analysis": "analysis",
     "run_screener": "screener",

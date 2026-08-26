@@ -402,38 +402,28 @@ class TestTheyRefuseWhatTheyCannotCompute:
         assert len(result) == 5
         assert result.isna().all()
 
-    def test_the_empty_input_contract_is_split_but_no_longer_crashes(self):
+    def test_every_indicator_refuses_an_empty_series_the_same_way(self):
         """
-        A FINDING, narrowed by a fix and then pinned.
+        One contract, fourteen indicators, no exceptions.
 
-        BEFORE. One indicator refused an empty series, thirteen returned one,
-        and `parabolic_sar` raised a bare IndexError from inside numpy --
-        three different answers to the same question, and the third is the
-        worst of them because a caller cannot act on it and it names nothing.
+        This started as a recorded inconsistency rather than a test: four of
+        fourteen carried `@validate_series()` and the other ten carried
+        nothing, so the same invalid input got three different answers --
+        a named refusal, a silently empty result, or a bare IndexError from
+        inside numpy. The split was then narrowed by fixing the decorator's
+        keyword hole and finally closed by decorating the other ten.
 
-        Worse, the split moved depending on HOW the function was called:
-        `obv(empty, empty)` refused while `obv(close=empty, volume=empty)`
-        crashed, because `validate_series` inspected only positional
-        arguments. That is fixed -- see tests/test_validation_decorator.py.
-
-        AFTER. Three refuse, eleven return, and nothing crashes. The
-        remaining split is no longer accidental: it follows whether a
-        function declares `allow_empty`, which is a per-function decision
-        somebody made rather than an artefact of the call site.
-
-        Still recorded rather than flattened. Returning empty is arguably
-        the worse default -- an empty result flows into a backtest as "no
-        signal" where a refusal says "no data" -- but changing eleven
-        functions is a breaking change and not one to make inside a test.
-        This fails if the split moves, which makes it a decision somebody
-        takes rather than a thing that drifts.
+        REFUSING is the right default, and the reason is downstream. An empty
+        indicator flows into a backtest as "no signal", which is a statement
+        about the market. "No data" is a statement about the inputs. They
+        lead to different decisions and an empty Series cannot tell them
+        apart.
         """
         import inspect
 
         from standard_quant_tools.error import ValidationError
 
         empty = pd.Series([], dtype=float, index=pd.DatetimeIndex([]))
-        raising, returning, crashing = [], [], []
         for name, fn in sorted(INDICATORS.items()):
             params = inspect.signature(fn).parameters
             kwargs = {
@@ -441,25 +431,46 @@ class TestTheyRefuseWhatTheyCannotCompute:
                 for k in ("series", "high", "low", "close", "volume")
                 if k in params
             }
-            try:
+            with pytest.raises(ValidationError, match="empty"):
                 fn(**kwargs)
-                returning.append(name)
-            except ValidationError:
-                raising.append(name)
-            except Exception:  # noqa: BLE001 - anything else is the bad case
-                crashing.append(name)
 
-        assert crashing == [], (
-            f"{crashing} raised an unhandled error on an empty series. That "
-            "is the worst of the three outcomes: a caller cannot act on it "
-            "and it names nothing."
+    def test_every_indicator_refuses_an_all_nan_series(self):
+        """All-NaN is not a flat market. Same argument, same contract."""
+        import inspect
+
+        from standard_quant_tools.error import ValidationError
+
+        nans = pd.Series([np.nan] * 60, index=pd.bdate_range("2024-01-01", periods=60))
+        for name, fn in sorted(INDICATORS.items()):
+            params = inspect.signature(fn).parameters
+            kwargs = {
+                k: nans
+                for k in ("series", "high", "low", "close", "volume")
+                if k in params
+            }
+            with pytest.raises(ValidationError):
+                fn(**kwargs)
+
+    def test_every_indicator_refuses_an_infinity(self):
+        """An infinity is not a large number -- it is a division that should
+        not have happened upstream, and it does not stay visible."""
+        import inspect
+
+        from standard_quant_tools.error import ValidationError
+
+        infected = pd.Series(
+            [100.0] * 30 + [np.inf] + [100.0] * 29,
+            index=pd.bdate_range("2024-01-01", periods=60),
         )
-        assert raising == ["obv", "rsi", "stochastic_oscillator"], (
-            f"the set of indicators that REFUSE an empty series changed to "
-            f"{raising}. That is either a fix worth making everywhere or a "
-            "regression; either way it is a decision, not a drift."
-        )
-        assert len(returning) == len(INDICATORS) - len(raising)
+        for name, fn in sorted(INDICATORS.items()):
+            params = inspect.signature(fn).parameters
+            kwargs = {
+                k: infected
+                for k in ("series", "high", "low", "close", "volume")
+                if k in params
+            }
+            with pytest.raises(ValidationError, match="infinite"):
+                fn(**kwargs)
 
     def test_a_single_observation_does_not_crash(self):
         one = pd.Series([100.0], index=pd.bdate_range("2024-01-01", periods=1))

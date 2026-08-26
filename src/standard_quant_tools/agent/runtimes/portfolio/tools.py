@@ -19,28 +19,26 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.agent.models import (
-    EstimateCovarianceInput,
-    EstimateCovarianceResult,
-    PlanRebalanceInput,
-    PlanRebalanceResult,
-    RebalanceStep,
-    UnreachableName,
-    ChannelResult,
-    LiquidityEventsInput,
-    LiquidityEventsResult,
-    UnavailableChannel,
     CapacityReportInput,
     CapacityReportResult,
+    ChannelResult,
+    EstimateCovarianceInput,
+    EstimateCovarianceResult,
     EstimateTradeCostInput,
     EstimateTradeCostResult,
     LiquidityAnalysisInput,
     LiquidityAnalysisResult,
+    LiquidityEventsInput,
+    LiquidityEventsResult,
     MicrostructureInput,
     MicrostructureResult,
+    PlanRebalanceInput,
+    PlanRebalanceResult,
     PortfolioOptimizationInput,
     PortfolioOptimizationResult,
     PositionSizerInput,
     PositionSizerResult,
+    RebalanceStep,
     RiskAttributionInput,
     RiskAttributionResult,
     SizeBucket,
@@ -52,6 +50,8 @@ from standard_quant_tools.agent.models import (
     TradeCostLeg,
     TradeProfileInput,
     TradeProfileResult,
+    UnavailableChannel,
+    UnreachableName,
 )
 from standard_quant_tools.analysis.microstructure import (
     intraday_volume_profile as _intraday_volume_profile,
@@ -1353,9 +1353,7 @@ def plan_rebalance(input_data: PlanRebalanceInput) -> PlanRebalanceResult:
     size the model assumed. It appears here in `unreachable`, with the number
     of days it would really take.
     """
-    from standard_quant_tools.portfolio.rebalance import (
-        plan_rebalance as _plan,
-    )
+    from standard_quant_tools.portfolio.rebalance import plan_rebalance as _plan
 
     logger.debug(
         "[plan_rebalance] %d -> %d names, urgency=%.2f",

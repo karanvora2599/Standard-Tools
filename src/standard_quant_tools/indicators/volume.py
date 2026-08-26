@@ -32,6 +32,7 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     return result
 
 
+@validate_series()
 def vwap(
     high: pd.Series,
     low: pd.Series,
@@ -72,6 +73,7 @@ def vwap(
     return result
 
 
+@validate_series()
 def mfi(
     high: pd.Series,
     low: pd.Series,

@@ -5490,3 +5490,243 @@ class EstimateCovarianceResult(BaseModel):
     annualized: bool
     matrix: Dict[str, Dict[str, float]]
     warnings: List[str] = Field(default_factory=list)
+
+
+# ── structure and stationarity (research) ───────────────────────────────
+
+_SERIES_WINDOW = "Start/end dates bounding the price history to analyze."
+
+
+class ChangePointInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker to analyze.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    max_breaks: int = Field(3, ge=1, le=10, description="Most breaks to look for.")
+    min_segment: int = Field(
+        20,
+        ge=5,
+        le=250,
+        description="Minimum observations either side of a break. A regime "
+        "of three bars is noise with a label on it.",
+    )
+    penalty: float = Field(
+        10.0,
+        gt=0.0,
+        description="Improvement a split must buy to be kept. This is what "
+        "stops it finding a break in white noise.",
+    )
+    on: str = Field(
+        "returns",
+        description="'returns' (default) finds volatility and drift regimes; "
+        "'price' finds level shifts, which on a trending series is almost "
+        "always just the trend.",
+    )
+
+
+class ChangePoint(BaseModel):
+    index: int
+    date: str
+    gain: float = Field(
+        ...,
+        description="How much the split improved the fit. Read it before "
+        "treating a break as a regime boundary.",
+    )
+    mean_before: float
+    mean_after: float
+    std_before: Optional[float] = None
+    std_after: Optional[float] = None
+
+
+class RegimeSegment(BaseModel):
+    segment: int
+    start: str
+    end: str
+    n: int
+    mean: float
+    std: Optional[float] = None
+
+
+class ChangePointResult(BaseModel):
+    symbol: str
+    n_observations: int
+    n_breaks: int
+    breaks: List[ChangePoint] = Field(default_factory=list)
+    segments: List[RegimeSegment] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class PartialCorrelationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: str = Field(..., description="First ticker.")
+    y: str = Field(..., description="Second ticker.")
+    controlling_for: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=10,
+        description="Tickers to remove from BOTH sides — a market proxy, a "
+        "sector ETF. Two stocks in one sector correlate at 0.7 and it says "
+        "almost nothing until these are taken out.",
+    )
+    start_date: str
+    end_date: str
+
+
+class PartialCorrelationResult(BaseModel):
+    x: str
+    y: str
+    controlling_for: List[str]
+    raw_correlation: float
+    partial_correlation: float = Field(
+        ...,
+        description="What is left once the controls are removed from both. "
+        "This is the number a pair trade lives on; the raw one systematically "
+        "overstates it.",
+    )
+    explained_away: float
+    n_observations: int
+    warnings: List[str] = Field(default_factory=list)
+
+
+class GrangerInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cause: str = Field(..., description="The ticker that might lead.")
+    effect: str = Field(..., description="The ticker that might follow.")
+    start_date: str
+    end_date: str
+    max_lag: int = Field(5, ge=1, le=30, description="Lags to test.")
+
+
+class GrangerLag(BaseModel):
+    lag: int
+    f_statistic: float
+    p_value: float
+    n_observations: int
+
+
+class GrangerResult(BaseModel):
+    cause: str
+    effect: str
+    best_lag: int
+    p_value: float = Field(
+        ...,
+        description="BONFERRONI CORRECTED for the number of lags tested. "
+        "Taking the smallest of several p-values and calling it a 5% test "
+        "delivers about 15%; uncorrected_p_value carries the raw one.",
+    )
+    uncorrected_p_value: Optional[float] = None
+    n_tests: int = 1
+    significant_at_05: bool
+    by_lag: List[GrangerLag] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class TailDependenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: str
+    y: str
+    start_date: str
+    end_date: str
+    quantile: float = Field(
+        0.05,
+        gt=0.0,
+        lt=0.5,
+        description="Tail depth. At 0.01 on a year of data that is two or "
+        "three observations, and the estimate's confidence interval covers "
+        "most of [0, 1] — n_tail_observations is returned so you can see it.",
+    )
+
+
+class TailDependenceResult(BaseModel):
+    x: str
+    y: str
+    quantile: float
+    lower_tail_dependence: float = Field(
+        ...,
+        description="P(y in its lower tail | x in its lower tail). The only "
+        "regime a diversification claim has to survive.",
+    )
+    upper_tail_dependence: float
+    full_sample_correlation: float
+    n_observations: int
+    n_tail_observations: int
+    warnings: List[str] = Field(default_factory=list)
+
+
+class StationarityInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    start_date: str
+    end_date: str
+    on: str = Field(
+        "price",
+        description="'price' tests the level for a unit root — the usual "
+        "question for a spread. 'returns' tests the increments.",
+    )
+    lags: int = Field(1, ge=0, le=30, description="ADF augmentation lags.")
+
+
+class VarianceRatio(BaseModel):
+    period: int
+    variance_ratio: float
+    z_statistic: Optional[float] = None
+    p_value: Optional[float] = None
+
+
+class StationarityResult(BaseModel):
+    symbol: str
+    n_observations: int
+    adf_statistic: float
+    adf_critical_5pct: float
+    adf_rejects_unit_root: bool
+    kpss_statistic: Optional[float] = None
+    kpss_critical_5pct: float
+    kpss_rejects_stationarity: bool
+    variance_ratios: List[VarianceRatio] = Field(default_factory=list)
+    verdict: str = Field(
+        ...,
+        description="'stationary', 'non_stationary', 'inconclusive' (neither "
+        "test rejects — a statement about the SAMPLE SIZE, not the series) or "
+        "'contradictory' (both reject — usually a structural break).",
+    )
+    detail: str
+    warnings: List[str] = Field(default_factory=list)
+
+
+class RegimeDetectionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    start_date: str
+    end_date: str
+    n_regimes: int = Field(2, ge=2, le=5)
+    seed: int = Field(0, ge=0, description="So the labelling is reproducible.")
+
+
+class Regime(BaseModel):
+    regime: int
+    mean: float
+    volatility: float
+    weight: float
+    n_observations: int
+
+
+class RegimeDetectionResult(BaseModel):
+    symbol: str
+    n_regimes: int
+    regimes: List[Regime] = Field(default_factory=list)
+    current_regime: int
+    persistence: float = Field(
+        ...,
+        description="Fraction of consecutive observations that keep the same "
+        "label. Low persistence means the labels are describing noise — a "
+        "Gaussian mixture has no transition matrix, so it flips where a "
+        "hidden Markov model would smooth.",
+    )
+    n_switches: int
+    warnings: List[str] = Field(default_factory=list)
