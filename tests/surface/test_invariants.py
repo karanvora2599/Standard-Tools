@@ -400,8 +400,7 @@ class TestNoMutationEscapedIntoTheSource:
         assert not offenders, (
             "constant conditions in the source. Either dead code, a disabled "
             "guard, or a mutation from Development/mutation_testing.py that "
-            "escaped into a commit -- run it with --restore. "
-            + "; ".join(offenders)
+            "escaped into a commit -- run it with --restore. " + "; ".join(offenders)
         )
 
     def test_the_mutation_catalogue_anchors_all_still_match(self):

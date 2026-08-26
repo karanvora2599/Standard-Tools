@@ -215,16 +215,47 @@ Both are now pinned by a test that searches for a case where the correction
 changes the *answer* — raw below 0.05, corrected above it — and asserts the
 flag follows the corrected one. Neither can pass with the correction gone.
 
-### Safety
+**Current state: 18 mutations, 18 killed, 0 survived.**
+
+### Safety — and the incident that shaped it
 
 The harness mutates source files on disk and restores them in a `finally`.
-A `finally` does not run when the process is **killed**, and a ten-minute
-CI timeout once left `if False:` in place of a bounds check.
+A `finally` does not run when the process is **killed**, and this went
+wrong twice in one session:
 
-So it refuses to start when a file it is about to mutate has uncommitted
-changes, which makes `git checkout --` an unconditional recovery.
-`--restore` does exactly that, and is what to run after an interrupted
-session.
+1. A ten-minute timeout killed a run mid-mutation, leaving `if False:` in
+   place of a bounds check in `analysis/options.py`. Caught by
+   `git status`, restored with `git checkout --`.
+2. The harness was then run in the background — and a `git add -A` for an
+   unrelated commit swept the working tree **while a mutation was live**.
+   `if False:` reached a commit, and the file then looked *clean* to git,
+   because the mutation had become the committed state.
+
+The second is the dangerous one. Nothing about the repository looked wrong
+afterwards, and the disabled guard sat in the source with a full docstring
+explaining why it was necessary.
+
+Three defences, in order of how much they cover:
+
+- **`require_clean_tree`** refuses to start when a file about to be mutated
+  has uncommitted changes. This protects *your* work from the harness, and
+  makes `git checkout --` an unconditional recovery.
+- **`.mutation_active`** is written for the duration of a run. It cannot
+  stop another process committing — nothing can — but it makes the state
+  diagnosable afterwards.
+- **`test_no_constant_condition_appears_in_the_source`** is the one that
+  actually closes it. The constants the catalogue substitutes (`if False:`,
+  `if True:`, `if 0:`, `if 1:`) cannot appear in committed source at all,
+  so an escaped mutation fails the ordinary test run. It is a worthwhile
+  check independently: `if False:` in committed code is either dead code or
+  a disabled guard, and neither should survive review.
+
+A fourth test, `test_the_mutation_catalogue_anchors_all_still_match`, fails
+in the normal run when an anchor has drifted. A mutation whose anchor no
+longer matches reports as SKIPPED rather than survived, which is easy to
+read past — and a catalogue that has quietly stopped covering the code it
+names is worse than no catalogue, because the report still says zero
+survivors.
 
 ```bash
 python Development/mutation_testing.py --list
