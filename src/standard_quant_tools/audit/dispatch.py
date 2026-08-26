@@ -71,7 +71,18 @@ def _run_and_record(
 
     try:
         result_obj = fn(model_instance)
-        result_dict: Dict[str, Any] = result_obj.model_dump()
+        # A TOOL MAY RETURN A PLAIN DICT. Most return a Pydantic result
+        # model, and calling `.model_dump()` unconditionally assumed all of
+        # them did -- a tool whose library function already produces a
+        # documented dict (option greeks, a volatility cone, a set of
+        # liquidity estimates) died here with AttributeError instead of
+        # returning. The audit record wants a dict either way, so accepting
+        # one directly costs a branch and removes the requirement to
+        # restate a well-shaped dict as a model purely to satisfy this line.
+        if isinstance(result_obj, dict):
+            result_dict: Dict[str, Any] = result_obj
+        else:
+            result_dict = result_obj.model_dump()
         output = result_dict
         return result_dict
     except Exception as exc:

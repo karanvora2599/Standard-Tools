@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 from standard_quant_tools import audit
 from standard_quant_tools._jsonsafe import sanitize_for_json
 from standard_quant_tools.agent.runtimes import backtest as _backtest
+from standard_quant_tools.agent.runtimes import derivatives as _derivatives
 from standard_quant_tools.agent.runtimes import meta as _meta
 from standard_quant_tools.agent.runtimes import portfolio as _portfolio
 from standard_quant_tools.agent.runtimes import research as _research
@@ -56,6 +57,18 @@ from standard_quant_tools.agent.runtimes.backtest import (
     run_sma_backtest,
     run_strategy_matrix,
     run_walk_forward_backtest,
+)
+from standard_quant_tools.agent.runtimes.derivatives import (
+    analyze_option_strategy,
+    analyze_vol_term_structure,
+    check_put_call_parity,
+    fit_volatility_smile,
+    get_expected_move,
+    get_implied_forward,
+    get_option_greeks,
+    get_option_risk_scenarios,
+    get_volatility_cone,
+    simulate_delta_hedge,
 )
 from standard_quant_tools.agent.runtimes.meta import (
     compare_data_sources,
@@ -129,6 +142,7 @@ _RUNTIME_MODULES = [
     _backtest,
     _portfolio,
     _meta,
+    _derivatives,
 ]
 
 #: Every tool in the library, from each runtime's own declaration —

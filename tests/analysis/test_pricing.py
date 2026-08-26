@@ -395,15 +395,20 @@ class TestThroughTheTool:
     def test_no_new_tool_was_added(self):
         from standard_quant_tools.agent.runtimes import resolve
 
-        research = resolve("research")
-        assert "price_option" not in research.dispatch_table
-        assert "get_option_pricing" in research.dispatch_table
+        # The tool MOVED to `derivatives` when that runtime reached
+        # twelve tools. What this test pins is unchanged: every
+        # pricing model is reachable through ONE tool, and no second
+        # pricing tool was added alongside it.
+        derivatives = resolve("derivatives")
+        assert "price_option" not in derivatives.dispatch_table
+        assert "get_option_pricing" in derivatives.dispatch_table
+        assert "get_option_pricing" not in resolve("research").dispatch_table
 
     @pytest.mark.parametrize("model", ["black_scholes", "black_76", "binomial"])
     def test_every_model_is_reachable_through_the_one_tool(self, model):
         from standard_quant_tools.agent.runtimes import resolve
 
-        result = resolve("research").dispatch(
+        result = resolve("derivatives").dispatch(
             "get_option_pricing", {**BASE, "model": model, "option_type": "call"}
         )
         assert result["price"] > 0
@@ -412,7 +417,7 @@ class TestThroughTheTool:
     def test_the_lattice_reports_no_theta_rather_than_a_fabricated_one(self):
         from standard_quant_tools.agent.runtimes import resolve
 
-        result = resolve("research").dispatch(
+        result = resolve("derivatives").dispatch(
             "get_option_pricing", {**BASE, "model": "binomial"}
         )
         assert result["greeks"]["theta"] is None
@@ -422,6 +427,6 @@ class TestThroughTheTool:
         """No existing call may move by a cent."""
         from standard_quant_tools.agent.runtimes import resolve
 
-        result = resolve("research").dispatch("get_option_pricing", dict(BASE))
+        result = resolve("derivatives").dispatch("get_option_pricing", dict(BASE))
         assert result["price"] == pytest.approx(10.450584, abs=1e-6)
         assert result["greeks"]["theta"] is not None

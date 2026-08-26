@@ -89,6 +89,16 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "— for one ticker or a multi-ticker signal panel."
         ),
     },
+    "derivatives": {
+        "label": "Derivatives",
+        "description": (
+            "Options: pricing under four models, the second-order greeks "
+            "that explain a hedged book's P&L, multi-leg payoffs, smile and "
+            "term-structure fitting with arbitrage checks, put-call parity, "
+            "expected move, delta-hedge simulation and revaluation grids. "
+            "Quotes are passed in rather than fetched."
+        ),
+    },
     "microstructure": {
         "label": "Microstructure",
         "description": (

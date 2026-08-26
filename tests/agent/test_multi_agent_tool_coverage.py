@@ -152,6 +152,7 @@ class TestWorkerToolCoverage:
             "backtest_execution",
             "backtest_validation",
             "custom_signal",
+            "derivatives",
             "portfolio_risk",
             "discovery",
             "provenance",

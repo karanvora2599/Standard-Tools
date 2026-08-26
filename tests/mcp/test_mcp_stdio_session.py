@@ -177,7 +177,11 @@ class TestStdioSession:
                 },
             )
 
-        result = run_session(tmp_path, body, "--categories", "analysis")
+        # `derivatives`, not `analysis`: option pricing moved out of
+        # `research` when derivatives became its own runtime. The tool, its
+        # arguments and its result are unchanged -- only the scope that
+        # serves it moved, which is exactly what this call has to name.
+        result = run_session(tmp_path, body, "--categories", "derivatives")
         assert result.is_error is not True, result.content[0].text
         assert result.structured_content, "no structuredContent returned"
         assert "price" in result.structured_content

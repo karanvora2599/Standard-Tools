@@ -78,6 +78,7 @@ RUNTIME_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "backtest": ("backtest_execution", "backtest_validation", "custom_signal"),
     "portfolio": ("portfolio_risk", "microstructure"),
     "meta": ("discovery", "provenance"),
+    "derivatives": ("derivatives",),
 }
 
 RUNTIME_LABELS: Dict[str, str] = {
@@ -85,6 +86,7 @@ RUNTIME_LABELS: Dict[str, str] = {
     "backtest": "Backtest",
     "portfolio": "Portfolio & Execution",
     "meta": "Discovery & Provenance",
+    "derivatives": "Derivatives",
     "modeling": "Modeling",
     "feature_lab": "Feature Lab",
 }
@@ -110,6 +112,14 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
         "market: what this library accepts and what the data provider can "
         "serve, and what a past tool call did and whether it still "
         "reproduces."
+    ),
+    "derivatives": (
+        "Price an option and understand what holding it does to you: the "
+        "second-order greeks, multi-leg payoffs, the consistency of a quoted "
+        "surface, what the market is pricing as a move, and what a delta "
+        "hedge costs to run. Takes quotes as arguments rather than fetching "
+        "a chain -- this library has no options data provider, and a tool "
+        "that pretended to would compute a chain that does not exist."
     ),
     "modeling": (
         "Build, validate and score a statistical model from this library's "
@@ -140,18 +150,24 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
 #: cleans up becomes a changelog nobody reads, embedded in an error message
 #: everybody does.
 MOVED_FROM: Dict[str, str] = {
-    name: "modeling"
-    for name in (
-        "analyze_feature",
-        "compare_feature_sets",
-        "get_feature_drift",
-        "get_feature_ic_decay",
-        "get_feature_redundancy",
-        "get_feature_regime_stability",
-        "run_feature_ablation",
-        "run_feature_permutation_test",
-        "select_features",
-    )
+    # Left `research` when `derivatives` reached twelve tools and became its
+    # own execution boundary. Same arguments, same behaviour, new scope.
+    "get_option_pricing": "research",
+    "get_implied_volatility": "research",
+    **{
+        name: "modeling"
+        for name in (
+            "analyze_feature",
+            "compare_feature_sets",
+            "get_feature_drift",
+            "get_feature_ic_decay",
+            "get_feature_redundancy",
+            "get_feature_regime_stability",
+            "run_feature_ablation",
+            "run_feature_permutation_test",
+            "select_features",
+        )
+    },
 }
 
 #: The modeling runtime lives in `modeling/agent`. It predates this module

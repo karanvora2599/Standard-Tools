@@ -205,10 +205,16 @@ from .models import (  # every Pydantic Input/Result/supporting model defined in
     WalkForwardResult,
     WalkForwardWindow,
 )
-from .tools import (  # backtest strategies; risk & technical analysis; screening & factors; statistical tools; advanced strategies; portfolio & sizing; supplementary tools; LLM wiring
+from .tools import (
+    simulate_delta_hedge,  # backtest strategies; risk & technical analysis; screening & factors; statistical tools; advanced strategies; portfolio & sizing; supplementary tools; LLM wiring
+)
+from .tools import (
     TOOL_CATEGORY,
+    analyze_option_strategy,
     analyze_stock_risk,
     analyze_tail_dependence,
+    analyze_vol_term_structure,
+    check_put_call_parity,
     check_spread_proxy,
     compare_cost_models,
     compare_data_sources,
@@ -228,6 +234,7 @@ from .tools import (  # backtest strategies; risk & technical analysis; screenin
     estimate_trade_cost,
     explain_decision,
     export_audit_bundle,
+    fit_volatility_smile,
     get_advanced_indicators,
     get_agent_tools,
     get_backtest_diagnostics,
@@ -235,11 +242,15 @@ from .tools import (  # backtest strategies; risk & technical analysis; screenin
     get_correlation_analysis,
     get_data_quality_report,
     get_drawdown_table,
+    get_expected_move,
     get_extended_risk_metrics,
+    get_implied_forward,
     get_implied_volatility,
     get_liquidity_metrics,
     get_microstructure_metrics,
+    get_option_greeks,
     get_option_pricing,
+    get_option_risk_scenarios,
     get_partial_correlation,
     get_portfolio_analysis,
     get_portfolio_risk_attribution,
@@ -251,6 +262,7 @@ from .tools import (  # backtest strategies; risk & technical analysis; screenin
     get_technical_analysis,
     get_technical_panel,
     get_trade_profile,
+    get_volatility_cone,
     get_volatility_estimators,
     list_reference_kinds,
     list_strategies,
@@ -290,6 +302,16 @@ from .tools import (  # backtest strategies; risk & technical analysis; screenin
 )
 
 __all__ = [
+    "analyze_option_strategy",
+    "analyze_vol_term_structure",
+    "check_put_call_parity",
+    "fit_volatility_smile",
+    "get_expected_move",
+    "get_implied_forward",
+    "get_option_greeks",
+    "get_option_risk_scenarios",
+    "get_volatility_cone",
+    "simulate_delta_hedge",
     # tools
     "run_sma_backtest",
     "run_rsi_backtest",

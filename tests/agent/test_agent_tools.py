@@ -216,6 +216,7 @@ class TestToolCategoryCoverage:
             "discovery",
             "provenance",
             "microstructure",
+            "derivatives",
         }
         assert set(TOOL_CATEGORY.values()) <= known_categories
 

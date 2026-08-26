@@ -200,16 +200,6 @@ TOOL_DEFS = [
         DataQualityReportInput,
     ),
     (
-        "get_option_pricing",
-        "Black-Scholes-Merton price and Greeks (delta, gamma, vega, theta, rho) for a European option.",
-        OptionPricingInput,
-    ),
-    (
-        "get_implied_volatility",
-        "Solve for Black-Scholes-Merton implied volatility from an observed European option price.",
-        ImpliedVolatilityInput,
-    ),
-    (
         "get_technical_panel",
         "Indicators (RSI/ADX/ATR/Bollinger/Stochastic) for a whole ticker universe in one native call, reported at the latest bar. Use instead of one get_technical_analysis call per ticker when screening.",
         TechnicalPanelInput,
@@ -246,8 +236,6 @@ TOOL_CATEGORY = {
     "get_extended_risk_metrics": "analysis",
     "get_tail_risk_metrics": "analysis",
     "get_data_quality_report": "analysis",
-    "get_option_pricing": "analysis",
-    "get_implied_volatility": "analysis",
     "get_technical_panel": "analysis",
 }
 
