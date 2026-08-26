@@ -288,6 +288,7 @@ def main() -> int:
     if options.restore:
         for path in {p.relative_to(ROOT).as_posix() for p in targets}:
             _git("checkout", "--", path)
+        (ROOT / "Development" / ".mutation_active").unlink(missing_ok=True)
         print(f"restored {len({p for p in targets})} file(s) from git")
         return 0
 
@@ -297,6 +298,19 @@ def main() -> int:
         return 0
 
     require_clean_tree([m.path for m in selected])
+
+    # A marker, so a `git add -A` running in another shell while this is
+    # live is at least diagnosable afterwards. It is not a lock -- nothing
+    # here can stop another process committing a mutated file, which is why
+    # `tests/surface/test_invariants.py` also refuses constant conditions in
+    # the source. That happened: `if False:` reached a commit.
+    marker = ROOT / "Development" / ".mutation_active"
+    marker.write_text(
+        "A mutation is applied to the source RIGHT NOW. Do not commit.\n"
+        "If this file exists and no run is in progress, a run was killed:\n"
+        "  python Development/mutation_testing.py --restore\n",
+        encoding="utf-8",
+    )
 
     survivors: List[str] = []
     skipped: List[str] = []
@@ -326,6 +340,7 @@ def main() -> int:
         else:
             print(f"  killed    {mutation.name}", flush=True)
 
+    marker.unlink(missing_ok=True)
     killed = len(selected) - len(survivors) - len(skipped)
     print(f"\n{killed} killed, {len(survivors)} survived, {len(skipped)} skipped")
     if survivors:

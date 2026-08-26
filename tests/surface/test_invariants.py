@@ -357,3 +357,91 @@ class TestTheContextBudgetHolds:
             "one runtime is now most of the surface, so scoping to it saves "
             "little and the boundary needs revisiting"
         )
+
+
+class TestNoMutationEscapedIntoTheSource:
+    """
+    A guard added after a mutation was COMMITTED.
+
+    `Development/mutation_testing.py` edits source files in place and
+    restores them in a `finally`. It was running in the background when a
+    `git add -A` swept the working tree, so `if False:` landed in a commit
+    in place of the overflow bound in `analysis/options.py` -- and the file
+    then looked clean to git, because the mutation WAS the committed state.
+
+    The harness already refused to start on a dirty tree, which protects
+    the developer's work from the harness. Nothing protected a commit from
+    the harness. This does: the constant conditions it substitutes cannot
+    appear in the source at all.
+
+    It is a useful check independently. `if False:` in committed code is
+    either dead code or a disabled guard, and neither should survive review.
+    """
+
+    #: What the mutation catalogue substitutes, plus the general smell.
+    FORBIDDEN = ("if False:", "if True:", "if 0:", "if 1:")
+
+    def test_no_constant_condition_appears_in_the_source(self):
+        import re
+        from pathlib import Path as _Path
+
+        root = _Path(__file__).resolve().parent.parent.parent / "src"
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                for forbidden in self.FORBIDDEN:
+                    if re.search(rf"(?<![\w.]){re.escape(forbidden)}", stripped):
+                        offenders.append(f"{path.name}:{number}  {stripped[:60]}")
+        assert not offenders, (
+            "constant conditions in the source. Either dead code, a disabled "
+            "guard, or a mutation from Development/mutation_testing.py that "
+            "escaped into a commit -- run it with --restore. "
+            + "; ".join(offenders)
+        )
+
+    def test_the_mutation_catalogue_anchors_all_still_match(self):
+        """
+        A mutation whose anchor has drifted tests NOTHING, and reports as
+        SKIPPED rather than survived -- which is easy to read past. This
+        fails instead, in the ordinary test run, so the catalogue cannot
+        quietly stop covering the code it names.
+        """
+        import importlib.util
+        from pathlib import Path as _Path
+
+        harness = (
+            _Path(__file__).resolve().parent.parent.parent
+            / "Development"
+            / "mutation_testing.py"
+        )
+        import sys
+
+        spec = importlib.util.spec_from_file_location("mutation_testing", harness)
+        assert spec and spec.loader, f"could not load {harness}"
+        module = importlib.util.module_from_spec(spec)
+        # REGISTERED BEFORE EXECUTION. The harness uses `@dataclass` under
+        # `from __future__ import annotations`, so dataclasses resolves the
+        # field annotations by looking the module up in `sys.modules` -- and
+        # raises `AttributeError: 'NoneType' object has no attribute
+        # '__dict__'` when it is not there yet.
+        sys.modules["mutation_testing"] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.modules.pop("mutation_testing", None)
+
+        drifted = []
+        for mutation in module.MUTATIONS:
+            text = mutation.path.read_text(encoding="utf-8")
+            found = text.count(mutation.old)
+            if found != 1:
+                drifted.append(f"{mutation.name} (anchor matched {found})")
+        assert not drifted, (
+            "mutation anchors no longer match the source, so those mutations "
+            f"test nothing: {drifted}"
+        )

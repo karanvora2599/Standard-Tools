@@ -89,7 +89,7 @@ def _validate_option_inputs(
         ("volatility", volatility, 100.0),
     ):
         numeric = float(value)
-        if False:
+        if not math.isfinite(numeric) or abs(numeric) > high:
             raise ValidationError(
                 f"{name}={numeric:g} has a magnitude outside what these "
                 f"formulas can price (limit {high:g}). A lognormal model's "
