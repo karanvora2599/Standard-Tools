@@ -276,3 +276,185 @@ async def main():
 
 returns_df = asyncio.run(main())
 ```
+
+---
+
+## Allocation without expected returns
+
+`run_portfolio_optimization` maximizes a mean-variance objective, which is
+the right tool when you genuinely have return forecasts and the wrong one
+otherwise.
+
+**Mean-variance is an error maximizer.** It puts weight where expected
+return is high and covariance is low, which is exactly where estimation
+error is most likely to have put them. With 50 assets and two years of data
+you are estimating 1,275 covariance parameters from 500 observations, and
+the optimizer finds the corner of that estimate where the noise happens to
+align.
+
+Three tools avoid the noisiest input entirely.
+
+### `optimize_risk_parity`
+
+Weights at which every asset contributes the **same amount of risk** — not
+the same weight. An equally weighted portfolio of a bond fund and a biotech
+stock is a biotech portfolio; the equity contributes almost all the
+variance.
+
+It uses no expected returns at all, which is the reason to prefer it in most
+real situations: the standard error on a mean return estimated from two
+years of daily data is roughly the size of the estimate, and mean-variance
+is maximally sensitive to precisely that input.
+
+Solved by cyclical coordinate descent, which needs no matrix inversion.
+Convergence is **reported** — a solution that did not converge comes back
+with `converged: false` rather than silently, because the iterate at that
+point is not a risk parity portfolio and using it as one is worse than not
+having it.
+
+Two closed-form cases pin the solver: with a diagonal covariance matrix the
+answer is exactly inverse-volatility, and the risk shares equalize to within
+4.5e-12 in nine iterations on a correlated one.
+
+`budget` allows an unequal **risk** budget — `[0.5, 0.3, 0.2]` gives the
+first asset half the portfolio's risk. Most real mandates are written that
+way rather than as equal contributions.
+
+**What it assumes:** equal risk contribution implicitly bets that Sharpe
+ratios are similar across assets. Where they are not, it over-weights the
+low-Sharpe ones.
+
+### `optimize_hierarchical_risk_parity`
+
+Lopez de Prado's HRP: allocation that **never inverts** the covariance
+matrix.
+
+Inversion is where an ill-conditioned estimate does its damage. The smallest
+eigenvalue becomes the largest after inversion, so the direction the data
+says least about becomes the one the portfolio bets most on — and with 50
+assets on 500 observations that smallest eigenvalue is essentially noise.
+
+HRP clusters assets by correlation distance into a tree, orders them so
+similar assets sit adjacent, then walks the tree splitting capital between
+each pair of branches in inverse proportion to their variance. No inversion
+happens anywhere.
+
+**The trade-off is real and worth stating: HRP has no optimality property.**
+It does not maximize anything. It is more robust out of sample than
+mean-variance in most published comparisons and it is not the highest-Sharpe
+portfolio under any model. It buys stability by giving up the claim to be
+optimal.
+
+### `optimize_max_diversification`
+
+Maximizes the **diversification ratio** — the weighted average of the
+assets' volatilities over the portfolio's own. It is 1.0 when everything is
+perfectly correlated (combining the assets bought nothing) and grows as
+correlations fall, so maximizing it maximizes the volatility that *cancels*.
+
+**Not the same as minimum variance**, which is the usual confusion. Minimum
+variance piles into the lowest-volatility assets because low volatility is
+what it minimizes; on a set containing one very quiet asset it concentrates
+there and is not diversified in any ordinary sense. Maximum diversification
+normalizes by each asset's own volatility first, so an asset is rewarded for
+being *uncorrelated* rather than for being quiet.
+
+It does invert the correlation matrix, and reports the condition number for
+exactly that reason.
+
+## What the portfolio is actually exposed to
+
+### `get_factor_exposure_budget`
+
+Answers the failure that sinks more portfolios than any optimizer: **"I hold
+40 names, so I am diversified."** Forty names with the same factor loading
+is one position with extra transaction costs.
+
+Risk is decomposed, not just exposure. A large loading on a low-variance
+factor is not a large risk, and a small loading on a volatile one can be.
+With `factor_covariance` supplied, the result reports each factor's share of
+total portfolio **variance** — the number that answers "what am I actually
+taking risk on". Without it, only exposures can be reported, and the result
+says so rather than implying they are the risk.
+
+The **residual** matters as much as the factors. A portfolio whose variance
+is 90% explained by three factors is a factor bet; one where the factors
+explain 20% is a stock-picking portfolio, and its risk lives somewhere this
+decomposition cannot see.
+
+### `analyze_concentration`
+
+Turns "how concentrated is this" into numbers with known interpretations.
+**Effective N** — the inverse Herfindahl — is the count of equally weighted
+positions that would give the same concentration. A 100-position portfolio
+with an effective N of 12 holds 100 names and has the concentration of 12,
+and that is the number to quote.
+
+Long-short books are measured on **gross** weights. Weights summing to zero
+make a share-of-total meaningless, and squaring signed weights loses the
+direction; gross is the economically relevant denominator, so a
+market-neutral book has an effective N in the tens rather than an undefined
+one.
+
+### `get_marginal_risk_contribution`
+
+For a portfolio you **already hold**: not "what should I hold" but "where is
+my risk coming from, and what does adding to this position cost me". An
+optimizer answers neither.
+
+Marginal risk is the derivative of portfolio volatility with respect to the
+weight — the cost of the next unit. Contribution is weight times marginal,
+and these sum **exactly** to portfolio volatility, which is what makes it a
+decomposition rather than an allocation of blame. The diagnostic is the
+contribution share against the weight share: an asset at 5% of the portfolio
+carrying 30% of the risk is the position to look at first.
+
+**A negative marginal contribution is the interesting case.** It means
+adding to that position *reduces* portfolio risk, which happens when the
+asset is negatively correlated with the rest of the book. Those positions
+are hedges whether or not they were intended as such.
+
+## Risk that admits you cannot exit at the mark
+
+### `get_liquidity_adjusted_var`
+
+The standard number assumes instant exit, and that assumption does more work
+than anyone acknowledges. A 1-day 95% VaR is a statement about a position
+you could close today. A position that takes 15 days to liquidate at a sane
+participation rate is exposed for 15 days, and its risk is larger by roughly
+√15 — a factor of four.
+
+Two parts, and they are different things:
+
+- **Holding-period extension.** Risk scales with the square root of the
+  liquidation horizon. This is the larger effect and the one usually missed.
+- **Liquidation cost.** Getting out moves the price against you. This is an
+  expected cost rather than a risk, and it is reported **separately** —
+  adding a cost to a quantile produces a number that is neither.
+
+The correlation argument matters enormously. At zero the position risks add
+in quadrature, which understates a real portfolio. At 1.0 they add linearly,
+which is the crisis case — and crisis is exactly when liquidation horizons
+matter, so an honest stress uses a correlation well above the historical
+average.
+
+### `run_portfolio_scenarios`
+
+What a portfolio does under **named** shocks rather than under a
+distribution.
+
+A 99% VaR is a quantile of a distribution fitted to history, and its central
+weakness is that the event you care about is usually not in that history. A
+named scenario — "rates +200bp, equities −20%, credit spreads double" —
+makes the assumption explicit and arguable, which a quantile does not. The
+two answer different questions and a risk process needs both.
+
+Assets in the portfolio but absent from a scenario are treated as
+**unchanged**, and the coverage is reported: a scenario touching three of
+forty positions produces a loss that is a lower bound, which is worth
+knowing before it is presented as a worst case.
+
+## Related
+
+- [22_microstructure.md](22_microstructure.md) — what it costs to get there
+- [24_overfitting.md](24_overfitting.md) — whether the signal driving the weights is real

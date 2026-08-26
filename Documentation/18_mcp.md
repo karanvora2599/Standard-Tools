@@ -197,22 +197,25 @@ screener                 2    2,035       508
 a client is actually served, and the most expensive of those is 58 KB —
 about a third of the full surface. `tests/mcp/test_runtime_scope.py` pins a
 72 KB per-runtime ceiling for exactly that reason, and it is deliberately
-tight: `backtest` sits at 66,437 bytes over the wire, roughly two tools of
-headroom.
+tight: `backtest` sits at 75,867 bytes at full detail, which is over the
+73,728 per-runtime ceiling -- and is the reason `--tool-detail auto` is
+now the default rather than an option. Under `auto` it serves at 43 KB.
 
 **Tool count and cost are barely related**, which is the useful thing to
-know when picking. `analysis` carries 14 tools for 15.5 KB; `custom_signal`
-carries 2 for 6.5 KB. `modeling` and `backtest_execution` together are
-nearly half the surface. Choosing by how many tools a category holds gets
-the budget almost exactly backwards.
+know when picking. `analysis` carries 12 tools for 13.8 KB; `custom_signal`
+carries 2 for 6.7 KB -- a third of the tools for half the bytes. `modeling`
+and `backtest_execution` together are nearly half the surface. Choosing by
+how many tools a category holds gets the budget almost exactly backwards.
 
-The default — `screener,analysis,quant_research,discovery`, 33 tools,
-~8k tokens — covers screening, risk and technical snapshots, the
-factor/cointegration/Hurst research path, and the offline discovery tools.
+The default — `screener,analysis,quant_research,discovery`, 53 tools,
+~13k tokens — covers screening, risk and technical snapshots, the
+factor/cointegration/Hurst research path, the statistical diagnostics
+(stationarity, structural breaks, bootstrap intervals, seasonality), and
+the offline discovery tools.
 
 `discovery` is in the default despite being one of the newest categories,
 because it is the only one that makes the OTHERS cheaper to use: it is
-5.4 KB, and the questions it answers — which parameters a strategy takes,
+10.3 KB, and the questions it answers — which parameters a strategy takes,
 which stress windows exist, whether this provider has ticks, whether these
 arguments are even valid — were previously answered by a failed call and an
 error round trip, which costs more than the category does.
@@ -220,11 +223,13 @@ error round trip, which costs more than the category does.
 Serve a runtime, or narrow inside one:
 
 ```bash
-sqt-mcp --runtime research                    # 22 tools, 30 KB
-sqt-mcp --runtime backtest                    # 20 tools, 62 KB
+sqt-mcp --runtime research                    # 40 tools, 43 KB
+sqt-mcp --runtime backtest                    # 32 tools, 43 KB
+sqt-mcp --runtime derivatives                 # 12 tools, 21 KB
+sqt-mcp --runtime microstructure              # 12 tools, 18 KB
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
 sqt-mcp --runtime research --categories screener
-sqt-mcp --runtime all                         # ~38k tokens, and it says so
+sqt-mcp --runtime all                         # ~60k tokens, and it says so
 ```
 
 `+` joins runtimes because that is how `combine()` names a joined runtime in
@@ -343,7 +348,7 @@ it -- widening scope is a decision, not a fallback.
 
 # exists nowhere -> a hallucination, and no flag will help
 unknown tool 'run_sma_backtestt'. No tool by that name exists in this
-library. This server serves 22 tools from the research runtime. Read
+library. This server serves 40 tools from the research runtime. Read
 sqt://catalog/categories for what exists, or call tools/list for what this
 server serves -- do not guess another name.
 

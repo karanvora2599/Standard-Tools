@@ -245,6 +245,11 @@ NaN/Inf data contract is covered separately, in
 | `Documentation/17_correctness.md` | The correctness audits and the backend-parity contract between the Python and C++ tiers |
 | `Documentation/18_mcp.md` | The MCP server: install, runtime and category scoping, the context budget, resources, prompts, and the audit trail over the protocol |
 | `Documentation/19_runtimes.md` | The five parallel runtimes and why scoping is enforced at dispatch rather than advertised; the typed handoff references that carry bulk values between them; pre-flight tool validation |
+| `Documentation/20_tool_index.md` | **Generated** index of all 157 tools by runtime, with the description the model sees and every argument name |
+| `Documentation/21_derivatives.md` | The derivatives runtime: second-order greeks, multi-leg payoffs, smile and term-structure fitting with arbitrage checks, put-call parity, delta-hedge simulation, revaluation grids |
+| `Documentation/22_microstructure.md` | The microstructure runtime: spreads measured from ticks, and the eight bar-based estimators (Roll, Corwin-Schultz, Amihud, Kyle, order flow, VPIN, volume profile, implementation shortfall) for when there is no tick feed |
+| `Documentation/23_inference.md` | Error bars and diagnostics: block bootstrap intervals, distribution comparison, normality and tail index, Sharpe stability, drawdown profile, seasonality, lead-lag, structural breaks |
+| `Documentation/24_overfitting.md` | How much of a backtest is real: deflated Sharpe, PBO, purged combinatorial CV, reality check, Monte Carlo trade paths, trade clustering, break-even cost |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 | `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
 | `Development/optimization_plan.md` | The optimization backlog, each item with its measured outcome |

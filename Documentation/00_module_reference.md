@@ -503,3 +503,118 @@ index-constituent history no shipped provider exposes, so survivorship bias
 is disclosed rather than corrected).
 
 ---
+
+---
+
+## Derivatives (`standard_quant_tools.analysis.derivatives`)
+
+What you do with an option price once you have one. `pricing.py` answers
+"what is this worth"; this answers everything after that.
+
+| Function | Description |
+|---|---|
+| `option_greeks(...)` | Full greek set including vanna, volga, charm, speed — validated against central finite differences |
+| `analyze_strategy(legs, ...)` | Payoff, breakevens and aggregate greeks of an arbitrary multi-leg position |
+| `fit_volatility_smile(...)` | Quadratic in log-moneyness, with a Durrleman arbitrage check |
+| `volatility_cone(prices, ...)` | Realized-vol percentiles by horizon, with the independent-window count |
+| `analyze_vol_term_structure(...)` | Contango/backwardation and the forward vols a calendar spread prices |
+| `check_put_call_parity(...)` | The model-free identity, with the implied dividend and forward for diagnosis |
+| `implied_forward_price(...)` | Carry forward with financing, dividend and borrow separated |
+| `expected_move(...)` | One-sd move and the straddle approximation, with the historical exceedance rate |
+| `simulate_delta_hedge(...)` | Hedged P&L distribution; error scales as 1/sqrt(n_hedges) |
+| `option_risk_scenarios(...)` | Full revaluation over spot x vol |
+
+Deep guide: [21_derivatives.md](21_derivatives.md)
+
+---
+
+## Microstructure estimators (`standard_quant_tools.analysis.microstructure_estimators`)
+
+Liquidity recovered from OHLCV, for the normal case where there is no tick
+feed. Each names what it is a proxy for and how it fails.
+
+| Function | Description |
+|---|---|
+| `roll_spread(prices, ...)` | Effective spread from bid-ask bounce, with a `smallest_detectable_spread` floor |
+| `corwin_schultz_spread(ohlc)` | Spread from the high-low range; reports the negative fraction |
+| `amihud_illiquidity(ohlcv, ...)` | Price move per dollar traded, reported as a percentile |
+| `kyle_lambda(ohlcv, ...)` | Market depth from signed order flow |
+| `order_flow_imbalance(ohlcv, ...)` | Signed imbalance, with non-overlapping persistence |
+| `estimate_vpin(ohlcv, ...)` | Flow one-sidedness in volume time |
+| `intraday_volume_profile(bars, ...)` | The U-shape, for scheduling |
+| `implementation_shortfall(...)` | Perold decomposition: delay, impact, opportunity, fees |
+
+Deep guide: [22_microstructure.md](22_microstructure.md)
+
+---
+
+## Inference and diagnostics (`standard_quant_tools.analysis.inference`, `.diagnostics`, `.structure`, `.stationarity`)
+
+Error bars on estimates normally reported without any, and structure a mean
+and standard deviation cannot see.
+
+| Function | Module | Description |
+|---|---|---|
+| `bootstrap_statistic(...)` | `inference` | Block-bootstrap confidence interval for eleven statistics |
+| `compare_distributions(a, b)` | `inference` | KS plus a moment and tail comparison |
+| `rolling_correlation_stability(...)` | `inference` | Sign flips, range, and the joint-worst-decile correlation |
+| `decompose_returns(...)` | `inference` | Arithmetic vs geometric, and the volatility drag |
+| `test_normality(values)` | `inference` | Jarque-Bera plus the tail ratio that actually matters |
+| `estimate_tail_index(...)` | `inference` | Hill estimator; which moments exist |
+| `ljung_box(series, ...)` | `diagnostics` | Joint autocorrelation test across lags |
+| `seasonality(returns, ...)` | `diagnostics` | Calendar effects, Bonferroni corrected |
+| `rolling_sharpe_stability(...)` | `diagnostics` | Did the edge decay, tested on non-overlapping halves |
+| `drawdown_profile(returns, ...)` | `diagnostics` | Every drawdown, with depth and duration separated |
+| `lead_lag_matrix(returns, ...)` | `diagnostics` | Cross-asset search, corrected for its own size |
+| `structural_break_test(...)` | `diagnostics` | Chow test at a known date |
+| `entropy_measures(series, ...)` | `diagnostics` | Nonlinear structure a linear test would miss |
+| `detect_change_points(...)` | `structure` | Binary segmentation for an unknown break date |
+| `partial_correlation(...)` | `structure` | What survives removing the common drivers |
+| `granger_causality(...)` | `structure` | Temporal precedence, Bonferroni corrected |
+| `tail_dependence(...)` | `structure` | Do these move together where it matters |
+| `run_stationarity_tests(...)` | `stationarity` | ADF, KPSS and variance ratio with a four-way verdict |
+| `detect_regimes(...)` | `stationarity` | Volatility regimes by Gaussian mixture |
+
+Deep guide: [23_inference.md](23_inference.md)
+
+---
+
+## Overfitting and trade analysis (`standard_quant_tools.backtesting.overfitting`, `.trade_analysis`)
+
+How much of a backtest is real.
+
+| Function | Module | Description |
+|---|---|---|
+| `deflated_sharpe_ratio(...)` | `overfitting` | Sharpe deflated for the number of trials |
+| `probability_of_backtest_overfitting(...)` | `overfitting` | PBO across every equal split |
+| `combinatorial_purged_cv(...)` | `overfitting` | Purged and embargoed train/test paths |
+| `reality_check(...)` | `overfitting` | White's Reality Check, block bootstrapped |
+| `regime_stratified_performance(...)` | `overfitting` | P&L concentration by regime |
+| `parameter_decay(...)` | `overfitting` | Plateau or spike |
+| `monte_carlo_trade_paths(...)` | `trade_analysis` | Drawdown distribution from reshuffled trades |
+| `analyze_trade_clustering(...)` | `trade_analysis` | Runs test on wins and losses |
+| `compare_against_random(...)` | `trade_analysis` | Do the entries beat a coin |
+| `exposure_attribution(...)` | `trade_analysis` | Timing versus being invested |
+| `break_even_cost(...)` | `trade_analysis` | The cost at which the edge disappears |
+
+Deep guide: [24_overfitting.md](24_overfitting.md)
+
+---
+
+## Portfolio construction (`standard_quant_tools.portfolio.construction`)
+
+Allocation that does not lean on expected returns, and what a portfolio is
+actually exposed to.
+
+| Function | Description |
+|---|---|
+| `risk_parity(covariance, ...)` | Equal risk contribution, or an explicit risk budget |
+| `hierarchical_risk_parity(returns)` | Allocation without inverting the covariance matrix |
+| `max_diversification(covariance)` | Maximizes the diversification ratio |
+| `factor_exposure_budget(...)` | What the portfolio is a bet on, once names collapse into factors |
+| `concentration_analysis(weights)` | Effective N, Herfindahl, top-k share |
+| `marginal_risk_contribution(...)` | Where the risk in a held portfolio comes from |
+| `liquidity_adjusted_var(...)` | VaR that admits you cannot exit at the mark |
+| `portfolio_scenarios(...)` | Named shocks rather than a distribution |
+
+Deep guide: [05_portfolio.md](05_portfolio.md#allocation-without-expected-returns)
