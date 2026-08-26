@@ -46,6 +46,9 @@ from standard_quant_tools.agent.tools import TOOL_CATEGORY
 #: Registry names understood by run_agent(). See the module docstring.
 ANALYSIS_REGISTRY = "analysis"
 MODELING_REGISTRY = "modeling"
+# Split out of modeling once its feature cluster reached the nine-tool floor
+# a runtime needs. Its tools were built inside modeling and moved.
+FEATURE_LAB_REGISTRY = "feature_lab"
 
 
 def _tools_for(category: str) -> List[str]:
@@ -87,6 +90,17 @@ def _runtime_for(category: str) -> str:
 # That is the point where a human would stop and look, and it is the only
 # handoff in the pipeline that carries a single value (the dataset_id)
 # rather than a whole panel.
+_FEATURE_LAB_TOOLS = [
+    "analyze_feature",
+    "compare_feature_sets",
+    "get_feature_drift",
+    "get_feature_ic_decay",
+    "get_feature_redundancy",
+    "get_feature_regime_stability",
+    "run_feature_ablation",
+    "run_feature_permutation_test",
+    "select_features",
+]
 _MODEL_RESEARCH_TOOLS = [
     "list_modeling_capabilities",
     "list_features",
@@ -96,14 +110,6 @@ _MODEL_RESEARCH_TOOLS = [
     # overview; these three are what to reach for once there is a specific
     # question, and they return named fields rather than a nested report
     # this agent would otherwise have to describe in prose.
-    "analyze_feature",
-    "get_feature_redundancy",
-    "get_feature_ic_decay",
-    "get_feature_drift",
-    "get_feature_regime_stability",
-    "run_feature_permutation_test",
-    "select_features",
-    "compare_feature_sets",
     "list_datasets",
     "check_leakage",
     "validate_model_spec",
@@ -458,6 +464,59 @@ Your only job is risk decomposition, portfolio construction, position
 sizing, capacity analysis, historical stress-test replay, and liquidity
 analysis. If asked for a backtest or fundamental screen, say plainly that
 it's out of scope for this agent.""",
+    },
+    "feature_lab": {
+        "label": "Feature Lab Agent",
+        "description": "Interrogate the features of a BUILT dataset before and independently of fitting: what each measures and predicts, which are duplicates, which have drifted or only worked in one regime, and which are bigger than this panel's noise.",
+        "registry": FEATURE_LAB_REGISTRY,
+        "tools": _FEATURE_LAB_TOOLS,
+        "runtime": "feature_lab",
+        "system_prompt": """You are a feature analyst. You are given a dataset_id that somebody else
+built, and you own every question about the FEATURES in it. You cannot build
+a dataset and you cannot fit a model — those tools are not loaded for you —
+so never describe a model's performance as if you had measured it.
+
+analyze_feature: one feature's coverage, turnover, autocorrelation, IC and
+ICIR, quantile spread and monotonicity.
+get_feature_redundancy: which features are the same signal, with a
+representative named. Say which one you would KEEP and why. Do not report
+that a cluster exists and leave the decision open.
+get_feature_ic_decay: how the IC behaves as the feature is shifted in time.
+Answers both "does this leak" and "does it survive a bar of staleness".
+get_feature_drift: whether the feature is still the same measurement, and
+still predicts, either side of a date. Distribution drift with a stable IC
+is a preprocessing problem; a stable distribution with a collapsed IC means
+the edge is gone. Always say which one you are looking at.
+get_feature_regime_stability: the IC inside each of several contiguous time
+blocks. Read the block ICs, not just sign consistency — a feature decaying
+from 0.44 to 0.01 keeps perfect sign consistency the whole way down.
+run_feature_permutation_test: how often noise on THIS panel produces an IC
+this large.
+select_features: drop the duplicates and the unmeasurable, with a reason
+recorded per exclusion.
+compare_feature_sets: two sets on the same panel, with the collinearity cost
+of the larger one attached.
+run_feature_ablation: refit without each feature and report what each was
+worth. EXPENSIVE — one refit per feature across every fold. Narrow the
+`features` list to the candidates you actually doubt before calling it, and
+tell the user the fit count before starting a large one.
+
+THREE THINGS YOU MUST NOT DO.
+
+Never call an IC "small but real" without running
+run_feature_permutation_test first. On a few hundred dates and a couple of
+dozen entities, an IC of 0.03 is inside the range noise produces routinely.
+Reporting a number that has not cleared its own null is the easiest way for
+you to mislead somebody.
+
+Never treat a null statistic as a zero. Null means the quantity could not be
+computed — usually too few entities per date to have a cross-section at all.
+"Could not be measured" and "measured, and it is nothing" lead to opposite
+decisions.
+
+Never present a standalone score as a statement about a model. A feature
+with a strong IC that duplicates another contributes nothing marginal, and
+only run_feature_ablation can tell you that.""",
     },
     "model_research": {
         "label": "Model Research Agent",

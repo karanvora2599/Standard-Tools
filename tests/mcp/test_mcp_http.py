@@ -50,6 +50,7 @@ def _no_ambient_token(monkeypatch):
 # Configuration: every refusal happens before the port opens
 # --------------------------------------------------------------------------
 
+
 class TestHttpConfig:
     def test_stdio_is_still_the_default(self):
         config = resolve([])
@@ -93,19 +94,33 @@ class TestHttpConfig:
 
     def test_public_bind_with_a_host_and_a_token_resolves(self, monkeypatch):
         monkeypatch.setenv(TOKEN_ENV_VAR, TOKEN)
-        config = resolve([
-            "--transport", "http", "--host", "0.0.0.0",
-            "--allow-host", "sqt.internal:8765",
-            "--allow-origin", "https://desk.internal",
-        ])
+        config = resolve(
+            [
+                "--transport",
+                "http",
+                "--host",
+                "0.0.0.0",
+                "--allow-host",
+                "sqt.internal:8765",
+                "--allow-origin",
+                "https://desk.internal",
+            ]
+        )
         assert config.allowed_hosts == ("sqt.internal:8765",)
         assert config.allowed_origins == ("https://desk.internal",)
 
     def test_unauthenticated_public_bind_is_allowed_but_shouted_about(self):
-        config = resolve([
-            "--transport", "http", "--host", "0.0.0.0",
-            "--allow-host", "sqt.internal:8765", "--no-auth",
-        ])
+        config = resolve(
+            [
+                "--transport",
+                "http",
+                "--host",
+                "0.0.0.0",
+                "--allow-host",
+                "sqt.internal:8765",
+                "--no-auth",
+            ]
+        )
         assert config.auth_token is None
         assert any("UNAUTHENTICATED" in w for w in config.warnings)
 
@@ -128,7 +143,13 @@ class TestHttpConfig:
 
     @pytest.mark.parametrize(
         "given,expected",
-        [("/mcp", "/mcp"), ("mcp", "/mcp"), ("/mcp/", "/mcp"), ("/", "/"), ("/a/b/", "/a/b")],
+        [
+            ("/mcp", "/mcp"),
+            ("mcp", "/mcp"),
+            ("/mcp/", "/mcp"),
+            ("/", "/"),
+            ("/a/b/", "/a/b"),
+        ],
     )
     def test_path_is_normalised(self, monkeypatch, given, expected):
         monkeypatch.setenv(TOKEN_ENV_VAR, TOKEN)
@@ -139,7 +160,9 @@ class TestHttpConfig:
         config = resolve(["--transport", "http"])
         report(config, 6, 12000)
         printed = capsys.readouterr().err
-        assert TOKEN not in printed, "the startup report is the likeliest place to leak it"
+        assert (
+            TOKEN not in printed
+        ), "the startup report is the likeliest place to leak it"
         assert TOKEN_ENV_VAR in printed
         assert "streamable-http" in printed
 
@@ -151,8 +174,15 @@ class TestHttpConfig:
 
     @pytest.mark.parametrize(
         "host,loopback",
-        [("127.0.0.1", True), ("localhost", True), ("::1", True), ("[::1]", True),
-         ("0.0.0.0", False), ("10.0.0.4", False), ("sqt.internal", False)],
+        [
+            ("127.0.0.1", True),
+            ("localhost", True),
+            ("::1", True),
+            ("[::1]", True),
+            ("0.0.0.0", False),
+            ("10.0.0.4", False),
+            ("sqt.internal", False),
+        ],
     )
     def test_is_loopback(self, host, loopback):
         assert is_loopback(host) is loopback
@@ -194,15 +224,23 @@ async def _request(app, method, path, headers, body):
         "root_path": "",
         "scheme": "http",
         "query_string": b"",
-        "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+        "headers": [
+            (k.lower().encode(), v.encode()) for k, v in (headers or {}).items()
+        ],
         "client": ("127.0.0.1", 54321),
         "server": ("127.0.0.1", DEFAULT_HTTP_PORT),
     }
 
     await app(scope, receive, send)
     start = next(m for m in sent if m["type"] == "http.response.start")
-    out = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
-    return start["status"], {k.decode(): v.decode() for k, v in start.get("headers", [])}, out
+    out = b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+    )
+    return (
+        start["status"],
+        {k.decode(): v.decode() for k, v in start.get("headers", [])},
+        out,
+    )
 
 
 def call_asgi(app, method="POST", path="/mcp", headers=None, body=b"{}"):
@@ -282,11 +320,20 @@ class TestBearerAuth:
 
     @pytest.mark.parametrize(
         "header",
-        ["Bearer wrong", "Bearer ", "bearer", TOKEN, f"Basic {TOKEN}", f"Bearer {TOKEN}x"],
+        [
+            "Bearer wrong",
+            "Bearer ",
+            "bearer",
+            TOKEN,
+            f"Basic {TOKEN}",
+            f"Bearer {TOKEN}x",
+        ],
     )
     def test_a_wrong_credential_is_rejected(self, header):
         inner = Inner()
-        status, _h, _b = call_asgi(BearerAuth(inner, TOKEN), headers={"Authorization": header})
+        status, _h, _b = call_asgi(
+            BearerAuth(inner, TOKEN), headers={"Authorization": header}
+        )
         assert status == 401
         assert inner.calls == 0
 
@@ -353,7 +400,9 @@ class TestApp:
     def test_no_auth_leaves_the_endpoint_open(self, monkeypatch):
         """The flag has to actually remove the gate, or --no-auth is theatre."""
         monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
-        config = resolve(["--transport", "http", "--no-auth", "--categories", "screener"])
+        config = resolve(
+            ["--transport", "http", "--no-auth", "--categories", "screener"]
+        )
         server, handlers = build_server(config)
         app = build_app(config, server, len(handlers.tools))
         # Reaches the transport rather than the auth gate. The transport then
@@ -366,7 +415,10 @@ class TestApp:
         """Without it every request raises instead of answering."""
         app, _config = self._app(monkeypatch)
         status, _headers, _body = call_asgi_live(
-            app, method="POST", path="/mcp", headers={"Authorization": f"Bearer {TOKEN}"}
+            app,
+            method="POST",
+            path="/mcp",
+            headers={"Authorization": f"Bearer {TOKEN}"},
         )
         assert 400 <= status < 500, "an unsessioned POST is refused, not crashed"
 
@@ -374,6 +426,7 @@ class TestApp:
 # --------------------------------------------------------------------------
 # It actually serves
 # --------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 class TestHttpIntegration:
@@ -400,19 +453,33 @@ class TestHttpIntegration:
             port = probe.getsockname()[1]
 
         env = dict(os.environ)
-        env.update({
-            "SQT_RUNS_DIR": str(tmp_path / "runs"),
-            "SQT_AUDIT_DIR": str(tmp_path / "audit"),
-            "SQT_CACHE_DIR": str(tmp_path / "cache"),
-            "SQT_AUDIT_ENABLED": "0",
-            "PYTHONPATH": str(REPO_ROOT / "src"),
-            TOKEN_ENV_VAR: TOKEN,
-        })
+        env.update(
+            {
+                "SQT_RUNS_DIR": str(tmp_path / "runs"),
+                "SQT_AUDIT_DIR": str(tmp_path / "audit"),
+                "SQT_CACHE_DIR": str(tmp_path / "cache"),
+                "SQT_AUDIT_ENABLED": "0",
+                "PYTHONPATH": str(REPO_ROOT / "src"),
+                TOKEN_ENV_VAR: TOKEN,
+            }
+        )
         proc = subprocess.Popen(
-            [sys.executable, "-m", "standard_quant_tools.mcp.server",
-             "--transport", "http", "--port", str(port), "--categories", "screener"],
-            env=env, cwd=str(REPO_ROOT),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            [
+                sys.executable,
+                "-m",
+                "standard_quant_tools.mcp.server",
+                "--transport",
+                "http",
+                "--port",
+                str(port),
+                "--categories",
+                "screener",
+            ],
+            env=env,
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
         try:
             self._wait_for_port(proc, port)
@@ -422,7 +489,10 @@ class TestHttpIntegration:
                     headers={"Authorization": f"Bearer {TOKEN}"}
                 )
                 url = f"http://127.0.0.1:{port}/mcp"
-                async with streamable_http_client(url, http_client=client) as (read, write):
+                async with streamable_http_client(url, http_client=client) as (
+                    read,
+                    write,
+                ):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         return await session.list_tools()

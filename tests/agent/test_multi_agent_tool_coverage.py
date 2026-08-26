@@ -22,6 +22,7 @@ import pytest
 
 from standard_quant_tools.agent import get_agent_tools
 from standard_quant_tools.modeling.agent import get_modeling_tools
+from standard_quant_tools.modeling.agent.feature_tools import get_feature_tools
 
 from .. import REPO_ROOT
 
@@ -32,6 +33,7 @@ MULTI_AGENT_DIR = REPO_ROOT / "Multi_Agent_Implementation"
 REGISTRY_TOOLS = {
     "analysis": lambda: {t["function"]["name"] for t in get_agent_tools()},
     "modeling": lambda: {t["function"]["name"] for t in get_modeling_tools()},
+    "feature_lab": lambda: {t["function"]["name"] for t in get_feature_tools()},
 }
 
 
@@ -156,6 +158,11 @@ class TestWorkerToolCoverage:
             "microstructure",
             "model_research",
             "model_builder",
+            # Split out of model_research when the nine feature tools moved
+            # to their own runtime. Feature work runs repeatedly before any
+            # model exists, which is a different job from assembling one
+            # dataset and handing off its id.
+            "feature_lab",
         }
 
     def test_every_analysis_category_has_exactly_one_worker(self, worker_agents):
@@ -172,3 +179,33 @@ class TestWorkerToolCoverage:
             if worker["registry"] == "analysis"
         }
         assert workers == categories
+
+
+def test_every_registry_has_at_least_one_worker(worker_agents):
+    """
+    A registry whose workers all disappeared is reachable by nobody.
+
+    This is not hypothetical: splitting the nine feature tools out of
+    `modeling` into `feature_lab` left every one of them claimed by no
+    worker, and every existing test passed -- because the coverage check
+    iterates the registries that HAVE workers, so a registry with none is
+    invisible to it. The gap was in the test, not only in the data.
+    """
+    from standard_quant_tools.agent.tools import _TOOL_DISPATCH
+    from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+    from standard_quant_tools.modeling.agent.feature_tools import (
+        FEATURE_TOOL_DISPATCH,
+    )
+
+    registries = {
+        "analysis": _TOOL_DISPATCH,
+        "modeling": MODELING_TOOL_DISPATCH,
+        "feature_lab": FEATURE_TOOL_DISPATCH,
+    }
+    covered = {w["registry"] for w in worker_agents.values()}
+    missing = sorted(set(registries) - covered)
+    assert not missing, (
+        f"registries with no worker at all: {missing}. Every tool in them is "
+        "unreachable from the multi-agent implementation, and the per-registry "
+        "coverage check cannot see it."
+    )

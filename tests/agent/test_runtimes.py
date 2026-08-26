@@ -16,6 +16,7 @@ and a model receiving it guesses again.
 import pytest
 
 from standard_quant_tools.agent.runtimes import (
+    FEATURE_LAB_RUNTIME,
     MODELING_RUNTIME,
     RUNTIME_CATEGORIES,
     all_runtimes,
@@ -36,8 +37,18 @@ class TestPartition:
                 assert tool not in seen, f"{tool} is in both {seen[tool]} and {name}"
                 seen[tool] = name
         from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
+        )
 
-        assert set(seen) == set(_TOOL_DISPATCH) | set(MODELING_TOOL_DISPATCH)
+        # Three registries now: the analysis facade, modeling, and
+        # feature_lab, which was split OUT of modeling once its
+        # cluster reached the nine-tool floor a runtime needs.
+        assert set(seen) == (
+            set(_TOOL_DISPATCH)
+            | set(MODELING_TOOL_DISPATCH)
+            | set(FEATURE_TOOL_DISPATCH)
+        )
 
     def test_every_category_belongs_to_exactly_one_runtime(self):
         owners: dict = {}
@@ -143,19 +154,32 @@ class TestSchemas:
         }
 
     def test_every_runtime_schema_is_the_same_one_the_union_advertises(self):
-        """Each ANALYSIS runtime's schemas must be byte-identical to what
-        get_agent_tools() advertises. Modeling is excluded because it has
-        its own union (get_modeling_tools) -- the two registries stay
-        apart, and this test would quietly merge them."""
+        """Each runtime's schemas must be byte-identical to whatever union
+        advertises them.
+
+        There are THREE unions, not one, and keeping them apart is the
+        point: get_agent_tools() for the analysis runtimes,
+        get_modeling_tools() for modeling, get_feature_tools() for
+        feature_lab. A test that checked every runtime against the analysis
+        union would quietly merge registries that this library has
+        deliberately declined to merge."""
         from standard_quant_tools.agent.tools import get_agent_tools
         from standard_quant_tools.modeling.agent import get_modeling_tools
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            get_feature_tools,
+        )
 
-        union = {t["function"]["name"]: t for t in get_agent_tools()}
-        modeling_union = {t["function"]["name"]: t for t in get_modeling_tools()}
+        unions = {
+            MODELING_RUNTIME: {t["function"]["name"]: t for t in get_modeling_tools()},
+            FEATURE_LAB_RUNTIME: {
+                t["function"]["name"]: t for t in get_feature_tools()
+            },
+        }
+        analysis_union = {t["function"]["name"]: t for t in get_agent_tools()}
         for name, runtime in all_runtimes().items():
-            expected = modeling_union if name == MODELING_RUNTIME else union
+            expected = unions.get(name, analysis_union)
             for tool in runtime.get_tools():
-                assert tool == expected[tool["function"]["name"]]
+                assert tool == expected[tool["function"]["name"]], name
 
 
 class TestExecution:
@@ -227,17 +251,20 @@ class TestFacadeStaysAFacade:
         assert not missing, f"tools missing from agent.__all__: {missing}"
 
     def test_the_facade_advertises_exactly_the_analysis_runtimes_combined(self):
-        """The facade is the ANALYSIS union. Modeling is reachable as a
-        runtime but is not in get_agent_tools(), and must not become so --
-        merging the two registries is the thing this library declined to
-        do."""
+        """The facade is the ANALYSIS union, and only that.
+
+        modeling and feature_lab are both reachable as runtimes and neither
+        is in get_agent_tools(). Merging the registries is the thing this
+        library declined to do, and a facade that quietly grew to cover
+        them would undo it without anybody deciding to."""
         from standard_quant_tools.agent.tools import get_agent_tools
 
+        separate = {MODELING_RUNTIME, FEATURE_LAB_RUNTIME}
         advertised = {t["function"]["name"] for t in get_agent_tools()}
         owned = {
             n
             for name, rt in all_runtimes().items()
-            if name != MODELING_RUNTIME
+            if name not in separate
             for n in rt.tool_names
         }
         assert advertised == owned

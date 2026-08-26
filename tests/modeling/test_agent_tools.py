@@ -150,25 +150,10 @@ class TestModelingDispatch:
             "check_leakage",
             "validate_model_spec",
             "score_predictions",
-            # Typed, single-question counterparts to analyze_features,
-            # which returns an untyped `report` blob an agent has to parse
-            # by guessing key names. These compute nothing new -- every
-            # number already came out of feature_report.py -- so they are
-            # three decisions an agent can now make separately rather than
-            # three it had to extract from one answer.
-            "analyze_feature",
-            "get_feature_redundancy",
-            "get_feature_ic_decay",
-            # Three questions a full-sample report structurally cannot
-            # answer: has the feature stopped being the same measurement,
-            # did its edge live in one regime, and is the IC bigger than
-            # what this panel's noise produces anyway.
-            "get_feature_drift",
-            "get_feature_regime_stability",
-            "run_feature_permutation_test",
-            # Acting on the answers: choose a set, or compare two.
-            "select_features",
-            "compare_feature_sets",
+            # The nine feature tools that used to sit here moved to the
+            # feature_lab runtime -- see tests/modeling/test_feature_tools.py.
+            # modeling is one ordered pipeline; feature work is a
+            # different, exploratory job that ran before any of it.
         }
         assert len(tools) == len({t["function"]["name"] for t in tools})
 

@@ -230,10 +230,19 @@ class StandardToolsServer:
                 "another name."
             )
         if known.runtime not in set(self.config.runtimes):
+            from standard_quant_tools.agent.runtimes import MOVED_FROM
+
+            moved = MOVED_FROM.get(name)
+            history = (
+                f" It used to be served by {moved!r}, which this server IS "
+                "scoped to -- it moved, and its arguments are unchanged."
+                if moved and moved in set(self.config.runtimes)
+                else ""
+            )
             return (
                 f"{name!r} exists, but belongs to the {known.runtime!r} "
                 f"runtime and this server is scoped to "
-                f"{'+'.join(self.config.runtimes)}. Restart with "
+                f"{'+'.join(self.config.runtimes)}.{history} Restart with "
                 f"`--runtime {known.runtime}` to serve it -- widening scope "
                 "is a decision, not a fallback."
             )

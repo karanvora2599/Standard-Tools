@@ -36,7 +36,7 @@ its own tools, so a name from another runtime is not discouraged — it is
 unroutable. This is the guarantee the modeling registry has had since it
 shipped, generalized to the rest of the surface.
 
-### The five runtimes
+### The six runtimes
 
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
@@ -98,6 +98,38 @@ being the silent default it used to be.
 Every tool belongs to exactly one, and a test enforces it. Duplicating a
 convenient tool into a second runtime would dissolve the boundary at
 exactly the points where it matters most.
+
+### The sixth runtime, and how it was made
+
+`feature_lab` is the first runtime created by this process rather than by
+the original split, so it is worth recording what the process actually
+required.
+
+The nine tools in it were **built inside `modeling` first** and moved once
+the cluster was big enough to stand alone. That order is the rule, not an
+accident of scheduling: a runtime declared empty and filled later spends
+however long it takes to fill as a boundary that isolates nothing, and the
+tools inside it get designed against a scope nobody is using yet.
+
+The floor is checked on both sides. `feature_lab` lands at 9; `modeling`
+keeps 14. Neither number is a coincidence — the split was sequenced so that
+both would clear 8, and the existing floor test would have failed the moment
+either did not.
+
+**A split is a breaking change**, so the move is recorded. An agent scoped
+to `modeling` that calls `analyze_feature` gets:
+
+```
+'analyze_feature' exists but belongs to the 'feature_lab' runtime, not to
+'modeling'. It used to be in 'modeling' and moved; the BOUNDARY was renamed,
+not the tool -- its arguments and behaviour are unchanged. ...
+```
+
+A `research`-scoped agent asking for the same tool does NOT get that
+sentence. It never had the tool, so the history explains something it was
+not part of and only makes the message longer. `MOVED_FROM` entries are
+retired one minor version after the move — a record nobody cleans up becomes
+a changelog nobody reads, embedded in an error message everybody does.
 
 ### The runtime is also the serving boundary
 

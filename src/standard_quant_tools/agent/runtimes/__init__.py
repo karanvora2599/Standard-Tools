@@ -86,6 +86,7 @@ RUNTIME_LABELS: Dict[str, str] = {
     "portfolio": "Portfolio & Execution",
     "meta": "Discovery & Provenance",
     "modeling": "Modeling",
+    "feature_lab": "Feature Lab",
 }
 
 RUNTIME_DESCRIPTIONS: Dict[str, str] = {
@@ -117,6 +118,40 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
         "predictions. One ordered pipeline rather than a set of "
         "interchangeable tools."
     ),
+    "feature_lab": (
+        "Interrogate the FEATURES of a built dataset, before and "
+        "independently of fitting anything: what each one measures and "
+        "predicts, which are restatements of one another, whether one has "
+        "drifted or only worked in one regime, whether its IC is larger than "
+        "what this panel's noise produces, and what each is worth to a "
+        "fitted model. Exploratory and repeatable, where `modeling` is one "
+        "ordered pipeline."
+    ),
+}
+
+#: Tools that used to live somewhere else, and where they were.
+#:
+#: A split is a breaking change: an agent scoped to the donor loses the tool,
+#: and a bare "belongs to feature_lab" reads as though it had hallucinated
+#: the name. Saying where it USED to live turns a break into an instruction,
+#: and it costs one dict.
+#:
+#: Retired one minor version after the move. A moved-from record nobody
+#: cleans up becomes a changelog nobody reads, embedded in an error message
+#: everybody does.
+MOVED_FROM: Dict[str, str] = {
+    name: "modeling"
+    for name in (
+        "analyze_feature",
+        "compare_feature_sets",
+        "get_feature_drift",
+        "get_feature_ic_decay",
+        "get_feature_redundancy",
+        "get_feature_regime_stability",
+        "run_feature_ablation",
+        "run_feature_permutation_test",
+        "select_features",
+    )
 }
 
 #: The modeling runtime lives in `modeling/agent`. It predates this module
@@ -125,6 +160,11 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
 #: MODELING_TOOL_DISPATCH itself, and this module never becomes a second
 #: place where the modeling surface is described.
 MODELING_RUNTIME = "modeling"
+
+#: `feature_lab` is wrapped the same way and for the same reason: its
+#: dispatch table lives in modeling/agent/feature_tools.py and is held here
+#: by reference, so this module never becomes a second description of it.
+FEATURE_LAB_RUNTIME = "feature_lab"
 
 
 @dataclass(frozen=True)
@@ -216,11 +256,29 @@ class Runtime:
             )
         return (
             f"{tool_name!r} exists but belongs to the {owner!r} runtime, not "
-            f"to {self.name!r}. This caller is scoped to {self.name!r}, which "
+            f"to {self.name!r}.{_moved_note(tool_name, self.name)} This "
+            f"caller is scoped to {self.name!r}, which "
             f"provides: {self.tool_names}. Either use one of those, or "
             f"construct the {owner!r} runtime deliberately — widening scope "
             "is a decision, not a fallback."
         )
+
+
+def _moved_note(tool: str, scope: str) -> str:
+    """
+    " It used to be in 'modeling'." -- when that is why the caller is here.
+
+    Added only when the caller is scoped to the runtime the tool LEFT.
+    Anyone else never had it, so telling them it moved explains a history
+    they were not part of and makes the message longer for nobody's benefit.
+    """
+    previous = MOVED_FROM.get(tool)
+    if previous is None or previous != scope:
+        return ""
+    return (
+        f" It used to be in {previous!r} and moved; the BOUNDARY was renamed, "
+        "not the tool -- its arguments and behaviour are unchanged."
+    )
 
 
 def _build() -> Dict[str, Runtime]:
@@ -271,6 +329,31 @@ def _build() -> Dict[str, Runtime]:
                 MODELING_TOOL_DISPATCH[tool["function"]["name"]][1],
             )
             for tool in get_modeling_tools()
+        ),
+    )
+    # The feature_lab runtime, wrapped by reference exactly like modeling.
+    # Both live under modeling/agent because that is where the analysis they
+    # call lives; the RUNTIME boundary and the package layout answer
+    # different questions and do not have to agree.
+    from standard_quant_tools.modeling.agent.feature_tools import (
+        FEATURE_TOOL_DISPATCH,
+        get_feature_tools,
+    )
+
+    runtimes[FEATURE_LAB_RUNTIME] = Runtime(
+        name=FEATURE_LAB_RUNTIME,
+        label=RUNTIME_LABELS[FEATURE_LAB_RUNTIME],
+        description=RUNTIME_DESCRIPTIONS[FEATURE_LAB_RUNTIME],
+        categories=(FEATURE_LAB_RUNTIME,),
+        dispatch_table=FEATURE_TOOL_DISPATCH,
+        # Keyed by NAME rather than zipped, for the reason recorded above.
+        tool_defs=tuple(
+            (
+                tool["function"]["name"],
+                tool["function"]["description"],
+                FEATURE_TOOL_DISPATCH[tool["function"]["name"]][1],
+            )
+            for tool in get_feature_tools()
         ),
     )
     return runtimes
@@ -341,7 +424,9 @@ def combine(names: Sequence[str], label: Optional[str] = None) -> Runtime:
 
 
 __all__ = [
+    "FEATURE_LAB_RUNTIME",
     "MODELING_RUNTIME",
+    "MOVED_FROM",
     "RUNTIME_CATEGORIES",
     "RUNTIME_DESCRIPTIONS",
     "RUNTIME_LABELS",

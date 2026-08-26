@@ -64,8 +64,16 @@ def catalog():
 class TestCoverage:
     """Every dispatchable tool is exposed exactly once, both directions."""
 
-    def test_catalog_covers_both_registries_exactly(self, catalog):
-        library = set(_TOOL_DISPATCH) | set(MODELING_TOOL_DISPATCH)
+    def test_catalog_covers_every_registry_exactly(self, catalog):
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
+        )
+
+        library = (
+            set(_TOOL_DISPATCH)
+            | set(MODELING_TOOL_DISPATCH)
+            | set(FEATURE_TOOL_DISPATCH)
+        )
         missing = library - set(catalog)
         extra = set(catalog) - library
         assert not missing, f"tools the MCP catalog does not expose: {sorted(missing)}"
@@ -88,23 +96,49 @@ class TestCoverage:
         assert seen == set(catalog)
 
     def test_each_tool_routes_to_its_own_registrys_dispatcher(self, catalog):
-        # The two dispatchers have identical signatures, so a mispaired tool
+        # Every dispatcher has an identical signature, so a mispaired tool
         # would fail only at call time with an "unknown tool" error naming
-        # the model's choice rather than this wiring.
+        # the model's choice rather than this wiring. Three registries now:
+        # the analysis facade, modeling, and feature_lab, which was split
+        # out of modeling.
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
+        )
+
+        tables = {
+            "analysis": _TOOL_DISPATCH,
+            "modeling": MODELING_TOOL_DISPATCH,
+            "feature_lab": FEATURE_TOOL_DISPATCH,
+        }
         for entry in catalog.values():
-            table = (
-                _TOOL_DISPATCH
-                if entry.registry == "analysis"
-                else MODELING_TOOL_DISPATCH
+            table = tables.get(entry.registry)
+            assert table is not None, (
+                f"{entry.name} claims registry {entry.registry!r}, which has "
+                "no dispatch table"
             )
             assert entry.name in table, f"{entry.name} routed to the wrong registry"
             assert callable(dispatch_for(entry))
 
-    def test_the_two_registries_share_no_tool_name(self):
-        overlap = set(_TOOL_DISPATCH) & set(MODELING_TOOL_DISPATCH)
-        assert (
-            not overlap
-        ), f"a name in both registries is unroutable: {sorted(overlap)}"
+    def test_no_two_registries_share_a_tool_name(self):
+        """A name in two registries is unroutable: the MCP server routes by
+        name and has nothing to disambiguate with."""
+        from itertools import combinations
+
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
+        )
+
+        tables = {
+            "analysis": set(_TOOL_DISPATCH),
+            "modeling": set(MODELING_TOOL_DISPATCH),
+            "feature_lab": set(FEATURE_TOOL_DISPATCH),
+        }
+        for (left, a), (right, b) in combinations(tables.items(), 2):
+            overlap = a & b
+            assert not overlap, (
+                f"{sorted(overlap)} is in both {left!r} and {right!r}, which "
+                "makes it unroutable by name"
+            )
 
 
 class TestSchemas:
@@ -193,9 +227,9 @@ class TestBudget:
         config = ServerConfig(categories=ALL_CATEGORIES, enable_long_running=True)
         _server, handlers = build_server(config)
         warning = check_context_budget(config, handlers.context_bytes())
-        assert warning is not None, (
-            "the eager whole surface is over the ceiling and said nothing"
-        )
+        assert (
+            warning is not None
+        ), "the eager whole surface is over the ceiling and said nothing"
         assert "--tool-detail auto" in warning, "the warning must name the fix"
 
     def test_a_scoped_configuration_does_not_warn(self):

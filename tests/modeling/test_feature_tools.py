@@ -27,7 +27,6 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.agent import (
     BuildModelDatasetInput,
     build_model_dataset,
-    modeling_dispatch,
 )
 from standard_quant_tools.modeling.agent.feature_models import (
     AnalyzeFeatureInput,
@@ -43,6 +42,7 @@ from standard_quant_tools.modeling.agent.feature_tools import (
     _pick_representative,
     analyze_feature,
     compare_feature_sets,
+    feature_dispatch,
     get_feature_drift,
     get_feature_ic_decay,
     get_feature_redundancy,
@@ -243,10 +243,13 @@ class TestTheyAreRealTools:
         args = {"dataset_id": dataset}
         if name != "get_feature_redundancy":
             args["feature"] = features[0]
-        result = modeling_dispatch(name, args)
+        result = feature_dispatch(name, args)
         assert isinstance(result, dict)
 
-    def test_they_belong_to_the_modeling_runtime(self):
+    def test_they_belong_to_the_feature_lab_runtime(self):
+        """They were built inside `modeling` and moved out once the cluster
+        reached the nine-tool floor a runtime needs -- which is the order
+        the splitting rule requires: grow it at home, then move it."""
         from standard_quant_tools.agent.runtimes import owner_of
 
         for name in (
@@ -254,12 +257,38 @@ class TestTheyAreRealTools:
             "get_feature_redundancy",
             "get_feature_ic_decay",
         ):
-            assert owner_of(name) == "modeling"
+            assert owner_of(name) == "feature_lab"
+
+    def test_the_move_is_recorded(self):
+        """A split is a breaking change. An agent scoped to the donor gets
+        a refusal, and a bare one reads as though it had hallucinated the
+        name."""
+        from standard_quant_tools.agent.runtimes import MOVED_FROM, resolve
+
+        assert MOVED_FROM["analyze_feature"] == "modeling"
+        try:
+            resolve("modeling").dispatch("analyze_feature", {})
+        except Exception as exc:
+            assert "used to be in 'modeling'" in str(exc)
+        else:  # pragma: no cover - the dispatch must refuse
+            raise AssertionError("modeling still dispatches a moved tool")
+
+    def test_the_history_is_not_told_to_callers_who_never_had_it(self):
+        """A research-scoped agent never held these tools, so telling it
+        they moved explains a history it was not part of."""
+        from standard_quant_tools.agent.runtimes import resolve
+
+        try:
+            resolve("research").dispatch("analyze_feature", {})
+        except Exception as exc:
+            assert "used to be" not in str(exc)
 
     def test_they_are_advertised(self):
-        from standard_quant_tools.modeling.agent import get_modeling_tools
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            get_feature_tools,
+        )
 
-        advertised = {d["function"]["name"] for d in get_modeling_tools()}
+        advertised = {d["function"]["name"] for d in get_feature_tools()}
         assert {
             "analyze_feature",
             "get_feature_redundancy",
@@ -522,22 +551,25 @@ class TestDriftAndStabilityTools:
             )
 
 
-class TestAllEightAreRealTools:
+class TestTheSplitFollowedTheRule:
+    """Development/runtime_expansion_plan.md section 3, checked rather than
+    asserted in prose."""
+
     FEATURE_TOOLS = [
         "analyze_feature",
-        "get_feature_redundancy",
-        "get_feature_ic_decay",
-        "select_features",
         "compare_feature_sets",
         "get_feature_drift",
+        "get_feature_ic_decay",
+        "get_feature_redundancy",
         "get_feature_regime_stability",
+        "run_feature_ablation",
         "run_feature_permutation_test",
+        "select_features",
     ]
 
-    def test_the_cluster_is_big_enough_to_carry_a_runtime(self):
-        """The splitting rule: a runtime lands at >= 8 tools. This cluster
-        is what `feature_lab` will be built from, so the count is pinned
-        here rather than discovered at the split."""
+    def test_the_new_runtime_clears_the_floor(self):
+        """Rule 2: a runtime lands at >= 8 tools. A runtime holding two is
+        overhead, not isolation."""
         from standard_quant_tools.modeling.agent.feature_tools import (
             FEATURE_TOOL_DISPATCH,
         )
@@ -545,25 +577,34 @@ class TestAllEightAreRealTools:
         assert set(FEATURE_TOOL_DISPATCH) == set(self.FEATURE_TOOLS)
         assert len(FEATURE_TOOL_DISPATCH) >= 8
 
-    def test_the_donor_stays_legal_after_the_split(self):
-        """The other half of the rule, checked BEFORE the move rather than
-        after: modeling must still hold >= 8 tools once these leave."""
+    def test_the_donor_still_clears_it_too(self):
+        """Rule 3. The generic floor test already covers this -- it iterates
+        every runtime, and a donor is still a runtime after a split -- but
+        naming the donor here says WHICH move would have broken it."""
         from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
 
-        remaining = set(MODELING_TOOL_DISPATCH) - set(self.FEATURE_TOOLS)
-        assert len(remaining) >= 8, (
-            f"moving the feature cluster out would leave modeling with "
-            f"{len(remaining)} tools, below the floor"
+        assert (
+            len(MODELING_TOOL_DISPATCH) >= 8
+        ), f"the split left modeling with {len(MODELING_TOOL_DISPATCH)} tools"
+
+    def test_the_two_runtimes_do_not_overlap(self):
+        """A tool duplicated into both would dissolve the boundary exactly
+        where it matters."""
+        from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
         )
+
+        assert not set(MODELING_TOOL_DISPATCH) & set(FEATURE_TOOL_DISPATCH)
 
     @pytest.mark.parametrize("name", FEATURE_TOOLS)
     def test_each_is_advertised_and_dispatchable(self, name):
         from standard_quant_tools.agent.runtimes import owner_of
-        from standard_quant_tools.modeling.agent import (
-            MODELING_TOOL_DISPATCH,
-            get_modeling_tools,
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
+            get_feature_tools,
         )
 
-        assert name in MODELING_TOOL_DISPATCH
-        assert name in {d["function"]["name"] for d in get_modeling_tools()}
-        assert owner_of(name) == "modeling"
+        assert name in FEATURE_TOOL_DISPATCH
+        assert name in {d["function"]["name"] for d in get_feature_tools()}
+        assert owner_of(name) == "feature_lab"

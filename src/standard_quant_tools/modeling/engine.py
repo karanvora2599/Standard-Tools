@@ -278,7 +278,11 @@ def _predict_fold(
 
 
 def run_experiment(
-    dataset: Dict[str, Any], model_spec: ModelSpec, dataset_id: str
+    dataset: Dict[str, Any],
+    model_spec: ModelSpec,
+    dataset_id: str,
+    *,
+    register: bool = True,
 ) -> Dict[str, Any]:
     """
     Args:
@@ -289,6 +293,15 @@ def run_experiment(
         dataset_id: id under which the dataset panel was persisted (see
             modeling/agent/tools.py::build_model_dataset) — recorded in
             the registered model's manifest for lineage.
+        register: persist the refit estimator and its OOS predictions, and
+            return a model_id. True for anything a caller might want to
+            score later. False for a comparison that fits many candidate
+            specs and keeps none of them — feature ablation refits once per
+            feature, and registering 41 models to answer one question about
+            a 40-feature panel would fill the registry with models nobody
+            asked for. The FITS are identical either way; only the writing
+            down is skipped, so an unregistered run's metrics are the same
+            numbers a registered one would have reported.
 
     Raises:
         ValidationError: unknown estimator, disallowed estimator param,
@@ -639,6 +652,20 @@ def run_experiment(
     # single as-of snapshot comes from this same final_estimator and
     # would leak if used to "predict" dates it was trained on).
     model_id = new_model_id()
+    if not register:
+        # Everything above has already happened: the folds are fit, the OOS
+        # metrics are computed, the importance is summarized. What is
+        # skipped is writing any of it down.
+        return {
+            "model_id": None,
+            "oos_metrics": oos_metrics,
+            "feature_importance_summary": importance_summary,
+            "n_folds": len(fold_metrics),
+            "validation_report": validation_report,
+            "oos_predictions_uri": None,
+            "n_train_rows_purged_overlap": n_purged_total,
+        }
+
     oos_predictions_df = pd.concat(oos_prediction_frames, ignore_index=True)
     oos_predictions_uri = _artifacts.save_artifact(
         oos_predictions_df, run_id=model_id, name="oos_predictions"

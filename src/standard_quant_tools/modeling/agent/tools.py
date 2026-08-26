@@ -41,17 +41,6 @@ from typing import Any, Dict, List
 
 from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.modeling.agent.feature_models import (
-    AnalyzeFeatureInput,
-    CompareFeatureSetsInput,
-    FeatureDriftInput,
-    FeatureICDecayInput,
-    FeatureRedundancyInput,
-    FeatureStabilityInput,
-    PermutationTestInput,
-    SelectFeaturesInput,
-)
-from standard_quant_tools.modeling.agent.feature_tools import FEATURE_TOOL_DISPATCH
 
 from .. import artifacts as _artifacts
 from ..analysis import build_feature_report
@@ -849,91 +838,6 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
 
 _MODELING_TOOL_DEFS: List[tuple] = [
     (
-        "analyze_feature",
-        "Profile ONE feature of a built dataset: coverage, turnover, "
-        "autocorrelation, cross-sectional IC and ICIR, quantile spread and "
-        "monotonicity. The single-feature counterpart to analyze_features — "
-        "reach for it when a specific feature is in question, since it costs "
-        "one feature's work instead of the whole panel's and returns every "
-        "number named rather than nested in a report dict.",
-        AnalyzeFeatureInput,
-    ),
-    (
-        "get_feature_redundancy",
-        "Which features are restatements of one another, and which one to "
-        "keep. RSI, 20-day momentum, MACD and stochastic are one momentum "
-        "cluster, not four independent sources of alpha. Returns each "
-        "cluster with a representative chosen by strongest rank IC, the drop "
-        "list already worked out, and the collinearity diagnostics (VIF, "
-        "condition number) that say whether linear coefficients on this "
-        "panel mean anything.",
-        FeatureRedundancyInput,
-    ),
-    (
-        "select_features",
-        "Choose a feature set from a built dataset: keep one feature per "
-        "redundancy cluster, drop what falls below an IC floor, and return a "
-        "reason for every exclusion. Deliberately has no greedy search -- a "
-        "selector scored on the panel it selects from manufactures overfit "
-        "that looks like evidence. Redundancy is resolved before the IC "
-        "floor, because a cluster is one signal and the question is whether "
-        "THAT signal clears the floor.",
-        SelectFeaturesInput,
-    ),
-    (
-        "compare_feature_sets",
-        "Two feature sets measured on the same panel, with the cost of the "
-        "difference attached: per-set IC, independent-signal count and "
-        "condition number, what is unique to each side, and the per-feature "
-        "IC table. Not a single score, because a larger set almost always "
-        "has a higher maximum IC and almost always more collinearity, and "
-        "one number hides half of that trade.",
-        CompareFeatureSetsInput,
-    ),
-    (
-        "get_feature_drift",
-        "Whether a feature is still the same measurement, and still "
-        "predicts, either side of a date. Returns PSI and a two-sample KS "
-        "for the distribution, plus the IC computed separately on each half. "
-        "The two fail differently and need different fixes: distribution "
-        "drift with a stable IC is a preprocessing problem, while a stable "
-        "distribution with a collapsed IC means the edge is gone.",
-        FeatureDriftInput,
-    ),
-    (
-        "get_feature_regime_stability",
-        "The feature's IC inside each of several CONTIGUOUS time blocks, "
-        "never shuffled -- a feature's usual problem is that it worked in "
-        "one regime, and interleaved folds average exactly that away. "
-        "Returns per-block IC plus sign consistency against the full-sample "
-        "IC. Read both: consistent sign with collapsing magnitude is decay, "
-        "and sign consistency stays at 1.0 through it.",
-        FeatureStabilityInput,
-    ),
-    (
-        "run_feature_permutation_test",
-        "How often noise on THIS panel produces an IC as large as the "
-        "observed one, in either direction. Shuffles the feature within each "
-        "date, which states the null exactly -- the feature carries no "
-        "cross-sectional information within a date -- and returns a "
-        "TWO-SIDED empirical p-value, so a strongly negative IC is "
-        "significant rather than ignored. null_p95_abs is the IC this panel "
-        "yields from noise alone 5% of the time, which is the defensible "
-        "floor for select_features(min_abs_rank_ic=...). Cost is linear in "
-        "n_permutations.",
-        PermutationTestInput,
-    ),
-    (
-        "get_feature_ic_decay",
-        "How one feature's IC behaves when the feature is displaced in time. "
-        "Answers two questions: whether it leaks (an IC that spikes at shift "
-        "0 and collapses on both sides already contains the answer) and "
-        "whether it is tradeable (how much IC survives one bar of "
-        "staleness). Returns the curve as ordered points with the peak "
-        "named.",
-        FeatureICDecayInput,
-    ),
-    (
         "validate_model_spec",
         "Check a ModelSpec before spending an experiment on it: that the "
         "estimator exists for the task, that its parameters are accepted, "
@@ -1128,7 +1032,6 @@ def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
 
 
 MODELING_TOOL_DISPATCH = {
-    **FEATURE_TOOL_DISPATCH,
     "validate_model_spec": (validate_model_spec, ValidateModelSpecInput),
     "score_predictions": (score_predictions, ScorePredictionsInput),
     "list_features": (list_features, ListFeaturesInput),

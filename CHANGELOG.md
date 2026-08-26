@@ -9,6 +9,55 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — `feature_lab`, the sixth runtime
+
+The nine feature tools have moved out of `modeling` into a runtime of their
+own. `modeling` is one ordered pipeline — build a dataset, fit it, register
+the model, score it — and feature work is a different job: exploratory, run
+repeatedly, and finished before any model exists. Nine of `modeling`'s
+twenty-three tools had nothing to do with fitting anything, so an agent
+scoped there to run an experiment carried nine it would not call, and an
+agent doing feature work carried fourteen it would not.
+
+`sqt-mcp --runtime feature_lab` serves them for 11.5 KB.
+
+The split followed the rule in `Development/runtime_expansion_plan.md §3`:
+the cluster was **built inside `modeling` first** and moved once it reached
+the eight-tool floor, rather than being declared empty and filled later.
+Both sides clear the floor — `feature_lab` at 9, `modeling` at 14.
+
+**A split is a breaking change**, so `MOVED_FROM` records where each tool
+came from, and both the library and the MCP refusals say so — but only to a
+caller scoped to the runtime the tool LEFT. Anyone else never had it, and
+the history would explain something they were not part of.
+
+### Added — `run_feature_ablation`
+
+Refits the model without each feature in turn. The only feature tool that
+asks a model-relative question: a strong feature that duplicates another
+contributes nothing marginal, and a mediocre feature that is the sole source
+of some information can be the one holding the model up. Neither shows in a
+per-feature report, and tree importance does not answer it either.
+
+It is also the most expensive tool in the library. One baseline plus one
+refit per feature across every fold — 40 features at 8 folds is 328 fits —
+so the count is computed BEFORE anything is fit and the run is refused past
+`max_fits`, with the refusal naming the number that would work.
+
+None of the refits are registered: `run_experiment` gained `register=False`
+for it, because 41 candidate models in the registry to answer one question
+is not a trade worth making. The fits are identical either way, and a test
+pins that the metrics match.
+
+### Fixed — a registry with no workers was invisible to its own coverage test
+
+Splitting `feature_lab` out left all nine of its tools reachable by no
+worker in `Multi_Agent_Implementation`, and every test passed: the coverage
+check iterates the registries that HAVE workers, so one with none cannot
+fail it. There is now a Feature Lab Agent, and a test that fails when any
+registry has no worker at all.
+
+
 ### Added — eight feature tools, one question each
 
 `analyze_features` returns `report: Dict[str, Any]`. Every number in it is

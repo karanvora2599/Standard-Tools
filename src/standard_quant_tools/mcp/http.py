@@ -146,7 +146,9 @@ class BearerAuth:
                 break
 
         scheme, _, presented = provided.partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(presented.strip(), self.token):
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+            presented.strip(), self.token
+        ):
             log.warning(
                 "rejected unauthenticated %s %s from %s",
                 scope.get("method"),
@@ -163,15 +165,17 @@ class BearerAuth:
                     ),
                 }
             ).encode("utf-8")
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode("ascii")),
-                    (b"www-authenticate", b'Bearer realm="standard-quant-tools"'),
-                ],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"www-authenticate", b'Bearer realm="standard-quant-tools"'),
+                    ],
+                }
+            )
             await send({"type": "http.response.body", "body": body})
             return
 
@@ -191,7 +195,8 @@ def build_app(
     """
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=list(config.allowed_hosts) or default_allowed_hosts(config.host, config.port),
+        allowed_hosts=list(config.allowed_hosts)
+        or default_allowed_hosts(config.host, config.port),
         allowed_origins=list(config.allowed_origins),
     )
 
@@ -213,15 +218,17 @@ def build_app(
         endpoint = BearerAuth(endpoint, config.auth_token)
 
     async def health(_request: Request) -> JSONResponse:
-        return JSONResponse({
-            "ok": True,
-            "server": "standard-quant-tools",
-            "version": _sqt_version,
-            "transport": "streamable-http",
-            "stateless": config.stateless,
-            "categories": list(config.categories),
-            "tools": tool_count,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "server": "standard-quant-tools",
+                "version": _sqt_version,
+                "transport": "streamable-http",
+                "stateless": config.stateless,
+                "categories": list(config.categories),
+                "tools": tool_count,
+            }
+        )
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -248,7 +255,9 @@ def build_app(
     )
 
 
-def serve_http(config: ServerConfig, mcp_server: "Server[Any]", tool_count: int) -> None:
+def serve_http(
+    config: ServerConfig, mcp_server: "Server[Any]", tool_count: int
+) -> None:
     """Bind the port and serve until interrupted.
 
     Blocking, and not run inside `anyio.run`: uvicorn owns its own event
@@ -266,4 +275,3 @@ def serve_http(config: ServerConfig, mcp_server: "Server[Any]", tool_count: int)
         # startup report a reader actually needs.
         access_log=False,
     )
-

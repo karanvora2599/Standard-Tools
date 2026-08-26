@@ -29,11 +29,15 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Sequence
 
+import pandas as pd
+
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.agent.feature_models import (
     AnalyzeFeatureInput,
     CompareFeatureSetsInput,
     CompareFeatureSetsResult,
+    FeatureAblationInput,
+    FeatureAblationResult,
     FeatureCluster,
     FeatureDistribution,
     FeatureDriftInput,
@@ -51,6 +55,13 @@ from standard_quant_tools.modeling.agent.feature_models import (
     PermutationTestResult,
     SelectFeaturesInput,
     SelectFeaturesResult,
+)
+from standard_quant_tools.modeling.analysis.feature_ablation import (
+    _lower_is_better,
+    _metric_value,
+    ablation_contributions,
+    estimate_ablation_fits,
+    summarize_ablation,
 )
 from standard_quant_tools.modeling.analysis.feature_report import (
     feature_distribution_stats,
@@ -464,6 +475,234 @@ def run_feature_permutation_test(
     return PermutationTestResult(dataset_id=input_data.dataset_id, **result)
 
 
+def _first_numeric_metric(metrics):
+    """
+    The metric to compare when the caller did not name one.
+
+    Deterministic rather than arbitrary: sorted, so two runs on the same
+    dataset compare the same thing. The chosen name is echoed in the result,
+    because an ablation ranked on a metric the caller did not choose and
+    cannot see is a table of numbers with no stated meaning.
+    """
+    import math
+
+    for name in sorted(metrics):
+        value = metrics[name]
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if math.isfinite(float(value)):
+                return name
+    raise ValidationError(
+        "the baseline experiment reported no finite numeric OOS metric, so "
+        "there is nothing to rank an ablation by"
+    )
+
+
+def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationResult:
+    """
+    Refit the model without each feature in turn, and report what each one
+    was worth.
+
+    This is the only feature tool that asks a MODEL-RELATIVE question. Every
+    other one scores a feature on its own -- its IC, its stability, its
+    distribution -- which is cheap and usually right, but cannot tell you
+    what happens to a fitted model when the feature goes away. The two
+    differ in the direction that costs money: a strong feature that
+    duplicates another contributes nothing marginal, and a mediocre feature
+    that is the sole source of some information can be the one holding the
+    model up.
+
+    It is also the most expensive tool here by a wide margin. One baseline
+    plus one refit per feature, each across every walk-forward fold: a
+    40-feature panel with 8 folds is 328 fits. The count is computed BEFORE
+    anything is fit and the run is refused if it exceeds `max_fits`, so an
+    afternoon is spent on purpose rather than by accident.
+
+    None of these refits are registered. They are candidate models nobody
+    asked for, and 41 of them in the registry to answer one question is not
+    a trade worth making -- but the fits themselves are the fits
+    run_model_experiment would do, so the metrics are the real ones.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+    from standard_quant_tools.modeling.engine import build_splitter, run_experiment
+    from standard_quant_tools.modeling.specs import ModelSpec
+
+    logger.debug("[run_feature_ablation] dataset_id=%s", input_data.dataset_id)
+    spec = (
+        input_data.spec
+        if isinstance(input_data.spec, ModelSpec)
+        else ModelSpec(**input_data.spec)
+    )
+    panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    features = _resolve_features(meta, input_data.features, input_data.dataset_id)
+    for feature in features:
+        _require_feature(panel, feature, input_data.dataset_id)
+    if len(features) < 2:
+        raise ValidationError(
+            "ablation needs at least two features: removing the only feature "
+            "leaves nothing to fit, which is not a comparison."
+        )
+
+    # Folds come from the real splitter against the real dates, so the
+    # estimate and the run cannot disagree.
+    dates = pd.Index(sorted(panel["date"].unique()))
+    n_folds = int(build_splitter(spec.validation).n_splits(dates))
+    if n_folds < 1:
+        raise ValidationError(
+            f"dataset {input_data.dataset_id!r} has {len(dates)} dates, not "
+            "enough for one fold under this validation spec. Ablation cannot "
+            "compare models that cannot be validated."
+        )
+
+    n_fits = estimate_ablation_fits(len(features), n_folds)
+    if n_fits > input_data.max_fits:
+        raise ValidationError(
+            f"this ablation needs {n_fits:,} fits "
+            f"({len(features)} features + 1 baseline, x {n_folds} folds), over "
+            f"the max_fits={input_data.max_fits:,} ceiling. That is minutes to "
+            "hours of compute. Either narrow `features` to the candidates you "
+            f"actually doubt, or pass max_fits={n_fits} to accept the cost."
+        )
+
+    def _fit(subset):
+        dataset = {
+            "panel": panel,
+            "feature_ids": list(subset),
+            "target_id": meta["target_id"],
+            "data_hash": meta["data_hash"],
+            "spec_hash": meta.get("spec_hash"),
+            "warnings": meta.get("warnings", []),
+        }
+        return run_experiment(
+            dataset, spec, dataset_id=input_data.dataset_id, register=False
+        )["oos_metrics"]
+
+    baseline_metrics = _fit(features)
+    metric = input_data.metric or _first_numeric_metric(baseline_metrics)
+    baseline = _metric_value(baseline_metrics, metric)
+
+    without = {}
+    for feature in features:
+        remaining = [f for f in features if f != feature]
+        without[feature] = _metric_value(_fit(remaining), metric)
+
+    rows = ablation_contributions(baseline, without, metric)
+    summary = summarize_ablation(rows, metric)
+
+    return FeatureAblationResult(
+        dataset_id=input_data.dataset_id,
+        metric=metric,
+        lower_is_better=_lower_is_better(metric),
+        baseline_metric=baseline,
+        n_folds=n_folds,
+        n_fits=n_fits,
+        contributions=rows,
+        **summary,
+    )
+
+
+FEATURE_TOOL_DEFS: List[tuple] = [
+    (
+        "analyze_feature",
+        "Profile ONE feature of a built dataset: coverage, turnover, "
+        "autocorrelation, cross-sectional IC and ICIR, quantile spread and "
+        "monotonicity. The single-feature counterpart to analyze_features — "
+        "reach for it when a specific feature is in question, since it costs "
+        "one feature's work instead of the whole panel's and returns every "
+        "number named rather than nested in a report dict.",
+        AnalyzeFeatureInput,
+    ),
+    (
+        "get_feature_redundancy",
+        "Which features are restatements of one another, and which one to "
+        "keep. RSI, 20-day momentum, MACD and stochastic are one momentum "
+        "cluster, not four independent sources of alpha. Returns each "
+        "cluster with a representative chosen by strongest rank IC, the drop "
+        "list already worked out, and the collinearity diagnostics (VIF, "
+        "condition number) that say whether linear coefficients on this "
+        "panel mean anything.",
+        FeatureRedundancyInput,
+    ),
+    (
+        "get_feature_ic_decay",
+        "How one feature's IC behaves when the feature is displaced in time. "
+        "Answers two questions: whether it leaks (an IC that spikes at shift "
+        "0 and collapses on both sides already contains the answer) and "
+        "whether it is tradeable (how much IC survives one bar of "
+        "staleness). Returns the curve as ordered points with the peak "
+        "named.",
+        FeatureICDecayInput,
+    ),
+    (
+        "select_features",
+        "Choose a feature set from a built dataset: keep one feature per "
+        "redundancy cluster, drop what falls below an IC floor, and return a "
+        "reason for every exclusion. Deliberately has no greedy search -- a "
+        "selector scored on the panel it selects from manufactures overfit "
+        "that looks like evidence. Redundancy is resolved before the IC "
+        "floor, because a cluster is one signal and the question is whether "
+        "THAT signal clears the floor.",
+        SelectFeaturesInput,
+    ),
+    (
+        "compare_feature_sets",
+        "Two feature sets measured on the same panel, with the cost of the "
+        "difference attached: per-set IC, independent-signal count and "
+        "condition number, what is unique to each side, and the per-feature "
+        "IC table. Not a single score, because a larger set almost always "
+        "has a higher maximum IC and almost always more collinearity, and "
+        "one number hides half of that trade.",
+        CompareFeatureSetsInput,
+    ),
+    (
+        "get_feature_drift",
+        "Whether a feature is still the same measurement, and still "
+        "predicts, either side of a date. Returns PSI and a two-sample KS "
+        "for the distribution, plus the IC computed separately on each half. "
+        "The two fail differently and need different fixes: distribution "
+        "drift with a stable IC is a preprocessing problem, while a stable "
+        "distribution with a collapsed IC means the edge is gone.",
+        FeatureDriftInput,
+    ),
+    (
+        "get_feature_regime_stability",
+        "The feature's IC inside each of several CONTIGUOUS time blocks, "
+        "never shuffled -- a feature's usual problem is that it worked in "
+        "one regime, and interleaved folds average exactly that away. "
+        "Returns per-block IC plus sign consistency against the full-sample "
+        "IC. Read both: consistent sign with collapsing magnitude is decay, "
+        "and sign consistency stays at 1.0 through it.",
+        FeatureStabilityInput,
+    ),
+    (
+        "run_feature_permutation_test",
+        "How often noise on THIS panel produces an IC as large as the "
+        "observed one, in either direction. Shuffles the feature within each "
+        "date, which states the null exactly -- the feature carries no "
+        "cross-sectional information within a date -- and returns a "
+        "TWO-SIDED empirical p-value, so a strongly negative IC is "
+        "significant rather than ignored. null_p95_abs is the IC this panel "
+        "yields from noise alone 5% of the time, which is the defensible "
+        "floor for select_features(min_abs_rank_ic=...). Cost is linear in "
+        "n_permutations.",
+        PermutationTestInput,
+    ),
+    (
+        "run_feature_ablation",
+        "Refit the model without each feature in turn and report what each "
+        "one was worth. The only feature tool that asks a MODEL-RELATIVE "
+        "question: a strong feature that duplicates another contributes "
+        "nothing marginal, and a mediocre feature that is the sole source of "
+        "some information can be the one holding the model up. Neither shows "
+        "in a per-feature report or in tree importance. EXPENSIVE -- one "
+        "baseline plus one refit per feature across every fold, so 40 "
+        "features at 8 folds is 328 fits. The count is computed before "
+        "anything is fit and the run is REFUSED past max_fits, so narrow "
+        "`features` to the candidates you actually doubt.",
+        FeatureAblationInput,
+    ),
+]
+
+
 FEATURE_TOOL_DISPATCH = {
     "analyze_feature": (analyze_feature, AnalyzeFeatureInput),
     "get_feature_redundancy": (get_feature_redundancy, FeatureRedundancyInput),
@@ -479,16 +718,55 @@ FEATURE_TOOL_DISPATCH = {
         run_feature_permutation_test,
         PermutationTestInput,
     ),
+    "run_feature_ablation": (run_feature_ablation, FeatureAblationInput),
 }
 
 __all__ = [
+    "FEATURE_TOOL_DEFS",
     "FEATURE_TOOL_DISPATCH",
+    "feature_dispatch",
+    "get_feature_tools",
     "analyze_feature",
     "compare_feature_sets",
     "get_feature_drift",
     "get_feature_ic_decay",
     "get_feature_redundancy",
     "get_feature_regime_stability",
+    "run_feature_ablation",
     "run_feature_permutation_test",
     "select_features",
 ]
+
+
+def get_feature_tools() -> List[Dict[str, Any]]:
+    """Tool definitions for the feature_lab runtime, in the same
+    OpenAI-style envelope as get_agent_tools() and get_modeling_tools()."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": input_model.model_json_schema(),
+            },
+        }
+        for name, description, input_model in FEATURE_TOOL_DEFS
+    ]
+
+
+def feature_dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Execute one feature_lab tool by name.
+
+    Refuses anything it does not own, by name, for the same reason every
+    other runtime dispatcher does: a scoped agent that hallucinates a tool
+    must get an error rather than a successful result from somewhere else.
+    """
+    entry = FEATURE_TOOL_DISPATCH.get(name)
+    if entry is None:
+        raise ValidationError(
+            f"unknown feature_lab tool {name!r}. This runtime provides: "
+            f"{sorted(FEATURE_TOOL_DISPATCH)}"
+        )
+    fn, model = entry
+    return fn(model(**arguments)).model_dump()

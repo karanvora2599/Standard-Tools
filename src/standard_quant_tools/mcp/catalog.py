@@ -69,6 +69,11 @@ from standard_quant_tools.modeling.agent import (
     get_modeling_tools,
     modeling_dispatch,
 )
+from standard_quant_tools.modeling.agent.feature_tools import (
+    FEATURE_TOOL_DISPATCH,
+    feature_dispatch,
+    get_feature_tools,
+)
 
 #: Retained under their original names because `ToolEntry.registry` is a
 #: public field and the MCP tests, the server and downstream callers all
@@ -90,21 +95,30 @@ _CATEGORY_RUNTIME = {
 #: pipeline -- so it is a single category whose name matches its registry.
 MODELING_CATEGORY = "modeling"
 
+#: Same for feature_lab: nine tools that all ask questions about the
+#: features of one dataset, with no useful sub-grouping among them.
+FEATURE_LAB_REGISTRY = "feature_lab"
+FEATURE_LAB_CATEGORY = "feature_lab"
+
 #: Every selectable category, analysis ones first in cost order at runtime.
 ALL_CATEGORIES: Tuple[str, ...] = tuple(
-    sorted(set(TOOL_CATEGORY.values())) + [MODELING_CATEGORY]
+    sorted(set(TOOL_CATEGORY.values())) + [MODELING_CATEGORY, FEATURE_LAB_CATEGORY]
 )
 
 #: Every selectable runtime, in the order they are declared. `modeling`
 #: is appended rather than read from RUNTIME_CATEGORIES because it has no
 #: category taxonomy of its own -- see MODELING_CATEGORY.
-ALL_RUNTIMES: Tuple[str, ...] = tuple(RUNTIME_CATEGORIES) + (MODELING_REGISTRY,)
+ALL_RUNTIMES: Tuple[str, ...] = tuple(RUNTIME_CATEGORIES) + (
+    MODELING_REGISTRY,
+    FEATURE_LAB_REGISTRY,
+)
 
 #: runtime -> the categories it owns. The inverse of `_CATEGORY_RUNTIME`,
 #: and the mapping `--runtime` is resolved through.
 RUNTIME_CATEGORY_MAP: Dict[str, Tuple[str, ...]] = {
     **{runtime: tuple(cats) for runtime, cats in RUNTIME_CATEGORIES.items()},
     MODELING_REGISTRY: (MODELING_CATEGORY,),
+    FEATURE_LAB_REGISTRY: (FEATURE_LAB_CATEGORY,),
 }
 
 #: The default. Measured at 25 tools / 21.2 KB / ~5k tokens: screening, risk
@@ -221,7 +235,7 @@ def _entries_for_registry(
             name=name,
             category=category,
             registry=registry,
-            runtime=_CATEGORY_RUNTIME.get(category, MODELING_REGISTRY),
+            runtime=_CATEGORY_RUNTIME.get(category, registry),
             description=fn_schema["description"],
             input_schema=input_schema,
             output_schema=output_schema,
@@ -252,6 +266,18 @@ def build_catalog() -> Dict[str, ToolEntry]:
             raise RuntimeError(
                 f"tool name {entry.name!r} exists in both registries; the MCP "
                 "server routes by name and cannot disambiguate it"
+            )
+        catalog[entry.name] = entry
+    for entry in _entries_for_registry(
+        get_feature_tools(),
+        FEATURE_TOOL_DISPATCH,
+        FEATURE_LAB_REGISTRY,
+        lambda _name: FEATURE_LAB_CATEGORY,
+    ):
+        if entry.name in catalog:  # pragma: no cover - pinned by a test
+            raise RuntimeError(
+                f"tool name {entry.name!r} exists in two registries; the "
+                "MCP server routes by name and cannot disambiguate it"
             )
         catalog[entry.name] = entry
     return catalog
@@ -492,4 +518,6 @@ def dispatch_for(entry: ToolEntry) -> Callable[[str, Dict[str, Any]], Dict[str, 
     """
     if entry.registry == MODELING_REGISTRY:
         return modeling_dispatch
+    if entry.registry == FEATURE_LAB_REGISTRY:
+        return feature_dispatch
     return resolve_runtime(entry.runtime).dispatch

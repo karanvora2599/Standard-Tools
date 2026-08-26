@@ -658,7 +658,92 @@ class PermutationTestResult(BaseModel):
     random_seed: int
 
 
+# ── ablation ────────────────────────────────────────────────────────────
+
+
+class FeatureContribution(BaseModel):
+    """What one feature is worth to the fitted model."""
+
+    model_config = _NO_PROTECTED
+
+    feature: str
+    rank: int
+    metric_with: Stat
+    metric_without: Stat
+    contribution: Stat = Field(
+        ...,
+        description="How much the model LOSES without this feature, already "
+        "sign-corrected for metrics where lower is better. Positive means the "
+        "feature earns its place. Negative means the model was better without "
+        "it, which is reported rather than clipped -- on one sample it is "
+        "also what noise looks like.",
+    )
+    relative_contribution: Stat = Field(
+        ..., description="contribution / |baseline metric|."
+    )
+
+
+class FeatureAblationInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    spec: Any = Field(
+        ...,
+        description="The ModelSpec to refit. Use the same spec the real "
+        "experiment uses -- an ablation of a different model answers a "
+        "different question.",
+    )
+    features: Optional[List[str]] = Field(
+        None,
+        description="Features to ablate one at a time. Defaults to every "
+        "feature in the dataset. Narrow this FIRST if the fit budget is the "
+        "problem: ablating six candidates is six refits, not forty.",
+    )
+    metric: Optional[str] = Field(
+        None,
+        description="Which OOS metric to compare. Defaults to the first "
+        "finite numeric metric the baseline reports, and the chosen name is "
+        "echoed back.",
+    )
+    max_fits: int = Field(
+        200,
+        ge=1,
+        le=100_000,
+        description="Refuse to start if the run needs more fits than this. "
+        "One baseline plus one per feature, times the folds -- a 40-feature "
+        "panel at 8 folds is 328 fits, which is minutes to hours. Raise it "
+        "deliberately once you have seen the estimate.",
+    )
+
+
+class FeatureAblationResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    metric: str = Field(..., description="The OOS metric that was compared.")
+    lower_is_better: bool
+    baseline_metric: Stat = Field(
+        ..., description="The metric with every feature present."
+    )
+    n_folds: int
+    n_fits: int = Field(..., description="Fits actually run: (features + 1) x folds.")
+    contributions: List[FeatureContribution] = Field(
+        ..., description="Ranked, most valuable first."
+    )
+    n_features: int
+    best_feature: Optional[str] = None
+    worst_feature: Optional[str] = None
+    mean_contribution: Stat = None
+    n_negative_contributions: int = 0
+    warnings: List[str] = Field(default_factory=list)
+
+
 __all__ = [
+    "FeatureContribution",
+    "FeatureAblationResult",
+    "FeatureAblationInput",
     "StabilityBlock",
     "SelectFeaturesResult",
     "SelectFeaturesInput",
