@@ -154,7 +154,14 @@ def validate_series(allow_empty: bool = False, allow_nan: bool = True):
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
-            for arg in args:
+            # BOTH, and the keyword half was missing. Every failure listed in
+            # this decorator's docstring came back the moment a caller wrote
+            # `sharpe_ratio(returns=...)` instead of `sharpe_ratio(...)` --
+            # measured, an all-NaN series returned nan rather than being
+            # refused. Keyword calls are normal Python and are what an agent
+            # building a call from a JSON schema produces by default, so the
+            # hole was open on exactly the caller this library is for.
+            for arg in (*args, *kwargs.values()):
                 if is_series_like(arg):
                     if is_empty(arg):
                         if allow_empty:
