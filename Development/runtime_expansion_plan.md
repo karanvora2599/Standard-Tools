@@ -542,20 +542,52 @@ backtest tools. The channel list is data; the tool is
 **Extends `modeling` · registry entries, not tools**
 
 Rankers are done. What is missing is everything downstream of a fitted
-model:
+model.
 
-- **Calibration** — isotonic and Platt. An uncalibrated classifier makes
-  `proba_threshold` in `convert_reference` meaningless, and that is a live
-  path today.
+**Shipped:**
+
+- **Calibration.** `EstimatorSpec.calibration` takes `isotonic` or
+  `sigmoid`, fitted on held-out folds inside each training window.
+
+  The live path was real, and worse than "meaningless". Measured on a
+  6,000-row synthetic panel, asking what a caller actually asks — if I set
+  `proba_threshold=T`, what fraction of the rows I select actually win:
+
+  ```
+  T      raw forest          isotonic-calibrated
+         realized    n       realized    n
+  0.5      0.740    943        0.741   909
+  0.7      0.875    353        0.829   532
+  0.9        --       0        0.912   194
+  ```
+
+  A random forest's probabilities are compressed toward the middle, so it
+  never emits one above ~0.9. A caller setting `proba_threshold=0.9` got an
+  **empty signal panel with no error anywhere** — not a wrong answer, no
+  answer. Calibrated, the same threshold selects 194 rows that win 0.912 of
+  the time.
+
+  Refused by name in the three ways it can be asked for wrongly: on a
+  regressor (no probabilities to map), with more folds than the window has
+  rows (sklearn's own error arrives three frames down talking about
+  `n_splits`), and with a method the schema does not know.
+
+- **Robust regression.** `huber` is registered with a bounded, documented
+  `epsilon`. Financial targets are heavy-tailed and an 8-sigma day
+  contributes 64 times what a 1-sigma day does to a squared loss.
+
+**Still open — remaining work, not deferred work. None of it is blocked:**
+
 - **Conformal prediction** — the only interval method here that does not
   assume a distribution. Pairs naturally with the existing
-  effective-sample-size reporting.
+  effective-sample-size reporting. NOT a registry entry: it wraps the
+  walk-forward loop, because its calibration set has to be held out the same
+  way calibration's is.
 - **Ensembling** — stacking, blending, seed-bagging as `EstimatorSpec`
-  compositions.
-- **Robust regression** — Huber. Financial targets are heavy-tailed and
-  every squared-loss fit here is being steered by its worst week.
-- **Multi-horizon** — one spec, several target horizons, which the IC-decay
-  curve from Phase 1 immediately motivates.
+  compositions. The open question is the composition shape: a spec that
+  contains other specs is a different type from one that names an estimator.
+- **Multi-horizon** — one spec, several target horizons, which
+  `get_feature_ic_decay` from Phase 1 immediately motivates.
 - Also: CatBoost, regime mixture-of-experts, online/partial-fit.
 
 > **Hold the line.** All of this lands in `ESTIMATOR_REGISTRY` and

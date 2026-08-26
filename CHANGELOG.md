@@ -9,6 +9,53 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — probability calibration, and the empty signal panel it fixes
+
+`EstimatorSpec.calibration` takes `isotonic` or `sigmoid`, fitted on
+held-out folds inside each training window — never on the rows the estimator
+itself trained on, which would calibrate against memorized labels and report
+a confidence nobody has.
+
+This fixes a live path. `convert_reference(proba_threshold=T)` turns a
+classifier's probabilities into a signal panel, and the threshold only means
+something if "probability above T" really means "wins about T of the time".
+Measured on a 6,000-row synthetic panel:
+
+```
+T      raw forest          isotonic-calibrated
+       realized    n       realized    n
+0.5      0.740    943        0.741   909
+0.7      0.875    353        0.829   532
+0.9        --       0        0.912   194
+```
+
+A random forest's probabilities are compressed toward the middle — an
+artefact of averaging trees — so it never emits one above ~0.9. **A caller
+setting `proba_threshold=0.9` got an empty signal panel with no error
+anywhere**: not a wrong answer, no answer. Calibrated, the same threshold
+selects 194 rows that win 0.912 of the time.
+
+Both the validation folds and the deployed refit are calibrated the same
+way. A model validated with calibrated probabilities and deployed without
+would report one threshold's behaviour and exhibit another's.
+
+Refused by name in the three ways it can be asked for wrongly: on a
+regressor (there are no probabilities to map), with more folds than the
+window has rows (sklearn's own error arrives three frames down talking about
+`n_splits`), and with an unrecognised method.
+
+### Added — `huber` for robust regression
+
+Every squared-loss fit was steered by its worst week: an 8-sigma day
+contributes 64 times what a 1-sigma day does, and financial targets have
+those. One registry entry, with `epsilon` bounded and documented.
+
+**No new tools.** Both land in `ESTIMATOR_REGISTRY` and `ModelSpec`, and
+`list_modeling_capabilities` reports the registry — so a new estimator is
+discoverable the moment it is registered. A test pins the modeling surface
+at 16 tools to keep it that way.
+
+
 ### Added — `detect_liquidity_events`: which part of the market changed
 
 "NVDA moved 1.4 sigma" describes one channel, and it is the channel that
