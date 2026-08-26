@@ -155,4 +155,12 @@ secrets/
 
 *claude*
 
-logsDevelopment/.mutation_active
+logs
+Development/.mutation_active
+
+# Test output, not source. The surface suite synthesizes arguments from
+# each tool's schema, and `export_audit_bundle` takes a path it WRITES to;
+# an unqualified placeholder used to land a zip here named `a`, which was
+# then committed. tests/surface/synth.py now routes path-shaped fields to a
+# scratch directory, and this makes a stray one unstageable regardless.
+/a

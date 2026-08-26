@@ -22,8 +22,13 @@ is not.
 
 from __future__ import annotations
 
+import atexit
 import math
+import re
+import shutil
+import tempfile
 import typing
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin
 
 import numpy as np
@@ -36,6 +41,40 @@ _RNG = np.random.default_rng(20260826)
 
 #: Names that look like tickers, for symbol-shaped fields.
 SYMBOLS = ["AAPL", "MSFT", "XOM", "JPM", "PG", "NVDA"]
+
+#: A throwaway directory for fields that name a file on disk.
+#:
+#: WHY THIS IS NOT JUST ANOTHER STRING. `export_audit_bundle` takes an
+#: `out_path` and WRITES a zip to it, resolved against the working
+#: directory. Synthesizing the generic placeholder for it meant every
+#: surface run dropped a file named `a` in whatever directory pytest was
+#: started from -- which for this repo is the repo root, where it was
+#: eventually committed. A test that mutates the tree it is testing is a
+#: test that can put its own output into a release.
+#:
+#: Routing these fields here keeps the tool FUZZED rather than skipped:
+#: the call still happens, the write still happens, and it lands
+#: somewhere the suite owns. The path is stable for the life of the
+#: process so that calling one tool twice -- which the determinism layer
+#: does -- passes the same arguments both times.
+_SCRATCH = Path(tempfile.mkdtemp(prefix="sqt-synth-"))
+atexit.register(shutil.rmtree, _SCRATCH, True)
+
+#: A field naming a file on disk. Matched on the SUFFIX rather than by
+#: substring, because `out`, `dir` and `file` appear inside plenty of
+#: fields that hold no path at all.
+#:
+#: Public because `test_determinism.py` needs the same answer: a tool
+#: naming a path is not a function of its arguments alone -- the file is
+#: the other input, read or written -- and two definitions of
+#: "names a path" would drift.
+PATH_FIELD = re.compile(r"(^|_)(path|file|filename|dir|directory)$")
+
+
+def names_a_path(model: Any) -> bool:
+    """Whether any of this model's fields names a file on disk."""
+    return any(PATH_FIELD.search(f) for f in model.model_fields)
+
 
 #: Business dates covering a period long enough for every minimum-length
 #: constraint in the library.
@@ -129,6 +168,8 @@ def _scalar(annotation: Any, info: Any, name: str) -> Any:
             return _DATES[0]
         if "symbol" in name or "ticker" in name:
             return SYMBOLS[0]
+        if PATH_FIELD.search(name):
+            return str(_SCRATCH / name)
         return "a"
     raise Unsynthesizable(f"{name}: no rule for scalar {annotation!r}")
 

@@ -39,7 +39,7 @@ import pytest
 #: test_adversarial_inputs.py.
 pytestmark = pytest.mark.slow
 
-from .synth import Unsynthesizable, build_arguments
+from .synth import Unsynthesizable, build_arguments, names_a_path
 
 
 def _seeded_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
@@ -75,6 +75,24 @@ def _offline_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
     apart can legitimately see different data — a provider updating a bar,
     a partially warm cache — and a test that called that non-determinism
     would be reporting the market rather than the code.
+
+    A tool naming a PATH is excluded for the same reason: the file is the
+    other input, whether the tool reads it or writes it.
+    `verify_audit_integrity` reads a public key and `export_audit_bundle`
+    writes a bundle, and neither is a function of its arguments alone.
+
+    `export_audit_bundle` is worth naming, because it is what this rule
+    was written for. Called twice with the same arguments it correctly
+    returns DIFFERENT notes — the second call overwrote the file the
+    first one wrote, and saying so is the honest answer. That went
+    unnoticed for as long as it did because the synthesized path used to
+    be the bare string `a`, so the target always already existed in the
+    repo root and both calls reported the overwrite. Making the
+    synthesizer write somewhere the suite owns is what surfaced it.
+
+    Reproducibility for a writer is a real property. It is a different
+    one — about the bytes on disk rather than the returned dict — and
+    `tests/audit/` is where it is checked.
     """
     from standard_quant_tools.agent.runtimes import all_runtimes
 
@@ -82,6 +100,8 @@ def _offline_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
     for runtime_name, runtime in all_runtimes().items():
         for tool_name, _description, model in runtime.tool_defs:
             if FETCHES_DATA & set(model.model_fields):
+                continue
+            if names_a_path(model):
                 continue
             try:
                 arguments = build_arguments(model)
