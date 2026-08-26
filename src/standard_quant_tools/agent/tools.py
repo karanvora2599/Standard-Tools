@@ -33,6 +33,7 @@ from standard_quant_tools._jsonsafe import sanitize_for_json
 from standard_quant_tools.agent.runtimes import backtest as _backtest
 from standard_quant_tools.agent.runtimes import derivatives as _derivatives
 from standard_quant_tools.agent.runtimes import meta as _meta
+from standard_quant_tools.agent.runtimes import microstructure as _microstructure
 from standard_quant_tools.agent.runtimes import portfolio as _portfolio
 from standard_quant_tools.agent.runtimes import research as _research
 from standard_quant_tools.agent.runtimes.backtest import (
@@ -93,6 +94,15 @@ from standard_quant_tools.agent.runtimes.meta import (
     replay_decision,
     validate_tool_call,
     verify_audit_integrity,
+)
+from standard_quant_tools.agent.runtimes.microstructure import (
+    estimate_corwin_schultz_spread,
+    estimate_kyle_lambda,
+    estimate_roll_spread,
+    estimate_vpin,
+    get_amihud_illiquidity,
+    get_intraday_volume_profile,
+    get_order_flow_imbalance,
 )
 from standard_quant_tools.agent.runtimes.portfolio import (
     analyze_concentration,
@@ -161,6 +171,7 @@ _RUNTIME_MODULES = [
     _portfolio,
     _meta,
     _derivatives,
+    _microstructure,
 ]
 
 #: Every tool in the library, from each runtime's own declaration —

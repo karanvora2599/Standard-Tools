@@ -57,11 +57,6 @@ TOOL_DEFS = [
         EstimateCovarianceInput,
     ),
     (
-        "detect_liquidity_events",
-        "Which part of the market changed, not merely that it did. Runs a CUSUM change detector across several channels — spread, effective spread, signed volume, trade intensity, realized volatility, mid return — and reports which broke and how badly. Price is the channel that moves LAST, so a report where the spread and flow fired while the mid did not is the ordinary sequence rather than a contradiction. Channels needing an order book are declared and REFUSED by name rather than dropped, because a missing row reads as a quiet channel. Needs a tick-capable provider.",
-        LiquidityEventsInput,
-    ),
-    (
         "run_portfolio_optimization",
         "Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike get_portfolio_analysis, which only scores weights already chosen.",
         PortfolioOptimizationInput,
@@ -92,21 +87,6 @@ TOOL_DEFS = [
         LiquidityAnalysisInput,
     ),
     (
-        "get_microstructure_metrics",
-        "Measured (not estimated) spreads from tick data: quoted and effective spread, the realized/impact decomposition, signed order flow and quote imbalance. Requires a provider with a tick feed — call describe_data_capabilities first.",
-        MicrostructureInput,
-    ),
-    (
-        "get_trade_profile",
-        "How a symbol's volume is distributed across trade sizes (quantile buckets) and times of day. Distinguishes a book that trades in blocks from one that trades in odd lots at the same ADV. Requires a tick feed.",
-        TradeProfileInput,
-    ),
-    (
-        "check_spread_proxy",
-        "Measure the spread from ticks, compute get_liquidity_metrics' OHLCV proxy for the same name, and report which way the proxy errs — understating it means backtests priced from it have been charging too little. Requires a tick feed.",
-        SpreadProxyCheckInput,
-    ),
-    (
         "estimate_trade_cost",
         "Itemized cost of one hypothetical trade under a composed cost model: commission (pct/per-share/directional/maker-taker), spread (fixed bps or a fraction of the bar's range), square-root market impact, short borrow and margin interest. No market data needed.",
         EstimateTradeCostInput,
@@ -130,10 +110,6 @@ TOOL_CATEGORY = {
     "get_position_size": "portfolio_risk",
     "get_capacity_report": "portfolio_risk",
     "get_liquidity_metrics": "portfolio_risk",
-    "get_microstructure_metrics": "microstructure",
-    "get_trade_profile": "microstructure",
-    "detect_liquidity_events": "microstructure",
-    "check_spread_proxy": "microstructure",
     "estimate_trade_cost": "portfolio_risk",
 }
 

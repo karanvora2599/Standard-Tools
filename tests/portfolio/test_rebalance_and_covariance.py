@@ -232,38 +232,56 @@ class TestShrinkageAnswersTheConditioningWarning:
             estimate_covariance(_returns(3, 100).head(1))
 
 
-class TestTheDonorFloorIsNowClear:
-    """Phase 5's second job: lifting `portfolio` so the DONOR side of the
-    microstructure split stops being illegal.
+class TestTheMicrostructureSplitHappened:
+    """
+    This class used to record why the split had NOT happened, and one of its
+    tests said so in as many words: "the day microstructure reaches eight
+    tools, this fails and says the split is now legal. Do it, and delete
+    this test." Microstructure reached eleven, the test failed, and this is
+    the follow-through.
 
-    Only the donor side. The split needs both -- the new runtime must also
-    land at >= 8 -- and microstructure has four tools, all four of the
-    missing ones being L2. So this clears one of two conditions."""
+    What it pins now is the finished state, and the floors it pins are the
+    same ones that blocked it: a runtime holding fewer than eight tools is
+    overhead rather than isolation, on either side of a split.
+    """
 
-    def test_moving_microstructure_out_would_leave_a_legal_donor(self):
+    def test_microstructure_is_its_own_runtime(self):
+        from standard_quant_tools.agent.runtimes import resolve
+
+        micro = resolve("microstructure")
+        assert len(micro) >= 8, (
+            f"microstructure has {len(micro)} tools, below the floor of "
+            "eight that makes a runtime worth its own boundary"
+        )
+        assert "get_microstructure_metrics" in micro.dispatch_table
+        assert "estimate_roll_spread" in micro.dispatch_table
+
+    def test_the_donor_still_clears_the_floor(self):
+        from standard_quant_tools.agent.runtimes import resolve
+
+        portfolio = resolve("portfolio")
+        assert len(portfolio) >= 8, (
+            f"portfolio was left with {len(portfolio)} tools after the "
+            "split, below the floor"
+        )
+
+    def test_no_microstructure_tool_is_still_served_by_portfolio(self):
+        """A split that left the tools in both places would dissolve the
+        boundary at exactly the point it was drawn."""
         from standard_quant_tools.agent.router import TOOL_CATEGORY
         from standard_quant_tools.agent.runtimes import resolve
 
         portfolio = resolve("portfolio")
-        micro = [
+        leaked = [
             n for n in portfolio.tool_names if TOOL_CATEGORY.get(n) == "microstructure"
         ]
-        remaining = len(portfolio) - len(micro)
-        assert len(micro) >= 4, "microstructure is too small to be its own runtime"
-        assert remaining >= 8, (
-            f"moving {len(micro)} microstructure tools out would leave "
-            f"portfolio with {remaining}, below the floor. Phase 5 exists to "
-            "fix exactly this."
-        )
+        assert not leaked, f"still served by portfolio: {leaked}"
 
-    def test_the_new_runtime_side_is_still_short(self):
-        """The other half of the rule, and the reason the split has not
-        happened. Recorded as a test so the day microstructure reaches eight
-        tools, this fails and says the split is now legal."""
-        from standard_quant_tools.agent.router import TOOL_CATEGORY
+    def test_the_donor_names_the_new_home(self):
+        """The break has to be recoverable. A bare 'unknown tool' cannot be
+        told apart from a hallucination, and a model receiving one guesses
+        again."""
+        from standard_quant_tools.agent.runtimes import resolve
 
-        micro = [n for n, c in TOOL_CATEGORY.items() if c == "microstructure"]
-        assert len(micro) < 8, (
-            f"microstructure now has {len(micro)} tools, so BOTH floors are "
-            "clear and the split is legal. Do it, and delete this test."
-        )
+        with pytest.raises(ValueError, match="microstructure"):
+            resolve("portfolio").dispatch("get_microstructure_metrics", {})

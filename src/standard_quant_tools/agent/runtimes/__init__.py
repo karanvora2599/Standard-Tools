@@ -76,7 +76,8 @@ from standard_quant_tools.audit.dispatch import _run_and_record
 RUNTIME_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "research": ("screener", "analysis", "quant_research"),
     "backtest": ("backtest_execution", "backtest_validation", "custom_signal"),
-    "portfolio": ("portfolio_risk", "microstructure"),
+    "portfolio": ("portfolio_risk",),
+    "microstructure": ("microstructure",),
     "meta": ("discovery", "provenance"),
     "derivatives": ("derivatives",),
 }
@@ -87,6 +88,7 @@ RUNTIME_LABELS: Dict[str, str] = {
     "portfolio": "Portfolio & Execution",
     "meta": "Discovery & Provenance",
     "derivatives": "Derivatives",
+    "microstructure": "Microstructure",
     "modeling": "Modeling",
     "feature_lab": "Feature Lab",
 }
@@ -112,6 +114,13 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
         "market: what this library accepts and what the data provider can "
         "serve, and what a past tool call did and whether it still "
         "reproduces."
+    ),
+    "microstructure": (
+        "What the market will charge you to trade, at two data "
+        "fidelities. Four tools MEASURE spreads and order flow from "
+        "ticks and refuse without a tick feed; seven ESTIMATE the same "
+        "quantities from OHLCV, which is the normal case, each saying "
+        "what it is a proxy for and how it fails."
     ),
     "derivatives": (
         "Price an option and understand what holding it does to you: the "
@@ -152,6 +161,11 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
 MOVED_FROM: Dict[str, str] = {
     # Left `research` when `derivatives` reached twelve tools and became its
     # own execution boundary. Same arguments, same behaviour, new scope.
+    # Left `portfolio` when microstructure reached eleven tools.
+    "get_microstructure_metrics": "portfolio",
+    "get_trade_profile": "portfolio",
+    "detect_liquidity_events": "portfolio",
+    "check_spread_proxy": "portfolio",
     "get_option_pricing": "research",
     "get_implied_volatility": "research",
     **{
