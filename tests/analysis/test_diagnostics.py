@@ -193,6 +193,40 @@ class TestSeasonality:
             assert row["p_value_corrected"] >= row["p_value_raw"]
         assert any("Bonferroni corrected" in w for w in result["warnings"])
 
+    def test_the_flag_follows_the_CORRECTED_p_value(self):
+        """
+        Found by mutation: the assertion above stays true when the FLAG is
+        computed from the raw p-value, because the corrected number is
+        still reported -- it just stops being the one that decides.
+
+        This searches for a period where the correction changes the answer
+        and asserts the flag follows it. Testing twelve months at 5%
+        produces at least one raw p under 0.05 on pure noise 46% of the
+        time, so such a period is easy to find and is exactly the false
+        positive the correction exists to suppress.
+        """
+        found = None
+        for seed in range(200):
+            series = pd.Series(
+                np.random.default_rng(seed).normal(0, 0.01, 1500), index=self.IDX
+            )
+            result = seasonality(series, by="month")
+            for row in result["by_period"]:
+                if row["p_value_raw"] < 0.05 <= row["p_value_corrected"]:
+                    found = row
+                    break
+            if found:
+                break
+        assert found is not None, (
+            "no seed in 200 produced a period where the correction changes "
+            "the verdict, which would itself be suspicious"
+        )
+        assert not found["significant_after_correction"], (
+            f"{found['period']} has a raw p of {found['p_value_raw']:.4f} and "
+            f"a corrected p of {found['p_value_corrected']:.4f}, yet it is "
+            "flagged as surviving correction -- the flag reads the raw value"
+        )
+
     def test_a_non_rejecting_joint_test_says_not_to_read_the_periods(self):
         series = pd.Series(
             np.random.default_rng(2).normal(0, 0.01, 1500), index=self.IDX

@@ -203,7 +203,11 @@ class TestGranger:
             b = pd.Series(rng.normal(0, 1, 300))
             fires += granger_causality(a, b, max_lag=max_lag)["significant_at_05"]
         rate = fires / trials
-        assert rate < 0.15, (
+        # 0.15 was the original bar and the UNCORRECTED rate is 12-15%, so
+        # it let the very mutation this test exists to catch slip under.
+        # Corrected, the measured rate is 6.0% / 4.0% / 3.3% at max_lag
+        # 1 / 4 / 8, so 0.12 separates the two with room either side.
+        assert rate < 0.12, (
             f"{rate:.0%} of independent pairs came back significant at "
             f"max_lag={max_lag}, against a nominal 5%"
         )
@@ -216,6 +220,37 @@ class TestGranger:
         assert result["p_value"] >= result["uncorrected_p_value"]
         assert result["n_tests"] == 4
         assert any("Bonferroni" in w for w in result["warnings"])
+
+    def test_the_flag_follows_the_CORRECTED_p_value(self):
+        """
+        The test that actually pins the correction, found by mutation.
+
+        The rate test above passes with the correction REMOVED -- the
+        uncorrected rate is 12-15% and the bar was 15%, so it slipped
+        under the threshold it existed to enforce. This one searches for a
+        case where the correction changes the answer (raw below 0.05,
+        corrected above it) and asserts the flag follows the corrected
+        number. It cannot pass without the correction, whatever the
+        sampling does.
+        """
+        found = None
+        for seed in range(400):
+            rng = np.random.default_rng(seed)
+            a = pd.Series(rng.normal(0, 1, 300))
+            b = pd.Series(rng.normal(0, 1, 300))
+            result = granger_causality(a, b, max_lag=4)
+            if result["uncorrected_p_value"] < 0.05 <= result["p_value"]:
+                found = result
+                break
+        assert found is not None, (
+            "no seed in 400 produced a case where the correction changes the "
+            "verdict, which would itself be suspicious"
+        )
+        assert not found["significant_at_05"], (
+            f"raw p={found['uncorrected_p_value']:.4f} is under 0.05 and "
+            f"corrected p={found['p_value']:.4f} is not, yet the tool called "
+            "it significant -- the flag is reading the uncorrected value"
+        )
 
     def test_the_multiple_comparison_is_declared(self):
         cause, effect = self._lead_lag()
