@@ -45,6 +45,12 @@ from typing import Any, Dict, List, Tuple
 import pydantic
 import pytest
 
+#: Roughly 90 seconds: 139 tools x ~40 mutations each. Marked `slow` so
+#: `-m "not slow"` skips it while iterating; the default run includes it,
+#: because a fuzzing suite nobody runs by default is a fuzzing suite
+#: nobody runs.
+pytestmark = pytest.mark.slow
+
 from standard_quant_tools.error import QuantError
 
 from .synth import Unsynthesizable, build_arguments, is_finite_json
