@@ -233,8 +233,12 @@ class TestShrinkageAnswersTheConditioningWarning:
 
 
 class TestTheDonorFloorIsNowClear:
-    """Phase 5's second job: lifting `portfolio` so the microstructure split
-    stops being illegal."""
+    """Phase 5's second job: lifting `portfolio` so the DONOR side of the
+    microstructure split stops being illegal.
+
+    Only the donor side. The split needs both -- the new runtime must also
+    land at >= 8 -- and microstructure has four tools, all four of the
+    missing ones being L2. So this clears one of two conditions."""
 
     def test_moving_microstructure_out_would_leave_a_legal_donor(self):
         from standard_quant_tools.agent.router import TOOL_CATEGORY
@@ -250,4 +254,16 @@ class TestTheDonorFloorIsNowClear:
             f"moving {len(micro)} microstructure tools out would leave "
             f"portfolio with {remaining}, below the floor. Phase 5 exists to "
             "fix exactly this."
+        )
+
+    def test_the_new_runtime_side_is_still_short(self):
+        """The other half of the rule, and the reason the split has not
+        happened. Recorded as a test so the day microstructure reaches eight
+        tools, this fails and says the split is now legal."""
+        from standard_quant_tools.agent.router import TOOL_CATEGORY
+
+        micro = [n for n, c in TOOL_CATEGORY.items() if c == "microstructure"]
+        assert len(micro) < 8, (
+            f"microstructure now has {len(micro)} tools, so BOTH floors are "
+            "clear and the split is legal. Do it, and delete this test."
         )

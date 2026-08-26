@@ -1490,36 +1490,78 @@ def get_option_pricing(input_data: OptionPricingInput) -> OptionPricingResult:
         input_data.volatility,
         input_data.dividend_yield,
     )
-    price = black_scholes_price(
-        input_data.spot,
-        input_data.strike,
-        input_data.time_to_expiry,
-        input_data.risk_free_rate,
-        input_data.volatility,
+    # The default path is unchanged: black_scholes still goes through the
+    # library's own implementation, so no existing call moves by a cent.
+    # Only a non-default `model` reaches the newer module.
+    if input_data.model == "black_scholes" and not input_data.american:
+        price = black_scholes_price(
+            input_data.spot,
+            input_data.strike,
+            input_data.time_to_expiry,
+            input_data.risk_free_rate,
+            input_data.volatility,
+            option_type=input_data.option_type,
+            dividend_yield=input_data.dividend_yield,
+        )
+        greeks = black_scholes_greeks(
+            input_data.spot,
+            input_data.strike,
+            input_data.time_to_expiry,
+            input_data.risk_free_rate,
+            input_data.volatility,
+            option_type=input_data.option_type,
+            dividend_yield=input_data.dividend_yield,
+        )
+        return OptionPricingResult(
+            option_type=input_data.option_type,
+            model=input_data.model,
+            price=round(price, 6),
+            greeks=OptionGreeks(
+                delta=round(greeks["delta"], 6),
+                gamma=round(greeks["gamma"], 6),
+                vega=round(greeks["vega"], 6),
+                theta=round(greeks["theta"], 6),
+                rho=round(greeks["rho"], 6),
+            ),
+            d1=round(greeks["d1"], 6),
+            d2=round(greeks["d2"], 6),
+        )
+
+    from standard_quant_tools.analysis.pricing import price_option as _price
+
+    result = _price(
+        spot=input_data.spot,
+        strike=input_data.strike,
+        time_to_expiry=input_data.time_to_expiry,
+        volatility=input_data.volatility,
+        risk_free_rate=input_data.risk_free_rate,
         option_type=input_data.option_type,
+        model=input_data.model,
         dividend_yield=input_data.dividend_yield,
+        american=input_data.american,
+        steps=input_data.binomial_steps,
     )
-    greeks = black_scholes_greeks(
-        input_data.spot,
-        input_data.strike,
-        input_data.time_to_expiry,
-        input_data.risk_free_rate,
-        input_data.volatility,
-        option_type=input_data.option_type,
-        dividend_yield=input_data.dividend_yield,
-    )
+
+    def _round(value):
+        return None if value is None else round(float(value), 6)
+
     return OptionPricingResult(
         option_type=input_data.option_type,
-        price=round(price, 6),
+        model=result["model"],
+        american=result.get("american", False),
+        price=round(result["price"], 6),
         greeks=OptionGreeks(
-            delta=round(greeks["delta"], 6),
-            gamma=round(greeks["gamma"], 6),
-            vega=round(greeks["vega"], 6),
-            theta=round(greeks["theta"], 6),
-            rho=round(greeks["rho"], 6),
+            delta=_round(result["delta"]),
+            gamma=_round(result["gamma"]),
+            vega=_round(result["vega"]),
+            # The lattice reports no analytic theta; a bumped one would be a
+            # different quantity from the closed-form thetas beside it.
+            theta=None,
+            rho=_round(result["rho"]),
         ),
-        d1=round(greeks["d1"], 6),
-        d2=round(greeks["d2"], 6),
+        d1=_round(result["d1"]),
+        d2=_round(result["d2"]),
+        notes=result.get("notes", []),
     )
 
 

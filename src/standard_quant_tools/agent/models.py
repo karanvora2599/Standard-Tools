@@ -3407,27 +3407,61 @@ class OptionPricingInput(BaseModel):
         description="Continuous dividend yield (Merton extension); 0.0 = plain Black-Scholes.",
     )
 
+    model: str = Field(
+        "black_scholes",
+        description=(
+            "Pricing model. 'black_scholes' (default) for equities — "
+            "lognormal spot with a continuous dividend yield. 'black_76' for "
+            "options on FUTURES, where the underlying is already a forward "
+            "and carrying it again double-counts. 'bachelier' when the "
+            "underlying can go NEGATIVE, which is not hypothetical: WTI "
+            "settled at -$37.63 on 20 April 2020 and every lognormal model "
+            "returned a domain error that day. 'binomial' is the only one "
+            "here that prices an AMERICAN option, because early exercise has "
+            "no closed form."
+        ),
+    )
+    american: bool = Field(
+        False,
+        description="Price early exercise. Requires model='binomial' and is "
+        "REFUSED otherwise rather than silently priced European, which would "
+        "understate the option by exactly the early-exercise premium.",
+    )
+    binomial_steps: int = Field(
+        200,
+        ge=10,
+        le=5000,
+        description="Lattice steps for model='binomial'. 200 lands within "
+        "about a cent of Black-Scholes on a European option; more is slower "
+        "and converges as 1/steps.",
+    )
+
 
 class OptionGreeks(BaseModel):
-    delta: float
-    gamma: float
-    vega: float = Field(
+    delta: Optional[float]
+    gamma: Optional[float]
+    vega: Optional[float] = Field(
         ...,
         description="Price change per 1.0 (100 percentage points) of volatility — divide by 100 for the conventional 'per vol point' quote.",
     )
-    theta: float = Field(
+    theta: Optional[float] = Field(
         ...,
         description="Price change per YEAR (raw) — divide by 365 for the conventional 'per calendar day' quote.",
     )
-    rho: float
+    rho: Optional[float]
 
 
 class OptionPricingResult(BaseModel):
+    model: str = "black_scholes"
+    american: bool = False
+    notes: List[str] = Field(default_factory=list)
     option_type: str
     price: float
     greeks: OptionGreeks
-    d1: float
-    d2: float
+    # d1/d2 are a Black-Scholes construct. The binomial lattice has no
+    # such quantity, so they are absent rather than fabricated.
+    d1: Optional[float]
+    d2: Optional[float]
 
 
 class ImpliedVolatilityInput(BaseModel):

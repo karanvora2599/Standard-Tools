@@ -604,10 +604,20 @@ is now clear**
 Two jobs at once: real portfolio construction, and lifting the donor above
 the floor so the microstructure split is legal.
 
-**The second job is done.** `portfolio` holds 13 tools — 9 `portfolio_risk`
-and 4 `microstructure` — so moving the microstructure four out leaves 9,
-above the floor. Phase 3's split is no longer blocked by this, and a test in
-`tests/portfolio/` pins it so a later move cannot quietly break it.
+**The second job is done, and it removes one of two blockers.**
+`portfolio` holds 13 tools — 9 `portfolio_risk` and 4 `microstructure` — so
+moving the microstructure four out leaves 9, above the floor. A test in
+`tests/portfolio/` pins that so a later move cannot quietly break it.
+
+> **Correction.** This originally read "Phase 3's split is no longer
+> blocked", which was half right and therefore wrong. Rule 2 is that the NEW
+> runtime lands at ≥ 8, and microstructure has **four** tools:
+> `check_spread_proxy`, `detect_liquidity_events`,
+> `get_microstructure_metrics`, `get_trade_profile`. The donor floor is
+> clear; the new-runtime floor is not, and the four missing tools are all L2
+> ones. So the split remains blocked by the same absent order-book source it
+> was blocked by from the start — Phase 5 removed one of the two conditions,
+> which is worth having and is not the same as removing the blocker.
 
 - **Covariance — SHIPPED** as `estimate_covariance`, with `sample`,
   `ledoit_wolf`, `ewma` and `ewma_shrunk`. Shrinkage is the answer to the
@@ -681,9 +691,45 @@ Target surface: `get_option_chain`, `price_option`,
 `analyze_volatility_risk_premium`.
 
 Gated on option-chain data, so it shares Phase 3's provider dependency. The
-model families — Black-Scholes, Black-76, Bachelier, binomial, local vol,
-SVI, SABR, Heston — go behind **one declarative `PricingSpec` with a
-`model` field**, exactly as estimators do in modeling. Not seven tools.
+model families go behind **one declarative spec with a `model` field**,
+exactly as estimators do in modeling. Not seven tools.
+
+> **The `model` field SHIPPED, and it needed no chain.** Pricing is
+> evaluated from parameters, not calibrated to a surface, so it was
+> buildable now. `get_option_pricing` gained `model`, `american` and
+> `binomial_steps` — **zero new tools**, because adding `price_option`
+> beside a tool that already prices options is exactly the redundancy the
+> rule exists to prevent.
+>
+> Four models: `black_scholes`, `black_76` (options on futures),
+> `bachelier` (NORMAL, so a negative underlying prices — WTI settled at
+> -$37.63 on 20 April 2020 and every lognormal model returned a domain
+> error), and `binomial` (the only one that prices AMERICAN exercise).
+> `american=True` on a European model is refused by name rather than
+> silently priced European, which would understate by exactly the
+> early-exercise premium.
+>
+> **Local vol, SVI, SABR and Heston are deliberately absent.** Every one of
+> them is CALIBRATED to a surface rather than evaluated from parameters, so
+> they need the chain nobody serves. Shipping a calibration routine with
+> nothing to calibrate against is the empty box `point_in_time.py` warns
+> about. The `model` field is the extension point; they are entries it does
+> not have yet.
+>
+> **A mutation survived and produced a test worth keeping.** Making
+> `black_76` carry the forward a second time — the exact double-count the
+> module warns about — passed all 65 tests. Put-call parity on a forward is
+> `C - P = e^(-rT)(F - K)` *whatever the drift is*, so parity structurally
+> cannot see it. The test that catches it is the identity that defines the
+> relationship: Black-76 on `F = S·e^((r-q)T)` must equal Black-Scholes on
+> `S`, exactly. The error also grows with expiry, so the horizons run to
+> four years — a near-dated test would have missed it too.
+
+Still gated on a chain: `get_option_chain`, `build_iv_surface`,
+`analyze_iv_term_structure`, `analyze_skew`, `fit_svi_surface`,
+`calculate_surface_greeks`, `calculate_gamma_exposure`,
+`analyze_volatility_risk_premium`. Buildable without one but not yet built:
+`calculate_portfolio_greeks`, `run_option_scenario`.
 
 New reference kinds: `option_chain`, `option_surface`, `greeks_panel`.
 
@@ -716,6 +762,20 @@ Tools: `create_stream`, `configure_stream`, `attach_indicator`,
 Defer indefinitely unless a live use case is actually waiting. It is the
 only phase that requires changing an invariant the rest of the architecture
 rests on.
+
+> **DEFERRED, and this is the decision rather than a postponement.** No
+> live use case is waiting, and the cost is not the twelve tools — it is
+> that `sqt://` currently promises resolving twice yields the same bytes,
+> and `publish()` refuses to overwrite specifically to protect that. Every
+> holder of a reference depends on it. Streaming would either break that
+> promise or bolt a second, mutable identity system beside it, and both of
+> those are decisions to make when something needs them rather than in
+> advance.
+>
+> The two prerequisites the section already names — a subscription-plus-
+> snapshot audit model, and an ownership and cleanup story for `stream_id`
+> — are the real work, and neither is startable without knowing what the
+> live use case actually is.
 
 ---
 

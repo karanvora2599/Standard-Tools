@@ -42,11 +42,16 @@ question about regime rather than about estimation error, and lowers the
 effective sample size doing so. They are not alternatives, which is why
 `ewma_shrunk` exists. Returned annualized.
 
-### The microstructure split is no longer blocked
+### One of the two blockers on the microstructure split is cleared
 
 `portfolio` now holds 13 tools — 9 `portfolio_risk` and 4 `microstructure` —
 so moving the microstructure four out leaves 9, above the eight-tool floor.
 A test pins it so a later move cannot quietly break it.
+
+The split is still blocked, by the other condition: a new runtime has to
+land at ≥ 8 tools and microstructure has four. The four it needs are all L2
+ones, so it waits on the same absent order-book source as the rest of
+Phase 3.
 
 
 ### Added — probability calibration, and the empty signal panel it fixes
