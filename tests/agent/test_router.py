@@ -114,29 +114,78 @@ class TestRoutingAccuracyEval:
 
     # (request, expected category) -- representative of the kind of
     # requests Implementation/Anthropic/Agent_*.py scripts actually send.
+    #
+    # EVERY ROUTABLE CATEGORY APPEARS HERE, and a test below enforces that
+    # rather than trusting it. This set had decayed to 7 of 12: `derivatives`
+    # and `microstructure` became categories when those runtimes split out,
+    # `data` when that runtime landed, and `discovery`/`provenance` were
+    # never covered at all. Nothing failed, because an eval that silently
+    # stops covering the surface still passes -- it just stops meaning
+    # anything, which is the same failure mode as a stale count in prose.
     EVAL_CASES = [
+        # backtest_execution -- run one strategy, fixed parameters
         ("Run an SMA crossover backtest on AAPL for 2023.", "backtest_execution"),
+        (
+            "Buy and hold SPY from 2019 to 2024 and show me the equity curve.",
+            "backtest_execution",
+        ),
+        # backtest_validation -- optimize, validate, diagnose
         (
             "Grid-search RSI parameters and find the best combination.",
             "backtest_validation",
         ),
+        ("Walk-forward validate a MACD strategy on MSFT.", "backtest_validation"),
+        (
+            "How likely is it that this strategy selection was overfit?",
+            "backtest_validation",
+        ),
+        # screener
         (
             "Screen the S&P 500 for stocks with P/E under 20 and RSI under 30.",
             "screener",
         ),
+        ("Get me NVDA's fundamentals — P/E, ROE, debt/equity.", "screener"),
+        # analysis
         ("What's the alpha, beta, and VaR for TSLA?", "analysis"),
+        ("Give me a technical snapshot of AMD — RSI, MACD, ADX.", "analysis"),
+        # quant_research
         ("Test if KO and PEP are cointegrated.", "quant_research"),
+        (
+            "Run a Fama-French factor regression on this fund's returns.",
+            "quant_research",
+        ),
+        # custom_signal
         ("Backtest this signal I already computed: {...}.", "custom_signal"),
+        # portfolio_risk
         (
             "Build me an optimal portfolio using Markowitz mean-variance.",
             "portfolio_risk",
         ),
-        ("Walk-forward validate a MACD strategy on MSFT.", "backtest_validation"),
         (
             "How much should I size this position given my account equity?",
             "portfolio_risk",
         ),
-        ("Get me NVDA's fundamentals — P/E, ROE, debt/equity.", "screener"),
+        # derivatives -- split out of research; never covered before
+        ("What are the vanna and volga on this call?", "derivatives"),
+        ("Fit a volatility smile to these strikes and implied vols.", "derivatives"),
+        # microstructure -- split out of portfolio; never covered before
+        (
+            "Estimate the effective spread on this name from daily bars.",
+            "microstructure",
+        ),
+        (
+            "What is the Amihud illiquidity for AAPL over the last year?",
+            "microstructure",
+        ),
+        # data -- the newest category
+        ("Fetch OHLCV for these fifty tickers and save it for later.", "data"),
+        ("Does this provider guarantee point-in-time data?", "data"),
+        # discovery
+        ("What strategies does this library actually support?", "discovery"),
+        ("What arguments does run_walk_forward_backtest take?", "discovery"),
+        # provenance
+        ("Show me the decision record for request abc123.", "provenance"),
+        ("Verify that the audit log has not been tampered with.", "provenance"),
     ]
 
     @pytest.mark.integration
@@ -148,7 +197,6 @@ class TestRoutingAccuracyEval:
             pytest.skip("ANTHROPIC_API_KEY not set")
 
         import sys
-        from pathlib import Path
 
         sys.path.insert(0, str(REPO_ROOT / "Implementation" / "Anthropic"))
         from _agent_utils import route_request  # type: ignore[import-not-found]
@@ -242,4 +290,139 @@ class TestRoutingAndEnforcementSpeakTheSameLanguage:
         assert not orphans, (
             f"the router can return {orphans}, which no runtime owns -- a "
             "request routed there cannot be executed by anything."
+        )
+
+
+class TestTheEvalStillCoversTheSurface:
+    """
+    An eval that stops covering the surface still passes.
+
+    That is the whole hazard, and it is not hypothetical here: this set was
+    written at 7 categories and stayed at 7 while the surface grew to 12.
+    `derivatives` and `microstructure` became routable when those runtimes
+    split out, `data` when that runtime landed, and `discovery` and
+    `provenance` were never covered. Routing to any of the five was
+    completely unmeasured, and the accuracy number stayed reassuring
+    because it was computed over the categories that were covered.
+
+    These checks cost NO API call, which is the point -- the accuracy eval
+    itself is integration-gated and skipped in CI, so a guard that also
+    needed a key would decay exactly the same way. They run every time.
+    """
+
+    def test_every_routable_category_appears_in_the_eval(self):
+        from standard_quant_tools.agent.router import TOOL_CATEGORIES
+
+        labelled = {
+            expected for _request, expected in TestRoutingAccuracyEval.EVAL_CASES
+        }
+        missing = sorted(set(TOOL_CATEGORIES) - labelled)
+        assert not missing, (
+            f"{len(missing)} routable categor(ies) have no labeled request: "
+            f"{missing}. Routing to them is unmeasured, and the accuracy "
+            "number is computed over the rest -- which is how this set sat "
+            "at 7 of 12 without anything failing."
+        )
+
+    def test_the_eval_labels_are_all_real_categories(self):
+        """The other direction: a label the router cannot return makes a
+        case unfalsifiable, because no answer could ever match it."""
+        from standard_quant_tools.agent.router import TOOL_CATEGORIES
+
+        labelled = {
+            expected for _request, expected in TestRoutingAccuracyEval.EVAL_CASES
+        }
+        unknown = sorted(labelled - set(TOOL_CATEGORIES))
+        assert not unknown, f"eval expects categories that do not exist: {unknown}"
+
+    def test_the_categories_stay_distinguishable_to_a_classifier(self):
+        """
+        The router prompt is category DESCRIPTIONS, and a classifier can
+        only separate what they separate. Two categories described in
+        largely the same words are a coin flip no eval can fix -- and
+        unlike a wrong answer, the failure looks like model error rather
+        than like a prompt that never carried the distinction.
+
+        Measured at the time of writing: the worst pair overlaps at 0.14,
+        so 0.35 leaves real room while still catching a genuinely
+        duplicated description.
+        """
+        import re
+
+        from standard_quant_tools.agent.router import TOOL_CATEGORIES
+
+        stop = {
+            "the",
+            "a",
+            "an",
+            "of",
+            "and",
+            "for",
+            "to",
+            "in",
+            "is",
+            "it",
+            "that",
+            "this",
+            "what",
+            "with",
+            "on",
+            "as",
+            "its",
+            "from",
+            "by",
+            "each",
+            "not",
+            "or",
+            "one",
+            "at",
+            "how",
+            "you",
+            "your",
+            "than",
+            "are",
+            "be",
+        }
+
+        def words(text):
+            return {w for w in re.findall(r"[a-z]{3,}", text.lower()) if w not in stop}
+
+        names = sorted(TOOL_CATEGORIES)
+        overlapping = []
+        for i, a in enumerate(names):
+            wa = words(TOOL_CATEGORIES[a]["description"])
+            for b in names[i + 1 :]:
+                wb = words(TOOL_CATEGORIES[b]["description"])
+                union = wa | wb
+                if not union:
+                    continue
+                jaccard = len(wa & wb) / len(union)
+                if jaccard >= 0.35:
+                    overlapping.append(f"{a} | {b} ({jaccard:.2f})")
+        assert not overlapping, (
+            "category descriptions overlap enough that a classifier cannot "
+            f"reliably separate them: {overlapping}. The router prompt is "
+            "these descriptions -- if they do not carry the distinction, no "
+            "amount of eval tuning will."
+        )
+
+    def test_every_category_narrows_the_surface_materially(self):
+        """A category holding almost every tool is not routing, it is a
+        rounding error with a name."""
+        from collections import Counter
+
+        from standard_quant_tools.agent.router import TOOL_CATEGORIES
+        from standard_quant_tools.agent.tools import TOOL_CATEGORY
+
+        counts = Counter(TOOL_CATEGORY.values())
+        total = sum(counts.values())
+        too_broad = {
+            category: counts[category]
+            for category in TOOL_CATEGORIES
+            if counts.get(category, 0) > total * 0.35
+        }
+        assert not too_broad, (
+            f"categories holding over a third of the facade: {too_broad}. "
+            "Routing to one of these narrows almost nothing, so the "
+            "classification call is being paid for without buying anything."
         )
