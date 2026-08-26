@@ -145,7 +145,7 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 82 tools cost about **150 KB of schema, ~38,000 tokens**, held for the
+The 95 tools cost about **166 KB of schema, ~49,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
@@ -168,24 +168,26 @@ sqt-mcp --print-budget
 ```
 runtime              tools    bytes   ~tokens
 backtest                21   58,419    14,604
-modeling                14   40,309    10,077
+modeling                16   43,340    10,835
 research                23   25,998     6,499
 portfolio               10   19,543     4,885
-meta                    14    8,997     2,249
-all                     82  153,266    38,316
+feature_lab              9   11,745     2,936
+meta                    16   11,362     2,840
+all                     95  170,407    42,601
 
-  a client is served ONE runtime: backtest is the most expensive at
-  58,419 bytes (38% of the total).
+  a client is served ONE runtime: backtest is the most
+  expensive at 58,419 bytes (34% of the total).
 
 category             tools    bytes   ~tokens
-modeling                14   40,309    10,077
+modeling                16   43,340    10,835
 backtest_execution      10   29,231     7,307
 backtest_validation      9   22,306     5,576
 portfolio_risk           7   15,526     3,881
 analysis                14   15,380     3,845
+feature_lab              9   11,745     2,936
 quant_research           7    8,583     2,145
+discovery               10    7,761     1,940
 custom_signal            2    6,882     1,720
-discovery                8    5,396     1,349
 microstructure           3    4,017     1,004
 provenance               6    3,601       900
 screener                 2    2,035       508
@@ -204,7 +206,7 @@ carries 2 for 6.5 KB. `modeling` and `backtest_execution` together are
 nearly half the surface. Choosing by how many tools a category holds gets
 the budget almost exactly backwards.
 
-The default — `screener,analysis,quant_research,discovery`, 31 tools,
+The default — `screener,analysis,quant_research,discovery`, 33 tools,
 ~8k tokens — covers screening, risk and technical snapshots, the
 factor/cointegration/Hurst research path, and the offline discovery tools.
 
@@ -218,8 +220,8 @@ error round trip, which costs more than the category does.
 Serve a runtime, or narrow inside one:
 
 ```bash
-sqt-mcp --runtime research                    # 23 tools, 32 KB
-sqt-mcp --runtime backtest                    # 21 tools, 65 KB
+sqt-mcp --runtime research                    # 22 tools, 30 KB
+sqt-mcp --runtime backtest                    # 20 tools, 62 KB
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
 sqt-mcp --runtime research --categories screener
 sqt-mcp --runtime all                         # ~38k tokens, and it says so
@@ -255,13 +257,14 @@ stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 
 | runtime | full | `auto` | thinned | thin |
 |---|---:|---:|---:|---:|
-| `research` | 32 KB | 32 KB | 0 | 12 KB |
 | `backtest` | 65 KB | 40 KB | 7 | 12 KB |
+| `modeling` | 47 KB | 30 KB | 2 | 9 KB |
+| `research` | 32 KB | 32 KB | 0 | 12 KB |
 | `portfolio` | 22 KB | 22 KB | 0 | 6 KB |
-| `meta` | 12 KB | 12 KB | 0 | 8 KB |
-| `modeling` | 44 KB | 35 KB | 1 | 8 KB |
+| `feature_lab` | 14 KB | 14 KB | 0 | 6 KB |
+| `meta` | 15 KB | 15 KB | 0 | 9 KB |
 
-Three runtimes already fit and pay nothing. That ordering is deliberate: a
+Four runtimes already fit and pay nothing. That ordering is deliberate: a
 runtime's cost is concentrated in a few large schemas — `modeling`'s top
 three are 65% of it — so thinning three tools buys what thinning fifteen
 cheap ones would not, and **every tool left described is one an agent calls
@@ -396,7 +399,7 @@ own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 82 tools has a typed Pydantic return, so the server can
+Every one of the 95 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. The plan assumed that was free; measured, it
@@ -500,7 +503,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 82 tools declares `readOnlyHint: true` and
+Every one of the 95 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 

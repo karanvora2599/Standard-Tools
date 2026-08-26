@@ -42,16 +42,25 @@ shipped, generalized to the rest of the surface.
 |---|---|---|---|
 | `research` | 23 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe. Does not run strategies. |
 | `backtest` | 21 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run, optimize, validate and diagnose a strategy. Does not build portfolios. |
+| `meta` | 16 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
+| `modeling` | 16 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `portfolio` | 10 | `portfolio_risk`, `microstructure` | Turn a view into a position and price what it costs. |
-| `meta` | 14 | `discovery`, `provenance` | Questions about the library and the session, not about a market. |
-| `modeling` | 14 | (one ordered pipeline) | Build, validate and score a model. Lives in `modeling/agent`. |
+| `feature_lab` | 9 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
 
 The grouping is deliberately coarse. A runtime holding two tools is
 overhead rather than isolation, so nothing has fewer than eight and a test
-pins that. `microstructure` sits with `portfolio_risk` because
+pins that — on both sides of a split, since a donor is still a runtime
+afterwards. `microstructure` sits with `portfolio_risk` because
 `get_liquidity_metrics` and `check_spread_proxy` are the same question at
 two data fidelities; `screener` sits with `analysis` because you screen in
 order to analyze.
+
+`feature_lab` and `modeling` both live under `modeling/agent`, which is
+where the analysis they call lives. The runtime boundary and the package
+layout answer different questions and do not have to agree: `modeling` is
+one ordered pipeline (build a dataset, fit it, register the model, score
+it) and feature work is exploratory, run repeatedly, and finished before
+any model exists.
 
 ### Runtime is not category
 
