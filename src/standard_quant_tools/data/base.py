@@ -153,6 +153,44 @@ class DataProvider(ABC):
         """
         pass
 
+    def get_temporal_contract(self, frame_kind: str = "bars"):
+        """
+        What this provider can say about WHEN its facts became knowable.
+
+        The base implementation is the honest default rather than a
+        placeholder. Bars are safe by construction -- a bar is knowable at
+        its own close -- and every other frame kind is declared UNSUPPORTED,
+        because no provider in this library currently supplies availability
+        timestamps for filings, estimates or macro releases. A provider that
+        can should override this and say so per kind.
+
+        Declaring it rather than inferring it is the point. A heuristic that
+        guessed availability from an event date would be right for prices,
+        wrong for every filing, and wrong in the direction that makes a
+        backtest look prescient.
+        """
+        from standard_quant_tools.data.temporal import (
+            TemporalContract,
+            price_contract,
+        )
+
+        name = type(self).__name__
+        if frame_kind == "bars":
+            return price_contract(name)
+        return TemporalContract(
+            source=name,
+            frame_kind=frame_kind,
+            has_event_time=False,
+            has_available_time=False,
+            revisions="unknown",
+            notes=[
+                f"{name} does not serve {frame_kind!r} with availability "
+                "timestamps. This is a statement about the provider, not "
+                "about the frame kind -- the point-in-time join is built and "
+                "tested, and works as soon as a source supplies the column.",
+            ],
+        )
+
     @abstractmethod
     def get_metadata(self, symbol: str, interval: str = "1d") -> DataSetMetadata:
         """

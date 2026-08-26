@@ -9,6 +9,41 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — the temporal contract, asked before anything is fetched
+
+`describe_temporal_contract` says what a source can tell you about WHEN its
+facts became knowable, without fetching. A quarterly filing describes 30
+September and is published on 25 October, so a model that joins it on the
+quarter end carries three weeks of hindsight per row.
+
+`asof_join` already refused a frame with no `available_time`. That refusal
+arrives after a universe has been chosen, a history fetched and a cache
+written; this answers the same question first.
+
+- `data/temporal.py`: `TemporalContract`, `require_pit`,
+  `contract_for_frame`, `price_contract`.
+- `DataProvider.get_temporal_contract(frame_kind)`, defaulting honestly to
+  "bars are safe by construction, everything else is unsupported here". A
+  provider that can serve availability timestamps overrides it.
+
+**`pit_safe` and `reproduces_history` are separate properties** because they
+come apart. A `snapshot` source joins without leaking the future and still
+shows a backtest final values nobody had at the time — not lookahead, a
+different history. Conflating them would have hidden it.
+
+**Two timestamps, not the three the plan specified.** A restatement is a
+row, not a column: `available_time` on the restating row already IS its
+publication date, and the existing join returns the version current at each
+date. A `revision_time` column would have duplicated it and invited the
+one-row-per-fact encoding that cannot reproduce history at all. What is
+declared instead is how revisions are encoded, and `unknown` is treated as
+unsafe.
+
+`DataSetMetadata` was deliberately left alone — it documents one OHLCV pull,
+and giving it a `frame_kind` to cover filings would have muddied a type that
+is currently precise.
+
+
 ### Added — `feature_lab`, the sixth runtime
 
 The nine feature tools have moved out of `modeling` into a runtime of their

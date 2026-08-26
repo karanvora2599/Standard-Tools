@@ -2060,3 +2060,63 @@ Not built here, and not accidentally half-built either:
 See [Documentation/08_analysis.md](08_analysis.md) for the underlying
 analysis primitives (`hurst_exponent`, `pca_returns`, `rolling_beta`,
 ...) every built-in feature wraps.
+
+## The temporal contract
+
+Every non-price dataset carries a leak waiting to happen. A quarterly filing
+describes 30 September and is published on 25 October. A model that joins it
+on 30 September has three weeks of hindsight in every row, and the backtest
+that results looks like skill rather than like a bug.
+
+`asof_join` already refuses a frame with no `available_time`. That refusal
+is correct and it is *late*: by the time it fires, a caller has chosen a
+universe, fetched a history and written a cache. `describe_temporal_contract`
+answers the same question first, and fetches nothing:
+
+```python
+describe_temporal_contract(source="yfinance", frame_kind="fundamentals")
+# pit_safe=False
+# "YFinanceProvider supplies no `available_time` for 'fundamentals', so
+#  there is no way to know when each value became knowable..."
+```
+
+**Read `pit_safe` first, then `reproduces_history`.** They come apart, and
+the gap between them is the interesting part:
+
+| | `pit_safe` | `reproduces_history` | what it means |
+|---|---|---|---|
+| no `available_time` | ✗ | ✗ | do not build this dataset from this source |
+| `snapshot` revisions | ✓ | ✗ | joins without leaking the future, but restated values were overwritten — a backtest reads numbers nobody had |
+| `versioned` revisions | ✓ | ✓ | a past decision can be reproduced exactly |
+| never restated | ✓ | ✓ | prices, splits |
+
+### Two timestamps, not three
+
+A restatement is a **row**, not a column:
+
+```
+row 1: event_time=2024-09-30  available_time=2024-10-25  eps=1.20
+row 2: event_time=2024-09-30  available_time=2025-02-10  eps=1.05
+```
+
+`asof_join` takes the latest row whose `available_time <= t`, so a join at
+2024-12-01 returns 1.20 and one at 2025-03-01 returns 1.05. A third
+`revision_time` column would carry the same value as row 2's
+`available_time`, and would invite the one-row-per-fact encoding that cannot
+reproduce history at all.
+
+So what is declared instead is **how revisions are encoded** — `versioned`,
+`snapshot`, `none` or `unknown`. `unknown` is treated as unsafe: a provider
+that does not say does not get the benefit of the doubt, because the cost of
+assuming `versioned` wrongly is a backtest nobody can reproduce.
+
+### Bars are the exception, and that is why it is stated
+
+A daily bar is knowable at its own close, so `event_time` and
+`available_time` coincide and the distinction collapses. `price_contract()`
+says so explicitly rather than leaving it implicit, because the implicit
+version is exactly what gets carried over to filings, where it is false.
+
+Adjustment is a separate question: a split-adjusted history is revised every
+time a split happens, and the adjusted close for 2019 is not the number
+anybody saw in 2019. That is `DataSetMetadata.adjusted`, not this contract.

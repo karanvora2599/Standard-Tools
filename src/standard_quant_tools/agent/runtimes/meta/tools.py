@@ -56,6 +56,8 @@ from standard_quant_tools.agent.models import (
     StrategyParameter,
     StrategyRelation,
     StressScenario,
+    TemporalContractInput,
+    TemporalContractResult,
     ValidateToolCallInput,
     ValidateToolCallResult,
     VerifyAuditIntegrityInput,
@@ -959,4 +961,48 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
         normalized_arguments=normalized if not problems else {},
         checked_strategy_parameters=checked_strategy,
         notes=notes,
+    )
+
+
+def describe_temporal_contract(
+    input_data: TemporalContractInput,
+) -> TemporalContractResult:
+    """
+    What a data source can say about WHEN its facts became knowable — asked
+    BEFORE fetching anything.
+
+    Every non-price dataset carries a leak waiting to happen. A quarterly
+    filing describes 30 September and is published on 25 October, so a model
+    that joins it on 30 September has three weeks of hindsight in every row,
+    and the backtest that results looks like skill rather than like a bug.
+
+    The point-in-time join already refuses a frame with no `available_time`.
+    That refusal arrives late — after a universe has been chosen, a history
+    fetched and a cache written. This answers the same question first, in
+    one call, and fetches nothing.
+
+    Read `pit_safe` first: False means do not build this dataset from this
+    source. Then `reproduces_history`, which is stricter and comes apart
+    from it — a snapshot source joins without leaking the future and still
+    shows a backtest numbers that were later restated.
+    """
+    from standard_quant_tools.data.factory import DataFactory
+
+    logger.debug(
+        "[describe_temporal_contract] source=%s kind=%s",
+        input_data.source,
+        input_data.frame_kind,
+    )
+    provider = DataFactory.get_provider(input_data.source)
+    contract = provider.get_temporal_contract(input_data.frame_kind)
+    return TemporalContractResult(
+        source=contract.source,
+        frame_kind=contract.frame_kind,
+        has_event_time=contract.has_event_time,
+        has_available_time=contract.has_available_time,
+        entity_scoped=contract.entity_scoped,
+        revisions=contract.revisions,
+        pit_safe=contract.pit_safe,
+        reproduces_history=contract.reproduces_history,
+        caveats=contract.caveats(),
     )

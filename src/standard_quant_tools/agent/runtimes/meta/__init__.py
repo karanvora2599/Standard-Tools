@@ -21,6 +21,7 @@ from standard_quant_tools.agent.models import (
     ListStressScenariosInput,
     ReferenceKind,
     ReplayDecisionInput,
+    TemporalContractInput,
     ValidateToolCallInput,
     ValidateToolCallResult,
     VerifyAuditIntegrityInput,
@@ -32,6 +33,7 @@ from .tools import (
     describe_artifact,
     describe_data_capabilities,
     describe_reference,
+    describe_temporal_contract,
     describe_tool,
     explain_decision,
     export_audit_bundle,
@@ -46,6 +48,11 @@ from .tools import (
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "describe_temporal_contract",
+        "What a data source can say about WHEN its facts became knowable, asked BEFORE fetching anything. A quarterly filing describes 30 September and is published on 25 October, so a model that joins it on the quarter end carries three weeks of hindsight per row. Read pit_safe first — False means do not build this dataset from this source — then reproduces_history, which is stricter: a snapshot source joins without leaking the future and still shows a backtest restated numbers nobody had. Fetches nothing.",
+        TemporalContractInput,
+    ),
     (
         "describe_tool",
         "One tool's full contract — arguments, result fields, owning runtime, and whether calling it fetches data or writes an artifact. Works for tools this caller is not scoped to; describing a tool is not calling it.",
@@ -136,6 +143,7 @@ TOOL_CATEGORY = {
     "list_strategies": "discovery",
     "list_stress_scenarios": "discovery",
     "describe_data_capabilities": "discovery",
+    "describe_temporal_contract": "discovery",
 }
 
 __all__ = [

@@ -330,18 +330,57 @@ cluster rather than four independent sources of alpha.
 **New runtime · ~13 tools · the highest-leverage phase here**
 
 The most important idea in this plan is not the tool list — it is the
-three-timestamp contract: `event_time`, `available_at`, `revision_time`.
-That is what makes every non-price dataset safe to model on, and the
-library already has the join that consumes it.
+temporal contract. That is what makes every non-price dataset safe to model
+on, and the library already has the join that consumes it.
+
+> **Correction, from building 2a.** This section specified three timestamps:
+> `event_time`, `available_at`, `revision_time`. **Two are enough, and the
+> third would have made things worse.** Measured against the join that
+> already exists:
+>
+> ```
+> Q3 EPS, reported at 1.20, later restated to 1.05
+>   row 1: event_time=2024-09-30  available_time=2024-10-25  eps=1.20
+>   row 2: event_time=2024-09-30  available_time=2025-02-10  eps=1.05
+>
+> asof_join at 2024-12-01 -> 1.20   (what was known then)
+> asof_join at 2025-03-01 -> 1.05   (the restatement)
+> ```
+>
+> A restatement is a **row**, not a column, and `available_time` on that row
+> already IS its publication date. A separate `revision_time` would carry
+> the same value — and would invite the one-row-per-fact encoding that
+> cannot reproduce history at all, because the earlier value is gone.
+>
+> So the third thing worth declaring is not a timestamp. It is **how
+> revisions are encoded** (`versioned` / `snapshot` / `none` / `unknown`),
+> which is what separates a source you can backtest on from one that can
+> only describe the present. The library's existing column is
+> `available_time`, not `available_at`; the plan's name was a synonym and
+> the code's name won.
 
 **Sequence it as a contract first, tools second.** Adding
 `build_fundamental_panel` before the timestamp contract means building a
 leak and retrofitting the fix.
 
-- **2a — the contract.** Extend `DataSetMetadata` so every non-price frame
-  declares which of the three timestamps it carries. A provider that cannot
-  supply `available_at` says so, and `point_in_time_join` refuses rather
-  than silently degrading to an ordinary timestamp join.
+- **2a — the contract. SHIPPED.** `data/temporal.py` defines
+  `TemporalContract`: what a source says about `event_time`,
+  `available_time`, entity scope and revision encoding. `DataProvider`
+  gained a `get_temporal_contract(frame_kind)` hook whose honest default is
+  "bars are safe by construction, everything else is unsupported here", and
+  `describe_temporal_contract` (in `meta`, for now) answers the question
+  BEFORE anything is fetched.
+
+  Two properties rather than one, because they come apart: `pit_safe` is
+  whether the join can happen at all, and `reproduces_history` is stricter —
+  a `snapshot` source joins without leaking the future and still shows a
+  backtest final values nobody had at the time. That is not lookahead; it is
+  a different history, and conflating them would have hidden it.
+
+  `DataSetMetadata` was NOT extended. It is documented as describing one
+  OHLCV pull, and adding a `frame_kind` to it to cover filings would have
+  muddied a type that is currently precise. The contract is its own type and
+  `price_contract()` is the bridge.
 - **2b — the bundle.** `DataBundle` as a typed multi-frame container
   published as one reference: `bars`, `trades`, `quotes`, `orderbook`,
   `fundamentals`, `estimates`, `macro`, `events`, `options`,

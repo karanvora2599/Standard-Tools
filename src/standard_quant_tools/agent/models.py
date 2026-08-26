@@ -5071,3 +5071,65 @@ class StrategyMatrixResult(BaseModel):
         ),
     )
     notes: List[str] = Field(default_factory=list)
+
+
+# ── describe_temporal_contract ──────────────────────────────────────────
+
+
+class TemporalContractInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(
+        "yfinance",
+        description="Provider name: 'yfinance', 'polygon' or 'bloomberg'. "
+        "Same argument and same default as describe_data_capabilities, so "
+        "the two tools describe the same provider unless told otherwise.",
+    )
+    frame_kind: str = Field(
+        "fundamentals",
+        description=(
+            "Which kind of data: 'bars', 'fundamentals', 'estimates', "
+            "'macro', 'events', 'corporate_actions' or 'reference_data'. "
+            "'bars' is the one kind that is point-in-time safe by "
+            "construction, because a bar is knowable at its own close."
+        ),
+    )
+
+
+class TemporalContractResult(BaseModel):
+    source: str
+    frame_kind: str
+    has_event_time: bool = Field(
+        ..., description="Whether the source says when the fact is ABOUT."
+    )
+    has_available_time: bool = Field(
+        ...,
+        description="Whether the source says when the fact could first be "
+        "ACTED ON. This is the join key, and what decides whether a "
+        "point-in-time join is possible at all.",
+    )
+    entity_scoped: bool
+    revisions: str = Field(
+        ...,
+        description="'versioned' (one row per version, history reproducible), "
+        "'snapshot' (restated values overwritten, history gone), 'none' "
+        "(never restated), or 'unknown'.",
+    )
+    pit_safe: bool = Field(
+        ...,
+        description="Whether a point-in-time join is possible at all. False "
+        "means building on this source would date each value to the period it "
+        "describes rather than its publication -- weeks of hindsight per row.",
+    )
+    reproduces_history: bool = Field(
+        ...,
+        description="Stricter than pit_safe, and the two come apart: a "
+        "snapshot source joins without leaking the future but shows final "
+        "values nobody had at the time. Not lookahead -- a different history.",
+    )
+    caveats: List[str] = Field(
+        default_factory=list,
+        description="What to tell the user before building on this. Relay "
+        "these rather than summarizing them away.",
+    )
