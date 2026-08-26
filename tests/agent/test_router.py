@@ -173,3 +173,73 @@ class TestRoutingAccuracyEval:
             f"Routing accuracy {accuracy:.0%} below the 70% baseline "
             f"threshold:\n{report}"
         )
+
+
+class TestRoutingAndEnforcementSpeakTheSameLanguage:
+    """
+    The router picks CATEGORIES. `Runtime.dispatch` enforces by RUNTIME.
+
+    Those are two vocabularies for one surface, and they were never
+    reconciled. Measured: of the 55 category PAIRS this router can return,
+    48 span more than one runtime -- so a caller who routed to categories
+    and then named a runtime by hand was usually describing an
+    intersection nobody had checked.
+
+    The sharp end of that: `registry="research"` with the routed pair
+    `["portfolio_risk", "derivatives"]` advertised ZERO tools, silently. An
+    agent handed no tools does not sit quietly -- it reads as a broken
+    install, and then it invents tool names, which is the exact failure
+    routing exists to prevent.
+
+    Two mechanisms close it, and both are pinned here: `registry_for`
+    DERIVES the scope from the routing decision, and `_registry_tools`
+    refuses to hand back an empty list when a fixed runtime and a routed
+    category set disagree.
+    """
+
+    def test_a_routed_pair_spanning_runtimes_resolves_to_both(self):
+        from standard_quant_tools.agent.router import registry_for
+
+        assert registry_for(["quant_research", "portfolio_risk"]) == (
+            "research+portfolio"
+        )
+
+    def test_the_disjoint_pair_that_used_to_yield_nothing_now_resolves(self):
+        """The regression, named. This pair against `research` gave 0."""
+        from standard_quant_tools.agent.router import registry_for
+        from standard_quant_tools.agent.runtimes import combine
+
+        spec = registry_for(["portfolio_risk", "derivatives"])
+        assert spec == "portfolio+derivatives"
+        runtime = combine(spec.split("+"))
+        served = runtime.get_tools(categories=["portfolio_risk", "derivatives"])
+        assert served, "the derived scope must not be empty"
+
+    def test_a_single_category_does_not_widen_beyond_its_owner(self):
+        """Deriving the scope must not become a way of quietly serving
+        more than was routed to."""
+        from standard_quant_tools.agent.router import registry_for
+
+        assert registry_for(["screener"]) == "research"
+        assert registry_for(["derivatives"]) == "derivatives"
+
+    def test_an_unroutable_category_fails_open_rather_than_empty(self):
+        """Same rule as `parse_router_response`: a classifier that returns
+        something unusable should WIDEN the surface, never empty it."""
+        from standard_quant_tools.agent.router import registry_for
+
+        assert registry_for(["not_a_category"]) == "analysis"
+        assert registry_for([]) == "analysis"
+
+    def test_every_router_category_is_owned_by_exactly_one_runtime(self):
+        """If a category the router can return has no runtime, routing to
+        it produces an agent that cannot execute anything it was routed
+        to."""
+        from standard_quant_tools.agent.router import TOOL_CATEGORIES
+        from standard_quant_tools.agent.runtimes import CATEGORY_RUNTIME
+
+        orphans = sorted(set(TOOL_CATEGORIES) - set(CATEGORY_RUNTIME))
+        assert not orphans, (
+            f"the router can return {orphans}, which no runtime owns -- a "
+            "request routed there cannot be executed by anything."
+        )

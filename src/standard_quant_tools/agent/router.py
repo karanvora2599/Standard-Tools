@@ -217,6 +217,44 @@ def _dedupe_preserve_order(items: List[str]) -> List[str]:
     return result
 
 
+def registry_for(categories: Iterable[str]) -> str:
+    """
+    The `registry=` value that can actually EXECUTE these routed categories.
+
+    THE MISMATCH THIS CLOSES. `route_request` returns CATEGORIES, and
+    `Runtime.dispatch` enforces by RUNTIME. Those are two vocabularies for
+    one surface, and 48 of the 55 category pairs this router can return
+    span more than one runtime -- so a caller who routed to categories and
+    then named a runtime by hand was usually describing an intersection
+    nobody had checked.
+
+    Measured before this existed: `registry="research"` with the routed
+    pair `["portfolio_risk", "derivatives"]` advertises ZERO tools, and
+    nothing says so. An agent handed no tools reads as a broken install
+    rather than as two decisions disagreeing, which is the same failure the
+    MCP server already refuses at `--runtime`/`--categories`.
+
+    Deriving the scope from the routing decision removes the disagreement
+    instead of detecting it:
+
+        cats = route_request(request, api_key=key)
+        run_agent(..., categories=cats, registry=registry_for(cats))
+
+    The widening stays VISIBLE -- the result is a "+"-joined spec like
+    `"research+portfolio"`, so a reader sees that two runtimes were opened
+    and why. What it stops being is silent.
+
+    Returns `"analysis"` when nothing maps, which is the union view. That
+    is the same fail-open rule `parse_router_response` uses: a classifier
+    that returned something unusable should widen the surface, never empty
+    it.
+    """
+    from .runtimes import runtimes_for_categories
+
+    owners = runtimes_for_categories(categories)
+    return "+".join(owners) if owners else "analysis"
+
+
 def _assert_categories_cover_every_tool() -> None:
     """Sanity check run at import time: every TOOL_CATEGORY value must have
     a corresponding TOOL_CATEGORIES entry, or the router prompt would be

@@ -59,7 +59,17 @@ silent default it used to be.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from standard_quant_tools._jsonsafe import sanitize_for_json
 from standard_quant_tools.audit.dispatch import _run_and_record
@@ -81,6 +91,42 @@ RUNTIME_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "meta": ("discovery", "provenance"),
     "derivatives": ("derivatives",),
 }
+
+#: category -> the ONE runtime that owns it. Derived, never written out,
+#: because two lists of the same fact drift.
+CATEGORY_RUNTIME: Dict[str, str] = {
+    category: runtime
+    for runtime, categories in RUNTIME_CATEGORIES.items()
+    for category in categories
+}
+
+
+def runtimes_for_categories(categories: Iterable[str]) -> Tuple[str, ...]:
+    """
+    The runtimes that can actually EXECUTE a set of categories.
+
+    WHY THIS EXISTS. The router picks 1-2 categories; the runtime is what
+    enforces. Those are two different vocabularies for the same surface,
+    and 48 of the 55 category PAIRS the router can return span more than
+    one runtime -- so a caller who routes to categories and then scopes to
+    a hand-chosen runtime is usually asking for an intersection nobody
+    checked. Measured before this existed: `registry="research"` with the
+    routed pair `["portfolio_risk", "derivatives"]` yields ZERO tools, and
+    nothing said so. An agent with no tools looks like a broken install
+    rather than like two decisions disagreeing.
+
+    Deriving the scope from the routing decision removes the disagreement
+    instead of detecting it. `combine()` still makes the widening visible
+    in the code that asked for it -- this just stops the alternative being
+    a silent empty surface.
+
+    Unknown categories are ignored rather than raised on, matching
+    `parse_router_response`: routing fails OPEN, and a typo'd key from a
+    classifier should widen the scope, never empty it.
+    """
+    owners = {CATEGORY_RUNTIME[c] for c in categories if c in CATEGORY_RUNTIME}
+    return tuple(r for r in RUNTIME_CATEGORIES if r in owners)
+
 
 RUNTIME_LABELS: Dict[str, str] = {
     "research": "Research",
@@ -457,9 +503,11 @@ __all__ = [
     "FEATURE_LAB_RUNTIME",
     "MODELING_RUNTIME",
     "MOVED_FROM",
+    "CATEGORY_RUNTIME",
     "RUNTIME_CATEGORIES",
     "RUNTIME_DESCRIPTIONS",
     "RUNTIME_LABELS",
+    "runtimes_for_categories",
     "Runtime",
     "all_runtimes",
     "combine",

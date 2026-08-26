@@ -37,6 +37,12 @@ _LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 _DIVIDER = "═" * 70
 _THIN_DIVIDER = "─" * 70
 
+#: Wiring problems go through logging rather than the pretty console
+#: helpers: `_log` narrates the agent run, and a scope disagreement is
+#: not part of that narration -- it is something an operator needs to
+#: see even when the run itself reads fine.
+logger = logging.getLogger(__name__)
+
 _fmt_console = logging.Formatter("  %(levelname)-7s  %(name)s  %(message)s")
 _fmt_file = logging.Formatter(
     "%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s  %(message)s",
@@ -219,7 +225,38 @@ def _registry_tools(registry: str, categories=None):
     # "analysis" and every scoped runtime take a category filter. Inside a
     # runtime the filter can only narrow further -- a category that runtime
     # does not own contributes nothing rather than reaching past it.
-    return load_tools(categories=categories)
+    tools = load_tools(categories=categories)
+
+    # THE ROUTER SPEAKS CATEGORIES; THE RUNTIME ENFORCES. Those are two
+    # vocabularies for one surface, and 48 of the 55 category pairs the
+    # router can return span more than one runtime -- so a routed pair and
+    # a hand-named runtime regularly describe an intersection nobody
+    # checked. Measured: registry="research" with the routed pair
+    # ["portfolio_risk", "derivatives"] advertised ZERO tools, silently.
+    #
+    # An agent handed no tools reads as a broken install rather than as two
+    # decisions disagreeing, and it will then hallucinate, because it has
+    # been asked to work with nothing. So the narrowing is DROPPED rather
+    # than honoured when it empties the runtime.
+    #
+    # Failing open matches the rest of routing: parse_router_response
+    # returns every category when it cannot parse one, precisely because a
+    # router that wrongly excludes is worse than no router. Narrowing is a
+    # confidence optimization, never a gate.
+    #
+    # `router.registry_for(categories)` is the other half of this -- a
+    # caller who wants the SCOPE derived from the routing decision, rather
+    # than a fixed runtime narrowed by it, should use that instead.
+    if categories and not tools:
+        logger.warning(
+            "[router] categories %s name nothing in the %r runtime; "
+            "serving all of %r instead of an empty tool list",
+            list(categories),
+            registry,
+            registry,
+        )
+        return load_tools()
+    return tools
 
 
 def run_agent(
