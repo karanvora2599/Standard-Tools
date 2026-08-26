@@ -5196,3 +5196,110 @@ class CompareDataSourcesResult(BaseModel):
         "SDK not installed) and the reason. A comparison against a provider "
         "that never answered is not a comparison.",
     )
+
+
+# ── detect_liquidity_events ─────────────────────────────────────────────
+
+
+class ChannelResult(BaseModel):
+    channel: str
+    triggered: bool
+    severity: str = Field(
+        ..., description="'none', 'low', 'moderate', 'high' or 'very high'."
+    )
+    peak_statistic: float = Field(
+        ...,
+        description="Accumulated CUSUM statistic at its peak. UNBOUNDED and "
+        "in units of accumulated standardized deviations -- read `shift` "
+        "instead when judging size.",
+    )
+    direction: Optional[str] = None
+    first_crossing: Optional[str] = None
+    peak_at: Optional[str] = None
+    baseline_mean: Optional[float] = None
+    baseline_std: Optional[float] = None
+    mean_after_reference: Optional[float] = None
+    shift: Optional[float] = Field(
+        None,
+        description="Level change in the channel's OWN units -- bps for a "
+        "spread, shares for signed volume. The number a reader can check.",
+    )
+    shift_in_reference_sd: Optional[float] = None
+    degenerate_baseline: bool = Field(
+        False,
+        description="True when the reference window barely varied, so the "
+        "statistic is a ratio to a denominator near zero and can be "
+        "arbitrarily large. Judge the shock from `shift`, not `severity`.",
+    )
+    notes: List[str] = Field(default_factory=list)
+    n_observations: Optional[int] = None
+    n_reference: Optional[int] = None
+
+
+class UnavailableChannel(BaseModel):
+    channel: str
+    requires: str
+    reason: str
+
+
+class LiquidityEventsInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker to analyze.")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    channels: List[str] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Which channels to watch. Available from trades and quotes: "
+            "mid_return, spread, effective_spread, signed_volume, "
+            "trade_intensity, realized_vol. Declared but needing an order "
+            "book nobody serves yet: microprice, book_imbalance, "
+            "l5_imbalance, ofi, bid_depth, ask_depth, depth_slope, "
+            "cancel_rate. A channel that cannot run is REPORTED rather than "
+            "dropped."
+        ),
+    )
+    freq: str = Field(
+        "1min",
+        description="Bucket size for every channel, e.g. '30s', '1min', "
+        "'5min'. Smaller buckets detect faster and are noisier.",
+    )
+    threshold: float = Field(
+        9.0,
+        gt=0.0,
+        le=100.0,
+        description="CUSUM decision threshold, calibrated for a ~5% "
+        "false-alarm rate over the whole window. The textbook 5.0 is an "
+        "average RUN LENGTH and alarms on pure noise 36-82% of the time here, "
+        "worse with more data. Lower it deliberately to trade false alarms "
+        "for sensitivity.",
+    )
+    reference_fraction: float = Field(
+        0.3,
+        ge=0.05,
+        le=0.9,
+        description="Fraction of the window used to learn 'normal'. Must "
+        "exclude the event: a shock inside its own baseline inflates the "
+        "denominator it is measured against and hides itself.",
+    )
+    source: Optional[str] = Field(
+        None, description="Data provider. Defaults to the configured one."
+    )
+
+
+class LiquidityEventsResult(BaseModel):
+    symbol: str
+    channels_run: List[str]
+    n_triggered: int
+    worst_channel: Optional[str] = None
+    summary: List[str] = Field(
+        default_factory=list,
+        description="One line per triggered channel, in the plan's own form: "
+        "'spread shock: very high'.",
+    )
+    results: List[ChannelResult] = Field(default_factory=list)
+    unavailable: List[UnavailableChannel] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)

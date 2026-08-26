@@ -6,6 +6,7 @@ from standard_quant_tools.agent.models import (
     CapacityReportInput,
     EstimateTradeCostInput,
     LiquidityAnalysisInput,
+    LiquidityEventsInput,
     MicrostructureInput,
     PortfolioOptimizationInput,
     PositionSizerInput,
@@ -16,6 +17,7 @@ from standard_quant_tools.agent.models import (
 )
 
 from .tools import (
+    detect_liquidity_events,
     check_spread_proxy,
     estimate_trade_cost,
     get_capacity_report,
@@ -31,6 +33,11 @@ from .tools import (
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "detect_liquidity_events",
+        "Which part of the market changed, not merely that it did. Runs a CUSUM change detector across several channels — spread, effective spread, signed volume, trade intensity, realized volatility, mid return — and reports which broke and how badly. Price is the channel that moves LAST, so a report where the spread and flow fired while the mid did not is the ordinary sequence rather than a contradiction. Channels needing an order book are declared and REFUSED by name rather than dropped, because a missing row reads as a quiet channel. Needs a tick-capable provider.",
+        LiquidityEventsInput,
+    ),
     (
         "run_portfolio_optimization",
         "Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike get_portfolio_analysis, which only scores weights already chosen.",
@@ -95,6 +102,7 @@ TOOL_CATEGORY = {
     "get_liquidity_metrics": "portfolio_risk",
     "get_microstructure_metrics": "microstructure",
     "get_trade_profile": "microstructure",
+    "detect_liquidity_events": "microstructure",
     "check_spread_proxy": "microstructure",
     "estimate_trade_cost": "portfolio_risk",
 }

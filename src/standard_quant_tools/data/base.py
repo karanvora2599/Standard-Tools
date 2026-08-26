@@ -153,6 +153,54 @@ class DataProvider(ABC):
         """
         pass
 
+    #: Canonical column layout for a depth frame, so every consumer of an
+    #: order book agrees on what one looks like before any provider serves
+    #: one. Levels are numbered from the touch: bid_price_0 is the best bid.
+    ORDER_BOOK_COLUMNS = (
+        "timestamp",
+        "bid_price_{level}",
+        "bid_size_{level}",
+        "ask_price_{level}",
+        "ask_size_{level}",
+    )
+
+    def get_order_book(
+        self,
+        symbol: str,
+        start_date,
+        end_date,
+        levels: int = 5,
+        limit=None,
+    ):
+        """
+        L2 depth snapshots: price and resting size at each level, per update.
+
+        NOT IMPLEMENTED BY ANY PROVIDER IN THIS LIBRARY. The refusal is
+        explicit and by name, exactly as `get_trades` refuses, because the
+        alternative -- returning top-of-book twice and calling it depth --
+        would silently produce a book with one level and an imbalance of
+        zero, which reads as a balanced market rather than as missing data.
+
+        Declared before any implementation on purpose. The analysis that
+        consumes a book (microprice, order-flow imbalance, depth slope) can
+        be written and tested against synthetic books now, so that when a
+        source arrives the correctness-critical part already exists rather
+        than being invented under deadline. That is the same sequencing
+        `point_in_time.py` used for the availability join, and for the same
+        reason.
+
+        Columns, when a provider does implement it: `timestamp`, then
+        `bid_price_{i}` / `bid_size_{i}` / `ask_price_{i}` / `ask_size_{i}`
+        for i in 0..levels-1, level 0 being the touch.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not serve L2 order book data. No "
+            "provider in this library does yet. Call "
+            "describe_data_capabilities to see what this provider can "
+            "serve; do not substitute top-of-book quotes, which have one "
+            "level and would report every book as perfectly balanced."
+        )
+
     def get_temporal_contract(self, frame_kind: str = "bars"):
         """
         What this provider can say about WHEN its facts became knowable.

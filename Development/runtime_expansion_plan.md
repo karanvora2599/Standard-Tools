@@ -455,13 +455,20 @@ The proposed tool list is good and all twelve are worth building. The
 correction is what comes first: **the library has no way to represent an
 order book at all.**
 
-1. **An L2 contract on `DataProvider`** — `get_order_book` returning a typed
-   depth frame, defaulting to the same explicit refusal `get_trades` already
-   gives. `describe_data_capabilities` gains `order_book` and becomes the
-   gate.
-2. **One provider that implements it.** Until this exists, every tool below
-   is a tool that refuses.
-3. **Then the twelve tools**, and only then the split from `portfolio`.
+1. **An L2 contract on `DataProvider`. SHIPPED.** `get_order_book` refuses
+   explicitly and by name, warning against the substitution that would
+   otherwise happen quietly — top-of-book quotes passed off as depth, which
+   gives a one-level book with an imbalance of exactly zero and reads as a
+   perfectly balanced market rather than as missing data. The column layout
+   is declared so every consumer agrees what a book looks like before one
+   exists.
+2. **One provider that implements it. STILL BLOCKED**, and not by anything
+   in this repository. Until a source exists, every L2 tool is a tool that
+   refuses, so none were built.
+3. **The twelve tools and the split: NOT STARTED.** The split is doubly
+   blocked — `portfolio` is at 11 and the microstructure category is at 4,
+   so moving them out leaves 7 and fails the floor. Phase 5 first, as this
+   section already said.
 
 Target surface: `summarize_order_book`, `get_order_flow_imbalance`,
 `get_microprice`, `get_book_imbalance`, `get_depth_profile`,
@@ -499,6 +506,36 @@ Build it as **one tool over a declared channel set**, not one tool per
 channel — the same rule that keeps `STRATEGY_REGISTRY` from becoming twelve
 backtest tools. The channel list is data; the tool is
 `detect_liquidity_events(channels=[...])`.
+
+> **SHIPPED, and it did not need L2 to be useful.** Six of the fourteen
+> channels — `mid_return`, `spread`, `effective_spread`, `signed_volume`,
+> `trade_intensity`, `realized_vol` — need only trades and quotes, which
+> providers here already serve. The eight that need a book are DECLARED and
+> refuse by name rather than being omitted, because a missing row in a
+> report reads as a quiet channel.
+>
+> **Three bugs were found by running it on data with no shock in it**, and
+> every one would have shipped as a confident alarm rather than an error:
+>
+> 1. **`mid_price` fired on 8 of 8 pure random walks.** A CUSUM over a
+>    price LEVEL accumulates the walk itself, because a level is not
+>    stationary. The channel is now `mid_return`; `mid_price` stays in the
+>    table as an explicitly refused channel so the trap is visible rather
+>    than merely absent.
+> 2. **A frozen channel produced a peak statistic of 286,431** while moving
+>    from 1.00 bps to 1.02 bps. The reference window was nearly constant, so
+>    the denominator was near zero. Now labelled `degenerate_baseline`, with
+>    the shift reported in the channel's own units — the detection is
+>    labelled, not suppressed, because a calm period before a real shock is
+>    the case this tool is for.
+> 3. **The textbook threshold of 5.0 alarmed on pure noise 36% of the time
+>    at n=120 and 82% at n=1000** — worse with more data, which is the tell.
+>    CUSUM's design figure is an average RUN LENGTH, and "did anything
+>    happen anywhere in this window" is a different question. Calibrated to
+>    ~5%: 8.6–9.3 across 42 to 1050 observations, essentially FLAT, because
+>    the maximum of the reflected random walk has a steep exponential tail.
+>    So the fix is a better constant (9.0) rather than the log-scaling
+>    formula I expected to need.
 
 ### Phase 4 — Modeling depth
 

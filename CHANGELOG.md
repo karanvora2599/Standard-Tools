@@ -9,6 +9,56 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — `detect_liquidity_events`: which part of the market changed
+
+"NVDA moved 1.4 sigma" describes one channel, and it is the channel that
+moves LAST. This runs a CUSUM change detector across several channels and
+reports which broke:
+
+```
+spread shock            very high
+effective_spread shock  very high
+signed_volume shock     very high
+(mid_return did not trigger)
+```
+
+One tool over a declared channel set, not one tool per channel. Six channels
+need only trades and quotes; the eight needing an order book are declared
+and refuse by name rather than being omitted — a missing row in a report
+reads as a quiet channel.
+
+**Three bugs found by running it on data with no shock in it**, each of
+which would have shipped as a confident alarm:
+
+- `mid_price` fired on 8 of 8 pure random walks. A CUSUM over a price LEVEL
+  accumulates the walk itself. The channel is now `mid_return`, and
+  `mid_price` stays as an explicitly refused channel so the trap is visible.
+- A frozen channel produced a peak statistic of 286,431 while moving from
+  1.00 bps to 1.02 bps — a denominator near zero. Now flagged
+  `degenerate_baseline`, with the shift reported in the channel's own units.
+  Labelled rather than suppressed: a calm period before a real shock is the
+  case the tool is for.
+- The textbook threshold of 5.0 alarmed on pure noise 36% of the time at
+  n=120 and **82% at n=1000** — worse with more data. Calibrated to ~5%
+  gives 8.6–9.3 across 42 to 1050 observations, essentially flat, so the fix
+  is a better constant (9.0) rather than the log-scaling formula expected.
+  False alarms now measure 4–6%, and a real shock still clears it.
+
+### Added — the L2 order-book contract
+
+`DataProvider.get_order_book` refuses explicitly and by name, and warns
+against the substitution that would otherwise happen quietly: top-of-book
+quotes passed off as depth give a one-level book with an imbalance of
+exactly zero, which reads as a perfectly balanced market rather than as
+missing data. The column layout is declared so every consumer agrees what a
+book looks like before one exists — the same sequencing the point-in-time
+join used, and for the same reason.
+
+No provider implements it. The twelve L2 tools in the expansion plan were
+**not** built, because until a source exists each one is a tool that
+refuses.
+
+
 ### Added — `compare_data_sources`, and the three verdicts it separates
 
 Fetches the same fundamentals from two providers and reports where they

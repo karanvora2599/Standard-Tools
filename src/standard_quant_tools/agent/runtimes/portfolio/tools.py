@@ -19,6 +19,10 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.agent.models import (
+    ChannelResult,
+    LiquidityEventsInput,
+    LiquidityEventsResult,
+    UnavailableChannel,
     CapacityReportInput,
     CapacityReportResult,
     EstimateTradeCostInput,
@@ -1243,4 +1247,81 @@ def estimate_trade_cost(
         total_bps=round(total_bps, 4),
         breakeven_move_bps=round(total_bps * 2.0, 4),
         notes=notes,
+    )
+
+
+def detect_liquidity_events(
+    input_data: LiquidityEventsInput,
+) -> LiquidityEventsResult:
+    """
+    Which part of the market changed, not merely that it did.
+
+    "NVDA moved 1.4 sigma" describes one channel — price — and it is the
+    channel that changes LAST. A liquidity event usually shows up first in
+    the spread, in one-sided flow, or in depth leaving one side of the book,
+    and by the time the mid has moved the interesting part is over. This
+    runs a CUSUM change detector across several channels and reports which
+    of them broke:
+
+        spread shock            very high
+        effective_spread shock  very high
+        signed_volume shock     high
+        (mid_return did not trigger)
+
+    A channel that cannot be computed is REPORTED with what it needs, never
+    silently dropped — dropping it would let a caller ask for order-flow
+    imbalance, get a clean report with no OFI row, and conclude the flow was
+    balanced.
+
+    Read `shift` rather than `peak_statistic` when judging size. The
+    statistic is accumulated and unbounded; the shift is in the channel's
+    own units. When `degenerate_baseline` is set, the reference window
+    barely varied and the statistic is a ratio to a denominator near zero —
+    the shift is the only number worth reading.
+    """
+    from standard_quant_tools.analysis.liquidity_events import (
+        detect_liquidity_events as _detect,
+    )
+    from standard_quant_tools.data.factory import DataFactory
+
+    logger.debug(
+        "[detect_liquidity_events] %s channels=%s",
+        input_data.symbol,
+        input_data.channels,
+    )
+    provider = DataFactory.get_provider(input_data.source or "yfinance")
+
+    trades = quotes = None
+    fetch_notes: List[str] = []
+    for name, method in (("trades", "get_trades"), ("quotes", "get_quotes")):
+        try:
+            frame = getattr(provider, method)(
+                input_data.symbol, input_data.start_date, input_data.end_date
+            )
+            if name == "trades":
+                trades = frame
+            else:
+                quotes = frame
+        except NotImplementedError as exc:
+            fetch_notes.append(f"{name}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            fetch_notes.append(f"{name}: {exc}")
+
+    report = _detect(
+        channels=input_data.channels,
+        trades=trades,
+        quotes=quotes,
+        freq=input_data.freq,
+        threshold=input_data.threshold,
+        reference_fraction=input_data.reference_fraction,
+    )
+    return LiquidityEventsResult(
+        symbol=input_data.symbol,
+        channels_run=report["channels_run"],
+        n_triggered=report["n_triggered"],
+        worst_channel=report["worst_channel"],
+        summary=report["summary"],
+        results=[ChannelResult(**r) for r in report["results"]],
+        unavailable=[UnavailableChannel(**u) for u in report["unavailable"]],
+        warnings=report["warnings"] + fetch_notes,
     )
