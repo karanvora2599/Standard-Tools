@@ -45,6 +45,14 @@ from .diagnostic_tools import (  # noqa: F401
     test_autocorrelation,
     test_structural_break,
 )
+from .inference_tools import (  # noqa: F401
+    INFERENCE_TOOL_DEFS,
+    INFERENCE_TOOL_DISPATCH,
+    compare_distributions,
+    decompose_returns,
+    get_bootstrap_interval,
+    get_correlation_stability,
+)
 from .tools import (
     analyze_stock_risk,
     analyze_tail_dependence,
@@ -222,6 +230,11 @@ TOOL_DEFS = [
 # unit and cannot half-register.
 TOOL_DEFS = TOOL_DEFS + DIAGNOSTIC_TOOL_DEFS
 
+# The quant_research tools declared in inference_tools.py,
+# concatenated rather than pasted so the group stays readable as a
+# unit and cannot half-register.
+TOOL_DEFS = TOOL_DEFS + INFERENCE_TOOL_DEFS
+
 TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS}
 
 #: This runtime's slice of the library-wide routing taxonomy.
@@ -258,7 +271,14 @@ TOOL_CATEGORY = {
 TOOL_DISPATCH.update(DIAGNOSTIC_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "quant_research" for name in DIAGNOSTIC_TOOL_DISPATCH})
 
+TOOL_DISPATCH.update(INFERENCE_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "quant_research" for name in INFERENCE_TOOL_DISPATCH})
+
 __all__ = [
+    "get_bootstrap_interval",
+    "compare_distributions",
+    "get_correlation_stability",
+    "decompose_returns",
     "test_autocorrelation",
     "run_seasonality_analysis",
     "get_entropy_measures",

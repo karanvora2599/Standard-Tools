@@ -28,6 +28,13 @@ from standard_quant_tools.agent.models import (
     VerifyAuditIntegrityInput,
 )
 
+from .scope_tools import (  # noqa: F401
+    SCOPE_TOOL_DEFS,
+    SCOPE_TOOL_DISPATCH,
+    compare_artifacts,
+    describe_runtime,
+    estimate_tool_cost,
+)
 from .tools import (
     compare_data_sources,
     compare_decisions,
@@ -132,6 +139,11 @@ TOOL_DEFS = [
     ),
 ]
 
+# The discovery tools declared in scope_tools.py,
+# concatenated rather than pasted so the group stays readable as a
+# unit and cannot half-register.
+TOOL_DEFS = TOOL_DEFS + SCOPE_TOOL_DEFS
+
 TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS}
 
 #: This runtime's slice of the library-wide routing taxonomy.
@@ -154,7 +166,13 @@ TOOL_CATEGORY = {
     "compare_data_sources": "discovery",
 }
 
+TOOL_DISPATCH.update(SCOPE_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "discovery" for name in SCOPE_TOOL_DISPATCH})
+
 __all__ = [
+    "estimate_tool_cost",
+    "describe_runtime",
+    "compare_artifacts",
     "describe_tool",
     "validate_tool_call",
     "describe_reference",
