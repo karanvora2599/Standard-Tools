@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 175 below.
+advertises 155 of the 178 below.
 
 
 ## The runtimes
@@ -38,11 +38,11 @@ advertises 155 of the 175 below.
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `modeling` | 17 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `microstructure` | 15 | 19 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `data` | 13 | 12 KB | *(one surface)* | — |
-| `microstructure` | 12 | 15 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 11 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **175** | | | |
+| **Total** | **178** | | | |
 
 ---
 
@@ -979,6 +979,115 @@ Check point-in-time records BEFORE joining them onto anything. The error worth c
 
 ---
 
+## `microstructure` — Microstructure
+
+What the market will charge you to trade, at two data fidelities. Four tools MEASURE spreads and order flow from ticks and refuse without a tick feed; seven ESTIMATE the same quantities from OHLCV, which is the normal case, each saying what it is a proxy for and how it fails.
+
+#### `check_spread_proxy`
+
+Measures the spread from ticks and compares it against the OHLCV estimate, so the proxy's error on THIS name is a number rather than an assumption. The Corwin-Schultz estimate is what a bar-only session would have used.
+
+**Required:** `symbol`, `start`, `end`, `bar_start_date`, `bar_end_date`  
+**Optional:** `window`, `limit`, `source`
+
+#### `classify_trade_direction`
+
+Sign a tick tape buyer- or seller-initiated and publish the signed series, which is what an event study, a CUSUM detector or a model consumes -- get_microstructure_metrics computes this internally and returns only averages. WITH a quote panel it is Lee-Ready, matching each trade against the quote PRECEDING it; without one it falls back to the tick rule, which agrees about 85% of the time on a liquid name and worse on an illiquid one. The result says which was used, because every downstream estimate inherits that error.
+
+**Required:** `tick_tape_ref`, `run_id`, `name`  
+**Optional:** `quote_panel_ref`
+
+#### `detect_liquidity_events`
+
+CUSUM change detection over tick-derived liquidity channels -- when the spread, depth, trade intensity or signed flow regime CHANGED, rather than what it is on average. Declares every channel it knows about, including the ones this feed cannot supply.
+
+**Required:** `symbol`, `start_date`, `end_date`, `channels`  
+**Optional:** `freq`, `threshold`, `reference_fraction`, `source`
+
+#### `estimate_corwin_schultz_spread`
+
+The spread implied by the HIGH-LOW RANGE (Corwin-Schultz 2012). A day's range contains both volatility and the spread; volatility scales with the square root of time and the spread does not, so one- and two-day ranges identify them separately with no quote data at all. It produces NEGATIVE estimates on 10-30% of days as a sampling artefact, floored at zero as the authors recommend -- read negative_fraction, because above about a third the flooring turns a symmetric error into a one-sided bias and the average is noise. Measured: a planted 100 bps spread came back at 103 bps, a planted 20 bps at 56 bps with 44% negative.
+
+**Required:** `high`, `low`
+
+#### `estimate_kyle_lambda`
+
+Market DEPTH: the price impact of a unit of signed order flow, from a regression of price change on signed volume. The one measure here with a direct trading interpretation -- multiply by the size you intend to trade for an estimate of the impact you will cause. The signing comes from the TICK RULE rather than from matching trades against quotes, which is right about 85% of the time on liquid names and worse on illiquid ones; misclassification attenuates the slope toward zero, so this understates impact and understates it most exactly where impact is largest. Check r_squared before sizing anything off it.
+
+**Required:** `close`, `volume`  
+**Optional:** `window`
+
+#### `estimate_roll_spread`
+
+The effective spread implied by BID-ASK BOUNCE, from trade prices alone (Roll 1984). Consecutive price changes mean-revert when trades arrive randomly at bid and ask, and the size of that reversal is the spread. IT RETURNS A SPREAD WHEN THERE IS NONE: on a simulated walk with a spread of exactly zero it produced 0.098 on a $100 stock, because the lag-1 autocovariance's standard error swamps the signal whenever the spread is small against volatility, and taking a root only when the covariance lands negative discards the other half of that noise. Read `significant` and `smallest_detectable_spread` before the estimate. On a trending series it returns null rather than zero, because 'could not measure' and 'was zero' are different facts.
+
+**Required:** `prices`  
+**Optional:** `window`
+
+#### `estimate_vpin`
+
+Flow one-sidedness measured in VOLUME time rather than clock time (Easley, Lopez de Prado and O'Hara 2012) -- information arrives with volume, so the series is cut into equal-volume buckets. TWO HONEST CAVEATS. This is built from daily bars with tick-rule signing; the original is a trade-level measure where each bucket holds hundreds of trades, so what comes back is a defensible series of one-sidedness and not the VPIN of the paper. And VPIN is contested: Andersen and Bondarenko (2014) argue it is largely a transformation of volatility. Calling one-sided flow 'informed trading' is a model assumption, not a measurement.
+
+**Required:** `close`, `volume`  
+**Optional:** `n_buckets`, `window`
+
+#### `get_amihud_illiquidity`
+
+How far the price moves per dollar traded (Amihud 2002) -- the most widely used liquidity proxy in the literature, because it needs nothing but daily bars. THE RAW NUMBER IS UNINTERPRETABLE: its units are return-per-dollar, so it scales inversely with dollar volume and a large cap's reading is orders of magnitude below a microcap's with neither meaning anything alone. Read the percentile against this name's own history. It is NOT a spread -- it conflates spread, book depth and the information content of trades, and a genuinely volatile stock scores as illiquid even with a deep book.
+
+**Required:** `close`, `volume`  
+**Optional:** `window`
+
+#### `get_effective_spread_series`
+
+What each trade ACTUALLY paid against the prevailing midpoint, per trade, published as a reference. Pass realized_horizon_seconds to split it into the REALIZED half the liquidity provider kept and the IMPACT half the trade moved -- those imply opposite remedies, impact says trade smaller and realized says trade somewhere else, and without the split neither is visible.
+
+**Required:** `tick_tape_ref`, `quote_panel_ref`, `run_id`, `name`  
+**Optional:** `realized_horizon_seconds`
+
+#### `get_implementation_shortfall`
+
+What an execution ACTUALLY cost, decomposed after Perold. Every other cost tool here is a model run before the fact -- estimate_trade_cost predicts, get_capacity_report bounds, plan_rebalance schedules -- and this is the measurement those models should be checked against. Splits the gap between the decision price and what was achieved into DELAY (the price moved before the order reached the market, a workflow problem no algorithm recovers, and frequently the largest term), IMPACT (the part an algorithm controls), OPPORTUNITY (the shares never filled -- an algorithm that beats its benchmark by not completing has moved its cost here rather than saved it), and FEES. Positive is a cost.
+
+**Required:** `decision_price`, `arrival_price`, `fills`, `target_quantity`, `final_price`  
+**Optional:** `side`
+
+#### `get_intraday_volume_profile`
+
+How volume distributes across the trading day, and what that implies for a participation schedule. The U-shape is the fact every execution schedule is built on: volume concentrates at the open and close with a midday trough routinely a third of the opening bucket, so a schedule spread evenly across the CLOCK over-participates at lunch -- paying impact into a thin book -- and under-participates at the close, missing the cheapest liquidity of the day. Needs INTRADAY bars with timestamps; daily bars are refused rather than aggregated into a meaningless single bucket.
+
+**Required:** `volume`, `timestamps`  
+**Optional:** `n_buckets`
+
+#### `get_microstructure_metrics`
+
+Quoted and effective spread MEASURED from trades and quotes, with the effective spread split into the realized (liquidity-provider) and impact (price-move) halves, plus Lee-Ready signed order flow. Needs a tick feed and refuses without one rather than approximating from bars.
+
+**Required:** `symbol`, `start`, `end`  
+**Optional:** `realized_horizon_seconds`, `limit`, `source`
+
+#### `get_order_flow_imbalance`
+
+Signed volume imbalance from bars, with its own predictive test attached rather than presented as a signal to be trusted. `persistence` is measured on NON-OVERLAPPING windows: a rolling sum at window=5 shares four of five observations with the previous point, so its raw autocorrelation is about +0.76 on PURE NOISE (and +0.89 at window 10, +0.96 at 21, tracking 1-1/w). That number describes the window, not the flow, and it is returned separately as `overlapping_persistence` so the difference is visible.
+
+**Required:** `close`, `volume`  
+**Optional:** `window`
+
+#### `get_quoted_spread_series`
+
+Spread and imbalance PER QUOTE rather than averaged into one number, published as a reference. QUOTED is what crossing would cost at an instant and is NOT what trades paid -- the effective spread is the one a backtest should be charging. Top of book only: depth and queue position are not in this data.
+
+**Required:** `quote_panel_ref`, `run_id`, `name`
+
+#### `get_trade_profile`
+
+How volume distributes across trade sizes and times of day, from tick data. Answers whether the liquidity is in a few large prints or many small ones, which decides whether a large order can hide.
+
+**Required:** `symbol`, `start`, `end`  
+**Optional:** `size_buckets`, `intraday_freq`, `limit`, `source`
+
+---
+
 ## `data` — Data
 
 Get the data and publish it as an `sqt://` reference every other runtime can read: OHLCV for one name or a whole universe, return panels, tick tapes and quote panels, provider guarantees, temporal contracts, and bundles that pair frames with what their sources promise. Fetches; does not analyze.
@@ -1069,95 +1178,6 @@ Whether a bundle is safe to model on, returned as a verdict with the blocking re
 Check ratios you already hold -- from a vendor, a spreadsheet, another system -- for values that are implausible on their face, without fetching anything. The same check fetch_financial_ratios applies, available for data this library has no provider for.
 
 **Required:** `ratios`
-
----
-
-## `microstructure` — Microstructure
-
-What the market will charge you to trade, at two data fidelities. Four tools MEASURE spreads and order flow from ticks and refuse without a tick feed; seven ESTIMATE the same quantities from OHLCV, which is the normal case, each saying what it is a proxy for and how it fails.
-
-#### `check_spread_proxy`
-
-Measures the spread from ticks and compares it against the OHLCV estimate, so the proxy's error on THIS name is a number rather than an assumption. The Corwin-Schultz estimate is what a bar-only session would have used.
-
-**Required:** `symbol`, `start`, `end`, `bar_start_date`, `bar_end_date`  
-**Optional:** `window`, `limit`, `source`
-
-#### `detect_liquidity_events`
-
-CUSUM change detection over tick-derived liquidity channels -- when the spread, depth, trade intensity or signed flow regime CHANGED, rather than what it is on average. Declares every channel it knows about, including the ones this feed cannot supply.
-
-**Required:** `symbol`, `start_date`, `end_date`, `channels`  
-**Optional:** `freq`, `threshold`, `reference_fraction`, `source`
-
-#### `estimate_corwin_schultz_spread`
-
-The spread implied by the HIGH-LOW RANGE (Corwin-Schultz 2012). A day's range contains both volatility and the spread; volatility scales with the square root of time and the spread does not, so one- and two-day ranges identify them separately with no quote data at all. It produces NEGATIVE estimates on 10-30% of days as a sampling artefact, floored at zero as the authors recommend -- read negative_fraction, because above about a third the flooring turns a symmetric error into a one-sided bias and the average is noise. Measured: a planted 100 bps spread came back at 103 bps, a planted 20 bps at 56 bps with 44% negative.
-
-**Required:** `high`, `low`
-
-#### `estimate_kyle_lambda`
-
-Market DEPTH: the price impact of a unit of signed order flow, from a regression of price change on signed volume. The one measure here with a direct trading interpretation -- multiply by the size you intend to trade for an estimate of the impact you will cause. The signing comes from the TICK RULE rather than from matching trades against quotes, which is right about 85% of the time on liquid names and worse on illiquid ones; misclassification attenuates the slope toward zero, so this understates impact and understates it most exactly where impact is largest. Check r_squared before sizing anything off it.
-
-**Required:** `close`, `volume`  
-**Optional:** `window`
-
-#### `estimate_roll_spread`
-
-The effective spread implied by BID-ASK BOUNCE, from trade prices alone (Roll 1984). Consecutive price changes mean-revert when trades arrive randomly at bid and ask, and the size of that reversal is the spread. IT RETURNS A SPREAD WHEN THERE IS NONE: on a simulated walk with a spread of exactly zero it produced 0.098 on a $100 stock, because the lag-1 autocovariance's standard error swamps the signal whenever the spread is small against volatility, and taking a root only when the covariance lands negative discards the other half of that noise. Read `significant` and `smallest_detectable_spread` before the estimate. On a trending series it returns null rather than zero, because 'could not measure' and 'was zero' are different facts.
-
-**Required:** `prices`  
-**Optional:** `window`
-
-#### `estimate_vpin`
-
-Flow one-sidedness measured in VOLUME time rather than clock time (Easley, Lopez de Prado and O'Hara 2012) -- information arrives with volume, so the series is cut into equal-volume buckets. TWO HONEST CAVEATS. This is built from daily bars with tick-rule signing; the original is a trade-level measure where each bucket holds hundreds of trades, so what comes back is a defensible series of one-sidedness and not the VPIN of the paper. And VPIN is contested: Andersen and Bondarenko (2014) argue it is largely a transformation of volatility. Calling one-sided flow 'informed trading' is a model assumption, not a measurement.
-
-**Required:** `close`, `volume`  
-**Optional:** `n_buckets`, `window`
-
-#### `get_amihud_illiquidity`
-
-How far the price moves per dollar traded (Amihud 2002) -- the most widely used liquidity proxy in the literature, because it needs nothing but daily bars. THE RAW NUMBER IS UNINTERPRETABLE: its units are return-per-dollar, so it scales inversely with dollar volume and a large cap's reading is orders of magnitude below a microcap's with neither meaning anything alone. Read the percentile against this name's own history. It is NOT a spread -- it conflates spread, book depth and the information content of trades, and a genuinely volatile stock scores as illiquid even with a deep book.
-
-**Required:** `close`, `volume`  
-**Optional:** `window`
-
-#### `get_implementation_shortfall`
-
-What an execution ACTUALLY cost, decomposed after Perold. Every other cost tool here is a model run before the fact -- estimate_trade_cost predicts, get_capacity_report bounds, plan_rebalance schedules -- and this is the measurement those models should be checked against. Splits the gap between the decision price and what was achieved into DELAY (the price moved before the order reached the market, a workflow problem no algorithm recovers, and frequently the largest term), IMPACT (the part an algorithm controls), OPPORTUNITY (the shares never filled -- an algorithm that beats its benchmark by not completing has moved its cost here rather than saved it), and FEES. Positive is a cost.
-
-**Required:** `decision_price`, `arrival_price`, `fills`, `target_quantity`, `final_price`  
-**Optional:** `side`
-
-#### `get_intraday_volume_profile`
-
-How volume distributes across the trading day, and what that implies for a participation schedule. The U-shape is the fact every execution schedule is built on: volume concentrates at the open and close with a midday trough routinely a third of the opening bucket, so a schedule spread evenly across the CLOCK over-participates at lunch -- paying impact into a thin book -- and under-participates at the close, missing the cheapest liquidity of the day. Needs INTRADAY bars with timestamps; daily bars are refused rather than aggregated into a meaningless single bucket.
-
-**Required:** `volume`, `timestamps`  
-**Optional:** `n_buckets`
-
-#### `get_microstructure_metrics`
-
-Quoted and effective spread MEASURED from trades and quotes, with the effective spread split into the realized (liquidity-provider) and impact (price-move) halves, plus Lee-Ready signed order flow. Needs a tick feed and refuses without one rather than approximating from bars.
-
-**Required:** `symbol`, `start`, `end`  
-**Optional:** `realized_horizon_seconds`, `limit`, `source`
-
-#### `get_order_flow_imbalance`
-
-Signed volume imbalance from bars, with its own predictive test attached rather than presented as a signal to be trusted. `persistence` is measured on NON-OVERLAPPING windows: a rolling sum at window=5 shares four of five observations with the previous point, so its raw autocorrelation is about +0.76 on PURE NOISE (and +0.89 at window 10, +0.96 at 21, tracking 1-1/w). That number describes the window, not the flow, and it is returned separately as `overlapping_persistence` so the difference is visible.
-
-**Required:** `close`, `volume`  
-**Optional:** `window`
-
-#### `get_trade_profile`
-
-How volume distributes across trade sizes and times of day, from tick data. Answers whether the liquidity is in a few large prints or many small ones, which decides whether a large order can hide.
-
-**Required:** `symbol`, `start`, `end`  
-**Optional:** `size_buckets`, `intraday_freq`, `limit`, `source`
 
 ---
 

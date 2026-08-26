@@ -100,17 +100,20 @@ KINDS: Dict[str, Dict[str, str]] = {
     "tick_tape": {
         "storage": "frame",
         "description": (
-            "Individual trades: timestamp, price and size. What the tick "
-            "microstructure tools measure from, and what no OHLCV row can "
-            "be turned back into."
+            "Individual trades, timestamp-indexed, with `price` and `size` "
+            "columns -- those exact names, because the microstructure tools "
+            "refuse without them. What the tick tools measure from, and "
+            "what no OHLCV row can be turned back into."
         ),
     },
     "quote_panel": {
         "storage": "frame",
         "description": (
-            "Top-of-book quotes: bid and ask price and size, by timestamp. "
-            "Top of book only -- no shipped provider exposes depth, so "
-            "queue position and resting size are not in here."
+            "Top-of-book quotes, timestamp-indexed, with `bid_price` and "
+            "`ask_price` columns -- those exact names, not `bid`/`ask`, "
+            "because the microstructure tools refuse without them. Top of "
+            "book only: no shipped provider exposes depth, so queue "
+            "position and resting size are not in here."
         ),
     },
     "data_bundle": {

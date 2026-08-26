@@ -46,7 +46,7 @@ shipped, generalized to the rest of the surface.
 | `meta` | 19 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 18 | `portfolio_risk` | Turn a view into a position and price what it costs. |
 | `modeling` | 17 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
-| `microstructure` | 12 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
+| `microstructure` | 15 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
 | `feature_lab` | 9 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
 
@@ -155,7 +155,7 @@ a changelog nobody reads, embedded in an error message everybody does.
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
 decision, though the budget forced it: at roughly 1,615 bytes per tool over
-the wire the session ceiling buys about 111 tools and the library has 175,
+the wire the session ceiling buys about 111 tools and the library has 178,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 
@@ -311,7 +311,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-175 schemas — which is exactly what the MCP category budget exists to avoid,
+178 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.

@@ -40,7 +40,7 @@ Everything above concerns the 132-tool analysis and backtest surface. There
 are two more: `standard_quant_tools.modeling.agent`, 16 tools, and the
 9-tool `feature_lab` runtime — neither of which the library merges into the
 first, see [15_modeling.md](15_modeling.md) for why. 132 + 16 + 9 is the
-175-tool whole surface. The example implementations keep the same
+178-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 
 | | Analysis registry | Modeling registry |
@@ -122,7 +122,7 @@ one of 11 category keys. Each category belongs to exactly one runtime.
 | `backtest_validation` | 20 | `backtest` | Optimize/validate/diagnose — grid search, walk-forward, regime-adaptive, robustness, Monte Carlo, cost sweep, drawdown table, and the overfitting layer (deflated Sharpe, PBO, purged combinatorial CV, reality check) |
 | `custom_signal` | 2 | `backtest` | Backtest a signal computed outside this library |
 | `portfolio_risk` | 17 | `portfolio` | Risk decomposition, portfolio construction/optimization, sizing, capacity, stress testing, liquidity, trade cost |
-| `microstructure` | 12 | `microstructure` | Spreads MEASURED from tick data, the eight bar-based estimators for when there is no tick feed, and a check of the OHLCV proxies against them |
+| `microstructure` | 15 | `microstructure` | Spreads MEASURED from tick data, the eight bar-based estimators for when there is no tick feed, and a check of the OHLCV proxies against them |
 | `derivatives` | 12 | `derivatives` | Option pricing and second-order greeks, multi-leg payoffs, smile/term-structure fitting, put-call parity, delta-hedge simulation |
 | `discovery` | 13 | `meta` | What the library accepts and what the provider can serve; describe or validate a tool call before making it; the handoff reference map |
 | `provenance` | 6 | `meta` | Read and verify the decision log. Read-only by design |

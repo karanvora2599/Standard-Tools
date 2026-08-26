@@ -1,7 +1,8 @@
 # Microstructure
 
-Twelve tools for what the market will charge you to trade, in two halves
-that answer the same question at two data fidelities.
+Fifteen tools for what the market will charge you to trade, in two halves
+that answer the same question at two data fidelities — plus three that
+publish the intermediate series the summary tools used to discard.
 
 **Four MEASURE** from trades and quotes, and refuse to run without a tick
 feed. **Eight ESTIMATE** the same quantities from OHLCV bars — which is the
@@ -207,10 +208,48 @@ Measure the spread you will actually pay. Every estimator here produces a
 historical average under a model. The cost at the moment you send an order
 depends on the book at that moment, and no daily bar contains it.
 
+## The series the summary tools used to throw away
+
+`get_microstructure_metrics` signs the tape, computes a spread per trade,
+splits the effective spread into its realized and impact halves — and then
+returns averages. The per-trade and per-quote series it built along the way
+is what an event study, a CUSUM detector or a model's features would
+actually consume, and it died inside the call.
+
+Three tools publish it instead. They became worth adding only once a tape
+could be fetched and handed around, which is what `fetch_tick_tape` in the
+`data` runtime now does:
+
+```
+fetch_tick_tape  ──┐
+                   ├──> classify_trade_direction ──> sqt://tick_tape/...
+fetch_quote_panel ─┘                                        │
+                                                            v
+                                              event study / CUSUM /
+                                              a model's features
+```
+
+**`classify_trade_direction` says which rule it used, and that matters
+more than it sounds.** With a quote panel it is Lee-Ready, matching each
+trade against the quote *preceding* it. Without one it falls back to the
+tick rule, which agrees with the true classification about 85% of the time
+on a liquid name and materially worse on an illiquid one. Every downstream
+estimate inherits that error, and misclassification attenuates toward zero
+— so the weaker rule makes an edge look smaller, not noisier.
+
+**`get_effective_spread_series` without `realized_horizon_seconds` gives
+you one number where there are two.** The realized half is what the
+liquidity provider kept; the impact half is what the trade moved. They
+imply opposite remedies — impact says trade smaller, realized says trade
+somewhere else — and unsplit, neither is visible.
+
 ## The tools
 
 | Tool | Needs ticks | Answers |
 |---|:--:|---|
+| `classify_trade_direction` | yes | Sign the tape, Lee-Ready or tick rule, published |
+| `get_quoted_spread_series` | yes | Spread and imbalance per quote, not averaged |
+| `get_effective_spread_series` | yes | What each trade paid, optionally split |
 | `get_microstructure_metrics` | yes | Quoted and effective spread, realized/impact split, Lee-Ready signed flow |
 | `get_trade_profile` | yes | Volume by trade size and time of day |
 | `detect_liquidity_events` | yes | When a liquidity regime *changed*, by CUSUM |
