@@ -140,7 +140,7 @@ if __name__ == "__main__":
 
     _header("Agentic Model Builder — GPT-4o mini")
     _log("Log file", str(log_file))
-    _log("Registry", "modeling (8 tools)")
+    _log("Registry", "modeling (16 tools)")
     _log("Universe", f"{len(UNIVERSE)} tickers")
     _log("Period", f"{START_DATE} → {END_DATE}")
     _log("Horizon", f"{HORIZON} bars")

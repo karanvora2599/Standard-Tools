@@ -70,7 +70,7 @@ month. Total variance adds across time, so the second month is offered at
 whatever makes the arithmetic work:
 
 ```
-√((0.28² × 60 − 0.25² × 30) / 30) = 0.306
+√((0.28² × 60 − 0.25² × 30) / 30) = 0.307
 ```
 
 `analyze_vol_term_structure` returns that number. Trading off the quoted

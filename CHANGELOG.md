@@ -3933,7 +3933,7 @@ published forms and are correct as written.
   Pre-existing audit directories need no migration — old day files stay
   independently valid, and cross-day linkage begins transparently at the
   next new-day write. See
-  [Documentation/10_auditability.md](Documentation/10_auditability.md#what-this-can-and-cannot-certify)
+  [Documentation/10_auditability.md](Documentation/10_auditability.md#auditability)
   for what this does and does not certify — it is a tamper-*detection*
   control, not tamper prevention or regulatory certification by itself.
 - `data.bloomberg_provider.BloombergProvider`: a second `DataProvider`

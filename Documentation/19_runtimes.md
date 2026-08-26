@@ -60,10 +60,9 @@ hallucination.
 The grouping is deliberately coarse. A runtime holding two tools is
 overhead rather than isolation, so nothing has fewer than eight and a test
 pins that — on both sides of a split, since a donor is still a runtime
-afterwards. `microstructure` sits with `portfolio_risk` because
-`get_liquidity_metrics` and `check_spread_proxy` are the same question at
-two data fidelities; `screener` sits with `analysis` because you screen in
-order to analyze.
+afterwards. `screener` sits with `analysis` because you screen in order to
+analyze; `discovery` sits with `provenance` because both ask about the
+session rather than about a market.
 
 `feature_lab` and `modeling` both live under `modeling/agent`, which is
 where the analysis they call lives. The runtime boundary and the package
@@ -75,7 +74,7 @@ any model exists.
 ### Runtime is not category
 
 `TOOL_CATEGORY` is unchanged and still drives `agent/router.py`, the MCP
-`--categories` flag, and the twelve workers in `Multi_Agent_Implementation`.
+`--categories` flag, and the fourteen workers in `Multi_Agent_Implementation`.
 
 - A **category** hints at which tools suit a request.
 - A **runtime** states which tools a caller may execute.
@@ -154,9 +153,10 @@ a changelog nobody reads, embedded in an error message everybody does.
 
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
-decision, though the budget forced it: at 2,184 bytes per tool over the
-wire the ceiling buys 82.4 tools and the library has 82, so the surface
-had reached the point where the 83rd tool could not be added at all.
+decision, though the budget forced it: at roughly 1,615 bytes per tool over
+the wire the session ceiling buys about 111 tools and the library has 157,
+so the whole surface stopped fitting in one session well before it stopped
+growing.
 
 What it buys beyond the bytes is that the boundary now holds in three
 places at once, and each is independent of the others:
@@ -310,7 +310,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-82 schemas — which is exactly what the MCP category budget exists to avoid,
+157 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.
@@ -344,7 +344,7 @@ addition into a crash.
 
 ## See also
 
-- [13_agent_orchestration.md](13_agent_orchestration.md) — the router and the twelve workers
+- [13_agent_orchestration.md](13_agent_orchestration.md) — the router and the fourteen workers
 - [18_mcp.md](18_mcp.md) — how runtimes reach an MCP client
 - [15_modeling.md](15_modeling.md) — the modeling runtime
 - [10_auditability.md](10_auditability.md) — what every dispatch records

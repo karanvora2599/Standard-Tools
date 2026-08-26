@@ -3,12 +3,13 @@ Worker-agent registry for the multi-agent Standard Quant Tools example.
 
 Each worker owns a small, non-overlapping subset of the library's agent
 tools and a system prompt scoped to exactly that workflow. Together the
-nine workers cover every registered tool exactly once — see
-test_multi_agent_tool_coverage in tests/ for the coverage check.
+fourteen workers cover every registered tool exactly once — see
+tests/agent/test_multi_agent_tool_coverage.py for the coverage check.
 
-TWO REGISTRIES, NOT ONE. Seven workers draw from the 46-tool analysis and
-backtest surface (standard_quant_tools.agent); two draw from the separate
-8-tool modeling runtime (standard_quant_tools.modeling.agent). The library
+THREE REGISTRIES, NOT ONE. Eleven workers draw from the 132-tool analysis
+and backtest surface (standard_quant_tools.agent); two draw from the
+separate 16-tool modeling runtime and one from the 9-tool feature_lab
+runtime (both in standard_quant_tools.modeling.agent). The library
 keeps those apart deliberately — see Documentation/15_modeling.md — and so
 does this file: each worker declares which registry it belongs to, and
 run_agent() loads that registry's schemas and calls that registry's

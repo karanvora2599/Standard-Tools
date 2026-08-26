@@ -9,7 +9,7 @@ before the user has asked anything.
 
 That is the constraint this module exists to manage. Tools are selected by
 CATEGORY, using the same `TOOL_CATEGORY` taxonomy that already drives
-`agent/router.py` and the nine workers in `Multi_Agent_Implementation/` --
+`agent/router.py` and the fourteen workers in `Multi_Agent_Implementation/` --
 reused rather than re-invented, so a tool's categorization stays correct in
 exactly one place.
 
@@ -177,7 +177,7 @@ class ToolEntry:
         Serialized schema size -- what this tool costs a client's context.
 
         Output schemas are EXCLUDED by default because the server omits them
-        by default: declaring all 54 adds about 74 KB, a 77% increase, and
+        by default: declaring all 157 adds about 235 KB, a 95% increase, and
         `structuredContent` is returned either way. Counting them here
         regardless would report a cost no client actually pays and make the
         category budget useless for choosing a `--categories` value.
@@ -193,7 +193,7 @@ def _output_schema(fn: Callable[..., Any]) -> Optional[Dict[str, Any]]:
     The tool's result model as a flat JSON Schema, or None if it has no
     usable return annotation.
 
-    Every one of the 54 tools has a typed Pydantic return today (verified by
+    Every one of the 157 tools has a typed Pydantic return today (verified by
     the test suite), so this returns a schema for all of them -- which is
     what lets the server declare `outputSchema` and send
     `structuredContent` rather than untyped text.
@@ -309,8 +309,9 @@ DETAIL_MODES: Tuple[str, ...] = ("full", "auto", "thin")
 #:
 #: 32,768 is a third of the 72 KB per-runtime ceiling rather than the
 #: ceiling itself, because a target that only just fits leaves the next
-#: added tool to blow it again. Measured: it costs `research` nothing (it
-#: is already 25 KB), `portfolio` two round trips, and `modeling` three.
+#: added tool to blow it again. Measured: it costs `backtest` twelve round
+#: trips, `research` eight and `modeling` two; the other five runtimes are
+#: already under it and pay nothing.
 DEFAULT_DETAIL_BUDGET = 32_768
 
 #: Fetching a schema is impossible without the tool that fetches it, so a

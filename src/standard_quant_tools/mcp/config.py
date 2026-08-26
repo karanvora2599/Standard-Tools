@@ -116,7 +116,7 @@ class ServerConfig:
     # runtime costs 74 KB against a 72 KB per-runtime ceiling, and
     # the ceiling is not the thing to move -- it has been argued up
     # once already. `auto` thins only what exceeds `detail_budget`,
-    # so the four runtimes already under it are returned unchanged
+    # so the five runtimes already under it are returned unchanged
     # and only `backtest` (74 -> 41 KB) and `modeling` (50 -> 30 KB)
     # differ. `describe_tool` is injected whenever anything is
     # thinned, so no schema becomes unreachable -- it becomes one
@@ -156,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Serve Standard Tools over the Model Context Protocol, on stdio "
             "or over streamable HTTP. Tools are selected by category because "
-            "the full set of 54 costs roughly 30,000 tokens of a client's "
+            "the full set of 157 costs roughly 63,000 tokens of a client's "
             "context at connect."
         ),
     )
@@ -222,8 +222,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-schemas",
         action="store_true",
         help=(
-            "Declare outputSchema for every tool. Costs about 77%% more "
-            "context (74 KB across all 54 tools) and is off by default: "
+            "Declare outputSchema for every tool. Costs about 95%% more "
+            "context (235 KB across all 157 tools) and is off by default: "
             "structuredContent is returned either way, and the declaration "
             "only helps clients that validate against it."
         ),

@@ -2,7 +2,7 @@
 
 Thirty-two high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 46), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 132), `dispatch()` wiring, and the complete Model Summary.
 
 ---
 
@@ -2136,7 +2136,7 @@ if result.warnings:
 | `warnings` | `List[str]` | Flags `n_trials < 5` — sensitivity/DSR estimates are noisy with very few combinations searched |
 
 **`random_seed`:** set this for reproducible bootstrap results — it's
-recorded in the audit trail (`audit.py`) alongside every other input, so a
+recorded in the audit trail (`audit/`) alongside every other input, so a
 `replay` of the recorded call reproduces the identical confidence interval.
 
 **Scope, stated explicitly:** the Deflated Sharpe Ratio's `sharpe_trials_std`

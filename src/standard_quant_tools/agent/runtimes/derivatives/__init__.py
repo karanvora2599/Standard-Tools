@@ -10,7 +10,7 @@ holding it does to you. An agent scoped to one rarely wants the other.
 
 The split clears the floor this library sets for one -- at least eight tools
 in the new runtime, at least eight left in the donor. Derivatives holds
-twelve and `research` keeps thirty-three.
+twelve; `research` was left with thirty-three and has grown since.
 
 `get_option_pricing` and `get_implied_volatility` MOVED here from `research`,
 which is a breaking change for anything scoped to that runtime. MOVED_FROM

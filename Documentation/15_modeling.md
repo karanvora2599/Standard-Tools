@@ -1,28 +1,28 @@
 # Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent runtime alongside the 68-tool
-`standard_quant_tools.agent` analysis/backtest surface — not tool #47.
+A second, independent runtime alongside the 132-tool
+`standard_quant_tools.agent` analysis/backtest surface — not tool #133.
 This document explains why that split exists, what's built in this first
 phase, and what's deliberately deferred.
 
 ---
 
-## Why a separate runtime, not a 47th tool
+## Why a separate runtime, not a 133rd tool
 
 `agent/tools.py`'s `TOOL_CATEGORY` router and `Multi_Agent_Implementation/`'s
 worker split (see
 [Documentation/13_agent_orchestration.md](13_agent_orchestration.md))
-exist specifically because handing an LLM 46 similarly-shaped tools on
+exist specifically because handing an LLM 132 similarly-shaped tools on
 every call causes selection ambiguity. Fitting/validating/registering a
 statistical model doesn't fit that surface's shape at all — it isn't a
 point-in-time snapshot (`analyze_stock_risk`) or a single backtest run
 (`run_sma_backtest`); it's a small, ordered pipeline (build data → fit →
 validate → register → score) that needs its own vocabulary. Adding it as
-tool #47 would make the ambiguity problem worse, not better.
+tool #133 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 8 tools, never merged into `agent.get_agent_tools()` /
+with exactly 16 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (68 tools, 4 runtimes)       (14 tools, one pipeline)
+    (132 tools, 6 runtimes)      (16 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,45 +44,73 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 8 tools
+## The 16 modeling tools
+
+The runtime is one ordered pipeline: **describe → build → check → fit →
+inspect → score**. The table follows that order rather than alphabetical,
+because the order is the point.
 
 | Tool | Input → Output |
 |---|---|
+| `list_modeling_capabilities` | → tasks, estimators and what each supports (sample weights, probabilities, query groups, coefficients, importances), features, targets, validation schemes, preprocessing, weighting, and which optional libraries are installed |
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback) |
-| `list_modeling_capabilities` | → tasks, estimators and what each supports, features, targets, validation schemes, preprocessing, weighting, and which optional libraries are installed |
+| `check_leakage` | a feature set → whether it is temporally safe to fit on, answered **before** a dataset is built with it |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
+| `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
 | `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
-| `analyze_feature` | `dataset_id` + `feature` → the same profile for ONE feature, every number named and typed |
+| `validate_pit_records` | point-in-time records → whether they are joinable, checked before anything is joined |
+| `join_point_in_time` | `dataset_id` + records → each panel row gets the most recent record **available by then**, never the one describing that date |
+| `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold |
+| `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
+| `list_models` | → every registered model, newest first, with task, estimator, headline OOS metric and source dataset |
+| `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
+| `compare_models` | several `model_id`s → ranked side by side on their out-of-sample metrics |
+| `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
+| `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns |
+| `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
+
+### The `feature_lab` runtime — 9 more tools, one level down
+
+Feature work outgrew `analyze_features`. The single nested report is still
+the right overview, but "is this one feature any good, and why" is a
+different question asked at a different point, and answering it inside one
+report meant returning a structure the agent then had to describe in prose.
+Those nine tools were split into their own runtime — each returns named,
+typed fields for **one** question:
+
+| Tool | Input → Output |
+|---|---|
+| `analyze_feature` | `dataset_id` + `feature` → coverage, turnover, autocorrelation, IC/ICIR, quantile spread and monotonicity for ONE feature |
 | `get_feature_redundancy` | `dataset_id` → clusters with a representative each, the drop list, VIF and condition number |
 | `get_feature_ic_decay` | `dataset_id` + `feature` → the lead-lag IC curve as ordered points, with the peak named |
 | `get_feature_drift` | `dataset_id` + `feature` → PSI, two-sample KS and the IC computed separately either side of a date |
-| `get_feature_regime_stability` | `dataset_id` + `feature` → IC per contiguous time block, plus sign consistency |
+| `get_feature_regime_stability` | `dataset_id` + `feature` → IC per **contiguous** time block, never shuffled, plus sign consistency |
 | `run_feature_permutation_test` | `dataset_id` + `feature` → two-sided empirical p-value against a within-date shuffle null |
+| `run_feature_ablation` | `dataset_id` + `ModelSpec` → refit without each feature in turn, reporting what each was worth |
 | `select_features` | `dataset_id` → a chosen set, with a recorded reason for every exclusion |
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta |
-| `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
-| `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
-| `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
-| `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
+
+`feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table:
+16 + 9 is 25, and the whole library is 157. `Multi_Agent_Implementation/`
+gives it its own worker for the same reason.
 
 ### Driving these from an agent
 
 `Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
 whole pipeline as a single agent, on all three providers. It is the one
-example script that does not use the 68-tool surface: it passes
-`registry="modeling"` to `run_agent()`, which loads these eight schemas and
-`modeling_dispatch` together.
+example script that does not use the 132-tool surface: it passes
+`registry="modeling"` to `run_agent()`, which loads these sixteen schemas
+and `modeling_dispatch` together.
 
-It also skips the category router, deliberately. Routing exists to narrow 46
-similarly-shaped tools down to the relevant few; eight tools in one ordered
-pipeline have nothing to narrow, since every one of them is used in
-sequence. Passing `categories=` alongside `registry="modeling"` raises
+It also skips the category router, deliberately. Routing exists to narrow
+132 similarly-shaped tools down to the relevant few; sixteen tools in one
+ordered pipeline have nothing to narrow, since they are used in sequence. Passing `categories=` alongside `registry="modeling"` raises
 rather than being quietly ignored.
 
-For the split-agent version, `Multi_Agent_Implementation/` gives these eight
-tools two workers rather than one — `model_research` (capabilities,
-catalog, build, analyze) and `model_builder` (fit, inspect, score,
-evaluate). The cut is at the dataset, which is the only handoff in the
+For the split-agent version, `Multi_Agent_Implementation/` gives these
+sixteen tools two workers rather than one — `model_research` (capabilities,
+catalog, build, point-in-time joins, leakage and spec checks, analyze) and
+`model_builder` (fit, inspect, compare, score, evaluate). The cut is at the dataset, which is the only handoff in the
 pipeline that carries a single value (`dataset_id`) rather than a whole
 panel — and therefore the only one that survives two agent sessions that
 cannot see each other's context. See
@@ -1547,7 +1575,7 @@ resolves.
 `run_model_experiment` answers "how did this model do out-of-sample."
 It doesn't answer "does this work as a trading strategy" — that requires
 an actual backtest, and this codebase already has one
-(`run_signal_panel_backtest`, in the *other* 68-tool surface).
+(`run_signal_panel_backtest`, in the *other* 132-tool surface).
 `modeling.bridge.oos_predictions_to_signal_panel` connects the two —
 a plain Python function, deliberately **not** a tool, because it only
 reshapes an artifact the caller already holds and hands it to a tool in
@@ -1877,13 +1905,13 @@ own `ValidationError`).
 
 Every modeling tool call routed through
 `modeling.agent.modeling_dispatch` writes a `DecisionRecord`, using the
-same `audit._run_and_record` the 68-tool surface uses — no parallel audit
+same `audit._run_and_record` the 132-tool surface uses — no parallel audit
 implementation.
 
 `audit.verify_replay` covers **both** surfaces: it resolves a record's tool
 against the agent registry and then the modeling registry. (Each is looked
 up lazily, since both tool packages import the audit package, and the
-modeling runtime is deliberately independent of the 68-tool surface rather
+modeling runtime is deliberately independent of the 132-tool surface rather
 than importable from it.)
 
 Replay comparison for modeling is **semantic**, not literal. Modeling mints

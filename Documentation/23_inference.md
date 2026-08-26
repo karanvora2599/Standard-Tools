@@ -105,7 +105,7 @@ is built into the test suite. A normal against a t(3):
 
 | | KS p-value | Kurtosis change | 1st percentile |
 |---|---:|---:|---:|
-| normal vs t(3) | 0.45 | **+10.8** | moved by 1.96× |
+| normal vs t(3) | 0.22 | **+3.8** | moved by 1.86× |
 
 Reading only the p-value would conclude nothing changed. KS's power is
 concentrated near the median, so the percentile comparison is reported
@@ -131,8 +131,9 @@ error *and* cutting the degrees of freedom applied the same correction twice
 — and on a series whose Sharpe visibly fell from 1.9 to 0.0, the result was
 `p = 0.17` and `decaying: false`.
 
-Measured calibration of the current version: **3.0% false positives** on a
-constant edge (one-sided 5% test) with **62% power** against a real halving.
+Measured calibration of the current version: **4.0% false positives** on a
+constant edge (one-sided 5% test, 6 of 150) with **62% power** against a real
+halving (37 of 60).
 That power is not high and it is honest — a Sharpe on 600 days has a
 standard error near 0.65, and a test claiming better on this much data would
 be miscalibrated.
@@ -199,15 +200,15 @@ form of that question. This function is deliberately not a searcher.
 
 With a `regressor` it tests whether the **relationship** broke — a beta or a
 hedge ratio — rather than whether the mean moved. On a planted break from
-β = 0.5 to β = 2.0 it recovers 0.481 and 2.007.
+β = 0.5 to β = 2.0 it recovers 0.52 and 2.00.
 
 ### `decompose_returns`
 
 **The arithmetic mean is not what you earned.** Compound growth is the
 arithmetic mean minus roughly half the variance, and for a volatile strategy
 that drag is most of the return: a series averaging 0.08% a day with 3%
-daily volatility has an arithmetic annual return of 20.8% and a compound one
-of 10.1%. Reporting the first as "the return" is the most common
+daily volatility has an arithmetic annual return of about 20% and a compound
+one near 9%. Reporting the first as "the return" is the most common
 overstatement in the business.
 
 The decomposition also separates the contribution of the best and worst five

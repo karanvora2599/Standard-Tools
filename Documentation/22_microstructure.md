@@ -56,8 +56,10 @@ Nothing in Roll's algebra reveals either. So the result now reports
 | 1.00 | 1.082 | 0.421 | yes |
 | 2.00 | 2.125 | 0.674 | yes |
 
-Above the floor it is accurate to within 8%. Below it, any number the
-formula returns is noise that happened to land on the negative side.
+Above the floor it is accurate to within 13% — the 0.50 row is the worst
+of them, and the error falls as the spread grows. Below the floor, any
+number the formula returns is noise that happened to land on the negative
+side.
 
 **On a trending series it returns `null`, not zero.** The literature's usual
 fix — substitute zero when the covariance is positive — produces a tidy

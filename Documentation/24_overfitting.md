@@ -79,13 +79,15 @@ Validated by construction:
 | Grid | PBO |
 |---|---:|
 | 20 strategies, no edge anywhere | 0.457 |
-| Same, with one genuine drift planted | 0.000 |
-| 15 configurations correlated at 0.997 | 0.771 (and flagged) |
+| Same, with one genuine drift planted | 0.014 |
+| 15 configurations correlated at 0.997 | 0.243 (and flagged) |
 
 That last row is why the result reports the **median pairwise correlation**
-between configurations. A hundred settings correlated at 0.99 are one
-strategy with a parameter nudged; every split ranks them identically and the
-PBO is measuring nothing.
+between configurations — and why the PBO beside it should not be read at
+all. A hundred settings correlated at 0.99 are one strategy with a parameter
+nudged; every split ranks them identically, so the number the estimator
+returns is arbitrary rather than low. The correlation is the finding; the
+PBO is the thing it invalidates.
 
 ### `run_reality_check`
 
@@ -100,8 +102,8 @@ destroys the serial correlation that drives drawdowns and volatility
 clustering, which makes the null far too narrow and the p-value far too
 small.
 
-Measured false-positive rate on no-edge strategies: **3.3%** against a
-nominal 5%.
+Measured false-positive rate on no-edge strategies: **1 of 40 (2.5%)**
+against a nominal 5%.
 
 The stationarity assumption is the weak point and is named in every result:
 block bootstrap assumes the return-generating process is the same

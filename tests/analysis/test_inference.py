@@ -221,9 +221,10 @@ class TestCompareDistributions:
     def test_ks_misses_a_tail_only_difference_and_the_result_says_so(self):
         """
         THE LIMITATION THIS TOOL EXISTS TO SURFACE. A normal against a t(3)
-        has the same mean and a kurtosis three times higher; KS returns
-        p=0.45 and the 1st percentile has moved by a factor of two. Reading
-        only the p-value would conclude nothing changed.
+        has the same mean and a far higher kurtosis; KS returns p=0.22 --
+        nowhere near rejection -- while the 1st percentile has moved by a
+        factor of 1.86. Reading only the p-value would conclude nothing
+        changed.
         """
         rng = np.random.default_rng(2)
         result = compare_distributions(rng.normal(0, 1, 500), rng.standard_t(3, 500))

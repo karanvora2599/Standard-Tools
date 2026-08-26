@@ -45,9 +45,12 @@ counts as one.
    ```
    tests/
      conftest.py        shared fixtures (mock_provider, …) — visible to every subdirectory
-     agent/  analysis/  audit/  backtest/  data/  indicators/
-     metrics/  modeling/  portfolio/  screener/
+     agent/  analysis/  audit/  backtest/  backtesting/  data/
+     indicators/  mcp/  metrics/  modeling/  portfolio/  screener/
      core/              cross-cutting: errors, compat shims, regression suites
+     surface/           whole-surface layers: invariants, fuzzing, metamorphic, determinism
+     docs/              the generated-documentation checks
+     bench/             performance harnesses — minutes to run, not part of the suite
      cpp/               C++ gtest sources, compiled by CMake — NOT collected by pytest
      cpp_bindings/      Python-side parity tests for the compiled extension
    ```
@@ -57,9 +60,10 @@ counts as one.
    path), while `tests/cpp_bindings/` holds the `test_cpp_*.py` files pytest
    collects, which assert the C++ and Python backends against each other.
 
-   Every directory needs an `__init__.py` — the suite is a package, which is
-   what lets `tests/agent/test_agent_tools.py` and
-   `tests/modeling/test_agent_tools.py` coexist. A test needing a path
+   Directories holding same-named test modules need an `__init__.py` — the
+   suite is a package, which is what lets `tests/agent/test_agent_tools.py`
+   and `tests/modeling/test_agent_tools.py` coexist. (`bench/` and `cpp/`
+   have none, because pytest does not collect them.) A test needing a path
    outside the suite (a script, a reference implementation) should import
    `REPO_ROOT` from the `tests` package rather than chaining `__file__`
    parents, which encodes how deep the file happens to sit.
@@ -96,10 +100,25 @@ counts as one.
   your new C++ path should still be exercised via `tests/cpp/*.cpp` native
   tests plus a Python-side parity test that's skipped (not failed) when the
   extension isn't built.
-- **Agent tools**: a new LLM-callable tool needs (a) a Pydantic input/result
-  model in `agent/models.py`, (b) a function in `agent/tools.py` registered
-  in both `get_agent_tools()` and `_TOOL_DISPATCH`, and (c) a matching
-  section in `Documentation/07_agent_tools.md` or `09_advanced_agent_tools.md`.
+- **Agent tools**: tools live in runtime packages under
+  `agent/runtimes/<runtime>/`; `agent/tools.py` is a FACADE that unions
+  them, not the place tools are defined. A new one needs (a) the
+  computation in a library module (`analysis/`, `portfolio/`,
+  `backtesting/`) with its limits in the docstring, (b) an Input model with
+  `ConfigDict(extra="forbid")` and a **typed** Result model — an untyped
+  return silently drops the MCP output schema, and a test pins that,
+  (c) entries in that runtime's `TOOL_DEFS` and `TOOL_DISPATCH`, which are
+  built from one list so a tool cannot be advertised without being
+  dispatchable, (d) a re-export from `agent/tools.py` and
+  `agent/__init__.py`'s `__all__`, which a test also pins, (e) a
+  regenerated `Documentation/20_tool_index.md`
+  (`python Development/generate_tool_index.py` — `tests/docs/` fails the
+  build otherwise), and (f) a matching section in
+  `Documentation/07_agent_tools.md` or `09_advanced_agent_tools.md`.
+  Adding a whole RUNTIME additionally needs `RUNTIME_CATEGORIES`,
+  `RUNTIME_LABELS` and `RUNTIME_DESCRIPTIONS` entries, a category in
+  `agent/router.py`, a worker in `Multi_Agent_Implementation/worker_agents.py`,
+  and `MOVED_FROM` entries for anything relocated.
 - **No look-ahead bias**: this is the single most damaging bug class in a
   backtest library. Any new signal/execution path must not use data that
   wouldn't have been available at decision time — see the walk-forward and

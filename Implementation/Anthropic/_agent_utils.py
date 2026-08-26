@@ -175,17 +175,19 @@ def route_request(
 # ── Core agent loop ─────────────────────────────────────────────────
 
 
-# ── The two tool registries ──────────────────────────────────────────
+# ── The tool registries ──────────────────────────────────────────────
 #
-# This library exposes TWO agent-tool registries and deliberately does not
-# merge them (see Documentation/15_modeling.md):
+# This library exposes THREE agent-tool registries and deliberately does
+# not merge them (see Documentation/15_modeling.md):
 #
-#   "analysis"  standard_quant_tools.agent           68 tools, 10 categories
-#   "modeling"  standard_quant_tools.modeling.agent  14 tools, one pipeline
+#   "analysis"     standard_quant_tools.agent          132 tools, 11 categories
+#   "modeling"     standard_quant_tools.modeling.agent  16 tools, one pipeline
+#   "feature_lab"  standard_quant_tools.modeling.agent   9 tools, exploratory
 #
-# The analysis surface is itself divided into four RUNTIMES -- research,
-# backtest, portfolio, meta -- and naming one of those instead gives a
-# dispatch table that refuses anything it does not own. That is the
+# 132 + 16 + 9 is the 157-tool whole surface. The analysis surface is itself
+# divided into six RUNTIMES -- research, backtest, portfolio, microstructure,
+# derivatives, meta -- and naming one of those instead gives a dispatch table
+# that refuses anything it does not own. That is the
 # difference between narrowing what a model is shown and enforcing what it
 # can run. See Documentation/19_runtimes.md.
 #

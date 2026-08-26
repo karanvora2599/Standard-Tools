@@ -145,15 +145,16 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 157 tools cost about **236 KB of schema, ~60,000 tokens**, held for the
+The 157 tools cost about **248 KB of schema, ~63,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
-It is also, right now, a hard wall. Over the wire a tool averages 2,184
-bytes and the ceiling is 180,000, which buys 82.4 tools. There are 82. The
-remaining headroom is 912 bytes — under half a tool — so **the 83rd tool
-fails the budget test whatever it is**. Serving the whole surface stopped
-being a thing to avoid and became a thing that no longer fits.
+That wall has already been hit and passed. Over the wire a tool averages
+1,615 bytes and the session ceiling is 180,000, which buys about 111 tools.
+There are 157. **The whole surface has not fitted in one session since the
+83rd tool**, and no amount of schema-shrinking brings it back — which is why
+scoping stopped being an optimization and became the way the server is
+meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
 
 Two flags, and they are nested rather than alternative:
 
@@ -167,45 +168,51 @@ sqt-mcp --print-budget
 
 ```
 runtime              tools    bytes   ~tokens
-backtest                21   58,419    14,604
-modeling                16   43,340    10,835
-research                23   25,998     6,499
-portfolio               10   19,543     4,885
+backtest                32   73,057    18,264
+modeling                16   46,651    11,662
+research                40   44,616    11,154
+portfolio               17   29,900     7,475
+derivatives             12   17,878     4,469
+microstructure          12   15,523     3,880
+meta                    19   14,138     3,534
 feature_lab              9   11,745     2,936
-meta                    16   11,362     2,840
-all                     95  170,407    42,601
+all                    157  253,508    63,377
 
   a client is served ONE runtime: backtest is the most
-  expensive at 58,419 bytes (34% of the total).
+  expensive at 73,057 bytes (29% of the total).
 
 category             tools    bytes   ~tokens
-modeling                16   43,340    10,835
-backtest_execution      10   29,231     7,307
-backtest_validation      9   22,306     5,576
-portfolio_risk           7   15,526     3,881
-analysis                14   15,380     3,845
+modeling                16   46,651    11,662
+backtest_validation     20   35,582     8,895
+backtest_execution      10   30,593     7,648
+portfolio_risk          17   29,900     7,475
+quant_research          26   28,497     7,124
+derivatives             12   17,878     4,469
+microstructure          12   15,523     3,880
+analysis                12   14,084     3,521
 feature_lab              9   11,745     2,936
-quant_research           7    8,583     2,145
-discovery               10    7,761     1,940
+discovery               13   10,537     2,634
 custom_signal            2    6,882     1,720
-microstructure           3    4,017     1,004
 provenance               6    3,601       900
 screener                 2    2,035       508
 ```
 
 **The total is a number nobody pays.** The row that matters is the runtime
-a client is actually served, and the most expensive of those is 58 KB —
-about a third of the full surface. `tests/mcp/test_runtime_scope.py` pins a
-72 KB per-runtime ceiling for exactly that reason, and it is deliberately
-tight: `backtest` sits at 75,867 bytes at full detail, which is over the
-73,728 per-runtime ceiling -- and is the reason `--tool-detail auto` is
-now the default rather than an option. Under `auto` it serves at 43 KB.
+a client is actually served, and the most expensive of those is 71 KB at
+full detail — 29% of the whole surface. `tests/mcp/test_runtime_scope.py`
+pins a 72 KB per-runtime ceiling for exactly that reason, and it is
+deliberately tight: `backtest` sits at 73,057 bytes at full detail, 671
+bytes under the 73,728 ceiling. That margin is under half a tool, which is
+why `--tool-detail auto` is the default rather than an option — the
+ceiling test measures what the server actually serves, and under `auto`
+`backtest` serves at 34 KB.
 
 **Tool count and cost are barely related**, which is the useful thing to
 know when picking. `analysis` carries 12 tools for 13.8 KB; `custom_signal`
-carries 2 for 6.7 KB -- a third of the tools for half the bytes. `modeling`
-and `backtest_execution` together are nearly half the surface. Choosing by
-how many tools a category holds gets the budget almost exactly backwards.
+carries 2 for 6.7 KB -- a sixth of the tools for half the bytes. `modeling`
+and `backtest_validation` are two categories out of thirteen and a third of
+the surface between them. Choosing by how many tools a category holds gets
+the budget almost exactly backwards.
 
 The default — `screener,analysis,quant_research,discovery`, 53 tools,
 ~13k tokens — covers screening, risk and technical snapshots, the
@@ -214,8 +221,8 @@ factor/cointegration/Hurst research path, the statistical diagnostics
 the offline discovery tools.
 
 `discovery` is in the default despite being one of the newest categories,
-because it is the only one that makes the OTHERS cheaper to use: it is
-10.3 KB, and the questions it answers — which parameters a strategy takes,
+because it is the only one that makes the OTHERS cheaper to use: 13 tools
+for 10.3 KB, and the questions it answers — which parameters a strategy takes,
 which stress windows exist, whether this provider has ticks, whether these
 arguments are even valid — were previously answered by a failed call and an
 error round trip, which costs more than the category does.
@@ -223,13 +230,13 @@ error round trip, which costs more than the category does.
 Serve a runtime, or narrow inside one:
 
 ```bash
-sqt-mcp --runtime research                    # 40 tools, 43 KB
-sqt-mcp --runtime backtest                    # 32 tools, 43 KB
-sqt-mcp --runtime derivatives                 # 12 tools, 21 KB
-sqt-mcp --runtime microstructure              # 12 tools, 18 KB
+sqt-mcp --runtime research                    # 40 tools, 33 KB served
+sqt-mcp --runtime backtest                    # 32 tools, 34 KB served
+sqt-mcp --runtime derivatives                 # 12 tools, 17 KB served
+sqt-mcp --runtime microstructure              # 12 tools, 15 KB served
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
 sqt-mcp --runtime research --categories screener
-sqt-mcp --runtime all                         # ~60k tokens, and it says so
+sqt-mcp --runtime all                         # ~63k tokens, and it says so
 ```
 
 `+` joins runtimes because that is how `combine()` names a joined runtime in
@@ -247,39 +254,39 @@ as a broken install rather than as two flags disagreeing.
 one is sent at connect.
 
 ```bash
-sqt-mcp --runtime backtest                       # 65 KB, every schema
-sqt-mcp --runtime backtest --tool-detail auto    # 40 KB, 8 tools thinned
-sqt-mcp --runtime backtest --tool-detail thin    # 12 KB, all thinned
+sqt-mcp --runtime backtest --tool-detail full     # 71 KB, every schema
+sqt-mcp --runtime backtest                       # 34 KB, 12 tools thinned (the default)
+sqt-mcp --runtime backtest --tool-detail thin    # 14 KB, all thinned
 ```
 
 A **thinned** tool is still listed and still callable. What it loses is its
 argument schema: the listing carries the name, one line of purpose, and an
-instruction to call `describe_tool` for the rest. Measured, that is 531
-bytes against 2,184 — **76% smaller**.
+instruction to call `describe_tool` for the rest. Measured, that is 483
+bytes against 1,615 — **70% smaller**.
 
 `auto` is the mode worth using. It thins the **most expensive** tools and
 stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 
-| runtime | full | `auto` | thin |
-|---|---:|---:|---:|
-| `backtest` | 74 KB | 43 KB | 15 KB |
-| `research` | 46 KB | 43 KB | 18 KB |
-| `modeling` | 50 KB | 30 KB | 9 KB |
-| `portfolio` | 34 KB | 34 KB | 10 KB |
-| `derivatives` | 21 KB | 21 KB | 7 KB |
-| `microstructure` | 18 KB | 18 KB | 7 KB |
-| `meta` | 18 KB | 18 KB | 9 KB |
-| `feature_lab` | 14 KB | 14 KB | 6 KB |
+| runtime | full | `auto` | thinned by `auto` | thin |
+|---|---:|---:|---:|---:|
+| `backtest` | 71 KB | 34 KB | 12 | 14 KB |
+| `modeling` | 46 KB | 25 KB | 2 | 6 KB |
+| `research` | 44 KB | 33 KB | 8 | 18 KB |
+| `portfolio` | 29 KB | 29 KB | 0 | 9 KB |
+| `derivatives` | 17 KB | 17 KB | 0 | 7 KB |
+| `microstructure` | 15 KB | 15 KB | 0 | 8 KB |
+| `meta` | 14 KB | 14 KB | 0 | 8 KB |
+| `feature_lab` | 11 KB | 11 KB | 0 | 5 KB |
 
 **`auto` is the default now, not an option.** At full detail `backtest`
-cost 75,867 bytes against the 73,728 per-runtime ceiling, and the ceiling
+comes within 671 bytes of the 73,728 per-runtime ceiling, and the ceiling
 is not the thing to move — it had been argued up once already. `auto`
 thins only what exceeds `--detail-budget`, so the five runtimes already
-under it are returned byte-for-byte unchanged and only `backtest` and
-`modeling` differ. `--tool-detail full` still exists and still does exactly
-what it did; it simply stopped being implicit.
+under it are returned byte-for-byte unchanged and only `backtest`,
+`modeling` and `research` differ. `--tool-detail full` still exists and
+still does exactly what it did; it simply stopped being implicit.
 
-Four runtimes already fit and pay nothing. That ordering is deliberate: a
+Five runtimes already fit and pay nothing. That ordering is deliberate: a
 runtime's cost is concentrated in a few large schemas — `modeling`'s top
 three are 65% of it — so thinning three tools buys what thinning fifteen
 cheap ones would not, and **every tool left described is one an agent calls
@@ -316,7 +323,7 @@ flag describes.
 ```
 
 Categories come from `TOOL_CATEGORY`, the same taxonomy behind
-[the router and the twelve workers](13_agent_orchestration.md), plus
+[the router and the fourteen workers](13_agent_orchestration.md), plus
 `modeling` for the modeling runtime.
 
 ### Categories, runtimes, and what the server enforces
@@ -529,7 +536,7 @@ The other two hints are derived from the code rather than maintained by
 hand: `openWorldHint` is true when a tool's input schema names a symbol,
 ticker or universe anywhere (including nested specs — `build_model_dataset`
 hides its universe two levels down), and `idempotentHint` is false for the
-four tools that persist a new artifact per call.
+six tools that persist a new artifact per call.
 
 Read-only is a statement about what the tools do, not about who may call
 them. Over stdio the only caller is the process that launched the server;
@@ -542,13 +549,13 @@ rate limit whether or not anything is mutated. See
 
 ## Architecture notes
 
-**Five runtimes, one server.** Ten categories come from the 68-tool
-analysis surface, spread across four runtimes, and one from the separate
-14-tool modeling runtime. They stay apart inside — `dispatch_for(entry)`
-returns that tool's own RUNTIME's dispatcher, so schemas and executor are
-never chosen separately, and a tool served from `research` is executed by a
-table holding only research tools — but a user configures one server, not
-five.
+**Eight runtimes, one server.** Eleven of the thirteen categories come from
+the 132-tool analysis surface, spread across six runtimes; the other two
+are the separate 16-tool `modeling` and 9-tool `feature_lab` runtimes. They
+stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
+dispatcher, so schemas and executor are never chosen separately, and a tool
+served from `research` is executed by a table holding only research tools —
+but a user configures one server, not eight.
 
 **Schemas are dereferenced.** Seven tools carry `$ref`/`$defs` upstream, and
 they are the seven most complex tools in the library. The server inlines

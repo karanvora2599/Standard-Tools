@@ -18,7 +18,7 @@ runtime has had since it shipped, generalized to the rest of the surface.
 
 RUNTIME IS NOT CATEGORY. `TOOL_CATEGORY` survives unchanged as the routing
 taxonomy: it still drives `router.py`, the MCP `--categories` flag, and the
-twelve workers in `Multi_Agent_Implementation`. Categories are a hint about
+fourteen workers in `Multi_Agent_Implementation`. Categories are a hint about
 which tools suit a request; runtimes are a hard statement about which tools
 a caller may execute. Several categories live inside one runtime, and the
 grouping is deliberately coarse -- a runtime holding two tools is overhead

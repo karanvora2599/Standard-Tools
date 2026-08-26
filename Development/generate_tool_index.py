@@ -9,8 +9,8 @@ document at all -- not because anyone decided they should not, but because
 adding a tool and remembering to document it are two actions and only one
 of them was enforced.
 
-This makes them one action. `tests/docs/test_tool_index.py` regenerates the
-file and fails if what is on disk differs, so a tool added without
+This makes them one action. `tests/docs/test_documentation.py` regenerates
+the file and fails if what is on disk differs, so a tool added without
 regenerating breaks the suite in the same commit that added it.
 
 RUN IT WITH:  python Development/generate_tool_index.py

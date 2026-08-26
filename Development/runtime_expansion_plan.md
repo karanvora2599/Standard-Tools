@@ -1,27 +1,49 @@
 # Runtime Expansion Plan — five runtimes to nine
 
-Status: **proposed**, not started. Written against `main` at the commit that
-added the risk-free rate to the backtest engine.
+> **Status: largely SHIPPED. This document is kept as the record of the
+> reasoning, not as a description of `main`.**
+>
+> It was written against `main` at the commit that added the risk-free rate
+> to the backtest engine, when the library had 82 tools across five
+> runtimes. Since then:
+>
+> | Phase | State |
+> |---|---|
+> | 0 — runtime-scoped exposure | **Shipped.** `sqt-mcp --runtime` is the serving boundary. |
+> | 0b — thin listings, schemas on demand | **Shipped.** `--tool-detail auto` is the default, `describe_tool` fetches the rest. |
+> | 1 — Feature Lab | **Shipped** as the 9-tool `feature_lab` runtime. |
+> | 2 — Data and the `available_at` contract | **Partly shipped**: `describe_temporal_contract`, `validate_pit_records` and `join_point_in_time` exist; the snapshot/panel-builder tools do not. |
+> | 3 — Microstructure | **Shipped** as the 12-tool `microstructure` runtime, bar-based estimators rather than the L2 surface sketched here. |
+> | 4 — Modeling depth | **Partly shipped**: the modeling runtime is 16 tools; calibration, ensembling and conformal intervals are not there. |
+> | 5 — Portfolio depth | **Partly shipped**: `portfolio` is 17 tools. |
+> | 6 — Derivatives | **Shipped** as the 12-tool `derivatives` runtime. |
+> | 7 — Streaming | **Not started**, and still last. None of the `*_stream` tools named below exist. |
+>
+> `main` now has **157 tools across eight runtimes**. Tool names in the
+> phases below are PROPOSALS as of writing; 44 of them now exist and the
+> rest do not. Check `Documentation/20_tool_index.md` — which is generated
+> from the live registry — for what the library actually serves.
 
-The tool-selection problem is solved. `main` has five hard execution
-runtimes (`research`, `backtest`, `portfolio`, `meta`, `modeling`) whose
-dispatch tables refuse what they do not own, and typed `sqt://` references
-already carry bulk values between them without bespoke bridges. The
-question is no longer *how to stop one agent seeing 82 tools* — it is how
-to grow past 82 without reintroducing that problem.
+The tool-selection problem is solved. At the time of writing, `main` had
+five hard execution runtimes (`research`, `backtest`, `portfolio`, `meta`,
+`modeling`) whose dispatch tables refuse what they do not own, and typed
+`sqt://` references already carried bulk values between them without
+bespoke bridges. The question was no longer *how to stop one agent seeing
+82 tools* — it was how to grow past 82 without reintroducing that problem.
 
-**Except that we cannot currently grow past 82 at all.** The measurement
-that came out of writing this plan is the thing to read first: at 2,184
-bytes per tool over the wire, the MCP context ceiling buys 82.4 tools, and
-the library has 82. The remaining headroom is 912 bytes — 0.42 of one tool.
-The 83rd tool fails the budget test whatever it is. Every phase below is
-blocked behind an exposure change (§2) that is not a scaling optimization
-for a hypothetical future surface, but the precondition for adding one more
-tool to this one.
+**Except that we could not then grow past 82 at all.** The measurement that
+came out of writing this plan is the thing to read first: at 2,184 bytes per
+tool over the wire, the MCP context ceiling bought 82.4 tools, and the
+library had 82. The remaining headroom was 912 bytes — 0.42 of one tool.
+The 83rd tool would fail the budget test whatever it was. Every phase below
+was blocked behind an exposure change (§2) that was not a scaling
+optimization for a hypothetical future surface, but the precondition for
+adding one more tool to that one. That change shipped, which is why the
+library is at 157 tools today.
 
-The target is **9 substantial runtimes averaging ~17 tools each**, not 20
-micro-runtimes. Execution (broker writes) is deliberately out of scope for
-this plan.
+The target was **9 substantial runtimes averaging ~17 tools each**, not 20
+micro-runtimes; it landed at eight averaging ~20. Execution (broker writes)
+was deliberately out of scope for this plan and still is.
 
 ---
 

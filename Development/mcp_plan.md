@@ -8,10 +8,17 @@ This document states the constraints before the design, the same way
 `modeling_native_plan.md` stated its ceiling before its method. Three of them
 are measured, and they are what make this more than "wrap 54 functions".
 
-> **Status: phases 1 and 2 are built and merged.** Four assumptions in this
+> **Status: built, merged, and since outgrown.** Four assumptions in this
 > plan did not survive the build; §16 records them, because a plan that is
 > quietly edited to match what happened stops being evidence of anything.
 > The sections below are left as written.
+>
+> **Every measurement below is from the 54-tool era and is no longer
+> current.** The library now serves **157 tools across eight runtimes** for
+> 248 KB, and the exposure policy this document argued for became
+> `--runtime` scoping plus `--tool-detail auto`. For the numbers as they
+> stand, run `sqt-mcp --print-budget`, or read
+> [Documentation/18_mcp.md](../Documentation/18_mcp.md#choosing-what-to-serve).
 
 ---
 

@@ -131,13 +131,14 @@ def _to_anthropic_tools(openai_tools: list[dict[str, Any]]) -> list[ToolParam]:
     ]
 
 
-# ── The two registries ───────────────────────────────────────────────
+# ── The registries ───────────────────────────────────────────────────
 #
-# This library exposes TWO agent-tool registries, and deliberately does not
-# merge them (see Documentation/15_modeling.md):
+# This library exposes THREE agent-tool registries, and deliberately does
+# not merge them (see Documentation/15_modeling.md):
 #
-#   "analysis"  standard_quant_tools.agent          46 tools, 7 categories
-#   "modeling"  standard_quant_tools.modeling.agent  8 tools, one pipeline
+#   "analysis"     standard_quant_tools.agent          132 tools, 11 categories
+#   "modeling"     standard_quant_tools.modeling.agent  16 tools, one pipeline
+#   "feature_lab"  standard_quant_tools.modeling.agent   9 tools, exploratory
 #
 # They have identical shapes -- same OpenAI-format schema, same
 # dispatch(tool_name, arguments) signature -- which is exactly why keeping

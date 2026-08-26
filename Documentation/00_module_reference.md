@@ -372,7 +372,7 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 46 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
-`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 68 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 14-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since eight tools in one ordered pipeline have no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 12 specialist sub-agents, ten over the analysis runtimes and two over the modeling one, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
+`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 132 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 16-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since sixteen tools in one ordered pipeline have no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 14 specialist sub-agents, eleven over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -395,7 +395,7 @@ from standard_quant_tools.agent.models import (
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools()  # 68 tools ready for function calling
+tools = get_agent_tools()  # 132 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -450,19 +450,23 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 ## Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent 14-tool runtime — `list_features`, `analyze_features`,
-`build_model_dataset`, `run_model_experiment`, `score_model`,
-`inspect_model`, `evaluate_model_portfolio`, `list_modeling_capabilities`
-— for building walk-forward-validated statistical models from this
-library's own features (21 built-in: technical, market, risk, volume,
-statistical and PCA-derived factors), never merged into the 68-tool
-`get_agent_tools()`/`TOOL_CATEGORY` surface above.
+A second, independent 16-tool runtime — `list_modeling_capabilities`,
+`list_features`, `check_leakage`, `build_model_dataset`, `list_datasets`,
+`analyze_features`, `validate_pit_records`, `join_point_in_time`,
+`validate_model_spec`, `run_model_experiment`, `list_models`,
+`inspect_model`, `compare_models`, `score_model`, `score_predictions`,
+`evaluate_model_portfolio` — for building walk-forward-validated
+statistical models from this library's own features (21 built-in:
+technical, market, risk, volume, statistical and PCA-derived factors),
+never merged into the 132-tool `get_agent_tools()`/`TOOL_CATEGORY` surface
+above. A sibling `feature_lab` runtime holds 9 more, for interrogating
+those features before a model exists.
 
 | Axis | What is available |
 |---|---|
 | **Targets** | `forward_return`, `forward_return_vol_scaled`, `forward_return_rank`, `forward_return_market_neutral` (regression); `forward_direction`, `triple_barrier` (classification) |
 | **Tasks** | `regression`, `classification`, `ranking` — each behind a `ModelAdapter` that owns how its arrays are built, scored and measured |
-| **Estimators** | 19 — 11 regression, 6 classification, 2 ranking. scikit-learn throughout, plus `lightgbm`/`xgboost` when installed, two quantile-regression forms, and LambdaRank rankers |
+| **Estimators** | 20 — 12 regression, 6 classification, 2 ranking. scikit-learn throughout, plus `lightgbm`/`xgboost` when installed, two quantile-regression forms, and LambdaRank rankers |
 | **Validation** | walk-forward (rolling or expanding) and purged K-fold, both with a target-overlap purge |
 | **Preprocessing** | pooled or cross-sectional normalization |
 | **Weighting** | none, label uniqueness, time decay, or both |
