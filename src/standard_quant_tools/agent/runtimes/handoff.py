@@ -97,6 +97,32 @@ KINDS: Dict[str, Dict[str, str]] = {
         "storage": "frame",
         "description": "Wide frame of per-asset returns, indexed by date.",
     },
+    "tick_tape": {
+        "storage": "frame",
+        "description": (
+            "Individual trades: timestamp, price and size. What the tick "
+            "microstructure tools measure from, and what no OHLCV row can "
+            "be turned back into."
+        ),
+    },
+    "quote_panel": {
+        "storage": "frame",
+        "description": (
+            "Top-of-book quotes: bid and ask price and size, by timestamp. "
+            "Top of book only -- no shipped provider exposes depth, so "
+            "queue position and resting size are not in here."
+        ),
+    },
+    "data_bundle": {
+        "storage": "frame",
+        "description": (
+            "A MANIFEST of other references, one row per frame: its kind, "
+            "its ref, its source and what that source guarantees about "
+            "when its rows became knowable. Holds no data itself, which is "
+            "what keeps a bundle immutable -- assembling one cannot copy "
+            "or diverge from the frames it names."
+        ),
+    },
     "price_panel": {
         "storage": "frame",
         "description": "Wide frame of prices or a stacked OHLCV panel.",

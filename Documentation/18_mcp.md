@@ -145,13 +145,13 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 157 tools cost about **248 KB of schema, ~63,000 tokens**, held for the
+The 170 tools cost about **260 KB of schema, ~66,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
 1,615 bytes and the session ceiling is 180,000, which buys about 111 tools.
-There are 157. **The whole surface has not fitted in one session since the
+There are 170. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
 meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
@@ -424,7 +424,7 @@ own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 157 tools has a typed Pydantic return, so the server can
+Every one of the 170 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. The plan assumed that was free; measured, it
@@ -528,7 +528,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 157 tools declares `readOnlyHint: true` and
+Every one of the 170 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 

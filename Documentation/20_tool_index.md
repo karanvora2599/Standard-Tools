@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 157 below.
+advertises 155 of the 170 below.
 
 
 ## The runtimes
@@ -38,10 +38,11 @@ advertises 155 of the 157 below.
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [10_auditability.md](10_auditability.md) |
 | `portfolio` | 17 | 29 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `modeling` | 16 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `data` | 13 | 12 KB | *(one surface)* | — |
 | `microstructure` | 12 | 15 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 11 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **157** | | | |
+| **Total** | **170** | | | |
 
 ---
 
@@ -941,6 +942,99 @@ Check point-in-time records BEFORE joining them onto anything. The error worth c
 
 **Required:** `records`  
 **Optional:** `entity_scoped`
+
+---
+
+## `data` — Data
+
+Get the data and publish it as an `sqt://` reference every other runtime can read: OHLCV for one name or a whole universe, return panels, tick tapes and quote panels, provider guarantees, temporal contracts, and bundles that pair frames with what their sources promise. Fetches; does not analyze.
+
+#### `build_data_bundle`
+
+Name several already-published frames as one unit and publish the manifest as a data_bundle reference. A bundle holds references rather than copies, so it cannot diverge from the frames it names, and it pairs each frame with what its source can say about timing -- which is the pairing a point-in-time join depends on and which a bare frame throws away.
+
+**Required:** `frames`, `run_id`, `name`
+
+#### `compare_ratio_frames`
+
+Two providers' ratios side by side, with each disagreement CLASSIFIED rather than merely measured: a unit mismatch is fixable by rescaling, a definition difference is not, and averaging across the second kind produces a number neither provider would stand behind. Takes the values as arguments, so it works for sources this library cannot fetch.
+
+**Required:** `left`, `right`  
+**Optional:** `left_name`, `right_name`, `fields`
+
+#### `describe_data_bundle`
+
+What frames a bundle names, how many rows and columns each has, and what each source can promise about revisions and point-in-time availability. Use it to see what a bundle actually contains before building a dataset on it, rather than after a model has already been fitted on whatever was in there.
+
+**Required:** `ref`
+
+#### `fetch_financial_ratios`
+
+Fetch a company's financial ratios and flag the ones that are implausible on their face -- a negative price-to-book, a dividend yield above a plausible ceiling. The flag is a weak signal in one direction only: it catches values that are obviously wrong, never values that are merely incorrect.
+
+**Required:** `symbol`
+
+#### `fetch_ohlcv`
+
+Fetch one symbol's OHLCV bars and publish them as an `sqt://` price_panel reference rather than returning the rows inline. Reach for this when the bars themselves are the thing another tool needs -- an indicator series, a custom signal, a panel join -- instead of going through an analysis tool that wants to do something else with them. The reference is what crosses runtimes; the frame never has to enter the conversation.
+
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
+**Optional:** `interval`
+
+#### `fetch_ohlcv_panel`
+
+Fetch a whole universe's OHLCV in one call and publish it stacked long, with an `entity` column, as a price_panel reference. Tickers that returned nothing are named in `warnings` and are ABSENT from the panel rather than present as NaN, which matters because a complete-case join downstream will not see them at all.
+
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
+**Optional:** `interval`
+
+#### `fetch_quote_panel`
+
+Fetch top-of-book quotes and publish them as a quote_panel reference, which is what signing trades by the Lee-Ready rule needs alongside a tape. Top of book ONLY: no shipped provider exposes depth, so queue position and resting size at a level are not recoverable from this and should not be inferred from it.
+
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
+**Optional:** `limit`
+
+#### `fetch_returns_panel`
+
+Fetch a universe and publish a wide date-by-ticker frame of returns as a returns_panel reference. This is the shape most panel analysis wants -- PCA, correlation, factor regressions and portfolio construction all consume it directly -- so computing it once and handing over the reference avoids every consumer rebuilding it from prices.
+
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
+**Optional:** `interval`
+
+#### `fetch_tick_tape`
+
+Fetch individual trades and publish them as a tick_tape reference, for the microstructure tools that measure rather than estimate. Needs a provider with a tick feed. A tape is large, so `limit` caps it -- and when the cap is hit the result says so, because a truncated tape makes every rate and total computed from it understate the real one.
+
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
+**Optional:** `limit`
+
+#### `get_dataset_metadata`
+
+What the active provider GUARANTEES about the data it serves: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates.
+
+**Required:** `symbol`  
+**Optional:** `interval`
+
+#### `infer_temporal_contract`
+
+Read a published frame's own columns and report what they imply about when each row became knowable. For data this library did not fetch -- a vendor extract, another system's output -- where no provider contract exists. Inference reads COLUMNS, so it can only say what is present and never what a source guarantees; prefer get_dataset_metadata whenever the data came from a known provider.
+
+**Required:** `ref`  
+**Optional:** `source`, `frame_kind`, `entity_scoped`
+
+#### `validate_data_bundle`
+
+Whether a bundle is safe to model on, returned as a verdict with the blocking reasons rather than raised as an error, because the answer is usually yes-with-caveats and a caller needs the caveats to decide. `require_pit` defaults to false: no shipped provider reports point-in-time for every frame kind, so requiring it refuses almost everything -- set it when a leakage-free join is the point.
+
+**Required:** `ref`  
+**Optional:** `require_pit`
+
+#### `validate_financial_ratios`
+
+Check ratios you already hold -- from a vendor, a spreadsheet, another system -- for values that are implausible on their face, without fetching anything. The same check fetch_financial_ratios applies, available for data this library has no provider for.
+
+**Required:** `ratios`
 
 ---
 

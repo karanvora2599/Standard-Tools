@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 from standard_quant_tools import audit
 from standard_quant_tools._jsonsafe import sanitize_for_json
 from standard_quant_tools.agent.runtimes import backtest as _backtest
+from standard_quant_tools.agent.runtimes import data as _data
 from standard_quant_tools.agent.runtimes import derivatives as _derivatives
 from standard_quant_tools.agent.runtimes import meta as _meta
 from standard_quant_tools.agent.runtimes import microstructure as _microstructure
@@ -69,6 +70,21 @@ from standard_quant_tools.agent.runtimes.backtest import (
     run_sma_backtest,
     run_strategy_matrix,
     run_walk_forward_backtest,
+)
+from standard_quant_tools.agent.runtimes.data import (
+    build_data_bundle,
+    compare_ratio_frames,
+    describe_data_bundle,
+    fetch_financial_ratios,
+    fetch_ohlcv,
+    fetch_ohlcv_panel,
+    fetch_quote_panel,
+    fetch_returns_panel,
+    fetch_tick_tape,
+    get_dataset_metadata,
+    infer_temporal_contract,
+    validate_data_bundle,
+    validate_financial_ratios,
 )
 from standard_quant_tools.agent.runtimes.derivatives import (
     analyze_option_strategy,
@@ -184,6 +200,7 @@ from standard_quant_tools.agent.runtimes.research import (
 logger = logging.getLogger(__name__)
 
 _RUNTIME_MODULES = [
+    _data,
     _research,
     _backtest,
     _portfolio,

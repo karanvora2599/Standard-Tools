@@ -34,13 +34,13 @@ categorization only ever needs to be correct in one place.
 > whose dispatch table holds only its own tools and refuses the rest by
 > name.
 
-## Three registries, eight runtimes
+## Three registries, nine runtimes
 
 Everything above concerns the 132-tool analysis and backtest surface. There
 are two more: `standard_quant_tools.modeling.agent`, 16 tools, and the
 9-tool `feature_lab` runtime — neither of which the library merges into the
 first, see [15_modeling.md](15_modeling.md) for why. 132 + 16 + 9 is the
-157-tool whole surface. The example implementations keep the same
+170-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 
 | | Analysis registry | Modeling registry |

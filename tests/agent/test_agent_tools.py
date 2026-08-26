@@ -206,6 +206,7 @@ class TestToolCategoryCoverage:
 
     def test_every_category_value_is_a_known_key(self):
         known_categories = {
+            "data",
             "screener",
             "analysis",
             "quant_research",

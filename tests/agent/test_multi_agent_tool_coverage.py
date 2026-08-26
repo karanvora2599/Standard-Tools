@@ -146,6 +146,7 @@ class TestWorkerToolCoverage:
         a magic number would, but derived from the actual registry rather
         than repeating a number that could itself drift."""
         assert set(worker_agents) == {
+            "data",
             "screener",
             "analysis",
             "quant_research",

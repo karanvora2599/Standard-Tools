@@ -32,6 +32,18 @@ from .tools import TOOL_CATEGORY
 # prompts — that prose already exists and is already tuned to disambiguate
 # confusable tools, reused here rather than rewritten from scratch.
 TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
+    "data": {
+        "label": "Data",
+        "description": (
+            "Get the data and publish it for other tools to read: OHLCV for "
+            "one name or a whole universe, return panels, tick tapes and "
+            "top-of-book quotes, what the provider guarantees about "
+            "adjustment/survivorship/point-in-time, temporal contracts for "
+            "frames this library did not fetch, and bundles pairing frames "
+            "with their sources' promises. Route here when the request is "
+            "about GETTING or CHECKING data rather than analyzing it."
+        ),
+    },
     "screener": {
         "label": "Screener",
         "description": (

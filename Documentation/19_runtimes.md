@@ -36,11 +36,12 @@ its own tools, so a name from another runtime is not discouraged — it is
 unroutable. This is the guarantee the modeling registry has had since it
 shipped, generalized to the rest of the surface.
 
-### The eight runtimes
+### The nine runtimes
 
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
 | `research` | 40 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
+| `data` | 13 | `data` | Get the bytes and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
 | `backtest` | 32 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 19 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 17 | `portfolio_risk` | Turn a view into a position and price what it costs. |
@@ -154,7 +155,7 @@ a changelog nobody reads, embedded in an error message everybody does.
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
 decision, though the budget forced it: at roughly 1,615 bytes per tool over
-the wire the session ceiling buys about 111 tools and the library has 157,
+the wire the session ceiling buys about 111 tools and the library has 170,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 
@@ -310,7 +311,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-157 schemas — which is exactly what the MCP category budget exists to avoid,
+170 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.

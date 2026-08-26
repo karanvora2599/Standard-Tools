@@ -84,6 +84,7 @@ from standard_quant_tools.audit.dispatch import _run_and_record
 #: It is still a runtime, and `all_runtimes()` includes it -- it just has
 #: nothing to contribute to a mapping FROM categories.
 RUNTIME_CATEGORIES: Dict[str, Tuple[str, ...]] = {
+    "data": ("data",),
     "research": ("screener", "analysis", "quant_research"),
     "backtest": ("backtest_execution", "backtest_validation", "custom_signal"),
     "portfolio": ("portfolio_risk",),
@@ -129,6 +130,7 @@ def runtimes_for_categories(categories: Iterable[str]) -> Tuple[str, ...]:
 
 
 RUNTIME_LABELS: Dict[str, str] = {
+    "data": "Data",
     "research": "Research",
     "backtest": "Backtest",
     "portfolio": "Portfolio & Execution",
@@ -140,6 +142,13 @@ RUNTIME_LABELS: Dict[str, str] = {
 }
 
 RUNTIME_DESCRIPTIONS: Dict[str, str] = {
+    "data": (
+        "Get the data and publish it as an `sqt://` reference every other "
+        "runtime can read: OHLCV for one name or a whole universe, return "
+        "panels, tick tapes and quote panels, provider guarantees, temporal "
+        "contracts, and bundles that pair frames with what their sources "
+        "promise. Fetches; does not analyze."
+    ),
     "research": (
         "Describe an asset or a universe: screen it, profile its risk and "
         "technicals, and analyze its statistical structure (factors, "
