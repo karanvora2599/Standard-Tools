@@ -224,7 +224,14 @@ class TestBudget:
         say so rather than silently costing 45k tokens."""
         from standard_quant_tools.mcp.config import check_context_budget
 
-        config = ServerConfig(categories=ALL_CATEGORIES, enable_long_running=True)
+        # tool_detail="full" is stated OUT LOUD now that `auto` is the
+        # default. This test is about the eager surface -- the thing a user
+        # can still type and be surprised by -- and under `auto` that
+        # surface is no longer oversized, which is the whole point of
+        # `auto` rather than a reason to stop testing the eager case.
+        config = ServerConfig(
+            categories=ALL_CATEGORIES, enable_long_running=True, tool_detail="full"
+        )
         _server, handlers = build_server(config)
         warning = check_context_budget(config, handlers.context_bytes())
         assert (
@@ -242,9 +249,19 @@ class TestBudget:
         assert check_context_budget(config, handlers.context_bytes()) is None
 
     def test_declaring_output_schemas_is_the_expensive_option(self):
-        _s1, off = build_server(ServerConfig(categories=ALL_CATEGORIES))
+        # Both sides at FULL detail, so the comparison isolates the output
+        # schemas. Under `auto` the two sides would also differ in how much
+        # description was thinned, and the ratio would be measuring two
+        # things at once.
+        _s1, off = build_server(
+            ServerConfig(categories=ALL_CATEGORIES, tool_detail="full")
+        )
         _s2, on = build_server(
-            ServerConfig(categories=ALL_CATEGORIES, include_output_schemas=True)
+            ServerConfig(
+                categories=ALL_CATEGORIES,
+                include_output_schemas=True,
+                tool_detail="full",
+            )
         )
         # ~77% more, measured. This is why it is a flag and not a default.
         assert on.context_bytes() > off.context_bytes() * 1.5
@@ -329,9 +346,16 @@ class TestSelection:
         assert not unknown, f"LONG_RUNNING names no tool has: {sorted(unknown)}"
 
     def test_output_schemas_are_opt_in(self):
-        _s, off = build_server(ServerConfig(categories=ALL_CATEGORIES))
+        # Full detail on both sides, for the reason recorded above.
+        _s, off = build_server(
+            ServerConfig(categories=ALL_CATEGORIES, tool_detail="full")
+        )
         _s2, on = build_server(
-            ServerConfig(categories=ALL_CATEGORIES, include_output_schemas=True)
+            ServerConfig(
+                categories=ALL_CATEGORIES,
+                include_output_schemas=True,
+                tool_detail="full",
+            )
         )
         assert all(t.output_schema is None for t in off.tools)
         assert all(t.output_schema is not None for t in on.tools)

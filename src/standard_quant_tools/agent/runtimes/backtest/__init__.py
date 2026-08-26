@@ -48,6 +48,16 @@ from .tools import (
     run_strategy_matrix,
     run_walk_forward_backtest,
 )
+from .validation_tools import (  # noqa: F401
+    VALIDATION_TOOL_DEFS,
+    VALIDATION_TOOL_DISPATCH,
+    analyze_parameter_decay,
+    build_purged_cv_splits,
+    estimate_backtest_overfitting,
+    get_deflated_sharpe_ratio,
+    get_regime_stratified_performance,
+    run_reality_check,
+)
 
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
@@ -162,6 +172,11 @@ TOOL_DEFS = [
     ),
 ]
 
+# The backtest_validation tools declared in validation_tools.py,
+# concatenated rather than pasted so the group stays readable as a
+# unit and cannot half-register.
+TOOL_DEFS = TOOL_DEFS + VALIDATION_TOOL_DEFS
+
 TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS}
 
 #: This runtime's slice of the library-wide routing taxonomy.
@@ -189,7 +204,16 @@ TOOL_CATEGORY = {
     "compare_cost_models": "backtest_validation",
 }
 
+TOOL_DISPATCH.update(VALIDATION_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "backtest_validation" for name in VALIDATION_TOOL_DISPATCH})
+
 __all__ = [
+    "get_deflated_sharpe_ratio",
+    "estimate_backtest_overfitting",
+    "build_purged_cv_splits",
+    "run_reality_check",
+    "get_regime_stratified_performance",
+    "analyze_parameter_decay",
     "run_strategy_matrix",
     "TOOL_CATEGORY",
     "TOOL_DEFS",

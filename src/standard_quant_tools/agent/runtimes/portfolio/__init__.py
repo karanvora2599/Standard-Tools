@@ -18,6 +18,15 @@ from standard_quant_tools.agent.models import (
     TradeProfileInput,
 )
 
+from .construction_tools import (  # noqa: F401
+    CONSTRUCTION_TOOL_DEFS,
+    CONSTRUCTION_TOOL_DISPATCH,
+    analyze_concentration,
+    get_factor_exposure_budget,
+    get_liquidity_adjusted_var,
+    optimize_hierarchical_risk_parity,
+    optimize_risk_parity,
+)
 from .tools import (
     check_spread_proxy,
     detect_liquidity_events,
@@ -104,6 +113,11 @@ TOOL_DEFS = [
     ),
 ]
 
+# The portfolio_risk tools declared in construction_tools.py,
+# concatenated rather than pasted so the group stays readable as a
+# unit and cannot half-register.
+TOOL_DEFS = TOOL_DEFS + CONSTRUCTION_TOOL_DEFS
+
 TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS}
 
 #: This runtime's slice of the library-wide routing taxonomy.
@@ -123,7 +137,15 @@ TOOL_CATEGORY = {
     "estimate_trade_cost": "portfolio_risk",
 }
 
+TOOL_DISPATCH.update(CONSTRUCTION_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "portfolio_risk" for name in CONSTRUCTION_TOOL_DISPATCH})
+
 __all__ = [
+    "optimize_risk_parity",
+    "optimize_hierarchical_risk_parity",
+    "get_factor_exposure_budget",
+    "analyze_concentration",
+    "get_liquidity_adjusted_var",
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",

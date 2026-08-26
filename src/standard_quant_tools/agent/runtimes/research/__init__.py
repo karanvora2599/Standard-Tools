@@ -34,6 +34,17 @@ from standard_quant_tools.agent.models import (
     VolatilityEstimatorsInput,
 )
 
+from .diagnostic_tools import (  # noqa: F401
+    DIAGNOSTIC_TOOL_DEFS,
+    DIAGNOSTIC_TOOL_DISPATCH,
+    get_drawdown_profile,
+    get_entropy_measures,
+    get_lead_lag_matrix,
+    get_sharpe_stability,
+    run_seasonality_analysis,
+    test_autocorrelation,
+    test_structural_break,
+)
 from .tools import (
     analyze_stock_risk,
     analyze_tail_dependence,
@@ -206,6 +217,11 @@ TOOL_DEFS = [
     ),
 ]
 
+# The quant_research tools declared in diagnostic_tools.py,
+# concatenated rather than pasted so the group stays readable as a
+# unit and cannot half-register.
+TOOL_DEFS = TOOL_DEFS + DIAGNOSTIC_TOOL_DEFS
+
 TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS}
 
 #: This runtime's slice of the library-wide routing taxonomy.
@@ -239,7 +255,17 @@ TOOL_CATEGORY = {
     "get_technical_panel": "analysis",
 }
 
+TOOL_DISPATCH.update(DIAGNOSTIC_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "quant_research" for name in DIAGNOSTIC_TOOL_DISPATCH})
+
 __all__ = [
+    "test_autocorrelation",
+    "run_seasonality_analysis",
+    "get_entropy_measures",
+    "get_sharpe_stability",
+    "get_drawdown_profile",
+    "get_lead_lag_matrix",
+    "test_structural_break",
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",

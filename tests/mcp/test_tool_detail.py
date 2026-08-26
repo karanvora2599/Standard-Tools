@@ -272,13 +272,49 @@ class TestTheRoundTripCloses:
         assert result.is_error is not True
 
 
-class TestTheDefaultIsUnchanged:
-    def test_detail_defaults_to_full(self):
-        assert resolve([]).tool_detail == "full"
+class TestTheDefaultIsAuto:
+    """
+    The default MOVED from `full` to `auto`, and this class records why.
 
-    def test_the_default_server_thins_nothing(self):
-        _s, handlers = build_server(resolve([]))
+    At full detail the backtest runtime cost 75,867 bytes against a 73,728
+    per-runtime ceiling. The ceiling was not the thing to move -- it had
+    been argued up once already, and its own failure message names thin
+    listings as the fix. `auto` was built for exactly this and was simply
+    not switched on.
+
+    It thins only what exceeds `detail_budget`, so the runtimes already
+    under it are returned byte-for-byte unchanged; measured, only backtest
+    (74 -> 41 KB) and modeling (50 -> 30 KB) differ.
+    """
+
+    def test_detail_defaults_to_auto(self):
+        assert resolve([]).tool_detail == "auto"
+
+    def test_a_directly_built_config_gets_the_same_default(self):
+        """The dataclass default and the CLI default have to agree, or a
+        server constructed in code behaves differently from one started
+        from a command line -- a discrepancy this codebase has been bitten
+        by before."""
+        from standard_quant_tools.mcp.config import ServerConfig
+
+        assert ServerConfig().tool_detail == "auto"
+
+    def test_full_is_still_available_and_still_thins_nothing(self):
+        """The old behaviour did not go away, it stopped being implicit."""
+        _s, handlers = build_server(resolve(["--tool-detail", "full"]))
         assert handlers.thinned == set()
+
+    def test_nothing_becomes_unreachable_when_the_default_thins(self):
+        """
+        The reason defaulting to `auto` is safe at all: when any tool is
+        thinned the server injects `describe_tool`, so the full schema is
+        one call away rather than gone.
+        """
+        _s, handlers = build_server(
+            resolve(["--runtime", "backtest", "--tool-detail", "auto"])
+        )
+        if handlers.thinned:
+            assert "describe_tool" in {t.name for t in handlers.tools}
 
     @pytest.mark.parametrize("mode", DETAIL_MODES)
     def test_every_advertised_mode_parses(self, mode):

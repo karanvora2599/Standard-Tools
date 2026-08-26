@@ -148,12 +148,17 @@ class TestTheServerHonoursTheScope:
     def test_a_scoped_server_lists_only_its_runtime(self):
         config = resolve(["--runtime", "research"])
         _server, handlers = build_server(config)
-        listed = {t.name for t in handlers.tools}
+        # `describe_tool` is INJECTED when anything is thinned, and `auto`
+        # is now the default -- so a scoped listing can hold one tool the
+        # runtime does not own. That is the mechanism working: without it a
+        # thinned schema would be unreachable. It is excluded here because
+        # what this test pins is that no OTHER runtime's tools leak in.
+        listed = {t.name for t in handlers.tools} - {"describe_tool"}
         expected = {
             e.name
             for e in select_runtimes(build_catalog(), ["research"])
             if e.name not in LONG_RUNNING
-        }
+        } - {"describe_tool"}
         assert listed == expected
 
     def test_a_scoped_server_cannot_dispatch_another_runtimes_tool(self):
@@ -209,8 +214,14 @@ class TestTheServerHonoursTheScope:
             enable_long_running=True,
         )
         _server, handlers = build_server(config)
-        served = {t.name for t in handlers.tools}
-        expected = {e.name for e in select_runtimes(build_catalog(), ["research"])}
+        # `describe_tool` is injected when `auto` thins anything, so it is
+        # excluded from both sides. What this test pins is that no OTHER
+        # runtime's tools leak in -- the injected schema-fetcher is the
+        # mechanism that makes thinning safe, not a scoping leak.
+        served = {t.name for t in handlers.tools} - {"describe_tool"}
+        expected = {e.name for e in select_runtimes(build_catalog(), ["research"])} - {
+            "describe_tool"
+        }
         assert served == expected, (
             "the runtimes field did not narrow the surface; a server "
             "reporting itself as research-scoped served "
@@ -239,7 +250,8 @@ class TestTheServerHonoursTheScope:
                 enable_long_running=True,
             )
             _server, handlers = build_server(config)
-            assert {t.name for t in handlers.tools} == by_runtime, runtime
+            listed = {t.name for t in handlers.tools} - {"describe_tool"}
+        assert listed == by_runtime - {"describe_tool"}, runtime
 
 
 class TestTheBudgetIsNowPerRuntime:
