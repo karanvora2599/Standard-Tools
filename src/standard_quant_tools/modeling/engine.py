@@ -65,6 +65,56 @@ def _target_horizon(target_id: "str | None") -> "int | None":
         return None
 
 
+def _calibrated(estimator, model_spec, n_rows: int):
+    """
+    Wrap a classifier so its probabilities mean what they say.
+
+    Returns the estimator unchanged unless calibration was asked for, which
+    keeps this a no-op for every existing spec.
+
+    THREE THINGS THIS REFUSES TO DO SILENTLY.
+
+    Calibrating a regressor is meaningless -- there are no probabilities to
+    map -- so a spec that asks for it is a mistake worth naming rather than
+    a request to ignore.
+
+    Calibrating with more folds than rows will support cannot work, and
+    sklearn's own error for it arrives from three frames down talking about
+    `n_splits`. The estimator needs enough rows per fold to fit at all.
+
+    And the calibration map is fitted on HELD-OUT folds inside the training
+    window, never on the rows the estimator itself trained on. Fitting it
+    there would calibrate against memorized labels and report a confidence
+    nobody has, which is the same failure as scoring a model on its training
+    set and one layer more obscure.
+    """
+    method = getattr(model_spec.estimator, "calibration", "none")
+    if method == "none":
+        return estimator
+
+    if model_spec.task != "classification":
+        raise ValidationError(
+            f"estimator.calibration={method!r} was requested for a "
+            f"{model_spec.task!r} task. Calibration maps scores onto "
+            "probabilities and only classification has any. Remove it, or "
+            "set task='classification'."
+        )
+
+    folds = int(getattr(model_spec.estimator, "calibration_folds", 3))
+    if n_rows < folds * 2:
+        raise ValidationError(
+            f"estimator.calibration needs at least {folds * 2} training rows "
+            f"for {folds} folds and this window has {n_rows}. Lower "
+            "calibration_folds, widen train_window, or drop calibration -- "
+            "an uncalibrated score is honest, and a calibration map fitted "
+            "on a handful of rows is not."
+        )
+
+    from sklearn.calibration import CalibratedClassifierCV
+
+    return CalibratedClassifierCV(estimator, method=method, cv=folds)
+
+
 def _instantiate(cls: Any, params: Dict[str, Any], random_seed: int) -> Any:
     sig = inspect.signature(cls.__init__)
     kwargs = dict(params)
@@ -479,6 +529,10 @@ def run_experiment(
 
         estimator = _instantiate(estimator_cls, fold_params, model_spec.random_seed)
         arrays = adapter.prepare(model_spec, train_df, train_X, train_y, sample_weight)
+        # Calibration is fitted INSIDE the training window, on folds held out
+        # from it, so the map never sees a label the estimator memorized --
+        # and never sees a test row at all.
+        estimator = _calibrated(estimator, model_spec, len(arrays.y))
         _fit(estimator, arrays.X, arrays.y, arrays.sample_weight, group=arrays.group)
 
         metrics, prediction_values, fold_ic = _predict_fold(
@@ -629,6 +683,10 @@ def run_experiment(
     final_estimator = _instantiate(
         estimator_cls, model_spec.estimator.params, model_spec.random_seed
     )
+    # The deployed estimator is calibrated the same way the folds were. A
+    # model validated with calibrated probabilities and deployed without
+    # would report one threshold's behaviour and exhibit another's.
+    final_estimator = _calibrated(final_estimator, model_spec, len(full_y))
     # Refit through the SAME adapter the folds used. The deployed model is
     # what actually scores, so fitting it differently from the one that was
     # validated is the quietest way to make a validation number describe
