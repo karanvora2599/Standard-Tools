@@ -1,4 +1,5 @@
 import logging
+import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -236,3 +237,36 @@ def require_finite_array(arr: np.ndarray, name: str, func: str) -> None:
             f"{func}: {name} contains {n_bad} non-finite value(s) (NaN/Inf); "
             f"{name} must be finite."
         )
+
+
+def last_finite(series: Any, name: str, *, minimum: int = 1) -> float:
+    """
+    The last finite value of a series, or a ValidationError that says why
+    there isn't one.
+
+    THE FAILURE THIS REPLACES. Taking `.dropna().iloc[-1]` is the
+    natural way to take an indicator's latest reading, and it raises
+
+        IndexError: single positional indexer is out-of-bounds
+
+    when the indicator's window is longer than the data supplied -- a
+    20-period band over 1 bar is all-NaN, `dropna()` empties it, and pandas
+    raises from inside its own indexer. Found by fuzzing three tools that
+    did exactly this.
+
+    That error is unactionable. It names no tool, no indicator and no
+    shortfall, and it reads like a library defect rather than a request the
+    data could not support. This raises instead with all three.
+    """
+    raw = series.to_numpy() if hasattr(series, "to_numpy") else np.asarray(series)
+    values = np.asarray(raw, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size < max(1, minimum):
+        total = values.size
+        raise ValidationError(
+            f"{name}: no finite value to report. {total} bar(s) went in and "
+            f"{finite.size} survived, which means the indicator's window is "
+            "longer than the data supplied. Fetch a longer range, or shorten "
+            "the period."
+        )
+    return float(finite[-1])

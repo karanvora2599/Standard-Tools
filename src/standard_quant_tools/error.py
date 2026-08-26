@@ -51,8 +51,22 @@ class CalculationError(QuantError):
     pass
 
 
-class ValidationError(QuantError):
-    """Raised when input validation fails (e.g., negative period, empty DataFrame)."""
+class ValidationError(QuantError, ValueError):
+    """Raised when input validation fails (e.g., negative period, empty DataFrame).
+
+    ALSO A `ValueError`, and the second base is load-bearing rather than
+    decorative. "This input was invalid" is semantically a ValueError, and
+    `except ValueError` is what a caller writes without reading the library's
+    exception hierarchy first.
+
+    Before this, parts of the library raised `ValidationError` and parts
+    raised a bare `ValueError` with an equally good message -- so
+    `except QuantError` silently missed four tools and `except ValueError`
+    silently missed the rest. Neither catch was wrong; the split was.
+
+    Adding the base is strictly widening: every handler that worked before
+    still works, and both spellings now catch everything.
+    """
 
     pass
 

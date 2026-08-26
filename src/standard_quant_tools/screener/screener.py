@@ -45,6 +45,7 @@ from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi as calc_rsi
 from standard_quant_tools.indicators.trend import sma as calc_sma
+from standard_quant_tools.validation import last_finite
 
 _VALID_FILTER_KEYS = frozenset(
     (
@@ -281,7 +282,7 @@ async def _fetch_ticker_data(
 
             if "rsi_max" in filters or "rsi_min" in filters:
                 rsi_vals = calc_rsi(close, 14)
-                last_rsi = float(rsi_vals.dropna().iloc[-1])
+                last_rsi = last_finite(rsi_vals, "rsi_vals")
                 row["rsi_14"] = round(last_rsi, 2)
                 if "rsi_max" in filters and last_rsi > filters["rsi_max"]:
                     return ("failed_filter", ticker, "rsi_max")
@@ -291,16 +292,16 @@ async def _fetch_ticker_data(
             if "price_above_sma" in filters:
                 n = int(filters["price_above_sma"])
                 sma_vals = calc_sma(close, n)
-                if last_close <= float(sma_vals.dropna().iloc[-1]):
+                if last_close <= last_finite(sma_vals, "sma_vals"):
                     return ("failed_filter", ticker, "price_above_sma")
-                row[f"sma_{n}"] = round(float(sma_vals.dropna().iloc[-1]), 2)
+                row[f"sma_{n}"] = round(last_finite(sma_vals, "sma_vals"), 2)
 
             if "price_below_sma" in filters:
                 n = int(filters["price_below_sma"])
                 sma_vals = calc_sma(close, n)
-                if last_close >= float(sma_vals.dropna().iloc[-1]):
+                if last_close >= last_finite(sma_vals, "sma_vals"):
                     return ("failed_filter", ticker, "price_below_sma")
-                row[f"sma_{n}"] = round(float(sma_vals.dropna().iloc[-1]), 2)
+                row[f"sma_{n}"] = round(last_finite(sma_vals, "sma_vals"), 2)
 
             if "beta_max" in filters or "beta_min" in filters:
                 _spy = (

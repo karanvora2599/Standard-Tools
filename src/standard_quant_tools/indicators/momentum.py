@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.validation import require_finite_array, validate_series
+from standard_quant_tools.validation import (
+    last_finite,
+    require_finite_array,
+    validate_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +171,7 @@ def stochastic_oscillator(
                 logger.debug(
                     "[stochastic] K last=%.2f  D last=%.2f",
                     float(valid_k.iloc[-1]),
-                    float(d.dropna().iloc[-1]),
+                    last_finite(d, "d"),
                 )
             return result
         except Exception as exc:
@@ -197,6 +201,6 @@ def stochastic_oscillator(
         logger.debug(
             "[stochastic] K last=%.2f  D last=%.2f",
             float(valid_k.iloc[-1]),
-            float(d.dropna().iloc[-1]),
+            last_finite(d, "d"),
         )
     return result

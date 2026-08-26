@@ -62,6 +62,40 @@ def _validate_option_inputs(
         raise ValidationError(
             f"option_type must be one of {sorted(_OPTION_TYPES)}, got {option_type!r}"
         )
+    # BOUNDED, not merely positive. Found by fuzzing: `volatility=1e300`
+    # passed every check above and then raised
+    #
+    #     OverflowError: (34, 'Result too large')
+    #
+    # out of `math.exp` two lines later, naming neither the argument nor the
+    # tool. exp(x) overflows a float at about x = 710, and a `vol * sqrt(T)`
+    # denominator underflows to exactly zero well before either factor
+    # reaches the smallest normal float.
+    #
+    # These limits sit far outside anything a real market produces -- 10,000%
+    # annualized volatility, a hundred-year expiry -- so they reject only
+    # inputs that were already a unit error or a typo, never an extreme case
+    # somebody meant to ask about.
+    #
+    # Bounded on MAGNITUDE rather than on the signed value, so a future
+    # model-specific sign exemption is not broken by this guard. Writing it
+    # against the signed value in pricing.py refused a negative spot outright
+    # and broke the Bachelier exemption -- WTI settled at -$37.63 on 20 April
+    # 2020, and that is the exact case the model exists for.
+    for name, value, high in (
+        ("spot", spot, 1e12),
+        ("strike", strike, 1e12),
+        ("time_to_expiry", time_to_expiry, 100.0),
+        ("volatility", volatility, 100.0),
+    ):
+        numeric = float(value)
+        if not math.isfinite(numeric) or abs(numeric) > high:
+            raise ValidationError(
+                f"{name}={numeric:g} has a magnitude outside what these "
+                f"formulas can price (limit {high:g}). A lognormal model's "
+                "exp(rate x time) overflows a float at about 710, so a value "
+                "this far out is a unit error rather than an extreme case."
+            )
 
 
 def _d1_d2(

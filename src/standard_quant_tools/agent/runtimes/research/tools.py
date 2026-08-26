@@ -167,6 +167,7 @@ from standard_quant_tools.portfolio.portfolio import (
     portfolio_metrics,
 )
 from standard_quant_tools.screener.screener import screen_stocks
+from standard_quant_tools.validation import last_finite
 
 # Indicators technical_indicators() can compute in one native call. "atr" is
 # deliberately excluded: the tool's plain atr() uses a simple rolling mean,
@@ -330,9 +331,9 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
 
     if "macd" in requested:
         m = macd(close)
-        last_macd = float(m["MACD"].dropna().iloc[-1])
-        last_sig = float(m["Signal"].dropna().iloc[-1])
-        last_hist = float(m["Histogram"].dropna().iloc[-1])
+        last_macd = last_finite(m["MACD"], "MACD")
+        last_sig = last_finite(m["Signal"], "Signal")
+        last_hist = last_finite(m["Histogram"], "Histogram")
         last_vals["macd"] = round(last_macd, 4)
         last_vals["macd_signal"] = round(last_sig, 4)
         last_vals["macd_histogram"] = round(last_hist, 4)
@@ -357,8 +358,8 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
             )
         else:
             stoch = stochastic_oscillator(high, low, close)
-        k = float(stoch["Stoch_K"].dropna().iloc[-1])
-        d = float(stoch["Stoch_D"].dropna().iloc[-1])
+        k = last_finite(stoch["Stoch_K"], "Stoch_K")
+        d = last_finite(stoch["Stoch_D"], "Stoch_D")
         last_vals["stoch_k"] = round(k, 2)
         last_vals["stoch_d"] = round(d, 2)
         signals["stoch_oversold"] = k < 20 and d < 20
@@ -372,9 +373,9 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
             )
         else:
             bb = bollinger_bands(close)
-        upper = float(bb["BB_Upper"].dropna().iloc[-1])
-        middle = float(bb["BB_Middle"].dropna().iloc[-1])
-        lower = float(bb["BB_Lower"].dropna().iloc[-1])
+        upper = last_finite(bb["BB_Upper"], "BB_Upper")
+        middle = last_finite(bb["BB_Middle"], "BB_Middle")
+        lower = last_finite(bb["BB_Lower"], "BB_Lower")
         last_vals["bb_upper"] = round(upper, 4)
         last_vals["bb_middle"] = round(middle, 4)
         last_vals["bb_lower"] = round(lower, 4)
@@ -395,7 +396,7 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
     if "vwap" in requested:
         v = vwap(high, low, close, volume)
         if not v.dropna().empty:
-            last_vwap = float(v.dropna().iloc[-1])
+            last_vwap = last_finite(v, "v")
             last_vals["vwap"] = round(last_vwap, 4)
             signals["price_above_vwap"] = last_close > last_vwap
 
@@ -1227,17 +1228,21 @@ def get_advanced_indicators(
         af_step=input_data.sar_af_step,
         af_max=input_data.sar_af_max,
     )
-    sar_val = float(sar_df["SAR"].iloc[-1])
-    sar_trend_int = int(sar_df["Trend"].iloc[-1])
+    # Each of these takes the latest value of an indicator whose window can
+    # exceed the data supplied. `.iloc[-1]` on the resulting empty series
+    # raises a pandas IndexError that names neither the tool nor the
+    # shortfall; `last_finite` names both.
+    sar_val = last_finite(sar_df["SAR"], "SAR")
+    sar_trend_int = int(last_finite(sar_df["Trend"], "SAR trend"))
     sar_trend = "bullish" if sar_trend_int == 1 else "bearish"
     sar_signal = "buy" if sar_trend_int == 1 else "sell"
 
     watr_series = wilder_atr(high, low, close, period=input_data.atr_period).dropna()
-    watr_val = float(watr_series.iloc[-1])
+    watr_val = last_finite(watr_series, "Wilder ATR")
     watr_pct = watr_val / last_close if last_close > 0 else 0.0
 
     mfi_series = mfi(high, low, close, volume, period=input_data.mfi_period).dropna()
-    mfi_val = float(mfi_series.iloc[-1])
+    mfi_val = last_finite(mfi_series, "MFI")
     if mfi_val >= 80:
         mfi_signal = "overbought"
     elif mfi_val <= 20:

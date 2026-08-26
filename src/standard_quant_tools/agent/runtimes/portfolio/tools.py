@@ -114,6 +114,7 @@ from standard_quant_tools.portfolio.optimize import (
 from standard_quant_tools.portfolio.portfolio import (
     fetch_returns_sync,
 )
+from standard_quant_tools.validation import last_finite
 
 
 def _rounded(value: Any, digits: int = 4) -> Optional[float]:
@@ -534,7 +535,7 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     atr_series = atr(
         df["High"], df["Low"], df["Close"], period=input_data.atr_period
     ).dropna()
-    last_atr = float(atr_series.iloc[-1])
+    last_atr = last_finite(atr_series, "atr_series")
 
     stop_distance = last_atr * input_data.atr_multiplier
     dollar_risk = input_data.account_equity * input_data.risk_per_trade_pct

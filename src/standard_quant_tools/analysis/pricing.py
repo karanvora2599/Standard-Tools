@@ -124,6 +124,33 @@ def price_option(
     resulting price is wrong by two orders of magnitude. Said here because
     no type system catches it.
     """
+    # BOUNDED, not merely positive. Fuzzing raised OverflowError out of this
+    # function at volatility=1e300: exp(r*T) overflows a float at about
+    # r*T = 710, and `vol * sqrt(T)` underflows to exactly zero well before
+    # either factor reaches the smallest normal float. The limits below sit
+    # far outside anything a real market produces, so they reject only
+    # inputs that were already wrong.
+    # Bounded on MAGNITUDE, never on sign. Bounding the signed value
+    # rejected a negative spot outright and broke the Bachelier exemption --
+    # the whole reason that model is here. WTI settled at -$37.63 on 20
+    # April 2020, and a guard that refuses it refuses the exact case the
+    # model exists for. The sign checks below are model-aware and stay
+    # there; this only has to stop 1e300 reaching exp().
+    for _name, _value, _high in (
+        ("spot", spot, 1e12),
+        ("strike", strike, 1e12),
+        ("time_to_expiry", time_to_expiry, 100.0),
+        ("volatility", volatility, 100.0),
+    ):
+        _numeric = float(_value)
+        if not math.isfinite(_numeric) or abs(_numeric) > _high:
+            raise ValidationError(
+                f"{_name}={_numeric:g} has a magnitude outside what these "
+                f"models can price (limit {_high:g}). A lognormal model's "
+                "exp(rate x time) overflows a float at about 710, so a value "
+                "this far out is a unit error rather than an extreme case."
+            )
+
     _validate(spot, strike, time_to_expiry, volatility, option_type, model)
     if american and model not in AMERICAN_CAPABLE:
         raise ValidationError(

@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.validation import require_finite_array, validate_series
+from standard_quant_tools.validation import (
+    last_finite,
+    require_finite_array,
+    validate_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +70,9 @@ def bollinger_bands(
                 logger.debug(
                     "[bollinger] last upper=%.4f  middle=%.4f  lower=%.4f  width=%.4f",
                     float(valid_u.iloc[-1]),
-                    float(middle.dropna().iloc[-1]),
-                    float(lower.dropna().iloc[-1]),
-                    float(valid_u.iloc[-1]) - float(lower.dropna().iloc[-1]),
+                    last_finite(middle, "middle"),
+                    last_finite(lower, "lower"),
+                    float(valid_u.iloc[-1]) - last_finite(lower, "lower"),
                 )
             return result
         except Exception as exc:
@@ -88,7 +92,7 @@ def bollinger_bands(
         logger.debug(
             "[bollinger] last upper=%.4f  middle=%.4f  lower=%.4f  width=%.4f",
             float(valid_u.iloc[-1]),
-            float(sma.dropna().iloc[-1]),
+            last_finite(sma, "sma"),
             float(valid_l.iloc[-1]),
             width,
         )

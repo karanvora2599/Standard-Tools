@@ -84,6 +84,81 @@ def _positive(value: Any, name: str) -> float:
     return value
 
 
+#: Magnitudes beyond which an input is not an extreme case, it is a
+#: mistake. Every one is set far outside anything a real market produces,
+#: so a rejection here never refuses a question somebody meant to ask.
+#:
+#: The reason they exist is arithmetic rather than taste: exp(r*T) overflows
+#: a float at about r*T = 710, and a `vol * sqrt(T)` denominator underflows
+#: to exactly zero well before either factor reaches the smallest normal
+#: float. Found by fuzzing, which raised OverflowError and
+#: ZeroDivisionError out of five tools at 1e300 and 1e-300.
+MAX_VOLATILITY = 100.0  # 10,000% annualized
+MIN_TIME_TO_EXPIRY = 1e-8  # about a third of a second
+MAX_TIME_TO_EXPIRY = 100.0  # years; no listed contract is close
+MAX_RATE = 10.0  # 1,000% continuously compounded
+MAX_PRICE = 1e12
+
+
+def _bounded(
+    value: float, name: str, *, low: float, high: float, unit: str = ""
+) -> float:
+    """
+    A finite value inside a plausible range, or a refusal that names the
+    bound it broke.
+
+    `_positive` admits 1e300, and 1e300 overflows `exp` two lines later
+    with an error naming neither the argument nor the tool. This refuses
+    first, with both.
+    """
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValidationError(f"{name} must be finite, got {value!r}")
+    if not low <= value <= high:
+        raise ValidationError(
+            f"{name}={value:g}{unit} is outside the range this can price "
+            f"({low:g} to {high:g}{unit}). That is not a conservative "
+            "limit -- it sits far outside anything a real market produces, "
+            "so a value beyond it is a unit error or a typo rather than an "
+            "extreme case. Note that a lognormal model's exp(rate x time) "
+            "overflows a float at about 710."
+        )
+    return value
+
+
+def _option_inputs(
+    *,
+    spot: Optional[float] = None,
+    strike: Optional[float] = None,
+    time_to_expiry: Optional[float] = None,
+    volatility: Optional[float] = None,
+    risk_free_rate: Optional[float] = None,
+    dividend_yield: Optional[float] = None,
+) -> None:
+    """Bound every option argument that was supplied. Order matters only
+    for which error a caller sees first."""
+    # Magnitude, for the reason recorded in pricing.py: a signed bound here
+    # would refuse the negative underlying a normal model exists to price.
+    if spot is not None:
+        _bounded(abs(float(spot)), "spot magnitude", low=1e-8, high=MAX_PRICE)
+    if strike is not None:
+        _bounded(abs(float(strike)), "strike magnitude", low=1e-8, high=MAX_PRICE)
+    if time_to_expiry is not None:
+        _bounded(
+            time_to_expiry,
+            "time_to_expiry",
+            low=MIN_TIME_TO_EXPIRY,
+            high=MAX_TIME_TO_EXPIRY,
+            unit=" years",
+        )
+    if volatility is not None:
+        _bounded(volatility, "volatility", low=1e-8, high=MAX_VOLATILITY)
+    if risk_free_rate is not None:
+        _bounded(risk_free_rate, "risk_free_rate", low=-MAX_RATE, high=MAX_RATE)
+    if dividend_yield is not None:
+        _bounded(dividend_yield, "dividend_yield", low=-MAX_RATE, high=MAX_RATE)
+
+
 # ── greeks beyond the first order ───────────────────────────────────────
 
 
@@ -131,6 +206,14 @@ def option_greeks(
     strike = _positive(strike, "strike")
     t = _positive(time_to_expiry, "time_to_expiry")
     vol = _positive(volatility, "volatility")
+    _option_inputs(
+        spot=spot,
+        strike=strike,
+        time_to_expiry=t,
+        volatility=vol,
+        risk_free_rate=risk_free_rate,
+        dividend_yield=dividend_yield,
+    )
     option_type = str(option_type).lower()
     if option_type not in ("call", "put"):
         raise ValidationError(
@@ -786,6 +869,13 @@ def check_put_call_parity(
     spot = _positive(spot, "spot")
     strike = _positive(strike, "strike")
     t = _positive(time_to_expiry, "time_to_expiry")
+    _option_inputs(
+        spot=spot,
+        strike=strike,
+        time_to_expiry=t,
+        risk_free_rate=risk_free_rate,
+        dividend_yield=dividend_yield,
+    )
     call_price = float(call_price)
     put_price = float(put_price)
     if call_price < 0 or put_price < 0:
@@ -875,6 +965,8 @@ def implied_forward_price(
     """
     spot = _positive(spot, "spot")
     t = _positive(time_to_expiry, "time_to_expiry")
+    _option_inputs(spot=spot, time_to_expiry=t, risk_free_rate=risk_free_rate)
+    _bounded(borrow_rate, "borrow_rate", low=-MAX_RATE, high=MAX_RATE)
     r, q, b = float(risk_free_rate), float(dividend_yield), float(borrow_rate)
     net_carry = r - q - b
     forward = spot * math.exp(net_carry * t)
@@ -939,6 +1031,8 @@ def expected_move(
     spot = _positive(spot, "spot")
     vol = _positive(implied_vol, "implied_vol")
     days = _positive(days, "days")
+    _option_inputs(spot=spot, volatility=vol)
+    _bounded(days, "days", low=1e-6, high=MAX_TIME_TO_EXPIRY * 365.0, unit=" days")
     t = days / 365.0
     sigma_move = spot * vol * math.sqrt(t)
     straddle = 0.8 * sigma_move
@@ -1047,6 +1141,14 @@ def simulate_delta_hedge(
     t = _positive(time_to_expiry, "time_to_expiry")
     iv = _positive(implied_vol, "implied_vol")
     rv = _positive(realized_vol, "realized_vol")
+    _option_inputs(
+        spot=spot,
+        strike=strike,
+        time_to_expiry=t,
+        volatility=iv,
+        risk_free_rate=risk_free_rate,
+    )
+    _bounded(rv, "realized_vol", low=1e-8, high=MAX_VOLATILITY)
     n_hedges = max(1, int(n_hedges))
     n_paths = max(1, int(n_paths))
     option_type = str(option_type).lower()
@@ -1192,6 +1294,13 @@ def option_risk_scenarios(
     strike = _positive(strike, "strike")
     t = _positive(time_to_expiry, "time_to_expiry")
     vol = _positive(volatility, "volatility")
+    _option_inputs(
+        spot=spot,
+        strike=strike,
+        time_to_expiry=t,
+        volatility=vol,
+        risk_free_rate=risk_free_rate,
+    )
     quantity = float(quantity)
     remaining = t - float(days_forward) / 365.0
     if remaining <= 0:
