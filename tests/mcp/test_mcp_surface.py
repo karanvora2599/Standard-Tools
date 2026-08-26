@@ -195,15 +195,25 @@ class TestBudget:
 
         What must stay true is that a client CAN still be served everything
         if it asks. That is this test. It is a stronger claim than the old
-        one, because it has to keep holding at 151 tools rather than failing
-        the moment one more is added.
+        one, because it has to keep holding as tools are added rather than
+        failing the moment one more is.
+
+        `detail_budget` IS NOT THE SERVED SIZE, and the gap is the reason
+        this number is not simply the ceiling. `plan_detail` thins until the
+        sum of schema costs fits the budget; `context_bytes()` measures what
+        actually goes over the wire, which carries the MCP envelope on top.
+        Measured across four budgets, that overhead runs about 50 KB and is
+        roughly flat, so the budget has to sit that far below the ceiling to
+        land under it. 98,304 serves the whole surface at ~152 KB with every
+        tool still advertised; 131,072 -- what this test used to pass --
+        lands at ~183 KB and does not.
         """
         _server, handlers = build_server(
             ServerConfig(
                 categories=ALL_CATEGORIES,
                 enable_long_running=True,
                 tool_detail="auto",
-                detail_budget=131_072,
+                detail_budget=98_304,
             )
         )
         total = handlers.context_bytes()

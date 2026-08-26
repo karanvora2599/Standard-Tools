@@ -2,13 +2,13 @@
 Thin listings: advertise a name and a purpose, fetch the schema on demand.
 
 WHY. Runtime scoping fixed *who sees what*; it did not change what a tool
-costs to advertise. `backtest` is 65 KB before an agent has done anything,
-and the ceiling that buys 82.4 tools is already spent at 82.
+costs to advertise. `backtest` runs to tens of KB before an agent has done
+anything, and almost none of it is schemas that agent will use.
 
 The observation this rests on is that `describe_tool` already existed, in
 `meta`, tested, and returning exactly the schema a thinned listing omits.
-The server was shipping all 82 schemas up front on the assumption an agent
-would need every one. It needs a handful.
+The server was shipping every schema up front on the assumption an agent
+would need them all. It needs a handful.
 
 WHAT THINNING MUST NOT DO. It changes the ADVERTISEMENT and nothing else:
 
@@ -274,17 +274,18 @@ class TestTheRoundTripCloses:
 
 class TestTheDefaultIsAuto:
     """
-    The default MOVED from `full` to `auto`, and this class records why.
+        The default MOVED from `full` to `auto`, and this class records why.
 
-    At full detail the backtest runtime cost 75,867 bytes against a 73,728
-    per-runtime ceiling. The ceiling was not the thing to move -- it had
-    been argued up once already, and its own failure message names thin
-    listings as the fix. `auto` was built for exactly this and was simply
-    not switched on.
+    `backtest` is by a wide margin the most expensive runtime at full
+        detail, and paying all of it on every connection to reach a handful of
+        its tools is waste. There is no fixed ceiling being breached -- what a
+        client can afford is a property of the client, and a constant in this
+        repository was never in a position to say. `auto` was built for exactly
+        this and was simply not switched on.
 
-    It thins only what exceeds `detail_budget`, so the runtimes already
-    under it are returned byte-for-byte unchanged; measured, only backtest
-    (74 -> 41 KB) and modeling (50 -> 30 KB) differ.
+        It thins only what exceeds `detail_budget`, so the runtimes already
+        under it are returned byte-for-byte unchanged; only the expensive ones
+        differ.
     """
 
     def test_detail_defaults_to_auto(self):

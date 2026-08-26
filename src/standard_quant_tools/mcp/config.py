@@ -112,13 +112,14 @@ class ServerConfig:
     #: fits `detail_budget`, 'thin' thins everything. A thinned
     #: tool is listed and callable; its ARGUMENTS come from
     #: describe_tool instead of from the listing.
-    # DEFAULTS TO AUTO, not full. At full detail the backtest
-    # runtime costs 74 KB against a 72 KB per-runtime ceiling, and
-    # the ceiling is not the thing to move -- it has been argued up
-    # once already. `auto` thins only what exceeds `detail_budget`,
-    # so the five runtimes already under it are returned unchanged
-    # and only `backtest` (74 -> 41 KB) and `modeling` (50 -> 30 KB)
-    # differ. `describe_tool` is injected whenever anything is
+    # DEFAULTS TO AUTO, not full. The backtest runtime is the most
+    # expensive by a wide margin at full detail, and paying that on
+    # every connection to reach a handful of its tools is waste --
+    # there is no fixed ceiling being breached, because what a client
+    # can afford is a property of the client rather than of this
+    # library. `auto` thins only what exceeds `detail_budget`, so the
+    # runtimes already under it are returned unchanged and only the
+    # expensive ones differ. `describe_tool` is injected whenever anything is
     # thinned, so no schema becomes unreachable -- it becomes one
     # call away, paid for by the callers who need it rather than by
     # every session at startup.

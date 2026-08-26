@@ -55,6 +55,12 @@ from .inference_tools import (  # noqa: F401
     get_correlation_stability,
     test_normality,
 )
+from .reference_tools import (
+    IndicatorPanelInput,
+    SeriesMetricsInput,
+    calculate_series_metrics,
+    compute_indicator_panel,
+)
 from .tools import (
     analyze_stock_risk,
     analyze_tail_dependence,
@@ -88,6 +94,28 @@ from .tools import (
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "calculate_series_metrics",
+        "Risk and return metrics for ANY return series -- a symbol, an "
+        "`sqt://` reference from another runtime, or values passed inline. "
+        "The same arithmetic analyze_stock_risk applies to a ticker, "
+        "available for a model's out-of-sample returns, an external fund's "
+        "series, or a panel another agent already computed. The metric set "
+        "is closed rather than open, because this surface is reachable from "
+        "an agent and an arbitrary-expression argument would be a code path "
+        "wearing a statistics costume.",
+        SeriesMetricsInput,
+    ),
+    (
+        "compute_indicator_panel",
+        "Indicator HISTORY for a whole universe, published one `sqt://` "
+        "reference per indicator. get_technical_panel answers what the "
+        "indicators are NOW; this answers what they have been, which is "
+        "what a signal, a feature or a custom backtest actually consumes. "
+        "Pass a price_panel_ref from the data runtime and nothing is "
+        "refetched -- the same bars are reused.",
+        IndicatorPanelInput,
+    ),
     (
         "detect_change_points",
         "When the process generating a series CHANGED, by binary segmentation on the mean. run_hurst_analysis says what KIND of process a series is; this says when it stopped being that one, which the first cannot -- a single Hurst exponent over a sample containing a break describes neither regime. Read `gain` on each break: a marginal call then looks marginal instead of looking like a boundary.",
@@ -255,6 +283,12 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
+    # Reference-native additions. `calculate_series_metrics` is `analysis`
+    # because it profiles ONE series the way analyze_stock_risk does;
+    # `compute_indicator_panel` is `analysis` for the same reason
+    # get_technical_panel is.
+    "calculate_series_metrics": "analysis",
+    "compute_indicator_panel": "analysis",
     "analyze_stock_risk": "analysis",
     "analyze_tail_dependence": "quant_research",
     "detect_change_points": "quant_research",

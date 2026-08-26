@@ -40,12 +40,12 @@ shipped, generalized to the rest of the surface.
 
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
-| `research` | 40 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
+| `research` | 42 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
 | `data` | 13 | `data` | Get the bytes and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
-| `backtest` | 32 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
+| `backtest` | 33 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 19 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
-| `portfolio` | 17 | `portfolio_risk` | Turn a view into a position and price what it costs. |
-| `modeling` | 16 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
+| `portfolio` | 18 | `portfolio_risk` | Turn a view into a position and price what it costs. |
+| `modeling` | 17 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 12 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
 | `feature_lab` | 9 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
@@ -155,7 +155,7 @@ a changelog nobody reads, embedded in an error message everybody does.
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
 decision, though the budget forced it: at roughly 1,615 bytes per tool over
-the wire the session ceiling buys about 111 tools and the library has 170,
+the wire the session ceiling buys about 111 tools and the library has 175,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 
@@ -311,7 +311,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-170 schemas — which is exactly what the MCP category budget exists to avoid,
+175 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.

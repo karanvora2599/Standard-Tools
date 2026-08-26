@@ -45,10 +45,25 @@ from .tools import (
     run_portfolio_optimization,
     run_stress_test,
 )
+from .weight_tools import (  # noqa: F401
+    ConstructWeightsInput,
+    construct_weights_from_scores,
+)
 
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "construct_weights_from_scores",
+        "Turn alpha scores into portfolio weights and STOP, so the weights "
+        "can be looked at before anything is simulated. Rank, top/bottom, "
+        "z-score or volatility-scaled construction, optionally "
+        "dollar-neutralised. This is the step that is otherwise buried "
+        "inside a larger operation: when a model's backtest looks wrong, "
+        "seeing the weights is what separates a bad signal from bad "
+        "construction. Returns TARGET weights, not a P&L.",
+        ConstructWeightsInput,
+    ),
     (
         "plan_rebalance",
         "A day-by-day path from the weights you hold to the weights you want. Every optimizer here returns a target vector and implicitly assumes you arrive instantly and for free; trading fast costs market impact and trading slow means holding the portfolio you were trying to leave, so this returns the SCHEDULE and both costs rather than one number. Surfaces what nothing else does: a target weight the market cannot supply, with the number of days it would really take.",
@@ -110,6 +125,7 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
+    "construct_weights_from_scores": "portfolio_risk",
     "run_portfolio_optimization": "portfolio_risk",
     "plan_rebalance": "portfolio_risk",
     "estimate_covariance": "portfolio_risk",

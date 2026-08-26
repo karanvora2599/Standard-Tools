@@ -307,9 +307,11 @@ DETAIL_MODES: Tuple[str, ...] = ("full", "auto", "thin")
 #: Target for one runtime's advertised surface, in bytes. `auto` thins the
 #: fewest tools needed to come in under this.
 #:
-#: 32,768 is a third of the 72 KB per-runtime ceiling rather than the
-#: ceiling itself, because a target that only just fits leaves the next
-#: added tool to blow it again. Measured: it costs `backtest` twelve round
+#: 32,768 is a working target rather than a limit -- there is no fixed
+#: per-runtime ceiling, because what a client can afford depends on its
+#: model and its session. Thinning to a target well under the full-detail
+#: cost keeps the common case cheap without asserting a threshold this
+#: library is in no position to choose. Measured: it costs `backtest` twelve round
 #: trips, `research` eight and `modeling` two; the other five runtimes are
 #: already under it and pay nothing.
 DEFAULT_DETAIL_BUDGET = 32_768

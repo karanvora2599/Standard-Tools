@@ -53,6 +53,10 @@ from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfol
 from ..registry.model_registry import load_manifest
 from ..scoring import score_model as _score_model
 from ..specs import DatasetSpec
+from .dataset_tools import (  # noqa: F401
+    ExplainRowLossInput,
+    explain_dataset_row_loss,
+)
 from .models import (
     AnalyzeFeaturesInput,
     AnalyzeFeaturesResult,
@@ -842,6 +846,11 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
 
 _MODELING_TOOL_DEFS: List[tuple] = [
     (
+        "explain_dataset_row_loss",
+        'Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.',
+        ExplainRowLossInput,
+    ),
+    (
         "validate_pit_records",
         "Check point-in-time records BEFORE joining them onto anything. The error worth catching is the two timestamps the wrong way round: event_time is when a fact is ABOUT, available_time is when it could first be ACTED ON, and swapped they make every model look prescient. Also reports median_publication_lag_days -- exactly how much hindsight a naive join on event_time would have handed you. Fetches nothing.",
         PitRecordsInput,
@@ -1239,6 +1248,10 @@ def join_point_in_time(input_data: JoinPointInTimeInput) -> JoinPointInTimeResul
 
 
 MODELING_TOOL_DISPATCH = {
+    "explain_dataset_row_loss": (
+        explain_dataset_row_loss,
+        ExplainRowLossInput,
+    ),
     "validate_pit_records": (validate_pit_records, PitRecordsInput),
     "join_point_in_time": (join_point_in_time, JoinPointInTimeInput),
     "validate_model_spec": (validate_model_spec, ValidateModelSpecInput),

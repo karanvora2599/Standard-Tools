@@ -26,23 +26,23 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 170 below.
+advertises 155 of the 175 below.
 
 
 ## The runtimes
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 40 | 44 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `backtest` | 32 | 71 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `backtest` | 33 | 73 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [10_auditability.md](10_auditability.md) |
-| `portfolio` | 17 | 29 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `modeling` | 16 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `modeling` | 17 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `data` | 13 | 12 KB | *(one surface)* | — |
 | `microstructure` | 12 | 15 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 11 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **170** | | | |
+| **Total** | **175** | | | |
 
 ---
 
@@ -58,6 +58,20 @@ Full risk profile of one asset against a benchmark: alpha, beta, Sharpe, VaR and
 
 **Required:** `symbol`  
 **Optional:** `benchmark`, `period`, `risk_free_rate`
+
+#### `calculate_series_metrics`
+
+Risk and return metrics for ANY return series -- a symbol, an `sqt://` reference from another runtime, or values passed inline. The same arithmetic analyze_stock_risk applies to a ticker, available for a model's out-of-sample returns, an external fund's series, or a panel another agent already computed. The metric set is closed rather than open, because this surface is reachable from an agent and an arbitrary-expression argument would be a code path wearing a statistics costume.
+
+**Required:** `series`  
+**Optional:** `metrics`, `risk_free_rate`, `periods_per_year`
+
+#### `compute_indicator_panel`
+
+Indicator HISTORY for a whole universe, published one `sqt://` reference per indicator. get_technical_panel answers what the indicators are NOW; this answers what they have been, which is what a signal, a feature or a custom backtest actually consumes. Pass a price_panel_ref from the data runtime and nothing is refetched -- the same bars are reused.
+
+**Required:** `tickers`, `start_date`, `end_date`, `indicators`, `run_id`, `name`  
+**Optional:** `price_panel_ref`
 
 #### `get_advanced_indicators`
 
@@ -547,6 +561,13 @@ Leakage-free regime-adaptive backtest: regime/strategy/parameter selection per w
 **Required:** `symbol`, `start_date`, `end_date`  
 **Optional:** `train_bars`, `test_bars`, `initial_capital`, `commission_pct`, `slippage_pct`, `hurst_method`, `sma_param_grid`, `rsi_param_grid`, `macd_param_grid`, `bollinger_param_grid`, `sort_by`, `fill_price`, `risk_free_rate`
 
+#### `run_terminal_monte_carlo`
+
+Monte Carlo that keeps only where the paths ENDED, so the simulation count is capped by wall-clock rather than by memory -- a million paths over a year is about 2 GB of path matrix for a handful of terminal quantiles, and this avoids allocating it. Same block bootstrap as run_monte_carlo_simulation. It says nothing about the journey: worst drawdown along the way and time underwater are not in here, and a benign distribution of endpoints can be reached by paths nobody could hold.
+
+**Required:** `returns`, `horizon_days`  
+**Optional:** `n_simulations`, `block_size`, `initial_capital`, `seed`
+
 #### `run_walk_forward_backtest`
 
 Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.
@@ -718,6 +739,13 @@ How concentrated a portfolio is, in numbers with known interpretations. Effectiv
 
 **Required:** `weights`
 
+#### `construct_weights_from_scores`
+
+Turn alpha scores into portfolio weights and STOP, so the weights can be looked at before anything is simulated. Rank, top/bottom, z-score or volatility-scaled construction, optionally dollar-neutralised. This is the step that is otherwise buried inside a larger operation: when a model's backtest looks wrong, seeing the weights is what separates a bad signal from bad construction. Returns TARGET weights, not a P&L.
+
+**Required:** `scores_ref`, `run_id`, `name`  
+**Optional:** `method`, `gross_leverage`, `n_long`, `n_short`, `returns_ref`, `vol_lookback`, `dollar_neutral`
+
 #### `estimate_covariance`
 
 A covariance matrix plus the diagnostics that say whether to trust it. Shrinkage is the ANSWER to the conditioning warnings the optimizer already emits rather than a caveat about them: a covariance over N assets has N(N+1)/2 parameters, and mean-variance optimization is an error-maximizer over its worst-estimated directions. Read observations_per_parameter and condition_number before the matrix. Returns it annualized.
@@ -866,6 +894,12 @@ Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transfo
 
 **Required:** `model_id`  
 **Optional:** `transform`, `portfolio`
+
+#### `explain_dataset_row_loss`
+
+Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.
+
+**Required:** `dataset_id`
 
 #### `inspect_model`
 

@@ -103,6 +103,10 @@ _FEATURE_LAB_TOOLS = [
     "select_features",
 ]
 _MODEL_RESEARCH_TOOLS = [
+    # Row loss is a DATASET question, not a model one: it is asked before
+    # anything is fitted and its answer changes the spec rather than the
+    # estimator.
+    "explain_dataset_row_loss",
     "list_modeling_capabilities",
     "list_features",
     "build_model_dataset",

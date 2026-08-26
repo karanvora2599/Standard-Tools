@@ -227,3 +227,60 @@ __all__ = [
     "ValidateDataBundleInput",
     "ValidateFinancialRatiosInput",
 ]
+
+
+def resolve_source(source: "DataSource", *, what: str = "series"):
+    """
+    Turn a `DataSource` into a pandas Series, whichever origin it named.
+
+    THIS IS THE HALF THAT MAKES THE POLYMORPHISM WORTH HAVING. A tool that
+    accepted three shapes and then branched on them in its own body would
+    have three code paths to keep correct and three places for the
+    date-alignment rules to drift. Resolving here means the tool sees one
+    Series and never learns where it came from.
+
+    A symbol is fetched as CLOSE-TO-CLOSE RETURNS rather than prices,
+    because every consumer of this helper so far wants returns and a tool
+    that silently handed one prices would produce a Sharpe off by orders of
+    magnitude with nothing looking wrong.
+    """
+    import pandas as pd
+
+    from standard_quant_tools.error import ValidationError
+
+    if source.values is not None:
+        series = pd.Series(source.values, dtype="float64")
+        if series.empty:
+            raise ValidationError(f"{what}: `values` was empty.")
+        return series
+
+    if source.ref is not None:
+        from ..handoff import resolve as _resolve
+
+        try:
+            data = _resolve(source.ref)
+        except Exception as exc:  # noqa: BLE001 -- one refusal, not a trace
+            raise ValidationError(
+                f"{what}: {source.ref!r} could not be resolved -- {exc}"
+            ) from exc
+        if isinstance(data, pd.DataFrame):
+            if data.shape[1] != 1:
+                raise ValidationError(
+                    f"{what}: {source.ref!r} resolves to a frame with "
+                    f"{data.shape[1]} columns, and this tool needs ONE "
+                    "series. Name a single-column artifact, or pass the "
+                    "column you mean inline."
+                )
+            data = data.iloc[:, 0]
+        series = pd.Series(data).astype("float64")
+        if series.empty:
+            raise ValidationError(f"{what}: {source.ref!r} resolved to nothing.")
+        return series
+
+    from standard_quant_tools.data.factory import DataFactory
+
+    provider = DataFactory.get_provider()
+    frame = provider.get_ohlcv(source.symbol, "1900-01-01", "2100-01-01")
+    if frame is None or frame.empty:
+        raise ValidationError(f"{what}: {source.symbol!r} returned no bars.")
+    return frame["Close"].pct_change().dropna()

@@ -145,13 +145,13 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 170 tools cost about **260 KB of schema, ~66,000 tokens**, held for the
+The 175 tools cost about **268 KB of schema, ~69,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
 1,615 bytes and the session ceiling is 180,000, which buys about 111 tools.
-There are 170. **The whole surface has not fitted in one session since the
+There are 175. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
 meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
@@ -198,14 +198,21 @@ screener                 2    2,035       508
 ```
 
 **The total is a number nobody pays.** The row that matters is the runtime
-a client is actually served, and the most expensive of those is 71 KB at
-full detail — 29% of the whole surface. `tests/mcp/test_runtime_scope.py`
-pins a 72 KB per-runtime ceiling for exactly that reason, and it is
-deliberately tight: `backtest` sits at 73,057 bytes at full detail, 671
-bytes under the 73,728 ceiling. That margin is under half a tool, which is
-why `--tool-detail auto` is the default rather than an option — the
-ceiling test measures what the server actually serves, and under `auto`
-`backtest` serves at 34 KB.
+a client is actually served, and the most expensive of those is 73 KB at
+full detail — 27% of the whole surface.
+
+There is deliberately **no fixed per-runtime limit**. There was one, at
+72 KB, and it was the wrong shape for what it was guarding: what a client
+can afford depends on its model, its context window and what else is in the
+session, none of which this library knows. A constant compiled into a test
+was asserting a fact about somebody else's deployment — and it had already
+been argued upward once, which is the usual sign that a number is a
+preference wearing a limit's clothes.
+
+What replaces it is measurement. `--print-budget` reports what each runtime
+costs, `estimate_tool_cost` reports it to an agent, and `--tool-detail auto`
+keeps the served size well under the full-detail figure without anyone
+having to pick a threshold: `backtest` serves at 34 KB against 73 KB full.
 
 **Tool count and cost are barely related**, which is the useful thing to
 know when picking. `analysis` carries 12 tools for 13.8 KB; `custom_signal`
@@ -230,8 +237,8 @@ error round trip, which costs more than the category does.
 Serve a runtime, or narrow inside one:
 
 ```bash
-sqt-mcp --runtime research                    # 40 tools, 33 KB served
-sqt-mcp --runtime backtest                    # 32 tools, 34 KB served
+sqt-mcp --runtime research                    # 42 tools, 35 KB served
+sqt-mcp --runtime backtest                    # 33 tools, 35 KB served
 sqt-mcp --runtime derivatives                 # 12 tools, 17 KB served
 sqt-mcp --runtime microstructure              # 12 tools, 15 KB served
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
@@ -279,11 +286,11 @@ stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 | `feature_lab` | 11 KB | 11 KB | 0 | 5 KB |
 
 **`auto` is the default now, not an option.** At full detail `backtest`
-comes within 671 bytes of the 73,728 per-runtime ceiling, and the ceiling
-is not the thing to move — it had been argued up once already. `auto`
-thins only what exceeds `--detail-budget`, so the five runtimes already
-under it are returned byte-for-byte unchanged and only `backtest`,
-`modeling` and `research` differ. `--tool-detail full` still exists and
+is the most expensive runtime by a wide margin, and paying that on every
+connection to reach a handful of its tools is waste rather than a limit
+being breached. `auto` thins only what exceeds `--detail-budget`, so the
+runtimes already under it are returned byte-for-byte unchanged and only the
+expensive ones differ. `--tool-detail full` still exists and
 still does exactly what it did; it simply stopped being implicit.
 
 Five runtimes already fit and pay nothing. That ordering is deliberate: a
@@ -355,7 +362,7 @@ it -- widening scope is a decision, not a fallback.
 
 # exists nowhere -> a hallucination, and no flag will help
 unknown tool 'run_sma_backtestt'. No tool by that name exists in this
-library. This server serves 40 tools from the research runtime. Read
+library. This server serves 42 tools from the research runtime. Read
 sqt://catalog/categories for what exists, or call tools/list for what this
 server serves -- do not guess another name.
 
@@ -424,7 +431,7 @@ own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 170 tools has a typed Pydantic return, so the server can
+Every one of the 175 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. The plan assumed that was free; measured, it
@@ -528,7 +535,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 170 tools declares `readOnlyHint: true` and
+Every one of the 175 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 

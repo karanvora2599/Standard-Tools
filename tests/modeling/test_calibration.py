@@ -243,4 +243,9 @@ class TestNoNewTools:
 
         assert "calibrate_model" not in MODELING_TOOL_DISPATCH
         assert "fit_huber" not in MODELING_TOOL_DISPATCH
-        assert len(MODELING_TOOL_DISPATCH) == 16
+        # The count moves when a genuine DECISION is added -- it went to 17
+        # for explain_dataset_row_loss, which is a question an agent asks
+        # rather than a capability the registry already reports. What this
+        # test guards is the two names above: a phase-4 capability must
+        # still arrive through the registry and the spec, never as a tool.
+        assert len(MODELING_TOOL_DISPATCH) == 17

@@ -69,6 +69,7 @@ from standard_quant_tools.agent.runtimes.backtest import (
     run_signal_panel_backtest,
     run_sma_backtest,
     run_strategy_matrix,
+    run_terminal_monte_carlo,
     run_walk_forward_backtest,
 )
 from standard_quant_tools.agent.runtimes.data import (
@@ -134,6 +135,7 @@ from standard_quant_tools.agent.runtimes.microstructure import (
 from standard_quant_tools.agent.runtimes.portfolio import (
     analyze_concentration,
     check_spread_proxy,
+    construct_weights_from_scores,
     detect_liquidity_events,
     estimate_covariance,
     estimate_trade_cost,
@@ -157,7 +159,9 @@ from standard_quant_tools.agent.runtimes.portfolio import (
 from standard_quant_tools.agent.runtimes.research import (
     analyze_stock_risk,
     analyze_tail_dependence,
+    calculate_series_metrics,
     compare_distributions,
+    compute_indicator_panel,
     decompose_returns,
     detect_change_points,
     detect_regimes,

@@ -71,8 +71,9 @@ checked over the whole surface:
 - Every input model sets `extra="forbid"`. Pydantic's default *drops* an
   unknown field, so a hallucinated argument runs on defaults while the
   caller believes it configured something.
-- Every runtime fits the per-runtime ceiling at the default detail, and
-  thinning never leaves a schema unreachable.
+- Every runtime reports a real schema cost, and thinning never leaves a
+  schema unreachable. The cost is measured rather than capped: what a
+  client can afford is a property of the client.
 - A foreign tool is refused **by name**; a hallucinated one is told it does
   not exist. Those need different answers — telling a model to widen its
   scope for a tool that exists nowhere sends it looking for a flag that

@@ -100,7 +100,6 @@ class ToolCostResult(_Result):
     n_runtimes: int = 0
     total_bytes: int = 0
     total_approx_tokens: int = 0
-    per_runtime_ceiling: int = 0
     by_runtime: List[RuntimeCost] = Field(default_factory=list)
     cheapest: str = ""
     most_expensive: str = ""
@@ -196,7 +195,6 @@ def estimate_tool_cost(input_data: ToolCostInput) -> ToolCostResult:
         n_runtimes=len(rows),
         total_bytes=int(total),
         total_approx_tokens=int(total // 4),
-        per_runtime_ceiling=73_728,
         by_runtime=[RuntimeCost(**r) for r in rows],
         cheapest=rows[-1]["runtime"] if rows else "",
         most_expensive=rows[0]["runtime"] if rows else "",

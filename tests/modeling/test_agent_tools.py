@@ -136,6 +136,7 @@ class TestModelingDispatch:
         """
         tools = get_modeling_tools()
         assert {t["function"]["name"] for t in tools} == {
+            "explain_dataset_row_loss",
             "list_features",
             "list_modeling_capabilities",
             "build_model_dataset",

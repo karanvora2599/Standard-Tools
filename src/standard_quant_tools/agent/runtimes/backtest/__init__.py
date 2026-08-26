@@ -25,6 +25,10 @@ from standard_quant_tools.agent.models import (
     WalkForwardInput,
 )
 
+from .terminal_mc_tools import (  # noqa: F401
+    TerminalMonteCarloInput,
+    run_terminal_monte_carlo,
+)
 from .tools import (
     compare_cost_models,
     compare_strategies,
@@ -71,6 +75,18 @@ from .validation_tools import (  # noqa: F401
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "run_terminal_monte_carlo",
+        "Monte Carlo that keeps only where the paths ENDED, so the "
+        "simulation count is capped by wall-clock rather than by memory -- "
+        "a million paths over a year is about 2 GB of path matrix for a "
+        "handful of terminal quantiles, and this avoids allocating it. Same "
+        "block bootstrap as run_monte_carlo_simulation. It says nothing "
+        "about the journey: worst drawdown along the way and time "
+        "underwater are not in here, and a benign distribution of endpoints "
+        "can be reached by paths nobody could hold.",
+        TerminalMonteCarloInput,
+    ),
     (
         "run_strategy_matrix",
         "Every requested strategy against every requested ticker in one "
@@ -216,6 +232,9 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
+    # Validation, not execution: it asks how a strategy could have turned
+    # out, which is the question that category answers.
+    "run_terminal_monte_carlo": "backtest_validation",
     "run_strategy_matrix": "backtest_execution",
     "run_sma_backtest": "backtest_execution",
     "run_rsi_backtest": "backtest_execution",

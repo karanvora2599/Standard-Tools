@@ -40,13 +40,13 @@ from standard_quant_tools.modeling.agent.feature_models import (
 )
 from standard_quant_tools.modeling.agent.feature_tools import (
     _pick_representative,
-    profile_feature,
     compare_feature_sets,
     feature_dispatch,
     get_feature_drift,
     get_feature_ic_decay,
     get_feature_redundancy,
     get_feature_regime_stability,
+    profile_feature,
     run_feature_permutation_test,
     select_features,
 )
