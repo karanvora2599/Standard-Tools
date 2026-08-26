@@ -53,6 +53,7 @@ from .trade_tools import (  # noqa: F401
     TRADE_TOOL_DISPATCH,
     analyze_trade_clustering,
     compare_against_random,
+    estimate_break_even_cost,
     get_exposure_attribution,
     run_monte_carlo_trade_paths,
 )
@@ -224,6 +225,7 @@ TOOL_DISPATCH.update(TRADE_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "backtest_validation" for name in TRADE_TOOL_DISPATCH})
 
 __all__ = [
+    "estimate_break_even_cost",
     "run_monte_carlo_trade_paths",
     "analyze_trade_clustering",
     "compare_against_random",

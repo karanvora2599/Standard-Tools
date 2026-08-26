@@ -24,8 +24,11 @@ from .construction_tools import (  # noqa: F401
     analyze_concentration,
     get_factor_exposure_budget,
     get_liquidity_adjusted_var,
+    get_marginal_risk_contribution,
     optimize_hierarchical_risk_parity,
+    optimize_max_diversification,
     optimize_risk_parity,
+    run_portfolio_scenarios,
 )
 from .tools import (
     check_spread_proxy,
@@ -117,6 +120,9 @@ TOOL_DISPATCH.update(CONSTRUCTION_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "portfolio_risk" for name in CONSTRUCTION_TOOL_DISPATCH})
 
 __all__ = [
+    "optimize_max_diversification",
+    "get_marginal_risk_contribution",
+    "run_portfolio_scenarios",
     "optimize_risk_parity",
     "optimize_hierarchical_risk_parity",
     "get_factor_exposure_budget",

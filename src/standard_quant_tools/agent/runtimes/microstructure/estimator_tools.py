@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
@@ -495,7 +495,107 @@ ESTIMATOR_TOOL_DISPATCH = {
     ),
 }
 
+
+class ShortfallFill(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: float = Field(..., gt=0, description="Shares or contracts filled.")
+    price: float = Field(..., gt=0)
+    fee: float = Field(0.0, description="Commission and fees for this fill.")
+
+
+class ShortfallInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision_price: float = Field(
+        ...,
+        gt=0,
+        description="Price when the DECISION was made, not when the order "
+        "reached the market. Passing the arrival price here sets the delay "
+        "cost to zero by construction, and delay is often where the money "
+        "went.",
+    )
+    arrival_price: float = Field(
+        ..., gt=0, description="Price when the order first reached the market."
+    )
+    fills: List[ShortfallFill] = Field(..., min_length=1)
+    target_quantity: float = Field(
+        ..., gt=0, description="What you intended to trade. Direction is `side`."
+    )
+    final_price: float = Field(
+        ...,
+        gt=0,
+        description="Price at which the unfilled remainder is valued.",
+    )
+    side: Literal["buy", "sell"] = Field("buy")
+
+
+class ShortfallComponent(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    component: str = ""
+    dollars: Stat = None
+    bps: Stat = None
+
+
+class ShortfallResult(_Result):
+    side: str = ""
+    target_quantity: Stat = None
+    filled_quantity: Stat = None
+    unfilled_quantity: Stat = None
+    fill_rate: Stat = None
+    decision_price: Stat = None
+    arrival_price: Stat = None
+    average_fill_price: Stat = None
+    final_price: Stat = None
+    total_shortfall_dollars: Stat = None
+    total_shortfall_bps: Stat = Field(
+        None, description="POSITIVE is a cost. Both conventions exist."
+    )
+    components: List[ShortfallComponent] = Field(default_factory=list)
+    largest_component: str = ""
+    n_fills: int = 0
+
+
+def get_implementation_shortfall(input_data: ShortfallInput) -> ShortfallResult:
+    return ShortfallResult(
+        **lib.implementation_shortfall(
+            decision_price=input_data.decision_price,
+            arrival_price=input_data.arrival_price,
+            fills=[f.model_dump() for f in input_data.fills],
+            target_quantity=input_data.target_quantity,
+            final_price=input_data.final_price,
+            side=input_data.side,
+        )
+    )
+
+
+ESTIMATOR_TOOL_DEFS.append(
+    (
+        "get_implementation_shortfall",
+        "What an execution ACTUALLY cost, decomposed after Perold. Every "
+        "other cost tool here is a model run before the fact -- "
+        "estimate_trade_cost predicts, get_capacity_report bounds, "
+        "plan_rebalance schedules -- and this is the measurement those models "
+        "should be checked against. Splits the gap between the decision price "
+        "and what was achieved into DELAY (the price moved before the order "
+        "reached the market, a workflow problem no algorithm recovers, and "
+        "frequently the largest term), IMPACT (the part an algorithm "
+        "controls), OPPORTUNITY (the shares never filled -- an algorithm that "
+        "beats its benchmark by not completing has moved its cost here rather "
+        "than saved it), and FEES. Positive is a cost.",
+        ShortfallInput,
+    )
+)
+
+ESTIMATOR_TOOL_DISPATCH["get_implementation_shortfall"] = (
+    get_implementation_shortfall,
+    ShortfallInput,
+)
+
+
 __all__ = [
+    "get_implementation_shortfall",
     "ESTIMATOR_TOOL_DEFS",
     "ESTIMATOR_TOOL_DISPATCH",
     "estimate_corwin_schultz_spread",

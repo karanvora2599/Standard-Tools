@@ -727,7 +727,317 @@ def _normal_quantile(p: float) -> float:
     return 0.5 * (lo + hi)
 
 
+def max_diversification(covariance: Any) -> Dict[str, Any]:
+    """
+    The portfolio that maximizes the DIVERSIFICATION RATIO: the weighted
+    average of the assets' volatilities over the portfolio's own.
+
+    WHAT THE RATIO MEANS. It is 1.0 when everything is perfectly correlated
+    -- combining the assets bought nothing -- and grows as the correlations
+    fall. Maximizing it is maximizing the volatility that CANCELS, which is
+    a cleaner statement of "diversify" than either equal weight or minimum
+    variance.
+
+    HOW IT DIFFERS FROM MINIMUM VARIANCE, which is the usual confusion. The
+    minimum-variance portfolio piles into the lowest-volatility assets,
+    because low volatility is what it is minimizing; on a set containing one
+    very quiet asset it concentrates there and is not diversified in any
+    ordinary sense. Maximum diversification normalizes by each asset's own
+    volatility first, so a quiet asset gets no advantage from being quiet --
+    only from being UNCORRELATED.
+
+    IT STILL INVERTS THE COVARIANCE MATRIX, and inherits everything that
+    implies: on an ill-conditioned estimate the smallest eigenvalue becomes
+    the largest and the portfolio bets on the direction the data says least
+    about. The condition number is reported for exactly that reason.
+    `hierarchical_risk_parity` is the version that avoids inversion.
+    """
+    frame = _covariance_frame(covariance, "max_diversification")
+    matrix = frame.to_numpy()
+    n = matrix.shape[0]
+    if n < 2:
+        raise ValidationError("max_diversification: needs at least two assets.")
+
+    volatilities = np.sqrt(np.diag(matrix))
+    # Maximizing w'v / sqrt(w'Sw) has the same solution as minimum variance
+    # on the CORRELATION matrix, rescaled by volatility.
+    correlation = matrix / np.outer(volatilities, volatilities)
+    try:
+        inverse = np.linalg.pinv(correlation)
+    except np.linalg.LinAlgError as exc:
+        raise ValidationError(
+            f"max_diversification: the correlation matrix could not be "
+            f"inverted ({exc})."
+        ) from None
+    raw = inverse @ np.ones(n)
+    if raw.sum() == 0:
+        raise ValidationError(
+            "max_diversification: the solution is degenerate, which happens "
+            "when the correlation matrix is singular."
+        )
+    weights = (raw / volatilities) / (raw / volatilities).sum()
+
+    portfolio_volatility = _portfolio_volatility(weights, matrix)
+    weighted_average = float(weights @ volatilities)
+    ratio = (
+        float(weighted_average / portfolio_volatility)
+        if portfolio_volatility > 0
+        else None
+    )
+    condition = float(np.linalg.cond(correlation))
+    negative = {str(name): float(w) for name, w in zip(frame.columns, weights) if w < 0}
+
+    warnings: List[str] = []
+    if negative:
+        warnings.append(
+            f"{len(negative)} weight(s) came out NEGATIVE, so this solution "
+            "requires shorting. Maximum diversification is unconstrained -- "
+            "if the mandate is long-only, this is not the portfolio, and a "
+            "constrained optimizer is needed rather than clipping these to "
+            "zero."
+        )
+    if condition > 1000:
+        warnings.append(
+            f"The correlation matrix has a condition number of "
+            f"{condition:,.0f}. This method INVERTS it, so the smallest "
+            "eigenvalue becomes the largest and the portfolio bets hardest "
+            "on the direction the data says least about. Use "
+            "hierarchical_risk_parity, which never inverts, or shrink the "
+            "estimate first."
+        )
+    warnings.append(
+        "NOT the same as minimum variance. Minimum variance piles into the "
+        "quietest assets because quiet is what it minimizes; this normalizes "
+        "by each asset's own volatility first, so an asset is rewarded for "
+        "being UNCORRELATED rather than for being quiet."
+    )
+    return {
+        "n_assets": int(n),
+        "weights": {str(c): float(w) for c, w in zip(frame.columns, weights)},
+        "diversification_ratio": ratio,
+        "portfolio_volatility": portfolio_volatility,
+        "weighted_average_volatility": weighted_average,
+        "condition_number": condition,
+        "n_negative_weights": len(negative),
+        "negative_weights": negative,
+        "warnings": warnings,
+    }
+
+
+def marginal_risk_contribution(
+    weights: Dict[str, float], covariance: Any
+) -> Dict[str, Any]:
+    """
+    What one more unit of each position does to portfolio risk, for a
+    portfolio you already hold.
+
+    THE QUESTION THIS ANSWERS is the one that comes up when a portfolio
+    already exists: not "what should I hold" but "where is my risk actually
+    coming from, and what does adding to this position cost me". Those are
+    different questions and an optimizer answers neither.
+
+    THREE NUMBERS PER ASSET, and the distinction matters. MARGINAL risk is
+    the derivative of portfolio volatility with respect to the weight -- the
+    cost of the next unit. CONTRIBUTION is weight times marginal, and these
+    sum exactly to portfolio volatility, which is what makes the
+    decomposition real rather than an allocation of blame. And the
+    contribution SHARE against the weight share is the diagnostic: an asset
+    at 5% of the portfolio carrying 30% of the risk is the position to look
+    at first.
+
+    A NEGATIVE MARGINAL CONTRIBUTION IS THE INTERESTING CASE. It means
+    adding to that position REDUCES portfolio risk, which happens when the
+    asset is negatively correlated with the rest of the book. Those
+    positions are hedges whether or not they were intended as such.
+    """
+    frame = _covariance_frame(covariance, "marginal_risk_contribution")
+    series = pd.Series(weights, dtype=float)
+    missing = [str(c) for c in frame.columns if str(c) not in series.index]
+    if missing:
+        raise ValidationError(
+            f"marginal_risk_contribution: no weight given for {missing}. "
+            "Every asset in the covariance matrix needs one -- omitting it "
+            "would silently treat the position as zero."
+        )
+    ordered = np.array([float(series[str(c)]) for c in frame.columns])
+    matrix = frame.to_numpy()
+
+    volatility = _portfolio_volatility(ordered, matrix)
+    if volatility <= 0:
+        raise ValidationError(
+            "marginal_risk_contribution: the portfolio has zero volatility, "
+            "so there is no risk to attribute."
+        )
+    marginal = matrix @ ordered / volatility
+    contribution = ordered * marginal
+    gross = float(np.abs(ordered).sum())
+
+    rows = [
+        {
+            "asset": str(name),
+            "weight": float(w),
+            "weight_share": float(abs(w) / gross) if gross > 0 else None,
+            "marginal_risk": float(m),
+            "risk_contribution": float(c),
+            "risk_share": float(c / volatility),
+            "concentration_flag": bool(
+                gross > 0 and c / volatility > 2.0 * abs(w) / gross
+            ),
+        }
+        for name, w, m, c in zip(frame.columns, ordered, marginal, contribution)
+    ]
+    rows.sort(key=lambda r: r["risk_contribution"], reverse=True)
+
+    hedges = [r["asset"] for r in rows if r["marginal_risk"] < 0]
+    outsized = [r for r in rows if r["concentration_flag"]]
+
+    warnings: List[str] = []
+    if outsized:
+        worst = outsized[0]
+        warnings.append(
+            f"{len(outsized)} position(s) carry more than twice their weight "
+            f"share of the risk. The largest is {worst['asset']}: "
+            f"{worst['weight_share']:.1%} of gross exposure and "
+            f"{worst['risk_share']:.1%} of the risk."
+        )
+    if hedges:
+        warnings.append(
+            f"{len(hedges)} position(s) have NEGATIVE marginal risk "
+            f"({hedges[:5]}): adding to them REDUCES portfolio volatility, "
+            "because they are negatively correlated with the rest of the "
+            "book. They are hedges whether or not they were meant as such."
+        )
+    warnings.append(
+        "Contributions sum exactly to portfolio volatility, which is what "
+        "makes this a decomposition rather than an allocation of blame. "
+        "Marginal risk is the cost of the NEXT unit and is the number to use "
+        "when deciding whether to add."
+    )
+    return {
+        "n_assets": len(rows),
+        "portfolio_volatility": volatility,
+        "gross_exposure": gross,
+        "by_asset": rows,
+        "n_hedges": len(hedges),
+        "sum_of_contributions": float(contribution.sum()),
+        "warnings": warnings,
+    }
+
+
+def portfolio_scenarios(
+    weights: Dict[str, float],
+    scenarios: Dict[str, Dict[str, float]],
+    *,
+    covariance: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    What a portfolio does under NAMED shocks, rather than under a
+    distribution.
+
+    WHY NAMED SCENARIOS AND NOT VaR. A 99% VaR is a statement about a
+    distribution fitted to history, and its central weakness is that the
+    event you care about is usually not in that history. A named scenario --
+    "rates +200bp, equities -20%, credit spreads double" -- makes the
+    assumption explicit and arguable, which a quantile does not. The two
+    answer different questions and a risk process needs both.
+
+    EACH SCENARIO IS A MAP OF ASSET TO RETURN. Assets in the portfolio but
+    absent from a scenario are treated as UNCHANGED, and the count is
+    reported: a scenario covering three of forty positions is a partial
+    scenario and its loss is a lower bound, which is worth knowing before it
+    is presented as the worst case.
+
+    With `covariance`, each scenario's move is also reported in standard
+    deviations of the portfolio -- which is the honest way to compare a
+    scenario against the statistical measures rather than instead of them.
+    """
+    series = pd.Series(weights, dtype=float).dropna()
+    if series.empty:
+        raise ValidationError("portfolio_scenarios: no weights given.")
+    if not scenarios:
+        raise ValidationError(
+            "portfolio_scenarios: no scenarios given. This tool exists to "
+            "make an assumption explicit; with none, use run_stress_test."
+        )
+
+    portfolio_volatility = None
+    if covariance is not None:
+        frame = _covariance_frame(covariance, "portfolio_scenarios")
+        common = [str(c) for c in frame.columns if str(c) in series.index]
+        if len(common) == len(frame.columns):
+            ordered = np.array([float(series[str(c)]) for c in frame.columns])
+            portfolio_volatility = _portfolio_volatility(ordered, frame.to_numpy())
+
+    rows: List[Dict[str, Any]] = []
+    for name, shocks in scenarios.items():
+        covered = [a for a in series.index if a in shocks]
+        uncovered = [a for a in series.index if a not in shocks]
+        impact = float(sum(series[a] * float(shocks[a]) for a in covered))
+        rows.append(
+            {
+                "scenario": str(name),
+                "portfolio_return": impact,
+                "n_positions_shocked": len(covered),
+                "n_positions_unchanged": len(uncovered),
+                "coverage": float(len(covered) / len(series)),
+                "sigma_move": (
+                    float(impact / portfolio_volatility)
+                    if portfolio_volatility
+                    else None
+                ),
+                "largest_contributor": (
+                    max(
+                        ((a, float(series[a] * float(shocks[a]))) for a in covered),
+                        key=lambda pair: abs(pair[1]),
+                    )[0]
+                    if covered
+                    else None
+                ),
+            }
+        )
+    rows.sort(key=lambda r: r["portfolio_return"])
+
+    partial = [r["scenario"] for r in rows if r["coverage"] < 0.9]
+    warnings: List[str] = []
+    if partial:
+        warnings.append(
+            f"Scenario(s) {partial[:5]} shock fewer than 90% of the "
+            "positions. Unshocked positions are treated as UNCHANGED, so "
+            "those losses are a LOWER BOUND rather than the scenario's full "
+            "effect."
+        )
+    if rows:
+        warnings.append(
+            f"Worst scenario is {rows[0]['scenario']} at "
+            f"{rows[0]['portfolio_return']:.2%}"
+            + (
+                f", a {abs(rows[0]['sigma_move']):.1f}-sigma move."
+                if rows[0]["sigma_move"]
+                else "."
+            )
+        )
+    warnings.append(
+        "A named scenario and a VaR answer different questions. VaR is a "
+        "quantile of a distribution fitted to history, and its weakness is "
+        "that the event you care about is usually not in that history; a "
+        "named scenario makes the assumption explicit and arguable. A risk "
+        "process needs both, not one instead of the other."
+    )
+    return {
+        "n_positions": int(len(series)),
+        "n_scenarios": len(rows),
+        "portfolio_volatility": portfolio_volatility,
+        "worst_scenario": rows[0] if rows else None,
+        "best_scenario": rows[-1] if rows else None,
+        "by_scenario": rows,
+        "warnings": warnings,
+    }
+
+
 __all__ = [
+    "marginal_risk_contribution",
+    "max_diversification",
+    "portfolio_scenarios",
     "MIN_OBS_PER_PARAMETER",
     "TRADING_DAYS",
     "concentration_analysis",

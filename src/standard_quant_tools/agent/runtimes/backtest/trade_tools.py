@@ -280,7 +280,86 @@ TRADE_TOOL_DISPATCH = {
     ),
 }
 
+
+class BreakEvenCostInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trade_returns: List[float] = Field(
+        ...,
+        min_length=20,
+        description="One return per trade, NET of whatever cost the backtest "
+        "already charged.",
+    )
+    current_cost_bps: float = Field(
+        0.0,
+        ge=0,
+        description="The per-trade cost the backtest assumed, in basis "
+        "points. Supplying it is what turns the break-even into a headroom "
+        "multiple.",
+    )
+
+
+class CostSensitivity(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    cost_bps: Stat = None
+    mean_return: Stat = None
+    per_trade_sharpe: Stat = None
+    profitable: bool = False
+
+
+class BreakEvenCostResult(_Result):
+    n_trades: int = 0
+    current_cost_bps: Stat = None
+    mean_return_net: Stat = None
+    mean_return_gross: Stat = None
+    break_even_cost_bps: Stat = Field(
+        None, description="The per-trade cost at which the edge disappears."
+    )
+    headroom_multiple: Stat = Field(
+        None,
+        description="Break-even over the assumed cost. Under about 2x, the "
+        "backtest is a statement about the cost assumption.",
+    )
+    sensitivity: List[CostSensitivity] = Field(default_factory=list)
+
+
+def estimate_break_even_cost(
+    input_data: BreakEvenCostInput,
+) -> BreakEvenCostResult:
+    return BreakEvenCostResult(
+        **lib.break_even_cost(
+            input_data.trade_returns,
+            current_cost_bps=input_data.current_cost_bps,
+        )
+    )
+
+
+TRADE_TOOL_DEFS.append(
+    (
+        "estimate_break_even_cost",
+        "The per-trade cost at which this edge disappears -- the number every "
+        "backtest should report and almost none do. What decides whether a "
+        "result survives contact with a real broker is not whether it is "
+        "profitable at the assumed cost but how far above it the break-even "
+        "sits. A strategy breaking even at 8bp when you modelled 5bp has 1.6x "
+        "of headroom, and one bad fill or a widening spread eats it; one "
+        "breaking even at 80bp is robust to both. Under about 2x, the "
+        "backtest is a statement about the cost ASSUMPTION rather than about "
+        "the strategy. Models a FLAT charge and not impact, so a strategy "
+        "with headroom here can still fail on capacity.",
+        BreakEvenCostInput,
+    )
+)
+
+TRADE_TOOL_DISPATCH["estimate_break_even_cost"] = (
+    estimate_break_even_cost,
+    BreakEvenCostInput,
+)
+
+
 __all__ = [
+    "estimate_break_even_cost",
     "TRADE_TOOL_DEFS",
     "TRADE_TOOL_DISPATCH",
     "analyze_trade_clustering",

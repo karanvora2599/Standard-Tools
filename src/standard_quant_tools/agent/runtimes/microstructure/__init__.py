@@ -38,6 +38,7 @@ from .estimator_tools import (  # noqa: F401
     estimate_roll_spread,
     estimate_vpin,
     get_amihud_illiquidity,
+    get_implementation_shortfall,
     get_intraday_volume_profile,
     get_order_flow_imbalance,
 )
@@ -80,6 +81,7 @@ TOOL_DISPATCH.update(ESTIMATOR_TOOL_DISPATCH)
 TOOL_CATEGORY = {name: "microstructure" for name in TOOL_DISPATCH}
 
 __all__ = [
+    "get_implementation_shortfall",
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",

@@ -301,7 +301,138 @@ INFERENCE_TOOL_DISPATCH = {
     "decompose_returns": (decompose_returns, DecomposeReturnsInput),
 }
 
+
+class NormalityInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    values: List[float] = Field(..., min_length=20, description="Returns.")
+
+
+class TailIndexInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    values: List[float] = Field(..., min_length=100)
+    tail: Literal["left", "right"] = Field(
+        "left", description="'left' is the loss tail, which is usually the one."
+    )
+    threshold_quantile: float = Field(
+        0.05,
+        gt=0,
+        lt=0.5,
+        description="Fraction of the sample treated as tail. The choice is "
+        "the whole problem and the result reports alpha across several.",
+    )
+
+
+class NormalityResult(_Result):
+    n_observations: int = 0
+    skewness: Stat = None
+    kurtosis: Stat = None
+    excess_kurtosis: Stat = None
+    jarque_bera: Stat = None
+    p_value: Stat = None
+    normal_at_05: bool = False
+    observations_beyond_3_sigma: int = 0
+    expected_beyond_3_sigma: Stat = None
+    observations_beyond_4_sigma: int = 0
+    expected_beyond_4_sigma: Stat = None
+    tail_ratio_3_sigma: Stat = Field(
+        None,
+        description="Observations beyond 3 sigma over what a normal predicts. "
+        "This is the number that measures SIZE; the p-value measures sample "
+        "length.",
+    )
+
+
+class ThresholdEstimate(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    threshold_quantile: Stat = None
+    k: int = 0
+    alpha: Stat = None
+
+
+class TailIndexResult(_Result):
+    n_observations: int = 0
+    tail: str = ""
+    threshold_quantile: Stat = None
+    k_tail_observations: int = 0
+    alpha: Stat = Field(
+        None,
+        description="Below 4 the kurtosis is infinite; below 2 the VARIANCE "
+        "is, and every volatility and Sharpe on the series is meaningless. "
+        "Biased LOW -- read it as a lower bound.",
+    )
+    standard_error: Stat = None
+    variance_finite: bool = True
+    kurtosis_finite: bool = True
+    across_thresholds: List[ThresholdEstimate] = Field(default_factory=list)
+    alpha_spread: Stat = Field(
+        None,
+        description="Range of alpha across thresholds. Large means the "
+        "threshold choice is doing the work, not the data.",
+    )
+
+
+def test_normality(input_data: NormalityInput) -> NormalityResult:
+    return NormalityResult(**lib.test_normality(input_data.values))
+
+
+def estimate_tail_index(input_data: TailIndexInput) -> TailIndexResult:
+    return TailIndexResult(
+        **lib.estimate_tail_index(
+            input_data.values,
+            tail=input_data.tail,
+            threshold_quantile=input_data.threshold_quantile,
+        )
+    )
+
+
+INFERENCE_TOOL_DEFS.extend(
+    [
+        (
+            "test_normality",
+            "Whether a return series is normal -- and it is not, which is the "
+            "point. Almost every risk number assumes normality somewhere: "
+            "parametric VaR multiplies a standard deviation by 1.645, a "
+            "Sharpe's confidence interval uses a normal approximation, and "
+            "every '2-sigma move' is a normal statement. The interesting "
+            "output is not the p-value but the TAIL RATIO -- how many "
+            "observations fall beyond three sigma against the 0.27% a normal "
+            "predicts. Three to five times that is common on daily returns "
+            "and it is what makes a parametric VaR understate the loss. On a "
+            "long sample the test always rejects, so read the tail counts, "
+            "which measure size, not the p-value, which measures length.",
+            NormalityInput,
+        ),
+        (
+            "estimate_tail_index",
+            "How fat the tail is, by the Hill estimator. Alpha says which "
+            "moments EXIST: below 4 the kurtosis is infinite, so a sample "
+            "kurtosis is an artefact of the sample size; below 2 the variance "
+            "is infinite and every volatility, Sharpe and correlation on the "
+            "series is meaningless. The threshold choice is the whole problem "
+            "and has no good answer, so alpha is reported across several -- "
+            "if it swings, the threshold is doing the work and there is no "
+            "tail index to report. Measured as biased LOW (2.39 for a true "
+            "3.0, 3.48 for a true 5.0), so read it as a lower bound on tail "
+            "thinness rather than as a measurement.",
+            TailIndexInput,
+        ),
+    ]
+)
+
+INFERENCE_TOOL_DISPATCH.update(
+    {
+        "test_normality": (test_normality, NormalityInput),
+        "estimate_tail_index": (estimate_tail_index, TailIndexInput),
+    }
+)
+
+
 __all__ = [
+    "test_normality",
+    "estimate_tail_index",
     "INFERENCE_TOOL_DEFS",
     "INFERENCE_TOOL_DISPATCH",
     "compare_distributions",

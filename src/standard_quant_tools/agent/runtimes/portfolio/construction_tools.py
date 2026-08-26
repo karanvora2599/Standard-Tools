@@ -421,7 +421,227 @@ CONSTRUCTION_TOOL_DISPATCH = {
     "get_liquidity_adjusted_var": (get_liquidity_adjusted_var, LiquidityVarInput),
 }
 
+
+class MaxDiversificationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assets: List[str] = Field(..., min_length=2)
+    covariance: List[List[float]] = Field(
+        ..., description="Square covariance matrix, rows parallel to `assets`."
+    )
+
+
+class MarginalRiskInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weights: Dict[str, float] = Field(
+        ...,
+        description="The portfolio you ALREADY hold. Every asset in the "
+        "covariance matrix needs one.",
+    )
+    assets: List[str] = Field(..., min_length=2)
+    covariance: List[List[float]] = Field(...)
+
+
+class PortfolioScenariosInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weights: Dict[str, float] = Field(...)
+    scenarios: Dict[str, Dict[str, float]] = Field(
+        ...,
+        description="Scenario name -> {asset: return}. Assets absent from a "
+        "scenario are treated as UNCHANGED, and the coverage is reported.",
+    )
+    assets: Optional[List[str]] = Field(
+        None, description="Needed only if supplying a covariance matrix."
+    )
+    covariance: Optional[List[List[float]]] = Field(
+        None,
+        description="Optional, to express each scenario in portfolio sigmas.",
+    )
+
+
+class MaxDiversificationResult(_Result):
+    n_assets: int = 0
+    weights: Dict[str, float] = Field(default_factory=dict)
+    diversification_ratio: Stat = Field(
+        None,
+        description="Weighted average volatility over portfolio volatility. "
+        "1.0 means combining the assets bought nothing.",
+    )
+    portfolio_volatility: Stat = None
+    weighted_average_volatility: Stat = None
+    condition_number: Stat = None
+    n_negative_weights: int = 0
+    negative_weights: Dict[str, float] = Field(default_factory=dict)
+
+
+class AssetRisk(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    asset: str = ""
+    weight: Stat = None
+    weight_share: Stat = None
+    marginal_risk: Stat = Field(
+        None,
+        description="Cost of the NEXT unit. Negative means adding to this "
+        "position reduces portfolio risk -- it is a hedge.",
+    )
+    risk_contribution: Stat = None
+    risk_share: Stat = None
+    concentration_flag: bool = False
+
+
+class MarginalRiskResult(_Result):
+    n_assets: int = 0
+    portfolio_volatility: Stat = None
+    gross_exposure: Stat = None
+    by_asset: List[AssetRisk] = Field(default_factory=list)
+    n_hedges: int = 0
+    sum_of_contributions: Stat = Field(
+        None, description="Equals portfolio_volatility exactly."
+    )
+
+
+class ScenarioOutcome(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    scenario: str = ""
+    portfolio_return: Stat = None
+    n_positions_shocked: int = 0
+    n_positions_unchanged: int = 0
+    coverage: Stat = None
+    sigma_move: Stat = None
+    largest_contributor: Optional[str] = None
+
+
+class PortfolioScenariosResult(_Result):
+    n_positions: int = 0
+    n_scenarios: int = 0
+    portfolio_volatility: Stat = None
+    worst_scenario: Optional[ScenarioOutcome] = None
+    best_scenario: Optional[ScenarioOutcome] = None
+    by_scenario: List[ScenarioOutcome] = Field(default_factory=list)
+
+
+def optimize_max_diversification(
+    input_data: MaxDiversificationInput,
+) -> MaxDiversificationResult:
+    return MaxDiversificationResult(
+        **lib.max_diversification(
+            _square_frame(
+                input_data.covariance,
+                input_data.assets,
+                "optimize_max_diversification",
+            )
+        )
+    )
+
+
+def get_marginal_risk_contribution(
+    input_data: MarginalRiskInput,
+) -> MarginalRiskResult:
+    return MarginalRiskResult(
+        **lib.marginal_risk_contribution(
+            input_data.weights,
+            _square_frame(
+                input_data.covariance,
+                input_data.assets,
+                "get_marginal_risk_contribution",
+            ),
+        )
+    )
+
+
+def run_portfolio_scenarios(
+    input_data: PortfolioScenariosInput,
+) -> PortfolioScenariosResult:
+    covariance = None
+    if input_data.covariance is not None:
+        if not input_data.assets:
+            raise ValidationError(
+                "run_portfolio_scenarios: a covariance matrix needs `assets` "
+                "to name its rows -- an unnamed matrix cannot be aligned "
+                "with the weights."
+            )
+        covariance = _square_frame(
+            input_data.covariance, input_data.assets, "run_portfolio_scenarios"
+        )
+    return PortfolioScenariosResult(
+        **lib.portfolio_scenarios(
+            input_data.weights, input_data.scenarios, covariance=covariance
+        )
+    )
+
+
+CONSTRUCTION_TOOL_DEFS.extend(
+    [
+        (
+            "optimize_max_diversification",
+            "The portfolio that maximizes the DIVERSIFICATION RATIO -- the "
+            "weighted average of the assets' volatilities over the "
+            "portfolio's own. It is 1.0 when everything is perfectly "
+            "correlated and grows as correlations fall, so maximizing it "
+            "maximizes the volatility that CANCELS. Not the same as minimum "
+            "variance, which piles into the quietest assets because quiet is "
+            "what it minimizes; this normalizes by each asset's own "
+            "volatility first, so an asset is rewarded for being "
+            "UNCORRELATED rather than for being quiet. It does invert the "
+            "correlation matrix and reports the condition number for that "
+            "reason.",
+            MaxDiversificationInput,
+        ),
+        (
+            "get_marginal_risk_contribution",
+            "Where the risk in a portfolio you ALREADY hold is coming from, "
+            "and what one more unit of each position costs. Marginal risk is "
+            "the derivative of portfolio volatility with respect to the "
+            "weight; contribution is weight times marginal, and these sum "
+            "exactly to portfolio volatility, which makes it a decomposition "
+            "rather than an allocation of blame. The diagnostic is the "
+            "contribution share against the weight share: an asset at 5% of "
+            "the book carrying 30% of the risk is the position to look at. A "
+            "NEGATIVE marginal contribution means adding reduces risk -- "
+            "that position is a hedge whether or not it was meant as one.",
+            MarginalRiskInput,
+        ),
+        (
+            "run_portfolio_scenarios",
+            "What a portfolio does under NAMED shocks rather than under a "
+            "distribution. A 99% VaR is a quantile of a distribution fitted "
+            "to history, and its central weakness is that the event you care "
+            "about is usually not in that history; a named scenario makes "
+            "the assumption explicit and arguable. Positions absent from a "
+            "scenario are treated as unchanged and the COVERAGE is reported, "
+            "because a scenario touching three of forty positions produces a "
+            "loss that is a lower bound rather than a worst case.",
+            PortfolioScenariosInput,
+        ),
+    ]
+)
+
+CONSTRUCTION_TOOL_DISPATCH.update(
+    {
+        "optimize_max_diversification": (
+            optimize_max_diversification,
+            MaxDiversificationInput,
+        ),
+        "get_marginal_risk_contribution": (
+            get_marginal_risk_contribution,
+            MarginalRiskInput,
+        ),
+        "run_portfolio_scenarios": (
+            run_portfolio_scenarios,
+            PortfolioScenariosInput,
+        ),
+    }
+)
+
+
 __all__ = [
+    "optimize_max_diversification",
+    "get_marginal_risk_contribution",
+    "run_portfolio_scenarios",
     "CONSTRUCTION_TOOL_DEFS",
     "CONSTRUCTION_TOOL_DISPATCH",
     "analyze_concentration",

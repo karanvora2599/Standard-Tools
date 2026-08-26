@@ -885,7 +885,184 @@ def intraday_volume_profile(
     }
 
 
+def implementation_shortfall(
+    *,
+    decision_price: float,
+    arrival_price: float,
+    fills: Sequence[Dict[str, float]],
+    target_quantity: float,
+    final_price: float,
+    side: str = "buy",
+) -> Dict[str, Any]:
+    """
+    What an execution actually cost, decomposed after Perold (1988).
+
+    EVERY OTHER COST TOOL HERE IS A MODEL. `estimate_trade_cost` predicts,
+    `get_capacity_report` bounds, `plan_rebalance` schedules -- all before
+    the fact, all under assumptions. This is the measurement, and it is the
+    number those models should be checked against.
+
+    THE FOUR COMPONENTS and why they are separated. The total gap between
+    the decision price and what was actually achieved splits into:
+
+    - **DELAY COST** -- the price moved between the decision and the first
+      order reaching the market. This is a workflow problem, not a trading
+      one, and it is frequently the largest term. No amount of clever
+      execution recovers it.
+    - **IMPACT COST** -- the price moved while the order was working,
+      relative to arrival. This is the part an execution algorithm controls.
+    - **OPPORTUNITY COST** -- the shares never filled, priced at the closing
+      level. An algorithm that beats VWAP by never completing has simply
+      moved its cost into this term, which is why a shortfall report without
+      it is not a report.
+    - **FEES**, which are known and are separated so they do not flatter or
+      contaminate the parts that are measured.
+
+    THE SIGN CONVENTION: a POSITIVE shortfall is a cost. It is stated
+    because both conventions exist in the wild and the sign is the first
+    thing misread.
+
+    THE DECISION PRICE IS THE HARD PART, and it is an input here rather than
+    inferred because only the caller knows it. Using the arrival price
+    instead -- which is common, because it is easy -- sets the delay cost to
+    zero by construction, and delay is often where the money went.
+    """
+    decision_price = float(decision_price)
+    arrival_price = float(arrival_price)
+    final_price = float(final_price)
+    target_quantity = float(target_quantity)
+    side = str(side).lower()
+    if side not in ("buy", "sell"):
+        raise ValidationError(
+            f"implementation_shortfall: side must be 'buy' or 'sell', got {side!r}"
+        )
+    for name, value in (
+        ("decision_price", decision_price),
+        ("arrival_price", arrival_price),
+        ("final_price", final_price),
+    ):
+        if not math.isfinite(value) or value <= 0:
+            raise ValidationError(f"{name} must be positive and finite, got {value!r}")
+    if target_quantity <= 0:
+        raise ValidationError(
+            "implementation_shortfall: target_quantity must be positive. Use "
+            "`side` to express direction -- a negative quantity and a sell "
+            "side together would double-negate."
+        )
+    if not fills:
+        raise ValidationError(
+            "implementation_shortfall: no fills. An order that never traded "
+            "is entirely opportunity cost, which this can report -- but it "
+            "needs an empty list to be passed deliberately rather than by "
+            "omission, so supply [] explicitly if that is the case."
+        )
+
+    filled = 0.0
+    notional = 0.0
+    fees = 0.0
+    for i, fill in enumerate(fills):
+        quantity = float(fill.get("quantity", 0.0))
+        price = float(fill.get("price", 0.0))
+        if quantity < 0:
+            raise ValidationError(
+                f"implementation_shortfall: fill {i} has a negative quantity. "
+                "Direction is carried by `side`, not by the fill signs."
+            )
+        if price <= 0 or not math.isfinite(price):
+            raise ValidationError(
+                f"implementation_shortfall: fill {i} has a non-positive price."
+            )
+        filled += quantity
+        notional += quantity * price
+        fees += float(fill.get("fee", 0.0))
+
+    if filled <= 0:
+        raise ValidationError(
+            "implementation_shortfall: the fills sum to zero quantity."
+        )
+    if filled > target_quantity * 1.0001:
+        raise ValidationError(
+            f"implementation_shortfall: filled {filled} against a target of "
+            f"{target_quantity}. An overfill is a reconciliation problem "
+            "rather than an execution one, and the decomposition would be "
+            "meaningless."
+        )
+
+    average_fill = notional / filled
+    unfilled = max(target_quantity - filled, 0.0)
+    # A buy pays MORE than the reference; a sell receives LESS. One sign.
+    direction = 1.0 if side == "buy" else -1.0
+
+    delay = direction * (arrival_price - decision_price) * filled
+    impact = direction * (average_fill - arrival_price) * filled
+    opportunity = direction * (final_price - decision_price) * unfilled
+    total = delay + impact + opportunity + fees
+
+    denominator = decision_price * target_quantity
+
+    def _bps(value: float) -> float:
+        return float(value / denominator * 1e4) if denominator > 0 else 0.0
+
+    fill_rate = float(filled / target_quantity)
+    components = [
+        {"component": "delay", "dollars": float(delay), "bps": _bps(delay)},
+        {"component": "impact", "dollars": float(impact), "bps": _bps(impact)},
+        {
+            "component": "opportunity",
+            "dollars": float(opportunity),
+            "bps": _bps(opportunity),
+        },
+        {"component": "fees", "dollars": float(fees), "bps": _bps(fees)},
+    ]
+    largest = max(components, key=lambda c: abs(c["dollars"]))
+
+    warnings: List[str] = [
+        "POSITIVE is a COST. Both sign conventions exist in the wild and "
+        "this is the first thing misread.",
+    ]
+    if largest["component"] == "delay" and abs(delay) > abs(total) * 0.4:
+        warnings.append(
+            f"DELAY is the largest component at {_bps(delay):.1f} bps -- the "
+            "price moved between the decision and the order reaching the "
+            "market. That is a workflow problem rather than an execution "
+            "one, and no algorithm recovers it."
+        )
+    if fill_rate < 0.95:
+        warnings.append(
+            f"Only {fill_rate:.0%} of the order filled, and the remainder is "
+            f"priced as {_bps(opportunity):.1f} bps of opportunity cost. An "
+            "algorithm that beats its benchmark by not completing has moved "
+            "its cost here rather than saved it."
+        )
+    if abs(arrival_price - decision_price) < 1e-12:
+        warnings.append(
+            "The arrival price equals the decision price, so the delay cost "
+            "is zero BY CONSTRUCTION. That usually means the arrival price "
+            "was passed for both because the true decision price was not "
+            "recorded -- in which case delay is not measured here, it is "
+            "assumed away."
+        )
+    return {
+        "side": side,
+        "target_quantity": target_quantity,
+        "filled_quantity": float(filled),
+        "unfilled_quantity": float(unfilled),
+        "fill_rate": fill_rate,
+        "decision_price": decision_price,
+        "arrival_price": arrival_price,
+        "average_fill_price": float(average_fill),
+        "final_price": final_price,
+        "total_shortfall_dollars": float(total),
+        "total_shortfall_bps": _bps(total),
+        "components": components,
+        "largest_component": largest["component"],
+        "n_fills": len(fills),
+        "warnings": warnings,
+    }
+
+
 __all__ = [
+    "implementation_shortfall",
     "MIN_OBSERVATIONS",
     "amihud_illiquidity",
     "corwin_schultz_spread",

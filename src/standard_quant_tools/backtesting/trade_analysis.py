@@ -446,7 +446,106 @@ def exposure_attribution(
     }
 
 
+def break_even_cost(
+    trade_returns: Sequence[float],
+    *,
+    current_cost_bps: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    The per-trade cost at which this edge disappears.
+
+    THE NUMBER EVERY BACKTEST SHOULD REPORT AND ALMOST NONE DO. A backtest
+    is run at some assumed cost, and the assumption is usually inherited
+    rather than chosen. What decides whether the result survives contact
+    with a real broker is not whether it is profitable at 5 basis points --
+    it is how far above 5 the break-even sits.
+
+    THE RATIO IS THE ANSWER. A strategy breaking even at 8bp when you
+    modelled 5bp has 1.6x of headroom, and a single bad fill, a widening
+    spread or a venue change eats it. One breaking even at 80bp is robust to
+    all of those. The rule of thumb worth carrying is that under about 2x
+    the assumed cost, the backtest is a statement about the cost assumption
+    rather than about the strategy.
+
+    WHAT THIS DOES NOT MODEL: impact. The break-even is computed as a flat
+    per-trade charge, so it answers "what fixed cost kills this" and not
+    "what happens when I trade larger". Impact grows with size and is not
+    flat, so a strategy with headroom here can still fail on capacity --
+    `get_capacity_report` and `estimate_trade_cost` are the tools for that.
+    """
+    array = _trades(trade_returns, "break_even_cost")
+    current = float(current_cost_bps) / 1e4
+
+    gross_mean = float(array.mean()) + current
+    if gross_mean <= 0:
+        return {
+            "n_trades": int(array.size),
+            "current_cost_bps": float(current_cost_bps),
+            "mean_return_gross": float(gross_mean),
+            "break_even_cost_bps": 0.0,
+            "headroom_multiple": 0.0,
+            "warnings": [
+                "The strategy does not make money even BEFORE costs -- the "
+                "gross mean trade return is non-positive. There is no "
+                "break-even cost to report."
+            ],
+        }
+
+    break_even_bps = float(gross_mean * 1e4)
+    headroom = (
+        float(break_even_bps / current_cost_bps) if current_cost_bps > 0 else None
+    )
+
+    # A cost applies to every trade, so its effect on the Sharpe is a shift
+    # of the mean with the dispersion unchanged.
+    std = float(array.std(ddof=1))
+    gross = array + current
+    sharpe_at = []
+    for cost_bps in (0.0, 5.0, 10.0, 25.0, 50.0, 100.0):
+        net = gross - cost_bps / 1e4
+        sharpe_at.append(
+            {
+                "cost_bps": cost_bps,
+                "mean_return": float(net.mean()),
+                "per_trade_sharpe": float(net.mean() / std) if std > 0 else None,
+                "profitable": bool(net.mean() > 0),
+            }
+        )
+
+    warnings: List[str] = []
+    if headroom is not None and headroom < 2:
+        warnings.append(
+            f"Break-even is {break_even_bps:.1f} bps against an assumed "
+            f"{current_cost_bps:.1f} bps -- only {headroom:.1f}x of headroom. "
+            "Below about 2x, the backtest is a statement about the cost "
+            "ASSUMPTION rather than about the strategy: one bad fill, a "
+            "widening spread or a venue change eats the edge."
+        )
+    elif headroom is not None:
+        warnings.append(
+            f"Break-even is {break_even_bps:.1f} bps against an assumed "
+            f"{current_cost_bps:.1f} bps, {headroom:.1f}x of headroom."
+        )
+    warnings.append(
+        "This is a FLAT per-trade charge and does not model impact. Impact "
+        "grows with size, so a strategy with headroom here can still fail on "
+        "capacity -- get_capacity_report and estimate_trade_cost answer that "
+        "question."
+    )
+    return {
+        "n_trades": int(array.size),
+        "current_cost_bps": float(current_cost_bps),
+        "mean_return_net": float(array.mean()),
+        "mean_return_gross": float(gross_mean),
+        "break_even_cost_bps": break_even_bps,
+        "headroom_multiple": headroom,
+        "sensitivity": sharpe_at,
+        "warnings": warnings,
+    }
+
+
 __all__ = [
+    "break_even_cost",
     "TRADING_DAYS",
     "analyze_trade_clustering",
     "compare_against_random",

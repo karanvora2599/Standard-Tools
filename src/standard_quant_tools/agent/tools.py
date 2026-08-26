@@ -44,6 +44,7 @@ from standard_quant_tools.agent.runtimes.backtest import (
     compare_cost_models,
     compare_strategies,
     estimate_backtest_overfitting,
+    estimate_break_even_cost,
     get_backtest_diagnostics,
     get_deflated_sharpe_ratio,
     get_drawdown_table,
@@ -108,6 +109,7 @@ from standard_quant_tools.agent.runtimes.microstructure import (
     estimate_roll_spread,
     estimate_vpin,
     get_amihud_illiquidity,
+    get_implementation_shortfall,
     get_intraday_volume_profile,
     get_order_flow_imbalance,
 )
@@ -121,14 +123,17 @@ from standard_quant_tools.agent.runtimes.portfolio import (
     get_factor_exposure_budget,
     get_liquidity_adjusted_var,
     get_liquidity_metrics,
+    get_marginal_risk_contribution,
     get_microstructure_metrics,
     get_portfolio_risk_attribution,
     get_position_size,
     get_trade_profile,
     optimize_hierarchical_risk_parity,
+    optimize_max_diversification,
     optimize_risk_parity,
     plan_rebalance,
     run_portfolio_optimization,
+    run_portfolio_scenarios,
     run_stress_test,
 )
 from standard_quant_tools.agent.runtimes.research import (
@@ -138,6 +143,7 @@ from standard_quant_tools.agent.runtimes.research import (
     decompose_returns,
     detect_change_points,
     detect_regimes,
+    estimate_tail_index,
     get_advanced_indicators,
     get_bootstrap_interval,
     get_correlation_analysis,
@@ -171,6 +177,7 @@ from standard_quant_tools.agent.runtimes.research import (
     scan_pairs,
     test_autocorrelation,
     test_granger_causality,
+    test_normality,
     test_structural_break,
 )
 

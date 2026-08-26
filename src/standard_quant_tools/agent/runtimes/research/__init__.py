@@ -50,8 +50,10 @@ from .inference_tools import (  # noqa: F401
     INFERENCE_TOOL_DISPATCH,
     compare_distributions,
     decompose_returns,
+    estimate_tail_index,
     get_bootstrap_interval,
     get_correlation_stability,
+    test_normality,
 )
 from .tools import (
     analyze_stock_risk,
@@ -275,6 +277,8 @@ TOOL_DISPATCH.update(INFERENCE_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "quant_research" for name in INFERENCE_TOOL_DISPATCH})
 
 __all__ = [
+    "test_normality",
+    "estimate_tail_index",
     "get_bootstrap_interval",
     "compare_distributions",
     "get_correlation_stability",
