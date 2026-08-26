@@ -1,6 +1,6 @@
 # The testing regime
 
-Five layers, each catching a class of defect the others cannot. The
+Seven layers, each catching a class of defect the others cannot. The
 arrangement is deliberate: every layer exists because something got through
 the ones above it.
 
@@ -9,6 +9,7 @@ the ones above it.
 | Per-module correctness | `tests/<package>/` | Wrong answers | ~3 min |
 | Whole-surface invariants | `tests/surface/test_invariants.py` | A tool registered halfway | 6 s |
 | Adversarial fuzzing | `tests/surface/test_adversarial_inputs.py` | Unhandled exceptions, NaN in output | ~90 s |
+| Metamorphic relations | `tests/surface/test_metamorphic.py` | Consistently-wrong answers | 4 s |
 | Determinism and purity | `tests/surface/test_determinism.py` | Ignored seeds, mutated arguments | ~7 min |
 | Documentation | `tests/docs/` | Stale counts, undocumented tools, dead links | 6 s |
 | Mutation testing | `Development/mutation_testing.py` | **Tests that would not notice** | ~15 min |
@@ -113,6 +114,35 @@ denominator underflows to exactly zero; `_positive` admitted both. Now
 bounded — and bounded on **magnitude**, because the first attempt used a
 signed range and broke the Bachelier exemption, which is the exact case
 that model exists for. The existing tests caught that in the same run.
+
+## Layer 3b — metamorphic relations
+
+The correctness tests check one input against one known answer. The fuzzer
+checks that nothing crashes. **Neither catches a function that is
+consistently wrong** — one returning a plausible number for every input,
+including the inputs where a known relation says it must return the *same*
+number as some other input.
+
+Metamorphic testing asks a different question: not "is this answer right"
+but "do these two answers stand in the relation they must". It needs no
+known answer, which is why it reaches code where the right answer is hard
+to compute independently.
+
+| Relation | Example |
+|---|---|
+| **Scale invariance** | Scaling a covariance matrix by 1e6 moves no risk-parity weight; `Sharpe(c·r) = Sharpe(r)` |
+| **Order invariance** | Total return and the moments cannot depend on the order the returns arrived |
+| **Order dependence** | ...and the runs count and the drawdown *must*, or they are measuring nothing |
+| **Permutation equivariance** | Relabelling the assets permutes the weights and changes nothing else |
+| **Monotonicity** | More observations narrow the interval; falling correlation raises the diversification ratio |
+| **Translation** | Adding a constant moves the mean by that constant and leaves the variance alone |
+
+Two of these catch bugs the other layers structurally cannot. **Scale
+invariance** breaks the moment an absolute threshold creeps into a solver —
+a comparison against `1e-8` that should have been relative — and a
+single-input test would never see it. **Permutation equivariance** breaks
+when something indexes by position where it should index by name, which
+produces a plausible number every single time.
 
 ## Layer 4 — determinism and purity
 
