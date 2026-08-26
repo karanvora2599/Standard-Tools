@@ -24,6 +24,10 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.agent.models import (
+    CompareDataSourcesInput,
+    CompareDataSourcesResult,
+    DeclaredNote,
+    FieldDivergence,
     ArgumentProblem,
     CompareDecisionsInput,
     CompareDecisionsResult,
@@ -1005,4 +1009,96 @@ def describe_temporal_contract(
         pit_safe=contract.pit_safe,
         reproduces_history=contract.reproduces_history,
         caveats=contract.caveats(),
+    )
+
+
+def compare_data_sources(
+    input_data: CompareDataSourcesInput,
+) -> CompareDataSourcesResult:
+    """
+    Fetch the same fundamentals from two providers and report where they
+    disagree — separating three cases that look identical in a diff.
+
+    `FinancialRatios` already documents that `debt_to_equity` means
+    different things depending on where it came from: Polygon derives it
+    from total LIABILITIES, which include payables and deferred revenue, so
+    it is systematically higher for reasons unrelated to leverage. That is
+    written down in a docstring somebody has to read, and nothing checks it.
+    A screen that ranks a universe on `debt_to_equity` fetched from two
+    providers is ordering it partly by which provider answered, and no error
+    appears anywhere.
+
+    The three verdicts need different responses:
+
+    - **scale** — a constant ratio, so a unit conversion was missed. The fix
+      is arithmetic.
+    - **definition** — systematic with NO constant ratio, so the two are
+      computing different quantities. No conversion exists; one has to be
+      chosen deliberately and recorded.
+    - **agree** — within rounding. Vendors differ at the margin about
+      everything and that is not a finding.
+
+    Also surfaces `declared_definition_notes`: differences the providers
+    declared about themselves. A declared difference is not a bug, and is
+    not convertible either.
+    """
+    from standard_quant_tools.data.comparison import compare_ratio_sources
+    from standard_quant_tools.data.factory import DataFactory
+
+    logger.debug(
+        "[compare_data_sources] %s vs %s on %d symbol(s)",
+        input_data.left,
+        input_data.right,
+        len(input_data.symbols),
+    )
+
+    unavailable: List[str] = []
+    fetched: Dict[str, Dict[str, Any]] = {}
+    for name in (input_data.left, input_data.right):
+        try:
+            provider = DataFactory.get_provider(name)
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            unavailable.append(f"{name}: {exc}")
+            continue
+        got: Dict[str, Any] = {}
+        for symbol in input_data.symbols:
+            try:
+                got[symbol] = provider.get_financial_ratios(symbol)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[compare_data_sources] %s/%s: %s", name, symbol, exc)
+        fetched[name] = got
+
+    if unavailable:
+        # A comparison against a provider that never answered is not a
+        # comparison, and returning an empty "they agree" would be worse
+        # than saying nothing.
+        return CompareDataSourcesResult(
+            left=input_data.left,
+            right=input_data.right,
+            n_entities_compared=0,
+            fields=[],
+            warnings=[
+                "no comparison was made: "
+                + "; ".join(unavailable)
+                + ". Configure the provider or pick two that are available."
+            ],
+            unavailable=unavailable,
+        )
+
+    report = compare_ratio_sources(
+        fetched[input_data.left],
+        fetched[input_data.right],
+        left_name=input_data.left,
+        right_name=input_data.right,
+        fields=input_data.fields,
+    )
+    return CompareDataSourcesResult(
+        left=report["left"],
+        right=report["right"],
+        n_entities_compared=report["n_entities_compared"],
+        fields=[FieldDivergence(**f) for f in report["fields"]],
+        declared_definition_notes=[
+            DeclaredNote(**n) for n in report["declared_definition_notes"]
+        ],
+        warnings=report["warnings"],
     )

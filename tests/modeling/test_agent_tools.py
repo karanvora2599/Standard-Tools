@@ -150,6 +150,12 @@ class TestModelingDispatch:
             "check_leakage",
             "validate_model_spec",
             "score_predictions",
+            # Point-in-time joins. The records arrive inline
+            # because no provider here serves them yet, which is a
+            # real use case rather than a placeholder: an earnings
+            # calendar or a set of FOMC dates can be joined today.
+            "validate_pit_records",
+            "join_point_in_time",
             # The nine feature tools that used to sit here moved to the
             # feature_lab runtime -- see tests/modeling/test_feature_tools.py.
             # modeling is one ordered pipeline; feature work is a

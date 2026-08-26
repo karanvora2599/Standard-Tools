@@ -789,3 +789,118 @@ class ScorePredictionsResult(BaseModel):
         ),
     )
     notes: List[str] = Field(default_factory=list)
+
+
+# ── point-in-time records ───────────────────────────────────────────────
+
+#: A record frame arrives inline because no provider in this library serves
+#: one yet. That is a real use case rather than a placeholder: a caller who
+#: has FOMC dates, an earnings calendar or a set of index-membership changes
+#: can join them onto a panel today. The cap is what stops somebody pasting
+#: a whole vendor history through a JSON argument, which would work and be
+#: a terrible way to move it.
+MAX_INLINE_PIT_RECORDS = 5000
+
+
+class PitRecordsInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    records: List[Dict[str, Any]] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_INLINE_PIT_RECORDS,
+        description=(
+            "Point-in-time records. Each needs `event_time` (when the fact "
+            "is ABOUT -- the quarter end, the reference month), "
+            "`available_time` (when it could first be ACTED ON -- the "
+            "publication or release), plus `entity` unless the series is "
+            "global, plus the value column(s). A value that was later "
+            "restated is a SECOND ROW with the same event_time and a later "
+            "available_time -- never an edit to the first."
+        ),
+    )
+    entity_scoped: bool = Field(
+        True,
+        description="False for a global series -- CPI, Fed Funds, VIX -- "
+        "which has no `entity` and joins to every entity on each date.",
+    )
+
+
+class PitValidationResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    valid: bool
+    n_records: int
+    n_entities: Optional[int] = None
+    fields: List[str] = Field(
+        default_factory=list, description="Value columns the records carry."
+    )
+    event_time_range: Optional[List[str]] = None
+    available_time_range: Optional[List[str]] = None
+    revisions: str = Field(
+        "unknown",
+        description="'versioned' when some fact carries more than one "
+        "version, so a past decision is reproducible; 'unknown' when every "
+        "fact appears once, which proves nothing either way.",
+    )
+    reproduces_history: bool = False
+    median_publication_lag_days: Optional[float] = Field(
+        None,
+        description="Median (available_time - event_time). This is the "
+        "hindsight a naive join on event_time would have given you, in days.",
+    )
+    problem: Optional[str] = Field(
+        None, description="Why the records were rejected, if they were."
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
+class JoinPointInTimeInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    records: List[Dict[str, Any]] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_INLINE_PIT_RECORDS,
+        description="Point-in-time records -- see validate_pit_records, "
+        "which checks the same input without joining anything.",
+    )
+    fields: Optional[List[str]] = Field(
+        None,
+        description="Value columns to attach. Defaults to every column that "
+        "is not event_time, available_time or entity.",
+    )
+    entity_scoped: bool = Field(
+        True, description="False for a global series joined to every entity."
+    )
+    prefix: str = Field(
+        "", description="Namespace for the added columns, to avoid collisions."
+    )
+    max_staleness_days: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Refuse to carry a record older than this. Without it, a "
+        "series that stops updating supplies its last value forever and the "
+        "model learns from a number that stopped being a measurement.",
+    )
+
+
+class JoinPointInTimeResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    dataset_id: str
+    joined_uri: str = Field(
+        ..., description="sqt:// reference to the panel with the fields added."
+    )
+    n_rows: int
+    fields_added: List[str]
+    coverage: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Fraction of panel rows that received a value, per field. "
+        "A low number is not a failure -- it is how much of the panel "
+        "predates the first release.",
+    )
+    warnings: List[str] = Field(default_factory=list)

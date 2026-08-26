@@ -68,6 +68,8 @@ from .models import (
     FeatureCatalogEntry,
     InspectModelInput,
     InspectModelResult,
+    JoinPointInTimeInput,
+    JoinPointInTimeResult,
     LeakageFinding,
     ListDatasetsInput,
     ListDatasetsResult,
@@ -79,6 +81,8 @@ from .models import (
     ListModelsResult,
     ModelComparison,
     ModelSummary,
+    PitRecordsInput,
+    PitValidationResult,
     RunModelExperimentInput,
     RunModelExperimentResult,
     ScoreModelInput,
@@ -838,6 +842,16 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
 
 _MODELING_TOOL_DEFS: List[tuple] = [
     (
+        "validate_pit_records",
+        "Check point-in-time records BEFORE joining them onto anything. The error worth catching is the two timestamps the wrong way round: event_time is when a fact is ABOUT, available_time is when it could first be ACTED ON, and swapped they make every model look prescient. Also reports median_publication_lag_days -- exactly how much hindsight a naive join on event_time would have handed you. Fetches nothing.",
+        PitRecordsInput,
+    ),
+    (
+        "join_point_in_time",
+        "Attach point-in-time records to a built dataset, each panel row getting the most recent record AVAILABLE by then. Strictly backward and inclusive: a filing released before a bar's close is usable on it, one released after is not, and a row with nothing available yet gets NaN rather than zero or the eventual value. A restatement is a second row with the same event_time and a later available_time, and the join returns whichever version was current at each date.",
+        JoinPointInTimeInput,
+    ),
+    (
         "validate_model_spec",
         "Check a ModelSpec before spending an experiment on it: that the "
         "estimator exists for the task, that its parameters are accepted, "
@@ -1031,7 +1045,187 @@ def analyze_features(input_data: AnalyzeFeaturesInput) -> AnalyzeFeaturesResult:
     )
 
 
+def _pit_frame(records, entity_scoped: bool):
+    """Records -> a validated PIT frame, with the caller's error surfaced."""
+    import pandas as pd
+
+    from standard_quant_tools.modeling.dataset.point_in_time import (
+        validate_pit_frame,
+    )
+
+    frame = pd.DataFrame(records)
+    return validate_pit_frame(frame, name="records", require_entity=entity_scoped)
+
+
+def validate_pit_records(input_data: PitRecordsInput) -> PitValidationResult:
+    """
+    Check point-in-time records BEFORE joining them onto anything.
+
+    The one error worth catching here is the two timestamps the wrong way
+    round. `event_time` is when a fact is about; `available_time` is when it
+    could first be acted on. Swapped, every value arrives weeks before it
+    existed, and the model built on it looks prescient rather than wrong —
+    which is why this is checked rather than assumed.
+
+    `median_publication_lag_days` is the number to read even when everything
+    passes: it is exactly how much hindsight a naive join on `event_time`
+    would have handed you. Three weeks for quarterly filings, and it does
+    not announce itself anywhere else.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from standard_quant_tools.error import ValidationError as _VE
+    from standard_quant_tools.modeling.dataset.point_in_time import (
+        AVAILABLE_TIME,
+        ENTITY,
+        EVENT_TIME,
+    )
+
+    logger.debug("[validate_pit_records] n=%d", len(input_data.records))
+    try:
+        frame = _pit_frame(input_data.records, input_data.entity_scoped)
+    except _VE as exc:
+        return PitValidationResult(
+            valid=False, n_records=len(input_data.records), problem=str(exc)
+        )
+
+    reserved = {EVENT_TIME, AVAILABLE_TIME, ENTITY}
+    fields = sorted(c for c in frame.columns if c not in reserved)
+    lag = (frame[AVAILABLE_TIME] - frame[EVENT_TIME]).dt.total_seconds() / 86400.0
+
+    keys = [EVENT_TIME] + ([ENTITY] if input_data.entity_scoped else [])
+    versions = frame.groupby(keys)[AVAILABLE_TIME].nunique()
+    versioned = bool((versions > 1).any())
+
+    warnings = []
+    if not versioned:
+        warnings.append(
+            "every fact appears once, so these records cannot show whether a "
+            "restated value would be kept as a new row or overwritten. That "
+            "is not a problem with the data -- it is a limit on what can be "
+            "concluded from it."
+        )
+    if not fields:
+        warnings.append(
+            "the records carry no value columns, only timestamps. A join "
+            "would add nothing."
+        )
+    zero_lag = int((lag <= 0).sum())
+    if zero_lag:
+        warnings.append(
+            f"{zero_lag} record(s) were available at the instant they "
+            "describe. That is right for a market bar and wrong for anything "
+            "reported -- check these are not event_time copied across."
+        )
+
+    return PitValidationResult(
+        valid=True,
+        n_records=int(len(frame)),
+        n_entities=(int(frame[ENTITY].nunique()) if input_data.entity_scoped else None),
+        fields=fields,
+        event_time_range=[
+            str(frame[EVENT_TIME].min().date()),
+            str(frame[EVENT_TIME].max().date()),
+        ],
+        available_time_range=[
+            str(frame[AVAILABLE_TIME].min().date()),
+            str(frame[AVAILABLE_TIME].max().date()),
+        ],
+        revisions="versioned" if versioned else "unknown",
+        reproduces_history=versioned,
+        median_publication_lag_days=(float(np.median(lag)) if len(lag) else None),
+        warnings=warnings,
+    )
+
+
+def join_point_in_time(input_data: JoinPointInTimeInput) -> JoinPointInTimeResult:
+    """
+    Attach point-in-time records to a built dataset, each panel row getting
+    the most recent record that was AVAILABLE by then.
+
+    The join is strictly backward and inclusive: a filing released before a
+    bar's close is usable on that bar, and one released after it is not. A
+    row with nothing available yet gets NaN, which is the honest answer for
+    "nobody knew this yet" — not zero, and not the eventual value.
+
+    A restatement is a SECOND ROW with the same `event_time` and a later
+    `available_time`. The join then returns whichever version was current at
+    each date, which is what reproducing a past decision means: seeing the
+    numbers as they were, mistakes included.
+
+    Call `validate_pit_records` first if the records came from anywhere you
+    did not construct yourself.
+    """
+    import pandas as pd
+
+    from standard_quant_tools.modeling.dataset.point_in_time import (
+        AVAILABLE_TIME,
+        ENTITY,
+        EVENT_TIME,
+        asof_join,
+    )
+
+    logger.debug(
+        "[join_point_in_time] dataset_id=%s n_records=%d",
+        input_data.dataset_id,
+        len(input_data.records),
+    )
+    panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    records = _pit_frame(input_data.records, input_data.entity_scoped)
+
+    reserved = {EVENT_TIME, AVAILABLE_TIME, ENTITY}
+    fields = input_data.fields or sorted(
+        c for c in records.columns if c not in reserved
+    )
+    staleness = (
+        pd.Timedelta(days=input_data.max_staleness_days)
+        if input_data.max_staleness_days
+        else None
+    )
+
+    joined = asof_join(
+        panel,
+        records,
+        fields=fields,
+        by_entity=input_data.entity_scoped,
+        prefix=input_data.prefix,
+        max_staleness=staleness,
+    )
+    added = [f"{input_data.prefix}{f}" for f in fields]
+    coverage = {column: float(joined[column].notna().mean()) for column in added}
+
+    warnings = []
+    for column, fraction in sorted(coverage.items()):
+        if fraction == 0.0:
+            warnings.append(
+                f"{column}: no panel row received a value. Every record "
+                "became available after the panel ends, or the entities do "
+                "not match."
+            )
+        elif fraction < 0.5:
+            warnings.append(
+                f"{column}: only {fraction:.0%} of rows received a value. "
+                "Usually the panel starts before the first release, which is "
+                "expected -- but check the entity names match."
+            )
+
+    uri = _artifacts.save_artifact(
+        joined, run_id=input_data.dataset_id, name="pit_joined"
+    )
+    return JoinPointInTimeResult(
+        dataset_id=input_data.dataset_id,
+        joined_uri=uri,
+        n_rows=int(len(joined)),
+        fields_added=added,
+        coverage=coverage,
+        warnings=warnings,
+    )
+
+
 MODELING_TOOL_DISPATCH = {
+    "validate_pit_records": (validate_pit_records, PitRecordsInput),
+    "join_point_in_time": (join_point_in_time, JoinPointInTimeInput),
     "validate_model_spec": (validate_model_spec, ValidateModelSpecInput),
     "score_predictions": (score_predictions, ScorePredictionsInput),
     "list_features": (list_features, ListFeaturesInput),

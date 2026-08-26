@@ -5133,3 +5133,66 @@ class TemporalContractResult(BaseModel):
         description="What to tell the user before building on this. Relay "
         "these rather than summarizing them away.",
     )
+
+
+# ── compare_data_sources ────────────────────────────────────────────────
+
+
+class FieldDivergence(BaseModel):
+    field: str
+    verdict: str = Field(
+        ...,
+        description="'agree', 'scale' (a constant ratio -- a unit conversion "
+        "somebody missed), 'definition' (systematic with NO constant ratio -- "
+        "the two are measuring different things and no conversion exists), "
+        "or 'no_overlap'.",
+    )
+    n_compared: int
+    detail: str
+    max_relative_difference: Optional[float] = None
+    median_relative_difference: Optional[float] = None
+    ratio: Optional[float] = Field(
+        None,
+        description="For a 'scale' verdict: how many times the second source "
+        "is the first. 100 means percent-versus-fraction.",
+    )
+    ratio_spread: Optional[float] = None
+    examples: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class DeclaredNote(BaseModel):
+    source: str
+    entity: str
+    field: str
+    note: str
+
+
+class CompareDataSourcesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    model_config = ConfigDict(extra="forbid")
+
+    symbols: List[str] = Field(
+        ..., min_length=1, max_length=50, description="Tickers to compare."
+    )
+    left: str = Field("yfinance", description="First provider.")
+    right: str = Field("polygon", description="Second provider.")
+    fields: Optional[List[str]] = Field(
+        None,
+        description="Ratio fields to compare. Defaults to every field "
+        "FinancialRatios carries.",
+    )
+
+
+class CompareDataSourcesResult(BaseModel):
+    left: str
+    right: str
+    n_entities_compared: int
+    fields: List[FieldDivergence]
+    declared_definition_notes: List[DeclaredNote] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    unavailable: List[str] = Field(
+        default_factory=list,
+        description="Providers that could not be constructed (no API key, "
+        "SDK not installed) and the reason. A comparison against a provider "
+        "that never answered is not a comparison.",
+    )

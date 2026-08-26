@@ -381,23 +381,68 @@ leak and retrofitting the fix.
   OHLCV pull, and adding a `frame_kind` to it to cover filings would have
   muddied a type that is currently precise. The contract is its own type and
   `price_contract()` is the bridge.
-- **2b — the bundle.** `DataBundle` as a typed multi-frame container
-  published as one reference: `bars`, `trades`, `quotes`, `orderbook`,
-  `fundamentals`, `estimates`, `macro`, `events`, `options`,
-  `reference_data`, `corporate_actions`.
-- **2c — the builders.** `build_price_panel`, `build_returns_panel`
-  (`alignment.build_returns_panel` exists), `build_fundamental_panel`,
-  `build_macro_panel`, `build_event_panel`, `build_universe_snapshot`,
-  `join_point_in_time`, `validate_dataset`, `compare_data_sources`,
-  `list_data_snapshots`.
+- **2b — the bundle. SHIPPED, narrower than specified.** `DataBundle`
+  pairs every frame with the `TemporalContract` it was fetched under, and
+  `validate_bundle` answers "is this safe to model on" from that pairing.
+  `pit_safe` is the WEAKEST link rather than an average: a bundle is used as
+  a unit, and "mostly safe" is not a number anybody can act on.
 
-> **Why this pays for itself.** `compare_data_sources` is the underrated
-> one. Two providers disagreeing about the same fundamental is currently
-> invisible. The `debt_to_equity` unit divergence already documented in
-> `FinancialRatios` — yfinance reports a percentage, Polygon a ratio, and
-> Polygon derives it from total liabilities — is exactly the class of bug it
-> would surface automatically rather than through a docstring someone has to
-> read.
+  It does **not** have eleven named slots. Eight of the eleven have no
+  provider behind them, and a container with eight permanently empty slots
+  is the "empty box with a correct label" `point_in_time.py` already warns
+  about — worse, a slot named `fundamentals` reads as an invitation to fill
+  it from a source with no availability timestamps, which is the exact leak
+  the contract exists to stop. A bundle holds whatever frames it was given,
+  keyed by frame kind. Adding `fundamentals` needs no change to the
+  container; it needs a source.
+- **2c — the builders. PARTIALLY SHIPPED, and the split is on purpose.**
+
+  **Built, because they have a source behind them:**
+  `compare_data_sources` (the underrated one — see below),
+  `join_point_in_time` and `validate_pit_records`. The last two take records
+  **inline**, which is a real use case rather than a placeholder: a caller
+  who has an earnings calendar, a set of FOMC dates or index-membership
+  changes can join them onto a panel today, capped at 5,000 rows so nobody
+  moves a vendor history through a JSON argument.
+
+  **Not built, because building them now would build a leak:**
+  `build_fundamental_panel`, `build_macro_panel`, `build_event_panel`. No
+  provider in this library supplies availability timestamps for any of them.
+  A tool named `build_fundamental_panel` that could only join on `event_time`
+  is not a partial implementation — it is a three-week lookahead with a
+  reassuring name, and the plan's own instruction was "adding
+  `build_fundamental_panel` before the timestamp contract means building a
+  leak and retrofitting the fix". The contract now exists and refuses; the
+  builder waits for a source.
+
+  **Not built, because the thing they list does not exist:**
+  `build_universe_snapshot`, `list_data_snapshots` need a snapshot store
+  that has not been designed.
+
+  **Renamed:** `validate_dataset` became `validate_pit_records`. A modeling
+  dataset built from bars is point-in-time safe by construction, so a tool
+  validating one would always say "fine"; what needs checking is the RECORD
+  frame about to be joined onto it, where the event/available swap lives.
+
+> **Why this pays for itself.** `compare_data_sources` was the underrated
+> one and it shipped. Building it turned up that the hard part is not
+> spotting a difference — a diff does that — but separating three cases
+> that look identical and need opposite responses:
+>
+> - **scale**: a CONSTANT ratio across entities. A missed unit conversion;
+>   the fix is arithmetic.
+> - **definition**: systematic, ratio NOT constant. The two are computing
+>   different quantities and no conversion exists.
+> - **agree**: within rounding. Vendors differ at the margin about
+>   everything and it is not a finding.
+>
+> The `debt_to_equity` case splits across two of them. yfinance reporting a
+> percentage is `scale` — divide by 100. Polygon deriving it from total
+> liabilities is `definition`, because payables and deferred revenue are not
+> proportional to debt, so the ratio wanders. Telling a user "these disagree
+> by 2x" when the verdict is `definition` invites them to divide by two,
+> which is exactly wrong. That distinction is the tool's whole value and it
+> was not visible from the docstring.
 
 Unlocks safe handling of earnings, analyst estimates, fundamentals,
 CPI/FOMC, alternative data, news, index membership and corporate actions.

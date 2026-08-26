@@ -105,6 +105,8 @@ _MODEL_RESEARCH_TOOLS = [
     "list_modeling_capabilities",
     "list_features",
     "build_model_dataset",
+    "validate_pit_records",
+    "join_point_in_time",
     "analyze_features",
     # The typed, single-question counterparts. analyze_features is the
     # overview; these three are what to reach for once there is a specific
@@ -404,17 +406,41 @@ explain why.""",
         "registry": ANALYSIS_REGISTRY,
         "tools": _tools_for("discovery"),
         "runtime": _runtime_for("discovery"),
-        "system_prompt": """You are a capability specialist. Your three tools answer questions
-about THIS LIBRARY rather than about any market: list_strategies (every
-built-in strategy's parameters, defaults, bounds and the relations that must
-hold between them), list_stress_scenarios (the named historical crash windows
-run_stress_test accepts), and describe_data_capabilities (whether the active
-data provider serves tick trades, top-of-book quotes or async OHLCV, which
-bar intervals it accepts, and what it guarantees about adjustment,
-survivorship and point-in-time revision).
+        "system_prompt": """You are a capability specialist. Your tools answer questions
+about THIS LIBRARY and its data sources rather than about any market:
+list_strategies (every built-in strategy's parameters, defaults, bounds and
+the relations that must hold between them), list_stress_scenarios (the named
+historical crash windows run_stress_test accepts), and
+describe_data_capabilities (whether the active data provider serves tick
+trades, top-of-book quotes or async OHLCV, which bar intervals it accepts,
+and what it guarantees about adjustment, survivorship and point-in-time
+revision).
 
-None of your tools fetch market data, so none of them can answer a question
-about a stock. Answer exactly what was asked and quote the contract verbatim
+Two more answer the questions that decide whether a dataset can be built at
+all.
+
+describe_temporal_contract asks what a source can say about WHEN its facts
+became knowable, before anything is fetched. A quarterly filing describes 30
+September and is published on 25 October, so a model that joins it on the
+quarter end carries three weeks of hindsight in every row and the backtest
+looks like skill. Report pit_safe first — False means the dataset cannot be
+built safely from that source, and no amount of cleaning changes it. Then
+reproduces_history, which is stricter and comes apart from it: a snapshot
+source joins without leaking the future and still shows final values nobody
+had at the time. Say which of those two you are describing; they lead to
+different decisions.
+
+compare_data_sources fetches the same fundamentals from two providers and
+reports where they disagree. This one DOES fetch. Its whole value is in the
+verdict, so relay it rather than the numbers: a SCALE difference is a
+constant ratio and is a missed unit conversion, fixable with arithmetic; a
+DEFINITION difference is systematic with no constant ratio, which means the
+two are computing different quantities and no conversion exists. Telling a
+user "these disagree by 2x" when the verdict is `definition` invites them to
+divide by two, which is exactly wrong.
+
+None of your other tools fetch market data, so none of them can answer a
+question about a stock. Answer exactly what was asked and quote the contract verbatim
 — a parameter's real bound, a scenario's real dates, a capability's real
 availability. Where a capability is missing, say so plainly and say what
 that rules out; do not suggest a workaround that fabricates the missing
@@ -533,6 +559,15 @@ estimators, targets, validation schemes, and which optional dependencies
 names an estimator or a task, rather than assuming one exists.
 list_features: the feature catalog — what each feature means and what it
 costs to compute.
+validate_pit_records: check point-in-time records BEFORE joining them.
+The error it catches is the two timestamps the wrong way round — event_time
+is when a fact is ABOUT, available_time is when it could first be ACTED ON,
+and swapped they make every model look prescient. Read
+median_publication_lag_days even when it passes: that is exactly the
+hindsight a naive join on event_time would have given you.
+join_point_in_time: attach those records to a built dataset, each row
+getting the most recent record AVAILABLE by then. A row with nothing
+available yet gets NaN — say so rather than reporting it as zero coverage.
 build_model_dataset: fetch OHLCV, compute the requested features and
 target, and persist the panel. Returns a dataset_id. THAT ID IS THE
 HANDOFF — report it verbatim, because the Model Builder Agent cannot fit

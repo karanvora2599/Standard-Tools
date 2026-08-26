@@ -9,6 +9,58 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — `compare_data_sources`, and the three verdicts it separates
+
+Fetches the same fundamentals from two providers and reports where they
+disagree. `FinancialRatios` already documented that `debt_to_equity` means
+different things depending on the source; nothing checked it, so a screen
+ranking a universe on a mix of two providers ordered it partly by which one
+answered, with no error anywhere.
+
+The hard part is not spotting a difference. It is separating:
+
+- **scale** — a CONSTANT ratio across entities. A missed unit conversion,
+  fixable by arithmetic. yfinance reporting a percentage is this.
+- **definition** — systematic, ratio NOT constant. The two are computing
+  different quantities and no conversion exists. Polygon deriving
+  `debt_to_equity` from total liabilities is this, because payables are not
+  proportional to debt.
+- **agree** — within rounding, and not a finding.
+
+Telling a user "these disagree by 2x" when the verdict is `definition`
+invites them to divide by two, which is exactly wrong.
+
+### Added — `DataBundle`, `validate_pit_records`, `join_point_in_time`
+
+`DataBundle` pairs every frame with the `TemporalContract` it was fetched
+under; `pit_safe` is the weakest link, not an average, because a bundle is
+used as a unit and "mostly safe" is not actionable.
+
+`validate_pit_records` catches the two timestamps the wrong way round —
+`event_time` is when a fact is ABOUT, `available_time` is when it could
+first be ACTED ON, and swapped they make every model look prescient. It
+reports `median_publication_lag_days` even when it passes: exactly the
+hindsight a naive join on `event_time` would have handed you.
+
+`join_point_in_time` attaches those records to a built dataset, each row
+getting the most recent record AVAILABLE by then. Records arrive inline
+(capped at 5,000) because no provider here serves them yet — which is a real
+use case, not a placeholder: an earnings calendar or a set of FOMC dates can
+be joined today.
+
+### Not built, deliberately
+
+`build_fundamental_panel`, `build_macro_panel` and `build_event_panel` are
+in the expansion plan and are **not** implemented. No provider supplies
+availability timestamps for any of them, so a tool with those names could
+only join on `event_time` — a three-week lookahead with a reassuring name.
+The plan's own instruction was to build the contract first for exactly this
+reason. The contract exists and refuses; the builders wait for a source.
+
+`build_universe_snapshot` and `list_data_snapshots` need a snapshot store
+that has not been designed.
+
+
 ### Added — the temporal contract, asked before anything is fetched
 
 `describe_temporal_contract` says what a source can tell you about WHEN its

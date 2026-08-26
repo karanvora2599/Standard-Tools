@@ -20,6 +20,7 @@ from standard_quant_tools.agent.models import (
     ListStrategiesInput,
     ListStressScenariosInput,
     ReferenceKind,
+    CompareDataSourcesInput,
     ReplayDecisionInput,
     TemporalContractInput,
     ValidateToolCallInput,
@@ -28,6 +29,7 @@ from standard_quant_tools.agent.models import (
 )
 
 from .tools import (
+    compare_data_sources,
     compare_decisions,
     convert_reference,
     describe_artifact,
@@ -48,6 +50,11 @@ from .tools import (
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "compare_data_sources",
+        "Fetch the same fundamentals from two providers and report where they disagree, separating a SCALE difference (a constant ratio -- a missed unit conversion, fixable by arithmetic) from a DEFINITION difference (systematic with no constant ratio -- the two are computing different quantities and no conversion exists) from noise. FinancialRatios already documents that Polygon derives debt_to_equity from total liabilities and yfinance reports it as a percentage; this checks it rather than leaving it in a docstring. Fetches from both providers.",
+        CompareDataSourcesInput,
+    ),
     (
         "describe_temporal_contract",
         "What a data source can say about WHEN its facts became knowable, asked BEFORE fetching anything. A quarterly filing describes 30 September and is published on 25 October, so a model that joins it on the quarter end carries three weeks of hindsight per row. Read pit_safe first — False means do not build this dataset from this source — then reproduces_history, which is stricter: a snapshot source joins without leaking the future and still shows a backtest restated numbers nobody had. Fetches nothing.",
@@ -144,6 +151,7 @@ TOOL_CATEGORY = {
     "list_stress_scenarios": "discovery",
     "describe_data_capabilities": "discovery",
     "describe_temporal_contract": "discovery",
+    "compare_data_sources": "discovery",
 }
 
 __all__ = [
