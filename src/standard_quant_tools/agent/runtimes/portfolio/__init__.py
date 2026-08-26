@@ -5,6 +5,8 @@ advertised without being dispatchable or the reverse."""
 from standard_quant_tools.agent.models import (
     CapacityReportInput,
     EstimateTradeCostInput,
+    EstimateCovarianceInput,
+    PlanRebalanceInput,
     LiquidityAnalysisInput,
     LiquidityEventsInput,
     MicrostructureInput,
@@ -17,6 +19,8 @@ from standard_quant_tools.agent.models import (
 )
 
 from .tools import (
+    estimate_covariance,
+    plan_rebalance,
     detect_liquidity_events,
     check_spread_proxy,
     estimate_trade_cost,
@@ -33,6 +37,16 @@ from .tools import (
 #: (name, description, input model) — the single source for both
 #: the advertised schema and the dispatch table below.
 TOOL_DEFS = [
+    (
+        "plan_rebalance",
+        "A day-by-day path from the weights you hold to the weights you want. Every optimizer here returns a target vector and implicitly assumes you arrive instantly and for free; trading fast costs market impact and trading slow means holding the portfolio you were trying to leave, so this returns the SCHEDULE and both costs rather than one number. Surfaces what nothing else does: a target weight the market cannot supply, with the number of days it would really take.",
+        PlanRebalanceInput,
+    ),
+    (
+        "estimate_covariance",
+        "A covariance matrix plus the diagnostics that say whether to trust it. Shrinkage is the ANSWER to the conditioning warnings the optimizer already emits rather than a caveat about them: a covariance over N assets has N(N+1)/2 parameters, and mean-variance optimization is an error-maximizer over its worst-estimated directions. Read observations_per_parameter and condition_number before the matrix. Returns it annualized.",
+        EstimateCovarianceInput,
+    ),
     (
         "detect_liquidity_events",
         "Which part of the market changed, not merely that it did. Runs a CUSUM change detector across several channels — spread, effective spread, signed volume, trade intensity, realized volatility, mid return — and reports which broke and how badly. Price is the channel that moves LAST, so a report where the spread and flow fired while the mid did not is the ordinary sequence rather than a contradiction. Channels needing an order book are declared and REFUSED by name rather than dropped, because a missing row reads as a quiet channel. Needs a tick-capable provider.",
@@ -95,6 +109,8 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 #: This runtime's slice of the library-wide routing taxonomy.
 TOOL_CATEGORY = {
     "run_portfolio_optimization": "portfolio_risk",
+    "plan_rebalance": "portfolio_risk",
+    "estimate_covariance": "portfolio_risk",
     "get_portfolio_risk_attribution": "portfolio_risk",
     "run_stress_test": "portfolio_risk",
     "get_position_size": "portfolio_risk",

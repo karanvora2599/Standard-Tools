@@ -9,6 +9,46 @@ bump, consistent with SemVer's pre-1.0 clause.
 
 ## [Unreleased]
 
+### Added — `plan_rebalance`: the transition an optimizer assumes is free
+
+Every optimizer here returns a target weight vector and implicitly assumes
+you arrive instantly and at no cost. The transition has two costs pulling
+opposite ways — impact for trading fast, holding the old portfolio for
+trading slow — so this returns the day-by-day schedule and both, with
+`urgency` exposed rather than chosen for you.
+
+**What it surfaces that nothing else does:** a target weight the market
+cannot supply. On a $100m book, a 60% target in a $2m-ADV name comes back as
+needing **295 days** at a 10% participation cap. The weight vector is valid,
+the backtest fills at the close, and until now nothing noticed.
+
+A bug found while building it, worth recording because it pointed the wrong
+way: `total_cost_bps` summed each day's average impact rate, reporting 1.83
+bps for trading everything at once against 4.08 for spreading it — exactly
+backwards. Summing basis points across days adds rates, not costs. Both
+numbers were small and plausible, and a caller would have concluded "trade
+fast, it's cheaper". It now reports total impact dollars over total notional,
+and a test checks the ratio against the square-root law's own arithmetic.
+
+### Added — `estimate_covariance` with shrinkage
+
+`sample`, `ledoit_wolf`, `ewma`, `ewma_shrunk`, plus the diagnostics that
+say whether to trust the result. Measured on 40 assets and 120 days:
+condition number 205 for `sample`, 143 for `ledoit_wolf`, **228 for `ewma`**
+and 35 for `ewma_shrunk`.
+
+EWMA making conditioning *worse* is the point worth carrying: it answers a
+question about regime rather than about estimation error, and lowers the
+effective sample size doing so. They are not alternatives, which is why
+`ewma_shrunk` exists. Returned annualized.
+
+### The microstructure split is no longer blocked
+
+`portfolio` now holds 13 tools — 9 `portfolio_risk` and 4 `microstructure` —
+so moving the microstructure four out leaves 9, above the eight-tool floor.
+A test pins it so a later move cannot quietly break it.
+
+
 ### Added — probability calibration, and the empty signal panel it fixes
 
 `EstimatorSpec.calibration` takes `isotonic` or `sigmoid`, fitted on

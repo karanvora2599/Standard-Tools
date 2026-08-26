@@ -5303,3 +5303,156 @@ class LiquidityEventsResult(BaseModel):
     results: List[ChannelResult] = Field(default_factory=list)
     unavailable: List[UnavailableChannel] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
+
+
+# ── plan_rebalance ──────────────────────────────────────────────────────
+
+
+class RebalanceStep(BaseModel):
+    day: int
+    turnover: float
+    traded_notional: float
+    max_participation_used: Optional[float] = None
+    impact_bps: Optional[float] = None
+    impact_dollars: Optional[float] = None
+    cumulative_cost_dollars: Optional[float] = None
+    distance_to_target: float = Field(
+        ...,
+        description="Sum of absolute weight differences still to close. This "
+        "is what the portfolio is NOT yet, and it is the cost of trading "
+        "slowly.",
+    )
+    weights: Dict[str, float]
+
+
+class UnreachableName(BaseModel):
+    name: str
+    residual_weight: float
+    days_needed: Optional[float] = Field(
+        None,
+        description="How long this name would ACTUALLY take at the "
+        "participation cap. The number an optimizer cannot tell you.",
+    )
+    daily_capacity_weight: Optional[float] = None
+
+
+class PlanRebalanceInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    model_config = ConfigDict(extra="forbid")
+
+    current_weights: Dict[str, float] = Field(
+        ..., description="What you hold now, as portfolio weights."
+    )
+    target_weights: Dict[str, float] = Field(
+        ..., description="What the optimizer said to hold."
+    )
+    portfolio_value: float = Field(
+        ..., gt=0, description="Portfolio notional, in the same currency as adv."
+    )
+    adv: Optional[Dict[str, float]] = Field(
+        None,
+        description="Average daily DOLLAR volume per name. Without it, "
+        "participation and impact cannot be computed and the costs come back "
+        "null rather than zero — an unpriced transition is not a free one.",
+    )
+    max_participation: float = Field(
+        0.10,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of a name's daily volume to take. Above ~0.20 "
+        "the square-root impact law stops describing reality, because you are "
+        "no longer trading alongside the day's flow — you are the day's flow.",
+    )
+    max_days: int = Field(10, ge=1, le=250, description="Horizon for the transition.")
+    urgency: float = Field(
+        0.5,
+        ge=0.0,
+        le=1.0,
+        description="1.0 trades as fast as the cap allows — least time "
+        "holding the wrong portfolio, most impact. 0.0 spreads it evenly. "
+        "The schedule reports the cost either way, so you can see the trade "
+        "rather than be handed one side of it.",
+    )
+    impact_coefficient: float = Field(
+        10.0,
+        gt=0.0,
+        description="Basis points of impact at 100% participation under the "
+        "square-root law. A MODEL, not a measurement — pass your own if you "
+        "have calibrated one.",
+    )
+
+
+class PlanRebalanceResult(BaseModel):
+    n_days: int
+    total_turnover: float
+    total_cost_bps: Optional[float] = Field(
+        None,
+        description="BLENDED rate: total impact dollars over total notional "
+        "traded. Not the sum of daily rates, which would add rates and call "
+        "them a cost.",
+    )
+    total_cost_dollars: Optional[float] = None
+    converged: bool = Field(
+        ..., description="Whether the target was actually reached in the horizon."
+    )
+    residual_distance: Optional[float] = None
+    schedule: List[RebalanceStep] = Field(default_factory=list)
+    unreachable: List[UnreachableName] = Field(
+        default_factory=list,
+        description="Names still short when the horizon ran out. An optimizer "
+        "can emit a 5% target in a name whose volume cannot support it, and "
+        "nothing else in the pipeline notices.",
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
+# ── estimate_covariance ─────────────────────────────────────────────────
+
+
+class EstimateCovarianceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: List[str] = Field(..., min_length=2, max_length=200)
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    method: str = Field(
+        "ledoit_wolf",
+        description=(
+            "'ledoit_wolf' (default) shrinks toward a scaled identity by an "
+            "amount chosen FROM THE DATA — the right default for portfolio "
+            "construction, because mean-variance optimization is an "
+            "error-maximizer over a covariance matrix's worst-estimated "
+            "directions. 'sample' is unbiased and unusable when assets "
+            "approach observations. 'ewma' weights recent data more, which is "
+            "a question about REGIME rather than estimation error and makes "
+            "conditioning worse. 'ewma_shrunk' does both."
+        ),
+    )
+    halflife: float = Field(60.0, gt=0.0, description="EWMA half-life in observations.")
+    periods_per_year: int = Field(
+        252, ge=1, description="Used to annualize the matrix."
+    )
+
+
+class EstimateCovarianceResult(BaseModel):
+    method: str
+    assets: List[str]
+    n_observations: int
+    n_assets: int
+    observations_per_parameter: float = Field(
+        ...,
+        description="Numbers available per estimated parameter. A covariance "
+        "over N assets has N(N+1)/2 of them, and this is the honest measure "
+        "of how thin the estimate is.",
+    )
+    shrinkage_intensity: Optional[float] = Field(
+        None,
+        description="Weight on the structured target. Near 1 means almost "
+        "nothing in the sample estimate survived — a finding about the data, "
+        "not a failure of the method.",
+    )
+    condition_number: float
+    smallest_eigenvalue: float
+    annualized: bool
+    matrix: Dict[str, Dict[str, float]]
+    warnings: List[str] = Field(default_factory=list)

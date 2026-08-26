@@ -598,27 +598,72 @@ model.
 
 ### Phase 5 — Portfolio depth
 
-**Extends `portfolio` · 10 → ~15 tools · must land before microstructure leaves**
+**Extends `portfolio` · 10 → 13 tools · PARTIALLY SHIPPED · the donor floor
+is now clear**
 
 Two jobs at once: real portfolio construction, and lifting the donor above
 the floor so the microstructure split is legal.
 
-- **Covariance** — Ledoit-Wolf, EWMA, factor. The optimizer already emits
-  conditioning warnings; shrinkage is the answer to those warnings rather
-  than a caveat about them.
+**The second job is done.** `portfolio` holds 13 tools — 9 `portfolio_risk`
+and 4 `microstructure` — so moving the microstructure four out leaves 9,
+above the floor. Phase 3's split is no longer blocked by this, and a test in
+`tests/portfolio/` pins it so a later move cannot quietly break it.
+
+- **Covariance — SHIPPED** as `estimate_covariance`, with `sample`,
+  `ledoit_wolf`, `ewma` and `ewma_shrunk`. Shrinkage is the answer to the
+  conditioning warnings rather than a caveat about them, and the reason is
+  arithmetic: a covariance over N assets has N(N+1)/2 parameters, so 40
+  assets on 120 days is about six numbers per parameter, and the smallest
+  eigenvalues — the directions an optimizer levers into because they look
+  like free risk reduction — are estimated worst.
+
+  Measured on exactly that panel: condition number 205 for `sample`, 143 for
+  `ledoit_wolf`, **228 for `ewma`** and 35 for `ewma_shrunk`. EWMA making it
+  *worse* is the point worth carrying: it answers a question about regime
+  rather than about estimation error, and it lowers the effective sample
+  size doing so. They are not alternatives, which is why `ewma_shrunk`
+  exists.
+
+  Returned ANNUALIZED, because every other risk number here is and a daily
+  covariance silently produces a volatility 16 times too small.
+**Still open — remaining work, nothing blocking it:**
+
 - **Objectives** — HRP, HERC, mean-CVaR, minimum CVaR, maximum
   diversification. As *methods on the existing optimizer tool*, not five new
   tools.
 - **Constraints** — factor-neutral, beta-neutral, sector, tracking-error,
   turnover-aware, transaction-cost-aware. Constraint spec, one tool.
-- **New tools worth their own name** — `estimate_covariance`,
-  `plan_rebalance`, `run_scenario_analysis`.
+- **`run_scenario_analysis`** — deliberately not built yet. `run_stress_test`
+  already applies named historical windows, so the marginal tool is
+  arbitrary user-specified shocks, and the two need separating carefully
+  before a second one earns its name.
+- **Wiring `estimate_covariance` into the optimizer** as a `covariance`
+  option, so the optimizer's own conditioning warning has a fix reachable
+  without a second call. A spec option, not a tool.
 
-> **Build `plan_rebalance` first.** Every optimizer here currently implies
-> an instantaneous jump between weight vectors. A transition path that takes
-> current holdings, costs, liquidity and constraints and returns a
-> *sequence* is what makes the optimizer's output actionable — and it
-> consumes `weight_panel` references that already exist.
+> **`plan_rebalance` was built first, and it was the right call.** Every
+> optimizer here implied an instantaneous jump between weight vectors, and
+> the transition has two costs pulling opposite ways — impact for trading
+> fast, holding the old portfolio for trading slow. It returns the schedule
+> and both costs rather than one number, with `urgency` exposed rather than
+> chosen.
+>
+> **What it surfaces that nothing else does:** a target weight the market
+> cannot supply. On a $100m book, a 60% target in a $2m-ADV name comes back
+> as needing **295 days** at a 10% participation cap. The weight vector is
+> valid, the backtest fills at the close, and until now nothing anywhere
+> noticed.
+>
+> **A bug found building it, worth recording because it pointed the wrong
+> way.** `total_cost_bps` summed each day's average impact rate, so on a
+> transition where liquidity does not bind it reported 1.83 bps for trading
+> everything at once against 4.08 for spreading it over five days — exactly
+> backwards. Summing basis points across days adds rates, not costs. Both
+> numbers were small and plausible, and a caller would have concluded "trade
+> fast, it's cheaper". It now reports total impact dollars over total
+> notional, and a test checks the ratio against the square-root law's own
+> arithmetic: 5x the daily volume must cost sqrt(5) times the rate, and it
+> does to two decimals.
 
 ### Phase 6 — Derivatives
 
