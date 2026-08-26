@@ -1,5 +1,52 @@
 # Changelog
 
+## Tool surface expansion — 102 to 157 tools, six runtimes to eight
+
+Fifty-five new tools and two new execution boundaries.
+
+**New runtimes.** `derivatives` (12) took option pricing out of `research`
+and added second-order greeks, multi-leg payoffs, smile and term-structure
+fitting with arbitrage checks, put-call parity, expected move, delta-hedge
+simulation and revaluation grids. `microstructure` (12) left `portfolio`
+once it held more than four tools, and gained seven bar-based liquidity
+estimators — Roll, Corwin-Schultz, Amihud, Kyle, order-flow imbalance,
+VPIN, intraday volume profile — plus implementation shortfall. Both splits
+clear the floor this library sets: at least eight tools on each side.
+`MOVED_FROM` names the old home, so a caller scoped to the donor gets an
+instruction rather than an "unknown tool" that reads like a hallucination.
+
+**Existing runtimes.** `research` +11 (change points, partial correlation,
+Granger, tail dependence, stationarity, regimes, Ljung-Box, seasonality,
+entropy, Sharpe stability, drawdown profile, lead-lag, Chow test, bootstrap
+intervals, distribution comparison, correlation stability, return
+decomposition, normality, tail index). `backtest` +11 (deflated Sharpe,
+PBO, purged combinatorial CV, White's reality check, regime-stratified
+performance, parameter decay, Monte Carlo trade paths, trade clustering,
+comparison against random, exposure attribution, break-even cost).
+`portfolio` +8 (risk parity, HRP, factor exposure budget, concentration,
+liquidity-adjusted VaR, max diversification, marginal risk contribution,
+named scenarios). `meta` +3 (tool cost, runtime description, artifact
+diff).
+
+**`--tool-detail` now defaults to `auto`.** At full detail the backtest
+runtime cost 75,867 bytes against a 73,728 per-runtime ceiling, and the
+ceiling was not the thing to move. `auto` thins only what exceeds the
+budget, so the runtimes already under it are byte-for-byte unchanged, and
+`describe_tool` is injected whenever anything is thinned.
+
+**Fixes found while building.** The audit layer could not accept a plain
+dict return. A constant return series produced a Sharpe of 7.3e16, because
+numpy's `std` on a flat array is ~1e-19 rather than 0 — the same fault
+lived in two places and both are relative checks now. `granger_causality`
+took the smallest p-value across every lag and called it significant at
+5%, delivering 15%; it is Bonferroni corrected. Roll's spread estimator
+returned 0.098 on a series with a spread of exactly zero, and now reports
+the smallest spread the sample could distinguish. Order-flow persistence
+was measuring its own window overlap (+0.76 on pure noise) and is computed
+on non-overlapping windows. `rolling_sharpe_stability` corrected for
+overlapping windows twice and had no power at all.
+
+
 All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

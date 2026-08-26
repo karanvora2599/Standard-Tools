@@ -76,7 +76,12 @@ TOOL_DEFS = [
     ),
     (
         "get_position_size",
-        "ATR-based position sizing with optional Kelly criterion.",
+        "How large to trade, from a stop distance measured in ATR and an "
+        "account risk budget. Answers the question a signal does not: a "
+        "correct direction sized wrong loses money. Kelly is optional and "
+        "is a CEILING rather than a target -- full Kelly maximizes "
+        "long-run growth and produces drawdowns almost nobody holds "
+        "through, which is why half-Kelly is the common practice.",
         PositionSizerInput,
     ),
     (

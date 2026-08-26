@@ -867,7 +867,16 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "forward returns. Works on predictions this library never produced.",
         ScorePredictionsInput,
     ),
-    ("list_features", "Feature catalog for the modeling runtime.", ListFeaturesInput),
+    (
+        "list_features",
+        "Which features this library can build, what each one measures, and "
+        "what it costs to compute. Call it BEFORE build_model_dataset rather "
+        "than guessing names -- a feature name that does not exist is a "
+        "failed call and an error round trip, which costs more than reading "
+        "the catalogue does. The feature_lab runtime then answers what each "
+        "one is worth once the dataset exists.",
+        ListFeaturesInput,
+    ),
     (
         "build_model_dataset",
         "Fetch OHLCV, compute requested features/target, persist the panel.",
@@ -880,7 +889,13 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     ),
     (
         "score_model",
-        "Score a registered model for a universe as of a date.",
+        "Run a registered model forward and get its predictions for a "
+        "universe as of a date. The step that turns a fitted model into "
+        "something a backtest can consume, and the one where point-in-time "
+        "discipline matters most: the `as_of` date is what stops the model "
+        "seeing features that did not exist yet. Raw probabilities from a "
+        "tree ensemble are NOT calibrated, so a 0.9 threshold may select no "
+        "rows at all -- check the distribution before thresholding.",
         ScoreModelInput,
     ),
     (

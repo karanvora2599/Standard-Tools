@@ -34,7 +34,7 @@ categorization only ever needs to be correct in one place.
 > whose dispatch table holds only its own tools and refuses the rest by
 > name.
 
-## Three registries, six runtimes
+## Three registries, eight runtimes
 
 Everything above concerns the 68-tool analysis and backtest surface. There
 is a second one: `standard_quant_tools.modeling.agent`, 14 tools, which the

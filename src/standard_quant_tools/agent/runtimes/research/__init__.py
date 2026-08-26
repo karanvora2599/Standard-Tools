@@ -122,17 +122,33 @@ TOOL_DEFS = [
     ),
     (
         "analyze_stock_risk",
-        "Full risk analysis: alpha, beta, Sharpe, VaR, CVaR.",
+        "Full risk profile of one asset against a benchmark: alpha, beta, "
+        "Sharpe, VaR and CVaR in a single call. The starting point for "
+        "'what is this thing like', and the place most analyses begin. "
+        "Every number here is a point estimate over the whole sample -- "
+        "use get_bootstrap_interval for what the Sharpe's error bar "
+        "actually is, and get_sharpe_stability to check the edge did not "
+        "decay inside the window.",
         AnalysisInput,
     ),
     (
         "get_technical_analysis",
-        "Compute configurable technical indicators.",
+        "Technical indicators for ONE ticker, with the parameters you choose "
+        "-- RSI, MACD, Bollinger, moving averages and the rest. Use "
+        "get_technical_panel instead when the question spans a universe: "
+        "it computes the same indicators for every ticker in one native "
+        "call, and looping this tool per ticker is the slow way to the "
+        "same answer.",
         TechnicalInput,
     ),
     (
         "get_portfolio_analysis",
-        "Multi-asset portfolio metrics.",
+        "Risk and return metrics for a basket held at fixed weights: "
+        "portfolio volatility, correlation structure, and contribution by "
+        "position. Describes a portfolio you specify rather than choosing "
+        "one -- run_portfolio_optimization and optimize_risk_parity "
+        "choose, and get_marginal_risk_contribution answers the follow-up "
+        "question of where the risk in this basket actually comes from.",
         PortfolioInput,
     ),
     (

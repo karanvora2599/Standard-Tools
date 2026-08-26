@@ -145,7 +145,7 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 95 tools cost about **166 KB of schema, ~49,000 tokens**, held for the
+The 157 tools cost about **236 KB of schema, ~60,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
@@ -255,14 +255,24 @@ bytes against 2,184 — **76% smaller**.
 `auto` is the mode worth using. It thins the **most expensive** tools and
 stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 
-| runtime | full | `auto` | thinned | thin |
-|---|---:|---:|---:|---:|
-| `backtest` | 65 KB | 40 KB | 7 | 12 KB |
-| `modeling` | 47 KB | 30 KB | 2 | 9 KB |
-| `research` | 32 KB | 32 KB | 0 | 12 KB |
-| `portfolio` | 22 KB | 22 KB | 0 | 6 KB |
-| `feature_lab` | 14 KB | 14 KB | 0 | 6 KB |
-| `meta` | 15 KB | 15 KB | 0 | 9 KB |
+| runtime | full | `auto` | thin |
+|---|---:|---:|---:|
+| `backtest` | 74 KB | 43 KB | 15 KB |
+| `research` | 46 KB | 43 KB | 18 KB |
+| `modeling` | 50 KB | 30 KB | 9 KB |
+| `portfolio` | 34 KB | 34 KB | 10 KB |
+| `derivatives` | 21 KB | 21 KB | 7 KB |
+| `microstructure` | 18 KB | 18 KB | 7 KB |
+| `meta` | 18 KB | 18 KB | 9 KB |
+| `feature_lab` | 14 KB | 14 KB | 6 KB |
+
+**`auto` is the default now, not an option.** At full detail `backtest`
+cost 75,867 bytes against the 73,728 per-runtime ceiling, and the ceiling
+is not the thing to move — it had been argued up once already. `auto`
+thins only what exceeds `--detail-budget`, so the five runtimes already
+under it are returned byte-for-byte unchanged and only `backtest` and
+`modeling` differ. `--tool-detail full` still exists and still does exactly
+what it did; it simply stopped being implicit.
 
 Four runtimes already fit and pay nothing. That ordering is deliberate: a
 runtime's cost is concentrated in a few large schemas — `modeling`'s top
@@ -350,9 +360,12 @@ invented a name to go and widen a scope that could never contain it.
 |---|---|
 | `research` | `screener`, `analysis`, `quant_research` |
 | `backtest` | `backtest_execution`, `backtest_validation`, `custom_signal` |
-| `portfolio` | `portfolio_risk`, `microstructure` |
+| `portfolio` | `portfolio_risk` |
+| `microstructure` | `microstructure` |
+| `derivatives` | `derivatives` |
 | `meta` | `discovery`, `provenance` |
 | `modeling` | `modeling` |
+| `feature_lab` | `feature_lab` |
 
 Selecting `--categories microstructure` is therefore not the same as
 `--runtime portfolio`: it advertises three tools rather than ten, and those
@@ -399,7 +412,7 @@ own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 95 tools has a typed Pydantic return, so the server can
+Every one of the 157 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. The plan assumed that was free; measured, it
@@ -503,7 +516,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 95 tools declares `readOnlyHint: true` and
+Every one of the 157 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 

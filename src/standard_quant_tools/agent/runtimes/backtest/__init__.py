@@ -81,22 +81,43 @@ TOOL_DEFS = [
     ),
     (
         "run_sma_backtest",
-        "SMA crossover backtest.",
+        "Backtest a moving-average crossover: long when the fast average "
+        "crosses above the slow one, flat or short when it crosses back. "
+        "The simplest trend-following rule there is, which makes it the "
+        "right BASELINE -- a more elaborate strategy that cannot beat it "
+        "has not earned its complexity. One run at one parameter pair; "
+        "run_backtest_optimization searches, and run_walk_forward_backtest "
+        "checks the search survived out of sample.",
         BacktestInput,
     ),
     (
         "run_rsi_backtest",
-        "RSI mean-reversion backtest.",
+        "Backtest an RSI mean-reversion rule: buy oversold, sell overbought. "
+        "The counterpart to the crossover strategies -- it profits when "
+        "prices revert and loses in a trend, so comparing the two on the "
+        "same period says more about the period than either does alone. "
+        "run_stationarity_tests and run_hurst_analysis say in advance "
+        "which regime the sample is in.",
         BacktestInput,
     ),
     (
         "run_macd_backtest",
-        "MACD crossover backtest.",
+        "Backtest a MACD signal-line crossover. Trend-following like the SMA "
+        "version but on the difference of two exponential averages, so it "
+        "turns faster and trades more -- which makes it the one most "
+        "sensitive to transaction costs. Run estimate_break_even_cost on "
+        "the result: a MACD strategy that breaks even near its assumed "
+        "cost is a cost assumption rather than an edge.",
         BacktestInput,
     ),
     (
         "run_bollinger_backtest",
-        "Bollinger Band mean-reversion backtest.",
+        "Backtest a Bollinger Band reversion rule: buy the lower band, sell "
+        "the upper. Mean-reverting like the RSI version but with a "
+        "volatility-scaled threshold, so it trades less in calm markets "
+        "and more in volatile ones. That scaling is the reason to prefer "
+        "it to a fixed threshold, and the reason its trade count varies "
+        "so much across periods.",
         BacktestInput,
     ),
     (
