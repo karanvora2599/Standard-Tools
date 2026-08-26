@@ -1219,13 +1219,6 @@ What a delta-hedged short option actually earns when the vol you sold at is not 
 
 Interrogate the FEATURES of a built dataset, before and independently of fitting anything: what each one measures and predicts, which are restatements of one another, whether one has drifted or only worked in one regime, whether its IC is larger than what this panel's noise produces, and what each is worth to a fitted model. Exploratory and repeatable, where `modeling` is one ordered pipeline.
 
-#### `analyze_feature`
-
-Profile ONE feature of a built dataset: coverage, turnover, autocorrelation, cross-sectional IC and ICIR, quantile spread and monotonicity. The single-feature counterpart to analyze_features — reach for it when a specific feature is in question, since it costs one feature's work instead of the whole panel's and returns every number named rather than nested in a report dict.
-
-**Required:** `dataset_id`, `feature`  
-**Optional:** `n_quantiles`, `include_ic_decay`, `max_shift`
-
 #### `compare_feature_sets`
 
 Two feature sets measured on the same panel, with the cost of the difference attached: per-set IC, independent-signal count and condition number, what is unique to each side, and the per-feature IC table. Not a single score, because a larger set almost always has a higher maximum IC and almost always more collinearity, and one number hides half of that trade.
@@ -1260,6 +1253,13 @@ The feature's IC inside each of several CONTIGUOUS time blocks, never shuffled -
 
 **Required:** `dataset_id`, `feature`  
 **Optional:** `n_blocks`, `method`
+
+#### `profile_feature`
+
+Profile ONE feature of a built dataset: coverage, turnover, autocorrelation, cross-sectional IC and ICIR, quantile spread and monotonicity. The single-feature counterpart to analyze_features — reach for it when a specific feature is in question, since it costs one feature's work instead of the whole panel's and returns every number named rather than nested in a report dict.
+
+**Required:** `dataset_id`, `feature`  
+**Optional:** `n_quantiles`, `include_ic_decay`, `max_shift`
 
 #### `run_feature_ablation`
 

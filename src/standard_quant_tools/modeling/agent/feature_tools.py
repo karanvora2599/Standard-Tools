@@ -131,7 +131,7 @@ def _pick_representative(
     return sorted(members, key=key)[0]
 
 
-def analyze_feature(input_data: AnalyzeFeatureInput) -> FeatureProfile:
+def profile_feature(input_data: AnalyzeFeatureInput) -> FeatureProfile:
     """
     Profile ONE feature: how well populated it is, how fast it turns over,
     what it predicts, and the quantile shape behind that prediction.
@@ -144,7 +144,7 @@ def analyze_feature(input_data: AnalyzeFeatureInput) -> FeatureProfile:
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
     logger.debug(
-        "[analyze_feature] dataset_id=%s feature=%s",
+        "[profile_feature] dataset_id=%s feature=%s",
         input_data.dataset_id,
         input_data.feature,
     )
@@ -602,7 +602,7 @@ def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationRes
 
 FEATURE_TOOL_DEFS: List[tuple] = [
     (
-        "analyze_feature",
+        "profile_feature",
         "Profile ONE feature of a built dataset: coverage, turnover, "
         "autocorrelation, cross-sectional IC and ICIR, quantile spread and "
         "monotonicity. The single-feature counterpart to analyze_features — "
@@ -704,7 +704,7 @@ FEATURE_TOOL_DEFS: List[tuple] = [
 
 
 FEATURE_TOOL_DISPATCH = {
-    "analyze_feature": (analyze_feature, AnalyzeFeatureInput),
+    "profile_feature": (profile_feature, AnalyzeFeatureInput),
     "get_feature_redundancy": (get_feature_redundancy, FeatureRedundancyInput),
     "get_feature_ic_decay": (get_feature_ic_decay, FeatureICDecayInput),
     "select_features": (select_features, SelectFeaturesInput),
@@ -726,7 +726,7 @@ __all__ = [
     "FEATURE_TOOL_DISPATCH",
     "feature_dispatch",
     "get_feature_tools",
-    "analyze_feature",
+    "profile_feature",
     "compare_feature_sets",
     "get_feature_drift",
     "get_feature_ic_decay",

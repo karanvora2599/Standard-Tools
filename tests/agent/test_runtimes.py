@@ -268,3 +268,81 @@ class TestFacadeStaysAFacade:
             for n in rt.tool_names
         }
         assert advertised == owned
+
+
+class TestARenamedToolSaysWhatItIsCalledNow:
+    """
+    `analyze_feature` sat one character from `analyze_features` in a
+    DIFFERENT runtime -- 0.97 name similarity, the closest pair on the whole
+    surface. The two answer different questions: the plural scores every
+    feature in a built dataset as one nested report, the singular profiles
+    ONE feature with every number named.
+
+    Reaching for the wrong one did not produce a wrong answer. It produced a
+    REFUSAL, because the two live in different runtimes and dispatch
+    enforces that -- so the model was told "wrong runtime" for what was
+    really a typo it could not see. Renaming the singular to
+    `profile_feature` removes the collision rather than documenting it.
+
+    `RENAMED_FROM` is what makes the rename recoverable instead of a dead
+    end, and it needs a different message from `MOVED_FROM`: a tool that
+    MOVED is reachable by widening scope, a tool that was RENAMED is
+    reachable only under its new name.
+    """
+
+    def test_the_old_name_is_gone_from_every_runtime(self):
+        from standard_quant_tools.agent.runtimes import all_runtimes
+
+        everywhere = {
+            tool for rt in all_runtimes().values() for tool in rt.dispatch_table
+        }
+        assert "analyze_feature" not in everywhere
+        assert "profile_feature" in everywhere
+
+    def test_the_plural_is_untouched(self):
+        """The rename must not have caught `analyze_features`, which is a
+        different tool in a different runtime and was never the problem."""
+        from standard_quant_tools.agent.runtimes import resolve
+
+        assert "analyze_features" in resolve("modeling").dispatch_table
+
+    def test_calling_the_old_name_names_the_new_one(self):
+        from standard_quant_tools.agent.runtimes import resolve
+
+        with pytest.raises(ValueError) as excinfo:
+            resolve("feature_lab").dispatch("analyze_feature", {})
+        message = str(excinfo.value)
+        assert "profile_feature" in message, (
+            "a renamed tool must name its replacement; without it the caller "
+            "cannot tell a rename from a hallucination"
+        )
+        assert "RENAMED" in message
+
+    def test_the_two_names_are_no_longer_confusable(self):
+        """The measurement that motivated the rename, kept as the guard.
+
+        Anything this similar across a runtime boundary is a refusal waiting
+        to happen, so the threshold is checked for EVERY pair rather than
+        only the one that prompted it."""
+        import difflib
+
+        from standard_quant_tools.agent.runtimes import all_runtimes
+
+        owner = {
+            tool: name
+            for name, rt in all_runtimes().items()
+            for tool in rt.dispatch_table
+        }
+        names = sorted(owner)
+        offenders = [
+            f"{a} | {b}  ({owner[a]}/{owner[b]})"
+            for i, a in enumerate(names)
+            for b in names[i + 1 :]
+            if owner[a] != owner[b]
+            and difflib.SequenceMatcher(None, a, b).ratio() >= 0.95
+        ]
+        assert not offenders, (
+            "near-identical tool names in DIFFERENT runtimes: dispatch "
+            f"refuses the wrong one, so this is a dead end rather than a "
+            f"wrong answer -- {offenders}"
+        )

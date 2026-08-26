@@ -40,7 +40,7 @@ from standard_quant_tools.modeling.agent.feature_models import (
 )
 from standard_quant_tools.modeling.agent.feature_tools import (
     _pick_representative,
-    analyze_feature,
+    profile_feature,
     compare_feature_sets,
     feature_dispatch,
     get_feature_drift,
@@ -87,7 +87,7 @@ def features(dataset):
 
 class TestAnalyzeFeature:
     def test_it_profiles_one_feature(self, dataset, features):
-        result = analyze_feature(
+        result = profile_feature(
             AnalyzeFeatureInput(dataset_id=dataset, feature=features[0])
         )
         assert result.feature == features[0]
@@ -116,7 +116,7 @@ class TestAnalyzeFeature:
             return typed_value == pytest.approx(raw_value)
 
         for feature in features:
-            typed = analyze_feature(
+            typed = profile_feature(
                 AnalyzeFeatureInput(dataset_id=dataset, feature=feature)
             )
             raw = report["features"][feature]
@@ -130,7 +130,7 @@ class TestAnalyzeFeature:
         not a KeyError from three frames down."""
         typo = features[0][:-1]
         with pytest.raises(ValidationError) as exc:
-            analyze_feature(AnalyzeFeatureInput(dataset_id=dataset, feature=typo))
+            profile_feature(AnalyzeFeatureInput(dataset_id=dataset, feature=typo))
         message = str(exc.value)
         assert typo in message
         assert features[0] in message, "the near-match was not offered"
@@ -237,7 +237,7 @@ class TestFeatureICDecay:
 class TestTheyAreRealTools:
     @pytest.mark.parametrize(
         "name",
-        ["analyze_feature", "get_feature_redundancy", "get_feature_ic_decay"],
+        ["profile_feature", "get_feature_redundancy", "get_feature_ic_decay"],
     )
     def test_dispatchable_by_name(self, name, dataset, features):
         args = {"dataset_id": dataset}
@@ -253,7 +253,7 @@ class TestTheyAreRealTools:
         from standard_quant_tools.agent.runtimes import owner_of
 
         for name in (
-            "analyze_feature",
+            "profile_feature",
             "get_feature_redundancy",
             "get_feature_ic_decay",
         ):
@@ -265,9 +265,9 @@ class TestTheyAreRealTools:
         name."""
         from standard_quant_tools.agent.runtimes import MOVED_FROM, resolve
 
-        assert MOVED_FROM["analyze_feature"] == "modeling"
+        assert MOVED_FROM["profile_feature"] == "modeling"
         try:
-            resolve("modeling").dispatch("analyze_feature", {})
+            resolve("modeling").dispatch("profile_feature", {})
         except Exception as exc:
             assert "used to be in 'modeling'" in str(exc)
         else:  # pragma: no cover - the dispatch must refuse
@@ -279,7 +279,7 @@ class TestTheyAreRealTools:
         from standard_quant_tools.agent.runtimes import resolve
 
         try:
-            resolve("research").dispatch("analyze_feature", {})
+            resolve("research").dispatch("profile_feature", {})
         except Exception as exc:
             assert "used to be" not in str(exc)
 
@@ -290,7 +290,7 @@ class TestTheyAreRealTools:
 
         advertised = {d["function"]["name"] for d in get_feature_tools()}
         assert {
-            "analyze_feature",
+            "profile_feature",
             "get_feature_redundancy",
             "get_feature_ic_decay",
         } <= advertised
@@ -556,7 +556,7 @@ class TestTheSplitFollowedTheRule:
     asserted in prose."""
 
     FEATURE_TOOLS = [
-        "analyze_feature",
+        "profile_feature",
         "compare_feature_sets",
         "get_feature_drift",
         "get_feature_ic_decay",

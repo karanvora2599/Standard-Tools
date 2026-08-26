@@ -80,7 +80,7 @@ typed fields for **one** question:
 
 | Tool | Input → Output |
 |---|---|
-| `analyze_feature` | `dataset_id` + `feature` → coverage, turnover, autocorrelation, IC/ICIR, quantile spread and monotonicity for ONE feature |
+| `profile_feature` | `dataset_id` + `feature` → coverage, turnover, autocorrelation, IC/ICIR, quantile spread and monotonicity for ONE feature |
 | `get_feature_redundancy` | `dataset_id` → clusters with a representative each, the drop list, VIF and condition number |
 | `get_feature_ic_decay` | `dataset_id` + `feature` → the lead-lag IC curve as ordered points, with the peak named |
 | `get_feature_drift` | `dataset_id` + `feature` → PSI, two-sample KS and the IC computed separately either side of a date |

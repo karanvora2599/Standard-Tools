@@ -213,6 +213,27 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
 #: Retired one minor version after the move. A moved-from record nobody
 #: cleans up becomes a changelog nobody reads, embedded in an error message
 #: everybody does.
+#: old name -> what it is called now.
+#:
+#: SEPARATE FROM `MOVED_FROM`, which records a tool changing RUNTIME while
+#: keeping its name. This records the opposite, and the two need different
+#: messages: "it moved, widen your scope" is recoverable by constructing
+#: another runtime, while "it is called something else now" is recoverable
+#: only by using the new name.
+#:
+#: `analyze_feature` is the entry this was built for. It sat one character
+#: from `analyze_features` in a DIFFERENT runtime -- 0.97 name similarity,
+#: the closest pair on the whole surface -- and the two answer different
+#: questions: the plural scores every feature in a built dataset as one
+#: nested report, the singular profiles ONE feature with every number
+#: named. A model reaching for the wrong one did not get a wrong answer, it
+#: got a refusal from `Runtime.dispatch`, because the two live in different
+#: runtimes. Renaming the singular to `profile_feature` removes the
+#: collision instead of documenting it.
+RENAMED_FROM: Dict[str, str] = {
+    "analyze_feature": "profile_feature",
+}
+
 MOVED_FROM: Dict[str, str] = {
     # Left `research` when `derivatives` reached twelve tools and became its
     # own execution boundary. Same arguments, same behaviour, new scope.
@@ -226,7 +247,7 @@ MOVED_FROM: Dict[str, str] = {
     **{
         name: "modeling"
         for name in (
-            "analyze_feature",
+            "profile_feature",
             "compare_feature_sets",
             "get_feature_drift",
             "get_feature_ic_decay",
@@ -332,6 +353,15 @@ class Runtime:
         name, so a model receiving one guesses again. Naming the owning
         runtime turns a dead end into a recoverable scoping error.
         """
+        renamed = RENAMED_FROM.get(tool_name)
+        if renamed is not None:
+            return (
+                f"{tool_name!r} was RENAMED to {renamed!r}. Same arguments, "
+                "same behaviour, new name — it was one character from "
+                "another runtime's tool and the pair was unusable. Call "
+                f"{renamed!r} instead."
+            )
+
         owner = owner_of(tool_name)
         if owner is None:
             return (
@@ -512,6 +542,7 @@ __all__ = [
     "FEATURE_LAB_RUNTIME",
     "MODELING_RUNTIME",
     "MOVED_FROM",
+    "RENAMED_FROM",
     "CATEGORY_RUNTIME",
     "RUNTIME_CATEGORIES",
     "RUNTIME_DESCRIPTIONS",

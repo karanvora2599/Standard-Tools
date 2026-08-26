@@ -136,10 +136,10 @@ both would clear 8, and the existing floor test would have failed the moment
 either did not.
 
 **A split is a breaking change**, so the move is recorded. An agent scoped
-to `modeling` that calls `analyze_feature` gets:
+to `modeling` that calls `profile_feature` gets:
 
 ```
-'analyze_feature' exists but belongs to the 'feature_lab' runtime, not to
+'profile_feature' exists but belongs to the 'feature_lab' runtime, not to
 'modeling'. It used to be in 'modeling' and moved; the BOUNDARY was renamed,
 not the tool -- its arguments and behaviour are unchanged. ...
 ```

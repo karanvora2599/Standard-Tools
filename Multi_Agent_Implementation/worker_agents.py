@@ -92,7 +92,7 @@ def _runtime_for(category: str) -> str:
 # handoff in the pipeline that carries a single value (the dataset_id)
 # rather than a whole panel.
 _FEATURE_LAB_TOOLS = [
-    "analyze_feature",
+    "profile_feature",
     "compare_feature_sets",
     "get_feature_drift",
     "get_feature_ic_decay",
@@ -659,7 +659,7 @@ built, and you own every question about the FEATURES in it. You cannot build
 a dataset and you cannot fit a model — those tools are not loaded for you —
 so never describe a model's performance as if you had measured it.
 
-analyze_feature: one feature's coverage, turnover, autocorrelation, IC and
+profile_feature: one feature's coverage, turnover, autocorrelation, IC and
 ICIR, quantile spread and monotonicity.
 get_feature_redundancy: which features are the same signal, with a
 representative named. Say which one you would KEEP and why. Do not report
