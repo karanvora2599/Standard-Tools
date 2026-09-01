@@ -68,6 +68,28 @@ def _both(data, weights, **kwargs):
     return native, looped
 
 
+def _helper_kwargs(data, weights, **kwargs):
+    """The arguments `run_portfolio_simulation` would hand the native helper.
+
+    Built by running the real engine once and capturing them, so this cannot
+    drift from the production call site the way a hand-written copy would.
+    """
+    captured = {}
+    real = pe._native_portfolio_sim
+
+    def capture(**kw):
+        captured.update(kw)
+        return real(**kw)
+
+    original = pe._native_portfolio_sim
+    pe._native_portfolio_sim = capture
+    try:
+        pe.run_portfolio_simulation(data, weights, **kwargs)
+    finally:
+        pe._native_portfolio_sim = original
+    return captured
+
+
 def _assert_agrees(native, looped):
     # Rounding error is proportional to the magnitude of the terms that were
     # summed, not to the magnitude of the answer -- so the yardstick is the
@@ -166,9 +188,45 @@ class TestNativeMatchesPythonLoop:
 
 
 @requires_cpp
-class TestNativePathIsSkippedWhenUnsupported:
-    """An unsupported option must fall through, not silently change behaviour."""
+class TestTheThreeFormerlyUnsupportedConfigurations:
+    """per_share commission, the impact model and the ADV cap all run NATIVELY
+    now, and must still agree with the loop.
 
+    These three used to fall through to Python by design, on the reasoning
+    that each is a per-element decision that would have to be restated in
+    C++. Measured, that reasoning cost more than it saved: the kernel bought
+    1.3x on the one configuration it covered while these three ran 6-21x
+    slower with no acceleration at all. The kernel's rebalance loop was
+    already per-ticker with a per-ticker error path, so supporting them was
+    arguments rather than a different shape.
+
+    The agreement assertion below is unchanged from when it guarded the
+    fallback -- it was always the right test, and now it is testing the
+    thing that actually runs.
+    """
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"commission_model": "per_share", "per_share_rate": 0.005},
+            {"use_impact_model": True},
+            {"max_adv_participation": 0.1},
+            # All three together, which is the configuration that measured
+            # slowest of all before the kernel learned them.
+            {
+                "commission_model": "per_share",
+                "per_share_rate": 0.005,
+                "min_commission": 1.0,
+                "use_impact_model": True,
+                "max_adv_participation": 0.5,
+            },
+        ],
+    )
+    def test_native_and_looped_agree(self, kwargs):
+        data, w = _universe(seed=7)
+        _assert_agrees(*_both(data, w, **kwargs))
+
+    @requires_cpp
     @pytest.mark.parametrize(
         "kwargs",
         [
@@ -177,42 +235,72 @@ class TestNativePathIsSkippedWhenUnsupported:
             {"max_adv_participation": 0.1},
         ],
     )
-    def test_falls_back_and_still_matches(self, kwargs):
-        data, w = _universe(seed=7)
-        _assert_agrees(*_both(data, w, **kwargs))
+    def test_the_native_path_is_actually_taken(self, kwargs, monkeypatch):
+        """Otherwise the agreement above would pass vacuously.
 
-    def test_native_helper_declines_unsupported_configurations(self):
-        """The helper returns None rather than raising -- an unsupported
-        option is not an error, it just means the loop runs."""
-        data, w = _universe(n_tickers=3, n_bars=60)
-        close = np.ones((60, 3))
+        A parity test that compares the Python loop against itself is the
+        failure mode this guards: it stays green forever and proves nothing
+        about the kernel.
+        """
+        called = {"n": 0}
+        real = pe._native_portfolio_sim
+
+        def counting(**kw):
+            called["n"] += 1
+            return real(**kw)
+
+        monkeypatch.setattr(pe, "_native_portfolio_sim", counting)
+        data, w = _universe(seed=7)
+        pe.run_portfolio_simulation(data, w, **kwargs)
+        assert called["n"] == 1, "the helper was never consulted"
         assert (
-            pe._native_portfolio_sim(
-                close_mat=close,
-                open_mat=close,
-                hl2_mat=close,
-                weights_mat=np.zeros((1, 3)),
-                rebalance_index=w.index[:1],
-                master_index=pd.RangeIndex(60),
-                tickers=["A", "B", "C"],
-                fill_price="close",
-                commission_model="per_share",
-                use_impact_model=False,
-                max_adv_participation=None,
-                initial_capital=1000.0,
-                commission_pct=0.0,
-                # Required, not defaulted: there is exactly one production
-                # call site and a default would let a future one silently
-                # get symmetric commission on a spec that asked for two
-                # rates.
-                sell_commission_rate=0.0,
-                slippage_pct=0.0,
-                max_gross_leverage=1.0,
-                max_position_pct=1.0,
-                borrow_fee_bps=0.0,
-                margin_interest_rate=0.0,
-            )
-            is None
+            real(**_helper_kwargs(data, w, **kwargs)) is not None
+        ), "the helper declined a configuration the kernel now supports"
+
+    def test_the_helper_still_declines_what_it_cannot_serve(self):
+        """Returning None rather than raising is the contract: an
+        unsupported option is not an error, it just means the loop runs.
+
+        The impact model needs a volatility panel and the ADV cap needs a
+        volume panel. Without them the helper must decline rather than
+        dereference a missing array -- a caller who asked for a
+        liquidity-aware run cannot have it satisfied by absent data.
+        """
+        close = np.ones((60, 3))
+        base = dict(
+            close_mat=close,
+            open_mat=close,
+            hl2_mat=close,
+            weights_mat=np.zeros((1, 3)),
+            rebalance_index=pd.RangeIndex(1),
+            master_index=pd.RangeIndex(60),
+            tickers=["A", "B", "C"],
+            fill_price="close",
+            commission_model="pct",
+            use_impact_model=False,
+            max_adv_participation=None,
+            initial_capital=1000.0,
+            commission_pct=0.0,
+            # Required, not defaulted: there is exactly one production
+            # call site and a default would let a future one silently
+            # get symmetric commission on a spec that asked for two
+            # rates.
+            sell_commission_rate=0.0,
+            slippage_pct=0.0,
+            max_gross_leverage=1.0,
+            max_position_pct=1.0,
+            borrow_fee_bps=0.0,
+            margin_interest_rate=0.0,
+        )
+        assert pe._native_portfolio_sim(**{**base, "fill_price": "nonsense"}) is None
+        assert (
+            pe._native_portfolio_sim(**{**base, "commission_model": "nonsense"}) is None
+        )
+        # Asked for the impact model, given no panels.
+        assert pe._native_portfolio_sim(**{**base, "use_impact_model": True}) is None
+        # Asked for an ADV cap, given no volume panel.
+        assert (
+            pe._native_portfolio_sim(**{**base, "max_adv_participation": 0.1}) is None
         )
 
 

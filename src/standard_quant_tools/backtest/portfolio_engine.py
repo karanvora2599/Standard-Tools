@@ -55,6 +55,12 @@ _PORTFOLIO_INSOLVENT_AT_REBALANCE = 2
 _PORTFOLIO_LEVERAGE_BREACH = 3
 _PORTFOLIO_POSITION_BREACH = 4
 _PORTFOLIO_INSOLVENT_AT_BAR = 5
+_PORTFOLIO_BAD_DOLLAR_VOLUME = 6
+_PORTFOLIO_ADV_BREACH = 7
+_PORTFOLIO_BAD_VOLATILITY = 8
+
+#: commission_model -> the kernel's enum.
+_COMMISSION_CODES = {"pct": 0, "per_share": 1}
 
 _FILL_CODES = {"close": 0, "next_open": 1, "hl2_exploratory": 2}
 
@@ -80,6 +86,11 @@ def _native_portfolio_sim(
     max_position_pct: float,
     borrow_fee_bps: float,
     margin_interest_rate: float,
+    per_share_rate: float = 0.0,
+    min_commission: float = 0.0,
+    impact_coefficient: float = 1.0,
+    dollar_volume_mat: Optional[np.ndarray] = None,
+    volatility_mat: Optional[np.ndarray] = None,
 ) -> Optional[
     Tuple[
         List[float],
@@ -97,16 +108,22 @@ def _native_portfolio_sim(
     """
     if not (HAS_CPP and _cpp_core is not None):
         return None
-    # Exactly the condition _apply_rebalance uses to take its own vectorized
-    # branch. Anything else is a genuinely per-element decision the kernel
-    # does not implement.
-    if (
-        commission_model != "pct"
-        or use_impact_model
-        or max_adv_participation is not None
-    ):
-        return None
     if fill_price not in _FILL_CODES:
+        return None
+    if commission_model not in _COMMISSION_CODES:
+        return None
+    # per_share commission, the impact model and the ADV cap USED to be
+    # refused here, on the reasoning that each is a per-element decision
+    # that would have to be restated in C++. They are per-element in the
+    # kernel too -- its rebalance loop was already per-ticker with a
+    # per-ticker error path -- so what they needed was arguments rather
+    # than a different shape. Measured before: the kernel bought 1.3x on
+    # the one configuration it covered while every configuration it
+    # refused ran 6-21x slower with no acceleration at all.
+    needs_volume = use_impact_model or (max_adv_participation is not None)
+    if needs_volume and dollar_volume_mat is None:
+        return None
+    if use_impact_model and volatility_mat is None:
         return None
 
     n_bars = len(master_index)
@@ -154,12 +171,35 @@ def _native_portfolio_sim(
         borrow_fee_bps,
         margin_interest_rate,
         _FILL_CODES[fill_price],
+        (
+            np.ascontiguousarray(dollar_volume_mat, dtype=np.float64)
+            if needs_volume
+            else None
+        ),
+        (
+            np.ascontiguousarray(volatility_mat, dtype=np.float64)
+            if use_impact_model
+            else None
+        ),
+        _COMMISSION_CODES[commission_model],
+        per_share_rate,
+        min_commission,
+        use_impact_model,
+        impact_coefficient,
+        # The kernel reads <= 0 as "no cap"; None is how Python spells it.
+        0.0 if max_adv_participation is None else float(max_adv_participation),
     )
 
     status = int(res["status"])
     if status != _PORTFOLIO_OK:
         _raise_portfolio_error(
-            status, res, master_index, tickers, max_gross_leverage, max_position_pct
+            status,
+            res,
+            master_index,
+            tickers,
+            max_gross_leverage,
+            max_position_pct,
+            max_adv_participation,
         )
 
     n_exec = int(res["n_executed"])
@@ -206,6 +246,7 @@ def _raise_portfolio_error(
     tickers: List[str],
     max_gross_leverage: float,
     max_position_pct: float,
+    max_adv_participation: Optional[float] = None,
 ) -> None:
     """Re-raise a kernel status as the message the Python loop would have raised."""
     bar = int(res["bar"])
@@ -238,6 +279,30 @@ def _raise_portfolio_error(
             f"rebalance {date}: realized position size "
             f"{value:.4f} exceeds max_position_pct={max_position_pct}"
         )
+    if status == _PORTFOLIO_BAD_DOLLAR_VOLUME:
+        ticker = tickers[int(res["ticker"])]
+        raise ValidationError(
+            f"rebalance {date} ticker {ticker!r}: average dollar volume is "
+            f"{value!r} (missing or invalid) — max_adv_participation/use_impact_model "
+            "require a valid 'Volume' baseline for every ticker actually traded."
+        )
+
+    if status == _PORTFOLIO_ADV_BREACH:
+        ticker = tickers[int(res["ticker"])]
+        raise ValidationError(
+            f"rebalance {date} ticker {ticker!r}: ADV participation "
+            f"{value:.4f} exceeds max_adv_participation={max_adv_participation}"
+        )
+
+    if status == _PORTFOLIO_BAD_VOLATILITY:
+        ticker = tickers[int(res["ticker"])]
+        raise ValidationError(
+            f"rebalance {date} ticker {ticker!r}: impact-model volatility is "
+            f"{value!r}. use_impact_model needs a finite non-negative "
+            "volatility for every ticker actually traded; a rebalance inside "
+            "the impact_lookback warm-up window has none yet."
+        )
+
     if status == _PORTFOLIO_INSOLVENT_AT_BAR:
         raise ValidationError(
             f"{date}: account equity is {value!r} (zero or negative) — "
@@ -1090,6 +1155,11 @@ def run_portfolio_simulation(
         max_position_pct=max_position_pct,
         borrow_fee_bps=borrow_fee_bps,
         margin_interest_rate=margin_interest_rate,
+        per_share_rate=per_share_rate,
+        min_commission=min_commission,
+        impact_coefficient=impact_coefficient,
+        dollar_volume_mat=dollar_volume_mat,
+        volatility_mat=volatility_mat,
     )
     if _native is not None:
         (

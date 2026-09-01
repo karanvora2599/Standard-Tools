@@ -254,6 +254,16 @@ enum PortfolioSimStatus : int {
     kPortfolioLeverageBreach,        // realized gross leverage over the limit
     kPortfolioPositionBreach,        // realized position size over the limit
     kPortfolioInsolventAtBar,        // equity <= 0 from price drift alone
+    kPortfolioBadDollarVolume,       // no usable ADV baseline for a traded name
+    kPortfolioAdvBreach,             // trade exceeds max_adv_participation
+    kPortfolioBadVolatility,         // non-finite/negative impact volatility
+};
+
+// Which commission model priced the trade. Mirrors the Python
+// `commission_model` parameter.
+enum PortfolioCommission : int {
+    kCommissionPct      = 0,  // a fraction of notional, side-dependent
+    kCommissionPerShare = 1,  // per share, with a per-ORDER minimum floor
 };
 
 struct PortfolioSimError {
@@ -285,6 +295,22 @@ struct PortfolioCosts {
     double borrow_fee_bps      = 0.0;
     double margin_interest_rate = 0.0;
     int    fill                = kFillClose;
+
+    // ── the three configurations this kernel used to refuse ─────────────
+    //
+    // Each one makes the rebalance a per-element decision, which is why the
+    // Python engine kept a scalar loop for them and why `_native_portfolio_sim`
+    // returned None rather than calling here. They are per-element in C++
+    // too -- the loop below was ALREADY per-ticker with a per-ticker error
+    // path, so what they needed was arguments, not a different shape.
+    int    commission_model      = kCommissionPct;
+    double per_share_rate        = 0.0;
+    double min_commission        = 0.0;
+    bool   use_impact_model      = false;
+    double impact_coefficient    = 1.0;
+    // <= 0 means no cap. A cap of exactly zero would forbid every trade,
+    // which no caller means, so the sentinel costs nothing.
+    double max_adv_participation = 0.0;
 };
 
 /**
@@ -329,7 +355,17 @@ std::size_t run_portfolio_simulation(
     // concentration limit is written against, and the per-bar series would
     // cost every caller a payload it reduces immediately. May be null.
     double* out_peak_position,
-    PortfolioSimError* err);
+    PortfolioSimError* err,
+    // (n_bars x n_tickers) row-major, or null when neither the impact model
+    // nor the ADV cap is active. Read at the TRIGGER bar rather than the
+    // execution bar: under kFillNextOpen those differ, and the execution
+    // bar's own full-day volume is not knowable when the decision is made.
+    //
+    // Appended and defaulted rather than inserted, so every existing
+    // positional call site -- the benchmarks and the C++ tests among them --
+    // keeps compiling unchanged.
+    const double* dollar_volume = nullptr,
+    const double* volatility    = nullptr);
 
 
 std::vector<BacktestResult> batch_run_strategy(

@@ -608,7 +608,9 @@ std::size_t run_portfolio_simulation(
     double* out_net,
     double* out_rebal,
     double* out_peak_position,
-    PortfolioSimError* err)
+    PortfolioSimError* err,
+    const double* dollar_volume,
+    const double* volatility)
 {
     if (err) *err = PortfolioSimError{};
     if (out_peak_position) *out_peak_position = 0.0;
@@ -618,6 +620,18 @@ std::size_t run_portfolio_simulation(
     // crossed whichever way the trade goes, so slippage is in both.
     const double buy_cost_rate  = costs.commission_pct + costs.slippage_pct;
     const double sell_cost_rate = costs.sell_commission_pct + costs.slippage_pct;
+
+    // Whether this configuration is one the Python engine would have run
+    // through its SCALAR loop. It matters beyond which costs apply: the
+    // scalar path subtracts cash per ticker while the vectorized path
+    // accumulates and subtracts twice, and floating-point addition is not
+    // associative, so matching the wrong one puts the two engines a few
+    // ULPs apart on every bar. This kernel therefore mirrors whichever
+    // branch the Python would have taken.
+    const bool per_share  = costs.commission_model == kCommissionPerShare;
+    const bool adv_capped = costs.max_adv_participation > 0.0;
+    const bool needs_volume = adv_capped || costs.use_impact_model;
+    const bool scalar_mode  = per_share || needs_volume;
     double cash = costs.initial_capital;
     std::vector<double> shares(n_tickers, 0.0);
     std::vector<double> position_values(n_tickers, 0.0);
@@ -636,7 +650,8 @@ std::size_t run_portfolio_simulation(
 
     // Applies one rebalance row at `bar`, executing at exec_prices[bar].
     // Returns false (and fills `err`) if the account cannot continue.
-    auto apply_rebalance = [&](std::size_t row, std::size_t bar) -> bool {
+    auto apply_rebalance = [&](std::size_t row, std::size_t bar,
+                               std::size_t trigger_bar) -> bool {
         const double* px = exec_prices + bar * n_tickers;
         const double* w  = weights + row * n_tickers;
 
@@ -663,17 +678,85 @@ std::size_t run_portfolio_simulation(
             if (std::abs(delta) > 1e-9) {
                 const double notional = std::abs(delta) * price;
                 turnover_notional += notional;
-                cash_delta        += delta * price;
-                // delta < 0 is a sale: reducing a long and extending a short
-                // both pay the sell rate. Same rule as the Python, which
-                // selects on the same sign.
-                cost_total        += notional
-                                   * (delta < 0.0 ? sell_cost_rate : buy_cost_rate);
+
+                if (!scalar_mode) {
+                    cash_delta += delta * price;
+                    // delta < 0 is a sale: reducing a long and extending a
+                    // short both pay the sell rate. Same rule as the Python,
+                    // which selects on the same sign.
+                    cost_total += notional
+                                * (delta < 0.0 ? sell_cost_rate : buy_cost_rate);
+                    shares[i] = target;
+                    continue;
+                }
+
+                // ── the scalar path, in the Python's own order ───────────
+                // Commission and spread are separate products rather than
+                // one combined rate, because the Python's scalar branch adds
+                // `commission + spread + impact` and n*c + n*s is not n*(c+s)
+                // in floating point.
+                const std::size_t src = trigger_bar * n_tickers + i;
+
+                if (needs_volume) {
+                    const double adv = dollar_volume[src];
+                    if (!std::isfinite(adv) || adv <= 0.0) {
+                        fail(kPortfolioBadDollarVolume, bar,
+                             static_cast<int>(i), adv);
+                        return false;
+                    }
+                    // Checked before the cost is priced, and before cash
+                    // moves, because the Python raises here and a kernel
+                    // that charged the trade first would leave the account
+                    // in a state the Python never reaches.
+                    if (adv_capped) {
+                        const double participation = notional / adv;
+                        if (participation >
+                            costs.max_adv_participation + 1e-9) {
+                            fail(kPortfolioAdvBreach, bar,
+                                 static_cast<int>(i), participation);
+                            return false;
+                        }
+                    }
+                }
+
+                double cost;
+                if (per_share) {
+                    // A per-ORDER floor. The zero-size trade was already
+                    // skipped above, so the floor cannot be charged to a
+                    // ticker that is not trading.
+                    cost = std::max(std::abs(delta) * costs.per_share_rate,
+                                    costs.min_commission);
+                } else {
+                    cost = notional
+                         * (delta < 0.0 ? costs.sell_commission_pct
+                                        : costs.commission_pct);
+                }
+                cost += notional * costs.slippage_pct;
+
+                if (costs.use_impact_model) {
+                    const double vol = volatility[src];
+                    if (!std::isfinite(vol) || vol < 0.0) {
+                        fail(kPortfolioBadVolatility, bar,
+                             static_cast<int>(i), vol);
+                        return false;
+                    }
+                    const double adv = dollar_volume[src];
+                    // sqrt_impact_bps multiplies by 1e4 and impact_cost
+                    // divides it straight back out; neither survives here.
+                    cost += notional * costs.impact_coefficient * vol
+                          * std::sqrt(notional / adv);
+                }
+
+                // Per ticker, in the Python scalar loop's order.
+                cash -= delta * price;
+                cash -= cost;
             }
             shares[i] = target;
         }
-        cash -= cash_delta;
-        cash -= cost_total;
+        if (!scalar_mode) {
+            cash -= cash_delta;
+            cash -= cost_total;
+        }
 
         // The three post-trade invariants all interrogate the signed market
         // value of each position, so it is formed once.
@@ -752,7 +835,8 @@ std::size_t run_portfolio_simulation(
 
         // ── Deferred next_open execution from the previous bar ────────────
         if (costs.fill == kFillNextOpen && pending) {
-            if (!apply_rebalance(pending_row, bar)) return n_executed;
+            // Filled at `bar`, decided at the bar before it.
+            if (!apply_rebalance(pending_row, bar, bar - 1)) return n_executed;
             pending = false;
         }
 
@@ -769,7 +853,7 @@ std::size_t run_portfolio_simulation(
                 pending = true;
                 pending_row = next_rebal;
             } else {
-                if (!apply_rebalance(next_rebal, bar)) return n_executed;
+                if (!apply_rebalance(next_rebal, bar, bar)) return n_executed;
             }
             ++next_rebal;
         }

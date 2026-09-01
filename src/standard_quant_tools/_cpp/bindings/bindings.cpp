@@ -806,7 +806,11 @@ PYBIND11_MODULE(_sqt_core, m) {
            double sell_commission_pct, double slippage_pct,
            double max_gross_leverage, double max_position_pct,
            double borrow_fee_bps, double margin_interest_rate,
-           int fill) -> py::dict
+           int fill,
+           py::object dollar_volume, py::object volatility,
+           int commission_model, double per_share_rate, double min_commission,
+           bool use_impact_model, double impact_coefficient,
+           double max_adv_participation) -> py::dict
         {
             auto c_buf = close.request();
             auto x_buf = exec_prices.request();
@@ -847,6 +851,49 @@ PYBIND11_MODULE(_sqt_core, m) {
             costs.borrow_fee_bps       = borrow_fee_bps;
             costs.margin_interest_rate = margin_interest_rate;
             costs.fill                 = fill;
+            costs.commission_model      = commission_model;
+            costs.per_share_rate        = per_share_rate;
+            costs.min_commission        = min_commission;
+            costs.use_impact_model      = use_impact_model;
+            costs.impact_coefficient    = impact_coefficient;
+            costs.max_adv_participation = max_adv_participation;
+
+            // Held at this scope, not inside the branch: the pointers below
+            // are borrowed from these arrays and must not outlive them.
+            using Mat = py::array_t<double,
+                                    py::array::c_style | py::array::forcecast>;
+            Mat dv_arr, vol_arr;
+            const double* dv_ptr  = nullptr;
+            const double* vol_ptr = nullptr;
+
+            auto take_panel = [&](py::object src, Mat& hold, const char* name)
+                -> const double* {
+                if (src.is_none()) return nullptr;
+                hold = src.cast<Mat>();
+                auto b = hold.request();
+                if (b.ndim != 2 ||
+                    static_cast<std::size_t>(b.shape[0]) != n_bars ||
+                    static_cast<std::size_t>(b.shape[1]) != n_tickers)
+                    throw std::invalid_argument(
+                        std::string(name) +
+                        " must have the same shape as close");
+                return static_cast<const double*>(b.ptr);
+            };
+            dv_ptr  = take_panel(dollar_volume, dv_arr, "dollar_volume");
+            vol_ptr = take_panel(volatility, vol_arr, "volatility");
+
+            // Refused here rather than dereferenced null in the kernel. A
+            // caller who asked for an ADV cap or the impact model and gave
+            // no volume panel wants a liquidity-aware run the data cannot
+            // support, and silently dropping the constraint would satisfy
+            // it by default.
+            if ((max_adv_participation > 0.0 || use_impact_model) && !dv_ptr)
+                throw std::invalid_argument(
+                    "max_adv_participation and use_impact_model both need a "
+                    "dollar_volume panel");
+            if (use_impact_model && !vol_ptr)
+                throw std::invalid_argument(
+                    "use_impact_model needs a volatility panel");
 
             const auto nb = static_cast<py::ssize_t>(n_bars);
             py::array_t<double> eq(nb), csh(nb), grs(nb), net(nb);
@@ -873,7 +920,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                     c_ptr, x_ptr, w_ptr, r_ptr, g_ptr,
                     n_bars, n_tickers, n_rebal, costs,
                     eq_ptr, csh_ptr, grs_ptr, net_ptr, reb_ptr,
-                    &peak_position, &err);
+                    &peak_position, &err, dv_ptr, vol_ptr);
             }
 
             py::dict d;
@@ -904,6 +951,17 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("borrow_fee_bps")       = 0.0,
         py::arg("margin_interest_rate") = 0.0,
         py::arg("fill")                 = 0,
+        // Defaulted to None/off so every existing call -- including the
+        // Python engine's own, before it learned to pass them -- keeps its
+        // exact previous behaviour.
+        py::arg("dollar_volume")        = py::none(),
+        py::arg("volatility")           = py::none(),
+        py::arg("commission_model")     = 0,
+        py::arg("per_share_rate")       = 0.0,
+        py::arg("min_commission")       = 0.0,
+        py::arg("use_impact_model")     = false,
+        py::arg("impact_coefficient")   = 1.0,
+        py::arg("max_adv_participation") = 0.0,
         "Shared-cash multi-asset portfolio simulation.\\n\\n"
         "Implements only the configuration portfolio_engine.py already treats\\n"
         "as its vectorized fast path: percentage commission, no impact model,\\n"
