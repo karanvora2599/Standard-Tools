@@ -57,18 +57,22 @@ from standard_quant_tools.mcp.catalog import (
 #: reported in every truncated result so nothing is ever silently dropped.
 DEFAULT_INLINE_LIMIT = 4096
 
-#: The context a client can be expected to hold for a whole session, in
-#: bytes. Not a protocol limit -- a judgement about what is reasonable to
-#: spend before an agent has done anything.
+#: The context a client may be told it is spending, in bytes, or None for
+#: no ceiling at all. **Uncapped by default.**
 #:
-#: This used to be enforced only by a test, which was adequate while the
-#: whole surface fit under it. It no longer does: at 85 tools the eager
-#: surface is ~183 KB. That was the predicted outcome rather than a
-#: regression -- `--tool-detail auto` exists precisely so the surface can
-#: keep growing -- but a user who types `--categories all` and gets a
-#: silently oversized listing deserves to be told at startup rather than to
-#: discover it as degraded model behaviour three turns in.
-CONTEXT_CEILING_BYTES = 180_000
+#: This was 180,000 and it was a real constraint: a test failed when the
+#: whole surface crossed it, so the tool count was bounded by a number
+#: chosen when the library had 54 tools. That is the wrong control. What
+#: actually governs cost is `--tool-detail auto`, which thins the most
+#: expensive schemas until the listing fits `detail_budget` and leaves
+#: every tool advertised -- a mechanism that scales with the surface
+#: instead of capping it. A fixed ceiling on top of that mechanism only
+#: decided how many tools the library was allowed to have.
+#:
+#: Set an integer to get the old startup warning back for a deployment
+#: that genuinely has a context limit. None means never warn, and nothing
+#: fails on size.
+CONTEXT_CEILING_BYTES = None
 
 _ENV_DIRS = (
     ("runs_dir", "SQT_RUNS_DIR", "artifact store"),
@@ -581,10 +585,14 @@ def check_context_budget(
     """
     A warning when this configuration costs more context than it should.
 
-    Returns None when it fits. The suggestion is specific on purpose: the
-    fix is almost always one flag, and a warning that says "too big" without
-    saying what to do about it just moves the problem to the reader.
+    Returns None when it fits, and ALWAYS when `CONTEXT_CEILING_BYTES` is
+    None -- which is the default. The suggestion is specific on purpose:
+    the fix is almost always one flag, and a warning that says "too big"
+    without saying what to do about it just moves the problem to the
+    reader.
     """
+    if CONTEXT_CEILING_BYTES is None:
+        return None
     if schema_bytes_total < CONTEXT_CEILING_BYTES:
         return None
     over = schema_bytes_total - CONTEXT_CEILING_BYTES

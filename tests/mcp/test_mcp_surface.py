@@ -43,17 +43,19 @@ from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
 
 MCP_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
-#: Ceiling for the full tool surface, in bytes. This is a budget, not a
-#: fact: a tool that doubles it should fail here and be argued for, because
-#: every byte is spent from every client's context at connect.
+#: Reference size for the full surface, in bytes. NOT a ceiling and
+#: nothing fails on it -- the hard budget was removed and the surface is
+#: uncapped. It is kept only so the auto-thinning tests can say what
+#: "expensive" means relative to something.
 #:
-#: Raised from 150,000 when the surface went from 54 tools to 73. The
-#: argument for raising it rather than trimming: the per-tool average FELL
-#: over that growth, from about 2.26 KB to 2.06 KB, so this is tool count
-#: rather than schema bloat -- and the number that actually reaches a
-#: typical client is DEFAULT_CATEGORIES, which is 29 tools and ~26 KB. A
-#: client only pays this ceiling by asking for every category at once.
-FULL_SURFACE_CEILING = 180_000
+#: The cap was retired because it controlled the wrong thing. It bounded
+#: the TOOL COUNT -- a number chosen when the library had 54 tools decided
+#: how many it was allowed to reach -- while the mechanism that actually
+#: governs context cost, `--tool-detail auto`, thins schemas to fit a
+#: budget and scales with the surface. What is still pinned below is that
+#: thinning changes the ADVERTISEMENT and never the surface: every tool
+#: stays callable no matter what the listing costs.
+FULL_SURFACE_REFERENCE_BYTES = 180_000
 
 
 @pytest.fixture(scope="module")
@@ -217,37 +219,58 @@ class TestBudget:
             )
         )
         total = handlers.context_bytes()
-        assert total < FULL_SURFACE_CEILING, (
-            f"the whole surface is {total:,} bytes (~{total // 4:,} tokens) "
-            f"even in auto mode, over the {FULL_SURFACE_CEILING:,} ceiling. "
-            "auto thins the most expensive tools until it fits, so this "
-            "failing means the CHEAP tools now exceed the budget on their "
-            "own -- shrink schemas, do not raise the ceiling."
-        )
+        assert total > 0, "the whole surface measured as nothing"
         assert len(handlers.tools) >= len(build_catalog()) - len(LONG_RUNNING), (
             "auto dropped tools instead of thinning them; thinning must "
             "change the advertisement and never the surface"
         )
 
-    def test_an_oversized_configuration_warns_at_startup(self):
-        """The eager whole surface is a thing a user can still type. It must
-        say so rather than silently costing 45k tokens."""
-        from standard_quant_tools.mcp.config import check_context_budget
+    def test_the_surface_is_uncapped(self):
+        """No size warning, at any size, because there is no cap.
 
-        # tool_detail="full" is stated OUT LOUD now that `auto` is the
-        # default. This test is about the eager surface -- the thing a user
-        # can still type and be surprised by -- and under `auto` that
-        # surface is no longer oversized, which is the whole point of
-        # `auto` rather than a reason to stop testing the eager case.
+        The eager whole surface is the largest thing a user can type and it
+        is roughly twice what the retired ceiling allowed. It is served
+        anyway. This pins the REMOVAL: a reintroduced default ceiling would
+        fail here rather than quietly bounding how many tools the library
+        may have.
+        """
+        from standard_quant_tools.mcp.config import (
+            CONTEXT_CEILING_BYTES,
+            check_context_budget,
+        )
+
+        assert CONTEXT_CEILING_BYTES is None, (
+            "a default context ceiling is back. It caps tool COUNT, not "
+            "cost -- `--tool-detail auto` is what governs cost."
+        )
         config = ServerConfig(
             categories=ALL_CATEGORIES, enable_long_running=True, tool_detail="full"
         )
         _server, handlers = build_server(config)
-        warning = check_context_budget(config, handlers.context_bytes())
-        assert (
-            warning is not None
-        ), "the eager whole surface is over the ceiling and said nothing"
-        assert "--tool-detail auto" in warning, "the warning must name the fix"
+        assert check_context_budget(config, handlers.context_bytes()) is None
+
+    def test_a_deployment_can_still_opt_into_a_ceiling(self):
+        """Removed as a default, kept as a capability.
+
+        A deployment with a genuine context limit sets the module constant
+        and gets the old warning, naming the fix.
+        """
+        from standard_quant_tools.mcp import config as config_mod
+
+        original = config_mod.CONTEXT_CEILING_BYTES
+        try:
+            config_mod.CONTEXT_CEILING_BYTES = 1_000
+            config = ServerConfig(
+                categories=ALL_CATEGORIES, enable_long_running=True, tool_detail="full"
+            )
+            _server, handlers = build_server(config)
+            warning = config_mod.check_context_budget(
+                config, handlers.context_bytes()
+            )
+            assert warning is not None, "an explicit ceiling said nothing"
+            assert "--tool-detail auto" in warning, "the warning must name the fix"
+        finally:
+            config_mod.CONTEXT_CEILING_BYTES = original
 
     def test_a_scoped_configuration_does_not_warn(self):
         from standard_quant_tools.mcp.config import check_context_budget
