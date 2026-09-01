@@ -239,7 +239,11 @@ class TestTheServerHonoursTheScope:
             )
             _server, handlers = build_server(config)
             listed = {t.name for t in handlers.tools} - {"describe_tool"}
-        assert listed == by_runtime - {"describe_tool"}, runtime
+            # Inside the loop. Dedented, this ran once on whichever runtime
+            # happened to be last in ALL_RUNTIMES and the other eight were
+            # built and thrown away -- a loop that looked exhaustive and
+            # checked one case.
+            assert listed == by_runtime - {"describe_tool"}, runtime
 
 
 class TestTheBudgetIsNowPerRuntime:

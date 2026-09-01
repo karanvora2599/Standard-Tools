@@ -33,13 +33,21 @@ sys.path.insert(0, str(ROOT / "src"))
 OUTPUT = ROOT / "Documentation" / "20_tool_index.md"
 
 #: Where the deep documentation for each runtime lives, when it has one.
+#:
+#: A MISSING KEY IS SILENT. The lookup below degrades to an em-dash, so a
+#: runtime that HAS a guide but no entry here advertises none, and nothing
+#: fails -- `data` sat that way with `26_data.md` on disk the whole time,
+#: and `meta` pointed only at the audit guide while `27_meta.md` was its
+#: actual deep dive. When a runtime is added, this dict is the easiest
+#: thing in the checklist to forget and the only one that stays green.
 DEEP_DOCS = {
     "research": "[08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md)",
     "backtest": "[04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md)",
     "portfolio": "[05_portfolio.md](05_portfolio.md)",
+    "data": "[26_data.md](26_data.md)",
     "microstructure": "[22_microstructure.md](22_microstructure.md)",
     "derivatives": "[21_derivatives.md](21_derivatives.md)",
-    "meta": "[10_auditability.md](10_auditability.md)",
+    "meta": "[27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md)",
     "modeling": "[15_modeling.md](15_modeling.md)",
     "feature_lab": "[15_modeling.md](15_modeling.md)",
 }

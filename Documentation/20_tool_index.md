@@ -35,11 +35,11 @@ advertises 155 of the 178 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 33 | 73 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `meta` | 19 | 14 KB | `discovery`, `provenance` | [10_auditability.md](10_auditability.md) |
+| `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `modeling` | 17 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `microstructure` | 15 | 19 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
-| `data` | 13 | 12 KB | *(one surface)* | — |
+| `data` | 13 | 12 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 11 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **178** | | | |

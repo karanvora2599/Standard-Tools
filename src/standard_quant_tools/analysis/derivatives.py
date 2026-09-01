@@ -965,7 +965,18 @@ def implied_forward_price(
     """
     spot = _positive(spot, "spot")
     t = _positive(time_to_expiry, "time_to_expiry")
-    _option_inputs(spot=spot, time_to_expiry=t, risk_free_rate=risk_free_rate)
+    # `dividend_yield` goes through `_option_inputs` alongside the other two
+    # rates rather than being trusted. Left out, it was the one term in
+    # `r - q - b` with no bound at all: q=1e5 returned a forward of exactly
+    # 0.0 as though the position were worthless, and q=-800 escaped as a
+    # bare OverflowError from math.exp rather than as a ValidationError
+    # naming the argument. Both are the failure `_bounded` exists to stop.
+    _option_inputs(
+        spot=spot,
+        time_to_expiry=t,
+        risk_free_rate=risk_free_rate,
+        dividend_yield=dividend_yield,
+    )
     _bounded(borrow_rate, "borrow_rate", low=-MAX_RATE, high=MAX_RATE)
     r, q, b = float(risk_free_rate), float(dividend_yield), float(borrow_rate)
     net_carry = r - q - b

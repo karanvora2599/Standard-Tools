@@ -26,6 +26,13 @@ from standard_quant_tools.data.bloomberg_provider import BloombergProvider
 from standard_quant_tools.data.polygon_provider import PolygonProvider
 from standard_quant_tools.data.yfinance_provider import YFinanceProvider
 
+# The initializers come BEFORE the try, never after. Below it they ran
+# unconditionally and overwrote a SUCCESSFUL import -- HAS_CPP was False on
+# every machine, built extension or not, and the fused technical-indicator
+# fast path in research/tools.py that reads these two names was dead code
+# wherever it was imported from here.
+_cpp_core: Any = None
+HAS_CPP = False
 try:
     from standard_quant_tools import (
         _sqt_core as _cpp_core,  # type: ignore[attr-defined]
@@ -34,8 +41,6 @@ try:
     HAS_CPP = True
 except ImportError:
     pass
-_cpp_core: Any = None
-HAS_CPP = False
 
 
 def _run_backtest(
