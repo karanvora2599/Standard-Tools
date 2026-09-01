@@ -1,0 +1,336 @@
+"""
+Typed inputs for the delta_one runtime.
+
+EVERY MODEL FORBIDS EXTRA FIELDS. Pydantic's default silently drops an
+unknown argument, so a hallucinated or misspelled name runs on defaults
+while the caller believes it configured something. On this surface that is
+expensive in a specific way: a dropped `multiplier` prices a futures
+position off by the contract's point value -- a factor of 50 on ES -- and
+every number downstream stays perfectly plausible. A dropped `fee_rate`
+makes an ETF look free.
+
+INPUTS ARE INLINE, not fetched. Nothing here takes a ticker. A futures
+curve arrives as a list of contracts, a basket as a list of constituents,
+a financing rate as a number, because this library has no futures data
+provider, no index-constituent source and no dividend calendar -- and a
+tool that pretended otherwise would compute a curve that does not exist.
+It is the call the derivatives runtime already made about option chains,
+with the same side benefit: these work on a hypothetical curve, which is
+most of what they are used for.
+
+RATES ARE DECIMALS, TIME IS YEARS, SPREADS ARE BASIS POINTS. Three
+conventions, stated on every field that uses them, because mixing them is
+the error this surface is most exposed to: passing 43 for a 4.3% rate, or
+90 days for 0.25 years, produces a number rather than a refusal.
+"""
+
+from __future__ import annotations
+
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+__all__ = [
+    "BasisHistoryInput",
+    "CashFuturesBasisInput",
+    "CompareExpressionsInput",
+    "DeltaOneExpression",
+    "FuturesContractQuote",
+    "FuturesCurveInput",
+    "FuturesHedgeInput",
+    "HedgeEffectivenessInput",
+    "IndexBasketInput",
+    "IndexConstituent",
+    "RollAnalysisInput",
+    "SolveForwardCarryInput",
+]
+
+
+class CashFuturesBasisInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    spot: float = Field(..., gt=0, description="Current cash index or share price.")
+    future_price: float = Field(..., gt=0, description="The QUOTED future.")
+    time_to_expiry: float = Field(
+        ..., gt=0, le=100, description="Years to expiry (0.25 = three months)."
+    )
+    risk_free_rate: float = Field(
+        ...,
+        ge=-10,
+        le=10,
+        description="Financing, as a decimal (0.043 = 4.3%), continuously compounded.",
+    )
+    dividend_yield: float = Field(
+        0.0, ge=-10, le=10, description="Continuous dividend yield as a decimal."
+    )
+    borrow_rate: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Stock-loan rate as a decimal. Kept apart from the "
+        "dividend because it floats and can move hundreds of bps in a day.",
+    )
+    tolerance_bps: float = Field(
+        25.0,
+        ge=0,
+        le=10_000,
+        description="Annualized bps within which the basis reads as fair.",
+    )
+
+
+class SolveForwardCarryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    spot: float = Field(..., gt=0, description="Current cash price.")
+    forward: float = Field(
+        ..., gt=0, description="The quoted forward or future to solve against."
+    )
+    time_to_expiry: float = Field(..., gt=0, le=100, description="Years to expiry.")
+    solve_for: Literal["financing_rate", "dividend_yield", "borrow_rate"] = Field(
+        ..., description="Which of the three unknowns to recover."
+    )
+    risk_free_rate: Optional[float] = Field(
+        None,
+        ge=-10,
+        le=10,
+        description="Required unless solving for it. Decimal, not percent.",
+    )
+    dividend_yield: Optional[float] = Field(
+        None, ge=-10, le=10, description="Required unless solving for it."
+    )
+    borrow_rate: Optional[float] = Field(
+        None, ge=-10, le=10, description="Required unless solving for it."
+    )
+
+
+class BasisHistoryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    spot_prices: List[float] = Field(
+        ..., min_length=3, description="Cash closes, oldest first."
+    )
+    futures_prices: List[float] = Field(
+        ...,
+        min_length=3,
+        description="Futures closes on the SAME dates, oldest first.",
+    )
+    window: Optional[int] = Field(
+        None,
+        ge=2,
+        le=5000,
+        description="Rolling z-score window. Omit for a full-sample z-score, "
+        "which describes history but looks ahead.",
+    )
+    time_to_expiry: Optional[List[float]] = Field(
+        None,
+        description="Years to expiry on each date. Supply it to annualize "
+        "the basis; without it the series steps at every roll.",
+    )
+
+
+class FuturesContractQuote(BaseModel):
+    """One contract on a curve."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    price: float = Field(..., gt=0, description="Quoted futures price.")
+    time_to_expiry: float = Field(
+        ..., gt=0, le=100, description="Years to this contract's expiry."
+    )
+    label: Optional[str] = Field(
+        None, description="Contract name, e.g. 'ESZ5'. Used in the output."
+    )
+
+
+class FuturesCurveInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contracts: List[FuturesContractQuote] = Field(
+        ..., min_length=2, description="The contracts. Sorted by expiry here."
+    )
+    spot: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Cash level. Without it only the relationships BETWEEN "
+        "contracts are computable, not richness to cash.",
+    )
+
+
+class RollAnalysisInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    front_price: float = Field(..., gt=0, description="The expiring contract.")
+    next_price: float = Field(..., gt=0, description="The contract rolled into.")
+    contracts_held: float = Field(
+        ...,
+        description="SIGNED position. Negative is short, whose roll "
+        "economics are the opposite sign of a long's.",
+    )
+    multiplier: float = Field(
+        ..., gt=0, description="Front contract's point value, e.g. 50 for ES."
+    )
+    days_to_front_expiry: float = Field(
+        ..., gt=0, le=10_000, description="Calendar days until the front expires."
+    )
+    next_multiplier: Optional[float] = Field(
+        None, gt=0, description="Only when the two differ, e.g. micro to full-size."
+    )
+    cost_per_contract: float = Field(
+        0.0, ge=0, description="Commission per contract, per side, in currency."
+    )
+    spread_ticks: float = Field(0.0, ge=0, description="Ticks crossed per leg.")
+    tick_value: float = Field(0.0, ge=0, description="Currency per tick.")
+
+
+class FuturesHedgeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    portfolio_value: float = Field(
+        ..., description="Market value of what is being hedged, in currency."
+    )
+    portfolio_beta: float = Field(
+        ..., ge=-100, le=100, description="Its beta to the hedge's benchmark."
+    )
+    future_price: float = Field(..., gt=0, description="Quoted future.")
+    multiplier: float = Field(
+        ..., gt=0, description="Contract point value, e.g. 50 for ES."
+    )
+    future_beta: float = Field(
+        1.0,
+        ge=-100,
+        le=100,
+        description="The contract's beta to that same benchmark. 1.0 is "
+        "right only when they are the same index -- hedging an S&P book "
+        "with NQ at 1.0 under-hedges.",
+    )
+    objective: Literal["beta_neutral", "dollar_neutral"] = Field(
+        "beta_neutral", description="beta_neutral is what 'hedged' usually means."
+    )
+    existing_contracts: float = Field(
+        0.0, description="Contracts already held; makes the answer a TRADE."
+    )
+
+
+class HedgeEffectivenessInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    portfolio_returns: List[float] = Field(
+        ..., min_length=3, description="Periodic returns as decimals, oldest first."
+    )
+    hedge_returns: List[float] = Field(
+        ..., min_length=3, description="The hedge instrument's returns, same dates."
+    )
+    hedge_ratio: float = Field(
+        ...,
+        ge=-1000,
+        le=1000,
+        description="SIGNED units of hedge per unit of portfolio. A short "
+        "hedge is negative; a positive one doubles the exposure.",
+    )
+    window: Optional[int] = Field(
+        60, ge=2, le=5000, description="Rolling window for hedge-ratio stability."
+    )
+    periods_per_year: int = Field(
+        252, ge=1, le=31_536_000, description="252 for daily, 52 weekly, 12 monthly."
+    )
+
+
+class IndexConstituent(BaseModel):
+    """One name in a basket."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker, used to attribute the spread.")
+    price: float = Field(..., gt=0, description="Current price.")
+    weight: Optional[float] = Field(
+        None, description="Index weight as a decimal. Use this OR shares."
+    )
+    shares: Optional[float] = Field(
+        None, gt=0, description="Index shares. Requires a divisor."
+    )
+    reference_price: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Last known traded price. An identical current price "
+        "flags the name as possibly stale.",
+    )
+
+
+class IndexBasketInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    constituents: List[IndexConstituent] = Field(
+        ..., min_length=1, description="The basket."
+    )
+    index_level: Optional[float] = Field(
+        None, gt=0, description="The published level to compare against."
+    )
+    divisor: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Index divisor. With it the basket is share-based and "
+        "reproduces the LEVEL; without it, weight-based, reproducing returns.",
+    )
+
+
+class DeltaOneExpression(BaseModel):
+    """One way of holding the exposure, with whatever it costs.
+
+    Every rate is a COST to the holder except `dividend_yield`, which is a
+    receipt. Omitted terms are zero, which is why the result reports what
+    was actually supplied.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(..., description="How this appears in the ranking.")
+    kind: Literal["cash", "etf", "future", "forward", "synthetic", "swap"] = Field(
+        ..., description="Instrument family."
+    )
+    financing_rate: float = Field(
+        0.0, ge=-10, le=10, description="Funding cost as a decimal."
+    )
+    dividend_yield: float = Field(
+        0.0, ge=-10, le=10, description="Received on a long, as a decimal."
+    )
+    borrow_rate: float = Field(0.0, ge=-10, le=10, description="Stock loan, decimal.")
+    fee_rate: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Expense ratio or swap spread, as a decimal. The term "
+        "most often forgotten on an ETF, and the whole difference over a "
+        "long hold.",
+    )
+    spread_bps: float = Field(0.0, ge=0, description="Half-spread crossed, ONE way.")
+    commission_bps: float = Field(0.0, ge=0, description="Commission, one way.")
+    impact_bps: float = Field(0.0, ge=0, description="Expected impact, one way.")
+    rolls_per_year: float = Field(0.0, ge=0, le=365, description="Rolls per year.")
+    roll_cost_bps: float = Field(0.0, description="Cost of ONE roll, in bps.")
+    capital_requirement_pct: float = Field(
+        1.0,
+        ge=0,
+        le=100,
+        description="Fraction of notional tied up. 1.0 fully funded, 0.06 "
+        "for futures margin.",
+    )
+
+
+class CompareExpressionsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expressions: List[DeltaOneExpression] = Field(
+        ..., min_length=1, description="The candidates to rank."
+    )
+    notional: float = Field(..., gt=0, description="Exposure wanted, in currency.")
+    horizon_years: float = Field(
+        ...,
+        gt=0,
+        le=100,
+        description="How long it will be held. This CHANGES THE RANKING: "
+        "execution is paid once and carry accrues, so 0.08 and 2.0 reorder "
+        "the same candidates.",
+    )
+    direction: Literal["long", "short"] = Field(
+        "long", description="Flips every carry sign."
+    )

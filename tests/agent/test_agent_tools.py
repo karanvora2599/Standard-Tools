@@ -218,6 +218,7 @@ class TestToolCategoryCoverage:
             "provenance",
             "microstructure",
             "derivatives",
+            "delta_one",
         }
         assert set(TOOL_CATEGORY.values()) <= known_categories
 

@@ -36,7 +36,7 @@ its own tools, so a name from another runtime is not discouraged — it is
 unroutable. This is the guarantee the modeling registry has had since it
 shipped, generalized to the rest of the surface.
 
-### The nine runtimes
+### The ten runtimes
 
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
@@ -48,6 +48,7 @@ shipped, generalized to the rest of the surface.
 | `modeling` | 17 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 15 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
+| `delta_one` | 9 | `delta_one` | Which instrument is the cheapest way to own or hedge an exposure: carry, basis, curves, rolls, hedge sizing and instrument comparison. Takes quotes as arguments; there is no futures provider. |
 | `feature_lab` | 9 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
 
 **Two of these are recent splits, and both were held back until they were

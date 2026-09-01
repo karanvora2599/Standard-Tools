@@ -32,6 +32,7 @@ from standard_quant_tools import audit
 from standard_quant_tools._jsonsafe import sanitize_for_json
 from standard_quant_tools.agent.runtimes import backtest as _backtest
 from standard_quant_tools.agent.runtimes import data as _data
+from standard_quant_tools.agent.runtimes import delta_one as _delta_one
 from standard_quant_tools.agent.runtimes import derivatives as _derivatives
 from standard_quant_tools.agent.runtimes import meta as _meta
 from standard_quant_tools.agent.runtimes import microstructure as _microstructure
@@ -86,6 +87,17 @@ from standard_quant_tools.agent.runtimes.data import (
     infer_temporal_contract,
     validate_data_bundle,
     validate_financial_ratios,
+)
+from standard_quant_tools.agent.runtimes.delta_one import (
+    analyze_basis_history,
+    analyze_cash_futures_basis,
+    analyze_futures_curve,
+    analyze_hedge_effectiveness,
+    analyze_index_basket,
+    analyze_roll,
+    compare_delta_one_expressions,
+    size_futures_hedge,
+    solve_forward_carry,
 )
 from standard_quant_tools.agent.runtimes.derivatives import (
     analyze_option_strategy,
@@ -208,6 +220,7 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_MODULES = [
     _data,
+    _delta_one,
     _research,
     _backtest,
     _portfolio,

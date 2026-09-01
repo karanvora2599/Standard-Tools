@@ -47,6 +47,7 @@ DEEP_DOCS = {
     "data": "[26_data.md](26_data.md)",
     "microstructure": "[22_microstructure.md](22_microstructure.md)",
     "derivatives": "[21_derivatives.md](21_derivatives.md)",
+    "delta_one": "[28_delta_one.md](28_delta_one.md)",
     "meta": "[27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md)",
     "modeling": "[15_modeling.md](15_modeling.md)",
     "feature_lab": "[15_modeling.md](15_modeling.md)",

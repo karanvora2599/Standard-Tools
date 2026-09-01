@@ -123,6 +123,16 @@ class TestRoutingAccuracyEval:
     # stops covering the surface still passes -- it just stops meaning
     # anything, which is the same failure mode as a stale count in prose.
     EVAL_CASES = [
+        # delta_one -- carry, basis, futures hedging, instrument choice
+        (
+            "The December ES future is 41 points over spot. Is that rich?",
+            "delta_one",
+        ),
+        (
+            "How many ES contracts do I short to hedge a $250m book with "
+            "beta 1.12?",
+            "delta_one",
+        ),
         # backtest_execution -- run one strategy, fixed parameters
         ("Run an SMA crossover backtest on AAPL for 2023.", "backtest_execution"),
         (

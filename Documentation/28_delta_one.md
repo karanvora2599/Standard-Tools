@@ -1,0 +1,157 @@
+# Delta One
+
+Nine tools for the instruments that move one-for-one with an underlying —
+cash, ETFs, baskets, futures, forwards and total return swaps. The runtime
+answers one question that no other runtime could: **which instrument is the
+cheapest way to own or hedge this exposure, and why do they differ.**
+
+It is not `derivatives`. That runtime prices ONE convex contract and asks
+what holding it does to you. This one prices the RELATIONSHIP between
+several linear ones. The two meet at exactly one place, and it is a
+feature: put-call parity produces a synthetic forward, and that forward is
+one row in `compare_delta_one_expressions`.
+
+---
+
+## 1. What was already here, and what was missing
+
+About two thirds of the mathematics existed before this runtime. The carry
+equation `F = S·e^(r−q−b)T` has been in `analysis/derivatives.py` for a
+long time, with financing, dividend and borrow deliberately kept apart.
+Beta, rolling beta, factor regression, Ledoit-Wolf covariance and the
+itemized trade-cost model were all present.
+
+What was missing was the layer that connects instruments to each other:
+
+```
+        Research              Portfolio
+       statistics              sizing
+       regression              risk
+            │                     │
+            └────────┐   ┌────────┘
+                     ▼   ▼
+                  DELTA ONE
+                     ▲   ▲
+            ┌────────┘   └────────┐
+       Derivatives          Microstructure
+          carry                spreads
+          forward              impact
+```
+
+Three things genuinely did not exist anywhere and had to be written:
+
+| Missing | Now at |
+|---|---|
+| A year fraction. No `year_fraction`, no day-count convention, five inline `/365.0` sites | `delta_one/daycount.py` |
+| Futures contract semantics — multiplier, tick value, expiry, settlement | `delta_one/contracts.py` |
+| `tracking_error` as a function (it was a local variable inside `information_ratio`) | `delta_one/hedging.py` |
+
+## 2. The tools
+
+| Tool | Answers |
+|---|---|
+| `analyze_cash_futures_basis` | Is this future rich, and which carry component explains it |
+| `solve_forward_carry` | What financing / dividend / borrow does this quote imply |
+| `analyze_basis_history` | Is this basis wide *for this name* |
+| `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price |
+| `analyze_roll` | What does moving this position to the next contract cost |
+| `size_futures_hedge` | How many contracts, and what does rounding leave behind |
+| `analyze_hedge_effectiveness` | Did that hedge actually work |
+| `analyze_index_basket` | Is this basket rich to its index, and which name explains it |
+| `compare_delta_one_expressions` | Which of these six ways of holding it is cheapest |
+
+Nine rather than eight is deliberate. The library's floor for a runtime is
+eight, and shipping exactly at the floor means one tool failing review
+makes the whole runtime unshippable.
+
+## 3. Three things this surface gets wrong if you let it
+
+### A wide basis is usually not an arbitrage
+
+In descending order of frequency: a spot print that is not simultaneous
+with the future, a wrong dividend assumption, a borrow that has moved,
+expensive funding, and only then something tradeable.
+
+This is why `analyze_cash_futures_basis` returns `implied_financing_rate`
+rather than stopping at the mispricing. A future 40 bps rich against a
+correct dividend is usually telling you what funding costs, and comparing
+that number to SOFR settles it in one step.
+
+### Points and basis points are not interchangeable
+
+A basis of 41 points on a March contract and 62 on a December one is not a
+comparison — they carry different amounts of time. The annualized rate is
+comparable; the points figure is what the screen shows. Every tool here
+returns both and labels which is which.
+
+### The horizon decides which instrument wins
+
+This is the reason `compare_delta_one_expressions` exists. Carry accrues
+per year; execution is paid once. The same four expressions, priced on
+identical inputs, at two horizons:
+
+| | 1 month | 2 years |
+|---|---:|---:|
+| Cash basket | 371 bps | **279 bps** |
+| SPY ETF | **301 bps** | 289 bps |
+| TRS | 302 bps | 290 bps |
+| ES futures | 302 bps | 295 bps |
+
+The ranking fully reverses. At one month the cash basket's 4 bp one-way
+execution amortizes to 96 bps a year and it is the worst choice; at two
+years execution has vanished into the horizon and it is the best. Nothing
+about the instruments changed — only how long they are held.
+
+An answer from this tool that does not state its horizon is not an answer.
+
+## 4. Nothing here fetches
+
+Curves arrive as lists of contracts, baskets as lists of constituents,
+financing as a number. This library has no futures data provider, no
+index-constituent source and no dividend calendar, and a tool that
+pretended otherwise would compute a curve that does not exist.
+
+That is the same call the derivatives runtime made about option chains,
+and it has the same side benefit: every tool here works on a hypothetical
+curve, which is most of what they are used for.
+
+The one thing that does reach a real provider is Bloomberg's identifier
+pass-through — `"ESZ5 Index"` and `"SPX Index"` survive normalization
+untouched. Note that the match is **case-sensitive**: `"SPX INDEX"`
+silently becomes `"SPX INDEX US Equity"`, and the timezone metadata reports
+`America/New_York` for a CME contract.
+
+## 5. What is not here yet
+
+Deliberately deferred, in the order they are worth building:
+
+- **Replication basket optimization.** Needs a tracking-error objective
+  `(w−b)'Σ(w−b)`, which SLSQP can express, and a max-names cardinality
+  constraint, which it cannot — there is no MIQP backend in this library.
+- **ETF fair value, TRS pricing, TRF, dividend points, index rebalance.**
+  Straightforward given the Phase I foundation.
+- **Futures backtesting.** Belongs in `backtest`, not here. The portfolio
+  engine's core identity is `position value == shares × price == cash
+  paid`, and a future breaks all three parts of it: margin instead of
+  notional, variation margin to cash, and no market value once that is
+  credited.
+- **Continuous futures.** Belongs in `data`, and must return two things —
+  a research series and a tradeable contract map — because a back-adjusted
+  series is not a price anyone could have traded.
+- **Live basis monitoring.** Not before the data layer has intraday
+  futures and index prices, which today it does not.
+
+---
+
+## Related
+
+- [21_derivatives.md](21_derivatives.md) — options, greeks, and the
+  put-call parity that produces a synthetic forward
+- [05_portfolio.md](05_portfolio.md) — sizing and the itemized trade-cost
+  model these tools compose
+- [22_microstructure.md](22_microstructure.md) — whether the arbitrage
+  survives execution
+- [20_tool_index.md#delta_one--delta-one](20_tool_index.md#delta_one--delta-one)
+  — generated argument-level reference
+- [19_runtimes.md](19_runtimes.md) — why runtimes exist and how values
+  cross between them

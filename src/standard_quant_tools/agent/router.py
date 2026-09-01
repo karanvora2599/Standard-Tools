@@ -111,6 +111,20 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "Quotes are passed in rather than fetched."
         ),
     },
+    "delta_one": {
+        "label": "Delta One",
+        "description": (
+            "Futures, ETFs, baskets, forwards and total return swaps -- "
+            "instruments moving one-for-one with an underlying. Cash-future "
+            "basis and which carry component explains it, implied "
+            "financing, the futures curve and roll economics, translating a "
+            "portfolio beta into a contract count, basket-versus-index "
+            "value, and ranking every way of expressing one exposure by "
+            "all-in annualized cost. Route here for hedging with futures, "
+            "carry, basis or choosing between instruments -- not for "
+            "options, whose pricing is derivatives."
+        ),
+    },
     "microstructure": {
         "label": "Microstructure",
         "description": (

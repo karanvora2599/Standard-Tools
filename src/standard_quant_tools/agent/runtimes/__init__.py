@@ -91,6 +91,7 @@ RUNTIME_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "microstructure": ("microstructure",),
     "meta": ("discovery", "provenance"),
     "derivatives": ("derivatives",),
+    "delta_one": ("delta_one",),
 }
 
 #: category -> the ONE runtime that owns it. Derived, never written out,
@@ -136,6 +137,7 @@ RUNTIME_LABELS: Dict[str, str] = {
     "portfolio": "Portfolio & Execution",
     "meta": "Discovery & Provenance",
     "derivatives": "Derivatives",
+    "delta_one": "Delta One",
     "microstructure": "Microstructure",
     "modeling": "Modeling",
     "feature_lab": "Feature Lab",
@@ -184,6 +186,16 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
         "hedge costs to run. Takes quotes as arguments rather than fetching "
         "a chain -- this library has no options data provider, and a tool "
         "that pretended to would compute a chain that does not exist."
+    ),
+    "delta_one": (
+        "Which instrument is the cheapest way to own or hedge this "
+        "exposure. Carry and basis against a quoted future, the term "
+        "structure and what rolling along it costs, a portfolio beta "
+        "translated into a number of contracts, whether that hedge "
+        "historically worked, a basket against its index, and every way of "
+        "expressing one position -- cash, ETF, future, swap, synthetic -- "
+        "ranked on one annualized number. Takes quotes and contract "
+        "specifications as arguments; there is no futures data provider."
     ),
     "modeling": (
         "Build, validate and score a statistical model from this library's "
