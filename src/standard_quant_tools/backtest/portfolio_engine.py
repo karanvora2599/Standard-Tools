@@ -765,8 +765,20 @@ def run_portfolio_simulation(
         exec_date: Any,
     ) -> float:
         if commission_model == "per_share":
-            commission = per_share_commission(
-                delta_shares, per_share_rate, min_commission
+            # Inlined for the reason the pct branch below was inlined, and
+            # on the same evidence: `per_share_rate` and `min_commission`
+            # are function parameters, validated once at entry through
+            # `_cost_rate` with every other rate, and cannot change between
+            # trades. `per_share_commission` re-checked both of them plus
+            # the share count on every call.
+            #
+            # Same arithmetic -- max(abs(shares) * rate, minimum), with a
+            # zero-share trade costing 0.0 rather than the per-ORDER floor
+            # -- so a change to that formula must be mirrored here.
+            commission = (
+                0.0
+                if delta_shares == 0.0
+                else max(abs(delta_shares) * per_share_rate, min_commission)
             )
         else:
             # Inlined rather than calling percentage_commission(): its
@@ -792,11 +804,35 @@ def run_portfolio_simulation(
             adv = _valid_dollar_volume(t, pos, trigger_bar, exec_date)
             # Same trigger-bar-not-exec-bar lookup as _valid_dollar_volume,
             # and for the same reason.
-            impact = impact_cost(
-                trade_notional,
-                adv,
-                float(volatility_mat[trigger_bar, pos]),
-                impact_coefficient,
+            vol = float(volatility_mat[trigger_bar, pos])
+            # The ONE value here that varies per element, so the one that
+            # still needs checking. `impact_lookback` uses min_periods=1, so
+            # the first bar's rolling std is NaN, and a NaN volatility must
+            # refuse rather than propagate into a plausible-looking cost.
+            if not math.isfinite(vol) or vol < 0:
+                raise ValidationError(
+                    f"rebalance {exec_date} ticker {t!r}: impact-model "
+                    f"volatility is {vol!r}. use_impact_model needs a finite "
+                    "non-negative volatility for every ticker actually "
+                    "traded; a rebalance inside the impact_lookback warm-up "
+                    "window has none yet."
+                )
+            # Inlined from impact_cost -> sqrt_impact_bps, which between them
+            # ran three `_cost_rate` calls per trade re-validating
+            # `impact_coefficient` (a parameter, checked once at entry), the
+            # volatility (checked immediately above) and a participation
+            # ratio built from `adv`, which `_valid_dollar_volume` has just
+            # proved finite and positive. Measured 3.75M of those calls on a
+            # 500-name daily-rebalanced panel.
+            #
+            # Same arithmetic: sqrt_impact_bps multiplies by 1e4 to return
+            # basis points and impact_cost divides it straight back out, so
+            # the two cancel and neither appears here.
+            impact = (
+                abs(trade_notional)
+                * impact_coefficient
+                * vol
+                * math.sqrt(abs(trade_notional) / adv)
             )
         return commission + spread + impact
 
