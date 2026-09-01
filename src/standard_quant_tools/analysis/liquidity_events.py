@@ -394,11 +394,18 @@ def cusum(
         }
 
     standardized = (values - mean) / std
+    # The recursion is genuinely sequential -- each step reads the previous
+    # one -- so there is no numpy escape from the loop itself. What there IS
+    # an escape from is `standardized.iloc[i]`, which was a pandas scalar
+    # lookup executed twice per observation and dominated the runtime.
+    # Reading the buffer once turns each step into array indexing.
+    standardized_values = standardized.to_numpy(dtype=float)
     up = np.zeros(len(values))
     down = np.zeros(len(values))
     for i in range(1, len(values)):
-        up[i] = max(0.0, up[i - 1] + standardized.iloc[i] - slack)
-        down[i] = max(0.0, down[i - 1] - standardized.iloc[i] - slack)
+        z = standardized_values[i]
+        up[i] = max(0.0, up[i - 1] + z - slack)
+        down[i] = max(0.0, down[i - 1] - z - slack)
 
     statistic = np.maximum(up, down)
     # Only the out-of-reference part can trigger: the reference window

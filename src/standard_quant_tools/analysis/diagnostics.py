@@ -908,19 +908,47 @@ def lead_lag_matrix(
     n_tests = n_assets * (n_assets - 1) * max_lag
     pairs: List[Dict[str, Any]] = []
     columns = list(frame.columns)
+
+    # ONE cross-correlation matrix per lag, rather than one `np.corrcoef`
+    # call per (leader, follower, lag) triple.
+    #
+    # The loop this replaces re-sliced `frame[leader].iloc[:-lag]` inside
+    # its INNERMOST body, so a 50-name universe at max_lag=3 rebuilt 14,700
+    # pandas slices where 150 numpy views would do, then called
+    # `np.corrcoef` 7,350 times. Measured 10.5 SECONDS at 200 assets, and
+    # `max_lag` is caller-settable to 20.
+    #
+    # For one lag L the whole matrix is a single matmul: correlate every
+    # column of the leading block against every column of the lagging one.
+    # ddof cancels between numerator and denominator, so the centred
+    # cross-products and the centred sums of squares can both be raw.
+    values = frame.to_numpy(dtype=float)
+    correlations: Dict[int, np.ndarray] = {}
+    for lag in range(1, max_lag + 1):
+        if n - lag < 30:
+            continue
+        lead = values[:-lag]
+        follow = values[lag:]
+        lead_c = lead - lead.mean(axis=0)
+        follow_c = follow - follow.mean(axis=0)
+        denominator = np.sqrt(
+            np.outer((lead_c**2).sum(axis=0), (follow_c**2).sum(axis=0))
+        )
+        with np.errstate(invalid="ignore", divide="ignore"):
+            correlations[lag] = (lead_c.T @ follow_c) / denominator
+
     for i, leader in enumerate(columns):
         for j, follower in enumerate(columns):
             if i == j:
                 continue
             for lag in range(1, max_lag + 1):
-                a = frame[leader].iloc[:-lag].to_numpy()
-                b = frame[follower].iloc[lag:].to_numpy()
-                if a.size < 30:
+                matrix = correlations.get(lag)
+                if matrix is None:
                     continue
-                rho = float(np.corrcoef(a, b)[0, 1])
+                rho = float(matrix[i, j])
                 if not math.isfinite(rho) or abs(rho) < min_correlation:
                     continue
-                effective = a.size
+                effective = n - lag
                 t = rho * math.sqrt(max(effective - 2, 1) / max(1 - rho * rho, 1e-12))
                 raw_p = _f_sf(t * t, 1, max(effective - 2, 1))
                 pairs.append(

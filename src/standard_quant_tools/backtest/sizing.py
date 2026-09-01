@@ -128,13 +128,26 @@ def equal_weight_top_bottom(
         long_w = 0.0
         short_w = gross_leverage / n_short
 
+    # Ranked in one pass rather than sorted per row. The `iterrows()` loop
+    # this replaces did a full `sort_values` and two label-based `.loc`
+    # assignments per date, and measured 1.42s on a 2499x500 panel against
+    # 0.05-0.10s for `rank_weighted` and `zscore_normalized` doing the same
+    # shape of work vectorized -- the outlier was the loop, not the task.
+    #
+    # `na_option="bottom"` reproduces `sort_values`, which places NaN last
+    # in a descending sort and therefore lets an unscored name be picked as
+    # a short. That is pre-existing behaviour, kept deliberately rather
+    # than quietly corrected here.
+    ranks = scores.rank(axis=1, ascending=False, method="first", na_option="bottom")
+    n_columns = scores.shape[1]
+
     weights = pd.DataFrame(0.0, index=scores.index, columns=scores.columns)
-    for date, row in scores.iterrows():
-        ordered = row.sort_values(ascending=False)
-        if n_long > 0:
-            weights.loc[date, ordered.index[:n_long]] = long_w
-        if n_short > 0:
-            weights.loc[date, ordered.index[-n_short:]] = -short_w
+    if n_long > 0:
+        weights = weights.mask(ranks <= n_long, long_w)
+    # Applied second so that, if the two selections overlap, the short wins
+    # -- the order the sequential `.loc` assignments resolved it in.
+    if n_short > 0:
+        weights = weights.mask(ranks > n_columns - n_short, -short_w)
     return weights
 
 
