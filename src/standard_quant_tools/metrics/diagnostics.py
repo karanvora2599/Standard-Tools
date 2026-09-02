@@ -185,7 +185,16 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
     win_rate = len(wins) / len(returns)
     avg_winner = float(wins.mean()) if len(wins) else 0.0
     avg_loser = float(losses.mean()) if len(losses) else 0.0  # <= 0
-    expectancy = win_rate * avg_winner + (1 - win_rate) * avg_loser
+
+    # THREE STATES HERE TOO. `(1 - win_rate)` is the not-won rate, which
+    # includes breakevens, so every flat trade was priced at `avg_loser`.
+    # On [10.0, 0.0, -5.0] that returned exactly -0.0 -- a profitable set
+    # of trades reported as breakeven, with the headline's sign flipped --
+    # where the mean is +1.667. A breakeven trade contributes its own
+    # return, which is zero, so it belongs in the denominator and not in
+    # either average. The streak loop below already got this right.
+    loss_rate = len(losses) / len(returns)
+    expectancy = win_rate * avg_winner + loss_rate * avg_loser
     payoff_ratio = abs(avg_winner / avg_loser) if avg_loser != 0 else float("inf")
 
     # Three states, not two. Iterating `is_win` alone made every non-win a

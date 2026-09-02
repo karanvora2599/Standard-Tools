@@ -199,6 +199,31 @@ def price_option(
     )
 
 
+def _rho(price, strike, t, discount, signed_nd2, forward: bool) -> float:
+    """
+    Sensitivity to the rate, for both models this function serves.
+
+    THEY ARE NOT THE SAME FORMULA, and using the Black-Scholes one for
+    Black-76 gave the call the WRONG SIGN. Under Black-Scholes the spot is
+    given and the rate grows it, so a higher rate raises a call. Under
+    Black-76 the FORWARD is given -- it does not move when the rate moves --
+    and the rate appears only in the discount factor, so a higher rate
+    simply discounts the same payoff harder and every option, call and put,
+    is worth less:
+
+        d/dr [ e^(-rT) (F N(d1) - K N(d2)) ] = -T * price
+
+    Measured against a finite difference of this function's own price at
+    F=K=100, T=1, vol=0.2, r=0.05: reported +0.437729, truth -0.075771.
+    Wrong sign and 5.8x, on a field documented as "price change per 1
+    percentage point of rate", in a tool where flipping `model` to
+    black_scholes returned the correct +0.532325.
+    """
+    if forward:
+        return -t * price
+    return signed_nd2 * strike * t * discount
+
+
 def _black_scholes(
     spot, strike, t, vol, rate, option_type, dividend_yield, forward=False
 ) -> Dict[str, Any]:
@@ -221,7 +246,7 @@ def _black_scholes(
             else spot * growth * _norm_cdf(d1) - strike * discount * _norm_cdf(d2)
         )
         delta = discount * _norm_cdf(d1) if forward else growth * _norm_cdf(d1)
-        rho = strike * t * discount * _norm_cdf(d2)
+        rho = _rho(price, strike, t, discount, _norm_cdf(d2), forward)
     else:
         price = (
             discount * (strike * _norm_cdf(-d2) - spot * _norm_cdf(-d1))
@@ -229,7 +254,7 @@ def _black_scholes(
             else strike * discount * _norm_cdf(-d2) - spot * growth * _norm_cdf(-d1)
         )
         delta = -discount * _norm_cdf(-d1) if forward else -growth * _norm_cdf(-d1)
-        rho = -strike * t * discount * _norm_cdf(-d2)
+        rho = _rho(price, strike, t, discount, -_norm_cdf(-d2), forward)
 
     gamma = (
         (growth if not forward else discount) * _norm_pdf(d1) / (spot * vol * sqrt_t)

@@ -44,6 +44,7 @@ import pandas as pd
 from standard_quant_tools.backtest.costs import impact_cost
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.numeric_contract import require_periods_per_year
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +235,9 @@ def risk_parity(
     }
 
 
-def hierarchical_risk_parity(returns: pd.DataFrame) -> Dict[str, Any]:
+def hierarchical_risk_parity(
+    returns: pd.DataFrame, *, periods_per_year: int = TRADING_DAYS
+) -> Dict[str, Any]:
     """
     Lopez de Prado's HRP: allocation without ever inverting the covariance
     matrix.
@@ -308,6 +311,15 @@ def hierarchical_risk_parity(returns: pd.DataFrame) -> Dict[str, Any]:
     weights = weights / weights.sum()
     contributions = _risk_contributions(weights, covariance)
 
+    # 252 was hardcoded, so monthly returns came back overstated by
+    # sqrt(252/12) = 4.583x with nothing in the result saying which
+    # convention had been assumed. `periods_per_year` is now the caller's
+    # to state and is echoed back.
+    periods_per_year = require_periods_per_year(
+        periods_per_year, "hierarchical_risk_parity"
+    )
+    annualization = math.sqrt(periods_per_year)
+
     warnings = [
         "HRP never inverts the covariance matrix, which is the point: "
         "inversion turns the smallest eigenvalue into the largest, so the "
@@ -334,13 +346,21 @@ def hierarchical_risk_parity(returns: pd.DataFrame) -> Dict[str, Any]:
         "n_observations": int(len(frame)),
         "weights": {str(c): float(w) for c, w in zip(frame.columns, weights)},
         "cluster_order": [str(frame.columns[i]) for i in order],
+        # BOTH ANNUALIZED, OR NEITHER. `_risk_contributions` documents that
+        # these sum to portfolio_volatility exactly -- "a genuine
+        # decomposition rather than an allocation of blame" -- and only the
+        # volatility was being scaled. The two disagreed by exactly
+        # sqrt(252) = 15.87451, in one dict, with the docstring asserting
+        # they were equal.
         "risk_contributions": {
-            str(c): float(rc) for c, rc in zip(frame.columns, contributions)
+            str(c): float(rc * annualization)
+            for c, rc in zip(frame.columns, contributions)
         },
         "portfolio_volatility": float(
-            _portfolio_volatility(weights, covariance) * math.sqrt(TRADING_DAYS)
+            _portfolio_volatility(weights, covariance) * annualization
         ),
         "effective_n": float(1.0 / (weights**2).sum()),
+        "periods_per_year": int(periods_per_year),
         "warnings": warnings,
     }
 

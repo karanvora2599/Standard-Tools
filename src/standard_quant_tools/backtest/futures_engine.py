@@ -153,9 +153,34 @@ def run_futures_simulation(
     for i, date in enumerate(dates):
         price = float(price_series.iloc[i])
 
+        # 0. Did the contract change since the last bar? This has to be
+        #    answered BEFORE variation margin, not after. `price` is the
+        #    NEW contract and `previous_price` is the OLD one, so on a roll
+        #    day their difference is the calendar spread, not a market move
+        #    -- and booking it as profit invented returns out of nothing.
+        #    A dead-flat market rolling 39 times up a contango curve
+        #    reported +5.85% with a maximum drawdown of 0.00%.
+        current_contract = rolls_by_date.get(date)
+        rolled = (
+            i > 0
+            and contract_map is not None
+            and current_contract is not None
+            and previous_contract is not None
+            and current_contract != previous_contract
+            and contracts != 0.0
+        )
+
         # 1. Variation margin on the position carried IN, before any trade.
         #    This is where a futures position's profit actually arrives.
-        if i > 0 and contracts != 0.0:
+        #
+        #    Skipped on a roll day. The correct figure is the OLD contract's
+        #    move over that day, and a single price series does not contain
+        #    it -- the old contract's last print here is yesterday's. Zero
+        #    understates by at most one day's move on one bar; the spread
+        #    was overstating by the whole width of the roll, with the wrong
+        #    sign for a long in contango. Pass a back-adjusted series if you
+        #    need that day, or supply the roll days as their own bars.
+        if i > 0 and contracts != 0.0 and not rolled:
             variation = (price - previous_price) * contracts * m
             cash += variation
             total_variation += variation
@@ -169,15 +194,7 @@ def run_futures_simulation(
             cash += interest
             total_interest += interest
 
-        # 3. Roll, when the contract changed.
-        current_contract = rolls_by_date.get(date)
-        rolled = (
-            contract_map is not None
-            and current_contract is not None
-            and previous_contract is not None
-            and current_contract != previous_contract
-            and contracts != 0.0
-        )
+        # 3. Roll costs, for the roll detected in step 0.
         if rolled:
             legs = 2.0 * abs(contracts)
             cost = legs * commission + legs * slippage * m
@@ -191,6 +208,8 @@ def run_futures_simulation(
                     "to": current_contract,
                     "contracts": float(contracts),
                     "cost": float(cost),
+                    "spread_points": float(price - previous_price),
+                    "variation_margin_skipped": True,
                 }
             )
 

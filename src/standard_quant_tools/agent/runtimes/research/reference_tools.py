@@ -52,11 +52,16 @@ Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 #: costume.
 _METRICS = {
     "cumulative_return": (M.cumulative_return, False),
-    "cagr": (M.cagr, False),
+    # `cagr` calls `cumulative_return`, and `calmar_ratio`'s own parameter
+    # is named `equity_curve`. Registered False, they were handed a RETURN
+    # series: cagr came back -0.4876 where the truth is +0.2337, sign
+    # flipped, and calmar -0.218 against +1.650 -- both next to a
+    # max_drawdown in the same response that was correct.
+    "cagr": (M.cagr, True),
     "annualized_volatility": (M.annualized_volatility, False),
     "sharpe_ratio": (M.sharpe_ratio, False),
     "sortino_ratio": (M.sortino_ratio, False),
-    "calmar_ratio": (M.calmar_ratio, False),
+    "calmar_ratio": (M.calmar_ratio, True),
     "var_historical": (M.var_historical, False),
     "var_parametric": (M.var_parametric, False),
     "cvar": (M.cvar, False),
@@ -123,7 +128,10 @@ def calculate_series_metrics(input_data: SeriesMetricsInput) -> SeriesMetricsRes
     for name in input_data.metrics:
         fn, wants_equity = _METRICS[name]
         try:
-            if name in ("sharpe_ratio", "sortino_ratio", "calmar_ratio"):
+            # `calmar_ratio` is NOT in this branch: it takes no
+            # risk_free_rate, so it raised TypeError and fell through to a
+            # handler that re-called it on the return series.
+            if name in ("sharpe_ratio", "sortino_ratio"):
                 values[name] = fn(
                     returns,
                     risk_free_rate=input_data.risk_free_rate,
@@ -131,8 +139,10 @@ def calculate_series_metrics(input_data: SeriesMetricsInput) -> SeriesMetricsRes
                 )
             elif wants_equity:
                 values[name] = fn(equity)
-            elif name in ("cagr", "annualized_volatility"):
+            elif name == "annualized_volatility":
                 values[name] = fn(returns, periods_per_year=input_data.periods_per_year)
+            elif name in ("cagr", "calmar_ratio"):
+                values[name] = fn(equity, periods_per_year=input_data.periods_per_year)
             else:
                 values[name] = fn(returns)
         except TypeError:

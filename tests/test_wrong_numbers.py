@@ -1,0 +1,313 @@
+"""
+Six functions that returned a plausible wrong number, and the suite was green.
+
+Every fix in this file was made against a full suite that passed before and
+after, which is the reason these tests exist in one place rather than being
+scattered into the files that already cover these modules. Those files test
+that the functions run and that their outputs are ordered sensibly. None of
+them pinned a value against an independent computation, so a wrong value
+looked exactly like a right one.
+
+The shared shape: none of these raised, none returned NaN, and four of the
+six put a wrong number directly beside a correct one in the same result
+object. That is what makes this class worse than a crash.
+"""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pandas as pd
+import pytest
+
+
+class TestFuturesRollIsNotProfit:
+    """`run_futures_simulation` computed variation margin before detecting
+    the roll, so on a roll day it differenced the NEW contract's price
+    against the OLD contract's. That is the calendar spread, not a market
+    move, and it was booked as P&L once per roll."""
+
+    def test_a_flat_market_earns_nothing_across_a_roll(self):
+        from standard_quant_tools.backtest.futures_engine import (
+            run_futures_simulation,
+        )
+
+        dates = [f"2024-01-0{i}" for i in range(1, 7)]
+        # Contract A prints 100 for three days, B prints 110 for three days.
+        # Neither ever moves.
+        result = run_futures_simulation(
+            prices=dict(zip(dates, [100.0, 100.0, 100.0, 110.0, 110.0, 110.0])),
+            target_contracts={dates[0]: 1.0},
+            multiplier=1.0,
+            initial_capital=1000.0,
+            contract_map=dict(zip(dates, ["A", "A", "A", "B", "B", "B"])),
+        )
+        assert result["n_rolls"] == 1, "the roll must still be detected"
+        assert result["total_variation_margin"] == 0.0
+        assert result["final_equity"] == pytest.approx(1000.0)
+        assert result["total_return_pct"] == pytest.approx(0.0)
+
+    def test_the_sign_was_backwards_for_a_long_in_contango(self):
+        """Rolling UP a contango curve costs money. It was credited."""
+        from standard_quant_tools.backtest.futures_engine import (
+            run_futures_simulation,
+        )
+
+        dates = [f"2024-01-0{i}" for i in range(1, 5)]
+        result = run_futures_simulation(
+            prices=dict(zip(dates, [100.0, 100.0, 115.0, 115.0])),
+            target_contracts={dates[0]: 10.0},
+            multiplier=50.0,
+            initial_capital=1_000_000.0,
+            contract_map=dict(zip(dates, ["A", "A", "B", "B"])),
+        )
+        assert result["total_variation_margin"] <= 0.0
+
+    def test_a_real_move_is_still_booked(self):
+        """The fix must not swallow genuine P&L."""
+        from standard_quant_tools.backtest.futures_engine import (
+            run_futures_simulation,
+        )
+
+        dates = [f"2024-01-0{i}" for i in range(1, 7)]
+        result = run_futures_simulation(
+            prices=dict(zip(dates, [100.0, 100.0, 100.0, 100.0, 105.0, 105.0])),
+            target_contracts={dates[0]: 1.0},
+            multiplier=1.0,
+            initial_capital=1000.0,
+        )
+        assert result["total_variation_margin"] == pytest.approx(5.0)
+
+
+class TestSeriesMetricsGetTheSeriesTheyDocument:
+    """`cagr` calls `cumulative_return` and `calmar_ratio`'s own parameter is
+    named `equity_curve`. Both were registered as wanting returns, so both
+    came back sign-flipped -- next to a `max_drawdown` in the same response
+    that was correct."""
+
+    def test_cagr_and_calmar_match_the_library(self):
+        from standard_quant_tools.agent.runtimes.research.reference_tools import (
+            SeriesMetricsInput,
+            calculate_series_metrics,
+        )
+        from standard_quant_tools.metrics.return_metrics import cagr
+        from standard_quant_tools.metrics.risk_metrics import (
+            calmar_ratio,
+            max_drawdown,
+        )
+
+        returns = pd.Series(np.random.default_rng(3).normal(0.0002, 0.013, 504))
+        equity = (1.0 + returns).cumprod()
+
+        got = calculate_series_metrics(
+            SeriesMetricsInput(
+                series={"values": returns.tolist()},
+                metrics=["cagr", "calmar_ratio", "max_drawdown"],
+            )
+        ).model_dump()["values"]
+
+        assert got["cagr"] == pytest.approx(float(cagr(equity)), rel=1e-9)
+        assert got["calmar_ratio"] == pytest.approx(
+            float(calmar_ratio(equity)), rel=1e-9
+        )
+        assert got["max_drawdown"] == pytest.approx(
+            float(max_drawdown(equity)), rel=1e-9
+        )
+
+    def test_a_profitable_series_does_not_report_a_loss(self):
+        """The failure was this stark: +23.4%/yr came back as -48.8%/yr."""
+        from standard_quant_tools.agent.runtimes.research.reference_tools import (
+            SeriesMetricsInput,
+            calculate_series_metrics,
+        )
+
+        returns = pd.Series(np.random.default_rng(3).normal(0.0002, 0.013, 504))
+        assert float((1.0 + returns).cumprod().iloc[-1]) > 1.0
+
+        got = calculate_series_metrics(
+            SeriesMetricsInput(
+                series={"values": returns.tolist()}, metrics=["cagr", "calmar_ratio"]
+            )
+        ).model_dump()["values"]
+        assert got["cagr"] > 0
+        assert got["calmar_ratio"] > 0
+
+
+class TestRhoMatchesTheModelItIsQuotedFor:
+    """Black-76's rho was the Black-Scholes formula. Under Black-76 the
+    FORWARD is given and does not move with the rate, so the rate enters
+    only through the discount factor and every option is worth less when it
+    rises: d/dr = -T * price. The call's sign was wrong."""
+
+    @staticmethod
+    def _finite_difference(model: str, **kwargs) -> float:
+        from standard_quant_tools.analysis.pricing import price_option
+
+        step = 1e-6
+        up = price_option(
+            **{**kwargs, "risk_free_rate": kwargs["risk_free_rate"] + step},
+            model=model,
+        )["price"]
+        down = price_option(
+            **{**kwargs, "risk_free_rate": kwargs["risk_free_rate"] - step},
+            model=model,
+        )["price"]
+        return (up - down) / (2 * step) / 100.0
+
+    @pytest.mark.parametrize("model", ["black_scholes", "black_76"])
+    @pytest.mark.parametrize("option_type", ["call", "put"])
+    @pytest.mark.parametrize("time_to_expiry", [0.25, 1.0, 2.0])
+    def test_rho_is_the_actual_derivative(self, model, option_type, time_to_expiry):
+        from standard_quant_tools.analysis.pricing import price_option
+
+        base = dict(
+            spot=100.0,
+            strike=100.0,
+            time_to_expiry=time_to_expiry,
+            volatility=0.2,
+            risk_free_rate=0.05,
+            option_type=option_type,
+        )
+        reported = price_option(**base, model=model)["rho"]
+        assert reported == pytest.approx(
+            self._finite_difference(model, **base), abs=1e-6
+        )
+
+    def test_black_76_rho_is_negative_for_both_calls_and_puts(self):
+        """The economics: a higher rate discounts the same forward payoff
+        harder, so it cannot help either side."""
+        from standard_quant_tools.analysis.pricing import price_option
+
+        for option_type in ("call", "put"):
+            got = price_option(
+                spot=100.0,
+                strike=100.0,
+                time_to_expiry=1.0,
+                volatility=0.2,
+                risk_free_rate=0.05,
+                option_type=option_type,
+                model="black_76",
+            )
+            assert got["rho"] < 0
+            assert got["rho"] == pytest.approx(-1.0 * got["price"] / 100.0, rel=1e-9)
+
+
+class TestExpectancyCountsBreakevenTradesAsBreakeven:
+    """`(1 - win_rate)` is the not-won rate and includes flat trades, so
+    every breakeven was priced at `avg_loser`. The streak loop in the same
+    function already handled three states."""
+
+    @pytest.mark.parametrize(
+        "trades",
+        [
+            [10.0, 0.0, -5.0],
+            [2.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+            [1.0, -1.0],
+            [0.0, 0.0, 0.0, 5.0],
+        ],
+    )
+    def test_expectancy_is_the_mean_trade(self, trades):
+        """Expectancy IS the mean of the trades. Splitting by sign is a
+        presentation choice, and it has to reassemble."""
+        from standard_quant_tools.metrics.diagnostics import trade_expectancy
+
+        got = trade_expectancy(pd.DataFrame({"return_pct": trades}))
+        assert got["expectancy_pct"] == pytest.approx(float(np.mean(trades)), abs=1e-4)
+
+    def test_a_profitable_set_is_not_reported_as_breakeven(self):
+        from standard_quant_tools.metrics.diagnostics import trade_expectancy
+
+        got = trade_expectancy(pd.DataFrame({"return_pct": [10.0, 0.0, -5.0]}))
+        assert got["expectancy_pct"] > 1.0
+
+
+class TestRiskContributionsSumToPortfolioVolatility:
+    """`_risk_contributions` documents that these sum to sigma_p exactly --
+    "a genuine decomposition rather than an allocation of blame". HRP scaled
+    only the volatility, so the two disagreed by exactly sqrt(252)."""
+
+    @pytest.mark.parametrize("periods_per_year", [252, 52, 12, 1])
+    def test_hierarchical_risk_parity_keeps_the_invariant(self, periods_per_year):
+        from standard_quant_tools.portfolio.construction import (
+            hierarchical_risk_parity,
+        )
+
+        frame = pd.DataFrame(
+            np.random.default_rng(2).normal(0.0004, 0.012, (600, 8)),
+            columns=list("ABCDEFGH"),
+        )
+        got = hierarchical_risk_parity(frame, periods_per_year=periods_per_year)
+        assert sum(got["risk_contributions"].values()) == pytest.approx(
+            got["portfolio_volatility"], rel=1e-9
+        )
+        assert got["periods_per_year"] == periods_per_year
+
+    def test_risk_parity_keeps_it_too(self):
+        """The sibling, which was already consistent -- both figures
+        per-period. This pins that they stay that way."""
+        from standard_quant_tools.portfolio.construction import risk_parity
+
+        frame = pd.DataFrame(
+            np.random.default_rng(2).normal(0.0004, 0.012, (600, 8)),
+            columns=list("ABCDEFGH"),
+        )
+        got = risk_parity(frame.cov().to_numpy())
+        assert sum(got["risk_contributions"].values()) == pytest.approx(
+            got["portfolio_volatility"], rel=1e-9
+        )
+
+    def test_the_annualization_is_not_hardcoded_to_daily(self):
+        """252 was baked in, so monthly returns came back 4.583x
+        overstated with nothing in the result naming the convention."""
+        from standard_quant_tools.portfolio.construction import (
+            hierarchical_risk_parity,
+        )
+
+        frame = pd.DataFrame(
+            np.random.default_rng(2).normal(0.0004, 0.012, (600, 8)),
+            columns=list("ABCDEFGH"),
+        )
+        daily = hierarchical_risk_parity(frame, periods_per_year=252)
+        monthly = hierarchical_risk_parity(frame, periods_per_year=12)
+        assert daily["portfolio_volatility"] == pytest.approx(
+            monthly["portfolio_volatility"] * math.sqrt(252 / 12), rel=1e-9
+        )
+
+
+class TestSeasonalityPValuesAreNotDoubled:
+    """`P(F(1, df) > t^2)` is already two-sided -- squaring the statistic is
+    what makes it so. The extra factor of 2 made every per-period p-value
+    exactly twice too large, and flipped `significant_after_correction`."""
+
+    def test_raw_p_values_match_the_two_sided_t(self):
+        scipy_stats = pytest.importorskip("scipy.stats")
+        from standard_quant_tools.analysis.diagnostics import seasonality
+
+        n = 500
+        index = pd.bdate_range("2022-01-03", periods=n)
+        rng = np.random.default_rng(16)
+        series = pd.Series(
+            rng.normal(0.0002, 0.011, n) + (index.dayofweek.to_numpy() == 0) * 0.003,
+            index=index,
+        )
+
+        for row in seasonality(series)["by_period"]:
+            expected = 2 * scipy_stats.t.sf(abs(row["t_statistic"]), n - 2)
+            assert row["p_value_raw"] == pytest.approx(expected, rel=1e-6), row[
+                "period"
+            ]
+
+    def test_no_p_value_can_exceed_one(self):
+        """The doubling could push a p-value above 1.0, which is not a
+        probability. It was clipped, so this is the visible half of the
+        fault rather than the whole of it."""
+        from standard_quant_tools.analysis.diagnostics import seasonality
+
+        n = 400
+        index = pd.bdate_range("2022-01-03", periods=n)
+        series = pd.Series(
+            np.random.default_rng(7).normal(0.0002, 0.011, n), index=index
+        )
+        for row in seasonality(series)["by_period"]:
+            assert 0.0 <= row["p_value_raw"] <= 1.0

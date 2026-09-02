@@ -449,7 +449,13 @@ def seasonality(
             array.var(ddof=1) / array.size + others.var(ddof=1) / others.size
         )
         t = float((array.mean() - others.mean()) / se) if se > 0 else 0.0
-        raw_p = 2.0 * _f_sf(t * t, 1, max(array.size + others.size - 2, 1))
+        # NOT doubled. P(F(1, df) > t^2) IS P(|T| > |t|) -- squaring the
+        # statistic is what makes it two-sided, and the extra factor made
+        # every per-period p-value exactly 2x too large. Wednesday at
+        # t = -2.598 came back 1.931e-02 against a true 9.656e-03, and
+        # `significant_after_correction` read False where the truth is
+        # True. The three other `_f_sf` calls in this file get it right.
+        raw_p = _f_sf(t * t, 1, max(array.size + others.size - 2, 1))
         rows.append(
             {
                 "period": labels.get(int(key), str(key)),
