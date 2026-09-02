@@ -2810,6 +2810,38 @@ class PairTradeBacktestResult(BaseModel):
 # ──────────────────────────────────────────────
 
 
+#: The eight names in `backtest.strategies.STRATEGY_REGISTRY`, as a type.
+#:
+#: WHY THIS IS A Literal AND NOT `str`. Four input models declared
+#: `strategy_type: str` and listed the allowed values in prose. Two
+#: consequences, and the second is the one that hid the first:
+#:
+#:   1. The advertised JSON schema carries no `enum`, so a client doing
+#:      constrained decoding cannot stop a hallucinated value. Every runtime
+#:      does validate at call time with a good message, so it costs a wasted
+#:      turn rather than a wrong answer -- but the whole point of the schema
+#:      is to make that turn unnecessary.
+#:   2. `tests/surface/synth.py` synthesizes `"a"` for a bare `str` and the
+#:      first `get_args(...)` entry for a Literal. A REQUIRED enumerated
+#:      parameter typed `str` therefore produced `"a"`, the tool refused it,
+#:      and the tool passed every adversarial-input test without its body
+#:      ever running. run_backtest_compact, get_backtest_diagnostics and
+#:      run_strategy_matrix were fuzzed only on their refusal path.
+#:
+#: `Literal` cannot be built from a dict at runtime, so this is written out
+#: and `tests/test_wrong_numbers.py` pins it against the registry.
+RegistryStrategy = Literal[
+    "sma_crossover",
+    "rsi_mean_reversion",
+    "macd_crossover",
+    "bollinger_reversion",
+    "donchian_breakout",
+    "momentum_timeseries",
+    "vwap_reversion",
+    "adx_trend",
+]
+
+
 class BacktestDiagnosticsInput(BaseModel):
     # An argument this tool does not take is REJECTED, not ignored.
     # Pydantic's default would drop it silently, so a typo or a
@@ -2822,7 +2854,7 @@ class BacktestDiagnosticsInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    strategy_type: str = Field(
+    strategy_type: RegistryStrategy = Field(
         ...,
         description=(
             "Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
@@ -3313,7 +3345,7 @@ class BacktestCompactInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    strategy_type: str = Field(
+    strategy_type: RegistryStrategy = Field(
         ...,
         description=(
             "Strategy type: 'sma_crossover', 'rsi_mean_reversion', "
@@ -3957,7 +3989,7 @@ class CompareCostModelsInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    strategy_type: str = Field(
+    strategy_type: RegistryStrategy = Field(
         ...,
         description=(
             "One of the eight registry strategies — call list_strategies for "
@@ -5050,7 +5082,7 @@ class StrategyMatrixInput(BaseModel):
     tickers: List[str] = Field(
         ..., min_length=1, max_length=50, description="Universe to test across."
     )
-    strategies: List[str] = Field(
+    strategies: List[RegistryStrategy] = Field(
         ...,
         min_length=1,
         max_length=8,

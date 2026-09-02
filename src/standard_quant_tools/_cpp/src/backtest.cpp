@@ -18,6 +18,9 @@ namespace sqt {
 
 namespace {
     constexpr double kInf = std::numeric_limits<double>::infinity();
+    // Sharpe on a zero-dispersion series is undefined, not zero --
+    // see the note at its computation below.
+    constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
     // kPPY is gone: the annualization factor is now a parameter, because a
     // hard-coded 252 silently annualized hourly and minute bars as though
     // they were trading days.
@@ -301,8 +304,16 @@ BacktestResult run_strategy(
     // for the excess series too: subtracting a constant from every element
     // shifts the mean and leaves the standard deviation untouched. Only the
     // numerator moves.
+    // NaN, NOT 0.0, when there is no dispersion -- matching
+    // metrics/risk_metrics.py::sharpe_ratio, whose comment states the
+    // reason: "zero would read as 'no edge', which is a measurement. It is
+    // undefined." The divergence was not cosmetic. In backtest_grid a
+    // no-trade combination scored 0.0 natively and sorted ABOVE genuinely
+    // losing combinations, where in Python it sorts to the bottom as NaN --
+    // so the two backends ranked the same grid differently. The identical
+    // bug class was found and fixed for CALMAR in this file and missed here.
     r.sharpe_ratio   = (sample_std > 0.0)
-        ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : 0.0;
+        ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : kNaN;
 
     // Sortino: semi-deviation = sqrt(mean(min(excess, 0)^2)) across ALL
     // periods. Sortino & Price (1994) — zero contribution from bars that
@@ -555,8 +566,16 @@ BacktestResult run_strategy_summary(
 
     const double sample_std = (n > 1) ? std::sqrt(sum_sq / (n_d - 1.0)) : 0.0;
     r.annualized_vol = sample_std * std::sqrt(periods_per_year);
+    // NaN, NOT 0.0, when there is no dispersion -- matching
+    // metrics/risk_metrics.py::sharpe_ratio, whose comment states the
+    // reason: "zero would read as 'no edge', which is a measurement. It is
+    // undefined." The divergence was not cosmetic. In backtest_grid a
+    // no-trade combination scored 0.0 natively and sorted ABOVE genuinely
+    // losing combinations, where in Python it sorts to the bottom as NaN --
+    // so the two backends ranked the same grid differently. The identical
+    // bug class was found and fixed for CALMAR in this file and missed here.
     r.sharpe_ratio   = (sample_std > 0.0)
-        ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : 0.0;
+        ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : kNaN;
 
     const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
     r.sortino_ratio =

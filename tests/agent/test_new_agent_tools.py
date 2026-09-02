@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pydantic
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from standard_quant_tools.agent.models import (
     BacktestDiagnosticsInput,
@@ -1763,14 +1764,19 @@ class TestBacktestDiagnostics:
         assert result.strategy_type == "sma_crossover"
 
     def test_unknown_strategy_raises(self, patched_long):
-        inp = BacktestDiagnosticsInput(
-            symbol="AAPL",
-            start_date=START,
-            end_date=END,
-            strategy_type="nonexistent_strategy",
-        )
-        with pytest.raises(ValueError, match="Unknown strategy"):
-            get_backtest_diagnostics(inp)
+        """Now rejected when the INPUT is built, not when the tool runs.
+        `strategy_type` was a bare `str` with the allowed values in prose;
+        it is a Literal, so the advertised schema carries an enum and a
+        constrained-decoding client cannot emit a bad one at all. Pydantic's
+        message names the allowed set, which is what the runtime check did.
+        """
+        with pytest.raises(PydanticValidationError, match="sma_crossover"):
+            BacktestDiagnosticsInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy_type="nonexistent_strategy",
+            )
 
     def test_top_drawdowns_respects_top_n(self, patched_long):
         inp = BacktestDiagnosticsInput(

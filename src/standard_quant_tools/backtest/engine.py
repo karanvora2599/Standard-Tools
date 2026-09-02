@@ -19,6 +19,7 @@ from standard_quant_tools.metrics.return_metrics import (
 )
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
+    has_no_dispersion,
     max_drawdown,
     sharpe_ratio,
     sortino_ratio,
@@ -520,6 +521,23 @@ def run_strategy(
             risk_free_rate,
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
+
+        # THE ZERO-DISPERSION CONVENTION, applied at the boundary.
+        # `backtest.cpp` returned 0.0 for a Sharpe with no dispersion where
+        # `metrics/risk_metrics.py` returns NaN, and that is not cosmetic:
+        # in `backtest_grid` a no-trade combination scored 0.0 natively and
+        # sorted ABOVE genuinely losing combinations, while in Python it
+        # sorts to the bottom as NaN -- the two backends ranked the same
+        # grid differently.
+        #
+        # The kernel source is fixed too, but a compiled extension already
+        # in the tree keeps the old value until it is rebuilt, so the
+        # convention is enforced here as well. Idempotent: after a rebuild
+        # the kernel returns NaN and this changes nothing.
+        native_returns = equity_curve.pct_change(fill_method=None).dropna().to_numpy()
+        if native_returns.size and has_no_dispersion(native_returns):
+            r = dict(r)
+            r["sharpe_ratio"] = float("nan")
         # win_rate/profit_factor/num_trades/avg_trade_return_pct: read
         # straight from the native result. backtest.cpp's own trade-log
         # logic uses the identical convention _build_trade_log does

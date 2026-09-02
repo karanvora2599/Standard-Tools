@@ -159,7 +159,17 @@ static double ar1_halflife(const double* y, std::size_t n) {
     // reversion, so it belongs in the same bucket as beta>=0, not a
     // separate silent NaN.
     if (!(beta < 0.0)) return kInf;
-    return -std::log(2.0) / beta;
+
+    // DISCRETE AR(1), matching analysis/cointegration.py::half_life.
+    // beta is b from regressing the first difference on the lagged level,
+    // so phi = 1 + b and a shock halves after log(0.5)/log(phi) BARS.
+    // -log(2)/b is the continuous-time limit, exact only as b -> 0, and
+    // biased one way: +38.63% at phi=0.50, +11.57% at 0.80, +2.59% at 0.95.
+    // Both implementations agreed to 7.11e-15 on the wrong formula.
+    const double phi = 1.0 + beta;
+    if (phi == 0.0) return 0.0;              // reverts within one bar
+    if (std::abs(phi) >= 1.0) return kInf;   // explosive, not fast
+    return std::log(0.5) / std::log(std::abs(phi));
 }
 
 }  // namespace

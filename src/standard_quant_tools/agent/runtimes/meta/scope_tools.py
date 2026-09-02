@@ -1,7 +1,7 @@
 """
 Questions about the tool surface itself.
 
-The library has 145 tools across eight runtimes, and no single session
+The library has 198 tools across ten runtimes, and no single session
 should hold all of them. Choosing a scope is therefore a real decision with
 a real cost, and until now it was one a caller had to make blind: the byte
 cost of a runtime existed as a number inside `mcp/catalog.py` and was

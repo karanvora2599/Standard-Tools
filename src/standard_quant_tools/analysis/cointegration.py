@@ -217,7 +217,36 @@ def half_life(spread: pd.Series) -> float:
     if ar_coeff >= 0:
         return float("inf")
 
-    return float(-np.log(2) / ar_coeff)
+    # THE DISCRETE AR(1) HALF-LIFE, not the continuous-time OU one.
+    #
+    # `ar_coeff` is b from regressing the spread's first difference on its
+    # own lag, so the process is spread_t = (1 + b) * spread_{t-1} + e and
+    # phi = 1 + b. A shock decays by a factor of phi each BAR, so it halves
+    # after log(0.5) / log(phi) bars. `-log(2) / b` is the continuous-time
+    # limit of that, exact only as b -> 0, and it is biased in one
+    # direction -- always "reverts slower":
+    #
+    #     phi     true    -ln2/b    bias
+    #     0.50    1.0000  1.3863    +38.63%
+    #     0.80    3.1063  3.4657    +11.57%
+    #     0.95   13.5134 13.8629     +2.59%
+    #     0.99   68.9676 69.3147     +0.50%
+    #
+    # Checked directly at phi = 0.5: a shock of 1.0 reaches 0.5 after
+    # exactly one bar. `agent/models.py` screens pairs on min_half_life=5
+    # and max_half_life=126 and then RANKS on this number, so the bias
+    # changed which pairs passed and in what order.
+    phi = 1.0 + ar_coeff
+    if phi == 0.0:
+        # Reverts completely in a single bar.
+        return 0.0
+    if abs(phi) >= 1.0:
+        # |phi| >= 1 does not decay: b < 0 with phi <= -1 is an explosive
+        # oscillation, not fast mean reversion.
+        return float("inf")
+    # `abs` so an overshooting (negative phi) spread is measured on the
+    # decay of its envelope rather than returning a complex log.
+    return float(np.log(0.5) / np.log(abs(phi)))
 
 
 def spread_zscore(

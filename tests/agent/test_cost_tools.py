@@ -17,6 +17,7 @@ sweep, not about any market.
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from standard_quant_tools.agent.tools import dispatch
 from standard_quant_tools.backtest import costs
@@ -352,7 +353,17 @@ class TestCompareCostModels:
         assert "unique" in str(exc.value)
 
     def test_unknown_strategy_names_the_available_ones(self, stub_provider):
-        with pytest.raises(ValidationError) as exc:
+        # Caught EARLIER than it used to be. `strategy_type` was a bare
+        # `str`, so the schema accepted anything and the runtime raised the
+        # library's ValidationError naming the registry. It is a Literal
+        # now, so the schema itself rejects it -- which is the point, since
+        # the advertised JSON schema then carries an enum and a client doing
+        # constrained decoding cannot emit a bad value at all.
+        #
+        # `dispatch`'s docstring already documents pydantic.ValidationError
+        # as what a schema mismatch raises. The assertion that matters is
+        # unchanged: the message still names the available strategies.
+        with pytest.raises(PydanticValidationError) as exc:
             dispatch(
                 "compare_cost_models",
                 {

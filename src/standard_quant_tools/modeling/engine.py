@@ -692,7 +692,18 @@ def run_experiment(
     # validated is the quietest way to make a validation number describe
     # something else -- for a ranker that would mean no grading and no
     # grouping at all.
-    full_arrays = adapter.prepare(model_spec, panel, full_X, full_y, None)
+    # WEIGHTED THE SAME WAY THE FOLDS WERE. This passed None, so a model
+    # validated under weighting.method='time_decay' was DEPLOYED
+    # UNWEIGHTED while the manifest still recorded the weighted config --
+    # which is precisely what the comment above says not to do. On a
+    # regime-switching panel the two fits disagreed in sign on 4 of 10
+    # as-of predictions, Spearman 0.75.
+    #
+    # `_fold_sample_weights` needs only `date`, `entity` and optionally the
+    # label-end column, all of which the full panel carries, so this is the
+    # same function the folds call rather than a second weighting path.
+    full_weights = _fold_sample_weights(model_spec, panel)
+    full_arrays = adapter.prepare(model_spec, panel, full_X, full_y, full_weights)
     _fit(
         final_estimator,
         full_arrays.X,

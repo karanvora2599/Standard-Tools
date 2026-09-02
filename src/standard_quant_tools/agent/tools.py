@@ -13,7 +13,7 @@ hundred tests all import from here — and because a union view is genuinely
 useful for a caller that has decided it wants the whole surface.
 
 But `dispatch()` here is UNSCOPED by construction: it will run any of the
-62 tools regardless of what was advertised to the model. That is the exact
+172 tools regardless of what was advertised to the model. That is the exact
 gap the runtimes exist to close, so an agent that is meant to be scoped
 should be handed a runtime rather than this module:
 

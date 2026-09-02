@@ -5,6 +5,7 @@ Agent-tool level tests for run_backtest_compact / BacktestResultV2
 
 import pandas as pd
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from standard_quant_tools.agent.models import BacktestCompactInput
 from standard_quant_tools.agent.tools import dispatch, run_backtest_compact
@@ -135,14 +136,15 @@ class TestRunBacktestCompact:
         assert "my-custom-run" in result.equity_curve_uri
 
     def test_invalid_strategy_raises(self, patched_long, runs_dir):
-        inp = BacktestCompactInput(
-            symbol="AAPL",
-            start_date=START,
-            end_date=END,
-            strategy_type="nonexistent_strategy",
-        )
-        with pytest.raises(ValueError, match="Unknown strategy"):
-            run_backtest_compact(inp)
+        """Rejected at the schema now: `strategy_type` is a Literal, so the
+        bad value never reaches the tool. Pydantic names the allowed set."""
+        with pytest.raises(PydanticValidationError, match="sma_crossover"):
+            BacktestCompactInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy_type="nonexistent_strategy",
+            )
 
     def test_dispatched_through_dispatch(self, patched_long, runs_dir):
         result = dispatch(

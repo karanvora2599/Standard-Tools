@@ -161,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Serve Standard Tools over the Model Context Protocol, on stdio "
             "or over streamable HTTP. Tools are selected by category because "
-            "the full set of 178 costs roughly 69,000 tokens of a client's "
+            "the full set of 198 costs roughly 80,000 tokens of a client's "
             "context at connect."
         ),
     )
@@ -227,8 +227,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-schemas",
         action="store_true",
         help=(
-            "Declare outputSchema for every tool. Costs about 95%% more "
-            "context (253 KB across all 178 tools) and is off by default: "
+            "Declare outputSchema for every tool. Costs about 102%% more "
+            "context (321 KB across all 198 tools) and is off by default: "
             "structuredContent is returned either way, and the declaration "
             "only helps clients that validate against it."
         ),
@@ -238,7 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Expose the tools that can run for minutes "
-            "(scan_cointegrated_pairs is measured at 5.31 min over a "
+            "(scan_pairs is measured at 5.31 min over a "
             "2,000-ticker universe). Off by default, because a client "
             "timeout that fires after most of the work is done is worse "
             "than not offering the tool."

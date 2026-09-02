@@ -99,7 +99,7 @@ def _annotations(entry: ToolEntry) -> types.ToolAnnotations:
     """
     MCP hints, derived from the code rather than hand-maintained.
 
-    `read_only_hint` is True for all 178 because this library does not place
+    `read_only_hint` is True for all 198 because this library does not place
     orders, hold positions, or mutate anything outside its own artifact
     store. That is a property worth encoding in the protocol and worth
     keeping: the moment one tool breaks it, a client has to treat the whole
