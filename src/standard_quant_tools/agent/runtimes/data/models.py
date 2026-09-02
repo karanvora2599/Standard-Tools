@@ -30,7 +30,7 @@ callers unable to predict which convention a given tool follows.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -284,3 +284,44 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
     if frame is None or frame.empty:
         raise ValidationError(f"{what}: {source.symbol!r} returned no bars.")
     return frame["Close"].pct_change().dropna()
+
+
+class FuturesContractSeries(BaseModel):
+    """One contract's history in a chain."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Contract code, e.g. 'ESH6'.")
+    expiry: str = Field(..., description="ISO expiry date.")
+    prices: Dict[str, float] = Field(
+        ..., min_length=1, description="ISO date to close, for THIS contract."
+    )
+    volume: Optional[Dict[str, float]] = Field(
+        None, description="Required when roll_rule is 'volume'."
+    )
+    open_interest: Optional[Dict[str, float]] = Field(
+        None, description="Required when roll_rule is 'open_interest'."
+    )
+
+
+class ContinuousFuturesInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contracts: List[FuturesContractSeries] = Field(
+        ..., min_length=2, description="The chain, in any order."
+    )
+    roll_rule: Literal["volume", "open_interest", "days_before_expiry"] = Field(
+        "volume",
+        description="The three produce different series from the same "
+        "contracts and disagree most where liquidity moved unusually.",
+    )
+    adjustment: Literal["none", "difference", "ratio"] = Field(
+        "ratio",
+        description="difference preserves point moves and can drive history "
+        "negative; ratio preserves compounding and cannot.",
+    )
+    days_before_expiry: int = Field(
+        5, ge=0, le=365, description="Only read by the days_before_expiry rule."
+    )
+    run_id: str = Field(..., description="Groups this workflow's artifacts.")
+    name: str = Field(..., description="Names the series within the run.")

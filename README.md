@@ -9,14 +9,14 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 
 ## Key Features
 - **High performance** — an optional C++ extension (`_sqt_core`) accelerates the CPU-bound paths, behind an identical API with an automatic pure-Python fallback. Headline measured figures: rolling Hurst **274×**, Engle-Granger cointegration **23–86×**, a 2 000-name pair scan **111×** (9.81 h → 5.31 min), whole-universe indicator panels **11.9×**, Wilder's ATR **28×**, the backtest kernel **~58×**, the modeling layer's preprocessing kernels **5.5–53.6×**. Several ports are worth less than that and are reported as such — ADX and GARCH measure at or below 1× against *warm* numba, and exist for the ~200 ms–1.1 s JIT cold start they remove, not for steady-state speed. Every number is measured by toggling the same module's own `HAS_CPP` flag and timing both paths back-to-back. Full tables, methodology, and the ports that did not pay off: **[Documentation/16_performance.md](Documentation/16_performance.md)**.
-- **Agent-first design** — every tool returns a Pydantic model. **193 LLM-callable tools** with OpenAI/Anthropic function-calling schemas, split across **ten parallel runtimes** whose dispatch tables refuse what they do not own, so a tool an agent was never given is unroutable rather than merely unlikely. Bulk values cross between runtimes as typed references, never through the conversation. Unknown arguments are rejected rather than silently ignored, every Sharpe-reporting tool takes the risk-free rate it is measured against, and errors are written to be self-correcting rather than merely accurate.
+- **Agent-first design** — every tool returns a Pydantic model. **195 LLM-callable tools** with OpenAI/Anthropic function-calling schemas, split across **ten parallel runtimes** whose dispatch tables refuse what they do not own, so a tool an agent was never given is unroutable rather than merely unlikely. Bulk values cross between runtimes as typed references, never through the conversation. Unknown arguments are rejected rather than silently ignored, every Sharpe-reporting tool takes the risk-free rate it is measured against, and errors are written to be self-correcting rather than merely accurate.
 - **A client is served one runtime, not the whole surface** — `sqt-mcp --runtime research` costs 47 KB against a 176 KB session ceiling, and the heaviest runtime, `backtest`, is 73 KB at full detail — there is no fixed per-runtime cap, because what a client can afford is a property of the client. `--tool-detail auto` is the DEFAULT: it thins the most expensive schemas until a runtime fits its budget and injects `describe_tool` so the full schema is one call away rather than gone — which brings `backtest` to 34 KB, `research` to 33 KB and `modeling` to 25 KB. The whole surface at full detail is 271 KB (~69k tokens), which does not fit and is not meant to — that constraint is what the scoping exists to answer, not a regression. Every figure here is what `sqt-mcp --print-budget` reports.
 
 | runtime | tools | schema cost | what it answers |
 |---|---:|---:|---|
 | `research` | 42 | 47 KB | what is this asset, and what is its statistical structure |
-| `data` | 13 | 12 KB | get the bytes, and say what they can and cannot support |
-| `backtest` | 33 | 73 KB | does this strategy work, and how much of it is real |
+| `data` | 14 | 15 KB | get the bytes, and say what they can and cannot support |
+| `backtest` | 34 | 76 KB | does this strategy work, and how much of it is real |
 | `modeling` | 17 | 46 KB | build, fit and score a model — one ordered pipeline |
 | `portfolio` | 18 | 31 KB | turn a view into a position and price what it costs |
 | `derivatives` | 12 | 17 KB | what an option is worth and what holding it does to you |
@@ -250,7 +250,7 @@ NaN/Inf data contract is covered separately, in
 | `Documentation/17_correctness.md` | The correctness audits and the backend-parity contract between the Python and C++ tiers |
 | `Documentation/18_mcp.md` | The MCP server: install, runtime and category scoping, the context budget, resources, prompts, and the audit trail over the protocol |
 | `Documentation/19_runtimes.md` | The ten parallel runtimes and why scoping is enforced at dispatch rather than advertised; the typed handoff references that carry bulk values between them; pre-flight tool validation |
-| `Documentation/20_tool_index.md` | **Generated** index of all 193 tools by runtime, with the description the model sees and every argument name |
+| `Documentation/20_tool_index.md` | **Generated** index of all 195 tools by runtime, with the description the model sees and every argument name |
 | `Documentation/21_derivatives.md` | The derivatives runtime: second-order greeks, multi-leg payoffs, smile and term-structure fitting with arbitrage checks, put-call parity, delta-hedge simulation, revaluation grids |
 | `Documentation/28_delta_one.md` | Carry and basis against a quoted future, futures curves and roll economics, beta translated into contracts, and why the holding horizon reverses which instrument is cheapest |
 | `Documentation/22_microstructure.md` | The microstructure runtime: spreads measured from ticks, and the eight bar-based estimators (Roll, Corwin-Schultz, Amihud, Kyle, order flow, VPIN, volume profile, implementation shortfall) for when there is no tick feed |

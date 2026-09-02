@@ -134,16 +134,41 @@ silently becomes `"SPX INDEX US Equity"`, and the timezone metadata reports
 
 Deliberately deferred, in the order they are worth building:
 
-- **Futures backtesting.** Belongs in `backtest`, not here. The portfolio
-  engine's core identity is `position value == shares × price == cash
-  paid`, and a future breaks all three parts of it: margin instead of
-  notional, variation margin to cash, and no market value once that is
-  credited.
-- **Continuous futures.** Belongs in `data`, and must return two things —
-  a research series and a tradeable contract map — because a back-adjusted
-  series is not a price anyone could have traded.
 - **Live basis monitoring.** Not before the data layer has intraday
-  futures and index prices, which today it does not.
+  futures and index prices, which today it does not. Bloomberg's provider
+  implements no intraday request path and no shipped provider exposes
+  depth, so a live index-arbitrage surface would be a set of tools that
+  refuse. Deferring it is the call the microstructure runtime already made
+  about L2, and it was right.
+
+## 6. The infrastructure underneath
+
+Two tools landed outside this runtime, in the runtimes that own them:
+
+| Tool | Runtime | Why there |
+|---|---|---|
+| `build_continuous_futures_series` | `data` | It produces references other runtimes read |
+| `run_futures_backtest` | `backtest` | Delta One computes economics; backtest simulates them |
+
+**A back-adjusted continuous future is not a price.** Adjustment changes
+every historical level — a difference-adjusted series can go negative on a
+contract that never traded below zero — so
+`build_continuous_futures_series` publishes **two** references: an adjusted
+`research_ref` for signals, and a `tradeable_ref` carrying which contract
+was actually active on each date and what it actually traded at. Size
+positions from the second. Collapsing the two is the error the tool exists
+to make impossible.
+
+**A futures account keeps different books.** The shared-cash engine rests on
+`position value == shares × price == cash paid`, and a future breaks all
+three: it costs margin rather than notional, its profit arrives as daily
+variation margin credited to cash, and once credited the contract is worth
+zero again. So `run_futures_backtest` reports equity as cash plus posted
+margin, and its `max_leverage` is **economic exposure over equity** — not
+the gross-market-value ratio the equity engine reports. A futures book is
+at zero on that definition and many times its equity on this one, which is
+why a limit written against one and measured against the other is how a
+flat-looking book turns out not to be.
 
 ---
 

@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 193 below.
+advertises 155 of the 195 below.
 
 
 ## The runtimes
@@ -34,16 +34,16 @@ advertises 155 of the 193 below.
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `backtest` | 33 | 73 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `backtest` | 34 | 76 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `modeling` | 17 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `microstructure` | 15 | 19 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `delta_one` | 15 | 29 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
-| `data` | 13 | 12 KB | *(one surface)* | [26_data.md](26_data.md) |
+| `data` | 14 | 15 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 11 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **193** | | | |
+| **Total** | **195** | | | |
 
 ---
 
@@ -384,6 +384,13 @@ Buy-and-hold baseline: long the full period. Use as a passive benchmark.
 
 **Required:** `symbol`, `start_date`, `end_date`  
 **Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`
+
+#### `run_futures_backtest`
+
+Simulate a FUTURES account, whose books the shared-cash engine cannot keep. Buying ten ES at 6200 does not cost 10 x 6200 x 50 of cash, it costs margin; the position then has no market value, because its profit arrives as daily variation margin credited to cash; and a short future pays no borrow. Equity here is cash plus posted margin and the contracts contribute nothing, so the leverage reported is economic exposure over equity rather than the gross-market-value ratio, and the two are not comparable. Margin calls reduce the position rather than being financed away.
+
+**Required:** `prices`, `target_contracts`, `multiplier`  
+**Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`
 
 #### `run_macd_backtest`
 
@@ -1203,6 +1210,13 @@ Recover whichever of financing, dividend or borrow a quoted forward implies, giv
 ## `data` — Data
 
 Get the data and publish it as an `sqt://` reference every other runtime can read: OHLCV for one name or a whole universe, return panels, tick tapes and quote panels, provider guarantees, temporal contracts, and bundles that pair frames with what their sources promise. Fetches; does not analyze.
+
+#### `build_continuous_futures_series`
+
+Stitch a chain of futures contracts into one continuous series, and publish TWO references rather than one. The adjusted series is a research instrument and is not a price -- back-adjustment changes every historical level, and a difference-adjusted series can go negative on a contract that never traded below zero -- so sizing a position from it means sizing against a number nobody could have transacted at. The second reference carries which contract was actually active each date and what it actually traded at.
+
+**Required:** `contracts`, `run_id`, `name`  
+**Optional:** `roll_rule`, `adjustment`, `days_before_expiry`
 
 #### `build_data_bundle`
 

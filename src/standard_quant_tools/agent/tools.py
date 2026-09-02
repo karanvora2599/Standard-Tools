@@ -58,6 +58,7 @@ from standard_quant_tools.agent.runtimes.backtest import (
     run_bollinger_backtest,
     run_buy_and_hold,
     run_custom_signal_backtest,
+    run_futures_backtest,
     run_macd_backtest,
     run_monte_carlo_simulation,
     run_monte_carlo_trade_paths,
@@ -74,6 +75,7 @@ from standard_quant_tools.agent.runtimes.backtest import (
     run_walk_forward_backtest,
 )
 from standard_quant_tools.agent.runtimes.data import (
+    build_continuous_futures_series,
     build_data_bundle,
     compare_ratio_frames,
     describe_data_bundle,

@@ -34,6 +34,7 @@ import pandas as pd
 
 from standard_quant_tools.data.bundle import DataBundle, validate_bundle
 from standard_quant_tools.data.comparison import compare_ratio_sources
+from standard_quant_tools.data.continuous import build_continuous_futures
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.data.ratios import implausible_value_warnings
 from standard_quant_tools.data.temporal import contract_for_frame
@@ -47,6 +48,7 @@ from ..handoff import publish, resolve
 from .models import (
     BuildDataBundleInput,
     CompareRatioFramesInput,
+    ContinuousFuturesInput,
     DataBundleRefInput,
     DatasetMetadataInput,
     FetchFinancialRatiosInput,
@@ -62,6 +64,7 @@ from .models import (
 from .results import (
     BundleFrameSummary,
     BundleVerdictResult,
+    ContinuousFuturesResult,
     DataBundleResult,
     DatasetMetadataResult,
     FetchResult,
@@ -590,3 +593,55 @@ __all__ = [
     "validate_data_bundle",
     "validate_financial_ratios",
 ]
+
+
+def build_continuous_futures_series(
+    input_data: ContinuousFuturesInput,
+) -> ContinuousFuturesResult:
+    chain = [c.model_dump(exclude_none=True) for c in input_data.contracts]
+    built = build_continuous_futures(
+        chain,
+        roll_rule=input_data.roll_rule,
+        adjustment=input_data.adjustment,
+        days_before_expiry=input_data.days_before_expiry,
+    )
+
+    research = pd.DataFrame(
+        {"price": pd.Series(built["research_series"], dtype="float64")}
+    )
+    research.index = pd.to_datetime(research.index)
+    tradeable = pd.DataFrame.from_dict(built["tradeable_contract_map"], orient="index")
+    tradeable.index = pd.to_datetime(tradeable.index)
+
+    # Published SEPARATELY on purpose. One reference carrying both would let
+    # a caller reach for whichever column was nearer, and the whole reason
+    # this tool returns two things is that using the adjusted series to size
+    # a position is the error it exists to prevent.
+    research_ref = publish(
+        research.sort_index(),
+        kind="price_panel",
+        run_id=input_data.run_id,
+        name=f"{input_data.name}_research",
+        producer="build_continuous_futures_series",
+    )
+    tradeable_ref = publish(
+        tradeable.sort_index(),
+        kind="price_panel",
+        run_id=input_data.run_id,
+        name=f"{input_data.name}_tradeable",
+        producer="build_continuous_futures_series",
+    )
+    return ContinuousFuturesResult(
+        research_ref=research_ref,
+        tradeable_ref=tradeable_ref,
+        roll_rule=built["roll_rule"],
+        adjustment=built["adjustment"],
+        n_contracts=built["n_contracts"],
+        n_observations=built["n_observations"],
+        n_rolls=built["n_rolls"],
+        roll_dates=built["roll_dates"],
+        contracts_used=built["contracts_used"],
+        start=built["start"],
+        end=built["end"],
+        warnings=built["warnings"],
+    )

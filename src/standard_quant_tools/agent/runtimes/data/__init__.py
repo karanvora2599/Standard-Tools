@@ -28,6 +28,7 @@ tool.
 from .models import (
     BuildDataBundleInput,
     CompareRatioFramesInput,
+    ContinuousFuturesInput,
     DataBundleRefInput,
     DatasetMetadataInput,
     FetchFinancialRatiosInput,
@@ -41,6 +42,7 @@ from .models import (
     ValidateFinancialRatiosInput,
 )
 from .tools import (
+    build_continuous_futures_series,
     build_data_bundle,
     compare_ratio_frames,
     describe_data_bundle,
@@ -184,6 +186,18 @@ TOOL_DEFS = [
         "library cannot fetch.",
         CompareRatioFramesInput,
     ),
+    (
+        "build_continuous_futures_series",
+        "Stitch a chain of futures contracts into one continuous series, and "
+        "publish TWO references rather than one. The adjusted series is a "
+        "research instrument and is not a price -- back-adjustment changes "
+        "every historical level, and a difference-adjusted series can go "
+        "negative on a contract that never traded below zero -- so sizing a "
+        "position from it means sizing against a number nobody could have "
+        "transacted at. The second reference carries which contract was "
+        "actually active each date and what it actually traded at.",
+        ContinuousFuturesInput,
+    ),
 ]
 
 TOOL_DISPATCH = {
@@ -209,6 +223,10 @@ TOOL_DISPATCH = {
         ValidateFinancialRatiosInput,
     ),
     "compare_ratio_frames": (compare_ratio_frames, CompareRatioFramesInput),
+    "build_continuous_futures_series": (
+        build_continuous_futures_series,
+        ContinuousFuturesInput,
+    ),
 }
 
 #: Every tool here belongs to the one category this runtime owns.
@@ -218,6 +236,7 @@ __all__ = [
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",
+    "build_continuous_futures_series",
     "build_data_bundle",
     "compare_ratio_frames",
     "describe_data_bundle",

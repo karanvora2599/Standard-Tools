@@ -41,8 +41,8 @@ shipped, generalized to the rest of the surface.
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
 | `research` | 42 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
-| `data` | 13 | `data` | Get the bytes and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
-| `backtest` | 33 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
+| `data` | 14 | `data` | Get the bytes and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
+| `backtest` | 34 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 19 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 18 | `portfolio_risk` | Turn a view into a position and price what it costs. |
 | `modeling` | 17 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |

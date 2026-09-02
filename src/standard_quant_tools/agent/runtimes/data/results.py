@@ -163,3 +163,31 @@ __all__ = [
     "Stat",
     "TemporalContractResult",
 ]
+
+
+class ContinuousFuturesResult(BaseModel):
+    """Two references, deliberately, and they are not interchangeable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    research_ref: str = Field(
+        ...,
+        description="The ADJUSTED continuous series, as a `price_panel`. For "
+        "indicators and signals. NOT a price -- do not size from it.",
+    )
+    tradeable_ref: str = Field(
+        ...,
+        description="Which contract was active on each date and what it "
+        "actually traded at, as a `price_panel`. Size positions, cost "
+        "trades and place stops from THIS one.",
+    )
+    roll_rule: str = ""
+    adjustment: str = ""
+    n_contracts: int = 0
+    n_observations: int = 0
+    n_rolls: int = 0
+    roll_dates: List[str] = Field(default_factory=list)
+    contracts_used: List[str] = Field(default_factory=list)
+    start: Optional[str] = None
+    end: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)

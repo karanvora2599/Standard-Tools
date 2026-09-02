@@ -25,6 +25,12 @@ from standard_quant_tools.agent.models import (
     WalkForwardInput,
 )
 
+from .futures_tools import (  # noqa: F401
+    FUTURES_TOOL_CATEGORY,
+    FUTURES_TOOL_DEFS,
+    FUTURES_TOOL_DISPATCH,
+    run_futures_backtest,
+)
 from .terminal_mc_tools import (  # noqa: F401
     TerminalMonteCarloInput,
     run_terminal_monte_carlo,
@@ -261,6 +267,12 @@ TOOL_CATEGORY = {
 TOOL_DISPATCH.update(VALIDATION_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "backtest_validation" for name in VALIDATION_TOOL_DISPATCH})
 
+# Its own file and its own category entry: run_futures_backtest is an
+# EXECUTION tool like the others, not a validation one.
+TOOL_DEFS = TOOL_DEFS + FUTURES_TOOL_DEFS
+TOOL_DISPATCH.update(FUTURES_TOOL_DISPATCH)
+TOOL_CATEGORY.update(FUTURES_TOOL_CATEGORY)
+
 TOOL_DISPATCH.update(TRADE_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "backtest_validation" for name in TRADE_TOOL_DISPATCH})
 
@@ -290,6 +302,7 @@ __all__ = [
     "run_bollinger_backtest",
     "run_buy_and_hold",
     "run_custom_signal_backtest",
+    "run_futures_backtest",
     "run_macd_backtest",
     "run_monte_carlo_simulation",
     "run_pair_trade_backtest",

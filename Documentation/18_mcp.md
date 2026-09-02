@@ -145,7 +145,7 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 193 tools cost about **300 KB of schema, ~77,000 tokens**, held for the
+The 195 tools cost about **306 KB of schema, ~78,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
@@ -239,7 +239,7 @@ Serve a runtime, or narrow inside one:
 
 ```bash
 sqt-mcp --runtime research                    # 42 tools, 35 KB served
-sqt-mcp --runtime backtest                    # 33 tools, 35 KB served
+sqt-mcp --runtime backtest                    # 34 tools, 36 KB served
 sqt-mcp --runtime derivatives                 # 12 tools, 17 KB served
 sqt-mcp --runtime microstructure              # 15 tools, 19 KB served
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
@@ -432,7 +432,7 @@ own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 193 tools has a typed Pydantic return, so the server can
+Every one of the 195 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. The plan assumed that was free; measured, it
@@ -536,7 +536,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 193 tools declares `readOnlyHint: true` and
+Every one of the 195 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 
