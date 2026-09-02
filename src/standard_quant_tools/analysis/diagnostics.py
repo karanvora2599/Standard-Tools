@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 
@@ -698,9 +699,10 @@ def rolling_sharpe_stability(
         "window": window,
         "n_windows": int(array.size),
         "n_independent_windows": independent,
-        "full_sample_sharpe": float(
-            values.mean() / values.std(ddof=1) * math.sqrt(periods_per_year)
-        ),
+        # Was the only Sharpe in this file with NO guard at all, which is
+        # how a flat series reported a full-sample Sharpe of 7.3e16 and a
+        # `decaying` verdict of False computed from it.
+        "full_sample_sharpe": _annualized_sharpe(values, periods_per_year),
         "mean_rolling_sharpe": float(array.mean()),
         "std_rolling_sharpe": float(array.std(ddof=1)) if array.size > 1 else 0.0,
         "min_rolling_sharpe": float(array.min()),
@@ -723,10 +725,13 @@ def rolling_sharpe_stability(
 
 
 def _annualized_sharpe(values: np.ndarray, periods: int) -> float:
+    # The guard is `has_no_dispersion`, not `std <= 0`. See its docstring:
+    # numpy returns 2.2e-19 on a constant series, so the absolute test
+    # passes and the answer comes back as 7.3e16.
     if values.size < 2:
         return float("nan")
     std = float(values.std(ddof=1))
-    if std <= 0:
+    if has_no_dispersion(values, std):
         return float("nan")
     return float(values.mean() / std * math.sqrt(periods))
 

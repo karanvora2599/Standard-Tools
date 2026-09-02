@@ -320,7 +320,7 @@ def get_portfolio_risk_attribution(
         {
             t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)[
                 "Close"
-            ].pct_change()
+            ].pct_change(fill_method=None)
             for t in input_data.tickers
         }
     ).dropna()
@@ -329,7 +329,7 @@ def get_portfolio_risk_attribution(
         provider.get_ohlcv(
             input_data.benchmark, input_data.start_date, input_data.end_date
         )["Close"]
-        .pct_change()
+        .pct_change(fill_method=None)
         .dropna()
     )
 
@@ -387,7 +387,7 @@ def get_portfolio_risk_attribution(
             {
                 name: provider.get_ohlcv(
                     tick, input_data.start_date, input_data.end_date
-                )["Close"].pct_change()
+                )["Close"].pct_change(fill_method=None)
                 for name, tick in zip(names, input_data.factor_tickers)
             }
         ).dropna()
@@ -451,7 +451,7 @@ def run_stress_test(input_data: StressTestInput) -> StressTestResult:
     for t in input_data.tickers:
         try:
             close = provider.get_ohlcv(t, scenario_start, scenario_end)["Close"]
-            returns = close.pct_change().dropna()
+            returns = close.pct_change(fill_method=None).dropna()
             if returns.empty:
                 raise ValueError("no trading days with data in this window")
             returns_by_ticker[t] = returns
@@ -740,7 +740,7 @@ def get_liquidity_metrics(
         if "Volume" not in df.columns:
             raise ValueError(f"OHLCV for {t!r} is missing a 'Volume' column")
 
-        returns = df["Close"].pct_change()
+        returns = df["Close"].pct_change(fill_method=None)
         dollar_volume = df["Close"] * df["Volume"]
         avg_dollar_volume = dollar_volume.rolling(window, min_periods=1).mean()
 
@@ -1046,7 +1046,7 @@ def check_spread_proxy(input_data: SpreadProxyCheckInput) -> SpreadProxyCheckRes
         )
     proxy_bps = float(cs_valid.mean()) * 10_000.0
 
-    returns = bars["Close"].pct_change()
+    returns = bars["Close"].pct_change(fill_method=None)
     dollar_volume = bars["Close"] * bars["Volume"]
     amihud = amihud_illiquidity(returns, dollar_volume, window=input_data.window)
     amihud_valid = amihud.dropna()

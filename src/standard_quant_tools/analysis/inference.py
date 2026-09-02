@@ -52,6 +52,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 
@@ -107,12 +108,15 @@ def _statistic(values: np.ndarray, name: str, periods: int = TRADING_DAYS) -> fl
                 else float("nan")
             )
         )
-        if not math.isfinite(std) or std <= 0:
+        # Relative, for the reason has_no_dispersion documents. This file
+        # already cites the same fault a few lines below, in
+        # `test_normality`, and had applied the fix only there.
+        if has_no_dispersion(values, std):
             return float("nan")
         return float(values.mean() / std * math.sqrt(periods))
     if name in ("skew", "kurtosis"):
         std = float(values.std(ddof=1))
-        if std <= 0:
+        if has_no_dispersion(values, std):
             return float("nan")
         centred = (values - values.mean()) / std
         return float((centred**3).mean() if name == "skew" else (centred**4).mean())

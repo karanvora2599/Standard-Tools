@@ -309,8 +309,8 @@ async def _fetch_ticker_data(
                     if spy_df is not None
                     else await provider.get_ohlcv_async("SPY", start_date, end_date)
                 )
-                asset_ret = close.pct_change().dropna()
-                spy_ret = _spy["Close"].pct_change().dropna()
+                asset_ret = close.pct_change(fill_method=None).dropna()
+                spy_ret = _spy["Close"].pct_change(fill_method=None).dropna()
                 # calculate_beta returns {"alpha": 0, "beta": 0, "r_squared": 0}
                 # when fewer than 2 points overlap -- a sentinel, but an
                 # indistinguishable one, because 0.0 is also a perfectly

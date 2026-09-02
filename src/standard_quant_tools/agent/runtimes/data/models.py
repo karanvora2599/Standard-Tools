@@ -283,7 +283,7 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
     frame = provider.get_ohlcv(source.symbol, "1900-01-01", "2100-01-01")
     if frame is None or frame.empty:
         raise ValidationError(f"{what}: {source.symbol!r} returned no bars.")
-    return frame["Close"].pct_change().dropna()
+    return frame["Close"].pct_change(fill_method=None).dropna()
 
 
 class FuturesContractSeries(BaseModel):

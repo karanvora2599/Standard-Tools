@@ -24,7 +24,23 @@ def build_returns_panel(close_by_entity: Dict[str, pd.Series]) -> pd.DataFrame:
     cross-section each date, not a ragged one, so a date missing for any
     single entity is dropped for all. dataset/coverage.py reports what that
     intersection cost when it is material."""
-    returns = {entity: close.pct_change() for entity, close in close_by_entity.items()}
+    # fill_method=None, EXPLICITLY. pandas' default is "pad": a gap in a
+    # price series is forward-filled before the difference is taken, so a
+    # name that did not trade is credited with a 0.00% return rather than
+    # with no return at all. Measured on a two-name panel with one halted
+    # day, the default produced B = 0.000000 on the halted date and the
+    # explicit form produces NaN, which `dropna` then removes.
+    #
+    # A fabricated zero is not a harmless placeholder here. It biases the
+    # covariance and the correlation toward understating a halted name's
+    # volatility and its co-movement with everything else -- and this panel
+    # is what PCA and the optimizer see. pandas has deprecated the default,
+    # so leaving it implicit also meant every one of those numbers would
+    # change silently on a pandas upgrade.
+    returns = {
+        entity: close.pct_change(fill_method=None)
+        for entity, close in close_by_entity.items()
+    }
     return pd.DataFrame(returns).dropna(how="any")
 
 

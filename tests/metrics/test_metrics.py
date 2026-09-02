@@ -11,6 +11,7 @@ from standard_quant_tools.metrics.return_metrics import (
     cumulative_return,
 )
 from standard_quant_tools.metrics.risk_metrics import (
+    has_no_dispersion,
     HAS_SCIPY,
     _fit_gpd_pwm,
     calmar_ratio,
@@ -117,6 +118,46 @@ class TestSharpeRatio:
         low_vol = pd.Series(np.random.normal(0.001, 0.005, 252))
         high_vol = pd.Series(np.random.normal(0.001, 0.020, 252))
         assert sharpe_ratio(low_vol) > sharpe_ratio(high_vol)
+
+
+class TestTheZeroDispersionGuard:
+    """A flat series has no Sharpe, and saying so is the whole point.
+
+    The guard has to be RELATIVE. numpy's `std` on a constant series
+    returns ~2.2e-19 rather than 0 -- the deviations are taken against an
+    accumulated mean and the rounding does not cancel -- so `std == 0`
+    passes and the ratio comes back finite and enormous. Measured before
+    the fix: a constant 0.001 gave 7.31e+16, a constant 0.01 gave 0.0, and
+    a constant -0.002 gave -7.31e+16. Three answers to one question,
+    decided by the constant's binary representation.
+
+    That mattered beyond the number: `robustness.parameter_sensitivity`
+    filters candidate rows with `np.isfinite`, and 7.31e16 IS finite, so a
+    degenerate zero-variance parameter row won the grid.
+    """
+
+    @pytest.mark.parametrize("constant", [0.001, 0.01, -0.002, 0.0, 1e-8])
+    def test_a_constant_series_has_no_sharpe(self, constant):
+        assert np.isnan(sharpe_ratio(pd.Series([constant] * 600)))
+
+    def test_the_guard_is_relative_not_absolute(self):
+        """A tiny-but-real spread is NOT constant and must still be scored."""
+        rng = np.random.default_rng(0)
+        tiny = pd.Series(rng.normal(1e-8, 1e-9, 600))
+        assert np.isfinite(sharpe_ratio(tiny))
+        assert not has_no_dispersion(tiny)
+
+    def test_a_real_series_is_untouched(self):
+        rng = np.random.default_rng(1)
+        real = pd.Series(rng.normal(0.0005, 0.012, 600))
+        assert np.isfinite(sharpe_ratio(real))
+
+    def test_the_predicate_agrees_with_what_sharpe_does(self):
+        for values in ([0.001] * 600, [0.0] * 600, [5.0], []):
+            series = pd.Series(values, dtype="float64")
+            flat = has_no_dispersion(series)
+            if len(series) >= 2:
+                assert flat == bool(np.isnan(sharpe_ratio(series))), values[:2]
 
 
 class TestSortinoRatio:

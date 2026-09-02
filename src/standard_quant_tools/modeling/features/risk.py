@@ -84,8 +84,8 @@ def _risk_rolling_beta(
             "risk.rolling_beta requires FeatureContext.benchmark_close — "
             "dataset.builder must fetch DatasetSpec.benchmark before computing it."
         )
-    asset_returns = ohlcv["Close"].pct_change().dropna()
-    benchmark_returns = context.benchmark_close.pct_change().dropna()
+    asset_returns = ohlcv["Close"].pct_change(fill_method=None).dropna()
+    benchmark_returns = context.benchmark_close.pct_change(fill_method=None).dropna()
     return _rolling_beta(asset_returns, benchmark_returns, window=window)[
         "Rolling_Beta"
     ]

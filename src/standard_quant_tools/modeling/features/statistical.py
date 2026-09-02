@@ -13,7 +13,7 @@ from .registry import register_feature
 def _statistical_hurst(
     ohlcv: pd.DataFrame, context: FeatureContext, window: int = 200, method: str = "dfa"
 ) -> pd.Series:
-    returns = ohlcv["Close"].pct_change().dropna()
+    returns = ohlcv["Close"].pct_change(fill_method=None).dropna()
     return _rolling_hurst(returns, window=window, method=method)
 
 

@@ -48,6 +48,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 
@@ -152,10 +153,11 @@ def _sharpe(values: np.ndarray, periods: int = TRADING_DAYS) -> float:
     if values.size < 2:
         return float("nan")
     std = float(values.std(ddof=1))
-    if std <= 0 or not math.isfinite(std):
-        return float("nan")
-    scale = float(np.max(np.abs(values)))
-    if scale > 0 and float(np.ptp(values)) <= scale * 1e-12:
+    # The relative test that used to live here inline. It is now
+    # `metrics.risk_metrics.has_no_dispersion`, because five other
+    # implementations were carrying the broken absolute version while this
+    # docstring explained why it was broken.
+    if has_no_dispersion(values, std):
         return float("nan")
     return float(values.mean() / std * math.sqrt(periods))
 

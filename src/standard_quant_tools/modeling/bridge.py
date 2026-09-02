@@ -133,7 +133,7 @@ def _assert_continuous_calendar(
     Reject an OOS artifact whose dates have a hole in them.
 
     `run_strategy` intersects price data down to the supplied signal index
-    and then calls `.pct_change()` on that COMPRESSED price series, so a
+    and then calls `.pct_change(fill_method=None)` on that COMPRESSED price series, so a
     missing span does not read as "no position" — it disappears from the
     price axis entirely and the two bars either side become adjacent.
     Measured on a 90-day series with February absent, the boundary bar

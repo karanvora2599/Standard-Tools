@@ -94,7 +94,7 @@ def detect_price_jumps(
     close = df["Close"]
     if len(close) < 2:
         return []
-    pct_change = close.pct_change()
+    pct_change = close.pct_change(fill_method=None)
     flagged = pct_change[pct_change.abs() > threshold]
     return [
         {"date": str(idx.date()), "pct_change": round(float(val), 4)}

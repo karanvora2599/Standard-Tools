@@ -217,8 +217,8 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
     asset_df = provider.get_ohlcv(input_data.symbol, start, end)
     bench_df = provider.get_ohlcv(input_data.benchmark, start, end)
 
-    asset_ret = asset_df["Close"].pct_change().dropna()
-    bench_ret = bench_df["Close"].pct_change().dropna()
+    asset_ret = asset_df["Close"].pct_change(fill_method=None).dropna()
+    bench_ret = bench_df["Close"].pct_change(fill_method=None).dropna()
 
     beta_metrics = calculate_beta(asset_ret, bench_ret)
     equity_curve = (1 + asset_ret).cumprod()
@@ -438,7 +438,7 @@ def get_portfolio_analysis(input_data: PortfolioInput) -> PortfolioResult:
     bench_df_raw = DataFactory.get_provider().get_ohlcv(
         input_data.benchmark, input_data.start_date, input_data.end_date
     )
-    bench_returns = bench_df_raw["Close"].pct_change().dropna()
+    bench_returns = bench_df_raw["Close"].pct_change(fill_method=None).dropna()
 
     common_idx = returns_df.index.intersection(bench_returns.index)
     aligned_returns = returns_df.loc[common_idx]
@@ -530,13 +530,13 @@ def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegression
     asset_df = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )
-    asset_rets = asset_df["Close"].pct_change().dropna()
+    asset_rets = asset_df["Close"].pct_change(fill_method=None).dropna()
 
     names = input_data.factor_names or input_data.factor_tickers
     factor_series = {}
     for ticker, name in zip(input_data.factor_tickers, names):
         df = provider.get_ohlcv(ticker, input_data.start_date, input_data.end_date)
-        factor_series[name] = df["Close"].pct_change().dropna()
+        factor_series[name] = df["Close"].pct_change(fill_method=None).dropna()
 
     factors = pd.DataFrame(factor_series)
     result = multi_factor_regression(asset_rets, factors)
@@ -706,7 +706,7 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
         {
             t: provider.get_ohlcv(t, input_data.start_date, input_data.end_date)[
                 "Close"
-            ].pct_change()
+            ].pct_change(fill_method=None)
             for t in input_data.tickers
         }
     ).dropna()
@@ -806,7 +806,7 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
     df = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )
-    returns = df["Close"].pct_change().dropna()
+    returns = df["Close"].pct_change(fill_method=None).dropna()
 
     result = hurst_exponent(
         returns,
@@ -925,7 +925,7 @@ def get_volatility_estimators(
     )
     period = input_data.period
 
-    close_returns = df["Close"].pct_change().dropna()
+    close_returns = df["Close"].pct_change(fill_method=None).dropna()
     close_to_close = annualized_volatility(close_returns)
 
     parkinson = parkinson_volatility(df["High"], df["Low"], period=period)
@@ -975,7 +975,7 @@ def run_garch_volatility_forecast(
     close = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )["Close"]
-    returns = close.pct_change().dropna()
+    returns = close.pct_change(fill_method=None).dropna()
 
     result = garch_volatility_forecast(
         returns, forecast_horizon=input_data.forecast_horizon
@@ -1281,8 +1281,8 @@ def get_rolling_beta(input_data: RollingBetaInput) -> RollingBetaResult:
         input_data.benchmark, input_data.start_date, input_data.end_date
     )
 
-    asset_ret = asset_df["Close"].pct_change().dropna()
-    bench_ret = bench_df["Close"].pct_change().dropna()
+    asset_ret = asset_df["Close"].pct_change(fill_method=None).dropna()
+    bench_ret = bench_df["Close"].pct_change(fill_method=None).dropna()
 
     rb = rolling_beta(asset_ret, bench_ret, window=input_data.window)[
         "Rolling_Beta"
@@ -1352,8 +1352,8 @@ def get_extended_risk_metrics(input_data: ExtendedRiskInput) -> ExtendedRiskResu
         input_data.benchmark, input_data.start_date, input_data.end_date
     )
 
-    asset_ret = asset_df["Close"].pct_change().dropna()
-    bench_ret = bench_df["Close"].pct_change().dropna()
+    asset_ret = asset_df["Close"].pct_change(fill_method=None).dropna()
+    bench_ret = bench_df["Close"].pct_change(fill_method=None).dropna()
     equity_curve = (1 + asset_ret).cumprod()
 
     ann_ret = cagr(equity_curve)
@@ -1407,7 +1407,7 @@ def get_tail_risk_metrics(input_data: TailRiskInput) -> TailRiskResult:
     close = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )["Close"]
-    returns = close.pct_change().dropna()
+    returns = close.pct_change(fill_method=None).dropna()
 
     result = evt_tail_risk(
         returns,
@@ -1660,7 +1660,7 @@ def _price_series(symbol: str, start_date: str, end_date: str, on: str = "price"
 
     frame = DataFactory.get_provider().get_ohlcv(symbol, start_date, end_date)
     close = frame["Close"] if "Close" in frame.columns else frame["close"]
-    return close.pct_change().dropna() if on == "returns" else close
+    return close.pct_change(fill_method=None).dropna() if on == "returns" else close
 
 
 def detect_change_points(input_data: ChangePointInput) -> ChangePointResult:

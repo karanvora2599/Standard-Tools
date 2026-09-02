@@ -462,7 +462,7 @@ def _summarize_simulation(
     equity = result["equity_curve"].dropna()
     if equity.empty:
         raise ValidationError("simulation produced an empty equity curve")
-    returns = equity.pct_change().dropna()
+    returns = equity.pct_change(fill_method=None).dropna()
 
     rebalance_log = result["rebalance_log"]
     turnover = (
@@ -679,7 +679,7 @@ def evaluate_model_portfolio(
         # because reindexing first would turn an N-bar volatility window
         # into N rebalance-period observations.
         returns_df = pd.DataFrame(
-            {e: price_data[e]["Close"].pct_change() for e in entities}
+            {e: price_data[e]["Close"].pct_change(fill_method=None) for e in entities}
         )
 
     weights, transform_diagnostics = transform_predictions_to_weights(

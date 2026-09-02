@@ -184,7 +184,7 @@ def detect_rally(
     else:
         effective_adx_threshold = adx_threshold
 
-    returns = close.pct_change().dropna()
+    returns = close.pct_change(fill_method=None).dropna()
     hurst_result = hurst_exponent(returns, method=hurst_method)
 
     breakout_high = df["High"].rolling(breakout_period).max().shift(1)

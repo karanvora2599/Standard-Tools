@@ -167,11 +167,34 @@ async def fetch_returns_async(
     ]
     dfs = await asyncio.gather(*tasks)
 
-    # Build aligned close-price matrix then compute returns
-    close_prices = pd.DataFrame(
-        {ticker: df["Close"] for ticker, df in zip(tickers, dfs)}
-    )
-    return close_prices.pct_change().dropna()
+    # PER TICKER FIRST, then assemble. Building the matrix first and
+    # calling pct_change() on it is not the same computation: the union
+    # index puts a NaN wherever one name lacks a bar, and DataFrame
+    # .pct_change(fill_method=None) still defaults to fill_method="pad", so that missing
+    # price is FORWARD-FILLED and the name is credited with a 0.00% return
+    # on a day it did not trade. Measured on a two-name panel with one
+    # halted day:
+    #
+    #     per-ticker   01-02 A 0.010000  B 0.040000
+    #                  01-04 A 0.009804  B 0.057692
+    #     assemble-first
+    #                  01-03 A 0.009901  B 0.000000   <-- fabricated
+    #
+    # A fabricated zero biases covariance, correlation and PCA toward
+    # understating a halted name's volatility and its correlation to
+    # everything else -- and this panel feeds the portfolio optimizer, the
+    # research correlation and PCA tools, and fetch_returns_panel. It also
+    # emitted a FutureWarning, so pandas dropping the pad would have
+    # changed every one of those results silently.
+    #
+    # Same three steps as modeling.dataset.alignment.build_returns_panel,
+    # which got this right; not imported because portfolio/ sits below
+    # modeling/ and the dependency would run the wrong way.
+    returns = {
+        ticker: df["Close"].pct_change(fill_method=None)
+        for ticker, df in zip(tickers, dfs)
+    }
+    return pd.DataFrame(returns).dropna(how="any")
 
 
 def fetch_returns_sync(

@@ -760,7 +760,7 @@ def run_portfolio_simulation(
     if use_impact_model:
         volatility_mat = np.empty((n_bars, n_tickers), dtype=np.float64)
         for t, i in ticker_pos.items():
-            ret = price_data[t]["Close"].pct_change().reindex(master_index)
+            ret = price_data[t]["Close"].pct_change(fill_method=None).reindex(master_index)
             volatility_mat[:, i] = (
                 ret.rolling(impact_lookback, min_periods=1)
                 .std()

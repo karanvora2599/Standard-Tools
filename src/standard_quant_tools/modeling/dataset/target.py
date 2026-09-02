@@ -77,7 +77,7 @@ def _horizon_volatility(close: pd.Series, spec: TargetSpec) -> pd.Series:
     meaningful volatility-scaled return, and alignment drops the row like
     any other missing value.
     """
-    returns = close.pct_change()
+    returns = close.pct_change(fill_method=None)
     vol = returns.rolling(spec.vol_window, min_periods=spec.vol_window).std()
     scaled = vol * np.sqrt(float(spec.horizon))
     return scaled.where(scaled > 0)

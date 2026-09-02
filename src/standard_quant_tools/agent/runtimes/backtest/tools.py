@@ -400,7 +400,7 @@ def run_regime_adaptive_backtest(
     df = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )
-    returns = df["Close"].pct_change().dropna()
+    returns = df["Close"].pct_change(fill_method=None).dropna()
 
     hurst_result = _hurst(returns, method=input_data.hurst_method)
     h = hurst_result["hurst"]
@@ -549,7 +549,7 @@ def run_regime_adaptive_walkforward_backtest(
         test_df = df.iloc[cursor + train_bars : cursor + train_bars + test_bars]
         full_slice = df.iloc[cursor : cursor + train_bars + test_bars]
 
-        train_returns = train_df["Close"].pct_change().dropna()
+        train_returns = train_df["Close"].pct_change(fill_method=None).dropna()
         hurst_result = _hurst(train_returns, method=input_data.hurst_method)
         h = hurst_result["hurst"]
         regime = hurst_result["regime"]
@@ -1086,7 +1086,7 @@ def run_signal_panel_backtest(
         bench_df = DataFactory.get_provider().get_ohlcv(
             input_data.benchmark, input_data.start_date, input_data.end_date
         )
-        bench_returns = bench_df["Close"].pct_change().dropna()
+        bench_returns = bench_df["Close"].pct_change(fill_method=None).dropna()
 
     weights_arg: Any = input_data.weights if input_data.weights is not None else None
 
@@ -1159,7 +1159,7 @@ def _metrics_with_day0_cost(
     invisible: equity_curve.iloc[0] from run_portfolio_simulation/
     run_pair_backtest is already net of that rebalance's costs, so naively
     using cumulative_return/cagr (baseline = equity_curve.iloc[0]) and
-    equity_curve.pct_change() (first return = NaN -> filled 0.0) silently
+    equity_curve.pct_change(fill_method=None) (first return = NaN -> filled 0.0) silently
     drops the day-0 cost's entire effect on every downstream metric.
     Prepending a synthetic pre-trade observation at initial_capital makes
     the first real return capture it instead.
@@ -1187,7 +1187,7 @@ def _metrics_with_day0_cost(
             equity_curve,
         ]
     )
-    returns = equity_with_start.pct_change().dropna()
+    returns = equity_with_start.pct_change(fill_method=None).dropna()
     total_return = float(equity_curve.iloc[-1]) / initial_capital - 1.0
     num_years = len(equity_curve) / 252
     annualized_return = (
@@ -1283,7 +1283,7 @@ def run_portfolio_simulation(
             )
         else:  # vol_scaled — validated to be one of _CONSTRUCTION_METHODS by the input model
             returns_df = pd.DataFrame(
-                {t: price_data[t]["Close"].pct_change() for t in input_data.tickers}
+                {t: price_data[t]["Close"].pct_change(fill_method=None) for t in input_data.tickers}
             )
             target_weights = vol_scaled(
                 values_panel,
@@ -1339,7 +1339,7 @@ def run_portfolio_simulation(
         bench_df = DataFactory.get_provider().get_ohlcv(
             input_data.benchmark, input_data.start_date, input_data.end_date
         )
-        bench_returns = bench_df["Close"].pct_change().dropna()
+        bench_returns = bench_df["Close"].pct_change(fill_method=None).dropna()
         common = returns.index.intersection(bench_returns.index)
         if len(common) > 1:
             ir = round(
@@ -1579,7 +1579,7 @@ def get_robustness_diagnostics(
         slippage_pct=input_data.slippage_pct,
         risk_free_rate=input_data.risk_free_rate,
     )
-    best_returns = best_result["equity_curve"].pct_change().fillna(0.0)
+    best_returns = best_result["equity_curve"].pct_change(fill_method=None).fillna(0.0)
 
     bootstrap = _block_bootstrap_ci(
         best_returns,
@@ -1729,7 +1729,7 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         risk_free_rate=input_data.risk_free_rate,
     )
     equity_curve = results["equity_curve"]
-    returns = equity_curve.pct_change().fillna(0.0)
+    returns = equity_curve.pct_change(fill_method=None).fillna(0.0)
     trade_log = results.get("trade_log", pd.DataFrame())
     executed = signals.shift(1).fillna(0.0)
 

@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,45 @@ except ImportError:
 _Z_TABLE = {0.90: 1.282, 0.95: 1.645, 0.99: 2.326, 0.999: 3.090}
 
 
+def has_no_dispersion(values: Any, std: Optional[float] = None) -> bool:
+    """
+    Whether a series is constant to within floating-point noise.
+
+    THE TEST IS RELATIVE, and it has to be. On a constant series numpy's
+    `std` returns 2.2e-19 rather than 0 -- the deviations are computed
+    against an accumulated mean, and the rounding does not cancel. A strict
+    `std == 0` test therefore PASSES on a flat series, and the Sharpe of a
+    constant 0.001 comes back as 7.3e16: a finite number, no NaN anywhere,
+    and complete nonsense that then propagates into every threshold
+    computed from it. Measured, before this existed:
+
+        constant 0.001    std 2.17e-19    sharpe_ratio  7.31e+16
+        constant 0.01     std 0.0         sharpe_ratio  0.0
+        constant -0.002   std 4.34e-19    sharpe_ratio -7.31e+16
+
+    The same flat input answered three different ways depending on the
+    constant's binary representation.
+
+    Comparing the RANGE against the magnitude catches the degenerate case
+    at any scale, which an absolute epsilon would not -- a series of
+    returns around 1e-8 is not constant just because its spread is small.
+
+    This lived only in `backtesting/overfitting._sharpe`, whose docstring
+    diagnosed the fault exactly while five other implementations kept the
+    broken absolute test. It is here now because this is the module the
+    others are duplicating.
+    """
+    array = np.asarray(values, dtype=np.float64).ravel()
+    if array.size < 2:
+        return True
+    if std is None:
+        std = float(np.nanstd(array, ddof=1))
+    if not np.isfinite(std) or std <= 0:
+        return True
+    scale = float(np.nanmax(np.abs(array))) if array.size else 0.0
+    return scale > 0 and float(np.ptp(array)) <= scale * 1e-12
+
+
 @validate_series()
 def sharpe_ratio(
     returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252
@@ -47,9 +86,13 @@ def sharpe_ratio(
     require_finite_scalar(risk_free_rate, "risk_free_rate", "sharpe_ratio")
     excess_returns = returns - risk_free_rate / periods_per_year
     std = returns.std()
-    if std == 0:
-        logger.warning("[sharpe_ratio] zero-volatility returns — returning 0.0")
-        return 0.0
+    if has_no_dispersion(returns, std):
+        # NaN rather than 0.0. A flat series at 0.001 a day has a positive
+        # excess return and no risk, so its Sharpe is not zero -- zero would
+        # read as "no edge", which is a measurement. It is undefined, and
+        # the agent layer's `Stat` type renders that as null.
+        logger.warning("[sharpe_ratio] no dispersion in returns — undefined")
+        return float("nan")
     return (excess_returns.mean() / std) * np.sqrt(periods_per_year)
 
 

@@ -375,7 +375,7 @@ def amihud_illiquidity(
     frame = frame[(frame["close"] > 0) & (frame["volume"] > 0)]
     _enough(len(frame), "amihud_illiquidity")
 
-    returns = frame["close"].pct_change().abs()
+    returns = frame["close"].pct_change(fill_method=None).abs()
     dollar_volume = frame["close"] * frame["volume"]
     ratio = (returns / dollar_volume).dropna()
     # Scaled by 1e6 so the numbers are readable; the scaling is stated rather
@@ -568,7 +568,7 @@ def order_flow_imbalance(
     frame = frame[frame["volume"] > 0]
     _enough(len(frame), "order_flow_imbalance")
 
-    returns = frame["close"].pct_change()
+    returns = frame["close"].pct_change(fill_method=None)
     direction = np.sign(returns)
     signed = direction * frame["volume"]
     window = max(2, int(window))
@@ -684,7 +684,7 @@ def estimate_vpin(
     _enough(len(frame), "estimate_vpin")
 
     n_buckets = max(5, int(n_buckets))
-    returns = frame["close"].pct_change().fillna(0.0)
+    returns = frame["close"].pct_change(fill_method=None).fillna(0.0)
     volume = frame["volume"].to_numpy()
     total_volume = float(volume.sum())
     bucket_size = total_volume / n_buckets

@@ -178,7 +178,7 @@ def run_signal_panel_backtest(
         # Realized per-bar strategy return, recovered from the equity curve —
         # mathematically identical to the internal strategy_returns series,
         # without needing run_strategy to expose it separately.
-        returns_cols[ticker] = result["equity_curve"].pct_change().fillna(0.0)
+        returns_cols[ticker] = result["equity_curve"].pct_change(fill_method=None).fillna(0.0)
 
     returns_df = pd.DataFrame(returns_cols).dropna(how="any")
 

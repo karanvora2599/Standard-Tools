@@ -545,7 +545,7 @@ def run_strategy(
 
     # ── Python fallback ───────────────────────────────────────────────────────
     logger.debug("[run_strategy] using Python fallback  fill_price=%s", fill_price)
-    returns = prices.pct_change().fillna(0.0)
+    returns = prices.pct_change(fill_method=None).fillna(0.0)
     executed = signals.shift(1).fillna(0.0)
     cost_per_unit = commission_pct + slippage_pct
     pos_diff = executed.diff().fillna(executed.iloc[0])

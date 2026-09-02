@@ -105,13 +105,15 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # Moved here from backtesting/overfitting.py, where this check used
+        # to be inlined. It is now the shared guard six call sites use, so
+        # reverting it here tests all of them at once rather than one.
         "sharpe: revert the relative zero-dispersion check",
-        SRC / "backtesting/overfitting.py",
-        "    scale = float(np.max(np.abs(values)))\n"
-        "    if scale > 0 and float(np.ptp(values)) <= scale * 1e-12:\n"
-        '        return float("nan")',
-        "    pass",
-        "tests/backtesting/test_overfitting.py",
+        SRC / "metrics/risk_metrics.py",
+        "    scale = float(np.nanmax(np.abs(array))) if array.size else 0.0\n"
+        "    return scale > 0 and float(np.ptp(array)) <= scale * 1e-12",
+        "    return False",
+        "tests/metrics/test_metrics.py",
     ),
     Mutation(
         "normality: revert the relative zero-dispersion check",
