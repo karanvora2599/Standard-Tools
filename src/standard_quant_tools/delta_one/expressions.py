@@ -162,7 +162,19 @@ def compare_expressions(
 
         # Costs positive, dividend a receipt. `sign` flips the whole carry
         # for a short, where you earn the funding and owe the dividend.
-        carry_rate = sign * (financing + borrow + fee - dividend)
+        #
+        # BORROW IS A RECEIPT TO A LONG, which is the sign this had
+        # backwards. The library's carry identity is `r - q - b`
+        # (`implied_forward_price`, which `carry.forward_price` and
+        # `basis.cash_futures_basis` both call): a holder of the physical
+        # can lend it out and earn the borrow, which is exactly why a hard-
+        # to-borrow name's forward trades below carry. Charging it to the
+        # long made a forward with r=4.5%, q=1.5%, b=3.0% -- net carry zero,
+        # a fair future -- report 600 bps of carry and $6,000,000 of cost on
+        # 100mm, while `carry.forward_price` on the same inputs returned
+        # exactly 0.000000. It also credited 300 bps to the SHORT, which is
+        # the party that actually pays to borrow the stock.
+        carry_rate = sign * (financing - dividend - borrow + fee)
         carry_bps = carry_rate * 10_000.0
 
         one_way = sum(
@@ -189,7 +201,9 @@ def compare_expressions(
                 "kind": kind,
                 "carry_bps": float(carry_bps),
                 "financing_bps": float(sign * financing * 10_000.0),
-                "borrow_bps": float(sign * borrow * 10_000.0),
+                # Negative for a long (earned by lending the shares out),
+                # positive for a short (paid to the lender).
+                "borrow_bps": float(-sign * borrow * 10_000.0),
                 "fee_bps": float(sign * fee * 10_000.0),
                 "dividend_bps": float(-sign * dividend * 10_000.0),
                 "execution_bps": float(execution_bps),

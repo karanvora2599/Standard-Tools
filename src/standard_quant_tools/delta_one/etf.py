@@ -111,12 +111,30 @@ def etf_fair_value(
             "there is nothing to divide it by."
         )
 
-    gross_bps = abs(premium_bps)
+    # THE ARBITRAGE IS PRICED AGAINST WHAT YOU TRADE. When a basket value
+    # is supplied it is the reference, not the NAV -- the module header says
+    # "THE BASKET ... CHANGES THE ANSWER" and it did not: `basket_value` was
+    # accepted, warned about, and then ignored by every decision field.
+    #
+    # NAV is an accounting figure struck at a point in time; the basket is
+    # what a creation actually buys and sells. Measured on price 100.30,
+    # nav 100.00, basket 100.45: against NAV this reported a 30 bp premium,
+    # classification "premium", action "create", net +14.00 bps and
+    # arbitrage_survives True. Against the holdings the fund is 14.93 bps
+    # CHEAP -- so that create buys at 100.45, sells at 100.30, and loses
+    # money. 44.93 bps of error, wrong sign, losing side recommended.
+    reference_bps = premium_bps
+    reference_label = "nav"
+    if basket_vs_nav_bps is not None and basket_total:
+        reference_bps = (price / basket_total - 1.0) * 10_000.0
+        reference_label = "basket"
+
+    gross_bps = abs(reference_bps)
     net_bps = gross_bps - execution_bps - fee_bps
 
-    if abs(premium_bps) <= tolerance_bps:
+    if abs(reference_bps) <= tolerance_bps:
         classification = "fair"
-    elif premium_bps > 0:
+    elif reference_bps > 0:
         classification = "premium"
     else:
         classification = "discount"
@@ -153,6 +171,12 @@ def etf_fair_value(
         )
     if basket_vs_nav_bps is not None and abs(basket_vs_nav_bps) > tolerance_bps:
         warnings.append(
+            f"Priced against the BASKET, not the NAV: the fund is "
+            f"{reference_bps:+.1f} bps to what it holds, where against NAV "
+            f"it would read {premium_bps:+.1f} bps. The basket is what a "
+            "creation actually buys and sells."
+        )
+        warnings.append(
             f"The creation basket is worth {basket_vs_nav_bps:+.0f} bps "
             "against the NAV, so the fund and its own stated value disagree "
             "before the ETF price is considered. On a fund holding anything "
@@ -170,6 +194,10 @@ def etf_fair_value(
         "tolerance_bps": float(tolerance_bps),
         "basket_value_per_share": basket_total,
         "basket_vs_nav_bps": basket_vs_nav_bps,
+        # Which reference the classification and action were taken against,
+        # so a caller can tell a NAV premium from a basket premium.
+        "priced_against": reference_label,
+        "premium_vs_reference_bps": float(reference_bps),
         "gross_arbitrage_bps": float(gross_bps),
         "execution_bps": float(execution_bps),
         "creation_fee_bps": float(fee_bps),

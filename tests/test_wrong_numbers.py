@@ -708,3 +708,106 @@ class TestBoundsOnTheProductNotJustTheFactors:
 
         fine = dividend_points(constituents, financing_rate=0.043, **kwargs)
         assert not any("percent rather than a fraction" in w for w in fine["warnings"])
+
+
+class TestDeltaOneAgreesWithItsOwnCarryIdentity:
+    """`compare_expressions` charged borrow to the LONG. The library's carry
+    identity, which `carry.forward_price` and `basis.cash_futures_basis`
+    both reach through `implied_forward_price`, is `r - q - b`: a holder of
+    the physical can lend it out and earn the borrow, which is why a
+    hard-to-borrow name's forward trades below carry."""
+
+    EXPRESSION = {
+        "kind": "forward",
+        "label": "fwd",
+        "financing_rate": 0.045,
+        "dividend_yield": 0.015,
+        "borrow_rate": 0.030,
+    }
+
+    def test_a_fair_future_costs_no_carry(self):
+        """r - q - b = 0. This reported 600 bps and $6,000,000 on 100mm."""
+        from standard_quant_tools.delta_one.carry import forward_price
+        from standard_quant_tools.delta_one.expressions import compare_expressions
+
+        reference = forward_price(
+            spot=6000.0,
+            time_to_expiry=1.0,
+            risk_free_rate=0.045,
+            dividend_yield=0.015,
+            borrow_rate=0.030,
+        )
+        assert reference["net_carry_rate"] == pytest.approx(0.0, abs=1e-12)
+
+        got = compare_expressions(
+            [self.EXPRESSION], notional=1e8, horizon_years=1.0, direction="long"
+        )["expressions"][0]
+        assert got["carry_bps"] == pytest.approx(0.0, abs=1e-9)
+
+    def test_borrow_is_earned_by_the_long_and_paid_by_the_short(self):
+        """It was the other way round, so the party that actually borrows
+        the stock was credited the fee."""
+        from standard_quant_tools.delta_one.expressions import compare_expressions
+
+        long = compare_expressions(
+            [self.EXPRESSION], notional=1e8, horizon_years=1.0, direction="long"
+        )["expressions"][0]
+        short = compare_expressions(
+            [self.EXPRESSION], notional=1e8, horizon_years=1.0, direction="short"
+        )["expressions"][0]
+        assert long["borrow_bps"] < 0 < short["borrow_bps"]
+        assert long["borrow_bps"] == pytest.approx(-short["borrow_bps"])
+
+
+class TestTheBasketChangesTheAnswer:
+    """`etf.py`'s module header says so in capitals. `basket_value` was
+    accepted, warned about, and then ignored by `gross_arbitrage_bps`,
+    `net_arbitrage_bps`, `classification`, `action` and
+    `arbitrage_survives`, all of which came from NAV alone."""
+
+    def test_the_basket_moves_the_classification(self):
+        """Against NAV: 30 bp premium, action `create`, net +14.00 bps.
+        Against the holdings the fund is 14.93 bps CHEAP, so that create
+        buys at 100.45 and sells at 100.30."""
+        from standard_quant_tools.delta_one.etf import etf_fair_value
+
+        rich_basket = etf_fair_value(
+            etf_price=100.30,
+            nav=100.00,
+            basket_value=100.45,
+            etf_spread_bps=3.0,
+            basket_spread_bps=5.0,
+        )
+        assert rich_basket["priced_against"] == "basket"
+        assert rich_basket["premium_vs_reference_bps"] < 0
+        assert rich_basket["action"] != "create"
+        assert rich_basket["net_arbitrage_bps"] < 0
+
+    def test_a_basket_equal_to_nav_reproduces_the_nav_answer(self):
+        """The control the old code passed trivially, because it returned
+        this answer no matter what the basket said."""
+        from standard_quant_tools.delta_one.etf import etf_fair_value
+
+        common = dict(
+            etf_price=100.30, nav=100.00, etf_spread_bps=3.0, basket_spread_bps=5.0
+        )
+        with_basket = etf_fair_value(basket_value=100.00, **common)
+        without = etf_fair_value(**common)
+        assert with_basket["classification"] == without["classification"]
+        assert with_basket["action"] == without["action"]
+        assert with_basket["net_arbitrage_bps"] == pytest.approx(
+            without["net_arbitrage_bps"]
+        )
+
+    def test_the_argument_is_not_inert(self):
+        """The proof the old version failed: two different baskets, two
+        different answers."""
+        from standard_quant_tools.delta_one.etf import etf_fair_value
+
+        common = dict(
+            etf_price=100.30, nav=100.00, etf_spread_bps=3.0, basket_spread_bps=5.0
+        )
+        cheap = etf_fair_value(basket_value=99.80, **common)
+        rich = etf_fair_value(basket_value=100.45, **common)
+        assert cheap["premium_vs_reference_bps"] != rich["premium_vs_reference_bps"]
+        assert cheap["net_arbitrage_bps"] != rich["net_arbitrage_bps"]
