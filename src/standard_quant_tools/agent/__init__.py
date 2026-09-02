@@ -348,6 +348,7 @@ from .tools import (
     run_custom_signal_backtest,
     run_factor_regression,
     run_futures_backtest,
+    run_futures_hedge_backtest,
     run_garch_volatility_forecast,
     run_hurst_analysis,
     run_kalman_hedge_ratio,
@@ -372,6 +373,7 @@ from .tools import (
     run_stress_test,
     run_terminal_monte_carlo,
     run_walk_forward_backtest,
+    scan_basis_dislocations,
     scan_pairs,
     size_futures_hedge,
     solve_forward_carry,
@@ -386,6 +388,8 @@ from .tools import (
 )
 
 __all__ = [
+    "scan_basis_dislocations",
+    "run_futures_hedge_backtest",
     "AdvancedIndicatorsInput",
     "AdvancedIndicatorsResult",
     "AnalysisInput",

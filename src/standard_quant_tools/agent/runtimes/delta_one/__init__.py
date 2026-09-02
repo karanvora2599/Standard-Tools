@@ -33,6 +33,7 @@ the parts that needed none of that got it into use sooner.
 from .models import (
     BasisDislocationInput,
     BasisHistoryInput,
+    BasisScanInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
     DividendPointsInput,
@@ -65,6 +66,7 @@ from .tools import (
     monitor_spread_stream,
     optimize_replication_basket,
     price_total_return_swap,
+    scan_basis_dislocations,
     size_futures_hedge,
     solve_forward_carry,
 )
@@ -273,6 +275,19 @@ TOOL_DEFS = [
         "one tick agree exactly.",
         SpreadMonitorInput,
     ),
+    (
+        "scan_basis_dislocations",
+        "Rank many spot/futures pairs by how far each basis sits from its "
+        "OWN history, not by how wide it is. A name that always trades 40 "
+        "bps is not news at 40 bps, so the ranking key is the z-score and "
+        "the level is reported beside it. Optionally runs CUSUM per pair, "
+        "because a basis sitting 2 sigma wide for months is a level while "
+        "one that moved there last week is an event and they otherwise "
+        "rank the same. Pairs it cannot evaluate are returned in `skipped` "
+        "with a reason each rather than dropped, since a misaligned series "
+        "is a data problem and not an absence of signal.",
+        BasisScanInput,
+    ),
 ]
 
 TOOL_DISPATCH = {
@@ -311,6 +326,7 @@ TOOL_DISPATCH = {
         BasisDislocationInput,
     ),
     "monitor_spread_stream": (monitor_spread_stream, SpreadMonitorInput),
+    "scan_basis_dislocations": (scan_basis_dislocations, BasisScanInput),
 }
 
 #: Every tool here belongs to the one category this runtime owns.

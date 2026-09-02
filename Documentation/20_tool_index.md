@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 198 below.
+advertises 155 of the 200 below.
 
 
 ## The runtimes
@@ -34,16 +34,16 @@ advertises 155 of the 198 below.
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `backtest` | 34 | 77 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `backtest` | 35 | 80 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `delta_one` | 17 | 35 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
+| `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `modeling` | 17 | 47 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `microstructure` | 16 | 20 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `data` | 14 | 15 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 11 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **198** | | | |
+| **Total** | **200** | | | |
 
 ---
 
@@ -391,6 +391,13 @@ Simulate a FUTURES account, whose books the shared-cash engine cannot keep. Buyi
 
 **Required:** `prices`, `target_contracts`, `multiplier`  
 **Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`
+
+#### `run_futures_hedge_backtest`
+
+Carry a cash book and its futures hedge together, bar by bar, and report the two P&L streams SEPARATELY. That separation is the point: a hedged book that made money because the hedge lost less than the cash leg is a different outcome from one where the hedge worked, and a net number cannot distinguish them. Re-hedges on a calendar or when residual exposure leaves a band -- the band is what a desk runs, since every re-hedge costs two spreads. Nothing estimates beta: the lookback is the most consequential choice in the simulation, so you supply it. Collateral is sized so margin never binds, because this measures a hedge, not a margin call.
+
+**Required:** `portfolio_values`, `future_prices`, `multiplier`  
+**Optional:** `portfolio_beta`, `future_beta`, `rehedge`, `drift_band`, `initial_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`
 
 #### `run_macd_backtest`
 
@@ -973,6 +980,13 @@ Mark a total return swap with the equity and financing legs separated. The payof
 
 **Required:** `notional`, `initial_price`, `current_price`, `financing_rate`  
 **Optional:** `spread_bps`, `dividends`, `start_date`, `valuation_date`, `time_elapsed`, `day_count`, `direction`
+
+#### `scan_basis_dislocations`
+
+Rank many spot/futures pairs by how far each basis sits from its OWN history, not by how wide it is. A name that always trades 40 bps is not news at 40 bps, so the ranking key is the z-score and the level is reported beside it. Optionally runs CUSUM per pair, because a basis sitting 2 sigma wide for months is a level while one that moved there last week is an event and they otherwise rank the same. Pairs it cannot evaluate are returned in `skipped` with a reason each rather than dropped, since a misaligned series is a data problem and not an absence of signal.
+
+**Required:** `pairs`  
+**Optional:** `window`, `detect_shifts`, `min_observations`, `top_n`
 
 #### `size_futures_hedge`
 

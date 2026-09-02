@@ -44,12 +44,14 @@ from standard_quant_tools.delta_one import futures as _futures
 from standard_quant_tools.delta_one import hedging as _hedging
 from standard_quant_tools.delta_one import rebalance as _rebalance
 from standard_quant_tools.delta_one import replication as _replication
+from standard_quant_tools.delta_one import scan as _scan
 from standard_quant_tools.delta_one import streaming as _streaming
 from standard_quant_tools.delta_one import swaps as _swaps
 
 from .models import (
     BasisDislocationInput,
     BasisHistoryInput,
+    BasisScanInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
     DividendPointsInput,
@@ -73,6 +75,7 @@ from .models import (
 from .results import (
     BasisDislocationResult,
     BasisHistoryResult,
+    BasisScanResult,
     CashFuturesBasisResult,
     CompareExpressionsResult,
     DividendPointsResult,
@@ -369,5 +372,17 @@ def monitor_spread_stream(input_data: SpreadMonitorInput) -> SpreadMonitorResult
             primary=input_data.primary_prices,
             reference=input_data.reference_prices,
             time_to_expiry=input_data.time_to_expiry,
+        )
+    )
+
+
+def scan_basis_dislocations(input_data: BasisScanInput) -> BasisScanResult:
+    return BasisScanResult(
+        **_scan.basis_scan(
+            [pair.model_dump(exclude_none=True) for pair in input_data.pairs],
+            window=input_data.window,
+            detect_shifts=input_data.detect_shifts,
+            min_observations=input_data.min_observations,
+            top_n=input_data.top_n,
         )
     )

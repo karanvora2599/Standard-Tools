@@ -14,11 +14,14 @@ engine exists to break.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from standard_quant_tools.backtest.futures_engine import run_futures_simulation
+from standard_quant_tools.backtest.futures_hedge_backtest import (
+    run_futures_hedge_backtest as _run_futures_hedge_backtest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,7 @@ __all__ = [
     "FuturesBacktestInput",
     "FuturesBacktestResult",
     "run_futures_backtest",
+    "run_futures_hedge_backtest",
 ]
 
 
@@ -156,6 +160,111 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
     )
 
 
+class FuturesHedgeBacktestInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    portfolio_values: Dict[str, float] = Field(
+        ...,
+        min_length=2,
+        description="The book's MARK by date, not its returns. A hedge is "
+        "sized off notional and a return series has thrown that away.",
+    )
+    future_prices: Dict[str, float] = Field(
+        ..., min_length=2, description="Hedge instrument closes on the same dates."
+    )
+    multiplier: float = Field(
+        ..., gt=0, le=1e6, description="Contract point value, e.g. 50 for ES."
+    )
+    portfolio_beta: float = Field(
+        1.0,
+        ge=-20.0,
+        le=20.0,
+        description="The book's beta to the hedge instrument. Nothing is "
+        "estimated here -- a rolling beta's lookback is the most "
+        "consequential choice in the simulation and it belongs to you.",
+    )
+    future_beta: float = Field(
+        1.0, ge=-20.0, le=20.0, description="Hedge instrument's own beta, usually 1."
+    )
+    rehedge: Literal["daily", "weekly", "monthly", "drift"] = Field(
+        "monthly",
+        description="When to re-size. 'drift' re-hedges only when residual "
+        "exposure leaves the band, which is what a desk runs, because every "
+        "re-hedge costs two spreads and a commission.",
+    )
+    drift_band: float = Field(
+        0.05,
+        ge=0.0,
+        le=1.0,
+        description="Residual exposure, as a fraction of the book, that "
+        "triggers a re-hedge under rehedge='drift'. Ignored otherwise.",
+    )
+    initial_margin: float = Field(0.0, ge=0, le=1e9)
+    commission_per_contract: float = Field(0.0, ge=0, le=1e6)
+    slippage_points: float = Field(0.0, ge=0, le=1e6)
+    collateral_rate: float = Field(0.0, ge=-1.0, le=1.0)
+    contract_map: Optional[Dict[str, str]] = Field(
+        None, description="Date -> contract label, to charge the roll."
+    )
+    allow_fractional: bool = Field(False)
+
+
+class FuturesHedgeBacktestResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    n_bars: int = 0
+    rehedge_rule: str = ""
+    n_rehedges: int = 0
+    cash_pnl: Optional[float] = Field(
+        None,
+        description="The unhedged book's P&L. Reported SEPARATELY from the "
+        "hedge on purpose: a hedged book that made money because the hedge "
+        "lost less than the cash leg is a different outcome from one where "
+        "the hedge worked, and a net number cannot tell them apart.",
+    )
+    hedge_pnl: Optional[float] = None
+    combined_pnl: Optional[float] = None
+    unhedged_volatility: Optional[float] = None
+    hedged_volatility: Optional[float] = None
+    volatility_reduction: Optional[float] = None
+    residual_beta: Optional[float] = Field(
+        None,
+        description="Beta left after hedging. The number that says whether it worked.",
+    )
+    effective_hedge_ratio: Optional[float] = None
+    peak_hedge_notional: Optional[float] = None
+    hedge_variation_margin: Optional[float] = None
+    hedge_margin_calls: int = 0
+    total_commission: Optional[float] = None
+    total_slippage: Optional[float] = None
+    n_rolls: int = 0
+    contracts_held: Dict[str, float] = Field(default_factory=dict)
+    hedge_effectiveness: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+
+
+def run_futures_hedge_backtest(
+    input_data: FuturesHedgeBacktestInput,
+) -> FuturesHedgeBacktestResult:
+    return FuturesHedgeBacktestResult(
+        **_run_futures_hedge_backtest(
+            portfolio_values=input_data.portfolio_values,
+            future_prices=input_data.future_prices,
+            multiplier=input_data.multiplier,
+            portfolio_beta=input_data.portfolio_beta,
+            future_beta=input_data.future_beta,
+            rehedge=input_data.rehedge,
+            drift_band=input_data.drift_band,
+            initial_margin=input_data.initial_margin,
+            commission_per_contract=input_data.commission_per_contract,
+            slippage_points=input_data.slippage_points,
+            collateral_rate=input_data.collateral_rate,
+            contract_map=input_data.contract_map,
+            allow_fractional=input_data.allow_fractional,
+        )
+    )
+
+
 FUTURES_TOOL_DEFS = [
     (
         "run_futures_backtest",
@@ -170,10 +279,31 @@ FUTURES_TOOL_DEFS = [
         "calls reduce the position rather than being financed away.",
         FuturesBacktestInput,
     ),
+    (
+        "run_futures_hedge_backtest",
+        "Carry a cash book and its futures hedge together, bar by bar, and "
+        "report the two P&L streams SEPARATELY. That separation is the "
+        "point: a hedged book that made money because the hedge lost less "
+        "than the cash leg is a different outcome from one where the hedge "
+        "worked, and a net number cannot distinguish them. Re-hedges on a "
+        "calendar or when residual exposure leaves a band -- the band is "
+        "what a desk runs, since every re-hedge costs two spreads. Nothing "
+        "estimates beta: the lookback is the most consequential choice in "
+        "the simulation, so you supply it. Collateral is sized so margin "
+        "never binds, because this measures a hedge, not a margin call.",
+        FuturesHedgeBacktestInput,
+    ),
 ]
 
 FUTURES_TOOL_DISPATCH = {
     "run_futures_backtest": (run_futures_backtest, FuturesBacktestInput),
+    "run_futures_hedge_backtest": (
+        run_futures_hedge_backtest,
+        FuturesHedgeBacktestInput,
+    ),
 }
 
-FUTURES_TOOL_CATEGORY = {"run_futures_backtest": "backtest_execution"}
+FUTURES_TOOL_CATEGORY = {
+    "run_futures_backtest": "backtest_execution",
+    "run_futures_hedge_backtest": "backtest_execution",
+}

@@ -30,6 +30,7 @@ from .futures_tools import (  # noqa: F401
     FUTURES_TOOL_DEFS,
     FUTURES_TOOL_DISPATCH,
     run_futures_backtest,
+    run_futures_hedge_backtest,
 )
 from .terminal_mc_tools import (  # noqa: F401
     TerminalMonteCarloInput,
@@ -303,6 +304,7 @@ __all__ = [
     "run_buy_and_hold",
     "run_custom_signal_backtest",
     "run_futures_backtest",
+    "run_futures_hedge_backtest",
     "run_macd_backtest",
     "run_monte_carlo_simulation",
     "run_pair_trade_backtest",

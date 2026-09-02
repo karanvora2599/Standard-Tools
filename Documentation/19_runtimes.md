@@ -42,13 +42,13 @@ shipped, generalized to the rest of the surface.
 |---|---|---|---|
 | `research` | 42 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
 | `data` | 14 | `data` | Get the bytes and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
-| `backtest` | 34 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
+| `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 19 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 18 | `portfolio_risk` | Turn a view into a position and price what it costs. |
 | `modeling` | 17 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 16 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
-| `delta_one` | 17 | `delta_one` | Which instrument is the cheapest way to own or hedge an exposure: carry, basis, curves, rolls, hedge sizing and instrument comparison. Takes quotes as arguments; there is no futures provider. |
+| `delta_one` | 18 | `delta_one` | Which instrument is the cheapest way to own or hedge an exposure: carry, basis, curves, rolls, hedge sizing and instrument comparison. Takes quotes as arguments; there is no futures provider. |
 | `feature_lab` | 9 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
 
 **Two of these are recent splits, and both were held back until they were

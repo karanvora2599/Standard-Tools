@@ -59,6 +59,7 @@ from standard_quant_tools.agent.runtimes.backtest import (
     run_buy_and_hold,
     run_custom_signal_backtest,
     run_futures_backtest,
+    run_futures_hedge_backtest,
     run_macd_backtest,
     run_monte_carlo_simulation,
     run_monte_carlo_trade_paths,
@@ -106,6 +107,7 @@ from standard_quant_tools.agent.runtimes.delta_one import (
     monitor_spread_stream,
     optimize_replication_basket,
     price_total_return_swap,
+    scan_basis_dislocations,
     size_futures_hedge,
     solve_forward_carry,
 )

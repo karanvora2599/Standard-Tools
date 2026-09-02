@@ -620,3 +620,46 @@ class SpreadMonitorResult(_Result):
     threshold: Stat = None
     baseline_mean: Stat = Field(None, description="Null until the warm-up completes.")
     baseline_std: Stat = None
+
+
+class BasisScanRow(_Result):
+    label: str = ""
+    n_observations: int = 0
+    current_basis_bps: Stat = None
+    mean_bps: Stat = None
+    std_bps: Stat = None
+    zscore: Stat = Field(
+        None,
+        description="How far the current basis sits from its own history. "
+        "This is the ranking key, NOT the level: a name that always trades "
+        "40 bps wide is not news at 40 bps.",
+    )
+    percentile: Stat = None
+    half_life_observations: Stat = None
+    shift_detected: Optional[bool] = Field(
+        None,
+        description="Whether the basis structurally MOVED, which is a "
+        "different finding from sitting far from its mean. Null when the "
+        "detector could not run; the level is still reported.",
+    )
+    shift_severity: Optional[str] = None
+    shift_at: Optional[int] = None
+
+
+class BasisScanSkip(_Result):
+    label: str = ""
+    reason: str = ""
+
+
+class BasisScanResult(_Result):
+    n_pairs: int = 0
+    n_evaluated: int = 0
+    n_skipped: int = 0
+    window: Optional[int] = None
+    ranked: List[BasisScanRow] = Field(default_factory=list)
+    skipped: List[BasisScanSkip] = Field(
+        default_factory=list,
+        description="Pairs that could not be evaluated, each with why. A "
+        "pair is never silently dropped -- a misaligned series is a data "
+        "problem, not an absence of signal.",
+    )

@@ -684,3 +684,58 @@ class SpreadMonitorInput(BaseModel):
     slack: float = Field(
         0.5, ge=0, le=100, description="Standardized deviations absorbed per step."
     )
+
+
+class BasisScanPair(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(
+        ..., min_length=1, max_length=64, description="How to name this pair."
+    )
+    spot: List[float] = Field(
+        ..., min_length=3, max_length=20_000, description="Cash closes, oldest first."
+    )
+    futures: List[float] = Field(
+        ...,
+        min_length=3,
+        max_length=20_000,
+        description="Futures closes on the SAME dates, oldest first.",
+    )
+    time_to_expiry: Optional[List[float]] = Field(
+        None,
+        max_length=20_000,
+        description="Years to expiry per observation. Without it the basis "
+        "is reported in points only; annualizing needs the horizon.",
+    )
+
+
+class BasisScanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pairs: List[BasisScanPair] = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="The spot/futures pairs to rank against each other.",
+    )
+    window: Optional[int] = Field(
+        None,
+        ge=2,
+        le=5000,
+        description="Rolling z-score window, applied to every pair. Omit for "
+        "a full-sample z-score, which describes history but looks ahead.",
+    )
+    detect_shifts: bool = Field(
+        True,
+        description="Also run CUSUM change detection per pair. A basis can "
+        "sit 2 sigma wide for months (a level) or have moved there last week "
+        "(an event); without this they rank identically.",
+    )
+    min_observations: int = Field(
+        30,
+        ge=3,
+        le=5000,
+        description="Pairs shorter than this are skipped with a reason "
+        "rather than ranked on a z-score built from a handful of points.",
+    )
+    top_n: int = Field(10, ge=1, le=100, description="How many ranked rows to return.")
