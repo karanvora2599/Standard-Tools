@@ -311,3 +311,101 @@ class TestSeasonalityPValuesAreNotDoubled:
         )
         for row in seasonality(series)["by_period"]:
             assert 0.0 <= row["p_value_raw"] <= 1.0
+
+
+class TestArgumentsAreEitherHonouredOrRefused:
+    """The library's stated contract is that an argument a tool does not
+    take is REJECTED, not ignored -- `PortfolioOptimizationInput` says so in
+    a comment, and every top-level input model sets extra="forbid". These
+    were the places that took an argument and quietly did nothing with it."""
+
+    def test_the_package_star_import_works(self):
+        """Four source comments had been sorted into `__all__` as string
+        literals, so `from standard_quant_tools.agent import *` failed with
+        a ModuleNotFoundError naming a TEST FILE PATH as a module."""
+        import standard_quant_tools.agent as package
+
+        missing = [n for n in package.__all__ if not hasattr(package, n)]
+        assert missing == []
+
+    def test_every_advertised_name_is_importable(self):
+        """`get_rally_signal` was in `__all__` and never imported, so the
+        tool was unreachable from the package facade."""
+        from standard_quant_tools.agent import get_rally_signal
+
+        assert callable(get_rally_signal)
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "run_buy_and_hold",
+            "run_custom_signal_backtest",
+            "run_portfolio_simulation",
+            "run_pair_trade_backtest",
+        ],
+    )
+    def test_risk_free_rate_reaches_the_metric(self, tool_name):
+        """All four declared it "for Sharpe/Sortino" and discarded it. The
+        existing guard asserted only that the FIELD EXISTS, and the one test
+        that checked behaviour exercised a single tool."""
+        import inspect
+
+        from standard_quant_tools.agent.runtimes.backtest import tools
+
+        source = inspect.getsource(getattr(tools, tool_name))
+        assert "input_data.risk_free_rate" in source, (
+            f"{tool_name} advertises risk_free_rate but never reads it; a "
+            f"caller asking for 4.5% gets a Sharpe measured against 0%"
+        )
+
+    def test_a_typo_inside_a_nested_spec_is_rejected(self):
+        """`validate_model_spec` exists to catch bad specs and certified one
+        `valid: True` while the leakage embargo the caller asked for was 0,
+        because the nested models did not forbid extras."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        from standard_quant_tools.modeling.specs import ValidationSpec
+
+        with pytest.raises(PydanticValidationError):
+            ValidationSpec(
+                method="walk_forward",
+                n_splits=5,
+                train_window=252,
+                test_window=63,
+                embargo_bars=10,  # the real field is `embargo`
+            )
+
+        ok = ValidationSpec(
+            method="walk_forward",
+            n_splits=5,
+            train_window=252,
+            test_window=63,
+            embargo=10,
+        )
+        assert ok.embargo == 10
+
+    def test_every_nested_input_model_forbids_extras(self):
+        """The top-level models all did; the nested ones reachable from them
+        did not, which is where a hallucinated argument actually lands."""
+        from pydantic import BaseModel
+
+        from standard_quant_tools import modeling
+        from standard_quant_tools.agent import models as agent_models
+        from standard_quant_tools.modeling import specs
+
+        offenders = []
+        for module in (specs,):
+            for name in dir(module):
+                obj = getattr(module, name)
+                if (
+                    isinstance(obj, type)
+                    and issubclass(obj, BaseModel)
+                    and obj is not BaseModel
+                    and obj.model_config.get("extra") != "forbid"
+                ):
+                    offenders.append(f"{module.__name__}.{name}")
+        assert offenders == []
+
+        for name in ("BLViewInput", "CostScenario"):
+            model = getattr(agent_models, name)
+            assert model.model_config.get("extra") == "forbid", name

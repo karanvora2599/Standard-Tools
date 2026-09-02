@@ -334,6 +334,12 @@ class PortfolioResult(BaseModel):
 
 
 class BLViewInput(BaseModel):
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     assets: Dict[str, float] = Field(
         ...,
         description=(
@@ -3909,6 +3915,12 @@ class EstimateTradeCostResult(BaseModel):
 
 class CostScenario(BaseModel):
     """One point in the cost sweep."""
+
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
 
     label: str = Field(..., min_length=1, max_length=64)
     commission_pct: float = Field(..., ge=0, le=1)

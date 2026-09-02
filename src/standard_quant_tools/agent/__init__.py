@@ -316,6 +316,7 @@ from .tools import (
     get_portfolio_risk_attribution,
     get_position_size,
     get_quoted_spread_series,
+    get_rally_signal,
     get_regime_stratified_performance,
     get_robustness_diagnostics,
     get_rolling_beta,
@@ -385,10 +386,6 @@ from .tools import (
 )
 
 __all__ = [
-    "# auditability",
-    "# kept in exact 1:1 sync (see tests/test_agent_tools.py::TestAgentModelExports)",
-    "# models â€” every Pydantic Input/Result/supporting model in models.py",
-    "# tools",
     "AdvancedIndicatorsInput",
     "AdvancedIndicatorsResult",
     "AnalysisInput",

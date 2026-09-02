@@ -11,7 +11,7 @@ import math
 from typing import Dict, List, Literal, Optional
 
 import pandas as pd
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .features.base import RESERVED_PANEL_COLUMNS
 
@@ -30,6 +30,12 @@ def _parse_date(value: str, field_name: str) -> pd.Timestamp:
 class FeatureSpec(BaseModel):
     """One requested feature: a `features.registry.FEATURE_REGISTRY` id
     plus caller-supplied overrides for that feature's `default_params`."""
+
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(..., description="Feature id, e.g. 'technical.rsi'.")
     params: Dict[str, object] = Field(
@@ -72,6 +78,12 @@ class FeatureSpec(BaseModel):
 
 
 class TargetSpec(BaseModel):
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal[
         "forward_return",
         "forward_direction",
@@ -152,6 +164,12 @@ class TargetSpec(BaseModel):
 
 
 class DatasetSpec(BaseModel):
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     # max_length alongside min_length: universe fetching creates a task per
     # symbol, and while a semaphore bounds how many run at once it does not
     # bound how many are created. One valid-looking tool call could
@@ -256,6 +274,12 @@ class DatasetSpec(BaseModel):
 
 
 class EstimatorSpec(BaseModel):
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     type: str = Field(
         ...,
         description="Estimator name — must be in estimators.registry.ESTIMATOR_REGISTRY.",
@@ -295,6 +319,12 @@ class EstimatorSpec(BaseModel):
 
 
 class ValidationSpec(BaseModel):
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     method: Literal["walk_forward", "purged_kfold"] = Field(
         "walk_forward",
         description=(
@@ -368,6 +398,12 @@ class ValidationSpec(BaseModel):
 class PreprocessingSpec(BaseModel):
     """How feature columns are normalized before the estimator sees them."""
 
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     normalization: Literal["pooled", "cross_sectional"] = Field(
         "pooled",
         description=(
@@ -396,6 +432,12 @@ class PreprocessingSpec(BaseModel):
 
 class WeightingSpec(BaseModel):
     """How much each training row counts."""
+
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
 
     method: Literal[
         "none", "label_uniqueness", "time_decay", "uniqueness_and_time_decay"
@@ -431,6 +473,12 @@ class SearchSpec(BaseModel):
     (entity, date) rows puts the same date on both sides of a split and
     would select hyperparameters on leaked information.
     """
+
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
 
     method: Literal["grid", "random"] = Field(
         "grid",
@@ -478,6 +526,12 @@ class RankingSpec(BaseModel):
     one — the requirement is integer relevance grades.
     """
 
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     n_grades: int = Field(
         8,
         ge=2,
@@ -519,6 +573,12 @@ class RankingSpec(BaseModel):
 
 
 class ModelSpec(BaseModel):
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
+
     task: Literal["regression", "classification", "ranking"]
     estimator: EstimatorSpec
     validation: ValidationSpec
@@ -568,6 +628,12 @@ class PredictionTransformSpec(BaseModel):
     the three pieces sizing.py does not have — a per-position cap, an
     explicit net-exposure target, and a rebalance schedule.
     """
+
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
 
     method: Literal[
         "sign",
@@ -711,6 +777,12 @@ class PortfolioSimSpec(BaseModel):
     that would make a model-selection number misleading.
     `run_portfolio_simulation` is still importable directly for those.
     """
+
+    # extra="forbid" like every top-level input model. Without it a
+    # nested typo was silently dropped: `validate_model_spec` -- the
+    # tool whose job is catching exactly this -- certified a spec
+    # `valid: True` while the embargo the caller asked for was 0.
+    model_config = ConfigDict(extra="forbid")
 
     initial_capital: float = Field(100_000.0, gt=0.0)
     commission_pct: float = Field(

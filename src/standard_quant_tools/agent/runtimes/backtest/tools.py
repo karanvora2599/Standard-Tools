@@ -275,6 +275,9 @@ def run_buy_and_hold(input_data: BuyAndHoldInput) -> BacktestResult:
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
+        # Rebuilding BacktestInput field by field dropped this, so the
+        # tool advertised "for Sharpe/Sortino" and measured against 0%.
+        risk_free_rate=input_data.risk_free_rate,
     )
     return _run_backtest(bt_input, df, signals)
 
@@ -1026,6 +1029,9 @@ def run_custom_signal_backtest(input_data: CustomSignalBacktestInput) -> Backtes
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
+        # Rebuilding BacktestInput field by field dropped this, so the
+        # tool advertised "for Sharpe/Sortino" and measured against 0%.
+        risk_free_rate=input_data.risk_free_rate,
     )
     return _run_backtest(bt_input, df, signal_series)
 
@@ -1283,7 +1289,10 @@ def run_portfolio_simulation(
             )
         else:  # vol_scaled — validated to be one of _CONSTRUCTION_METHODS by the input model
             returns_df = pd.DataFrame(
-                {t: price_data[t]["Close"].pct_change(fill_method=None) for t in input_data.tickers}
+                {
+                    t: price_data[t]["Close"].pct_change(fill_method=None)
+                    for t in input_data.tickers
+                }
             )
             target_weights = vol_scaled(
                 values_panel,
@@ -1382,8 +1391,13 @@ def run_portfolio_simulation(
         total_return=round(total_return, 6),
         annualized_return=round(annualized_return, 6),
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
-        sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
-        sortino_ratio=round(float(sortino_ratio(returns)), 4),
+        # Both of these dropped the advertised risk_free_rate, so a caller
+        # asking for a 4.5% rate got a Sharpe measured against 0% with no
+        # error and no warning.
+        sharpe_ratio=round(float(sharpe_ratio(returns, input_data.risk_free_rate)), 4),
+        sortino_ratio=round(
+            float(sortino_ratio(returns, input_data.risk_free_rate)), 4
+        ),
         max_drawdown=round(day0_max_dd, 6),
         calmar_ratio=round(day0_calmar, 4),
         var_95=round(float(var_historical(returns, 0.95)), 6),
@@ -1483,8 +1497,13 @@ def run_pair_trade_backtest(
         total_return=round(total_return, 6),
         annualized_return=round(annualized_return, 6),
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
-        sharpe_ratio=round(float(sharpe_ratio(returns)), 4),
-        sortino_ratio=round(float(sortino_ratio(returns)), 4),
+        # Both of these dropped the advertised risk_free_rate, so a caller
+        # asking for a 4.5% rate got a Sharpe measured against 0% with no
+        # error and no warning.
+        sharpe_ratio=round(float(sharpe_ratio(returns, input_data.risk_free_rate)), 4),
+        sortino_ratio=round(
+            float(sortino_ratio(returns, input_data.risk_free_rate)), 4
+        ),
         max_drawdown=round(day0_max_dd, 6),
         calmar_ratio=round(day0_calmar, 4),
         final_equity=round(float(raw["final_equity"]), 2),

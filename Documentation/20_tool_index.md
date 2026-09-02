@@ -34,11 +34,11 @@ advertises 155 of the 198 below.
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `backtest` | 34 | 76 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `backtest` | 34 | 77 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 17 | 35 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
-| `modeling` | 17 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 17 | 47 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `microstructure` | 16 | 20 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `data` | 14 | 15 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
