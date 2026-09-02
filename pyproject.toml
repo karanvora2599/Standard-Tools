@@ -62,7 +62,11 @@ sqt-mcp = "standard_quant_tools.mcp.server:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-v --tb=short"
+# --strict-markers: a typo in a @pytest.mark name is currently a silent
+# no-op, so a test meant to be gated runs ungated (or a whole marker
+# selection quietly matches nothing). With this, an unregistered marker
+# is an error at collection.
+addopts = "-v --tb=short --strict-markers"
 markers = [
     "integration: tests requiring live network access (skip with '-m not integration')",
     "slow: tests that are slow due to Numba JIT warm-up or large data",

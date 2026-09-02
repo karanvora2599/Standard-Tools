@@ -26,12 +26,32 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        # SQT_REQUIRE_NATIVE=ON turns a missing or broken C++ toolchain
+        # into a HARD ERROR. Without it CMakeLists.txt downgrades that to
+        # a warning and installs the pure-Python package -- which is right
+        # for a user with no compiler and wrong for CI, because 266 tests
+        # are decorated `@requires_cpp` and would then SKIP while the run
+        # stayed green. pyproject.toml has documented this flag since the
+        # native layer was added; no workflow actually passed it.
         run: |
           pip install flit_core
-          pip install -e ".[test]"
+          pip install -e ".[test]" -C cmake.define.SQT_REQUIRE_NATIVE=ON
+
+      - name: Verify the native extension loaded
+        # A successful build is not an importable module: a wheel can
+        # install with the .so left behind, and every native test then
+        # skips silently. build-cpp.yml has always checked this; the
+        # workflow that runs the actual test suite did not.
+        run: |
+          python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
+          python -c "from standard_quant_tools.agent.runtimes._shared import HAS_CPP; assert HAS_CPP is True, 'HAS_CPP is False after a required native build'; print('HAS_CPP: True')"
 
       - name: Run tests
         # Skip integration (live network), slow (Numba JIT warmup), benchmark (C++ required)
+        env:
+          # Read by tests/test_native_extension.py: with this set, a
+          # missing extension FAILS rather than skipping 266 tests.
+          SQT_EXPECT_NATIVE: "1"
         run: |
           pytest -m "not integration and not slow and not benchmark" \
             --tb=short -q \
