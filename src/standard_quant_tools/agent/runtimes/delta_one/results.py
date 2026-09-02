@@ -33,6 +33,8 @@ from typing import Annotated, Any, Dict, List, Optional
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 __all__ = [
+    "BasisDislocationResult",
+    "BasisMonitorResult",
     "BasisHistoryResult",
     "CashFuturesBasisResult",
     "CompareExpressionsResult",
@@ -525,3 +527,86 @@ class IndexRebalanceResult(_Result):
         default_factory=list, description="By days of ADV, worst first."
     )
     largest_flow: Optional[str] = None
+
+
+class BasisBreak(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    index: Optional[int] = None
+    gain: Stat = None
+    mean_before: Stat = None
+    mean_after: Stat = None
+    std_before: Stat = None
+    std_after: Stat = None
+
+
+class BasisDislocationResult(_Result):
+    n_observations: int = 0
+    units: str = Field("", description="'bps of spot' or 'annualized bps'.")
+    current: Stat = None
+    triggered: bool = False
+    first_crossing: Optional[int] = Field(
+        None, description="Observation index, or null if it never crossed."
+    )
+    peak_statistic: Stat = Field(
+        None, description="Accumulated standardized deviations, at its highest."
+    )
+    peak_at: Optional[int] = None
+    direction: Optional[str] = None
+    severity: Optional[str] = None
+    baseline_mean: Stat = None
+    baseline_std: Stat = None
+    degenerate_baseline: bool = Field(
+        False,
+        description="The warm-up saw no variation, so any statistic here "
+        "is arithmetic rather than evidence -- it divides by almost "
+        "nothing. A stale or halted feed through the warm-up does this.",
+    )
+    mean_after_reference: Stat = Field(
+        None,
+        description="The before-and-after a reader can check. A peak "
+        "statistic is accumulated and unbounded; this is not.",
+    )
+    shift: Stat = None
+    shift_in_reference_sd: Stat = None
+    n_reference: Optional[int] = None
+    threshold: Stat = None
+    n_breaks: int = 0
+    breaks: List[BasisBreak] = Field(default_factory=list)
+
+
+class BasisAlert(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    observation: Optional[int] = None
+    value: Stat = None
+    statistic: Stat = None
+    direction: Optional[str] = None
+    baseline_mean: Stat = None
+    baseline_std: Stat = None
+    shift_in_baseline_sd: Stat = None
+    message: str = ""
+
+
+class BasisMonitorResult(_Result):
+    state: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Pass THIS back on the next call. JSON-safe, so a "
+        "monitor can be paused, moved between processes and resumed without "
+        "losing its baseline.",
+    )
+    alert: Optional[BasisAlert] = Field(
+        None,
+        description="Set once, on the update that crosses. It does not "
+        "re-fire while a dislocation persists -- a monitor that alerts every "
+        "tick is a monitor somebody turns off.",
+    )
+    triggered: bool = False
+    warming_up: bool = False
+    n_observations: int = 0
+    current_value: Stat = None
+    statistic: Stat = None
+    peak_statistic: Stat = None
+    threshold: Stat = None
+    baseline_mean: Stat = Field(None, description="Null until the warm-up completes.")
+    baseline_std: Stat = None

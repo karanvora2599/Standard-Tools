@@ -26,13 +26,15 @@ the error this surface is most exposed to: passing 43 for a 4.3% rate, or
 
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "BasisHistoryInput",
     "CashFuturesBasisInput",
+    "BasisDislocationInput",
+    "BasisMonitorInput",
     "CompareExpressionsInput",
     "DeltaOneExpression",
     "DividendConstituent",
@@ -554,4 +556,104 @@ class IndexRebalanceInput(BaseModel):
         description="Share of daily volume printing in the closing auction, "
         "where index trades execute. Typically 0.10-0.20; leaving it at 1.0 "
         "understates participation by five to ten times.",
+    )
+
+
+class BasisDislocationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    spot_prices: List[float] = Field(
+        ..., min_length=20, description="Cash closes, oldest first."
+    )
+    futures_prices: List[float] = Field(
+        ..., min_length=20, description="Futures closes on the SAME dates."
+    )
+    time_to_expiry: Optional[List[float]] = Field(
+        None,
+        description="Years to expiry per date. Without it the channel is in "
+        "bps of spot and STEPS at a roll, which both detectors read as a "
+        "structural shift because in that channel it is one.",
+    )
+    reference_fraction: float = Field(
+        0.3,
+        gt=0,
+        lt=1,
+        description="Fraction of the START used to learn normal. A baseline "
+        "drawn from the whole series hides the shift inside it.",
+    )
+    threshold: float = Field(
+        9.0,
+        gt=0,
+        le=1000,
+        description="CUSUM decision threshold. 9.0 is calibrated, not the "
+        "textbook 5.0, which measures 51% false alarms over 300 "
+        "observations when asking whether anything happened anywhere.",
+    )
+    slack: float = Field(
+        0.5, ge=0, le=100, description="Standardized deviations absorbed per step."
+    )
+    max_breaks: int = Field(
+        3, ge=1, le=20, description="Most segment boundaries to look for."
+    )
+
+
+class BasisMonitorInput(BaseModel):
+    """One stateful call rather than three tools.
+
+    Omit `state` to open a monitor; pass back the `state` from the previous
+    call to advance it. The caller holds the state between calls, because a
+    tool call returns and there is nowhere for a subscription to live.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    spot_prices: List[float] = Field(
+        ..., min_length=1, description="Cash ticks since the last call, oldest first."
+    )
+    futures_prices: List[float] = Field(
+        ..., min_length=1, description="Futures ticks on the SAME updates."
+    )
+    state: Optional[Dict[str, Any]] = Field(
+        None,
+        description="The `state` returned by the previous call. Omit to open "
+        "a new monitor. Pass the state, not the whole result.",
+    )
+    time_to_expiry: Optional[List[float]] = Field(
+        None, description="Years to expiry per tick. Required iff annualized."
+    )
+    reset: bool = Field(
+        False,
+        description="Clear the accumulators before applying this update. Use "
+        "after acknowledging an alert.",
+    )
+    keep_baseline_on_reset: bool = Field(
+        True,
+        description="On reset, keep the same idea of normal (a spike that "
+        "passed) or relearn it (a regime change). Opposite conclusions that "
+        "look identical in the accumulators, so this is not guessed.",
+    )
+    label: str = Field("basis", description="Names the monitor in its alerts.")
+    warmup: int = Field(
+        60,
+        ge=10,
+        le=100_000,
+        description="Observations before the baseline is fixed and anything "
+        "can trigger. A baseline from fewer than about ten is estimation "
+        "error, and a detector standardized against it fires on that.",
+    )
+    threshold: float = Field(
+        9.0,
+        gt=0,
+        le=1000,
+        description="CUSUM decision threshold. 9.0 is calibrated; the "
+        "textbook 5.0 measures 51% false alarms over 300 observations.",
+    )
+    slack: float = Field(
+        0.5, ge=0, le=100, description="Standardized deviations absorbed per step."
+    )
+    annualized: bool = Field(
+        False,
+        description="Watch ln(F/S)/T in bps rather than (F/S-1). Comparable "
+        "across expiries; the un-annualized channel STEPS at a roll and the "
+        "monitor will report that step.",
     )

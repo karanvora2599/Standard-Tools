@@ -20,7 +20,7 @@ architecture permits because it scopes dispatch rather than values.
 The floor this library sets for a runtime is eight tools. delta_one
 shipped with nine -- the ninth deliberate margin, since shipping exactly
 at the floor means one tool failing review makes the whole runtime
-unshippable -- and now holds fifteen.
+unshippable -- and now holds seventeen.
 
 The six added second are the desk instruments: replication, ETF fair
 value, total return swaps and futures, dividend points and index
@@ -31,7 +31,9 @@ the parts that needed none of that got it into use sooner.
 """
 
 from .models import (
+    BasisDislocationInput,
     BasisHistoryInput,
+    BasisMonitorInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
     DividendPointsInput,
@@ -59,6 +61,8 @@ from .tools import (
     analyze_roll,
     analyze_total_return_future,
     compare_delta_one_expressions,
+    detect_basis_dislocation,
+    monitor_basis_stream,
     optimize_replication_basket,
     price_total_return_swap,
     size_futures_hedge,
@@ -243,6 +247,31 @@ TOOL_DEFS = [
         "sizes the flow and deliberately does not predict the price move.",
         IndexRebalanceInput,
     ),
+    (
+        "detect_basis_dislocation",
+        "Whether a basis has STRUCTURALLY shifted rather than merely moved, "
+        "by CUSUM and change-point detection. A z-score asks how "
+        "unusual today is, and a basis that drifts two sigma wide and stays "
+        "there never has a remarkable day -- CUSUM accumulates, so a "
+        "sustained shift crosses when no single observation would. That is "
+        "the difference between 'the basis is wide' and 'the basis is not "
+        "the same basis any more', and only the second is a reason to "
+        "re-examine the carry behind a position. A crossing is usually a roll "
+        "or a dividend rather than a dislocation.",
+        BasisDislocationInput,
+    ),
+    (
+        "monitor_basis_stream",
+        "Watch a basis on a LIVE feed, one stateful call at a time. A tool "
+        "call returns, so there is nowhere for a subscription to live -- the "
+        "state comes back in the result and goes in on the next call, which "
+        "means a monitor can be paused, serialized and resumed elsewhere "
+        "without losing its baseline. Accumulators are carried rather than "
+        "recomputed, so feeding a hundred ticks in one call and a hundred "
+        "calls of one tick give the same answer, and cost is constant per "
+        "tick rather than a pass over a growing history.",
+        BasisMonitorInput,
+    ),
 ]
 
 TOOL_DISPATCH = {
@@ -276,6 +305,11 @@ TOOL_DISPATCH = {
     ),
     "analyze_dividend_points": (analyze_dividend_points, DividendPointsInput),
     "analyze_index_rebalance": (analyze_index_rebalance, IndexRebalanceInput),
+    "detect_basis_dislocation": (
+        detect_basis_dislocation,
+        BasisDislocationInput,
+    ),
+    "monitor_basis_stream": (monitor_basis_stream, BasisMonitorInput),
 }
 
 #: Every tool here belongs to the one category this runtime owns.
@@ -296,6 +330,8 @@ __all__ = [
     "analyze_roll",
     "analyze_total_return_future",
     "compare_delta_one_expressions",
+    "detect_basis_dislocation",
+    "monitor_basis_stream",
     "optimize_replication_basket",
     "price_total_return_swap",
     "size_futures_hedge",

@@ -44,10 +44,13 @@ from standard_quant_tools.delta_one import futures as _futures
 from standard_quant_tools.delta_one import hedging as _hedging
 from standard_quant_tools.delta_one import rebalance as _rebalance
 from standard_quant_tools.delta_one import replication as _replication
+from standard_quant_tools.delta_one import streaming as _streaming
 from standard_quant_tools.delta_one import swaps as _swaps
 
 from .models import (
+    BasisDislocationInput,
     BasisHistoryInput,
+    BasisMonitorInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
     DividendPointsInput,
@@ -68,7 +71,9 @@ from .models import (
 # typing.get_type_hints() and `from __future__ import annotations` makes
 # these strings that must resolve, or the tool loses its output schema.
 from .results import (
+    BasisDislocationResult,
     BasisHistoryResult,
+    BasisMonitorResult,
     CashFuturesBasisResult,
     CompareExpressionsResult,
     DividendPointsResult,
@@ -89,6 +94,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "analyze_basis_history",
+    "monitor_basis_stream",
+    "detect_basis_dislocation",
     "analyze_cash_futures_basis",
     "analyze_dividend_points",
     "analyze_etf_fair_value",
@@ -321,5 +328,45 @@ def analyze_index_rebalance(
             indexed_assets=input_data.indexed_assets,
             adv=input_data.adv,
             auction_fraction=input_data.auction_fraction,
+        )
+    )
+
+
+def detect_basis_dislocation(
+    input_data: BasisDislocationInput,
+) -> BasisDislocationResult:
+    return BasisDislocationResult(
+        **_basis.detect_basis_dislocation(
+            spot=input_data.spot_prices,
+            futures=input_data.futures_prices,
+            time_to_expiry=input_data.time_to_expiry,
+            reference_fraction=input_data.reference_fraction,
+            threshold=input_data.threshold,
+            slack=input_data.slack,
+            max_breaks=input_data.max_breaks,
+        )
+    )
+
+
+def monitor_basis_stream(input_data: BasisMonitorInput) -> BasisMonitorResult:
+    state = input_data.state
+    if state is None:
+        state = _streaming.new_basis_monitor(
+            label=input_data.label,
+            warmup=input_data.warmup,
+            threshold=input_data.threshold,
+            slack=input_data.slack,
+            annualized=input_data.annualized,
+        )
+    elif input_data.reset:
+        state = _streaming.reset_basis_monitor(
+            state, keep_baseline=input_data.keep_baseline_on_reset
+        )
+    return BasisMonitorResult(
+        **_streaming.update_basis_monitor(
+            state,
+            spot=input_data.spot_prices,
+            futures=input_data.futures_prices,
+            time_to_expiry=input_data.time_to_expiry,
         )
     )

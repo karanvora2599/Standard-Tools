@@ -36,12 +36,19 @@ import pandas as pd
 
 from standard_quant_tools.analysis.cointegration import half_life, spread_zscore
 from standard_quant_tools.analysis.derivatives import _positive
+from standard_quant_tools.analysis.liquidity_events import (
+    DEFAULT_REFERENCE_FRACTION,
+    DEFAULT_SLACK,
+    DEFAULT_THRESHOLD,
+    cusum,
+)
+from standard_quant_tools.analysis.structure import detect_change_points
 from standard_quant_tools.error import ValidationError
 
 from ._numbers import bounded, finite, non_negative, positive
 from .carry import forward_price, observed_carry_rate, solve_carry
 
-__all__ = ["basis_history", "cash_futures_basis"]
+__all__ = ["basis_history", "cash_futures_basis", "detect_basis_dislocation"]
 
 #: Default richness tolerance, in annualized basis points of the carry
 #: spread. 25 bps matches `check_put_call_parity`'s tolerance and is set
@@ -270,6 +277,162 @@ def basis_history(
         "half_life_observations": float(hl),
         "annualized": annualized_bps is not None,
         "window": window,
+        "warnings": warnings,
+    }
+
+
+def detect_basis_dislocation(
+    *,
+    spot: Sequence[float],
+    futures: Sequence[float],
+    time_to_expiry: Optional[Sequence[float]] = None,
+    reference_fraction: float = DEFAULT_REFERENCE_FRACTION,
+    threshold: float = DEFAULT_THRESHOLD,
+    slack: float = DEFAULT_SLACK,
+    max_breaks: int = 3,
+) -> Dict[str, Any]:
+    """
+    Whether a basis has STRUCTURALLY shifted, rather than merely moved.
+
+    A DIFFERENT QUESTION FROM `basis_history`, and the difference is the one
+    this library already draws in its microstructure runtime: a z-score
+    measures how unusual ONE observation is, and a basis that drifts two
+    sigma wide and stays there never produces a remarkable single day. CUSUM
+    accumulates, so a sustained shift crosses even when no individual
+    observation would have. The distinction is exactly the difference
+    between "the basis is wide today" and "the basis is not the same basis
+    any more", and only the second is a reason to re-examine the carry
+    assumptions behind a position.
+
+    THE BASELINE IS THE FIRST `reference_fraction` AND NOTHING LATER. A
+    detector standardized against the whole series puts the dislocation into
+    its own baseline and then reports it as normal -- which is why the
+    reference window is a fraction of the START rather than a rolling one.
+    The consequence is that a crossing inside that window is not reported:
+    the detector cannot fire on the data that taught it what normal is.
+
+    Two detectors, because they answer different halves. CUSUM says WHETHER
+    and roughly when a sustained shift began; `detect_change_points` says
+    where the segment boundaries are and what the level was on each side.
+    Agreement between them is worth more than either alone.
+
+    THE THRESHOLD IS THE LIBRARY'S CALIBRATED ONE, not the textbook 5.0.
+    That figure is quoted as an average RUN LENGTH -- one false alarm every
+    so many observations -- and this asks a different question, "did
+    anything happen anywhere in this window", which any fixed threshold
+    eventually answers yes to. `liquidity_events` measured it on noise with
+    no change in it: 5.0 gives 51% false alarms over 300 observations. Its
+    9.0 is used here rather than a number invented for this module.
+    """
+    s = _series(spot, "spot")
+    f = _series(futures, "futures")
+    if len(s) != len(f):
+        raise ValidationError(
+            f"spot has {len(s)} observations and futures has {len(f)}; they "
+            "must be aligned and the same length."
+        )
+    if (s <= 0).any():
+        raise ValidationError("spot contains a non-positive price.")
+    if len(s) < 20:
+        raise ValidationError(
+            f"only {len(s)} observations. A shift cannot be told from noise "
+            "on fewer than about twenty, and the reference window would be "
+            "four points."
+        )
+
+    if time_to_expiry is not None:
+        t = _series(time_to_expiry, "time_to_expiry")
+        if len(t) != len(s):
+            raise ValidationError(
+                f"time_to_expiry has {len(t)} observations against {len(s)} "
+                "prices; they must be aligned."
+            )
+        if (t <= 0).any():
+            raise ValidationError(
+                "time_to_expiry contains a non-positive value; a contract at "
+                "or past expiry has no annualized basis."
+            )
+        channel = np.log(f / s) / t * 10_000.0
+        units = "annualized bps"
+    else:
+        channel = (f / s - 1.0) * 10_000.0
+        units = "bps of spot"
+
+    detected = cusum(
+        channel,
+        slack=slack,
+        threshold=threshold,
+        reference_fraction=reference_fraction,
+    )
+    # The degenerate-baseline branch returns a SHORTER dict, so read it by
+    # `.get` rather than by key -- a flat reference window is a statement
+    # about the window and not a failure to detect anything.
+    triggered = bool(detected.get("triggered", False))
+
+    breaks: Dict[str, Any] = {"n_breaks": 0, "breaks": []}
+    try:
+        breaks = detect_change_points(channel, max_breaks=max_breaks)
+    except ValidationError:
+        # Too short to segment is not too short to run CUSUM on, and the
+        # CUSUM answer is still worth returning.
+        pass
+
+    warnings: List[str] = []
+    if detected.get("degenerate_baseline") or "reason" in detected:
+        warnings.append(
+            "The reference window is effectively constant, so there is no "
+            "scale to measure a shift against and nothing can trigger. That "
+            "is a statement about the first "
+            f"{reference_fraction:.0%} of this series, not evidence that the "
+            "basis held steady."
+        )
+    if triggered:
+        warnings.append(
+            f"A sustained shift crossed the CUSUM threshold. Before treating "
+            "it as a dislocation, rule out the mechanical causes in order: a "
+            "contract roll inside the window (the basis steps because the "
+            "time to expiry did), a dividend going ex, and a change in the "
+            "financing curve. Only then is it the market repricing carry."
+        )
+    if breaks.get("n_breaks") and not triggered:
+        warnings.append(
+            f"Change-point detection found {breaks['n_breaks']} break(s) that "
+            "CUSUM did not flag. The two disagree when a shift is large but "
+            "brief -- segmentation sees the level change, CUSUM needs it to "
+            "persist. Read the segment means before deciding which is right."
+        )
+    if time_to_expiry is None:
+        warnings.append(
+            "Measured in bps of spot, NOT annualized -- no time_to_expiry "
+            "was given. A series spanning a roll therefore STEPS at the "
+            "roll, and both detectors will read that step as a structural "
+            "shift because in this channel it is one."
+        )
+    warnings.append(
+        "CUSUM rather than a z-score, deliberately. A z-score asks how "
+        "unusual today is; a basis that drifts wide and stays there never "
+        "has a remarkable day. This asks whether the level changed."
+    )
+
+    return {
+        "n_observations": int(len(s)),
+        "units": units,
+        "current": float(channel.iloc[-1]),
+        "triggered": triggered,
+        "first_crossing": detected.get("first_crossing"),
+        "peak_statistic": detected.get("peak_statistic"),
+        "peak_at": detected.get("peak_at"),
+        "direction": detected.get("direction"),
+        "severity": detected.get("severity"),
+        "baseline_mean": detected.get("baseline_mean"),
+        "baseline_std": detected.get("baseline_std"),
+        "mean_after_reference": detected.get("mean_after_reference"),
+        "shift": detected.get("shift"),
+        "shift_in_reference_sd": detected.get("shift_in_reference_sd"),
+        "n_reference": detected.get("n_reference"),
+        "threshold": float(threshold),
+        "n_breaks": int(breaks.get("n_breaks", 0)),
+        "breaks": breaks.get("breaks", []),
         "warnings": warnings,
     }
 

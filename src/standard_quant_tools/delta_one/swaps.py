@@ -32,9 +32,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional
 
-from standard_quant_tools.error import ValidationError
-
 from standard_quant_tools.analysis.derivatives import MAX_RATE
+from standard_quant_tools.error import ValidationError
 
 from ._numbers import bounded, finite, non_negative, positive
 from .daycount import DEFAULT_CONVENTION, year_fraction

@@ -30,6 +30,12 @@ from standard_quant_tools.agent.runtimes.portfolio.tools import (
     get_trade_profile,
 )
 
+from .book_tools import (  # noqa: F401
+    BOOK_TOOL_CATEGORY,
+    BOOK_TOOL_DEFS,
+    BOOK_TOOL_DISPATCH,
+    get_order_book_metrics,
+)
 from .estimator_tools import (  # noqa: F401
     ESTIMATOR_TOOL_DEFS,
     ESTIMATOR_TOOL_DISPATCH,
@@ -133,10 +139,12 @@ TOOL_DISPATCH.update(
 )
 TOOL_DISPATCH.update(ESTIMATOR_TOOL_DISPATCH)
 
+TOOL_DEFS = TOOL_DEFS + BOOK_TOOL_DEFS
+TOOL_DISPATCH.update(BOOK_TOOL_DISPATCH)
+
 TOOL_CATEGORY = {name: "microstructure" for name in TOOL_DISPATCH}
 
 __all__ = [
-    "get_implementation_shortfall",
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",
@@ -147,8 +155,10 @@ __all__ = [
     "estimate_roll_spread",
     "estimate_vpin",
     "get_amihud_illiquidity",
+    "get_implementation_shortfall",
     "get_intraday_volume_profile",
     "get_microstructure_metrics",
+    "get_order_book_metrics",
     "get_order_flow_imbalance",
     "get_trade_profile",
 ]

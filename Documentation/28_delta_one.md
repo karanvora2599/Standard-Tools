@@ -1,6 +1,6 @@
 # Delta One
 
-Fifteen tools for the instruments that move one-for-one with an underlying —
+Seventeen tools for the instruments that move one-for-one with an underlying —
 cash, ETFs, baskets, futures, forwards and total return swaps. The runtime
 answers one question that no other runtime could: **which instrument is the
 cheapest way to own or hedge this exposure, and why do they differ.**
@@ -65,6 +65,8 @@ Three things genuinely did not exist anywhere and had to be written:
 | `analyze_total_return_future` | What financing spread does this TRF embed |
 | `analyze_dividend_points` | How many index points of dividend before expiry |
 | `analyze_index_rebalance` | What will this index change force people to trade |
+| `detect_basis_dislocation` | Has this basis *structurally shifted*, or just moved |
+| `monitor_basis_stream` | Watch a basis on a live feed, one stateful call at a time |
 
 The first nine shipped alone, deliberately: the floor for a runtime is
 eight, shipping exactly at it means one tool failing review makes the whole
@@ -134,12 +136,11 @@ silently becomes `"SPX INDEX US Equity"`, and the timezone metadata reports
 
 Deliberately deferred, in the order they are worth building:
 
-- **Live basis monitoring.** Not before the data layer has intraday
-  futures and index prices, which today it does not. Bloomberg's provider
-  implements no intraday request path and no shipped provider exposes
-  depth, so a live index-arbitrage surface would be a set of tools that
-  refuse. Deferring it is the call the microstructure runtime already made
-  about L2, and it was right.
+Nothing on the original roadmap is now deferred. What remains is not a
+missing tool but a missing *source*: no provider shipped here serves L2 or
+intraday futures. Everything that consumes them exists and is tested
+against synthetic books, which was the sequencing
+`DataProvider.get_order_book` chose on purpose — see §7.
 
 ## 6. The infrastructure underneath
 
@@ -184,3 +185,64 @@ flat-looking book turns out not to be.
   — generated argument-level reference
 - [19_runtimes.md](19_runtimes.md) — why runtimes exist and how values
   cross between them
+
+## 7. The live layer
+
+`DataProvider.get_order_book` declared its column contract before any
+provider implemented it, and said why: *"the analysis that consumes a book
+(microprice, order-flow imbalance, depth slope) can be written and tested
+against synthetic books now, so that when a source arrives the
+correctness-critical part already exists rather than being invented under
+deadline."* That analysis now exists.
+
+### A depth book says what a quote cannot
+
+`get_order_book_metrics` (in `microstructure`) reads that contract and
+nothing else, so any feed shaped to it works — including one this library
+has no provider for.
+
+The midpoint ignores size, so a book with 5,000 bid and 100 offered reads
+identically to its mirror, and the second is about to trade higher. The
+**microprice** weights each side by the *opposite* side's resting size,
+which reads backwards until you see why: the heavy side is the side that
+absorbs, so price is pinned nearer the thin one. On a balanced book it
+equals the mid exactly.
+
+Touch and cumulative imbalance are both reported because they routinely
+disagree and answer different questions — the touch predicts the next tick,
+the cumulative predicts where *size* ends up. A book bid at the touch with
+weight behind the offer is exactly the one that ticks up and fills badly.
+
+### A monitor cannot be a subscription
+
+A tool call is asked a question and answers; there is nowhere for a
+long-running loop to live between calls. So `monitor_basis_stream` returns
+its state, and you pass it back:
+
+```
+state = None
+while True:
+    result = monitor_basis_stream(spot_prices=…, futures_prices=…, state=state)
+    state = result["state"]
+    if result["alert"]:
+        ...
+```
+
+Two properties fall out of that shape which a subscription does not have:
+the state is inspectable at every step, and a monitor can be paused,
+serialized, moved to another process and resumed without losing its
+baseline.
+
+**Accumulators are carried, not recomputed.** Feeding a hundred ticks in one
+call and making a hundred single-tick calls reach byte-identical state, so
+call frequency is a deployment decision rather than a modelling one — and
+cost is constant per tick rather than a pass over a growing history.
+
+**The baseline freezes after warm-up, deliberately.** A monitor that keeps
+updating its own idea of normal adapts to the dislocation it is meant to
+report and goes quiet exactly when it matters. The consequence is stated
+rather than hidden: after a genuine regime change the monitor stays
+triggered until reset, because by its own baseline the world is still
+abnormal. Whether that is a spike to acknowledge or a new level to watch
+from are opposite conclusions that look identical in the accumulators, so
+`reset` asks which rather than guessing.
