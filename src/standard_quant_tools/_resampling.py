@@ -37,6 +37,8 @@ import math
 
 import numpy as np
 
+from standard_quant_tools.numeric_contract import require_positive_int
+
 __all__ = ["block_indices"]
 
 
@@ -64,6 +66,12 @@ def block_indices(
     satisfies `s + span <= n` by construction, so no block runs off the end
     and the truncation is the only thing trimming.
 
+    `n`, `block_size` and `target` must all be positive integers. A
+    `block_size` larger than `n` is fine and is clamped to `n` -- see
+    `span` above -- but one below 1 is refused rather than clamped up,
+    because silently returning an IID resample under this function's name
+    destroys exactly the serial correlation a caller chose it to preserve.
+
     A `block_size` of 1 needs no special case: `span` is 1, `n_blocks` is
     `target`, and the call becomes `rng.integers(0, n, target)` -- exactly
     the iid draw, from exactly the same call, so the random stream matches
@@ -71,7 +79,18 @@ def block_indices(
     """
     if target is None:
         target = n
-    span = min(max(int(block_size), 1), n)
+
+    # Both of these used to be silent. `n = 0` divided by zero and raised a
+    # bare ZeroDivisionError from inside the ceil, and `block_size` of 0 or
+    # -3 was clamped up to 1 -- which is an IID resample, returned under the
+    # name of a block bootstrap. The docstring below reasons carefully about
+    # why a block_size of exactly 1 is safe and then said nothing about the
+    # values that are not.
+    n = require_positive_int(n, "n", "block_indices")
+    block_size = require_positive_int(block_size, "block_size", "block_indices")
+    target = require_positive_int(target, "target", "block_indices")
+
+    span = min(block_size, n)
     n_blocks = int(math.ceil(target / span))
     starts = rng.integers(0, n - span + 1, n_blocks)
     return (starts[:, None] + np.arange(span)).ravel()[:target]

@@ -97,6 +97,38 @@ MUTATIONS: List[Mutation] = [
         "tests/backtesting/test_trade_analysis.py",
     ),
     Mutation(
+        # Found by an audit that applied it out-of-repo: it survived 2,149
+        # tests across 71 live calls. Optimizer weights are invariant to a
+        # uniform scaling of the covariance, and every magnitude assertion
+        # elsewhere is computed from that same covariance, so nothing
+        # noticed every portfolio volatility coming back 15.87x too small.
+        "covariance: annualize by sqrt(ppy) instead of ppy",
+        SRC / "portfolio/optimize.py",
+        "    cov = returns_df.cov().to_numpy(dtype=float) * periods_per_year",
+        "    cov = returns_df.cov().to_numpy(dtype=float) * np.sqrt(periods_per_year)",
+        "tests/test_single_definition.py",
+    ),
+    Mutation(
+        # Also a proven survivor: 1,300 tests. Every deflated-Sharpe test
+        # asserts an ordering or a 0..1 range and a monotone transform
+        # preserves both. `kurtosis` is the RAW fourth moment here, so
+        # normal is 3.0 and the correction subtracts 1.0, not 3.0.
+        "deflated sharpe: switch to the excess-kurtosis convention",
+        SRC / "backtest/robustness.py",
+        "((kurtosis - 1.0) / 4.0)",
+        "((kurtosis - 3.0) / 4.0)",
+        "tests/test_single_definition.py",
+    ),
+    Mutation(
+        # Clamping a non-positive block_size UP to 1 returns an IID
+        # resample under the name of a block bootstrap.
+        "bootstrap: clamp a non-positive block_size instead of refusing",
+        SRC / "_resampling.py",
+        '    block_size = require_positive_int(block_size, "block_size", "block_indices")',
+        "    block_size = max(int(block_size), 1)",
+        "tests/test_single_definition.py",
+    ),
+    Mutation(
         # Moved here from analysis/inference.py, which used to hold its
         # own copy of the block index construction. Setting `span` to 1
         # is the same mutation the old anchor made: every block becomes
@@ -104,7 +136,7 @@ MUTATIONS: List[Mutation] = [
         # correlation the block bootstrap exists to preserve is gone.
         "bootstrap: force an IID resample regardless of block_size",
         SRC / "_resampling.py",
-        "    span = min(max(int(block_size), 1), n)",
+        "    span = min(block_size, n)",
         "    span = 1",
         "tests/analysis/test_inference.py",
     ),

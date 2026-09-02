@@ -204,3 +204,107 @@ class TestDeflatedSharpeFormulasAreDefinedOnce:
             assert wrapped["deflated_sharpe_probability"] == pytest.approx(
                 core["deflated_sharpe_ratio"], abs=1e-6
             )
+
+
+class TestTheConsolidatedHelpersOnDegenerateInput:
+    """The consolidation pass made these single points of failure for the
+    whole library and pinned none of them. Every function here had zero test
+    references until this class existed, and each one was wrong on an input
+    a caller can produce.
+    """
+
+    def test_norm_cdf_array_handles_an_empty_array(self):
+        """`np.vectorize` infers its dtype by calling the function once, so
+        size-0 raised `ValueError: cannot call vectorize on size 0 inputs`.
+        Reached from `multi_factor`'s scipy-absent p-value path, which is
+        itself never executed in this environment."""
+        from standard_quant_tools._special import norm_cdf_array
+
+        out = norm_cdf_array([])
+        assert out.shape == (0,)
+        assert out.dtype == np.dtype(float)
+
+    def test_norm_cdf_array_agrees_with_the_scalar_version(self):
+        from standard_quant_tools._special import norm_cdf, norm_cdf_array
+
+        xs = np.random.default_rng(0).normal(0, 3, 200)
+        assert np.allclose(norm_cdf_array(xs), [norm_cdf(x) for x in xs])
+
+    @pytest.mark.parametrize("block_size", [0, -1, -3])
+    def test_block_indices_refuses_a_block_size_below_one(self, block_size):
+        """It used to clamp up to 1, which is an IID resample returned under
+        the name of a block bootstrap -- destroying exactly the serial
+        correlation a caller chose this function to preserve. The agent
+        boundary guards it with ge=1; the library API did not."""
+        from standard_quant_tools._resampling import block_indices
+        from standard_quant_tools.error import ValidationError
+
+        rng = np.random.default_rng(0)
+        with pytest.raises(ValidationError, match="block_size"):
+            block_indices(10, block_size, rng)
+
+    @pytest.mark.parametrize("n", [0, -5])
+    def test_block_indices_refuses_an_empty_source(self, n):
+        """`n=0` raised a bare ZeroDivisionError from inside math.ceil."""
+        from standard_quant_tools._resampling import block_indices
+        from standard_quant_tools.error import ValidationError
+
+        rng = np.random.default_rng(0)
+        with pytest.raises(ValidationError, match="n must be"):
+            block_indices(n, 5, rng)
+
+    def test_block_indices_still_clamps_a_block_larger_than_the_source(self):
+        """Clamping DOWN is correct and documented -- it reproduces what the
+        concatenating version did. Only clamping up was the bug."""
+        from standard_quant_tools._resampling import block_indices
+
+        rng = np.random.default_rng(0)
+        out = block_indices(10, 999, rng)
+        assert len(out) == 10
+        assert out.min() >= 0 and out.max() < 10
+
+    def test_annualized_mean_cov_scales_covariance_linearly(self):
+        """THE MUTATION THAT SURVIVED 2,149 TESTS. Changing `* ppy` to
+        `* sqrt(ppy)` here understates every reported portfolio volatility
+        by 15.87x across 71 live calls and no test noticed, because
+        optimizer weights are invariant to a uniform scaling of the
+        covariance and every magnitude assertion elsewhere is computed from
+        the same mutated matrix."""
+        import pandas as pd
+
+        from standard_quant_tools.portfolio.optimize import annualized_mean_cov
+
+        rng = np.random.default_rng(0)
+        frame = pd.DataFrame(rng.normal(0.0005, 0.012, (500, 4)))
+
+        mu, cov = annualized_mean_cov(frame, 252)
+        mu_1, cov_1 = annualized_mean_cov(frame, 1)
+
+        # Linear in periods_per_year, both of them -- not sqrt, not mixed.
+        assert np.allclose(mu, mu_1 * 252)
+        assert np.allclose(cov, cov_1 * 252)
+
+        # And an absolute anchor, so a uniform rescale of BOTH cannot pass.
+        assert np.allclose(cov, frame.cov().to_numpy() * 252)
+        assert np.allclose(mu, frame.mean().to_numpy() * 252)
+
+        # A daily vol of 1.2% is ~19% annualized. sqrt-scaling gives 1.2%.
+        annual_vol = float(np.sqrt(cov[0, 0]))
+        assert 0.15 < annual_vol < 0.24, annual_vol
+
+    def test_sharpe_standard_error_factor_uses_the_raw_fourth_moment(self):
+        """THE OTHER SURVIVING MUTATION. `(kurtosis - 1.0)` -> `(kurtosis -
+        3.0)` passes 1,300 tests, because every deflated-Sharpe test asserts
+        an ordering or a 0..1 range and both survive a monotone transform.
+        3.0 is normal here, not 0.0."""
+        from standard_quant_tools.backtest.robustness import (
+            sharpe_standard_error_factor,
+        )
+
+        # Normal moments: skew 0, kurtosis 3 -> factor sqrt(1 + SR^2/2).
+        got = sharpe_standard_error_factor(0.1, skew=0.0, kurtosis=3.0)
+        assert got == pytest.approx(np.sqrt(1.0 + (3.0 - 1.0) / 4.0 * 0.01))
+
+        # Negative skew widens it; fat tails widen it.
+        assert sharpe_standard_error_factor(0.1, -1.0, 3.0) > got
+        assert sharpe_standard_error_factor(0.1, 0.0, 9.0) > got

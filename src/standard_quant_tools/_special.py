@@ -76,9 +76,20 @@ def norm_pdf(x: float) -> float:
 
 
 def norm_cdf_array(x: Any) -> np.ndarray:
-    """`norm_cdf` over an array. `math.erf` is scalar and numpy has no erf,
-    so this is a vectorize wrapper -- the same one `multi_factor` used."""
-    return np.vectorize(norm_cdf)(np.asarray(x, dtype=float)).astype(float)
+    """
+    `norm_cdf` over an array. `math.erf` is scalar and numpy has no erf, so
+    this is a vectorize wrapper -- the same one `multi_factor` used.
+
+    The empty case is handled explicitly because `np.vectorize` infers its
+    output dtype by calling the function once, and on a size-0 input there
+    is nothing to call it with: it raises `ValueError: cannot call
+    vectorize on size 0 inputs unless otypes is set`. The CDF of no
+    observations is no observations, not an error.
+    """
+    values = np.asarray(x, dtype=float)
+    if values.size == 0:
+        return np.empty(values.shape, dtype=float)
+    return np.vectorize(norm_cdf)(values).astype(float)
 
 
 def norm_ppf(p: float) -> float:
