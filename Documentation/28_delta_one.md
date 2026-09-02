@@ -66,7 +66,7 @@ Three things genuinely did not exist anywhere and had to be written:
 | `analyze_dividend_points` | How many index points of dividend before expiry |
 | `analyze_index_rebalance` | What will this index change force people to trade |
 | `detect_basis_dislocation` | Has this basis *structurally shifted*, or just moved |
-| `monitor_basis_stream` | Watch a basis on a live feed, one stateful call at a time |
+| `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time |
 
 The first nine shipped alone, deliberately: the floor for a runtime is
 eight, shipping exactly at it means one tool failing review makes the whole
@@ -213,16 +213,45 @@ disagree and answer different questions — the touch predicts the next tick,
 the cumulative predicts where *size* ends up. A book bid at the touch with
 weight behind the offer is exactly the one that ticks up and fills badly.
 
+### One monitor, three channels, five jobs
+
+The roadmap asked for five monitors — live basis, ETF NAV, index arbitrage,
+roll spread, and a generic cross-instrument spread. They are not five
+computations. Four are `(a/b − 1)` in basis points and differ only in what
+the legs are *called*; the fifth is a difference in points. Five tools for
+three formulas would mint near-identical names for one rearrangement —
+exactly what `solve_forward_carry` exists to avoid.
+
+So the **channel** says how the legs combine, the **label** says what they
+are:
+
+| channel | value | serves |
+|---|---|---|
+| `relative_bps` | `(primary/reference − 1) × 10⁴` | live basis, ETF NAV, index arbitrage, any cross-instrument spread |
+| `annualized_bps` | `ln(primary/reference)/T × 10⁴` | basis across more than one expiry — `relative_bps` *steps* at a roll and the detector will report the step |
+| `absolute_points` | `primary − reference` | roll spread, and anything the market quotes in points |
+
+One sign convention throughout: **positive means `primary` is dear to
+`reference`.** Future over spot, ETF over NAV, basket over index, next
+contract over front.
+
+`absolute_points` is not a stylistic alternative to `relative_bps`. A
+31-point calendar spread on a 6000 index is 51 bps — expressing a roll in
+bps compresses the whole signal, and a difference needs no positive
+denominator where a ratio does.
+
 ### A monitor cannot be a subscription
 
 A tool call is asked a question and answers; there is nowhere for a
-long-running loop to live between calls. So `monitor_basis_stream` returns
+long-running loop to live between calls. So `monitor_spread_stream` returns
 its state, and you pass it back:
 
 ```
 state = None
 while True:
-    result = monitor_basis_stream(spot_prices=…, futures_prices=…, state=state)
+    result = monitor_spread_stream(
+        primary_prices=…, reference_prices=…, channel="relative_bps", state=state
+    )
     state = result["state"]
     if result["alert"]:
         ...

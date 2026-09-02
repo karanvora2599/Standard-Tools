@@ -34,7 +34,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 __all__ = [
     "BasisDislocationResult",
-    "BasisMonitorResult",
+    "SpreadMonitorResult",
     "BasisHistoryResult",
     "CashFuturesBasisResult",
     "CompareExpressionsResult",
@@ -575,7 +575,7 @@ class BasisDislocationResult(_Result):
     breaks: List[BasisBreak] = Field(default_factory=list)
 
 
-class BasisAlert(BaseModel):
+class SpreadAlert(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     observation: Optional[int] = None
@@ -585,17 +585,20 @@ class BasisAlert(BaseModel):
     baseline_mean: Stat = None
     baseline_std: Stat = None
     shift_in_baseline_sd: Stat = None
+    channel: str = ""
+    degenerate_baseline: bool = False
     message: str = ""
 
 
-class BasisMonitorResult(_Result):
+class SpreadMonitorResult(_Result):
     state: Dict[str, Any] = Field(
         default_factory=dict,
         description="Pass THIS back on the next call. JSON-safe, so a "
         "monitor can be paused, moved between processes and resumed without "
         "losing its baseline.",
     )
-    alert: Optional[BasisAlert] = Field(
+    channel: str = Field("", description="Which formula combined the two legs.")
+    alert: Optional[SpreadAlert] = Field(
         None,
         description="Set once, on the update that crosses. It does not "
         "re-fire while a dislocation persists -- a monitor that alerts every "

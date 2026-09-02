@@ -1,19 +1,30 @@
 """
-Monitoring a basis on a live feed, in a world where a tool call returns.
+Monitoring a spread on a live feed, in a world where a tool call returns.
 
 THE ARCHITECTURAL PROBLEM, AND WHY THE SHAPE IS WHAT IT IS. A monitor wants
 to be a subscription: open it, and it tells you when something happens. A
 tool call cannot be that. It is asked a question and it answers, and there
 is nowhere for a long-running loop to live between calls.
 
-So the state is the return value. `new_basis_monitor` produces a plain
-JSON-safe dict; `update_basis_monitor` takes that dict plus whatever ticks
+So the state is the return value. `new_spread_monitor` produces a plain
+JSON-safe dict; `update_spread_monitor` takes that dict plus whatever ticks
 have arrived since the last call and hands back a new one, with any alert
 attached. The caller -- an agent, a cron loop, a `while True` in a script --
 holds the state between calls. That is the only shape that works here, and
 it has two properties a subscription does not: the state is inspectable at
 every step, and a monitor can be paused, serialized, moved to another
 process and resumed without losing its baseline.
+
+ONE MONITOR, THREE CHANNELS, FIVE JOBS. The roadmap this came from asked
+for five separate monitors -- live basis, ETF NAV, index arbitrage, roll
+spread, and a generic cross-instrument spread. They are not five
+computations. Four are `(a/b - 1)` in basis points and differ only in what
+a and b are CALLED, which is the caller's business rather than the
+library's; the fifth is a difference in points. Five tools for three
+formulas would mint near-identical names for one rearrangement, which is
+the mistake `solve_carry` exists to avoid. So the CHANNEL says how the two
+series combine, the LABEL says what they are, and `CHANNEL_USES` records
+which roadmap monitor each channel serves.
 
 O(1) PER OBSERVATION, WHICH IS THE POINT. `detect_basis_dislocation` reruns
 CUSUM over the whole history every call: correct, and quadratic if you call
@@ -29,7 +40,7 @@ failure the batch detector's reference window exists to avoid. The
 consequence is real and stated rather than hidden: after a genuine regime
 change the monitor stays triggered until it is reset, because by its own
 baseline the world is still abnormal. That is a decision for whoever is
-watching, so `reset_basis_monitor` is explicit rather than automatic.
+watching, so `reset_spread_monitor` is explicit rather than automatic.
 """
 
 from __future__ import annotations
@@ -47,41 +58,93 @@ from standard_quant_tools.error import ValidationError
 from ._numbers import finite, non_negative, positive
 
 __all__ = [
+    "CHANNEL_USES",
+    "CHANNELS",
     "MONITOR_VERSION",
-    "new_basis_monitor",
-    "reset_basis_monitor",
-    "update_basis_monitor",
+    "new_spread_monitor",
+    "reset_spread_monitor",
+    "update_spread_monitor",
 ]
 
 #: Bumped when the state's shape changes. A monitor resumed from a state
 #: written by older code would otherwise carry accumulators that mean
 #: something slightly different, and the drift would be invisible.
-MONITOR_VERSION = 2
+MONITOR_VERSION = 3
 
 #: Observations gathered before the baseline is fixed. Below about this the
 #: standard deviation is too noisy to standardize against, and a detector
 #: built on it fires on its own estimation error.
 DEFAULT_WARMUP = 60
 
+#: How the two series combine into the number being watched. THREE, not
+#: five, because four of the roadmap's monitors are the same arithmetic
+#: under different names.
+CHANNELS: Dict[str, str] = {
+    "relative_bps": (
+        "(primary / reference - 1) * 10,000. The general case: any two "
+        "instruments whose prices are comparable in level. Positive means "
+        "primary is dear to reference."
+    ),
+    "annualized_bps": (
+        "ln(primary / reference) / T * 10,000, so the number is a RATE and "
+        "is comparable across expiries. Needs a time to expiry on every "
+        "tick; without one a March and a December contract are not on the "
+        "same scale and a single baseline spans both."
+    ),
+    "absolute_points": (
+        "primary - reference, in the underlying's own points. For spreads "
+        "quoted in points rather than as a ratio -- a calendar spread is "
+        "the usual one, and expressing it in bps of a 6000 index would "
+        "compress the whole signal into the third decimal."
+    ),
+}
 
-def new_basis_monitor(
+#: Which of the roadmap's five monitors each channel serves, and what to
+#: pass as primary and reference. Kept as data rather than as five tools:
+#: the arithmetic is shared and only the naming differs, so a caller needs
+#: the mapping rather than a separate schema for each.
+CHANNEL_USES: Dict[str, str] = {
+    "relative_bps": (
+        "live basis (primary=future, reference=spot); ETF NAV "
+        "(primary=ETF price, reference=NAV); index arbitrage "
+        "(primary=basket value, reference=index level); any cross-instrument "
+        "spread between two comparable prices."
+    ),
+    "annualized_bps": (
+        "live basis where the series spans more than one expiry, which is "
+        "the case a bps-of-spot channel gets wrong: it STEPS at every roll "
+        "and the detector faithfully reports the step."
+    ),
+    "absolute_points": (
+        "roll spread (primary=next contract, reference=front), and any "
+        "spread the market quotes in points."
+    ),
+}
+
+
+def new_spread_monitor(
     *,
-    label: str = "basis",
+    channel: str = "relative_bps",
+    label: str = "spread",
     warmup: int = DEFAULT_WARMUP,
     threshold: float = DEFAULT_THRESHOLD,
     slack: float = DEFAULT_SLACK,
-    annualized: bool = False,
 ) -> Dict[str, Any]:
     """
     An empty monitor, ready to be fed.
 
-    `annualized` says which channel is being watched: with it, updates must
-    carry a time to expiry and the basis is `ln(F/S)/T` in bps, comparable
-    across expiries. Without it the channel is `(F/S - 1)` in bps of spot,
-    which is fine within one contract and STEPS at a roll -- and a step is
-    exactly what this is built to flag, so a monitor left un-annualized
-    across a roll will report the roll.
+    `channel` decides how the two series combine; `label` says what they
+    are and appears in any alert. The two are separate because the
+    arithmetic is shared across jobs and the naming is not -- an ETF premium
+    and a cash-futures basis are the same computation and want different
+    words in the message.
     """
+    if channel not in CHANNELS:
+        raise ValidationError(
+            f"channel={channel!r} must be one of {sorted(CHANNELS)}. There "
+            "are three because there are three formulas: a ratio in basis "
+            "points, an annualized rate, and a difference in points."
+        )
     if int(warmup) < 10:
         raise ValidationError(
             f"warmup={warmup} is too short. A baseline standard deviation "
@@ -90,11 +153,11 @@ def new_basis_monitor(
         )
     return {
         "version": MONITOR_VERSION,
+        "channel": channel,
         "label": str(label),
         "warmup": int(warmup),
         "threshold": positive(threshold, "threshold"),
         "slack": non_negative(slack, "slack"),
-        "annualized": bool(annualized),
         "n": 0,
         # Welford's online mean and sum of squared deviations, so the
         # baseline is computed without keeping the warm-up observations --
@@ -121,15 +184,20 @@ def new_basis_monitor(
     }
 
 
-def update_basis_monitor(
+def update_spread_monitor(
     state: Dict[str, Any],
     *,
-    spot: Sequence[float],
-    futures: Sequence[float],
+    primary: Sequence[float],
+    reference: Sequence[float],
     time_to_expiry: Optional[Sequence[float]] = None,
 ) -> Dict[str, Any]:
     """
     Feed everything that arrived since the last call.
+
+    `primary` and `reference` are the two legs, in the order the sign
+    convention expects: positive means primary is dear to reference. For a
+    basis that is future over spot; for an ETF, price over NAV; for a
+    calendar spread, the next contract over the front.
 
     Returns `{"state": ..., "alert": ..., ...}`. The state is what to pass
     back next time; the alert is None until the accumulated statistic
@@ -143,15 +211,16 @@ def update_basis_monitor(
     call frequency a deployment choice rather than a modelling one.
     """
     state = _validated(state)
-    spot_values = _floats(spot, "spot")
-    futures_values = _floats(futures, "futures")
-    if len(spot_values) != len(futures_values):
+    channel = state["channel"]
+    primary_values = _floats(primary, "primary")
+    reference_values = _floats(reference, "reference")
+    if len(primary_values) != len(reference_values):
         raise ValidationError(
-            f"spot has {len(spot_values)} observations and futures has "
-            f"{len(futures_values)}; an update must carry both sides of every "
-            "tick it reports."
+            f"primary has {len(primary_values)} observations and reference "
+            f"has {len(reference_values)}; an update must carry both legs of "
+            "every tick it reports."
         )
-    if not spot_values:
+    if not primary_values:
         raise ValidationError(
             "an update with no observations. Pass at least one tick, or do "
             "not call -- an empty update would advance nothing and its "
@@ -159,23 +228,24 @@ def update_basis_monitor(
         )
 
     expiries: Optional[List[float]] = None
-    if state["annualized"]:
+    if channel == "annualized_bps":
         if time_to_expiry is None:
             raise ValidationError(
-                "this monitor watches the ANNUALIZED basis, so every update "
-                "needs time_to_expiry. Without it the two channels would be "
-                "mixed inside one baseline, which is not a comparison."
+                "the annualized_bps channel needs time_to_expiry on every "
+                "update -- that is what makes it a rate rather than a level. "
+                "Without it a March and a December contract share one "
+                "baseline, which is not a comparison."
             )
         expiries = _floats(time_to_expiry, "time_to_expiry")
-        if len(expiries) != len(spot_values):
+        if len(expiries) != len(primary_values):
             raise ValidationError(
                 f"time_to_expiry has {len(expiries)} values against "
-                f"{len(spot_values)} ticks."
+                f"{len(primary_values)} ticks."
             )
     elif time_to_expiry is not None:
         raise ValidationError(
-            "time_to_expiry was given to a monitor that is not annualized. "
-            "Create it with annualized=True, or drop the argument -- "
+            f"time_to_expiry was given to the {channel!r} channel, which "
+            "does not use it. Use annualized_bps, or drop the argument -- "
             "silently ignoring it would leave the caller believing the "
             "channel was one thing while it was another."
         )
@@ -184,23 +254,8 @@ def update_basis_monitor(
     warnings: List[str] = []
     crossed_this_call = False
 
-    for index, (s, f) in enumerate(zip(spot_values, futures_values)):
-        if s <= 0:
-            raise ValidationError(
-                f"observation {index} has spot={s!r}; the basis in bps of "
-                "spot is undefined there."
-            )
-        if state["annualized"]:
-            t = expiries[index]  # type: ignore[index]
-            if t <= 0:
-                raise ValidationError(
-                    f"observation {index} has time_to_expiry={t!r}. A "
-                    "contract at or past expiry has no annualized basis; "
-                    "roll the monitor onto the next contract instead."
-                )
-            value = math.log(f / s) / t * 10_000.0
-        else:
-            value = (f / s - 1.0) * 10_000.0
+    for index, (a, b) in enumerate(zip(primary_values, reference_values)):
+        value = _channel_value(channel, a, b, expiries, index)
 
         state["n"] += 1
         state["last_value"] = value
@@ -229,6 +284,8 @@ def update_basis_monitor(
             state["peak"] = statistic
 
         if not state["triggered"] and statistic >= state["threshold"]:
+            direction = "above" if state["up"] >= state["down"] else "below"
+            unit = "points" if channel == "absolute_points" else "bps"
             state["triggered"] = True
             state["first_crossing_at"] = state["n"]
             state["n_alerts"] += 1
@@ -237,18 +294,19 @@ def update_basis_monitor(
                 "observation": state["n"],
                 "value": value,
                 "statistic": statistic,
-                "direction": "above" if state["up"] >= state["down"] else "below",
+                "direction": direction,
+                "channel": channel,
                 "baseline_mean": mean,
                 "baseline_std": std,
                 "shift_in_baseline_sd": (value - mean) / std,
                 "degenerate_baseline": bool(state.get("degenerate_baseline")),
                 "message": (
-                    f"{state['label']}: the basis has shifted "
-                    f"{'above' if state['up'] >= state['down'] else 'below'} "
-                    f"its baseline of {mean:.1f} bps and stayed there. Now "
-                    f"{value:.1f} bps. Rule out a contract roll, a dividend "
-                    "going ex and a move in the financing curve before "
-                    "treating this as a dislocation."
+                    f"{state['label']}: the spread has shifted {direction} "
+                    f"its baseline of {mean:.1f} {unit} and stayed there. "
+                    f"Now {value:.1f} {unit}. Rule out the mechanical causes "
+                    "first -- a contract roll, a dividend going ex, a move "
+                    "in the financing curve -- before treating this as a "
+                    "dislocation."
                 ),
             }
 
@@ -270,13 +328,21 @@ def update_basis_monitor(
             "Already triggered on an earlier update and NOT re-alerting. The "
             "baseline is frozen, so a genuine regime change leaves this "
             "monitor triggered until it is reset -- by its own definition of "
-            "normal the world is still abnormal. reset_basis_monitor when "
+            "normal the world is still abnormal. reset_spread_monitor when "
             "the new level is the one to watch from."
+        )
+    if channel == "relative_bps":
+        warnings.append(
+            "The relative_bps channel STEPS at a contract roll, because the "
+            "two legs then carry different amounts of time. Over a series "
+            "spanning more than one expiry use annualized_bps -- otherwise "
+            "the detector will faithfully report the roll."
         )
 
     return {
         "state": state,
         "alert": alert,
+        "channel": channel,
         "triggered": bool(state["triggered"]),
         "n_observations": int(state["n"]),
         "warming_up": bool(state["n"] < state["warmup"]),
@@ -291,7 +357,7 @@ def update_basis_monitor(
     }
 
 
-def reset_basis_monitor(
+def reset_spread_monitor(
     state: Dict[str, Any], *, keep_baseline: bool = False
 ) -> Dict[str, Any]:
     """
@@ -333,6 +399,43 @@ def reset_basis_monitor(
 # ── internals ───────────────────────────────────────────────────────────
 
 
+def _channel_value(
+    channel: str,
+    primary: float,
+    reference: float,
+    expiries: Optional[List[float]],
+    index: int,
+) -> float:
+    """One tick, combined the way this channel says."""
+    if channel == "absolute_points":
+        return primary - reference
+
+    if reference <= 0:
+        raise ValidationError(
+            f"observation {index} has reference={reference!r}. The "
+            f"{channel!r} channel divides by it, so a non-positive reference "
+            "has no value. Use absolute_points for a spread that does not "
+            "need a positive denominator."
+        )
+    if primary <= 0:
+        raise ValidationError(
+            f"observation {index} has primary={primary!r}, which the "
+            f"{channel!r} channel cannot take a ratio of."
+        )
+
+    if channel == "relative_bps":
+        return (primary / reference - 1.0) * 10_000.0
+
+    t = expiries[index]  # type: ignore[index]
+    if t <= 0:
+        raise ValidationError(
+            f"observation {index} has time_to_expiry={t!r}. A contract at or "
+            "past expiry has no annualized spread; roll the monitor onto the "
+            "next contract instead."
+        )
+    return math.log(primary / reference) / t * 10_000.0
+
+
 def _freeze_baseline(state: Dict[str, Any], warnings: List[str]) -> None:
     """Fix the baseline from the warm-up, then never touch it again."""
     n = state["n"]
@@ -365,12 +468,12 @@ def _validated(state: Any) -> Dict[str, Any]:
     """A monitor state, or a refusal naming what is wrong with it."""
     if not isinstance(state, dict):
         raise ValidationError(
-            f"state must be the dict returned by new_basis_monitor, got "
+            f"state must be the dict returned by new_spread_monitor, got "
             f"{type(state).__name__}."
         )
     missing = [
         key
-        for key in ("version", "warmup", "threshold", "slack", "annualized", "n")
+        for key in ("version", "channel", "warmup", "threshold", "slack", "n")
         if key not in state
     ]
     if missing:
@@ -384,6 +487,11 @@ def _validated(state: Any) -> Dict[str, Any]:
             f"this is version {MONITOR_VERSION}. The accumulators would "
             "carry forward meaning something slightly different, so it is "
             "refused rather than resumed. Create a new monitor."
+        )
+    if state["channel"] not in CHANNELS:
+        raise ValidationError(
+            f"state carries channel={state['channel']!r}, which is not one "
+            f"of {sorted(CHANNELS)}."
         )
     return dict(state)
 

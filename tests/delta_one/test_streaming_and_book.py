@@ -19,6 +19,8 @@ returned 1.4e-06 on seventy identical ticks rather than 0, slipped past a
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -29,9 +31,10 @@ from standard_quant_tools.analysis.order_book import (
     microprice,
 )
 from standard_quant_tools.delta_one.streaming import (
-    new_basis_monitor,
-    reset_basis_monitor,
-    update_basis_monitor,
+    CHANNELS,
+    new_spread_monitor,
+    reset_spread_monitor,
+    update_spread_monitor,
 )
 from standard_quant_tools.error import ValidationError
 
@@ -105,25 +108,30 @@ class TestBookMetrics:
         assert distances == sorted(distances)
 
 
-class TestBasisMonitor:
+class TestSpreadMonitor:
     def _feed(self, n=200, shift=45.0, at=None, seed=7):
-        # `at` defaults to 60% of the window rather than a fixed 120, so
-        # a short feed does not ask for a negative-length second segment.
+        """A spread that steps partway through, returned as (primary, reference).
+
+        `at` defaults to 60% of the window rather than a fixed index, so a
+        short feed does not ask for a negative-length second segment.
+        """
         at = int(n * 0.6) if at is None else at
         rng = np.random.default_rng(seed)
         bps = np.concatenate([rng.normal(30, 4, at), rng.normal(30 + shift, 4, n - at)])
-        spot = 6000 * np.exp(np.cumsum(rng.normal(0.0003, 0.008, n)))
-        return spot, spot * (1 + bps / 10_000)
+        reference = 6000 * np.exp(np.cumsum(rng.normal(0.0003, 0.008, n)))
+        return reference * (1 + bps / 10_000), reference
 
     def test_a_batch_and_a_stream_reach_the_same_state(self):
         """The property that makes call frequency a deployment choice."""
-        spot, futures = self._feed()
-        batched = update_basis_monitor(
-            new_basis_monitor(warmup=60), spot=spot, futures=futures
+        primary, reference = self._feed()
+        batched = update_spread_monitor(
+            new_spread_monitor(warmup=60), primary=primary, reference=reference
         )
-        state = new_basis_monitor(warmup=60)
-        for i in range(len(spot)):
-            streamed = update_basis_monitor(state, spot=[spot[i]], futures=[futures[i]])
+        state = new_spread_monitor(warmup=60)
+        for i in range(len(primary)):
+            streamed = update_spread_monitor(
+                state, primary=[primary[i]], reference=[reference[i]]
+            )
             state = streamed["state"]
         assert batched["state"]["first_crossing_at"] == state["first_crossing_at"]
         assert batched["peak_statistic"] == pytest.approx(streamed["peak_statistic"])
@@ -131,9 +139,9 @@ class TestBasisMonitor:
         assert batched["baseline_std"] == pytest.approx(state["baseline_std"])
 
     def test_nothing_triggers_during_warm_up(self):
-        spot, futures = self._feed(n=40, at=20)
-        out = update_basis_monitor(
-            new_basis_monitor(warmup=60), spot=spot, futures=futures
+        primary, reference = self._feed(n=40, at=20)
+        out = update_spread_monitor(
+            new_spread_monitor(warmup=60), primary=primary, reference=reference
         )
         assert out["warming_up"] is True
         assert out["triggered"] is False
@@ -141,79 +149,161 @@ class TestBasisMonitor:
         assert any("warming up" in w for w in out["warnings"])
 
     def test_a_sustained_shift_triggers_and_a_stable_feed_does_not(self):
-        spot, shifted = self._feed(shift=45.0)
-        spot2, flat = self._feed(shift=0.0)
-        assert update_basis_monitor(
-            new_basis_monitor(warmup=60), spot=spot, futures=shifted
+        shifted, reference = self._feed(shift=45.0)
+        flat, reference2 = self._feed(shift=0.0)
+        assert update_spread_monitor(
+            new_spread_monitor(warmup=60), primary=shifted, reference=reference
         )["triggered"]
-        assert not update_basis_monitor(
-            new_basis_monitor(warmup=60), spot=spot2, futures=flat
+        assert not update_spread_monitor(
+            new_spread_monitor(warmup=60), primary=flat, reference=reference2
         )["triggered"]
 
     def test_the_alert_fires_once_and_not_again(self):
-        spot, futures = self._feed()
-        first = update_basis_monitor(
-            new_basis_monitor(warmup=60), spot=spot, futures=futures
+        primary, reference = self._feed()
+        first = update_spread_monitor(
+            new_spread_monitor(warmup=60), primary=primary, reference=reference
         )
         assert first["alert"] is not None
-        again = update_basis_monitor(
-            first["state"], spot=spot[-10:], futures=futures[-10:]
+        again = update_spread_monitor(
+            first["state"], primary=primary[-10:], reference=reference[-10:]
         )
         assert again["triggered"] is True
         assert again["alert"] is None
         assert any("NOT re-alerting" in w for w in again["warnings"])
 
     def test_reset_can_keep_or_relearn_the_baseline(self):
-        spot, futures = self._feed()
-        out = update_basis_monitor(
-            new_basis_monitor(warmup=60), spot=spot, futures=futures
+        primary, reference = self._feed()
+        out = update_spread_monitor(
+            new_spread_monitor(warmup=60), primary=primary, reference=reference
         )
-        kept = reset_basis_monitor(out["state"], keep_baseline=True)
+        kept = reset_spread_monitor(out["state"], keep_baseline=True)
         assert kept["triggered"] is False
         assert kept["baseline_mean"] == pytest.approx(out["baseline_mean"])
-        relearn = reset_basis_monitor(out["state"], keep_baseline=False)
+        relearn = reset_spread_monitor(out["state"], keep_baseline=False)
         assert relearn["baseline_mean"] is None
         assert relearn["n"] == 0
 
     def test_a_frozen_warm_up_cannot_produce_an_enormous_statistic(self):
         """The bug the naive variance caused: 1.7 billion from 70 flat ticks."""
-        out = update_basis_monitor(
-            new_basis_monitor(warmup=60), spot=[100.0] * 70, futures=[100.3] * 70
+        out = update_spread_monitor(
+            new_spread_monitor(warmup=60),
+            primary=[100.3] * 70,
+            reference=[100.0] * 70,
         )
         assert out["baseline_std"] == 0.0
         assert out["degenerate_baseline"] is True
-        moved = update_basis_monitor(
-            out["state"], spot=[100.0] * 40, futures=[100.9] * 40
+        moved = update_spread_monitor(
+            out["state"], primary=[100.9] * 40, reference=[100.0] * 40
         )
         assert moved["triggered"] is False
         assert moved["statistic"] == 0.0
 
-    def test_an_annualized_monitor_insists_on_a_time_to_expiry(self):
-        spot, futures = self._feed(n=20)
-        state = new_basis_monitor(warmup=10, annualized=True)
-        with pytest.raises(ValidationError, match="time_to_expiry"):
-            update_basis_monitor(state, spot=spot, futures=futures)
-
-    def test_a_time_to_expiry_given_to_a_plain_monitor_is_refused(self):
-        spot, futures = self._feed(n=20)
-        with pytest.raises(ValidationError, match="not annualized"):
-            update_basis_monitor(
-                new_basis_monitor(warmup=10),
-                spot=spot,
-                futures=futures,
-                time_to_expiry=[0.25] * 20,
-            )
-
     def test_a_state_from_another_version_is_refused_rather_than_resumed(self):
-        state = new_basis_monitor(warmup=10)
+        state = new_spread_monitor(warmup=10)
         state["version"] = 0
         with pytest.raises(ValidationError, match="version"):
-            update_basis_monitor(state, spot=[100.0], futures=[100.1])
+            update_spread_monitor(state, primary=[100.1], reference=[100.0])
 
-    def test_mismatched_sides_are_refused(self):
-        with pytest.raises(ValidationError, match="both sides"):
-            update_basis_monitor(
-                new_basis_monitor(warmup=10),
-                spot=[100.0, 101.0],
-                futures=[100.3],
+    def test_mismatched_legs_are_refused(self):
+        with pytest.raises(ValidationError, match="both legs"):
+            update_spread_monitor(
+                new_spread_monitor(warmup=10),
+                primary=[100.0, 101.0],
+                reference=[100.3],
             )
+
+
+class TestTheThreeChannels:
+    """Five roadmap monitors, three formulas, one tool.
+
+    What is pinned here is that each channel computes what it says and that
+    the sign convention is the same across all of them: positive means the
+    PRIMARY leg is dear to the reference.
+    """
+
+    def _run(self, channel, primary, reference, **kwargs):
+        state = new_spread_monitor(channel=channel, warmup=10)
+        return update_spread_monitor(
+            state, primary=primary, reference=reference, **kwargs
+        )
+
+    def test_every_channel_is_documented_and_has_a_stated_use(self):
+        from standard_quant_tools.delta_one.streaming import CHANNEL_USES
+
+        assert set(CHANNELS) == set(CHANNEL_USES)
+        for name, description in CHANNELS.items():
+            assert len(description) > 60, name
+            assert len(CHANNEL_USES[name]) > 40, name
+
+    def test_relative_bps_is_a_ratio_in_basis_points(self):
+        out = self._run("relative_bps", [101.0] * 12, [100.0] * 12)
+        assert out["current_value"] == pytest.approx(100.0)
+
+    def test_absolute_points_is_a_difference(self):
+        out = self._run("absolute_points", [6072.0] * 12, [6041.0] * 12)
+        assert out["current_value"] == pytest.approx(31.0)
+
+    def test_annualized_bps_is_a_rate(self):
+        out = self._run(
+            "annualized_bps",
+            [101.0] * 12,
+            [100.0] * 12,
+            time_to_expiry=[0.5] * 12,
+        )
+        expected = math.log(1.01) / 0.5 * 10_000.0
+        assert out["current_value"] == pytest.approx(expected)
+
+    def test_the_sign_convention_is_the_same_on_every_channel(self):
+        """Positive always means the PRIMARY leg is dear."""
+        for channel, extra in (
+            ("relative_bps", {}),
+            ("absolute_points", {}),
+            ("annualized_bps", {"time_to_expiry": [0.5] * 12}),
+        ):
+            dear = self._run(channel, [101.0] * 12, [100.0] * 12, **extra)
+            cheap = self._run(channel, [99.0] * 12, [100.0] * 12, **extra)
+            assert dear["current_value"] > 0, channel
+            assert cheap["current_value"] < 0, channel
+
+    def test_an_etf_premium_is_the_relative_channel(self):
+        """primary=ETF price, reference=NAV. 40 bps premium."""
+        out = self._run("relative_bps", [100.40] * 12, [100.0] * 12)
+        assert out["current_value"] == pytest.approx(40.0)
+
+    def test_a_roll_spread_is_the_points_channel(self):
+        """A calendar spread in bps of a 6000 index would round to nothing."""
+        out = self._run("absolute_points", [6072.0] * 12, [6041.0] * 12)
+        assert out["current_value"] == pytest.approx(31.0)
+        as_bps = self._run("relative_bps", [6072.0] * 12, [6041.0] * 12)
+        assert as_bps["current_value"] == pytest.approx(51.31, abs=0.02)
+
+    def test_absolute_points_accepts_a_negative_reference(self):
+        """A difference needs no positive denominator; a ratio does."""
+        out = self._run("absolute_points", [1.0] * 12, [-2.0] * 12)
+        assert out["current_value"] == pytest.approx(3.0)
+        with pytest.raises(ValidationError, match="divides by it"):
+            self._run("relative_bps", [1.0] * 12, [-2.0] * 12)
+
+    def test_annualized_insists_on_a_time_to_expiry(self):
+        with pytest.raises(ValidationError, match="time_to_expiry"):
+            self._run("annualized_bps", [101.0] * 12, [100.0] * 12)
+
+    def test_the_other_channels_refuse_one(self):
+        for channel in ("relative_bps", "absolute_points"):
+            with pytest.raises(ValidationError, match="does not use it"):
+                self._run(
+                    channel, [101.0] * 12, [100.0] * 12, time_to_expiry=[0.5] * 12
+                )
+
+    def test_an_unknown_channel_names_the_three(self):
+        with pytest.raises(ValidationError, match="three formulas"):
+            new_spread_monitor(channel="index_arb")
+
+    def test_the_channel_travels_in_the_state(self):
+        out = self._run("absolute_points", [6072.0] * 12, [6041.0] * 12)
+        assert out["channel"] == "absolute_points"
+        assert out["state"]["channel"] == "absolute_points"
+        resumed = update_spread_monitor(
+            out["state"], primary=[6080.0], reference=[6041.0]
+        )
+        assert resumed["current_value"] == pytest.approx(39.0)

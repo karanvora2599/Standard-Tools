@@ -37,7 +37,7 @@ advertises 155 of the 198 below.
 | `backtest` | 34 | 76 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `delta_one` | 17 | 34 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
+| `delta_one` | 17 | 35 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `modeling` | 17 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `microstructure` | 16 | 20 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `data` | 14 | 15 KB | *(one surface)* | [26_data.md](26_data.md) |
@@ -953,12 +953,12 @@ Whether a basis has STRUCTURALLY shifted rather than merely moved, by CUSUM and 
 **Required:** `spot_prices`, `futures_prices`  
 **Optional:** `time_to_expiry`, `reference_fraction`, `threshold`, `slack`, `max_breaks`
 
-#### `monitor_basis_stream`
+#### `monitor_spread_stream`
 
-Watch a basis on a LIVE feed, one stateful call at a time. A tool call returns, so there is nowhere for a subscription to live -- the state comes back in the result and goes in on the next call, which means a monitor can be paused, serialized and resumed elsewhere without losing its baseline. Accumulators are carried rather than recomputed, so feeding a hundred ticks in one call and a hundred calls of one tick give the same answer, and cost is constant per tick rather than a pass over a growing history.
+Watch a spread on a LIVE feed, one stateful call at a time. A tool call returns, so there is nowhere for a subscription to live -- the state comes back in the result and goes in on the next call, which means a monitor can be paused, serialized and resumed elsewhere without losing its baseline. ONE tool covers live basis, ETF NAV, index arbitrage, roll spread and any cross-instrument spread, because those are three formulas rather than five. Accumulators are carried, so a hundred ticks in one call and a hundred calls of one tick agree exactly.
 
-**Required:** `spot_prices`, `futures_prices`  
-**Optional:** `state`, `time_to_expiry`, `reset`, `keep_baseline_on_reset`, `label`, `warmup`, `threshold`, `slack`, `annualized`
+**Required:** `primary_prices`, `reference_prices`  
+**Optional:** `channel`, `state`, `time_to_expiry`, `reset`, `keep_baseline_on_reset`, `label`, `warmup`, `threshold`, `slack`
 
 #### `optimize_replication_basket`
 

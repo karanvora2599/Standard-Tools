@@ -103,7 +103,7 @@ from standard_quant_tools.agent.runtimes.delta_one import (
     analyze_total_return_future,
     compare_delta_one_expressions,
     detect_basis_dislocation,
-    monitor_basis_stream,
+    monitor_spread_stream,
     optimize_replication_basket,
     price_total_return_swap,
     size_futures_hedge,

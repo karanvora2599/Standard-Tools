@@ -33,7 +33,6 @@ the parts that needed none of that got it into use sooner.
 from .models import (
     BasisDislocationInput,
     BasisHistoryInput,
-    BasisMonitorInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
     DividendPointsInput,
@@ -46,6 +45,7 @@ from .models import (
     ReplicationBasketInput,
     RollAnalysisInput,
     SolveForwardCarryInput,
+    SpreadMonitorInput,
     TotalReturnFutureInput,
     TotalReturnSwapInput,
 )
@@ -62,7 +62,7 @@ from .tools import (
     analyze_total_return_future,
     compare_delta_one_expressions,
     detect_basis_dislocation,
-    monitor_basis_stream,
+    monitor_spread_stream,
     optimize_replication_basket,
     price_total_return_swap,
     size_futures_hedge,
@@ -261,16 +261,17 @@ TOOL_DEFS = [
         BasisDislocationInput,
     ),
     (
-        "monitor_basis_stream",
-        "Watch a basis on a LIVE feed, one stateful call at a time. A tool "
+        "monitor_spread_stream",
+        "Watch a spread on a LIVE feed, one stateful call at a time. A tool "
         "call returns, so there is nowhere for a subscription to live -- the "
         "state comes back in the result and goes in on the next call, which "
         "means a monitor can be paused, serialized and resumed elsewhere "
-        "without losing its baseline. Accumulators are carried rather than "
-        "recomputed, so feeding a hundred ticks in one call and a hundred "
-        "calls of one tick give the same answer, and cost is constant per "
-        "tick rather than a pass over a growing history.",
-        BasisMonitorInput,
+        "without losing its baseline. ONE tool covers live basis, ETF NAV, "
+        "index arbitrage, roll spread and any cross-instrument spread, "
+        "because those are three formulas rather than five. Accumulators "
+        "are carried, so a hundred ticks in one call and a hundred calls of "
+        "one tick agree exactly.",
+        SpreadMonitorInput,
     ),
 ]
 
@@ -309,7 +310,7 @@ TOOL_DISPATCH = {
         detect_basis_dislocation,
         BasisDislocationInput,
     ),
-    "monitor_basis_stream": (monitor_basis_stream, BasisMonitorInput),
+    "monitor_spread_stream": (monitor_spread_stream, SpreadMonitorInput),
 }
 
 #: Every tool here belongs to the one category this runtime owns.
@@ -331,7 +332,7 @@ __all__ = [
     "analyze_total_return_future",
     "compare_delta_one_expressions",
     "detect_basis_dislocation",
-    "monitor_basis_stream",
+    "monitor_spread_stream",
     "optimize_replication_basket",
     "price_total_return_swap",
     "size_futures_hedge",

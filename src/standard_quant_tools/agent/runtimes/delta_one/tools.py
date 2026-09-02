@@ -50,7 +50,6 @@ from standard_quant_tools.delta_one import swaps as _swaps
 from .models import (
     BasisDislocationInput,
     BasisHistoryInput,
-    BasisMonitorInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
     DividendPointsInput,
@@ -63,6 +62,7 @@ from .models import (
     ReplicationBasketInput,
     RollAnalysisInput,
     SolveForwardCarryInput,
+    SpreadMonitorInput,
     TotalReturnFutureInput,
     TotalReturnSwapInput,
 )
@@ -73,7 +73,6 @@ from .models import (
 from .results import (
     BasisDislocationResult,
     BasisHistoryResult,
-    BasisMonitorResult,
     CashFuturesBasisResult,
     CompareExpressionsResult,
     DividendPointsResult,
@@ -86,6 +85,7 @@ from .results import (
     ReplicationBasketResult,
     RollAnalysisResult,
     SolveForwardCarryResult,
+    SpreadMonitorResult,
     TotalReturnFutureResult,
     TotalReturnSwapResult,
 )
@@ -94,7 +94,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "analyze_basis_history",
-    "monitor_basis_stream",
+    "monitor_spread_stream",
     "detect_basis_dislocation",
     "analyze_cash_futures_basis",
     "analyze_dividend_points",
@@ -348,25 +348,25 @@ def detect_basis_dislocation(
     )
 
 
-def monitor_basis_stream(input_data: BasisMonitorInput) -> BasisMonitorResult:
+def monitor_spread_stream(input_data: SpreadMonitorInput) -> SpreadMonitorResult:
     state = input_data.state
     if state is None:
-        state = _streaming.new_basis_monitor(
+        state = _streaming.new_spread_monitor(
+            channel=input_data.channel,
             label=input_data.label,
             warmup=input_data.warmup,
             threshold=input_data.threshold,
             slack=input_data.slack,
-            annualized=input_data.annualized,
         )
     elif input_data.reset:
-        state = _streaming.reset_basis_monitor(
+        state = _streaming.reset_spread_monitor(
             state, keep_baseline=input_data.keep_baseline_on_reset
         )
-    return BasisMonitorResult(
-        **_streaming.update_basis_monitor(
+    return SpreadMonitorResult(
+        **_streaming.update_spread_monitor(
             state,
-            spot=input_data.spot_prices,
-            futures=input_data.futures_prices,
+            primary=input_data.primary_prices,
+            reference=input_data.reference_prices,
             time_to_expiry=input_data.time_to_expiry,
         )
     )

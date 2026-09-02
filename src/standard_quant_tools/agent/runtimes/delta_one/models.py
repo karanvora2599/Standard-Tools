@@ -34,7 +34,7 @@ __all__ = [
     "BasisHistoryInput",
     "CashFuturesBasisInput",
     "BasisDislocationInput",
-    "BasisMonitorInput",
+    "SpreadMonitorInput",
     "CompareExpressionsInput",
     "DeltaOneExpression",
     "DividendConstituent",
@@ -597,21 +597,39 @@ class BasisDislocationInput(BaseModel):
     )
 
 
-class BasisMonitorInput(BaseModel):
-    """One stateful call rather than three tools.
+class SpreadMonitorInput(BaseModel):
+    """One stateful call rather than five tools.
 
     Omit `state` to open a monitor; pass back the `state` from the previous
     call to advance it. The caller holds the state between calls, because a
     tool call returns and there is nowhere for a subscription to live.
+
+    ONE MONITOR COVERS FIVE JOBS through `channel`. Live basis, ETF NAV,
+    index arbitrage and a generic cross-instrument spread are the same
+    arithmetic and differ only in what the two legs are CALLED; the roll
+    spread is a difference in points. Three formulas, so three channels.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    spot_prices: List[float] = Field(
-        ..., min_length=1, description="Cash ticks since the last call, oldest first."
+    primary_prices: List[float] = Field(
+        ...,
+        min_length=1,
+        description="The leg that is DEAR when the spread is positive: the "
+        "future against spot, the ETF against NAV, the basket against the "
+        "index, the next contract against the front.",
     )
-    futures_prices: List[float] = Field(
-        ..., min_length=1, description="Futures ticks on the SAME updates."
+    reference_prices: List[float] = Field(
+        ..., min_length=1, description="The other leg, on the same ticks."
+    )
+    channel: Literal["relative_bps", "annualized_bps", "absolute_points"] = Field(
+        "relative_bps",
+        description="How the legs combine. relative_bps is (primary/"
+        "reference - 1) x 10,000 and serves basis, ETF premium, index "
+        "arbitrage and any cross-instrument spread. annualized_bps is "
+        "ln(primary/reference)/T x 10,000, comparable across expiries and "
+        "needing time_to_expiry. absolute_points is primary - reference, "
+        "for a roll spread and anything else quoted in points.",
     )
     state: Optional[Dict[str, Any]] = Field(
         None,
@@ -619,7 +637,7 @@ class BasisMonitorInput(BaseModel):
         "a new monitor. Pass the state, not the whole result.",
     )
     time_to_expiry: Optional[List[float]] = Field(
-        None, description="Years to expiry per tick. Required iff annualized."
+        None, description="Years to expiry per tick. Required iff annualized_bps."
     )
     reset: bool = Field(
         False,
@@ -632,7 +650,11 @@ class BasisMonitorInput(BaseModel):
         "passed) or relearn it (a regime change). Opposite conclusions that "
         "look identical in the accumulators, so this is not guessed.",
     )
-    label: str = Field("basis", description="Names the monitor in its alerts.")
+    label: str = Field(
+        "spread",
+        description="Names the monitor in its alerts. The channel says how "
+        "the legs combine; this says what they are.",
+    )
     warmup: int = Field(
         60,
         ge=10,
@@ -650,10 +672,4 @@ class BasisMonitorInput(BaseModel):
     )
     slack: float = Field(
         0.5, ge=0, le=100, description="Standardized deviations absorbed per step."
-    )
-    annualized: bool = Field(
-        False,
-        description="Watch ln(F/S)/T in bps rather than (F/S-1). Comparable "
-        "across expiries; the un-annualized channel STEPS at a roll and the "
-        "monitor will report that step.",
     )
