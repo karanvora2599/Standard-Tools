@@ -446,6 +446,36 @@ def transform_predictions_to_weights(
         "n_dates_with_no_position": int(empty_dates.sum()),
         "max_abs_weight": float(np.nanmax(np.abs(final))) if final.size else 0.0,
     }
+
+    # THE SHORTFALL HAS TO SAY SOMETHING. `n_dates_below_target_gross` was
+    # counted and then left sitting in the dict, so a caller who asked for
+    # gross 1.0 / net 0.0 and received a 100%-LONG book at gross 0.5 had
+    # to notice a number nothing pointed at.
+    #
+    # It happens whenever the sizer does not centre its scores and the
+    # scores are one-sided: `vol_scaled` divides by volatility and
+    # normalizes gross without recentring, so all-positive predictions
+    # produce no short book at all, and `apply_exposure_targets` can only
+    # fill the long half. Measured on 40 names x 60 dates of positive
+    # predictions: 60 of 60 dates short of target, mean net +0.34 against
+    # a requested 0.0, and `warnings` was None.
+    notes: List[str] = []
+    if int(shortfall.sum()):
+        mean_net = float(np.mean([d["realized_net"] for d in per_date]))
+        notes.append(
+            f"{int(shortfall.sum())} of {out.shape[0]} dates came in below "
+            f"the requested gross exposure of {spec.gross_exposure:.2f} "
+            f"(mean realized {realized_gross.mean():.4f}), and mean net was "
+            f"{mean_net:+.4f} against a target of {spec.net_exposure:+.2f}. "
+            "One book could not be filled. The usual cause is a sizing "
+            "method that does not recentre -- volatility_scale=True divides "
+            "by volatility and normalizes gross without recentring, so "
+            "one-sided scores yield no short book."
+        )
+    if int(empty_dates.sum()):
+        notes.append(f"{int(empty_dates.sum())} dates hold no position at all.")
+    diagnostics["warnings"] = notes
+
     return out, diagnostics
 
 

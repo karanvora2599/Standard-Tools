@@ -449,9 +449,20 @@ def classification_metrics(
     # of imbalance easy to request (a 2% up-move threshold labels most bars
     # 0). base_rate is the accuracy of always guessing the majority class —
     # the number `accuracy` has to beat to mean anything.
-    positive_rate = float(np.mean(np.asarray(y_true, dtype=float) == 1.0))
+    truth = np.asarray(y_true, dtype=float)
+    positive_rate = float(np.mean(truth == 1.0))
     metrics["positive_rate"] = positive_rate
-    metrics["majority_class_accuracy"] = max(positive_rate, 1.0 - positive_rate)
+
+    # THE LARGEST CLASS SHARE, over however many classes there are.
+    # `max(positive_rate, 1 - positive_rate)` is the binary formula, and
+    # this is reached for the 3-class `triple_barrier` target too. On
+    # labels [0]*20 + [1]*30 + [2]*50 predicted all-2 -- which IS the
+    # majority-class predictor, accuracy 0.5000 -- it reported 0.7000:
+    # the baseline quoted 20 points ABOVE the thing it is a baseline for.
+    _, counts = np.unique(truth[np.isfinite(truth)], return_counts=True)
+    metrics["majority_class_accuracy"] = (
+        float(counts.max() / counts.sum()) if counts.size else float("nan")
+    )
     return metrics
 
 
