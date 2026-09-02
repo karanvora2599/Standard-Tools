@@ -29,9 +29,15 @@ what a caller passes instead.
 
 from __future__ import annotations
 
-__all__ = ["TRADING_DAYS_PER_YEAR"]
+__all__ = ["EULER_MASCHERONI", "TRADING_DAYS_PER_YEAR"]
 
 #: US equity trading days in a calendar year: 365 days, less weekends, less
 #: the nine NYSE holidays. The standard convention, and the default
 #: annualization factor throughout this library.
 TRADING_DAYS_PER_YEAR = 252
+
+#: The Euler-Mascheroni constant. Here because it appears in exactly one
+#: place in this library -- the expected maximum of N Gaussian draws, which
+#: is the bar a Sharpe ratio has to clear to survive being one of N trials --
+#: and it was written out twice for that one use.
+EULER_MASCHERONI = 0.5772156649015329

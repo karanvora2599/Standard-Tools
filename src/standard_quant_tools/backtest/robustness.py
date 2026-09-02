@@ -33,11 +33,13 @@ from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
 )
+from standard_quant_tools.constants import EULER_MASCHERONI
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
-_EULER_MASCHERONI = 0.5772156649015329
+# One definition, in `constants`.
+_EULER_MASCHERONI = EULER_MASCHERONI
 
 
 # See `_special`: this had 7 copies across the library, and the ones
@@ -207,6 +209,63 @@ def parameter_sensitivity(
     return result
 
 
+def expected_max_sharpe(trials_std: float, n_trials: int) -> float:
+    """
+    The Sharpe ratio you expect from the BEST of `n_trials` strategies that
+    are all worthless, given the spread of Sharpes across those trials.
+
+    This is the bar a real result has to clear, and it is the whole idea
+    behind deflating: run enough backtests and one of them looks good, so
+    "good" has to mean "better than the best of this many coin flips".
+
+    Bailey and Lopez de Prado's expected-maximum approximation, from the
+    order statistics of the Gaussian:
+
+        E[max] = sigma * ((1 - gamma) * Z(1 - 1/N) + gamma * Z(1 - 1/(N e)))
+
+    with gamma the Euler-Mascheroni constant. Returns 0.0 for a single
+    trial, where there is no maximum to take.
+
+    Both `deflated_sharpe_ratio` implementations in this library computed
+    this inline. They agreed, and nothing kept them agreeing.
+    """
+    if n_trials <= 1:
+        return 0.0
+    return trials_std * (
+        (1.0 - _EULER_MASCHERONI) * _norm_ppf(1.0 - 1.0 / n_trials)
+        + _EULER_MASCHERONI * _norm_ppf(1.0 - 1.0 / (n_trials * math.e))
+    )
+
+
+def sharpe_standard_error_factor(
+    observed_sharpe: float, skew: float, kurtosis: float
+) -> float:
+    """
+    The non-normality correction on a Sharpe ratio's standard error, as the
+    factor that multiplies 1/sqrt(n - 1).
+
+        sqrt(1 - skew * SR + (kurtosis - 1)/4 * SR^2)
+
+    `kurtosis` is the RAW fourth moment, so 3.0 is normal, not 0.0. Negative
+    skew and fat tails both widen the error, which is the point: the return
+    streams that most need deflating are exactly the ones where the textbook
+    Sharpe standard error is too narrow.
+
+    Raises:
+        ValidationError: the term under the root is non-positive, which
+        happens on extremely skewed short samples and means there is not
+        enough data here to deflate rather than that the answer is zero.
+    """
+    inner = 1.0 - skew * observed_sharpe + ((kurtosis - 1.0) / 4.0) * observed_sharpe**2
+    if inner <= 0:
+        raise ValidationError(
+            "degenerate skew/kurtosis input: Sharpe standard-error denominator "
+            f"is non-positive ({inner:.6f}) for observed_sharpe={observed_sharpe}, "
+            f"skew={skew}, kurtosis={kurtosis}"
+        )
+    return math.sqrt(inner)
+
+
 def deflated_sharpe_ratio(
     observed_sharpe: float,
     sharpe_trials_std: float,
@@ -254,24 +313,8 @@ def deflated_sharpe_ratio(
     if n_obs < 2:
         raise ValidationError(f"n_obs must be >= 2, got {n_obs}")
 
-    if n_trials <= 1:
-        sr0 = 0.0
-    else:
-        sr0 = sharpe_trials_std * (
-            (1.0 - _EULER_MASCHERONI) * _norm_ppf(1.0 - 1.0 / n_trials)
-            + _EULER_MASCHERONI * _norm_ppf(1.0 - 1.0 / (n_trials * math.e))
-        )
-
-    denom_sq = (
-        1.0 - skew * observed_sharpe + ((kurtosis - 1.0) / 4.0) * observed_sharpe**2
-    )
-    if denom_sq <= 0:
-        raise ValidationError(
-            "degenerate skew/kurtosis input: Sharpe standard-error denominator "
-            f"is non-positive ({denom_sq:.6f}) for observed_sharpe={observed_sharpe}, "
-            f"skew={skew}, kurtosis={kurtosis}"
-        )
-    denom = math.sqrt(denom_sq)
+    sr0 = expected_max_sharpe(sharpe_trials_std, n_trials)
+    denom = sharpe_standard_error_factor(observed_sharpe, skew, kurtosis)
 
     z = (observed_sharpe - sr0) * math.sqrt(n_obs - 1) / denom
     dsr = _norm_cdf(z)

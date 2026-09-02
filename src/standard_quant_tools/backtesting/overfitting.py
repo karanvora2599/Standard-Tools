@@ -51,7 +51,14 @@ from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
 )
-from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
+from standard_quant_tools.backtest.robustness import (
+    expected_max_sharpe,
+    sharpe_standard_error_factor,
+)
+from standard_quant_tools.constants import EULER_MASCHERONI as _EULER_MASCHERONI
+from standard_quant_tools.constants import (
+    TRADING_DAYS_PER_YEAR,
+)
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
@@ -63,7 +70,9 @@ logger = logging.getLogger(__name__)
 TRADING_DAYS = TRADING_DAYS_PER_YEAR
 
 #: Euler-Mascheroni, needed for the expected maximum of N normal draws.
-EULER_MASCHERONI = 0.5772156649015329
+# One definition, in `constants`. Re-exported because this name is
+# in this module's __all__.
+EULER_MASCHERONI = _EULER_MASCHERONI
 
 
 # See `_special`: this had 7 copies across the library, and the ones
@@ -203,28 +212,19 @@ def deflated_sharpe_ratio(
         # sampling variance of a zero-edge strategy on this much data.
         trial_variance = 1.0 / n
 
-    if n_trials == 1:
-        expected_max = 0.0
-    else:
-        # E[max of N standard normals], to the usual two-term expansion.
-        first = _norm_ppf(1.0 - 1.0 / n_trials)
-        second = _norm_ppf(1.0 - 1.0 / (n_trials * math.e))
-        expected_max = math.sqrt(trial_variance) * (
-            (1.0 - EULER_MASCHERONI) * first + EULER_MASCHERONI * second
-        )
+    # Bailey and Lopez de Prado's expected maximum, from
+    # `backtest.robustness`. `deflated_sharpe_ratio` there computed the
+    # same thing inline; they agreed, and nothing kept them agreeing.
+    expected_max = expected_max_sharpe(math.sqrt(trial_variance), n_trials)
 
     threshold = max(expected_max, benchmark_sharpe / math.sqrt(periods_per_year))
 
-    # The Sharpe's own standard error, widened by skew and kurtosis.
-    variance = (1.0 - skew * per_period + (kurtosis - 1.0) / 4.0 * per_period**2) / (
-        n - 1
-    )
-    if variance <= 0:
-        raise ValidationError(
-            "deflated_sharpe_ratio: the estimated variance of the Sharpe "
-            "ratio came out non-positive, which happens on extremely "
-            "skewed short samples. There is not enough data here to deflate."
-        )
+    # The Sharpe's own standard error, widened by skew and kurtosis. Shared
+    # with `robustness.deflated_sharpe_ratio`, which had its own copy: the
+    # factor there multiplies 1/sqrt(n - 1), so this is the same quantity
+    # written as a variance.
+    factor = sharpe_standard_error_factor(per_period, skew, kurtosis)
+    variance = factor**2 / (n - 1)
     statistic = (per_period - threshold) / math.sqrt(variance)
     probability = _norm_cdf(statistic)
 

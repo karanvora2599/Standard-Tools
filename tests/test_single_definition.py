@@ -146,3 +146,61 @@ class TestTradingDaysIsDefinedOnce:
         from standard_quant_tools.delta_one.daycount import TRADING_DAYS_PER_YEAR as d
 
         assert d == TRADING_DAYS_PER_YEAR
+
+
+class TestDeflatedSharpeFormulasAreDefinedOnce:
+    """Two `deflated_sharpe_ratio` functions, one taking summary statistics
+    and one taking a return series, each with its own copy of the two
+    formulas that make a deflated Sharpe deflated. They agreed to rounding,
+    which is what a duplicate looks like right up until it does not."""
+
+    def test_euler_mascheroni_is_defined_once(self):
+        offenders = _definitions(r"^_?EULER_MASCHERONI = 0\.", "constants.py")
+        assert offenders == [], f"defined in {offenders}; it lives in constants.py"
+
+    def test_the_expected_maximum_is_not_written_out_twice(self):
+        """The `(1 - gamma) * Z(1 - 1/N) + gamma * Z(1 - 1/(N e))` expansion
+        should appear only inside `expected_max_sharpe`."""
+        offenders = []
+        for path in _python_files():
+            text = path.read_text(encoding="utf-8")
+            if re.search(r"1\.0 / \(n_trials \* math\.e\)", text):
+                offenders.append(path.relative_to(SRC).as_posix())
+        assert offenders == ["backtest/robustness.py"], (
+            f"the expected-maximum expansion appears in {offenders}; it belongs "
+            f"in `backtest.robustness.expected_max_sharpe` alone"
+        )
+
+    def test_both_entry_points_agree(self):
+        """The wrapper takes returns and the core takes summary statistics, so
+        this drives them to the same place by hand and checks they land
+        together. They must, now that they share both formulas."""
+        import math
+
+        import pandas as pd
+
+        from standard_quant_tools.backtest.robustness import deflated_sharpe_ratio
+        from standard_quant_tools.backtesting.overfitting import (
+            deflated_sharpe_ratio as from_returns,
+        )
+
+        rng = np.random.default_rng(4)
+        for n, trials in [(300, 10), (500, 50), (750, 200), (1000, 5), (1200, 1000)]:
+            series = pd.Series(rng.normal(0.0006, 0.011, n))
+            values = series.to_numpy()
+            mean, std = values.mean(), values.std(ddof=1)
+            centred = (values - mean) / std
+
+            wrapped = from_returns(series, n_trials=trials)
+            core = deflated_sharpe_ratio(
+                observed_sharpe=mean / std,
+                sharpe_trials_std=math.sqrt(1.0 / n),
+                n_trials=trials,
+                n_obs=n,
+                skew=float((centred**3).mean()),
+                kurtosis=float((centred**4).mean()),
+            )
+            # The core rounds its output to 6 places; that is the only gap.
+            assert wrapped["deflated_sharpe_probability"] == pytest.approx(
+                core["deflated_sharpe_ratio"], abs=1e-6
+            )
