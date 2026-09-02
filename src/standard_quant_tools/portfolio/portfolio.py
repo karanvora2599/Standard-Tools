@@ -13,6 +13,7 @@ from standard_quant_tools.metrics.risk_metrics import (
     cvar,
     information_ratio,
     max_drawdown,
+    sharpe_ratio,
     sortino_ratio,
     var_historical,
 )
@@ -101,8 +102,22 @@ def portfolio_metrics(
     port_vol = float(np.sqrt(w @ cov_matrix @ w))
 
     annual_ret = float(cagr(equity_curve, periods_per_year))
-    excess = annual_ret - risk_free_rate
-    sr = excess / port_vol if port_vol != 0 else 0.0
+    # Sharpe from the canonical metric, not from CAGR / port_vol.
+    #
+    # The denominators agree exactly -- sqrt(w'Sw) with an annualized
+    # covariance IS port_returns.std() * sqrt(ppy), both ddof=1 -- so the
+    # whole difference was GEOMETRIC vs ARITHMETIC in the numerator, worth
+    # up to 24% at high volatility (0.4153 against 0.5453 at 55% vol).
+    #
+    # That mattered twice over. `sortino_ratio` on the next line already
+    # used the arithmetic convention, so one result dict reported Sharpe
+    # and Sortino on two different definitions of "return". And
+    # `run_strategy` reports a field of the same name computed the
+    # canonical way, so the two disagreed across tools.
+    #
+    # `annualized_return` stays CAGR: that field IS the geometric annual
+    # return and is correct as it is.
+    sr = float(sharpe_ratio(port_returns, risk_free_rate, periods_per_year))
 
     metrics: Dict[str, Any] = {
         "annualized_return": round(annual_ret, 6),

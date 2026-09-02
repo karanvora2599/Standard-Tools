@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.backtest.costs import impact_cost
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -604,6 +605,7 @@ def liquidity_adjusted_var(
     confidence: float = 0.95,
     participation_rate: float = 0.15,
     correlation: float = 0.0,
+    impact_coefficient: float = 0.1,
 ) -> Dict[str, Any]:
     """
     VaR that accounts for the fact that you cannot get out at the mark.
@@ -663,8 +665,20 @@ def liquidity_adjusted_var(
         days = abs(value) / (volume * participation_rate)
         naive = abs(value) * daily_volatility * z
         adjusted = naive * math.sqrt(max(days, 1.0))
-        # Square-root impact, the standard functional form.
-        impact_cost = abs(value) * 0.1 * volatility * math.sqrt(abs(value) / volume)
+        # `impact_cost` from backtest.costs, not a second copy of the
+        # square-root model -- and fed the DAILY volatility.
+        #
+        # This line used to inline the same arithmetic and pass the ANNUAL
+        # figure, five lines after computing `daily_volatility` for the VaR
+        # half of the same row. costs.sqrt_impact_bps states its contract
+        # explicitly ("`volatility` is a per-bar (not annualized) return
+        # volatility"), so the reported liquidation cost was too large by
+        # sqrt(252) = 15.875x: $56,569 against $3,563 on a $5m position in
+        # a 32%-vol name against $40m of daily volume. One result row was
+        # carrying two different volatility units.
+        liquidation_cost = impact_cost(
+            value, volume, daily_volatility, impact_coefficient
+        )
         rows.append(
             {
                 "asset": str(asset),
@@ -674,7 +688,7 @@ def liquidity_adjusted_var(
                 "naive_1d_var": float(naive),
                 "liquidity_adjusted_var": float(adjusted),
                 "adjustment_multiple": float(adjusted / naive) if naive > 0 else None,
-                "expected_liquidation_cost": float(impact_cost),
+                "expected_liquidation_cost": float(liquidation_cost),
             }
         )
     rows.sort(key=lambda r: r["liquidity_adjusted_var"], reverse=True)

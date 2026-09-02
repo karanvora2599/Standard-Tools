@@ -52,7 +52,13 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
+from standard_quant_tools.metrics.risk_metrics import (
+    cvar,
+    has_no_dispersion,
+    sharpe_ratio,
+    sortino_ratio,
+    var_historical,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,21 +105,23 @@ def _statistic(values: np.ndarray, name: str, periods: int = TRADING_DAYS) -> fl
     if name == "std":
         return float(values.std(ddof=1))
     if name in ("sharpe", "sortino"):
-        std = (
-            float(values.std(ddof=1))
-            if name == "sharpe"
-            else (
-                float(values[values < 0].std(ddof=1))
-                if (values < 0).sum() > 1
-                else float("nan")
-            )
-        )
-        # Relative, for the reason has_no_dispersion documents. This file
-        # already cites the same fault a few lines below, in
-        # `test_normality`, and had applied the fix only there.
-        if has_no_dispersion(values, std):
-            return float("nan")
-        return float(values.mean() / std * math.sqrt(periods))
+        # Delegated, so a bootstrap of "sortino" is a bootstrap of the
+        # SORTINO this library reports elsewhere.
+        #
+        # This branch used to compute its own: the std of the negative
+        # returns about THEIR own mean, over only the negative count. The
+        # canonical `sortino_ratio` uses the Sortino & Price semi-deviation
+        # -- RMS of clipped returns over ALL N periods, about zero -- which
+        # is a larger and more conservative denominator. Measured on 600
+        # draws the two differed by 19.6% (-2.0722 against -2.4782), so the
+        # confidence interval reported for "sortino" was an interval for a
+        # different statistic under that name.
+        series = pd.Series(values)
+        if name == "sharpe":
+            if has_no_dispersion(values):
+                return float("nan")
+            return float(sharpe_ratio(series, periods_per_year=periods))
+        return float(sortino_ratio(series, periods_per_year=periods))
     if name in ("skew", "kurtosis"):
         std = float(values.std(ddof=1))
         if has_no_dispersion(values, std):
@@ -125,11 +133,16 @@ def _statistic(values: np.ndarray, name: str, periods: int = TRADING_DAYS) -> fl
         return float((equity / np.maximum.accumulate(equity) - 1.0).min())
     if name == "win_rate":
         return float((values > 0).mean())
+    # LOSSES POSITIVE, matching var_historical and cvar. These two used to
+    # return the raw negative quantile, so `bootstrap_statistic` reported
+    # -0.019479 where `var_historical` reports +0.019479 -- opposite signs
+    # under the same name. Worse for an interval than for a point estimate:
+    # negating a distribution swaps its bounds, so `lower` and `upper` were
+    # labelled the wrong way round.
     if name == "var_95":
-        return float(np.percentile(values, 5))
+        return float(var_historical(pd.Series(values), 0.95))
     if name == "cvar_95":
-        tail = values[values <= np.percentile(values, 5)]
-        return float(tail.mean()) if tail.size else float("nan")
+        return float(cvar(pd.Series(values), 0.95))
     raise ValidationError(
         f"unknown statistic {name!r}. Available: {', '.join(STATISTICS)}."
     )
