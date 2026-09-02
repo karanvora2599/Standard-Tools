@@ -506,6 +506,7 @@ def break_even_cost(
     # of the mean with the dispersion unchanged.
     std = float(array.std(ddof=1))
     gross = array + current
+    degenerate = has_no_dispersion(array, std)
     sharpe_at = []
     for cost_bps in (0.0, 5.0, 10.0, 25.0, 50.0, 100.0):
         net = gross - cost_bps / 1e4
@@ -513,7 +514,10 @@ def break_even_cost(
             {
                 "cost_bps": cost_bps,
                 "mean_return": float(net.mean()),
-                "per_trade_sharpe": float(net.mean() / std) if std > 0 else None,
+                # `std > 0` is the absolute test: 63 identical trades give
+                # std = 4e-19, which passes, and the ratio came back at
+                # 2.3e+15. See metrics.risk_metrics.has_no_dispersion.
+                "per_trade_sharpe": (None if degenerate else float(net.mean() / std)),
                 "profitable": bool(net.mean() > 0),
             }
         )

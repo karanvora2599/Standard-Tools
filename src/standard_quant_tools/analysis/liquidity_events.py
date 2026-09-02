@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +382,12 @@ def cusum(
     reference = values.iloc[:n_reference]
     mean = float(reference.mean())
     std = float(reference.std(ddof=1))
-    if not np.isfinite(std) or std == 0.0:
+    # `std == 0.0` is the absolute test. A reference window of a constant
+    # 0.07 has std = 2.79e-17, which is not equal to zero, so the guard was
+    # skipped and the statistic came back at 87.8 -- a confident detection
+    # on a window with nothing in it. The same flat window answered
+    # differently depending on the constant's binary representation.
+    if has_no_dispersion(reference.to_numpy(), std):
         return {
             "triggered": False,
             "reason": (

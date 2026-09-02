@@ -572,6 +572,19 @@ def rolling_sharpe_stability(
     rolling = (rolling_mean / rolling_std * math.sqrt(periods_per_year)).dropna()
     array = rolling.to_numpy()
 
+    # A window that is constant divides by a std of ~1e-19 and returns inf,
+    # which then makes mean_rolling_sharpe inf and std_rolling_sharpe NaN
+    # while full_sample_sharpe alongside them stays a plausible 1.34. The
+    # ratio is undefined on a flat window, not enormous. This file fixes
+    # the same fault for its own Sharpe 80 lines below and missed this one.
+    array = array[np.isfinite(array)]
+    if array.size < 2:
+        raise ValidationError(
+            "rolling_sharpe_stability: fewer than two windows have any "
+            "dispersion, so every rolling Sharpe is undefined. A constant "
+            "or near-constant return series has no stability to assess."
+        )
+
     independent = max(int(len(values) / window), 2)
 
     # THE TEST: two independent halves of the RAW returns, never two halves

@@ -115,7 +115,7 @@ MUTATIONS: List[Mutation] = [
         "sharpe: revert the relative zero-dispersion check",
         SRC / "metrics/risk_metrics.py",
         "    scale = float(np.nanmax(np.abs(array))) if array.size else 0.0\n"
-        "    return scale > 0 and float(np.ptp(array)) <= scale * 1e-12",
+        "    return scale > 0 and float(np.ptp(array)) <= scale * DISPERSION_RTOL",
         "    return False",
         "tests/metrics/test_metrics.py",
     ),

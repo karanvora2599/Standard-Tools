@@ -496,3 +496,62 @@ class TestEvtTailRiskScale:
         elapsed = time.time() - t0
         assert elapsed < 5.0, f"2M-point EVT fit took {elapsed:.2f}s"
         assert result["n_obs"] == 2_000_000
+
+
+class TestTheDispersionGuardReachedTheRestOfTheLibrary:
+    """`has_no_dispersion` was added for `sharpe_ratio` and its docstring
+    named five other implementations still using the broken absolute test.
+    Four of them were still using it: `information_ratio` in this same file,
+    `cusum`, `per_trade_sharpe`, and `rolling_sharpe_stability`.
+
+    The absolute test is broken because numpy's `std` of a constant series
+    is not 0.0 -- it is ~1e-19, and which side of the guard a flat series
+    lands on depends on the constant's binary representation.
+    """
+
+    def test_information_ratio_refuses_a_constant_nonzero_active_return(self):
+        """Was 2.98e+16. A strategy beating its benchmark by exactly 10bp
+        every day has no tracking error to divide by."""
+        base = pd.Series(np.random.default_rng(0).normal(0.0005, 0.012, 300))
+        for offset in (0.001, -0.001, 0.07):
+            result = information_ratio(base + offset, base)
+            assert np.isnan(result), f"offset {offset} gave {result!r}"
+
+    def test_information_ratio_still_says_zero_for_no_active_bet(self):
+        """The other degenerate case, and it is genuinely 0.0: holding the
+        benchmark is not skill, and callers have been told this."""
+        base = pd.Series(np.random.default_rng(1).normal(0.0005, 0.012, 300))
+        assert information_ratio(base, base) == pytest.approx(0.0, abs=1e-6)
+
+    @pytest.mark.parametrize("constant", [0.001, 0.07, 5.0, -0.002, 1e-8])
+    def test_cusum_answers_every_flat_window_the_same_way(self, constant):
+        """The bug was that it did not. A constant 0.07 has std 2.79e-17,
+        which is not == 0.0, so the guard was skipped and the statistic came
+        back at 87.8 -- a confident detection on a window with no data."""
+        from standard_quant_tools.analysis.liquidity_events import cusum
+
+        result = cusum(pd.Series([constant] * 180))
+        assert result["triggered"] is False
+        assert "constant" in result["reason"]
+
+    @pytest.mark.parametrize("constant", [0.001, 0.07, 5.0])
+    def test_rolling_sharpe_stability_refuses_a_flat_series(self, constant):
+        """Returned mean_rolling_sharpe=inf and std_rolling_sharpe=nan next
+        to a plausible full_sample_sharpe."""
+        from standard_quant_tools.analysis.diagnostics import (
+            rolling_sharpe_stability,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="dispersion"):
+            rolling_sharpe_stability(pd.Series([constant] * 600), window=63)
+
+    def test_per_trade_sharpe_is_none_not_a_quadrillion(self):
+        """63 identical trades gave 2.30e+15."""
+        from standard_quant_tools.backtesting.trade_analysis import (
+            break_even_cost,
+        )
+
+        result = break_even_cost(pd.Series([0.002] * 63))
+        for row in result["sensitivity"]:
+            assert row["per_trade_sharpe"] is None, row

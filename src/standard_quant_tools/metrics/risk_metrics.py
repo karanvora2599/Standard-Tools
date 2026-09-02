@@ -39,6 +39,12 @@ except ImportError:
 _Z_TABLE = {0.90: 1.282, 0.95: 1.645, 0.99: 2.326, 0.999: 3.090}
 
 
+#: Relative width below which a series counts as constant. Relative, not
+#: absolute, so it means the same thing for returns around 1e-8 as for
+#: prices around 1e4 -- see `has_no_dispersion`.
+DISPERSION_RTOL = 1e-12
+
+
 def has_no_dispersion(values: Any, std: Optional[float] = None) -> bool:
     """
     Whether a series is constant to within floating-point noise.
@@ -75,7 +81,7 @@ def has_no_dispersion(values: Any, std: Optional[float] = None) -> bool:
     if not np.isfinite(std) or std <= 0:
         return True
     scale = float(np.nanmax(np.abs(array))) if array.size else 0.0
-    return scale > 0 and float(np.ptp(array)) <= scale * 1e-12
+    return scale > 0 and float(np.ptp(array)) <= scale * DISPERSION_RTOL
 
 
 @validate_series()
@@ -228,9 +234,36 @@ def information_ratio(
     """
     common_idx = returns.index.intersection(benchmark_returns.index)
     active = returns.loc[common_idx] - benchmark_returns.loc[common_idx]
+
+    # `has_no_dispersion` rather than `tracking_error == 0`, which is the
+    # broken absolute test its docstring 190 lines above was written to
+    # replace. A strategy beating its benchmark by exactly 10bp every day
+    # has an active std of 5.3e-19, not 0.0, so the equality never fired
+    # and this returned 2.98e+16 -- the same 7.3e16-shaped nonsense
+    # `sharpe_ratio` used to produce, in the same file, on the same input.
+    #
+    # NaN, not 0.0, when it does fire. Zero reads as "no skill", which is a
+    # measurement; a constant active return has an undefined ratio, and a
+    # strategy that won every single day is the opposite of no skill.
+    if has_no_dispersion(active.to_numpy()):
+        # Two different degenerate cases, and only one of them is 0.0.
+        #
+        # Active return constant at ZERO means the portfolio held the
+        # benchmark. There was no active bet, so "no active skill" is the
+        # honest answer and callers have been told it.
+        #
+        # Active return constant at anything ELSE means the portfolio beat
+        # (or trailed) the benchmark by the same amount every single day.
+        # The ratio is undefined -- there is no tracking error to divide by
+        # -- but it is emphatically not zero, and returning 0.0 reported a
+        # strategy that won every day as having no skill.
+        mean_active = float(active.mean())
+        scale = float(np.abs(active.to_numpy()).max())
+        if abs(mean_active) <= DISPERSION_RTOL * max(1.0, scale):
+            return 0.0
+        return float("nan")
+
     tracking_error = active.std() * np.sqrt(periods_per_year)
-    if tracking_error == 0:
-        return 0.0
     return float((active.mean() * periods_per_year) / tracking_error)
 
 
