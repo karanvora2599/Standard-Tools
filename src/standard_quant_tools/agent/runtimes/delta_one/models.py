@@ -181,6 +181,17 @@ class RollAnalysisInput(BaseModel):
     days_to_front_expiry: float = Field(
         ..., gt=0, le=10_000, description="Calendar days until the front expires."
     )
+    days_between_expiries: Optional[float] = Field(
+        None,
+        gt=0,
+        le=10_000,
+        description="Calendar days between the two contracts' expiries, e.g. "
+        "about 91 for a quarterly roll. This is what roll_yield is "
+        "annualized over, because the step between the contracts is earned "
+        "across the gap between them. Omitted, roll_yield_bps is null "
+        "rather than annualized by the front's remaining life, which made "
+        "the answer depend on the roll date.",
+    )
     next_multiplier: Optional[float] = Field(
         None, gt=0, description="Only when the two differ, e.g. micro to full-size."
     )

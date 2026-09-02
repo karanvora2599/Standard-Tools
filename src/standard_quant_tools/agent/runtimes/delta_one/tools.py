@@ -169,6 +169,7 @@ def analyze_roll(input_data: RollAnalysisInput) -> RollAnalysisResult:
             contracts_held=input_data.contracts_held,
             multiplier=input_data.multiplier,
             days_to_front_expiry=input_data.days_to_front_expiry,
+            days_between_expiries=input_data.days_between_expiries,
             next_multiplier=input_data.next_multiplier,
             cost_per_contract=input_data.cost_per_contract,
             spread_ticks=input_data.spread_ticks,

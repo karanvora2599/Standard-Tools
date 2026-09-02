@@ -198,7 +198,11 @@ class FuturesCurveResult(_Result):
     calendar_spreads: List[CalendarSpread] = Field(default_factory=list)
     curve_slope_rate: Stat = None
     curve_curvature: Stat = Field(
-        None, description="Null with fewer than three contracts -- no bend to measure."
+        None,
+        description="Mean second difference of the forward carries: positive "
+        "means the curve steepens with maturity. Null with fewer than FOUR "
+        "contracts, because a second difference needs three carries and "
+        "three contracts give two.",
     )
     front_label: Optional[str] = None
     back_label: Optional[str] = None
@@ -224,9 +228,12 @@ class RollAnalysisResult(_Result):
     roll_yield_bps: Stat = Field(
         None,
         description="A price STEP as a rate, not a return. What the position "
-        "must overcome, not what it earns.",
+        "must overcome, not what it earns. Annualized over the gap between "
+        "the two expiries, so it needs days_between_expiries; null without "
+        "it rather than annualized over the wrong period.",
     )
     days_to_front_expiry: Stat = None
+    days_between_expiries: Stat = None
     breakeven_annualized_rate: Stat = None
 
 

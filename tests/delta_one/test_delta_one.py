@@ -316,6 +316,11 @@ class TestRoll:
             contracts_held=10,
             multiplier=50,
             days_to_front_expiry=5,
+            # roll_yield is annualized over the gap BETWEEN the expiries, so
+            # it needs that gap; without it the field is null rather than
+            # annualized by the front's remaining life, which made the
+            # answer depend on the roll date.
+            days_between_expiries=91.0,
             cost_per_contract=2.0,
         )
         assert out["cash_impact"] == pytest.approx(0.0)

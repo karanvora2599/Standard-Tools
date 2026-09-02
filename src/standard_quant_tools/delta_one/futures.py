@@ -136,12 +136,27 @@ def futures_curve(
     )
 
     curvature = None
-    if len(spreads) >= 2:
-        # Second difference of forward carry: positive means the curve
-        # steepens with maturity. Reported only with three contracts
-        # because with two there is one segment and no bend to measure.
-        carries = [row["forward_carry_rate"] for row in spreads]
-        curvature = float(carries[-1] - 2.0 * carries[len(carries) // 2] + carries[0])
+    carries = [row["forward_carry_rate"] for row in spreads]
+    if len(carries) >= 3:
+        # MEAN OF THE CONSECUTIVE SECOND DIFFERENCES, which uses every
+        # carry and needs no midpoint.
+        #
+        # This was `carries[-1] - 2*carries[len//2] + carries[0]`, and
+        # `len//2` is only the true middle when the count is odd. With two
+        # carries it collapsed to `c0 - c1` -- the NEGATIVE of the first
+        # difference -- so a curve steepening from 0.0067 to 0.0133
+        # reported -0.0066 against a docstring saying positive means
+        # steepening. Exactly three contracts, the case the field
+        # description called out as the minimum, was the broken one; with
+        # five it silently skipped the second carry.
+        #
+        # Three carries (four contracts) is the real minimum: a second
+        # difference needs three points, and three contracts give only two.
+        second = [
+            carries[i + 1] - 2.0 * carries[i] + carries[i - 1]
+            for i in range(1, len(carries) - 1)
+        ]
+        curvature = float(sum(second) / len(second))
 
     if s is None:
         warnings.append(
@@ -184,6 +199,7 @@ def roll_analysis(
     contracts_held: float,
     multiplier: float,
     days_to_front_expiry: float,
+    days_between_expiries: Optional[float] = None,
     next_multiplier: Optional[float] = None,
     cost_per_contract: float = 0.0,
     spread_ticks: float = 0.0,
@@ -240,8 +256,30 @@ def roll_analysis(
     )
     net_cost = -cash_impact + execution
 
+    # THE DENOMINATOR IS THE GAP BETWEEN THE TWO EXPIRIES, not the time
+    # left on the front. `log(f1/f0)` is a carry BETWEEN contracts, so
+    # annualizing it by the front's remaining life makes the answer depend
+    # on the roll DATE, which is not an economic variable. Same two prices,
+    # rolling at 90 days vs 1 day, reported 101 bps vs 9,114 bps -- and
+    # rolling the day before expiry, which is when you roll, claimed a 91%
+    # annualized break-even on an unchanged $7,540 cost. `futures_curve`
+    # 140 lines above uses the expiry gap and always did.
+    carry_years = (
+        float(days_between_expiries) / 365.0
+        if days_between_expiries is not None
+        else None
+    )
+    if carry_years is not None and carry_years <= 0:
+        raise ValidationError(
+            f"days_between_expiries={days_between_expiries!r} must be "
+            "positive: it is the gap between the two contracts' expiries, "
+            "which is what the roll's carry is earned over."
+        )
+    roll_yield = math.log(f1 / f0) / carry_years if carry_years else None
+
+    # The break-even is a cost over the HOLDING period, so this one really
+    # is the front's remaining life.
     years = days / 365.0
-    roll_yield = math.log(f1 / f0) / years if years > 0 else float("nan")
     breakeven = (
         net_cost / front_notional / years if front_notional and years else float("nan")
     )
@@ -286,9 +324,14 @@ def roll_analysis(
             if front_notional
             else float("nan")
         ),
-        "roll_yield_rate": float(roll_yield),
-        "roll_yield_bps": float(roll_yield * 10_000.0),
+        "roll_yield_rate": (float(roll_yield) if roll_yield is not None else None),
+        "roll_yield_bps": (
+            float(roll_yield * 10_000.0) if roll_yield is not None else None
+        ),
         "days_to_front_expiry": days,
+        "days_between_expiries": (
+            float(days_between_expiries) if days_between_expiries is not None else None
+        ),
         "breakeven_annualized_rate": float(breakeven),
         "warnings": warnings,
     }

@@ -482,3 +482,120 @@ class TestThePythonFallbacksActuallyRun:
         right = np.asarray(fallback[indicator], dtype=float)
         assert left.shape == right.shape
         assert np.allclose(left, right, rtol=1e-9, atol=1e-12, equal_nan=True)
+
+
+class TestTheTwoFuturesCurveMeasuresAgree:
+    """`analyze_futures_curve` and `analyze_roll` describe the same two
+    contracts and disagreed by 18.25x, because `roll_analysis` annualized
+    the step between them by the FRONT'S REMAINING LIFE rather than by the
+    gap between the two expiries."""
+
+    def test_roll_yield_does_not_move_with_the_roll_date(self):
+        """It used to. Same prices, same cost, rolling at 90 days vs 1 day:
+        101 bps against 9,114 bps. The roll date is not an economic
+        variable."""
+        from standard_quant_tools.delta_one.futures import roll_analysis
+
+        seen = set()
+        for days_to_front in (90.0, 30.0, 5.0, 1.0, 0.5):
+            got = roll_analysis(
+                front_price=6000.0,
+                next_price=6015.0,
+                contracts_held=10.0,
+                multiplier=50.0,
+                days_to_front_expiry=days_to_front,
+                days_between_expiries=91.0,
+            )
+            seen.add(round(got["roll_yield_bps"], 8))
+        assert len(seen) == 1, f"roll_yield moved with the roll date: {seen}"
+
+    def test_it_agrees_with_the_curve_tool(self):
+        from standard_quant_tools.delta_one.futures import (
+            futures_curve,
+            roll_analysis,
+        )
+
+        front_days, gap_days = 5.0, 91.0
+        rolled = roll_analysis(
+            front_price=6000.0,
+            next_price=6015.0,
+            contracts_held=10.0,
+            multiplier=50.0,
+            days_to_front_expiry=front_days,
+            days_between_expiries=gap_days,
+        )
+        curve = futures_curve(
+            contracts=[
+                {"label": "H5", "price": 6000.0, "time_to_expiry": front_days / 365},
+                {
+                    "label": "M5",
+                    "price": 6015.0,
+                    "time_to_expiry": (front_days + gap_days) / 365,
+                },
+            ]
+        )
+        carry_bps = curve["calendar_spreads"][0]["forward_carry_rate"] * 1e4
+        assert rolled["roll_yield_bps"] == pytest.approx(carry_bps, rel=1e-9)
+
+    def test_roll_yield_is_null_rather_than_annualized_by_the_wrong_period(self):
+        from standard_quant_tools.delta_one.futures import roll_analysis
+
+        got = roll_analysis(
+            front_price=6000.0,
+            next_price=6015.0,
+            contracts_held=10.0,
+            multiplier=50.0,
+            days_to_front_expiry=5.0,
+        )
+        assert got["roll_yield_bps"] is None
+        assert got["net_roll_cost"] is not None, "the cost is still reported"
+
+
+class TestCurveCurvatureNeedsThreeCarries:
+    """`carries[-1] - 2*carries[len//2] + carries[0]` is only a second
+    difference when the count is odd. With two carries it collapsed to
+    `c0 - c1`, the NEGATIVE of the first difference, so a steepening curve
+    reported a negative curvature against a docstring saying positive means
+    steepening. Exactly three contracts -- the case the field description
+    named as the minimum -- was the broken one."""
+
+    @staticmethod
+    def _linear_carry_curve(n_contracts: int):
+        times = [(i + 1) * 30 / 365 for i in range(n_contracts)]
+        prices = [6000.0]
+        for i in range(1, n_contracts):
+            carry = 0.02 + 0.01 * (i - 1)  # linear -> zero second difference
+            prices.append(prices[-1] * math.exp(carry * (times[i] - times[i - 1])))
+        return [
+            {"label": f"C{i}", "price": prices[i], "time_to_expiry": times[i]}
+            for i in range(n_contracts)
+        ]
+
+    @pytest.mark.parametrize("n_contracts", [4, 5, 6, 7])
+    def test_a_linear_carry_curve_has_zero_curvature(self, n_contracts):
+        from standard_quant_tools.delta_one.futures import futures_curve
+
+        got = futures_curve(contracts=self._linear_carry_curve(n_contracts))
+        assert got["curve_curvature"] == pytest.approx(0.0, abs=1e-12)
+
+    def test_three_contracts_report_null_rather_than_a_sign_flip(self):
+        from standard_quant_tools.delta_one.futures import futures_curve
+
+        got = futures_curve(contracts=self._linear_carry_curve(3))
+        assert got["curve_curvature"] is None
+
+    def test_a_genuinely_convex_curve_reports_positive(self):
+        from standard_quant_tools.delta_one.futures import futures_curve
+
+        times = [(i + 1) * 30 / 365 for i in range(5)]
+        prices = [6000.0]
+        for i in range(1, 5):
+            carry = 0.02 + 0.01 * (i - 1) ** 2  # convex in i
+            prices.append(prices[-1] * math.exp(carry * (times[i] - times[i - 1])))
+        got = futures_curve(
+            contracts=[
+                {"label": f"C{i}", "price": prices[i], "time_to_expiry": times[i]}
+                for i in range(5)
+            ]
+        )
+        assert got["curve_curvature"] > 0

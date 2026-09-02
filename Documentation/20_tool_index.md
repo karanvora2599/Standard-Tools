@@ -930,7 +930,7 @@ The buying and selling an index change forces on passive money, sized as DAYS OF
 What moving a position from one contract into the next actually costs, with the break-even rate it then has to out-earn. Distinct from the curve because this one has a size: the position is SIGNED, and a short rolled up a contango curve collects the step a long pays. Roll yield is reported as what it is -- a price step expressed as a rate, not a return, which a long gives up if spot does not move. Different multipliers are resized by money, not contract count.
 
 **Required:** `front_price`, `next_price`, `contracts_held`, `multiplier`, `days_to_front_expiry`  
-**Optional:** `next_multiplier`, `cost_per_contract`, `spread_ticks`, `tick_value`
+**Optional:** `days_between_expiries`, `next_multiplier`, `cost_per_contract`, `spread_ticks`, `tick_value`
 
 #### `analyze_total_return_future`
 
