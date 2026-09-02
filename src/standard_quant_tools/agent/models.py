@@ -3442,13 +3442,20 @@ class OptionGreeks(BaseModel):
     gamma: Optional[float]
     vega: Optional[float] = Field(
         ...,
-        description="Price change per 1.0 (100 percentage points) of volatility — divide by 100 for the conventional 'per vol point' quote.",
+        description="Price change per 1 volatility POINT (0.01), the "
+        "conventional quote. Same convention as get_option_greeks, so the "
+        "two tools' numbers can be compared and added.",
     )
     theta: Optional[float] = Field(
         ...,
-        description="Price change per YEAR (raw) — divide by 365 for the conventional 'per calendar day' quote.",
+        description="Price change per CALENDAR DAY, the conventional quote. "
+        "None for models this library does not compute it for -- Black-76 "
+        "among them -- which is a gap rather than a zero.",
     )
-    rho: Optional[float]
+    rho: Optional[float] = Field(
+        ...,
+        description="Price change per 1 percentage point (0.01) of rate.",
+    )
 
 
 class OptionPricingResult(BaseModel):

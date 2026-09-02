@@ -309,9 +309,23 @@ def get_option_pricing(input_data: OptionPricingInput) -> OptionPricingResult:
             greeks=OptionGreeks(
                 delta=round(greeks["delta"], 6),
                 gamma=round(greeks["gamma"], 6),
-                vega=round(greeks["vega"], 6),
-                theta=round(greeks["theta"], 6),
-                rho=round(greeks["rho"], 6),
+                # SCALED HERE, because `analysis.options.black_scholes_greeks`
+                # returns raw greeks and every other path on this surface
+                # returns the conventional quote.
+                #
+                # Unscaled, this branch reported vega 100x and theta 365x
+                # larger than the same field from the same tool under a
+                # different `model` -- and 100x larger than get_option_greeks,
+                # which is registered in the same dispatch table. Flipping
+                # `model` from black_scholes to black_76, a ~1% change in
+                # price, moved vega from 27.789321 to 0.276812.
+                #
+                # Per vol point and per calendar day is what three of the
+                # four paths already produced, what get_option_greeks
+                # documents, and what a trader quotes.
+                vega=round(greeks["vega"] / 100.0, 6),
+                theta=round(greeks["theta"] / 365.0, 6),
+                rho=round(greeks["rho"] / 100.0, 6),
             ),
             d1=round(greeks["d1"], 6),
             d2=round(greeks["d2"], 6),
