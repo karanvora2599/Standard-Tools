@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from standard_quant_tools.analysis.derivatives import _bounded_exponent
 from standard_quant_tools.error import ValidationError
 
 from ._numbers import bounded, finite, non_negative, positive
@@ -133,10 +134,42 @@ def dividend_points(
         # F = (S - D) * exp(r*T)  ->  D = S - F * exp(-r*T). The discrete
         # form, deliberately: the whole point of this module is that the
         # continuous-yield form is the approximation being avoided.
-        implied_points = float(s - f * math.exp(-float(financing_rate) * t))
+        # No bound at all here -- only the pydantic layer constrained it,
+        # so the library call overflowed outright. And a percent-for-
+        # fraction typo (4.3 for 4.3%) produced 5,308 index points of
+        # implied dividends on a 6,000 index -- 88% of the index paid out
+        # in six months -- reported with the ordinary "It is a position"
+        # warning. `solve_carry` guards exactly this with `abs(...) > 1.0`.
+        exponent = _bounded_exponent(
+            -float(financing_rate) * t,
+            "-financing_rate * time_to_expiry",
+            "dividend_points",
+        )
+        implied_points = float(s - f * math.exp(exponent))
         difference = total_points - implied_points
 
     warnings: List[str] = []
+
+    # A plausibility floor on the IMPLIED total, which `solve_carry` has and
+    # this did not. Passing 4.3 for a 4.3% financing rate -- the exact
+    # mistake models.py's own header names -- returns 5,308 index points on
+    # a 6,000 index: 88% of the index paid out as dividends in six months,
+    # reported with the ordinary "It is a position" line below and nothing
+    # else. This does not refuse, because a genuine special can be large;
+    # it says which input is the likely cause.
+    if spot and implied_points is not None:
+        implied_share = abs(implied_points) / float(spot)
+        if implied_share > 0.25:
+            warnings.append(
+                f"The future implies {implied_points:.2f} index points of "
+                f"dividends, which is {implied_share * 100:.0f}% of spot over "
+                f"this window. No index pays that. The usual cause is a "
+                f"financing_rate given as a percent rather than a fraction "
+                f"({financing_rate!r} would be "
+                f"{float(financing_rate) * 100:.0f}%) -- check that before "
+                "reading the gap below as a position."
+            )
+
     if not included:
         warnings.append(
             f"No constituent goes ex between {start} and {end}, so the total "

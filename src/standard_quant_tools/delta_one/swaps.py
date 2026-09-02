@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional
 
-from standard_quant_tools.analysis.derivatives import MAX_RATE
+from standard_quant_tools.analysis.derivatives import MAX_RATE, _bounded_exponent
 from standard_quant_tools.error import ValidationError
 
 from ._numbers import bounded, finite, non_negative, positive
@@ -214,7 +214,16 @@ def total_return_future(
         )
         # A level consistent with that spread, so both conventions come back
         # populated whichever one was supplied.
-        implied_level = s * math.exp((rate + implied_spread_bps / 10_000.0) * t)
+        # The rate and the sum were bounded when this overflow was first
+        # fixed; the PRODUCT with `t` was not, so the same bare
+        # OverflowError the fix's own comment describes was still live at
+        # reference_rate=9.99, T=100.
+        exponent = _bounded_exponent(
+            (rate + implied_spread_bps / 10_000.0) * t,
+            "(reference_rate + spread) * time_to_expiry",
+            "total_return_future",
+        )
+        implied_level = s * math.exp(exponent)
     else:
         level = positive(quote, "quote")
         implied_level = level

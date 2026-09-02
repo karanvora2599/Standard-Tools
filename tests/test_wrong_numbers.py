@@ -599,3 +599,112 @@ class TestCurveCurvatureNeedsThreeCarries:
             ]
         )
         assert got["curve_curvature"] > 0
+
+
+class TestBoundsOnTheProductNotJustTheFactors:
+    """`MAX_RATE * MAX_TIME_TO_EXPIRY` is 1,000 and `math.exp` overflows at
+    about 709.78, so inputs entirely inside every declared field constraint
+    reached `exp` and either raised a bare OverflowError or returned a
+    number that was not a price."""
+
+    def test_the_declared_bounds_no_longer_admit_an_overflow(self):
+        """Sweeping the tool's OWN field bounds: 12.77% raised a bare
+        OverflowError and 8.74% returned a forward of exactly 0.0 for a
+        6,000 index, classified `future_rich`."""
+        from standard_quant_tools.analysis.derivatives import (
+            implied_forward_price,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        rng = np.random.default_rng(0)
+        bad = 0
+        for _ in range(3000):
+            try:
+                forward = implied_forward_price(
+                    spot=float(rng.uniform(1e-6, 1e12)),
+                    time_to_expiry=float(rng.uniform(1e-8, 100.0)),
+                    risk_free_rate=float(rng.uniform(-10, 10)),
+                    dividend_yield=float(rng.uniform(-10, 10)),
+                    borrow_rate=float(rng.uniform(-10, 10)),
+                )["forward"]
+                if not np.isfinite(forward) or forward <= 0 or forward > 1e12:
+                    bad += 1
+            except ValidationError:
+                pass  # a refusal that names the input is the correct outcome
+            except OverflowError:
+                bad += 1
+        assert bad == 0
+
+    @pytest.mark.parametrize(
+        "rate,time_to_expiry", [(10.0, 100.0), (10.0, 70.0), (-10.0, 100.0)]
+    )
+    def test_it_refuses_rather_than_returning_a_non_price(self, rate, time_to_expiry):
+        from standard_quant_tools.analysis.derivatives import (
+            implied_forward_price,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError):
+            implied_forward_price(
+                spot=6000.0,
+                time_to_expiry=time_to_expiry,
+                risk_free_rate=rate,
+                dividend_yield=0.0,
+                borrow_rate=0.0,
+            )
+
+    def test_ordinary_inputs_are_untouched(self):
+        from standard_quant_tools.analysis.derivatives import (
+            implied_forward_price,
+        )
+
+        got = implied_forward_price(
+            spot=6000.0,
+            time_to_expiry=1.0,
+            risk_free_rate=0.05,
+            dividend_yield=0.02,
+            borrow_rate=0.01,
+        )
+        assert got["forward"] == pytest.approx(6000.0 * math.exp(0.02), rel=1e-12)
+
+    def test_the_total_return_future_bound_covers_the_product_too(self):
+        """The earlier fix bounded the rate and the sum. Not the product."""
+        from standard_quant_tools.delta_one.swaps import total_return_future
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError):
+            total_return_future(
+                quote=25.0,
+                quote_convention="spread_bps",
+                underlying_price=6000.0,
+                time_to_expiry=100.0,
+                reference_rate=9.99,
+            )
+
+    def test_dividend_points_names_the_percent_typo(self):
+        """4.3 for 4.3% implies 5,308 index points on a 6,000 index -- 88%
+        of the index paid out in six months -- and used to come back with
+        only the ordinary "It is a position" line."""
+        from standard_quant_tools.delta_one.dividends import dividend_points
+
+        constituents = [
+            {
+                "symbol": "A",
+                "shares": 1.0,
+                "dividend_per_share": 20.0,
+                "ex_date": "2025-04-15",
+            }
+        ]
+        kwargs = dict(
+            divisor=1.0,
+            as_of="2025-01-01",
+            expiry="2025-06-30",
+            spot=6000.0,
+            future_price=5940.0,
+            time_to_expiry=0.5,
+        )
+        typo = dividend_points(constituents, financing_rate=4.3, **kwargs)
+        assert any("percent rather than a fraction" in w for w in typo["warnings"])
+
+        fine = dividend_points(constituents, financing_rate=0.043, **kwargs)
+        assert not any("percent rather than a fraction" in w for w in fine["warnings"])

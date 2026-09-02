@@ -107,6 +107,17 @@ MAX_TIME_TO_EXPIRY = 100.0  # years; no listed contract is close
 MAX_RATE = 10.0  # 1,000% continuously compounded
 MAX_PRICE = 1e12
 
+#: The largest exponent `math.exp` can take. Bounding the rate and the time
+#: SEPARATELY is not enough: MAX_RATE * MAX_TIME_TO_EXPIRY is 1,000, and a
+#: net carry built from three independently-bounded rates reaches 3,000,
+#: while exp overflows at about 709.78. Sweeping 20,000 draws from the
+#: declared field bounds of one tool: 12.77% raised a bare OverflowError,
+#: 8.74% returned a forward of exactly 0.0, and only 7.71% were plausible.
+#: A forward of 0.0 for a 6,000 index is the bad one -- it is not an error
+#: and not an infinity, it is a number, and it was classified 'future_rich'
+#: with a warning quoting 300,000 bps.
+MAX_EXPONENT = 700.0
+
 
 def _bounded(
     value: float, name: str, *, low: float, high: float, unit: str = ""
@@ -948,6 +959,32 @@ def check_put_call_parity(
     }
 
 
+def _bounded_exponent(value: float, expression: str, func: str) -> float:
+    """
+    An exponent `math.exp` can actually take.
+
+    The individual factors are each bounded and their product is not, which
+    is the whole failure: `rate * time_to_expiry` is inside every declared
+    field constraint at r=10, T=100 and still overflows. Refusing here names
+    the product and both factors, where the alternatives were a bare
+    OverflowError out of the math module or a silent 0.0.
+    """
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValidationError(
+            f"{func}: {expression} is {number!r}, which math.exp cannot take."
+        )
+    if abs(number) > MAX_EXPONENT:
+        raise ValidationError(
+            f"{func}: {expression} = {number:.4g}, and math.exp overflows a "
+            f"float above about {MAX_EXPONENT:.0f}. The rate and the time to "
+            "expiry are each individually inside their bounds -- it is their "
+            "PRODUCT that is not. Check the units: a rate of 4.3 is 430%, not "
+            "4.3%."
+        )
+    return number
+
+
 def implied_forward_price(
     *,
     spot: float,
@@ -988,7 +1025,31 @@ def implied_forward_price(
     _bounded(borrow_rate, "borrow_rate", low=-MAX_RATE, high=MAX_RATE)
     r, q, b = float(risk_free_rate), float(dividend_yield), float(borrow_rate)
     net_carry = r - q - b
+    _bounded_exponent(
+        net_carry * t, "(risk_free - dividend - borrow) * T", "implied_forward_price"
+    )
+    for rate, label in (
+        (r, "risk_free_rate"),
+        (q, "dividend_yield"),
+        (b, "borrow_rate"),
+    ):
+        _bounded_exponent(rate * t, f"{label} * T", "implied_forward_price")
     forward = spot * math.exp(net_carry * t)
+
+    # The exponent bound stops the overflow; this stops what survives it.
+    # At r=10, T=70 the exponent is exactly 700 and the forward comes back
+    # 6.09e307 -- finite, so nothing downstream refuses it, and it was
+    # classified `future_cheap` with a basis spread of -100,000 bps. A
+    # forward outside the same MAX_PRICE band the spot had to satisfy is
+    # not a price.
+    if not math.isfinite(forward) or abs(forward) > MAX_PRICE:
+        raise ValidationError(
+            f"implied_forward_price: the forward comes out {forward:.4g} for "
+            f"a spot of {float(spot):.4g}, which is outside the price band "
+            f"(+/-{MAX_PRICE:.0g}) the spot itself had to satisfy. Net carry "
+            f"{net_carry:.4g} over {t:.4g} years compounds to "
+            f"{math.exp(net_carry * t):.4g}x. Check the rate units."
+        )
 
     return {
         "spot": float(spot),
