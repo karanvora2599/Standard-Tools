@@ -811,3 +811,89 @@ class TestTheBasketChangesTheAnswer:
         rich = etf_fair_value(basket_value=100.45, **common)
         assert cheap["premium_vs_reference_bps"] != rich["premium_vs_reference_bps"]
         assert cheap["net_arbitrage_bps"] != rich["net_arbitrage_bps"]
+
+
+class TestStatisticsMatchTheirDefinitions:
+    """Four functions computing something adjacent to what they claimed."""
+
+    def test_jarque_bera_uses_population_moments(self):
+        """It standardized by the SAMPLE deviation, shrinking both moments.
+        Worst on short samples -- which is where this function's own
+        20-observation minimum puts most of its callers. It flipped the
+        normality verdict at n = 20, 30 and 40."""
+        scipy_stats = pytest.importorskip("scipy.stats")
+        from standard_quant_tools.analysis.inference import test_normality
+
+        for n in (20, 30, 40, 120, 500):
+            sample = np.random.default_rng(16).standard_t(6, n)
+            got = test_normality(sample.tolist())
+            expected, _ = scipy_stats.jarque_bera(sample)
+            assert got["jarque_bera"] == pytest.approx(expected, rel=1e-9), n
+            assert got["skewness"] == pytest.approx(
+                scipy_stats.skew(sample), rel=1e-9
+            ), n
+
+    def test_decompose_returns_drops_five_observations_not_five_values(self):
+        """`np.isin(array, best_five)` removes every observation EQUAL IN
+        VALUE to one of the five. On any rounded or capped series that is
+        far more than five: measured, it dropped 8 as "the best 5" and 34 as
+        "the worst 5", and reported a negative total for a positive series
+        with the "lottery ticket rather than an edge" warning attached."""
+        from standard_quant_tools.analysis.inference import decompose_returns
+
+        values = [0.05] * 8 + [-0.04] * 4 + [0.001] * 30
+        got = decompose_returns(values)
+
+        array = np.array(values)
+        order = np.argsort(array, kind="stable")
+        keep = np.ones(array.size, dtype=bool)
+        keep[order[-5:]] = False
+        expected = float(np.prod(1.0 + array[keep]) - 1.0)
+
+        assert got["total_without_best_5"] == pytest.approx(expected, rel=1e-12)
+        assert got["total_without_best_5"] > 0, "the series is profitable"
+
+    def test_buy_volume_fraction_weighs_volume_not_bars(self):
+        """`(direction > 0).mean()` is the fraction of up DAYS. The sibling
+        in `analysis/microstructure.py` computes it size-weighted under the
+        same field name; the two were 506x apart on one tape."""
+        from standard_quant_tools.analysis.microstructure_estimators import (
+            order_flow_imbalance,
+        )
+
+        rng = np.random.default_rng(0)
+        n = 300
+        close = 100 + np.cumsum(rng.normal(0, 0.4, n))
+        change = np.diff(close, prepend=close[0])
+        # Up days carry ten times the volume, so the two answers must differ.
+        volume = np.where(change > 0, 10_000.0, 1_000.0)
+        frame = pd.DataFrame(
+            {"close": close, "volume": volume},
+            index=pd.date_range("2024-01-01", periods=n, freq="D"),
+        )
+        got = order_flow_imbalance(frame)["buy_volume_fraction"]
+
+        up = change > 0
+        assert got == pytest.approx(volume[up].sum() / volume.sum(), rel=1e-9)
+        assert abs(got - up.mean()) > 0.3, "the test data must separate the two"
+
+    def test_the_effective_spread_tool_reports_the_effective_spread(self):
+        """`_bps_summary` returned the FIRST column whose name contained
+        "bps", and `effective_spread` merges the quoted `spread_bps` in
+        before assigning `effective_spread_bps`. So the tool whose promise
+        is "what each trade ACTUALLY paid against the prevailing midpoint"
+        reported the quoted number -- exactly what its own warning says not
+        to charge."""
+        import inspect
+
+        from standard_quant_tools.agent.runtimes.microstructure import (
+            series_tools,
+        )
+
+        source = inspect.getsource(series_tools)
+        assert '_bps_summary(series, "effective_spread_bps")' in source
+        assert '_bps_summary(series, "spread_bps")' in source
+        # And the helper must not be able to guess again.
+        assert "for column in frame.columns" not in inspect.getsource(
+            series_tools._bps_summary
+        )

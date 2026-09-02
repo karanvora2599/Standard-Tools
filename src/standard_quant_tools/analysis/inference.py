@@ -555,15 +555,26 @@ def decompose_returns(
     drag = arithmetic - geometric
 
     total = float(np.prod(1.0 + array) - 1.0)
-    ordered = np.sort(array)
-    best_five = ordered[-5:]
-    worst_five = ordered[:5]
+
+    # BY RANK, NOT BY VALUE. `np.isin(array, best_five)` removes every
+    # observation EQUAL IN VALUE to one of the five, which on any rounded
+    # or capped return series is far more than five. Measured on
+    # [0.05]*8 + [-0.04]*4 + [0.001]*30 it dropped 8 as "the best 5" and 34
+    # as "the worst 5", reported total_without_best_5 = -0.1248 where the
+    # truth is +0.0132, and then emitted "Removing the five best days turns
+    # the total return NEGATIVE ... a lottery ticket rather than an edge"
+    # about a series whose correct value is positive.
+    order = np.argsort(array, kind="stable")
+    keep_best = np.ones(array.size, dtype=bool)
+    keep_best[order[-5:]] = False
+    keep_worst = np.ones(array.size, dtype=bool)
+    keep_worst[order[:5]] = False
 
     def _without(mask: np.ndarray) -> float:
         return float(np.prod(1.0 + array[mask]) - 1.0)
 
-    without_best = _without(~np.isin(array, best_five))
-    without_worst = _without(~np.isin(array, worst_five))
+    without_best = _without(keep_best)
+    without_worst = _without(keep_worst)
 
     positive = array[array > 0]
     negative = array[array < 0]
@@ -660,7 +671,18 @@ def test_normality(values: Sequence[float]) -> Dict[str, Any]:
             "magnitude, because a constant series has a standard deviation "
             "near 1e-19 rather than exactly zero.)"
         )
-    centred = (array - array.mean()) / std
+    # POPULATION moments (ddof=0), which is how Jarque-Bera is defined and
+    # what scipy computes. Standardizing by the SAMPLE deviation shrinks
+    # both moments by (1 - 1/n) powers and the effect is worst on short
+    # samples -- which is where this function's own 20-observation minimum
+    # puts most of its callers. Measured on default_rng(16).standard_t(6,
+    # 30): statistic 5.3098, p 0.070305, normal=True against scipy's
+    # 7.1460, 0.028072, False. It flipped the verdict at n = 20, 30 and 40.
+    #
+    # `std` above stays ddof=1: it is the dispersion GUARD, and the sample
+    # deviation is the right thing to ask "is this series constant".
+    population_std = float(array.std(ddof=0))
+    centred = (array - array.mean()) / population_std
     skew = float((centred**3).mean())
     kurtosis = float((centred**4).mean())
     excess = kurtosis - 3.0

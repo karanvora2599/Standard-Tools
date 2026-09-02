@@ -192,17 +192,29 @@ class SpreadSeriesResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
-def _bps_summary(frame: pd.DataFrame) -> tuple:
-    for column in frame.columns:
-        if "bps" in str(column).lower():
-            series = pd.to_numeric(frame[column], errors="coerce").dropna()
-            if len(series):
-                return (
-                    float(series.mean()),
-                    float(series.median()),
-                    float(series.quantile(0.95)),
-                )
-    return (None, None, None)
+def _bps_summary(frame: pd.DataFrame, column: str) -> tuple:
+    """
+    Summarize ONE named bps column.
+
+    This used to scan for the first column whose name contained "bps" and
+    summarize that. `effective_spread` merges the quoted `spread_bps` in
+    before it assigns `effective_spread_bps`, so the first match was the
+    QUOTED spread -- and `get_effective_spread_series`, whose whole promise
+    is "what each trade ACTUALLY paid against the prevailing midpoint",
+    reported the quoted number instead. Measured on a 20 bps quote with
+    trades 1 bp off mid: reported mean_bps 20.0, true effective 2.0. It is
+    the number the tool's own warning says not to charge.
+    """
+    if column not in frame.columns:
+        return (None, None, None)
+    series = pd.to_numeric(frame[column], errors="coerce").dropna()
+    if not len(series):
+        return (None, None, None)
+    return (
+        float(series.mean()),
+        float(series.median()),
+        float(series.quantile(0.95)),
+    )
 
 
 def get_quoted_spread_series(input_data: QuotedSpreadInput) -> SpreadSeriesResult:
@@ -211,7 +223,7 @@ def get_quoted_spread_series(input_data: QuotedSpreadInput) -> SpreadSeriesResul
         input_data.quote_panel_ref, "quote_panel", "get_quoted_spread_series"
     )
     series = lib.quoted_spread(quotes)
-    mean, median, p95 = _bps_summary(series)
+    mean, median, p95 = _bps_summary(series, "spread_bps")
     ref = publish(
         series,
         kind="quote_panel",
@@ -278,7 +290,7 @@ def get_effective_spread_series(
         else None
     )
     series = lib.effective_spread(trades, quotes, horizon)
-    mean, median, p95 = _bps_summary(series)
+    mean, median, p95 = _bps_summary(series, "effective_spread_bps")
 
     warnings = [
         "EFFECTIVE is what trades paid against the prevailing midpoint, and "

@@ -639,7 +639,16 @@ def order_flow_imbalance(
         "persistence": persistence,
         "overlapping_persistence": overlapping_persistence,
         "next_day_correlation": predictive,
-        "buy_volume_fraction": float((direction > 0).mean()),
+        # VOLUME, not bars. This was `(direction > 0).mean()` -- the
+        # fraction of up DAYS, which is a different quantity under the same
+        # field name that `analysis/microstructure.py` computes correctly
+        # size-weighted. Measured on the same synthetic tape: 0.495050 here
+        # against 0.000979 there, a factor of 506, same package.
+        "buy_volume_fraction": (
+            float(frame["volume"][direction > 0].sum() / frame["volume"].sum())
+            if float(frame["volume"].sum()) > 0
+            else float("nan")
+        ),
         "warnings": warnings,
     }
 
