@@ -1057,3 +1057,73 @@ class TestPctChangeDoesNotPadAcrossAGap:
             if not any(kw.arg == "fill_method" for kw in node.keywords):
                 offenders.append(node.lineno)
         assert offenders == [], f"{module}: bare pct_change at lines {offenders}"
+
+
+class TestValidatedDomainsAreActuallyUsed:
+    """Two functions validated an input across a range and then handled only
+    part of it."""
+
+    @pytest.mark.parametrize("correlation", [-1.0, -0.75, -0.5, -0.25])
+    def test_liquidity_var_uses_negative_correlations(self, correlation):
+        """`if correlation <= 0` returned the ZERO answer for the whole
+        negative half of the domain the validator accepts, while the result
+        echoed back `assumed_correlation: -0.5`. The formula two lines down
+        is correct across [-1, 1]."""
+        from standard_quant_tools.portfolio.construction import (
+            liquidity_adjusted_var,
+        )
+
+        common = (
+            {"A": 5e6, "B": 5e6},
+            {"A": 0.32, "B": 0.32},
+            {"A": 4e7, "B": 4e7},
+        )
+        negative = liquidity_adjusted_var(*common, correlation=correlation)
+        zero = liquidity_adjusted_var(*common, correlation=0.0)
+        assert negative["liquidity_adjusted_var"] < zero["liquidity_adjusted_var"]
+        assert negative["assumed_correlation"] == correlation
+
+    def test_liquidity_var_is_monotone_in_correlation(self):
+        from standard_quant_tools.portfolio.construction import (
+            liquidity_adjusted_var,
+        )
+
+        values = [
+            liquidity_adjusted_var(
+                {"A": 5e6, "B": 5e6},
+                {"A": 0.32, "B": 0.32},
+                {"A": 4e7, "B": 4e7},
+                correlation=rho,
+            )["liquidity_adjusted_var"]
+            for rho in (-1.0, -0.5, 0.0, 0.5, 1.0)
+        ]
+        assert values == sorted(values)
+        # Two equal, perfectly offsetting positions net to nothing.
+        assert values[0] == pytest.approx(0.0, abs=1e-6)
+
+    def test_variance_ratio_does_not_depend_on_where_a_spread_sits(self):
+        """`log(abs(x))` folds a zero-crossing spread onto the positive
+        half-line, so the answer moved with the level. Measured VR(2)
+        0.620832 centred at zero against 0.855876 for the same series
+        shifted by +1000, and a trending spread read as mean-reverting."""
+        from standard_quant_tools.analysis.stationarity import variance_ratio
+
+        rng = np.random.default_rng(4)
+        n = 800
+        noise = rng.normal(0, 1, n)
+        spread = np.zeros(n)
+        for i in range(1, n):
+            spread[i] = 0.85 * spread[i - 1] + noise[i]
+
+        for period in (2, 4, 8):
+            centred = variance_ratio(spread, period)["variance_ratio"]
+            shifted = variance_ratio(spread + 1000.0, period)["variance_ratio"]
+            assert centred == pytest.approx(shifted, rel=0.02), period
+
+    def test_variance_ratio_reports_which_differencing_it_used(self):
+        from standard_quant_tools.analysis.stationarity import variance_ratio
+
+        rng = np.random.default_rng(4)
+        walk = np.cumsum(rng.normal(0, 1, 400))
+        assert variance_ratio(walk - walk.mean(), 2)["differencing"] == "level"
+        assert variance_ratio(np.abs(walk) + 100.0, 2)["differencing"] == "log"

@@ -720,7 +720,18 @@ def liquidity_adjusted_var(
     adjusted_values = np.array([r["liquidity_adjusted_var"] for r in rows])
 
     def _aggregate(values: np.ndarray) -> float:
-        if correlation <= 0:
+        # ONLY zero short-circuits. `correlation <= 0` returned the ZERO
+        # answer for the entire negative half of the domain the validator
+        # above accepts -- while the result echoed back
+        # `assumed_correlation: -0.5`. At rho = -0.5 that reported 212,412.88
+        # where this function's own formula, two lines down, gives
+        # 77,560.49: VaR overstated 2.74x for a book whose positions offset.
+        #
+        # The formula is correct across [-1, 1]: variance is
+        # sum(v^2)(1 - rho) + rho * (sum v)^2, which at rho = -0.5 on two
+        # equal positions gives exactly one position's worth, and the
+        # `max(..., 0.0)` below already guards the degenerate corner.
+        if correlation == 0:
             return float(math.sqrt((values**2).sum()))
         independent = (values**2).sum()
         cross = correlation * (values.sum() ** 2 - independent)

@@ -183,7 +183,26 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
     """
     if period < 2:
         raise ValidationError("variance_ratio: period must be at least 2")
-    returns = np.diff(np.log(np.abs(values) + 1e-12))
+    # A SPREAD CROSSES ZERO, and `log(abs(x))` folds it onto the positive
+    # half-line: the answer then depends on where the spread happens to
+    # sit. Measured on one AR(1) spread, VR(2) = 0.620832 centred at zero
+    # against 0.855876 for the same series shifted by +1000, and on a
+    # zero-centred TRENDING spread VR(8) came back 0.547940 ("increments
+    # revert") where the level-difference answer is 2.461144 ("trending") --
+    # so the warning text told the mean-reversion story about a trending
+    # series. A spread is the documented use case for this test.
+    #
+    # Log differences only where every value is strictly positive, which is
+    # a price series and where the log is the conventional choice. Anything
+    # that touches or crosses zero gets simple differences, which is the
+    # Lo-MacKinlay statistic on the level and is what a spread needs.
+    array = np.asarray(values, dtype=float)
+    if np.all(array > 0):
+        returns = np.diff(np.log(array))
+        differencing = "log"
+    else:
+        returns = np.diff(array)
+        differencing = "level"
     n = len(returns)
     if n < period * 4:
         raise ValidationError(
@@ -216,6 +235,9 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
             float(2.0 * (1.0 - _norm_cdf(abs(z)))) if np.isfinite(z) else float("nan")
         ),
         "period": int(period),
+        # Which differencing was used, so a caller can tell a price-series
+        # answer from a spread one rather than having to infer it.
+        "differencing": differencing,
     }
 
 
