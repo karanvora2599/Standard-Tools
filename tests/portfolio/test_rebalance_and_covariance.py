@@ -24,7 +24,11 @@ import pytest
 
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.portfolio.covariance import estimate_covariance
-from standard_quant_tools.portfolio.rebalance import plan_rebalance
+from standard_quant_tools.portfolio import rebalance as rebalance_module
+from standard_quant_tools.portfolio.rebalance import (
+    DEFAULT_IMPACT_COEFFICIENT,
+    plan_rebalance,
+)
 
 
 def _returns(n_assets=40, n_obs=120, seed=0):
@@ -285,3 +289,44 @@ class TestTheMicrostructureSplitHappened:
 
         with pytest.raises(ValueError, match="microstructure"):
             resolve("portfolio").dispatch("get_microstructure_metrics", {})
+
+
+class TestImpactModelIdentity:
+    """`rebalance` and `backtest.costs` must stay one impact model.
+
+    The module docstring in `rebalance.py` used to claim its impact model was
+    "the same one `estimate_trade_cost` already uses", and a reader checking
+    that against the code found the volatility term missing. It is the same
+    model -- the volatility is folded into the coefficient -- but nothing
+    held the two together, so either could have been changed alone and the
+    claim would have quietly become false.
+    """
+
+    IDENTITY = "impact_coefficient == coefficient * volatility * 1e4"
+
+    @pytest.mark.parametrize(
+        "participation", [0.0, 1e-6, 0.01, 0.05, 0.10, 0.20, 0.50, 1.0, 3.0]
+    )
+    @pytest.mark.parametrize("volatility", [0.0005, 0.001, 0.01, 0.02, 0.08])
+    def test_the_two_parameterizations_agree(self, participation, volatility):
+        from standard_quant_tools.backtest.costs import sqrt_impact_bps
+
+        coefficient = 1.0
+        folded = coefficient * volatility * 1e4  # the identity
+
+        canonical = sqrt_impact_bps(participation, volatility, coefficient)
+        as_rebalance_computes_it = folded * np.sqrt(participation)
+
+        assert as_rebalance_computes_it == pytest.approx(canonical, rel=1e-12)
+
+    def test_the_shipped_default_is_a_volatility_no_equity_has(self):
+        """Not a failure -- a documented one. The default is a floor, and the
+        module docstring has to keep saying so."""
+        implied_per_bar_vol = DEFAULT_IMPACT_COEFFICIENT / 1e4
+        assert implied_per_bar_vol == pytest.approx(0.001)
+
+        annualized = implied_per_bar_vol * np.sqrt(252)
+        assert annualized < 0.02, "1.6% annualized, quieter than any real name"
+
+        docs = rebalance_module.__doc__ or ""
+        assert "floor" in docs and "1e4" in docs

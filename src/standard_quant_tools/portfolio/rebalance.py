@@ -23,9 +23,30 @@ the number of days it would actually take.
 
 THE IMPACT MODEL IS THE SQUARE ROOT LAW. Cost in basis points scales with
 the square root of participation -- take 4x the volume and pay 2x the
-impact per share, not 4x. It is the standard empirical form and the same one
-`estimate_trade_cost` already uses. It is a model, not a measurement, and
-the coefficient is the part that varies by market and by name.
+impact per share, not 4x. It is the standard empirical form.
+
+IT IS `sqrt_impact_bps` IN A DIFFERENT PARAMETERIZATION, AND THAT IS WORTH
+BEING PRECISE ABOUT, because this docstring used to claim it was "the same
+one `estimate_trade_cost` already uses" and a reader could check that
+against the code and find a term missing. `backtest.costs.sqrt_impact_bps`
+is `coefficient * volatility * sqrt(participation) * 1e4`. This is
+`impact_coefficient * sqrt(participation)`. The volatility term is not
+absent -- it is folded into the coefficient, exactly:
+
+    impact_coefficient == coefficient * volatility * 1e4
+
+The two agree to floating point under that identity, and a test pins it so
+they cannot drift. The parameterization here is the one that fits the
+question: this function plans a schedule across many names over many days
+and is not given a per-name volatility, so it takes the one number a trader
+can actually quote -- basis points at full participation.
+
+WHAT THE DEFAULT IMPLIES. Under that identity `DEFAULT_IMPACT_COEFFICIENT`
+of 10 bps is `coefficient=1.0` at a per-bar volatility of 0.001, which is
+about 1.6% annualized. No equity is that quiet. Against a name at a more
+ordinary 2% daily the canonical model charges 20x more, so the default is
+a floor and not a central estimate. A caller who has a volatility should
+convert it through the identity above and pass the result.
 """
 
 from __future__ import annotations
@@ -43,6 +64,10 @@ logger = logging.getLogger(__name__)
 #: Widely quoted between 5 and 20 bps for liquid US equities; 10 is the
 #: middle and is a MODEL rather than a measurement. A caller who has
 #: calibrated their own should pass it.
+#:
+#: In `sqrt_impact_bps` terms this is `coefficient * volatility * 1e4`, so
+#: 10 is coefficient 1.0 at a per-bar volatility of 0.001 -- quieter than
+#: any real equity. See the module docstring: treat it as a floor.
 DEFAULT_IMPACT_COEFFICIENT = 10.0
 
 #: Fraction of a day's volume this will plan to take. Above ~20% the square
@@ -155,7 +180,12 @@ def plan_rebalance(
                     adv_vector > 0, traded_notional / adv_vector, np.nan
                 )
             # Square root law, weighted by how much of the day's trading
-            # each name represents.
+            # each name represents. This is `sqrt_impact_bps` with the
+            # volatility folded into the coefficient -- see the module
+            # docstring for the identity, and test_impact_model_identity
+            # for the assertion that keeps the two equal. It stays written
+            # out here because that function is scalar and this is a
+            # names-by-days sweep.
             impact = impact_coefficient * np.sqrt(np.nan_to_num(participation))
             day_bps = (
                 float((impact * traded_notional).sum() / traded_notional.sum())
