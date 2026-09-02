@@ -35,6 +35,19 @@ def drawdown_periods(equity_curve: pd.Series) -> pd.DataFrame:
     `duration_bars` spans peak -> recovery (or peak -> last bar if
     unrecovered); `recovery_bars` spans trough -> recovery (None if
     unrecovered).
+
+    `start` IS THE PEAK BAR, not the first bar below it. That matters
+    because `analysis.diagnostics.drawdown_profile` answers the same
+    question with the other convention -- its episodes start on the first
+    bar underwater -- so the two report starts exactly one bar apart on the
+    same equity curve, agreeing on trough and depth. Both are reachable
+    from the agent surface, under result models that both happen to be
+    called `DrawdownEpisode`.
+
+    Neither convention is wrong and neither is changed here, because each
+    is the one its own duration field is measured from: this counts peak ->
+    recovery, and that one counts underwater -> recovery. The difference is
+    pinned by test_drawdown_start_conventions so it stays deliberate.
     """
     if equity_curve.empty:
         return pd.DataFrame(

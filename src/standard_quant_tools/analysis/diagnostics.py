@@ -722,6 +722,19 @@ def drawdown_profile(
     THE DISTINCTION BETWEEN DEPTH AND DURATION is why this returns episodes
     rather than a summary: they are close to independent, and a strategy can
     be bad at either.
+
+    AN EPISODE STARTS ON THE FIRST BAR UNDERWATER, not on the peak that
+    preceded it. `metrics.diagnostics.drawdown_periods` uses the other
+    convention, so on the same equity curve the two report starts exactly
+    one bar apart while agreeing on trough and depth. Both are reachable
+    from the agent surface and both return something named
+    `DrawdownEpisode`, so a caller comparing a start from one against a
+    start from the other is off by one with nothing to indicate it.
+
+    Neither is changed, because each matches the duration its own result
+    reports: `length_days` here counts from the first underwater bar, and
+    `duration_bars` there counts from the peak. The relationship is pinned
+    by test_drawdown_start_conventions.
     """
     values = _clean(returns, "drawdown_profile")
     equity = (1.0 + values).cumprod()
