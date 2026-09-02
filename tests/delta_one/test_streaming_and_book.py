@@ -184,7 +184,18 @@ class TestSpreadMonitor:
         assert relearn["n"] == 0
 
     def test_a_frozen_warm_up_cannot_produce_an_enormous_statistic(self):
-        """The bug the naive variance caused: 1.7 billion from 70 flat ticks."""
+        """The bug the naive variance caused: 1.7 billion from 70 flat ticks.
+
+        The first fix made the statistic 0.0 instead -- and, because a zero
+        baseline can never standardize anything and was never re-frozen,
+        0.0 FOREVER. This asserted that silence, so the monitor was deaf to
+        a 100 bps move, then 1,000, then 10,000, with a warning that said
+        "The monitor still runs".
+
+        Both failures are the same mistake in opposite directions. The
+        invariant is that a real level shift is detected and the statistic
+        stays a number, not that it is any particular one.
+        """
         out = update_spread_monitor(
             new_spread_monitor(warmup=60),
             primary=[100.3] * 70,
@@ -192,11 +203,36 @@ class TestSpreadMonitor:
         )
         assert out["baseline_std"] == 0.0
         assert out["degenerate_baseline"] is True
+        assert out["statistic"] == 0.0, "untestable during the flat stretch"
+
         moved = update_spread_monitor(
             out["state"], primary=[100.9] * 40, reference=[100.0] * 40
         )
-        assert moved["triggered"] is False
-        assert moved["statistic"] == 0.0
+        assert moved["triggered"] is True, "a 60 bps step is not nothing"
+        assert 0.0 < moved["statistic"] < 1e4, moved["statistic"]
+        assert any("re-frozen" in w for w in moved["warnings"])
+        assert moved["state"]["degenerate_baseline"] is False
+
+    def test_a_stalled_warm_up_does_not_deafen_the_monitor_forever(self):
+        """The regression this class is really guarding. Measured before:
+        50 ticks at +100 bps, then +1,000, then +10,000, all returned
+        triggered=False with a statistic of exactly 0.0."""
+        state = update_spread_monitor(
+            new_spread_monitor(warmup=60),
+            primary=[100.0] * 60,
+            reference=[100.0] * 60,
+        )["state"]
+
+        fired = False
+        for multiplier in (1.01, 1.10, 2.0):
+            out = update_spread_monitor(
+                state,
+                primary=[100.0 * multiplier] * 50,
+                reference=[100.0] * 50,
+            )
+            state = out["state"]
+            fired = fired or bool(out["triggered"])
+        assert fired, "still deaf after a stalled warm-up"
 
     def test_a_state_from_another_version_is_refused_rather_than_resumed(self):
         state = new_spread_monitor(warmup=10)

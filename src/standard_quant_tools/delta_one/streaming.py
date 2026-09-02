@@ -76,6 +76,33 @@ MONITOR_VERSION = 3
 #: built on it fires on its own estimation error.
 DEFAULT_WARMUP = 60
 
+#: CUSUM threshold for a STREAM, which is not the same problem the batch
+#: detector solves and does not take the same number.
+#:
+#: `liquidity_events.DEFAULT_THRESHOLD` is 9.0, calibrated for a ~5% false
+#: alarm rate over a window of KNOWN length -- its reference window is
+#: 0.3*n, so its baseline sharpens as the series grows. A stream has no
+#: known length and a baseline frozen at `warmup` observations, so the
+#: statistic keeps accumulating against a fixed scale and the false alarm
+#: rate climbs without bound. Measured here on pure noise, 200 trials:
+#:
+#:      tested obs      thr=9      thr=15     thr=20
+#:            150        2.5%       0.0%       0.0%
+#:            430       10.5%       1.0%       0.0%
+#:          1,500       31.0%       2.0%       0.5%
+#:          5,000       45.0%       7.0%       2.0%
+#:
+#: 45% is not a detector. Detection power pays almost nothing for the move:
+#: 100% at a 1 sd shift and above at every threshold tested, and the only
+#: loss is at 0.5 sd (78% -> 53%), which is a marginal signal either way.
+#:
+#: This is a rate per stream, not per observation, and it still grows with
+#: length -- a monitor left running for a million updates will eventually
+#: fire on noise. That is inherent to a fixed threshold on an unbounded
+#: stream, not something a constant can fix; reset the monitor periodically
+#: if the horizon is long.
+STREAMING_THRESHOLD = 15.0
+
 #: How the two series combine into the number being watched. THREE, not
 #: five, because four of the roadmap's monitors are the same arithmetic
 #: under different names.
@@ -127,7 +154,7 @@ def new_spread_monitor(
     channel: str = "relative_bps",
     label: str = "spread",
     warmup: int = DEFAULT_WARMUP,
-    threshold: float = DEFAULT_THRESHOLD,
+    threshold: float = STREAMING_THRESHOLD,
     slack: float = DEFAULT_SLACK,
 ) -> Dict[str, Any]:
     """
@@ -272,8 +299,19 @@ def update_spread_monitor(
         mean = state["baseline_mean"]
         std = state["baseline_std"]
         if std is None or std <= 0:
-            # Exactly zero has no z at all, so there is nothing to test
-            # rather than something enormous to report.
+            # A zero baseline has no z at all, so this observation cannot be
+            # tested. It used to `continue` and nothing else, which meant a
+            # warm-up spent on a stalled or halted feed left the monitor
+            # DEAF FOREVER: the baseline never re-froze, and 50 ticks at
+            # +100 bps, then +1,000, then +10,000, all returned
+            # triggered=False with a statistic of 0.0.
+            #
+            # `_freeze_baseline`'s own warning says "The monitor still runs
+            # -- a calm period before a real shock is exactly the case it is
+            # for", and named a stale feed as the way to produce this. It
+            # was wrong in precisely that case. So keep accumulating and
+            # re-freeze as soon as the window has real dispersion.
+            _refreeze_if_possible(state, value, warnings)
             continue
 
         z = (value - mean) / std
@@ -436,6 +474,53 @@ def _channel_value(
     return math.log(primary / reference) / t * 10_000.0
 
 
+def _refreeze_if_possible(
+    state: Dict[str, Any], value: float, warnings: List[str]
+) -> None:
+    """
+    Try again on a baseline that came out degenerate.
+
+    A frozen baseline is normally fixed for the life of the monitor, which
+    is what makes the statistic comparable across the stream. A baseline of
+    zero standard deviation is the exception: it can never standardize
+    anything, so holding it is not stability, it is silence. This keeps
+    feeding Welford past the warm-up and re-freezes the moment the window
+    has dispersion to measure against.
+    """
+    # Welford again, on its own accumulators, the same one pass the warm-up
+    # uses at line 264 -- not a second variance formula.
+    count = int(state.get("degenerate_n", 0)) + 1
+    mean = float(state.get("degenerate_mean", 0.0))
+    m2 = float(state.get("degenerate_m2", 0.0))
+    delta = value - mean
+    mean += delta / count
+    m2 += delta * (value - mean)
+    state["degenerate_n"], state["degenerate_mean"], state["degenerate_m2"] = (
+        count,
+        mean,
+        m2,
+    )
+    if count < 2 or m2 <= 0.0:
+        return
+    std = math.sqrt(m2 / (count - 1))
+    coefficient = abs(std / mean) if mean else (0.0 if std == 0 else float("inf"))
+    if std <= 0 or coefficient < DEGENERATE_BASELINE_CV:
+        return
+    state["baseline_mean"] = float(mean)
+    state["baseline_std"] = float(std)
+    state["degenerate_baseline"] = False
+    state["up"] = 0.0
+    state["down"] = 0.0
+    warnings.append(
+        f"The warm-up baseline had no dispersion, so it could not "
+        f"standardize anything. It has been re-frozen on the first "
+        f"{count} observations that did "
+        f"(mean {mean:.4f}, sd {std:.6g}), and the CUSUM accumulators were "
+        "reset with it. Everything before this point was untestable, not "
+        "quiet."
+    )
+
+
 def _freeze_baseline(state: Dict[str, Any], warnings: List[str]) -> None:
     """Fix the baseline from the warm-up, then never touch it again."""
     n = state["n"]
@@ -455,12 +540,14 @@ def _freeze_baseline(state: Dict[str, Any], warnings: List[str]) -> None:
     if state["degenerate_baseline"]:
         warnings.append(
             f"The warm-up window saw effectively no variation (mean "
-            f"{mean:.4f}, sd {std:.6g}). The monitor still runs -- a calm "
-            "period before a real shock is exactly the case it is for -- but "
-            "every statistic measured against this baseline is arithmetic "
-            "rather than evidence, and any alert will read as enormous "
-            "because it is dividing by almost nothing. A feed that was "
-            "stale or halted through the warm-up produces exactly this."
+            f"{mean:.4f}, sd {std:.6g}), so it cannot standardize anything "
+            "and no observation can be tested against it. Rather than run "
+            "on a zero denominator -- or, as this did before, fall silent "
+            "forever -- the monitor keeps accumulating and re-freezes the "
+            "baseline as soon as the window has real dispersion, resetting "
+            "the accumulators with it. A feed that was stale or halted "
+            "through the warm-up produces exactly this, and the ticks until "
+            "the re-freeze are untestable rather than quiet."
         )
 
 
