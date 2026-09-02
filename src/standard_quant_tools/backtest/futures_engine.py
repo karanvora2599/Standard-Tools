@@ -332,6 +332,9 @@ def run_futures_simulation(
         "initial_capital": capital,
         "final_equity": float(equity.iloc[-1]),
         "total_return_pct": float((equity.iloc[-1] / capital - 1.0) * 100.0),
+        # PERCENT here (x100), unlike the identically-named field in
+        # `stress_test`, which returns a fraction. Same name, 100x apart,
+        # both agent-reachable, and neither used to say which.
         "max_drawdown_pct": float(drawdown.min() * 100.0),
         "max_leverage": float(np.nanmax(leverage.to_numpy())),
         "peak_exposure": float(exposure.max()),

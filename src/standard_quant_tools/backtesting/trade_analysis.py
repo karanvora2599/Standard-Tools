@@ -90,7 +90,13 @@ def monte_carlo_trade_paths(
     rng = np.random.default_rng(int(seed))
 
     def _path_stats(order: np.ndarray) -> tuple:
-        equity = starting_equity * np.cumprod(1.0 + order)
+        # Seeded with the starting equity: `cumprod` alone never contains
+        # it, so a first-trade loss sat at the running peak. A path of
+        # [-0.40] followed by 24 small gains reported observed_max_drawdown
+        # 0.0 -- at the 0TH PERCENTILE of a distribution where no path is
+        # shallower than -40%, beside observed_final_equity 0.615. The
+        # documented "number to size on" was the one that was wrong.
+        equity = starting_equity * np.concatenate([[1.0], np.cumprod(1.0 + order)])
         peak = np.maximum.accumulate(equity)
         drawdown = equity / peak - 1.0
         underwater = float((drawdown < 0).mean())
@@ -106,13 +112,18 @@ def monte_carlo_trade_paths(
     percentile_of_observed = float((drawdowns > observed[0]).mean() * 100.0)
 
     warnings: List[str] = []
-    p95 = float(np.percentile(drawdowns, 5))  # 5th pct of a negative number
-    if observed[0] > p95:
+    # THE DEEP TAIL IS THE 5TH PERCENTILE, because these are negative
+    # numbers. Naming the variable `p95` and then printing it as "the 95th
+    # percentile" got the label exactly backwards on the one figure a
+    # reader is meant to size against.
+    deep_tail = float(np.percentile(drawdowns, 5))
+    if observed[0] > deep_tail:
         warnings.append(
             f"The backtested drawdown of {observed[0]:.1%} sits at the "
             f"{percentile_of_observed:.0f}th percentile of what this same "
-            f"edge produces in a different order. The 95th percentile is "
-            f"{p95:.1%}. Sizing so the backtested drawdown is survivable is "
+            f"edge produces in a different order. The DEEP tail -- the 5th "
+            f"percentile, since these are negative numbers -- is "
+            f"{deep_tail:.1%}. Sizing so the backtested drawdown is survivable is "
             "sizing on a lucky ordering."
         )
     warnings.append(

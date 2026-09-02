@@ -101,9 +101,17 @@ class MonteCarloTradesResult(_Result):
         "the same trades could have produced.",
     )
     median_max_drawdown: Stat = None
-    p05_max_drawdown: Stat = None
+    p05_max_drawdown: Stat = Field(
+        None,
+        description="THE NUMBER TO SIZE ON. These are negative, so the 5th "
+        "percentile is the DEEP tail -- the drawdown a bad ordering of the "
+        "same trades produces. This label used to sit on p95, which is the "
+        "shallowest.",
+    )
     p95_max_drawdown: Stat = Field(
-        None, description="The number to size on, not the backtested one."
+        None,
+        description="The SHALLOW tail: the drawdown a lucky ordering "
+        "produces. Reported for the spread against p05, not to size on.",
     )
     worst_max_drawdown: Stat = None
     mean_fraction_underwater: Stat = None

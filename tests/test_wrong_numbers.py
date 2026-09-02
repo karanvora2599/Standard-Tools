@@ -897,3 +897,58 @@ class TestStatisticsMatchTheirDefinitions:
         assert "for column in frame.columns" not in inspect.getsource(
             series_tools._bps_summary
         )
+
+
+class TestDrawdownPeaksIncludeTheStartingValue:
+    """`(1 + r).cumprod()` never contains 1.0, so a first-bar loss sits AT
+    the running maximum and shows no drawdown at all. Two functions had it,
+    and in both the wrong number sat beside a correct one."""
+
+    def test_a_first_day_crash_is_a_drawdown(self):
+        """Reported max_drawdown_pct 0.0 next to portfolio_return_pct
+        -18.39% and worst_day_return_pct -20%, in one result."""
+        from standard_quant_tools.backtest.stress_test import (
+            replay_stress_scenario,
+        )
+
+        got = replay_stress_scenario(pd.DataFrame({"SPY": [-0.20, 0.01, 0.01]}), [1.0])
+        assert got["max_drawdown_pct"] == pytest.approx(-0.20, abs=1e-9)
+
+    def test_the_monte_carlo_path_drawdown_is_not_zero(self):
+        """Reported 0.0 at the 0TH PERCENTILE of a distribution where no
+        path is shallower than -40%, beside a final equity of 0.615."""
+        from standard_quant_tools.backtesting.trade_analysis import (
+            monte_carlo_trade_paths,
+        )
+
+        got = monte_carlo_trade_paths([-0.40] + [0.001] * 24, n_paths=200, seed=0)
+        assert got["observed_max_drawdown"] == pytest.approx(-0.40, abs=1e-6)
+        assert got["worst_max_drawdown"] <= got["observed_max_drawdown"] + 1e-9
+
+    def test_the_deep_tail_is_the_fifth_percentile(self):
+        """These are negative numbers, so p05 is the DEEP tail. "The number
+        to size on" was documented on p95, the shallowest, and the warning
+        printed p05 while calling it the 95th percentile."""
+        from standard_quant_tools.agent.runtimes.backtest.trade_tools import (
+            MonteCarloTradesResult,
+        )
+        from standard_quant_tools.backtesting.trade_analysis import (
+            monte_carlo_trade_paths,
+        )
+
+        got = monte_carlo_trade_paths(
+            np.random.default_rng(3).normal(0.004, 0.03, 120).tolist(),
+            n_paths=500,
+            seed=1,
+        )
+        assert got["p05_max_drawdown"] < got["p95_max_drawdown"]
+
+        fields = MonteCarloTradesResult.model_fields
+        # The capitalized marker sits on exactly one field, and it is the
+        # deep tail. (p95's text says "not to size on", so a bare substring
+        # check finds "size on" there too -- which is why this looks for
+        # the marker rather than the phrase.)
+        marker = "NUMBER TO SIZE ON"
+        assert marker in (fields["p05_max_drawdown"].description or "")
+        assert marker not in (fields["p95_max_drawdown"].description or "")
+        assert "SHALLOW" in (fields["p95_max_drawdown"].description or "")

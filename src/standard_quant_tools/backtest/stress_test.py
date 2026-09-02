@@ -51,6 +51,13 @@ def replay_stress_scenario(
     an old window before this function ever runs).
 
     Returns:
+        UNITS: every `_pct` field here is a FRACTION, not a percentage --
+        -0.20 means -20%. The suffix is a misnomer and it is kept because
+        callers read these keys, but it is worth being explicit:
+        `backtest/futures_engine.py` returns a field of the same name
+        already multiplied by 100, so the two differ by exactly 100x and
+        neither said so.
+
         Dict with portfolio_return_pct, max_drawdown_pct,
         worst_day_return_pct, worst_day_date, best_day_return_pct,
         best_day_date, n_trading_days.
@@ -67,7 +74,15 @@ def replay_stress_scenario(
     equity = (1.0 + portfolio_returns).cumprod()
 
     total_return = float(equity.iloc[-1] - 1.0)
-    mdd = float(max_drawdown(equity))
+
+    # THE PEAK HAS TO INCLUDE THE STARTING VALUE. `cumprod` never contains
+    # 1.0, so a first-day crash sits AT the running maximum and shows no
+    # drawdown at all: a -20% opening day reported max_drawdown_pct 0.0
+    # next to portfolio_return_pct -18.39% and worst_day_return_pct -20%,
+    # in the same result. A stress scenario whose whole point is the first
+    # day is exactly where this bites.
+    seeded = pd.concat([pd.Series([1.0]), equity], ignore_index=True)
+    mdd = float(max_drawdown(seeded))
 
     worst_idx = portfolio_returns.idxmin()
     best_idx = portfolio_returns.idxmax()
