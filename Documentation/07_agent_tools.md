@@ -56,13 +56,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **152 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 17 and 9 more, for 178 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **174 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 17 and 9 more, for 200 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 152
+print(len(tools))  # 174
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -211,7 +211,7 @@ Tell the model what tools are available and how to use them together:
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to a 152-tool financial
+You are a quantitative analyst assistant with access to a 174-tool financial
 toolkit. The most commonly used are described below (see
 09_advanced_agent_tools.md, and the generated 20_tool_index.md, for the
 rest — execution/diagnostic tools like run_regime_adaptive_walkforward_backtest,
@@ -1252,7 +1252,7 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 SYSTEM = """
-You are a quantitative investment analyst. You have access to a 152-tool
+You are a quantitative investment analyst. You have access to a 174-tool
 financial toolkit; the ones covered here are the most commonly used (see
 09_advanced_agent_tools.md for the remaining execution/diagnostic tools):
 

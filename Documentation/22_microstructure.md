@@ -1,6 +1,6 @@
 # Microstructure
 
-Fifteen tools for what the market will charge you to trade, in two halves
+Sixteen tools for what the market will charge you to trade, in two halves
 that answer the same question at two data fidelities — plus three that
 publish the intermediate series the summary tools used to discard.
 
@@ -77,7 +77,7 @@ scales with the square root of time and the spread does not — so comparing a
 one-day range against a two-day range identifies them separately, with no
 quote data at all.
 
-**It produces negative estimates routinely**, on 10–30% of days, as a
+**It produces negative estimates routinely**, on 29–44% of days in the measurements below, as a
 sampling artefact. Corwin and Schultz recommend flooring those at zero, and
 that is done — *and reported*, because flooring turns a symmetric error into
 a one-sided bias. Measured:

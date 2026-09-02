@@ -1,5 +1,73 @@
 # Changelog
 
+## Delta One, a correctness pass, and the CI gap — 157 to 200 tools, eight runtimes to ten
+
+Forty-three new tools, two new execution boundaries, and roughly thirty
+fixed defects that returned a plausible wrong number rather than raising.
+
+### Two new runtimes
+
+`delta_one` (18 tools) is the instrument-equivalence layer: carry and
+basis, futures curves and rolls, hedge sizing, baskets and replication, ETF
+fair value, swaps and total-return futures, and the comparison that
+normalizes six ways of holding one exposure onto a single annualized carry.
+It exists because the economics connecting cash, futures, ETFs, baskets,
+forwards and swaps is a different question from what `derivatives` answers,
+which is what one convex contract is worth.
+
+`data` (14 tools) is the fetch-and-publish boundary, including
+`build_continuous_futures_series`, which returns a back-adjusted research
+series and a tradeable contract map SEPARATELY -- a back-adjusted price is
+fine for indicators and is not a price anyone could have traded.
+
+### Roughly thirty wrong numbers
+
+Each was reproduced before being touched and re-measured after. The
+sharpest, with what they returned:
+
+- `run_futures_simulation` booked the calendar spread at each roll as P&L.
+  A decade of dead-flat market with 39 quarterly rolls reported +5.85%.
+- `calculate_series_metrics` handed a RETURN series to `cagr` and
+  `calmar_ratio`, both of which take an equity curve. Both came back
+  SIGN-FLIPPED: +23%/yr reported as -49%/yr.
+- Black-76's `rho` was the Black-Scholes formula, so the call's sign was
+  wrong: +0.4377 where the derivative of its own price is -0.0758.
+- `run_strategy` carried equity NEGATIVE through a total loss and kept
+  compounding, reporting a Sharpe of +2.59 on a dead account.
+- `etf_fair_value` accepted a creation basket, warned about it, and priced
+  against NAV anyway -- recommending the losing side of a 44.9 bps error.
+- `trade_expectancy` priced breakeven trades at the average loss, so
+  [10.0, 0.0, -5.0] returned exactly -0.000 where the mean is +1.667.
+- `hierarchical_risk_parity` annualized its portfolio volatility but not
+  its risk contributions: the two disagreed by sqrt(252) in one dict.
+- `information_ratio` returned 7.31e+16 on a constant active return.
+
+### Duplication that had already drifted
+
+Fourteen copies of six special functions collapsed into `_special.py`; two
+pairs had drifted at the edge of their domain, one returning +inf where the
+other raised and one returning a p-value of 0.0 for a test with no
+denominator degrees of freedom. `252` was defined nine times under two
+spellings and now lives once in `constants.py`. The moving-block bootstrap
+index builder was written four times, three of them the slow way that one
+of the four had already measured at 87% of its own runtime.
+
+### The CI gap that hid all of it
+
+266 tests are gated on the C++ extension, and a failed build turned them
+into skips while the run stayed green -- measured at `3 failed, 5570
+passed, 506 skipped` with the extension blocked, and one of those three
+failures is `slow`, which CI filters out. `ci.yml` now installs with
+`SQT_REQUIRE_NATIVE=ON`, verifies `_sqt_core` imports and `HAS_CPP is
+True`, and sets `SQT_EXPECT_NATIVE=1` so `tests/test_native_extension.py`
+FAILS rather than skipping. `--strict-markers` is on, so a typo'd marker is
+a collection error rather than a silently ungated test.
+
+Two mutations that an audit proved survive the entire suite are now killed:
+scaling covariance by `sqrt(periods_per_year)` instead of
+`periods_per_year` (71 live calls, 2,149 tests green) and scoring the
+opposite class in `positive_class_proba` (77 calls, 858 tests green).
+
 ## Tool surface expansion — 102 to 157 tools, six runtimes to eight
 
 Fifty-five new tools and two new execution boundaries.
@@ -99,6 +167,11 @@ The split is still blocked, by the other condition: a new runtime has to
 land at ≥ 8 tools and microstructure has four. The four it needs are all L2
 ones, so it waits on the same absent order-book source as the rest of
 Phase 3.
+
+> **Since superseded.** The split shipped: `microstructure` is its own
+> 16-tool runtime and `portfolio` is 18, all `portfolio_risk`. The
+> eight-tool floor was cleared by the bar-based estimators rather than by
+> the L2 tools this entry was waiting on.
 
 
 ### Added — probability calibration, and the empty signal panel it fixes

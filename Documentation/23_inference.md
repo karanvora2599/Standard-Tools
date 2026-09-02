@@ -1,6 +1,6 @@
 # Statistical inference and diagnostics
 
-Twenty tools in the `research` runtime that answer questions a summary
+Nineteen tools in the `research` runtime that answer questions a summary
 statistic hides. They fall into three groups: **error bars** on estimates
 that are normally reported without any, **structure** in a series that a
 mean and a standard deviation cannot see, and **corrections** for the fact
@@ -61,7 +61,7 @@ true Sharpe is known by construction, and the nominal 95% interval covers it
 is the only test that would catch an IID bootstrap masquerading as a blocked
 one.
 
-Eleven statistics are available (`sharpe`, `sortino`, `max_drawdown`,
+Twelve statistics are available (`sharpe`, `sortino`, `max_drawdown`,
 `var_95`, `cvar_95`, `win_rate`, and the moments). The set is closed rather
 than accepting arbitrary code, because this surface is reachable from an
 agent and an eval-shaped hole is not worth the generality.

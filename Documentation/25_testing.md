@@ -16,7 +16,8 @@ the ones above it.
 
 ```bash
 pytest                          # everything
-pytest -m "not slow"            # skip the two heavy surface files
+pytest -m "not slow"            # skips five files, not two: both heavy surface
+                                # suites plus test_strategies and two cpp_bindings
 pytest tests/surface -q         # the surface layers alone
 python Development/mutation_testing.py
 ```
@@ -216,7 +217,7 @@ Both are now pinned by a test that searches for a case where the correction
 changes the *answer* — raw below 0.05, corrected above it — and asserts the
 flag follows the corrected one. Neither can pass with the correction gone.
 
-**Current state: 18 mutations, 18 killed, 0 survived.**
+**Current state: 21 mutations, 21 killed, 0 survived.**
 
 ### Safety — and the incident that shaped it
 

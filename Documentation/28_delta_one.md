@@ -1,6 +1,6 @@
 # Delta One
 
-Seventeen tools for the instruments that move one-for-one with an underlying —
+Eighteen tools for the instruments that move one-for-one with an underlying —
 cash, ETFs, baskets, futures, forwards and total return swaps. The runtime
 answers one question that no other runtime could: **which instrument is the
 cheapest way to own or hedge this exposure, and why do they differ.**
@@ -53,20 +53,21 @@ Three things genuinely did not exist anywhere and had to be written:
 | `analyze_cash_futures_basis` | Is this future rich, and which carry component explains it |
 | `solve_forward_carry` | What financing / dividend / borrow does this quote imply |
 | `analyze_basis_history` | Is this basis wide *for this name* |
-| `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price |
-| `analyze_roll` | What does moving this position to the next contract cost |
+| `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price *(`curve_curvature` is null below FOUR contracts: a second difference needs three carries and three contracts give two)* |
+| `analyze_roll` | What does moving this position to the next contract cost | *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period)*
 | `size_futures_hedge` | How many contracts, and what does rounding leave behind |
 | `analyze_hedge_effectiveness` | Did that hedge actually work |
 | `analyze_index_basket` | Is this basket rich to its index, and which name explains it |
 | `compare_delta_one_expressions` | Which of these six ways of holding it is cheapest |
 | `optimize_replication_basket` | What is the smallest basket that tracks this |
-| `analyze_etf_fair_value` | Is this ETF premium real after costs |
+| `analyze_etf_fair_value` | Is this ETF premium real after costs *(priced against the BASKET when one is supplied -- that is what a creation actually buys -- and against NAV otherwise; `priced_against` says which)* |
 | `price_total_return_swap` | What is this swap worth, leg by leg |
 | `analyze_total_return_future` | What financing spread does this TRF embed |
 | `analyze_dividend_points` | How many index points of dividend before expiry |
 | `analyze_index_rebalance` | What will this index change force people to trade |
 | `detect_basis_dislocation` | Has this basis *structurally shifted*, or just moved |
 | `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time |
+| `scan_basis_dislocations` | Which of these pairs is wide *for itself*, ranked |
 
 The first nine shipped alone, deliberately: the floor for a runtime is
 eight, shipping exactly at it means one tool failing review makes the whole
@@ -74,6 +75,13 @@ runtime unshippable, and the nine needed nothing the library did not
 already have. The six added second each needed something new -- a
 constrained optimizer, a day-count convention, an index divisor -- and
 holding them back got the runtime into use sooner.
+
+The last three came with the live and survey layers.
+`detect_basis_dislocation` and `monitor_spread_stream` answer the same
+question in batch and in stream. `scan_basis_dislocations` runs the
+single-pair tools over a whole set and RANKS BY |z|, NOT BY LEVEL -- a name
+that always trades 40 bps wide is not news at 40 bps -- and returns the
+pairs it could not evaluate with a reason each rather than dropping them.
 
 ## 3. Three things this surface gets wrong if you let it
 
@@ -134,9 +142,19 @@ silently becomes `"SPX INDEX US Equity"`, and the timezone metadata reports
 
 ## 5. What is not here yet
 
-Deliberately deferred, in the order they are worth building:
+THREE TOOLS WILL NOT BE BUILT, and the reason is the same for all three:
+`fetch_index_constituents`, `fetch_corporate_actions` and
+`fetch_contract_metadata` need data no shipped provider serves.
+`DataProvider` offers OHLCV, ticker info, ratios, an order book, trades and
+quotes; `corporate_actions` appears in `data/bundle.py` as a vocabulary
+label for the temporal contract, not as a source. This runtime's own rule
+covers it -- take the specialised dataset as structured arguments rather
+than pretending it exists -- which is why `analyze_index_basket` and
+`analyze_etf_fair_value` take constituents and a creation basket as
+arguments instead of fetching them. `ContractSpec` is foundational
+metadata, not an agent tool, for the same reason.
 
-Nothing on the original roadmap is now deferred. What remains is not a
+Nothing else on the original roadmap is now deferred. What remains is not a
 missing tool but a missing *source*: no provider shipped here serves L2 or
 intraday futures. Everything that consumes them exists and is tested
 against synthetic books, which was the sequencing

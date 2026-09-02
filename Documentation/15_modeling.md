@@ -1,6 +1,6 @@
 # Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent runtime alongside the 152-tool
+A second, independent runtime alongside the 174-tool
 `standard_quant_tools.agent` analysis/backtest surface — not tool #133.
 This document explains why that split exists, what's built in this first
 phase, and what's deliberately deferred.
@@ -12,7 +12,7 @@ phase, and what's deliberately deferred.
 `agent/tools.py`'s `TOOL_CATEGORY` router and `Multi_Agent_Implementation/`'s
 worker split (see
 [Documentation/13_agent_orchestration.md](13_agent_orchestration.md))
-exist specifically because handing an LLM 152 similarly-shaped tools on
+exist specifically because handing an LLM 174 similarly-shaped tools on
 every call causes selection ambiguity. Fitting/validating/registering a
 statistical model doesn't fit that surface's shape at all — it isn't a
 point-in-time snapshot (`analyze_stock_risk`) or a single backtest run
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (152 tools, 7 runtimes)      (17 tools, one pipeline)
+    (174 tools, 7 runtimes)      (17 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -92,19 +92,19 @@ typed fields for **one** question:
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta |
 
 `feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table:
-17 + 9 is 26, and the whole library is 178. `Multi_Agent_Implementation/`
+17 + 9 is 26, and the whole library is 200. `Multi_Agent_Implementation/`
 gives it its own worker for the same reason.
 
 ### Driving these from an agent
 
 `Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
 whole pipeline as a single agent, on all three providers. It is the one
-example script that does not use the 152-tool surface: it passes
-`registry="modeling"` to `run_agent()`, which loads these sixteen schemas
+example script that does not use the 174-tool surface: it passes
+`registry="modeling"` to `run_agent()`, which loads these seventeen schemas
 and `modeling_dispatch` together.
 
 It also skips the category router, deliberately. Routing exists to narrow
-152 similarly-shaped tools down to the relevant few; seventeen tools in one
+174 similarly-shaped tools down to the relevant few; seventeen tools in one
 ordered pipeline have nothing to narrow, since they are used in sequence. Passing `categories=` alongside `registry="modeling"` raises
 rather than being quietly ignored.
 
@@ -124,8 +124,10 @@ impossible to register a model that was never walk-forward validated.
 inspection tools, for the same reason `get_rally_signal` returns five
 signal fields in one call instead of six tools.
 
-The count has grown from five to eight, and the invariant was never the
-count — it is that **every tool is a decision the agent makes, not
+The count has grown from five to seventeen, and the invariant was never
+the count — it is that **every tool is a decision the agent makes, not a
+step it merely executes**. A pipeline stage with no choice in it belongs
+inside another tool, not beside one.
 ### The feature cluster
 
 `analyze_features` answers every question at once and returns an untyped
@@ -1576,7 +1578,7 @@ resolves.
 `run_model_experiment` answers "how did this model do out-of-sample."
 It doesn't answer "does this work as a trading strategy" — that requires
 an actual backtest, and this codebase already has one
-(`run_signal_panel_backtest`, in the *other* 152-tool surface).
+(`run_signal_panel_backtest`, in the *other* 174-tool surface).
 `modeling.bridge.oos_predictions_to_signal_panel` connects the two —
 a plain Python function, deliberately **not** a tool, because it only
 reshapes an artifact the caller already holds and hands it to a tool in
@@ -1906,13 +1908,13 @@ own `ValidationError`).
 
 Every modeling tool call routed through
 `modeling.agent.modeling_dispatch` writes a `DecisionRecord`, using the
-same `audit._run_and_record` the 152-tool surface uses — no parallel audit
+same `audit._run_and_record` the 174-tool surface uses — no parallel audit
 implementation.
 
 `audit.verify_replay` covers **both** surfaces: it resolves a record's tool
 against the agent registry and then the modeling registry. (Each is looked
 up lazily, since both tool packages import the audit package, and the
-modeling runtime is deliberately independent of the 152-tool surface rather
+modeling runtime is deliberately independent of the 174-tool surface rather
 than importable from it.)
 
 Replay comparison for modeling is **semantic**, not literal. Modeling mints

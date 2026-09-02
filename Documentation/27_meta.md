@@ -118,7 +118,7 @@ is not useful on its own; "the inputs are identical and the output moved"
 is a code change, while "the upstream data moved" is not. Distinguishing
 them is what makes the audit trail worth keeping.
 
-`export_audit_bundle` WRITES a file to a path you give it. It is the one
+`export_audit_bundle` WRITES a file, and the path is CONFINED. A bare or relative name lands under `$SQT_RUNS_DIR/bundles` rather than the working directory; an absolute path is allowed, since a bundle exists to be handed to someone outside this process, but its parent directory must already exist. An existing destination is REFUSED rather than overwritten -- a bundle is evidence, and `out_path` is a string chosen by a model. It is the one
 tool in this runtime that is not purely read-only, and it is included
 because handing an auditor a bundle is a read operation from the log's
 point of view — it copies, never edits.

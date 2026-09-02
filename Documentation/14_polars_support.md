@@ -111,7 +111,10 @@ the initiative's early phases.
 
 ## What will never silently "just work"
 
-Polars input to a function not yet covered by the phases above raises a
-clear error rather than a confusing crash on a missing pandas method — if
-you hit one and need it sooner, open an issue naming the specific
-function.
+Polars input to a function not yet covered by the phases above does NOT
+yet raise a clear error. It fails the way any un-adapted pandas call
+fails: `rsi(pl.Series(...))` raises `AttributeError: 'Series' object has
+no attribute 'values'`, which is precisely the confusing crash this
+section exists to warn about rather than a guarantee against it. Convert
+explicitly with `.to_pandas()` outside the phases above — and if you hit
+one that should be adapted, open an issue naming the specific function.

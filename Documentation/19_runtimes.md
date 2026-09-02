@@ -76,7 +76,7 @@ any model exists.
 ### Runtime is not category
 
 `TOOL_CATEGORY` is unchanged and still drives `agent/router.py`, the MCP
-`--categories` flag, and the fourteen workers in `Multi_Agent_Implementation`.
+`--categories` flag, and the sixteen workers in `Multi_Agent_Implementation`.
 
 - A **category** hints at which tools suit a request.
 - A **runtime** states which tools a caller may execute.
@@ -90,7 +90,7 @@ a runtime works; it can never widen past it.
 from standard_quant_tools.agent.runtimes import resolve, combine
 
 research = resolve("research")
-research.get_tools()                       # 23 schemas, this runtime only
+research.get_tools()                       # 42 schemas, this runtime only
 research.dispatch("run_screener", {...})   # fine
 
 research.dispatch("run_sma_backtest", {...})
@@ -155,8 +155,8 @@ a changelog nobody reads, embedded in an error message everybody does.
 
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
-decision, though the budget forced it: at roughly 1,561 bytes per tool over
-the wire the session ceiling buys about 115 tools and the library has 178,
+decision, though the budget forced it: at roughly 1,638 bytes per tool over
+the wire the session ceiling buys about 110 tools and the library has 200,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 
@@ -356,7 +356,7 @@ addition into a crash.
 
 ## See also
 
-- [13_agent_orchestration.md](13_agent_orchestration.md) — the router and the fourteen workers
+- [13_agent_orchestration.md](13_agent_orchestration.md) — the router and the sixteen workers
 - [18_mcp.md](18_mcp.md) — how runtimes reach an MCP client
 - [15_modeling.md](15_modeling.md) — the modeling runtime
 - [10_auditability.md](10_auditability.md) — what every dispatch records

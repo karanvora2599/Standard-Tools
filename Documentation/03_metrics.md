@@ -1,6 +1,6 @@
 # Metrics
 
-All metric functions accept `pd.Series`. Most return a single `float` — the exception is `drawdown_series`, which returns a full `pd.Series` (one drawdown value per bar). The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `information_ratio`, `treynor_ratio`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility`/`drawdown_series` return `nan`/an empty `Series` rather than raising.
+All metric functions accept `pd.Series`. Most return a single `float` — the exception is `drawdown_series`, which returns a full `pd.Series` (one drawdown value per bar). The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `information_ratio`, `treynor_ratio`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility` and `drawdown_series` now RAISE `ValidationError` on an empty series rather than returning `nan` or an empty `Series`; `drawdown_series` also refuses a non-positive opening level.
 
 ---
 

@@ -15,7 +15,7 @@ is now tested directly rather than assumed.
 
 Both tiers went through a line-by-line correctness audit (31 findings in the
 Python tier, 10 in the C++ tier — full write-ups in
-[CHANGELOG.md](../CHANGELOG.md)). Three themes are worth knowing as a user:
+[CHANGELOG.md](../CHANGELOG.md)). Nine themes are worth knowing as a user:
 
 1. **Backend divergences.** Five cases were found where the same call
    returned a different answer depending on whether `_sqt_core` was built —
@@ -89,7 +89,7 @@ Python tier, 10 in the C++ tier — full write-ups in
 
 6. **The portfolio, screener and agent-tools audit — 10 more items.** The
    three packages the earlier passes had only touched incidentally. The
-   sharpest two both produced a confident number that was not merely
+   sharpest four each produced a confident number that was not merely
    imprecise but inverted or fictional:
 
    - With observations ≤ assets a sample covariance is singular *by

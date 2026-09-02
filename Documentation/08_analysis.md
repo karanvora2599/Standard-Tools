@@ -922,8 +922,15 @@ ticker, start, end = "MSFT", "2021-01-01", "2024-01-01"
 rets = provider.get_ohlcv(ticker, start, end)["Close"].pct_change().dropna()
 result = hurst_exponent(rets)
 
+# `strategy_type` is a Literal, so it cannot be left blank and filled in
+# later -- an empty string is rejected when the model is constructed.
+# Pick the regime first, then build the input once.
+strategy = (
+    "sma_crossover" if result["regime"] == "trending" else "rsi_mean_reversion"
+)
 inp = BacktestInput(symbol=ticker, start_date=start, end_date=end,
-                    strategy_type="", parameters={}, initial_capital=10_000)
+                    strategy_type=strategy, parameters={},
+                    initial_capital=10_000)
 
 if result["regime"] == "trending":
     inp.strategy_type = "sma_crossover"

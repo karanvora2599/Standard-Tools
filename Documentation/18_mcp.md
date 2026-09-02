@@ -150,7 +150,7 @@ whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
-1,561 bytes and the session ceiling is 180,000, which buys about 115 tools.
+1,638 bytes and the session ceiling that used to be 180,000 would buy about 110 tools.
 There are 178. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
@@ -168,33 +168,35 @@ sqt-mcp --print-budget
 
 ```
 runtime              tools    bytes   ~tokens
-backtest                33   75,248    18,812
+backtest                35   82,037    20,509
 research                42   47,887    11,971
-modeling                17   47,323    11,830
-portfolio               18   32,065     8,016
-microstructure          15   18,992     4,748
+modeling                17   47,874    11,968
+delta_one               18   38,529     9,632
+portfolio               18   32,094     8,023
+microstructure          16   20,274     5,068
 derivatives             12   17,878     4,469
-meta                    19   14,138     3,534
-data                    13   12,541     3,135
+data                    14   15,018     3,754
+meta                    19   14,371     3,592
 feature_lab              9   11,745     2,936
-all                    178  277,817    69,454
+all                    200  327,707    81,926
 
-  a client is served ONE runtime: backtest is the most expensive at 75,248 bytes (27% of the total).
+  a client is served ONE runtime: backtest is the most expensive at 82,037 bytes (25% of the total).
 
 category             tools    bytes   ~tokens
-modeling                17   47,323    11,830
-backtest_validation     21   37,773     9,443
-portfolio_risk          18   32,065     8,016
-backtest_execution      10   30,593     7,648
+modeling                17   47,874    11,968
+delta_one               18   38,529     9,632
+backtest_validation     21   38,114     9,528
+backtest_execution      12   37,041     9,260
+portfolio_risk          18   32,094     8,023
 quant_research          26   28,497     7,124
-microstructure          15   18,992     4,748
+microstructure          16   20,274     5,068
 derivatives             12   17,878     4,469
 analysis                14   17,355     4,338
-data                    13   12,541     3,135
+data                    14   15,018     3,754
 feature_lab              9   11,745     2,936
 discovery               13   10,537     2,634
 custom_signal            2    6,882     1,720
-provenance               6    3,601       900
+provenance               6    3,834       958
 screener                 2    2,035       508
 ```
 
@@ -317,7 +319,7 @@ the instruction would otherwise be unfollowable and every thinned tool
 uncallable. It is the one place scope widens automatically, and it is
 reported at startup.
 
-`--tool-detail full` is the default, so nothing changes for an existing
+`--tool-detail auto` is the DEFAULT; pass `full` explicitly for every
 invocation.
 
 Naming a category the runtime does not own is refused at startup, by name:
@@ -331,7 +333,7 @@ flag describes.
 ```
 
 Categories come from `TOOL_CATEGORY`, the same taxonomy behind
-[the router and the fourteen workers](13_agent_orchestration.md), plus
+[the router and the sixteen workers](13_agent_orchestration.md), plus
 `modeling` for the modeling runtime.
 
 ### Categories, runtimes, and what the server enforces
@@ -414,7 +416,7 @@ own decisions is not audited by it.
 |---|---|---|
 | `--runtime` | every runtime | The coarse scope: which runtimes can be served **or executed**. One name, or several joined with `+`, or `all`. Given alone, serves all of that runtime's categories. |
 | `--categories` | `screener,analysis,quant_research,discovery` | Narrows which tools are advertised *within* the chosen runtimes. `all` for everything. A category outside the chosen runtime is refused at startup. |
-| `--tool-detail` | `full` | How much of each tool to advertise. `auto` thins the most expensive schemas until the runtime fits `--detail-budget`; `thin` thins everything. A thinned tool is still callable — its arguments come from `describe_tool`. |
+| `--tool-detail` | `auto` | How much of each tool to advertise. `auto` thins the most expensive schemas until the runtime fits `--detail-budget`; `thin` thins everything. A thinned tool is still callable — its arguments come from `describe_tool`. |
 | `--detail-budget` | `32768` | Byte target for `--tool-detail auto`. |
 | `--inline-limit` | `4096` | Results larger than this are stored and returned as a summary plus a `sqt://result/...` link. |
 | `--output-schemas` | off | Declare `outputSchema` per tool. **Roughly doubles the context cost.** `structuredContent` is returned either way, so this only helps clients that validate against the schema. |
@@ -557,13 +559,13 @@ rate limit whether or not anything is mutated. See
 
 ## Architecture notes
 
-**Nine runtimes, one server.** Twelve of the fourteen categories come from
+**Ten runtimes, one server.** Twelve of the fourteen categories come from
 the 152-tool analysis surface, spread across seven runtimes; the other two
 are the separate 17-tool `modeling` and 9-tool `feature_lab` runtimes. They
 stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
 dispatcher, so schemas and executor are never chosen separately, and a tool
 served from `research` is executed by a table holding only research tools —
-but a user configures one server, not nine.
+but a user configures one server, not ten.
 
 **Schemas are dereferenced.** Seven tools carry `$ref`/`$defs` upstream, and
 they are the seven most complex tools in the library. The server inlines

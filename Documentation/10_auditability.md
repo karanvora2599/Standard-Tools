@@ -383,7 +383,7 @@ through `dispatch()`), so it does not itself write a new decision record.
 ### Replaying modeling records
 
 The modeling runtime is a second tool registry (`MODELING_TOOL_DISPATCH`, 17
-entries) deliberately kept separate from the 152-tool analysis surface — see
+entries) deliberately kept separate from the 174-tool analysis surface — see
 [15_modeling.md](15_modeling.md). `verify_replay` resolves the record's
 `tool_name` against **both** registries, so a `run_model_experiment` or
 `build_model_dataset` record replays like any other. An earlier version
