@@ -91,11 +91,17 @@ from standard_quant_tools.agent.runtimes.data import (
 from standard_quant_tools.agent.runtimes.delta_one import (
     analyze_basis_history,
     analyze_cash_futures_basis,
+    analyze_dividend_points,
+    analyze_etf_fair_value,
     analyze_futures_curve,
     analyze_hedge_effectiveness,
     analyze_index_basket,
+    analyze_index_rebalance,
     analyze_roll,
+    analyze_total_return_future,
     compare_delta_one_expressions,
+    optimize_replication_basket,
+    price_total_return_swap,
     size_futures_hedge,
     solve_forward_carry,
 )

@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from standard_quant_tools.analysis.derivatives import _positive
 from standard_quant_tools.error import ValidationError
 
+from ._numbers import bounded, finite, non_negative, positive
 from .carry import observed_carry_rate
 
 __all__ = ["futures_curve", "roll_analysis"]
@@ -71,7 +72,7 @@ def futures_curve(
         )
 
     warnings: List[str] = []
-    s = _positive(spot, "spot") if spot is not None else None
+    s = positive(spot, "spot") if spot is not None else None
 
     points: List[Dict[str, Any]] = []
     for row in rows:
@@ -201,10 +202,10 @@ def roll_analysis(
     the next expiry, and `breakeven_annualized_rate` is the rate of return
     on the position's notional that exactly repays it.
     """
-    f0 = _positive(front_price, "front_price")
-    f1 = _positive(next_price, "next_price")
-    m0 = _positive(multiplier, "multiplier")
-    m1 = _positive(next_multiplier, "next_multiplier") if next_multiplier else m0
+    f0 = positive(front_price, "front_price")
+    f1 = positive(next_price, "next_price")
+    m0 = positive(multiplier, "multiplier")
+    m1 = positive(next_multiplier, "next_multiplier") if next_multiplier else m0
     n = float(contracts_held)
     if not math.isfinite(n) or n == 0:
         raise ValidationError(
@@ -317,10 +318,10 @@ def _parse_contracts(contracts: Sequence[Mapping[str, Any]]) -> List[Dict[str, A
         rows.append(
             {
                 "label": label,
-                "time_to_expiry": _positive(
+                "time_to_expiry": positive(
                     item["time_to_expiry"], f"{label}.time_to_expiry"
                 ),
-                "price": _positive(item["price"], f"{label}.price"),
+                "price": positive(item["price"], f"{label}.price"),
             }
         )
 

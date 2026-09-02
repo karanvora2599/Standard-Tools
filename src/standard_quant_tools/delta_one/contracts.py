@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional
 
 from standard_quant_tools.error import ValidationError
 
+from ._numbers import bounded, finite, non_negative, positive
 from .daycount import DateLike, to_date, year_fraction
 
 __all__ = ["SETTLEMENT_TYPES", "ContractSpec"]
@@ -70,9 +71,9 @@ class ContractSpec:
             raise ValidationError(
                 f"symbol must be a non-empty string, got {self.symbol!r}."
             )
-        _positive(self.multiplier, "multiplier")
+        positive(self.multiplier, "multiplier")
         if self.tick_size is not None:
-            _positive(self.tick_size, "tick_size")
+            positive(self.tick_size, "tick_size")
         if self.settlement not in SETTLEMENT_TYPES:
             raise ValidationError(
                 f"settlement={self.settlement!r} is not one of "
@@ -102,7 +103,7 @@ class ContractSpec:
 
     def notional(self, price: float) -> float:
         """The money one contract represents at `price`."""
-        return _finite(price, "price") * float(self.multiplier)
+        return finite(price, "price") * float(self.multiplier)
 
     def contracts_for(self, exposure: float, price: float) -> float:
         """
@@ -113,7 +114,7 @@ class ContractSpec:
         a function that quietly returned an integer here would hide the one
         number that says whether the hedge is finished.
         """
-        return _finite(exposure, "exposure") / self.notional(price)
+        return finite(exposure, "exposure") / self.notional(price)
 
     def time_to_expiry(self, as_of: DateLike, *, convention: str = "ACT/365F") -> float:
         """
@@ -174,28 +175,3 @@ class ContractSpec:
                 f"A ContractSpec carries {sorted(known)}."
             )
         return cls(**{k: v for k, v in data.items() if k in known})
-
-
-# ── internals ───────────────────────────────────────────────────────────
-
-
-def _positive(value: Any, name: str) -> float:
-    if value is None:
-        raise ValidationError(f"{name} is required and was not given")
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        raise ValidationError(f"{name} must be a number, got {value!r}") from None
-    if not math.isfinite(value) or value <= 0:
-        raise ValidationError(f"{name} must be positive and finite, got {value!r}")
-    return value
-
-
-def _finite(value: Any, name: str) -> float:
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        raise ValidationError(f"{name} must be a number, got {value!r}") from None
-    if not math.isfinite(value):
-        raise ValidationError(f"{name} must be finite, got {value!r}")
-    return value

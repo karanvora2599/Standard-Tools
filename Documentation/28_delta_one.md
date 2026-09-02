@@ -1,6 +1,6 @@
 # Delta One
 
-Nine tools for the instruments that move one-for-one with an underlying —
+Fifteen tools for the instruments that move one-for-one with an underlying —
 cash, ETFs, baskets, futures, forwards and total return swaps. The runtime
 answers one question that no other runtime could: **which instrument is the
 cheapest way to own or hedge this exposure, and why do they differ.**
@@ -59,10 +59,19 @@ Three things genuinely did not exist anywhere and had to be written:
 | `analyze_hedge_effectiveness` | Did that hedge actually work |
 | `analyze_index_basket` | Is this basket rich to its index, and which name explains it |
 | `compare_delta_one_expressions` | Which of these six ways of holding it is cheapest |
+| `optimize_replication_basket` | What is the smallest basket that tracks this |
+| `analyze_etf_fair_value` | Is this ETF premium real after costs |
+| `price_total_return_swap` | What is this swap worth, leg by leg |
+| `analyze_total_return_future` | What financing spread does this TRF embed |
+| `analyze_dividend_points` | How many index points of dividend before expiry |
+| `analyze_index_rebalance` | What will this index change force people to trade |
 
-Nine rather than eight is deliberate. The library's floor for a runtime is
-eight, and shipping exactly at the floor means one tool failing review
-makes the whole runtime unshippable.
+The first nine shipped alone, deliberately: the floor for a runtime is
+eight, shipping exactly at it means one tool failing review makes the whole
+runtime unshippable, and the nine needed nothing the library did not
+already have. The six added second each needed something new -- a
+constrained optimizer, a day-count convention, an index divisor -- and
+holding them back got the runtime into use sooner.
 
 ## 3. Three things this surface gets wrong if you let it
 
@@ -125,11 +134,6 @@ silently becomes `"SPX INDEX US Equity"`, and the timezone metadata reports
 
 Deliberately deferred, in the order they are worth building:
 
-- **Replication basket optimization.** Needs a tracking-error objective
-  `(w−b)'Σ(w−b)`, which SLSQP can express, and a max-names cardinality
-  constraint, which it cannot — there is no MIQP backend in this library.
-- **ETF fair value, TRS pricing, TRF, dividend points, index rebalance.**
-  Straightforward given the Phase I foundation.
 - **Futures backtesting.** Belongs in `backtest`, not here. The portfolio
   engine's core identity is `position value == shares × price == cash
   paid`, and a future breaks all three parts of it: margin instead of

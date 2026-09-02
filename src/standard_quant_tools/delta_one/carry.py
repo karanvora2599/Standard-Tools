@@ -39,6 +39,8 @@ from standard_quant_tools.analysis.derivatives import (
 )
 from standard_quant_tools.error import ValidationError
 
+from ._numbers import bounded, finite, non_negative, positive
+
 __all__ = ["SOLVE_TARGETS", "forward_price", "observed_carry_rate", "solve_carry"]
 
 #: Which unknown the inverse solves for, and what the answer means. The
@@ -100,9 +102,9 @@ def observed_carry_rate(*, spot: float, forward: float, time_to_expiry: float) -
     market quotes one price and the decomposition is always an assumption
     laid over it.
     """
-    s = _positive(spot, "spot")
-    f = _positive(forward, "forward")
-    t = _positive(time_to_expiry, "time_to_expiry")
+    s = positive(spot, "spot")
+    f = positive(forward, "forward")
+    t = positive(time_to_expiry, "time_to_expiry")
     return math.log(f / s) / t
 
 

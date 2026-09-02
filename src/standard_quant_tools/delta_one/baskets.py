@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from standard_quant_tools.error import ValidationError
 
+from ._numbers import bounded, finite, non_negative, positive
+
 __all__ = ["index_basket"]
 
 
@@ -188,7 +190,7 @@ def _parse_constituents(
         symbol = str(item.get("symbol") or f"constituent_{index}")
         if "price" not in item:
             raise ValidationError(f"constituent {symbol!r} has no `price`.")
-        price = _number(item["price"], f"{symbol}.price", positive=True)
+        price = positive(item["price"], f"{symbol}.price")
 
         if need not in item:
             raise ValidationError(
@@ -197,7 +199,7 @@ def _parse_constituents(
                 f"basket is {'share' if divisor is not None else 'weight'}-"
                 "based and every constituent needs that field."
             )
-        quantity = _number(item[need], f"{symbol}.{need}", positive=divisor is not None)
+        quantity = finite(item[need], f"{symbol}.{need}")
 
         reference = item.get("reference_price")
         is_stale = (
@@ -210,15 +212,3 @@ def _parse_constituents(
         row[need] = quantity
         rows.append(row)
     return rows
-
-
-def _number(value: Any, name: str, *, positive: bool) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        raise ValidationError(f"{name} must be a number, got {value!r}") from None
-    if not math.isfinite(out):
-        raise ValidationError(f"{name} must be finite, got {value!r}")
-    if positive and out <= 0:
-        raise ValidationError(f"{name} must be positive, got {value!r}")
-    return out

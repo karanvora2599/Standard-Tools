@@ -36,13 +36,19 @@ __all__ = [
     "BasisHistoryResult",
     "CashFuturesBasisResult",
     "CompareExpressionsResult",
+    "DividendPointsResult",
+    "EtfFairValueResult",
     "FuturesCurveResult",
     "FuturesHedgeResult",
     "HedgeEffectivenessResult",
     "IndexBasketResult",
+    "IndexRebalanceResult",
+    "ReplicationBasketResult",
     "RollAnalysisResult",
     "SolveForwardCarryResult",
     "Stat",
+    "TotalReturnFutureResult",
+    "TotalReturnSwapResult",
 ]
 
 
@@ -345,3 +351,177 @@ class CompareExpressionsResult(_Result):
     spread_currency_over_horizon: Stat = Field(
         None, description="What choosing wrong costs over the stated horizon."
     )
+
+
+# ── Phase II: the desk instruments ──────────────────────────────────────
+
+
+class ReplicationBasketResult(_Result):
+    n_candidates: int = 0
+    n_observations: int = 0
+    n_selected: int = 0
+    max_names: Optional[int] = None
+    long_only: bool = True
+    covariance_method: str = ""
+    weights: Dict[str, Stat] = Field(
+        default_factory=dict, description="Only the names actually held."
+    )
+    selected_names: List[str] = Field(default_factory=list)
+    predicted_tracking_error: Stat = Field(
+        None, description="Annualized, from the covariance."
+    )
+    realized_tracking_error: Stat = Field(
+        None,
+        description="Annualized, from the actual series. IN SAMPLE -- the "
+        "weights were fitted on the window they are scored on.",
+    )
+    correlation: Stat = None
+    beta: Stat = None
+    gross_weight: Stat = None
+    net_weight: Stat = Field(
+        None, description="Should be 1.0; a deviation is reported."
+    )
+    largest_weight: Stat = None
+    periods_per_year: int = 252
+
+
+class EtfFairValueResult(_Result):
+    etf_price: Stat = None
+    nav: Stat = None
+    nav_is_intraday: bool = False
+    premium_discount: Stat = Field(None, description="Currency, per share.")
+    premium_discount_pct: Stat = None
+    premium_discount_bps: Stat = None
+    classification: str = Field("", description="'premium', 'discount' or 'fair'.")
+    tolerance_bps: Stat = None
+    basket_value_per_share: Stat = None
+    basket_vs_nav_bps: Stat = Field(
+        None,
+        description="The creation basket against the fund's own stated value. "
+        "Null when no basket was supplied.",
+    )
+    gross_arbitrage_bps: Stat = None
+    execution_bps: Stat = Field(None, description="ROUND TRIP, both legs.")
+    creation_fee_bps: Stat = None
+    net_arbitrage_bps: Stat = Field(
+        None, description="What survives costs. The number that decides anything."
+    )
+    arbitrage_survives: bool = False
+    action: Optional[str] = Field(
+        None, description="'create' on a premium, 'redeem' on a discount."
+    )
+
+
+class TotalReturnSwapResult(_Result):
+    direction: str = ""
+    notional: Stat = None
+    initial_price: Stat = None
+    current_price: Stat = None
+    time_elapsed_years: Stat = None
+    day_count: str = ""
+    price_return: Stat = None
+    dividend_return: Stat = None
+    total_return: Stat = None
+    financing_rate: Stat = None
+    spread_bps: Stat = None
+    all_in_financing_rate: Stat = None
+    financing_accrued: Stat = Field(None, description="As a rate over the period.")
+    equity_leg: Stat = Field(None, description="Currency.")
+    financing_leg: Stat = Field(None, description="Currency. Negative to a receiver.")
+    net_pnl: Stat = None
+    net_return_on_notional: Stat = None
+
+
+class TotalReturnFutureResult(_Result):
+    quote: Stat = None
+    quote_convention: str = ""
+    convention_meaning: str = ""
+    underlying_price: Stat = None
+    time_to_expiry: Stat = None
+    reference_rate: Stat = None
+    implied_spread_bps: Stat = Field(
+        None,
+        description="The financing spread the quote implies. CONDITIONAL on "
+        "the reference rate given, which it absorbs one-for-one.",
+    )
+    implied_level: Stat = None
+    all_in_financing_rate: Stat = None
+    net_carry_rate: Stat = None
+    comparison_spread_bps: Stat = None
+    difference_bps: Stat = Field(
+        None, description="Null unless a comparison spread was supplied."
+    )
+
+
+class DividendContribution(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str = ""
+    ex_date: str = ""
+    dividend_per_share: Stat = None
+    index_points: Stat = None
+
+
+class DividendPointsResult(_Result):
+    as_of: str = ""
+    expiry: str = ""
+    divisor: Stat = None
+    n_constituents: int = 0
+    n_included: int = 0
+    n_excluded_already_ex: int = 0
+    n_excluded_after_expiry: int = 0
+    total_index_points: Stat = Field(
+        None, description="INDEX POINTS, not a yield. That is the whole point."
+    )
+    points_by_date: Dict[str, Stat] = Field(default_factory=dict)
+    points_by_constituent: List[DividendContribution] = Field(default_factory=list)
+    largest_contributor: Optional[str] = None
+    implied_index_points: Stat = Field(
+        None, description="What the quoted future implies. Null without one."
+    )
+    forecast_minus_implied: Stat = Field(
+        None,
+        description="The tradeable quantity. A gap is usually a position "
+        "rather than an error on either side.",
+    )
+
+
+class RebalanceChange(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str = ""
+    event: str = Field("", description="addition, deletion, increase or decrease.")
+    old_weight: Stat = None
+    new_weight: Stat = None
+    weight_change: Stat = None
+    side: str = ""
+    notional: Stat = Field(None, description="Signed currency.")
+    adv: Stat = None
+    days_of_adv: Stat = Field(
+        None, description="Null when no ADV was supplied for this name."
+    )
+    auction_participation: Stat = Field(
+        None, description="Flow as a multiple of the auction's own volume."
+    )
+
+
+class IndexRebalanceResult(_Result):
+    indexed_assets: Stat = None
+    auction_fraction: Stat = None
+    n_changes: int = 0
+    n_additions: int = 0
+    n_deletions: int = 0
+    buy_notional: Stat = None
+    sell_notional: Stat = None
+    net_notional: Stat = None
+    gross_notional: Stat = None
+    turnover_pct: Stat = Field(
+        None, description="One-way, as index providers quote it."
+    )
+    changes: List[RebalanceChange] = Field(
+        default_factory=list, description="Sorted by absolute notional."
+    )
+    hardest_to_trade: List[str] = Field(
+        default_factory=list, description="By days of ADV, worst first."
+    )
+    largest_flow: Optional[str] = None

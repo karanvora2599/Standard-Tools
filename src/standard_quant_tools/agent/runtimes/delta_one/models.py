@@ -26,7 +26,7 @@ the error this surface is most exposed to: passing 43 for a 4.3% rate, or
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,14 +35,21 @@ __all__ = [
     "CashFuturesBasisInput",
     "CompareExpressionsInput",
     "DeltaOneExpression",
+    "DividendConstituent",
+    "DividendPointsInput",
+    "EtfFairValueInput",
     "FuturesContractQuote",
     "FuturesCurveInput",
     "FuturesHedgeInput",
     "HedgeEffectivenessInput",
     "IndexBasketInput",
     "IndexConstituent",
+    "IndexRebalanceInput",
+    "ReplicationBasketInput",
     "RollAnalysisInput",
     "SolveForwardCarryInput",
+    "TotalReturnFutureInput",
+    "TotalReturnSwapInput",
 ]
 
 
@@ -333,4 +340,218 @@ class CompareExpressionsInput(BaseModel):
     )
     direction: Literal["long", "short"] = Field(
         "long", description="Flips every carry sign."
+    )
+
+
+# ── Phase II: the desk instruments ──────────────────────────────────────
+
+
+class ReplicationBasketInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    returns: Dict[str, List[float]] = Field(
+        ...,
+        min_length=2,
+        description="Candidate return series keyed by symbol, oldest first. "
+        "Decimals, not percent.",
+    )
+    benchmark_returns: List[float] = Field(
+        ..., min_length=3, description="The series to track, on the same dates."
+    )
+    max_names: Optional[int] = Field(
+        None,
+        ge=1,
+        le=5000,
+        description="Cardinality ceiling. Enforced by thresholding, not by "
+        "an integer solver -- the result is a good basket of that size, not "
+        "provably the best one.",
+    )
+    long_only: bool = Field(
+        True,
+        description="A basket allowed to short is a long-short position "
+        "benchmarked to an index, not a replication basket.",
+    )
+    max_weight: Optional[float] = Field(
+        None, gt=0, le=1, description="Ceiling on any single name."
+    )
+    weight_caps: Optional[Dict[str, float]] = Field(
+        None,
+        description="Per-name ceiling. The natural home for an ADV-derived "
+        "limit, so a name that cannot be traded in size is not selected in size.",
+    )
+    covariance_method: Literal["ledoit_wolf", "sample", "ewma"] = Field(
+        "ledoit_wolf",
+        description="Shrinkage matters here: a replication universe usually "
+        "has more candidates than a sample covariance can support.",
+    )
+    periods_per_year: int = Field(
+        252, ge=1, le=31_536_000, description="252 daily, 52 weekly, 12 monthly."
+    )
+
+
+class EtfFairValueInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    etf_price: float = Field(..., gt=0, description="Traded price of the fund.")
+    nav: float = Field(..., gt=0, description="Net asset value PER SHARE.")
+    nav_is_intraday: bool = Field(
+        False,
+        description="False means a struck end-of-day NAV, in which case an "
+        "intraday premium is mostly the market's move since the strike.",
+    )
+    basket_value: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Independent value of one share's worth of creation "
+        "basket. Supply it to separate a fund away from its holdings from a "
+        "NAV that disagrees with them.",
+    )
+    cash_component: float = Field(
+        0.0, description="Per-share cash in the creation basket."
+    )
+    creation_unit_shares: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Shares per creation unit. Needed to express a fee in bps.",
+    )
+    creation_fee: float = Field(0.0, ge=0, description="Currency, per unit.")
+    etf_spread_bps: float = Field(0.0, ge=0, description="Half-spread, ONE way.")
+    basket_spread_bps: float = Field(
+        0.0, ge=0, description="Blended basket half-spread, one way."
+    )
+    tolerance_bps: float = Field(
+        25.0, ge=0, le=10_000, description="Within this the premium reads as fair."
+    )
+
+
+class TotalReturnSwapInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    notional: float = Field(..., description="Swap notional, in currency.")
+    initial_price: float = Field(..., gt=0, description="Underlying at inception.")
+    current_price: float = Field(..., gt=0, description="Underlying now.")
+    financing_rate: float = Field(
+        ..., ge=-10, le=10, description="Reference rate as a decimal."
+    )
+    spread_bps: float = Field(
+        0.0,
+        ge=-10_000,
+        le=10_000,
+        description="Spread over the reference. This is the negotiated part "
+        "and where the product's economics are.",
+    )
+    dividends: float = Field(
+        0.0,
+        description="Cash dividends per unit of underlying over the period. "
+        "Zero makes this a PRICE-return swap in everything but name.",
+    )
+    start_date: Optional[str] = Field(None, description="ISO date, e.g. '2026-01-02'.")
+    valuation_date: Optional[str] = Field(None, description="ISO date.")
+    time_elapsed: Optional[float] = Field(
+        None, description="Years, as an alternative to the two dates."
+    )
+    day_count: Literal["ACT/365F", "ACT/360", "30/360", "ACT/ACT"] = Field(
+        "ACT/365F",
+        description="ACT/360 accrues about 1.4% more financing than ACT/365F.",
+    )
+    direction: Literal["receive", "pay"] = Field(
+        "receive", description="Receive the total return, or pay it."
+    )
+
+
+class TotalReturnFutureInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    quote: float = Field(
+        ...,
+        ge=-100_000,
+        le=1_000_000,
+        description="The TRF's quoted number. Bounded because it is read as "
+        "either a spread in bps or a price level, and an unbounded value "
+        "under the first reading overflows the exponential.",
+    )
+    quote_convention: Literal["spread_bps", "index_level"] = Field(
+        ...,
+        description="What that number IS. The two are not convertible without "
+        "knowing which you have, and guessing misprices by the whole "
+        "financing leg.",
+    )
+    underlying_price: float = Field(..., gt=0, description="Index or share price.")
+    time_to_expiry: float = Field(..., gt=0, le=100, description="Years.")
+    reference_rate: float = Field(
+        ..., ge=-10, le=10, description="The rate the spread is quoted over."
+    )
+    dividend_yield: float = Field(0.0, ge=-10, le=10, description="Decimal.")
+    comparison_spread_bps: Optional[float] = Field(
+        None,
+        description="What the same exposure costs elsewhere, typically the "
+        "TRS quote. Supplying it turns a measurement into a decision.",
+    )
+
+
+class DividendConstituent(BaseModel):
+    """One name's dividend."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="Ticker, used to attribute the total.")
+    shares: float = Field(
+        ..., gt=0, description="INDEX shares, not shares outstanding."
+    )
+    dividend_per_share: float = Field(..., description="Cash amount per share.")
+    ex_date: str = Field(..., description="ISO ex-date, e.g. '2026-04-15'.")
+
+
+class DividendPointsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    constituents: List[DividendConstituent] = Field(..., min_length=1)
+    divisor: float = Field(
+        ...,
+        gt=0,
+        description="The index divisor. Getting it wrong scales every point "
+        "figure by a constant.",
+    )
+    as_of: str = Field(..., description="ISO date. Dividends already ex are excluded.")
+    expiry: str = Field(..., description="ISO date of the contract.")
+    spot: Optional[float] = Field(None, gt=0, description="Index level.")
+    future_price: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Supply with spot, financing_rate and time_to_expiry to "
+        "get the market's own dividend number alongside your forecast.",
+    )
+    financing_rate: Optional[float] = Field(None, ge=-10, le=10)
+    time_to_expiry: Optional[float] = Field(None, gt=0, le=100)
+
+
+class IndexRebalanceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    old_weights: Dict[str, float] = Field(
+        ..., min_length=1, description="Index weights before the change."
+    )
+    new_weights: Dict[str, float] = Field(
+        ..., min_length=1, description="Index weights after it."
+    )
+    indexed_assets: float = Field(
+        ...,
+        gt=0,
+        description="Money tracking the index, in currency. The least "
+        "knowable input and the one everything scales by -- published "
+        "figures exclude closet indexers, so treat the output as a floor.",
+    )
+    adv: Optional[Dict[str, float]] = Field(
+        None,
+        description="Average daily dollar volume per name. Without it flow is "
+        "sized in currency but not in days, and currency alone does not say "
+        "whether a trade is difficult.",
+    )
+    auction_fraction: float = Field(
+        1.0,
+        gt=0,
+        le=1,
+        description="Share of daily volume printing in the closing auction, "
+        "where index trades execute. Typically 0.10-0.20; leaving it at 1.0 "
+        "understates participation by five to ten times.",
     )

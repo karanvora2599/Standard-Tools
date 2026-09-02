@@ -17,30 +17,50 @@ no donor was depleted and no MOVED_FROM entry was needed. In particular
 needs it -- this runtime calls the same LIBRARY function, which the
 architecture permits because it scopes dispatch rather than values.
 
-The floor this library sets for a runtime is eight tools. delta_one holds
-nine, and the ninth is deliberate margin: shipping exactly at the floor
-means one tool failing review makes the whole runtime unshippable.
+The floor this library sets for a runtime is eight tools. delta_one
+shipped with nine -- the ninth deliberate margin, since shipping exactly
+at the floor means one tool failing review makes the whole runtime
+unshippable -- and now holds fifteen.
+
+The six added second are the desk instruments: replication, ETF fair
+value, total return swaps and futures, dividend points and index
+rebalance flow. They were held back from the first nine because each
+needs something the first nine did not -- a constrained optimizer, a
+day-count convention, an index divisor -- and shipping the runtime on
+the parts that needed none of that got it into use sooner.
 """
 
 from .models import (
     BasisHistoryInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
+    DividendPointsInput,
+    EtfFairValueInput,
     FuturesCurveInput,
     FuturesHedgeInput,
     HedgeEffectivenessInput,
     IndexBasketInput,
+    IndexRebalanceInput,
+    ReplicationBasketInput,
     RollAnalysisInput,
     SolveForwardCarryInput,
+    TotalReturnFutureInput,
+    TotalReturnSwapInput,
 )
 from .tools import (
     analyze_basis_history,
     analyze_cash_futures_basis,
+    analyze_dividend_points,
+    analyze_etf_fair_value,
     analyze_futures_curve,
     analyze_hedge_effectiveness,
     analyze_index_basket,
+    analyze_index_rebalance,
     analyze_roll,
+    analyze_total_return_future,
     compare_delta_one_expressions,
+    optimize_replication_basket,
+    price_total_return_swap,
     size_futures_hedge,
     solve_forward_carry,
 )
@@ -156,6 +176,73 @@ TOOL_DEFS = [
         "surprisingly cheap row is usually an unpriced one.",
         CompareExpressionsInput,
     ),
+    (
+        "optimize_replication_basket",
+        "The smallest basket that tracks a benchmark, minimizing the variance "
+        "of the DIFFERENCE rather than the portfolio's own variance. Those are "
+        "different portfolios: minimum-variance picks a defensive corner of a "
+        "universe, minimum-tracking-error picks whatever most resembles the "
+        "index. A max_names limit is enforced by thresholding because SLSQP "
+        "cannot express an integer constraint and this library has no "
+        "mixed-integer solver, so the answer is a GOOD basket of that size "
+        "rather than a provably best one. Tracking error is in sample.",
+        ReplicationBasketInput,
+    ),
+    (
+        "analyze_etf_fair_value",
+        "An ETF's premium or discount, and what survives the cost of capturing "
+        "it. A visible 40 bp premium is almost never 40 bps of edge: the "
+        "creation unit is an indivisible block, creating means crossing the "
+        "BASKET's spreads rather than the fund's, and the NAV compared against "
+        "is usually last night's struck value rather than a live one, so an "
+        "intraday premium is mostly the market's move since the strike. The "
+        "net figure after round-trip costs is the number that decides anything.",
+        EtfFairValueInput,
+    ),
+    (
+        "price_total_return_swap",
+        "Mark a total return swap with the equity and financing legs "
+        "separated. The payoff is simple -- receive price change plus "
+        "dividends, pay a rate plus a spread -- and the CONVENTIONS are where "
+        "the money is: ACT/360 accrues about 1.4% more financing than ACT/365F "
+        "on the same period, and a zero dividend argument silently turns this "
+        "into a price-return swap, understating the equity leg by 200 bps a "
+        "year on a 2% yielder.",
+        TotalReturnSwapInput,
+    ),
+    (
+        "analyze_total_return_future",
+        "Read a TRF quote as the financing spread it embeds, and compare it to "
+        "what a swap charges. This is what answers 'regular futures imply 50 "
+        "bp of funding and the TRF implies 95 -- where does the 45 go' as a "
+        "calculation rather than a reconstruction. quote_convention is REQUIRED "
+        "because some contracts quote the spread in bps and others quote a "
+        "level, the two are not convertible without knowing which you have, "
+        "and assuming wrong misprices by the entire financing leg.",
+        TotalReturnFutureInput,
+    ),
+    (
+        "analyze_dividend_points",
+        "Index dividends as POINTS to a contract's expiry, dated and attributed "
+        "by name. A continuous yield is the approximation this replaces: index "
+        "dividends arrive in dense seasonal clusters, so a June and a September "
+        "contract straddle the whole season and pricing both off one q puts one "
+        "badly wrong. Supply a quoted future to get the market's own dividend "
+        "number alongside the forecast -- a gap between them is usually a "
+        "position rather than an error on either side.",
+        DividendPointsInput,
+    ),
+    (
+        "analyze_index_rebalance",
+        "The buying and selling an index change forces on passive money, sized "
+        "as DAYS OF VOLUME first and currency second. $2.8bn is nothing in a "
+        "name trading $2bn a day and is a crisis in one trading $450m, and only "
+        "the ratio says which. Index flow conventionally clears in a single "
+        "closing auction that is 10-20% of the day, so leaving auction_fraction "
+        "at 1.0 understates the binding participation by five to ten times. It "
+        "sizes the flow and deliberately does not predict the price move.",
+        IndexRebalanceInput,
+    ),
 ]
 
 TOOL_DISPATCH = {
@@ -177,6 +264,18 @@ TOOL_DISPATCH = {
         compare_delta_one_expressions,
         CompareExpressionsInput,
     ),
+    "optimize_replication_basket": (
+        optimize_replication_basket,
+        ReplicationBasketInput,
+    ),
+    "analyze_etf_fair_value": (analyze_etf_fair_value, EtfFairValueInput),
+    "price_total_return_swap": (price_total_return_swap, TotalReturnSwapInput),
+    "analyze_total_return_future": (
+        analyze_total_return_future,
+        TotalReturnFutureInput,
+    ),
+    "analyze_dividend_points": (analyze_dividend_points, DividendPointsInput),
+    "analyze_index_rebalance": (analyze_index_rebalance, IndexRebalanceInput),
 }
 
 #: Every tool here belongs to the one category this runtime owns.
@@ -188,11 +287,17 @@ __all__ = [
     "TOOL_DISPATCH",
     "analyze_basis_history",
     "analyze_cash_futures_basis",
+    "analyze_dividend_points",
+    "analyze_etf_fair_value",
     "analyze_futures_curve",
     "analyze_hedge_effectiveness",
     "analyze_index_basket",
+    "analyze_index_rebalance",
     "analyze_roll",
+    "analyze_total_return_future",
     "compare_delta_one_expressions",
+    "optimize_replication_basket",
+    "price_total_return_swap",
     "size_futures_hedge",
     "solve_forward_carry",
 ]

@@ -42,6 +42,8 @@ from standard_quant_tools.analysis.regression import calculate_beta, rolling_bet
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import max_drawdown
 
+from ._numbers import bounded, finite, non_negative, positive
+
 __all__ = ["HEDGE_OBJECTIVES", "futures_hedge", "hedge_effectiveness", "tracking_error"]
 
 #: What "hedged" is being taken to mean. The two are genuinely different
@@ -122,12 +124,12 @@ def futures_hedge(
         raise ValidationError(
             f"objective={objective!r} is not one of {sorted(HEDGE_OBJECTIVES)}."
         )
-    v = _finite(portfolio_value, "portfolio_value")
-    beta_p = _finite(portfolio_beta, "portfolio_beta")
-    f = _finite(future_price, "future_price")
-    m = _finite(multiplier, "multiplier")
-    beta_f = _finite(future_beta, "future_beta")
-    held = _finite(existing_contracts, "existing_contracts")
+    v = finite(portfolio_value, "portfolio_value")
+    beta_p = finite(portfolio_beta, "portfolio_beta")
+    f = finite(future_price, "future_price")
+    m = finite(multiplier, "multiplier")
+    beta_f = finite(future_beta, "future_beta")
+    held = finite(existing_contracts, "existing_contracts")
 
     if f <= 0 or m <= 0:
         raise ValidationError(
@@ -249,7 +251,7 @@ def hedge_effectiveness(
             f"only {len(frame)} overlapping observations; hedge effectiveness "
             "cannot be judged from that. Sixty is a reasonable floor."
         )
-    ratio = _finite(hedge_ratio, "hedge_ratio")
+    ratio = finite(hedge_ratio, "hedge_ratio")
 
     unhedged = frame["portfolio"]
     hedge = frame["benchmark"]
@@ -346,16 +348,6 @@ def hedge_effectiveness(
 
 
 # ── internals ───────────────────────────────────────────────────────────
-
-
-def _finite(value: Any, name: str) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        raise ValidationError(f"{name} must be a number, got {value!r}") from None
-    if not math.isfinite(out):
-        raise ValidationError(f"{name} must be finite, got {value!r}")
-    return out
 
 
 def _aligned_returns(portfolio: Any, benchmark: Any) -> pd.DataFrame:

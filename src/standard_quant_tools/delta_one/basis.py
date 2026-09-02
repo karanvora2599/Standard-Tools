@@ -38,6 +38,7 @@ from standard_quant_tools.analysis.cointegration import half_life, spread_zscore
 from standard_quant_tools.analysis.derivatives import _positive
 from standard_quant_tools.error import ValidationError
 
+from ._numbers import bounded, finite, non_negative, positive
 from .carry import forward_price, observed_carry_rate, solve_carry
 
 __all__ = ["basis_history", "cash_futures_basis"]
@@ -70,9 +71,9 @@ def cash_futures_basis(
     compared between a March and a December contract; the annualized spread
     can.
     """
-    s = _positive(spot, "spot")
-    f = _positive(future_price, "future_price")
-    t = _positive(time_to_expiry, "time_to_expiry")
+    s = positive(spot, "spot")
+    f = positive(future_price, "future_price")
+    t = positive(time_to_expiry, "time_to_expiry")
     tolerance = float(tolerance_bps)
     if not math.isfinite(tolerance) or tolerance < 0:
         raise ValidationError(

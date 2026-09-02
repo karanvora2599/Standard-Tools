@@ -32,23 +32,36 @@ from __future__ import annotations
 
 import logging
 
+import pandas as pd
+
 from standard_quant_tools.delta_one import basis as _basis
 from standard_quant_tools.delta_one import baskets as _baskets
 from standard_quant_tools.delta_one import carry as _carry
+from standard_quant_tools.delta_one import dividends as _dividends
+from standard_quant_tools.delta_one import etf as _etf
 from standard_quant_tools.delta_one import expressions as _expressions
 from standard_quant_tools.delta_one import futures as _futures
 from standard_quant_tools.delta_one import hedging as _hedging
+from standard_quant_tools.delta_one import rebalance as _rebalance
+from standard_quant_tools.delta_one import replication as _replication
+from standard_quant_tools.delta_one import swaps as _swaps
 
 from .models import (
     BasisHistoryInput,
     CashFuturesBasisInput,
     CompareExpressionsInput,
+    DividendPointsInput,
+    EtfFairValueInput,
     FuturesCurveInput,
     FuturesHedgeInput,
     HedgeEffectivenessInput,
     IndexBasketInput,
+    IndexRebalanceInput,
+    ReplicationBasketInput,
     RollAnalysisInput,
     SolveForwardCarryInput,
+    TotalReturnFutureInput,
+    TotalReturnSwapInput,
 )
 
 # Imported at MODULE level, never under TYPE_CHECKING: mcp/catalog.py calls
@@ -58,12 +71,18 @@ from .results import (
     BasisHistoryResult,
     CashFuturesBasisResult,
     CompareExpressionsResult,
+    DividendPointsResult,
+    EtfFairValueResult,
     FuturesCurveResult,
     FuturesHedgeResult,
     HedgeEffectivenessResult,
     IndexBasketResult,
+    IndexRebalanceResult,
+    ReplicationBasketResult,
     RollAnalysisResult,
     SolveForwardCarryResult,
+    TotalReturnFutureResult,
+    TotalReturnSwapResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,11 +90,17 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "analyze_basis_history",
     "analyze_cash_futures_basis",
+    "analyze_dividend_points",
+    "analyze_etf_fair_value",
     "analyze_futures_curve",
     "analyze_hedge_effectiveness",
     "analyze_index_basket",
+    "analyze_index_rebalance",
     "analyze_roll",
+    "analyze_total_return_future",
     "compare_delta_one_expressions",
+    "optimize_replication_basket",
+    "price_total_return_swap",
     "size_futures_hedge",
     "solve_forward_carry",
 ]
@@ -194,5 +219,107 @@ def compare_delta_one_expressions(
             notional=input_data.notional,
             horizon_years=input_data.horizon_years,
             direction=input_data.direction,
+        )
+    )
+
+
+def optimize_replication_basket(
+    input_data: ReplicationBasketInput,
+) -> ReplicationBasketResult:
+    return ReplicationBasketResult(
+        **_replication.optimize_replication_basket(
+            returns=pd.DataFrame(input_data.returns),
+            benchmark_returns=pd.Series(input_data.benchmark_returns),
+            max_names=input_data.max_names,
+            long_only=input_data.long_only,
+            max_weight=input_data.max_weight,
+            weight_caps=input_data.weight_caps,
+            covariance_method=input_data.covariance_method,
+            periods_per_year=input_data.periods_per_year,
+        )
+    )
+
+
+def analyze_etf_fair_value(input_data: EtfFairValueInput) -> EtfFairValueResult:
+    return EtfFairValueResult(
+        **_etf.etf_fair_value(
+            etf_price=input_data.etf_price,
+            nav=input_data.nav,
+            nav_is_intraday=input_data.nav_is_intraday,
+            basket_value=input_data.basket_value,
+            cash_component=input_data.cash_component,
+            creation_unit_shares=input_data.creation_unit_shares,
+            creation_fee=input_data.creation_fee,
+            etf_spread_bps=input_data.etf_spread_bps,
+            basket_spread_bps=input_data.basket_spread_bps,
+            tolerance_bps=input_data.tolerance_bps,
+        )
+    )
+
+
+def price_total_return_swap(
+    input_data: TotalReturnSwapInput,
+) -> TotalReturnSwapResult:
+    return TotalReturnSwapResult(
+        **_swaps.price_total_return_swap(
+            notional=input_data.notional,
+            initial_price=input_data.initial_price,
+            current_price=input_data.current_price,
+            financing_rate=input_data.financing_rate,
+            spread_bps=input_data.spread_bps,
+            dividends=input_data.dividends,
+            start_date=input_data.start_date,
+            valuation_date=input_data.valuation_date,
+            time_elapsed=input_data.time_elapsed,
+            day_count=input_data.day_count,
+            direction=input_data.direction,
+        )
+    )
+
+
+def analyze_total_return_future(
+    input_data: TotalReturnFutureInput,
+) -> TotalReturnFutureResult:
+    return TotalReturnFutureResult(
+        **_swaps.total_return_future(
+            quote=input_data.quote,
+            quote_convention=input_data.quote_convention,
+            underlying_price=input_data.underlying_price,
+            time_to_expiry=input_data.time_to_expiry,
+            reference_rate=input_data.reference_rate,
+            dividend_yield=input_data.dividend_yield,
+            comparison_spread_bps=input_data.comparison_spread_bps,
+        )
+    )
+
+
+def analyze_dividend_points(
+    input_data: DividendPointsInput,
+) -> DividendPointsResult:
+    constituents = [c.model_dump() for c in input_data.constituents]
+    return DividendPointsResult(
+        **_dividends.dividend_points(
+            constituents,
+            divisor=input_data.divisor,
+            as_of=input_data.as_of,
+            expiry=input_data.expiry,
+            spot=input_data.spot,
+            future_price=input_data.future_price,
+            financing_rate=input_data.financing_rate,
+            time_to_expiry=input_data.time_to_expiry,
+        )
+    )
+
+
+def analyze_index_rebalance(
+    input_data: IndexRebalanceInput,
+) -> IndexRebalanceResult:
+    return IndexRebalanceResult(
+        **_rebalance.index_rebalance_flow(
+            old_weights=input_data.old_weights,
+            new_weights=input_data.new_weights,
+            indexed_assets=input_data.indexed_assets,
+            adv=input_data.adv,
+            auction_fraction=input_data.auction_fraction,
         )
     )

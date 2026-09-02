@@ -42,6 +42,8 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from standard_quant_tools.error import ValidationError
 
+from ._numbers import bounded, finite, non_negative, positive
+
 __all__ = ["EXPRESSION_KINDS", "compare_expressions"]
 
 #: The instrument families this normalizes across, and the cost that
@@ -110,8 +112,8 @@ def compare_expressions(
             f"direction={direction!r} must be 'long' or 'short'. It flips "
             "every carry sign, so it is not defaulted silently."
         )
-    n = _number(notional, "notional", positive=True)
-    horizon = _number(horizon_years, "horizon_years", positive=True)
+    n = positive(notional, "notional")
+    horizon = positive(horizon_years, "horizon_years")
     if not expressions:
         raise ValidationError(
             "expressions is empty; there is nothing to compare. Two or more "
@@ -153,10 +155,10 @@ def compare_expressions(
 
         supplied = sorted(k for k in item if k not in ("label", "kind"))
 
-        financing = _number(item.get("financing_rate", 0.0), f"{label}.financing_rate")
-        borrow = _number(item.get("borrow_rate", 0.0), f"{label}.borrow_rate")
-        fee = _number(item.get("fee_rate", 0.0), f"{label}.fee_rate")
-        dividend = _number(item.get("dividend_yield", 0.0), f"{label}.dividend_yield")
+        financing = finite(item.get("financing_rate", 0.0), f"{label}.financing_rate")
+        borrow = finite(item.get("borrow_rate", 0.0), f"{label}.borrow_rate")
+        fee = finite(item.get("fee_rate", 0.0), f"{label}.fee_rate")
+        dividend = finite(item.get("dividend_yield", 0.0), f"{label}.dividend_yield")
 
         # Costs positive, dividend a receipt. `sign` flips the whole carry
         # for a short, where you earn the funding and owe the dividend.
@@ -164,26 +166,21 @@ def compare_expressions(
         carry_bps = carry_rate * 10_000.0
 
         one_way = sum(
-            _number(item.get(field, 0.0), f"{label}.{field}", non_negative=True)
+            non_negative(item.get(field, 0.0), f"{label}.{field}")
             for field in _EXECUTION_FIELDS
         )
         round_trip_bps = 2.0 * one_way
         # Amortized, which is the whole reason horizon is an argument.
         execution_bps = round_trip_bps / horizon
 
-        rolls = _number(
-            item.get("rolls_per_year", 0.0),
-            f"{label}.rolls_per_year",
-            non_negative=True,
-        )
-        roll_cost = _number(item.get("roll_cost_bps", 0.0), f"{label}.roll_cost_bps")
+        rolls = non_negative(item.get("rolls_per_year", 0.0), f"{label}.rolls_per_year")
+        roll_cost = finite(item.get("roll_cost_bps", 0.0), f"{label}.roll_cost_bps")
         roll_bps = rolls * roll_cost
 
         total_bps = carry_bps + execution_bps + roll_bps
-        capital_pct = _number(
+        capital_pct = non_negative(
             item.get("capital_requirement_pct", 1.0),
             f"{label}.capital_requirement_pct",
-            non_negative=True,
         )
 
         rows.append(
@@ -268,25 +265,3 @@ def compare_expressions(
         "spread_currency_over_horizon": float(spread_bps * horizon / 10_000.0 * n),
         "warnings": warnings,
     }
-
-
-# ── internals ───────────────────────────────────────────────────────────
-
-
-def _number(
-    value: Any, name: str, *, positive: bool = False, non_negative: bool = False
-) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        raise ValidationError(f"{name} must be a number, got {value!r}") from None
-    if not math.isfinite(out):
-        raise ValidationError(f"{name} must be finite, got {value!r}")
-    if positive and out <= 0:
-        raise ValidationError(f"{name} must be positive, got {value!r}")
-    if non_negative and out < 0:
-        raise ValidationError(
-            f"{name} must not be negative, got {value!r}. Execution and roll "
-            "costs are quoted as costs; a rebate belongs in the rate terms."
-        )
-    return out
