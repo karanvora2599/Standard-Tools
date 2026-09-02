@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
+from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import max_drawdown
 
@@ -63,7 +64,9 @@ HEDGE_OBJECTIVES: Dict[str, str] = {
     ),
 }
 
-TRADING_DAYS = 252
+# One definition, in `constants`. This name stays because it is
+# imported from here by name.
+TRADING_DAYS = TRADING_DAYS_PER_YEAR
 
 
 def tracking_error(

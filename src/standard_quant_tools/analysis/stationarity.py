@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._special import norm_cdf
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
 
@@ -218,8 +219,9 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
     }
 
 
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+# See `_special`: this had 7 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_cdf = norm_cdf
 
 
 def run_stationarity_tests(

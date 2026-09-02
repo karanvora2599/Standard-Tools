@@ -5,6 +5,7 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._special import norm_cdf_array
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
 
@@ -33,10 +34,9 @@ _sqrt2 = math.sqrt(2.0)
 _math_erf = math.erf
 
 
-def _norm_cdf(x: np.ndarray) -> np.ndarray:
-    """Exact normal CDF via math.erf — no scipy required."""
-    vec = np.vectorize(lambda v: 0.5 * (1.0 + _math_erf(v / _sqrt2)))
-    return vec(x).astype(float)
+# See `_special`: this had 7 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_cdf = norm_cdf_array
 
 
 def multi_factor_regression(

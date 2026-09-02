@@ -43,13 +43,21 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._special import (
+    betacf,
+    betainc,
+    f_sf,
+)
 from standard_quant_tools.analysis._series import clean_series
+from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 
-TRADING_DAYS = 252
+# One definition, in `constants`. This name stays because it is
+# imported from here by name.
+TRADING_DAYS = TRADING_DAYS_PER_YEAR
 
 #: Day names in the order pandas uses, so a weekday index maps to a label.
 WEEKDAYS = (
@@ -116,75 +124,17 @@ def _chi2_sf(statistic: float, degrees: int) -> float:
     return float(max(0.0, min(1.0, 1.0 - _lower_gamma(degrees / 2.0, statistic / 2.0))))
 
 
-def _betacf(a: float, b: float, x: float) -> float:
-    tiny = 1e-300
-    qab, qap, qam = a + b, a + 1.0, a - 1.0
-    c = 1.0
-    d = 1.0 - qab * x / qap
-    if abs(d) < tiny:
-        d = tiny
-    d = 1.0 / d
-    h = d
-    for m in range(1, 300):
-        m2 = 2 * m
-        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
-        d = 1.0 + aa * d
-        if abs(d) < tiny:
-            d = tiny
-        c = 1.0 + aa / c
-        if abs(c) < tiny:
-            c = tiny
-        d = 1.0 / d
-        h *= d * c
-        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
-        d = 1.0 + aa * d
-        if abs(d) < tiny:
-            d = tiny
-        c = 1.0 + aa / c
-        if abs(c) < tiny:
-            c = tiny
-        d = 1.0 / d
-        delta = d * c
-        h *= delta
-        if abs(delta - 1.0) < 1e-14:
-            break
-    return h
+# See `_special`: this had 2 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_betacf = betacf
 
+# See `_special`: this had 2 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_betainc = betainc
 
-def _betainc(a: float, b: float, x: float) -> float:
-    if x <= 0:
-        return 0.0
-    if x >= 1:
-        return 1.0
-    front = math.exp(
-        math.lgamma(a + b)
-        - math.lgamma(a)
-        - math.lgamma(b)
-        + a * math.log(x)
-        + b * math.log(1.0 - x)
-    )
-    if x < (a + 1.0) / (a + b + 2.0):
-        return front * _betacf(a, b, x) / a
-    return (
-        1.0
-        - math.exp(
-            math.lgamma(a + b)
-            - math.lgamma(a)
-            - math.lgamma(b)
-            + b * math.log(1.0 - x)
-            + a * math.log(x)
-        )
-        * _betacf(b, a, 1.0 - x)
-        / b
-    )
-
-
-def _f_sf(statistic: float, d1: int, d2: int) -> float:
-    """Upper tail of the F distribution."""
-    if statistic <= 0 or d1 <= 0 or d2 <= 0:
-        return 1.0
-    x = d2 / (d2 + d1 * statistic)
-    return float(max(0.0, min(1.0, _betainc(d2 / 2.0, d1 / 2.0, x))))
+# See `_special`: this had 2 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_f_sf = f_sf
 
 
 def _clean(series: pd.Series, who: str, minimum: int = 30) -> pd.Series:

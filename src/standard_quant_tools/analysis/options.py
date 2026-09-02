@@ -20,6 +20,10 @@ import logging
 import math
 from typing import Any, Dict, Tuple
 
+from standard_quant_tools._special import (
+    norm_cdf,
+    norm_pdf,
+)
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -28,14 +32,13 @@ _OPTION_TYPES = frozenset({"call", "put"})
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 
 
-def _norm_cdf(x: float) -> float:
-    """Standard normal CDF via math.erf — exact, no scipy needed."""
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+# See `_special`: this had 7 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_cdf = norm_cdf
 
-
-def _norm_pdf(x: float) -> float:
-    """Standard normal PDF."""
-    return math.exp(-0.5 * x * x) / _SQRT_2PI
+# See `_special`: this had 3 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_pdf = norm_pdf
 
 
 def _validate_option_inputs(

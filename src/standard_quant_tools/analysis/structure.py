@@ -34,6 +34,11 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._special import (
+    betacf,
+    betainc,
+    f_sf,
+)
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
 
@@ -366,83 +371,17 @@ def _lagged_design(target: pd.Series, sources: Sequence[pd.Series], lag: int):
     return float((residual**2).sum()), len(frame), x.shape[1]
 
 
-def _f_sf(f: float, df1: int, df2: int) -> float:
-    """
-    Upper tail of the F distribution, via the regularized incomplete beta.
+# See `_special`: this had 2 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_f_sf = f_sf
 
-    Written out because scipy is not a dependency here. The identity is
-    P(F > f) = I_{df2/(df2 + df1 f)}(df2/2, df1/2), and the continued
-    fraction below is the standard Lentz evaluation of the incomplete beta.
-    """
-    if f <= 0:
-        return 1.0
-    x = df2 / (df2 + df1 * f)
-    return _betainc(df2 / 2.0, df1 / 2.0, x)
+# See `_special`: this had 2 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_betainc = betainc
 
-
-def _betainc(a: float, b: float, x: float) -> float:
-    if x <= 0:
-        return 0.0
-    if x >= 1:
-        return 1.0
-    import math
-
-    front = math.exp(
-        math.lgamma(a + b)
-        - math.lgamma(a)
-        - math.lgamma(b)
-        + a * math.log(x)
-        + b * math.log(1 - x)
-    )
-    if x < (a + 1) / (a + b + 2):
-        return front * _betacf(a, b, x) / a
-    return (
-        1.0
-        - math.exp(
-            math.lgamma(a + b)
-            - math.lgamma(a)
-            - math.lgamma(b)
-            + b * math.log(1 - x)
-            + a * math.log(x)
-        )
-        * _betacf(b, a, 1 - x)
-        / b
-    )
-
-
-def _betacf(a: float, b: float, x: float, iterations: int = 200) -> float:
-    tiny = 1e-30
-    qab, qap, qam = a + b, a + 1.0, a - 1.0
-    c, d = 1.0, 1.0 - qab * x / qap
-    if abs(d) < tiny:
-        d = tiny
-    d = 1.0 / d
-    h = d
-    for m in range(1, iterations + 1):
-        m2 = 2 * m
-        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
-        d = 1.0 + aa * d
-        if abs(d) < tiny:
-            d = tiny
-        c = 1.0 + aa / c
-        if abs(c) < tiny:
-            c = tiny
-        d = 1.0 / d
-        h *= d * c
-        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
-        d = 1.0 + aa * d
-        if abs(d) < tiny:
-            d = tiny
-        c = 1.0 + aa / c
-        if abs(c) < tiny:
-            c = tiny
-        d = 1.0 / d
-        delta = d * c
-        h *= delta
-        if abs(delta - 1.0) < 1e-12:
-            break
-    return h
-
+# See `_special`: this had 2 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_betacf = betacf
 
 # ── tail dependence ─────────────────────────────────────────────────────
 

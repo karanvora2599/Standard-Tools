@@ -52,6 +52,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.analysis._series import clean_series
+from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import (
     cvar,
@@ -63,7 +64,9 @@ from standard_quant_tools.metrics.risk_metrics import (
 
 logger = logging.getLogger(__name__)
 
-TRADING_DAYS = 252
+# One definition, in `constants`. This name stays because it is
+# imported from here by name.
+TRADING_DAYS = TRADING_DAYS_PER_YEAR
 
 #: Statistics `bootstrap_statistic` knows how to compute. Restricted to a
 #: named set rather than accepting arbitrary code, because this is reachable

@@ -37,6 +37,10 @@ import logging
 import math
 from typing import Any, Dict, Optional
 
+from standard_quant_tools._special import (
+    norm_cdf,
+    norm_pdf,
+)
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -58,12 +62,13 @@ AMERICAN_CAPABLE = ("binomial",)
 DEFAULT_BINOMIAL_STEPS = 200
 
 
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+# See `_special`: this had 7 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_cdf = norm_cdf
 
-
-def _norm_pdf(x: float) -> float:
-    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+# See `_special`: this had 3 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_pdf = norm_pdf
 
 
 def _validate(spot, strike, time_to_expiry, volatility, option_type, model):

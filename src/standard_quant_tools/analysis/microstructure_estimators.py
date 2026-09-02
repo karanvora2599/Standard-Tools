@@ -72,7 +72,6 @@ logger = logging.getLogger(__name__)
 MIN_OBSERVATIONS = 30
 
 #: Trading days per year, for annualizing anything that needs it.
-TRADING_DAYS = 252
 
 
 def _require_columns(

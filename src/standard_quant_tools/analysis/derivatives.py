@@ -44,14 +44,21 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._special import (
+    norm_cdf,
+    norm_pdf,
+)
 from standard_quant_tools.analysis.pricing import price_option
+from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
 #: Trading days in a year. Used to annualize realized volatility and to
 #: convert a hedging schedule into a time step.
-TRADING_DAYS = 252
+# One definition, in `constants`. This name stays because it is
+# imported from here by name.
+TRADING_DAYS = TRADING_DAYS_PER_YEAR
 
 #: The horizons a volatility cone is built over, in trading days. Chosen to
 #: bracket the listed expiries an equity option trader actually quotes --
@@ -64,12 +71,13 @@ CONE_HORIZONS = (5, 10, 21, 42, 63, 126)
 MIN_SMILE_STRIKES = 5
 
 
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+# See `_special`: this had 7 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_cdf = norm_cdf
 
-
-def _norm_pdf(x: float) -> float:
-    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+# See `_special`: this had 3 copies across the library, and the ones
+# that were not identical disagreed at the edge of the domain.
+_norm_pdf = norm_pdf
 
 
 def _positive(value: Any, name: str) -> float:

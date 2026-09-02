@@ -34,6 +34,9 @@ from typing import Any, Dict, Union
 
 import pandas as pd
 
+from standard_quant_tools.constants import (
+    TRADING_DAYS_PER_YEAR as _TRADING_DAYS_PER_YEAR,
+)
 from standard_quant_tools.error import ValidationError
 
 __all__ = [
@@ -53,7 +56,8 @@ DateLike = Union[str, _dt.date, _dt.datetime, "pd.Timestamp"]
 #: below -- 252 annualizes a series of daily observations, while a year
 #: fraction prices an accrual over calendar time, and using either for the
 #: other's job is a real and quiet error.
-TRADING_DAYS_PER_YEAR = 252
+# Re-exported from `constants`, which is the one definition.
+TRADING_DAYS_PER_YEAR = _TRADING_DAYS_PER_YEAR
 
 #: What each convention counts, in one line, for the error message and for
 #: the `convention` field every caller gets back.
