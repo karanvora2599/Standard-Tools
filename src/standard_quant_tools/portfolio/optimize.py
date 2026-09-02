@@ -56,12 +56,31 @@ except ImportError:
     HAS_SCIPY = False
 
 
-def _mean_cov(
+def annualized_mean_cov(
     returns_df: pd.DataFrame, periods_per_year: int
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Annualized (mean, covariance) from a frame of periodic returns.
+
+    PUBLIC BECAUSE IT HAD A SECOND COPY. The portfolio runtime carried an
+    identical `_mean_cov_for_tools`, whose docstring gave the reason: it did
+    not want to import a leading-underscore helper across a module boundary.
+    That was a fair objection to the import and not to the sharing, so the
+    fix is the name.
+
+    Two lines, and both of them are a convention rather than a calculation:
+    the covariance scales LINEARLY with `periods_per_year` while a
+    volatility would scale with its square root, and getting that wrong in
+    one copy and not the other is a factor of ~16 on a daily series that
+    shows up as a plausible-looking number rather than an error.
+    """
     mu = returns_df.mean().to_numpy(dtype=float) * periods_per_year
     cov = returns_df.cov().to_numpy(dtype=float) * periods_per_year
     return mu, cov
+
+
+#: The name this had while it was private; still used inside this module.
+_mean_cov = annualized_mean_cov
 
 
 def _require_finite_scalar(name: str, value: Any) -> float:

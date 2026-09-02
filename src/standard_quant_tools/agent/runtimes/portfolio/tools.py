@@ -106,6 +106,7 @@ from standard_quant_tools.metrics.risk_metrics import (
 from standard_quant_tools.portfolio.optimize import (
     _check_covariance_estimable,
     _small_sample_warnings,
+    annualized_mean_cov,
     black_litterman,
     build_bl_views,
     mean_variance_optimize,
@@ -278,16 +279,13 @@ def run_portfolio_optimization(
     )
 
 
-def _mean_cov_for_tools(
-    returns_df: pd.DataFrame, periods_per_year: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Same annualized (mean, cov) computation portfolio.optimize's private
-    _mean_cov does — reimplemented here rather than imported since it's a
-    two-line pandas call and importing a leading-underscore helper across
-    module boundaries would couple this file to that module's internals."""
-    mu = returns_df.mean().to_numpy(dtype=float) * periods_per_year
-    cov = returns_df.cov().to_numpy(dtype=float) * periods_per_year
-    return mu, cov
+#: Was a byte-identical copy of `portfolio.optimize`'s private `_mean_cov`,
+#: because importing a leading-underscore helper across a module boundary is
+#: a real objection. That helper is now public, so the objection is gone and
+#: the copy with it -- the two lines encode the annualization convention
+#: (covariance scales linearly with periods_per_year, not by its root) and
+#: are worth having in one place.
+_mean_cov_for_tools = annualized_mean_cov
 
 
 def get_portfolio_risk_attribution(
