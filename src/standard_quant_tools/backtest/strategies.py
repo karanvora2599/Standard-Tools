@@ -299,7 +299,13 @@ def _momentum_signals(
         threshold,
         len(df),
     )
-    trailing_return = df["Close"].pct_change(periods=lookback)
+    # pandas pads by default, so a halted name's stale price made the
+    # trailing return look positive on bars it did not trade. Measured:
+    # a rally to 114, a 4-bar halt, a reopen at 70, lookback=8 -- the
+    # signal held long into the gap for -37.04% where the correct one
+    # returned +1.56%. Reachable from run_backtest, backtest_grid,
+    # walk-forward and the optimizer.
+    trailing_return = df["Close"].pct_change(periods=lookback, fill_method=None)
     result = pd.Series(np.where(trailing_return > threshold, 1, 0), index=df.index)
     _log_signals("momentum_timeseries", result)
     return result

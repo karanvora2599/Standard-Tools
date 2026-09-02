@@ -463,6 +463,41 @@ def run_strategy(
     # kernel now takes an optional per-bar reference (fill) price and applies
     # the same two-leg overnight/intraday decomposition this module's Python
     # fallback does.
+    # ── total-loss guard, BEFORE either path ─────────────────────────────
+    # A bar return at or below -100% wipes the account out. Neither engine
+    # models that: both compound `1 + r` unguarded, so equity goes NEGATIVE
+    # and then keeps compounding. A 1x short (signal -1.0, inside the
+    # documented {-1, 0, 1}) through a +200% bar gave
+    # [10000, 10000, 10000, -10000, -11666, -12833] -- equity getting MORE
+    # negative on bars where the short profits, max_drawdown -2.283 (deeper
+    # than a total loss), and at 2x through a -60% bar a sharpe_ratio of
+    # +2.5923 on a dead account.
+    #
+    # This refuses rather than truncating, because the engine has no
+    # bankruptcy model to truncate INTO -- no margin call, no forced
+    # liquidation, no borrow. Returning a number for a scenario it cannot
+    # represent is what produced the +2.59 Sharpe. `run_portfolio_simulation`
+    # models the account properly and is the tool for leveraged shorts.
+    #
+    # Computed from `prices` and `signals` directly because `returns` is
+    # built after the dispatch below; it is the same one-bar lag both paths
+    # apply.
+    _wipeout = signals.shift(1).fillna(0.0) * prices.pct_change(
+        fill_method=None
+    ).fillna(0.0)
+    if bool((_wipeout <= -1.0).any()):
+        _at = _wipeout.index[_wipeout <= -1.0][0]
+        raise ValidationError(
+            f"run_strategy: the position loses "
+            f"{float(_wipeout.loc[_at]) * 100:.1f}% of the account on the bar "
+            f"at {_at}, which is a total loss. This engine compounds "
+            f"(1 + r) with no bankruptcy model, so it would carry equity "
+            f"negative from there and report a drawdown deeper than -100% "
+            f"and a Sharpe computed on a dead account. Reduce the signal "
+            f"magnitude, or use run_portfolio_simulation, which models cash "
+            f"and margin."
+        )
+
     if HAS_CPP and _cpp_core is not None:
         logger.debug("[run_strategy] using C++ kernel  fill_price=%s", fill_price)
         ref_arr = None
@@ -589,7 +624,31 @@ def run_strategy(
         # (only used for the trade log below; the return calc above is
         # already correct as-is).
         ref_prices = prices.shift(1)
-    equity_curve = initial_capital * (1 + strategy_returns).cumprod()
+    # A BAR RETURN AT OR BELOW -100% WIPES THE ACCOUNT OUT; it does not
+    # take equity negative. An unguarded cumprod does exactly that, and
+    # then keeps compounding: a 1x short (signal -1.0, inside the
+    # documented {-1, 0, 1}) through a +200% bar produced
+    # [10000, 10000, 10000, -10000, -12500, -11250] -- equity getting MORE
+    # negative on bars where the short profits, a max_drawdown of -2.283
+    # (deeper than a total loss), and at 2x leverage through a -60% bar a
+    # sharpe_ratio of +2.5923 on a dead account.
+    #
+    # Floored at zero and held there, which is what a broker does.
+    # `run_portfolio_simulation` already models this; `run_strategy` did
+    # not, and it is what run_custom_signal_backtest, run_backtest_compact,
+    # run_signal_panel_backtest, run_strategy_matrix and every backtest_grid
+    # run through.
+    growth = (1 + strategy_returns).clip(lower=0.0)
+    equity_curve = initial_capital * growth.cumprod()
+    if bool((strategy_returns <= -1.0).any()):
+        first = strategy_returns.index[strategy_returns <= -1.0][0]
+        logger.warning(
+            "[run_strategy] a bar return of %.4f at %s is a total loss; "
+            "equity is floored at zero from there rather than compounding "
+            "negative.",
+            float(strategy_returns.loc[first]),
+            first,
+        )
 
     total_ret = cumulative_return(equity_curve)
     annual_vol = annualized_volatility(strategy_returns)

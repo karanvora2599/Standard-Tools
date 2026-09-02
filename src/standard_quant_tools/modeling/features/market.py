@@ -14,7 +14,8 @@ from .registry import register_feature
 def _market_momentum(
     ohlcv: pd.DataFrame, context: FeatureContext, lookback: int = 20
 ) -> pd.Series:
-    return ohlcv["Close"].pct_change(periods=lookback)
+    # Declared PIT_SAFE, and padding across a halt is not point-in-time.
+    return ohlcv["Close"].pct_change(periods=lookback, fill_method=None)
 
 
 def _market_new_high_breakout(

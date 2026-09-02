@@ -45,7 +45,7 @@ def _return_zscore(close: pd.Series, lookback: int, zscore_window: int) -> pd.Se
     would over-trigger on the latter and under-trigger on the former.
     Not implemented anywhere else in this codebase's metrics/ modules.
     """
-    trailing_return = close.pct_change(periods=lookback)
+    trailing_return = close.pct_change(periods=lookback, fill_method=None)
     rolling_mean = trailing_return.rolling(zscore_window).mean()
     rolling_std = trailing_return.rolling(zscore_window).std()
     return (trailing_return - rolling_mean) / rolling_std
@@ -152,7 +152,7 @@ def detect_rally(
 
     close = df["Close"]
 
-    trailing_return = close.pct_change(periods=lookback)
+    trailing_return = close.pct_change(periods=lookback, fill_method=None)
     zscore_series = _return_zscore(close, lookback, zscore_window)
     current_return = float(trailing_return.iloc[-1])
     current_zscore = (

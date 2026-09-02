@@ -952,3 +952,108 @@ class TestDrawdownPeaksIncludeTheStartingValue:
         assert marker in (fields["p05_max_drawdown"].description or "")
         assert marker not in (fields["p95_max_drawdown"].description or "")
         assert "SHALLOW" in (fields["p95_max_drawdown"].description or "")
+
+
+class TestATotalLossIsNotNegativeEquity:
+    """Both engines compounded `1 + r` unguarded, so a bar return at or
+    below -100% carried equity NEGATIVE and kept compounding. The C++ kernel
+    computes this curve on the default path, so fixing only the Python
+    fallback fixed nothing -- the guard sits before the dispatch."""
+
+    @staticmethod
+    def _frame(closes):
+        index = pd.date_range("2024-01-01", periods=len(closes), freq="D")
+        return pd.DataFrame(
+            {
+                "Open": closes,
+                "High": closes,
+                "Low": closes,
+                "Close": closes,
+                "Volume": [1e6] * len(closes),
+            },
+            index=index,
+        )
+
+    def test_a_one_x_short_through_a_tripling_is_refused(self):
+        """signal -1.0 is inside the documented {-1, 0, 1}. It produced
+        equity [10000, 10000, 10000, -10000, -11666, -12833] -- getting
+        MORE negative on bars where the short profits -- and a max_drawdown
+        of -2.283, deeper than a total loss."""
+        from standard_quant_tools.backtest.engine import run_strategy
+        from standard_quant_tools.error import ValidationError
+
+        frame = self._frame([20.0, 20.0, 20.0, 60.0, 50.0, 45.0])
+        signals = pd.Series([-1.0] * 6, index=frame.index)
+
+        with pytest.raises(ValidationError, match="total loss"):
+            run_strategy(
+                frame,
+                signals,
+                initial_capital=10000.0,
+                commission_pct=0.0,
+                slippage_pct=0.0,
+            )
+
+    def test_an_ordinary_strategy_is_untouched(self):
+        from standard_quant_tools.backtest.engine import run_strategy
+
+        frame = self._frame([20.0, 21.0, 22.0, 23.0, 22.0, 24.0])
+        signals = pd.Series([1.0] * 6, index=frame.index)
+        got = run_strategy(
+            frame,
+            signals,
+            initial_capital=10000.0,
+            commission_pct=0.0,
+            slippage_pct=0.0,
+        )
+        assert got["final_equity"] > 0
+        assert got["max_drawdown"] >= -1.0
+
+
+class TestPctChangeDoesNotPadAcrossAGap:
+    """pandas pads by default, so a halted name's stale price makes a
+    trailing return look real on bars it did not trade. Fixed at 51 sites in
+    this repo already; five were left."""
+
+    def test_build_target_does_not_fabricate_a_label(self):
+        """close=[100, 101, nan, nan, 90, ...] with horizon=2 gave row 1 a
+        forward_return of +0.010000 -- the next real print is -10%. As
+        `forward_direction` that is class 1.0, "went up", and those rows are
+        not NaN so they survive the downstream dropna. The function's own
+        docstring says it exists to prevent this."""
+        from standard_quant_tools.modeling.dataset.target import build_target
+        from standard_quant_tools.modeling.specs import TargetSpec
+
+        close = pd.Series([100.0, 101.0, np.nan, np.nan, 90.0, 91.0, 92.0, 93.0])
+        got = build_target(close, TargetSpec(type="forward_return", horizon=2))
+        # Rows 0 and 1 look two bars ahead into the gap: unknowable.
+        assert bool(np.isnan(got.iloc[0])) and bool(np.isnan(got.iloc[1]))
+
+    @pytest.mark.parametrize(
+        "module,attribute",
+        [
+            ("standard_quant_tools.analysis.rally", None),
+            ("standard_quant_tools.backtest.strategies", None),
+            ("standard_quant_tools.modeling.dataset.target", None),
+            ("standard_quant_tools.modeling.features.market", None),
+        ],
+    )
+    def test_no_bare_pct_change_survives(self, module, attribute):
+        """Parsed with `ast`, not grepped. A docstring naming the call --
+        "vectorized pandas.Series.pct_change(periods=lookback) call" -- is
+        prose, and every substring filter I tried admitted it."""
+        import ast
+        import importlib
+        import inspect
+
+        source = inspect.getsource(importlib.import_module(module))
+        offenders = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "pct_change"):
+                continue
+            if not any(kw.arg == "fill_method" for kw in node.keywords):
+                offenders.append(node.lineno)
+        assert offenders == [], f"{module}: bare pct_change at lines {offenders}"

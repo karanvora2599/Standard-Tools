@@ -47,7 +47,17 @@ def build_target(close: pd.Series, spec: TargetSpec) -> pd.Series:
     manufacturing a "went down" observation for bars whose outcome simply
     has not happened yet. Alignment drops NaN rows instead.
     """
-    forward_return = close.pct_change(periods=spec.horizon).shift(-spec.horizon)
+    # `_horizon_volatility` 30 lines below already passes this. Without
+    # it, pandas pads across a data gap and FABRICATES a supervised
+    # label: close=[100, 101, nan, nan, 90, ...] with horizon=2 gave
+    # row 1 a forward_return of +0.010000 -- correct is NaN, and the
+    # next real print is -10%. As `forward_direction` that becomes
+    # class 1.0, "went up". Those rows are not NaN, so they survive
+    # the downstream dropna. This function's docstring says it exists
+    # to prevent exactly this.
+    forward_return = close.pct_change(periods=spec.horizon, fill_method=None).shift(
+        -spec.horizon
+    )
     if spec.type == "forward_return":
         return forward_return
     if spec.type in CROSS_SECTIONAL_TARGETS:
