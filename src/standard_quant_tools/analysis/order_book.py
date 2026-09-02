@@ -47,13 +47,36 @@ __all__ = ["book_metrics", "depth_profile", "microprice"]
 
 
 def _levels_present(frame: pd.DataFrame) -> int:
-    """How many complete levels the frame actually carries."""
+    """
+    How many levels the frame actually carries DATA for.
+
+    It used to count columns. A two-level book whose level-1 prices are all
+    NaN -- the most ordinary malformed shape a vendor produces -- reported
+    `levels_available: 2`, emitted no "only one level" warning, and returned
+    a depth_slope computed from the single real level. The refusal this
+    module's docstring advertises was defeated by the commonest bad input.
+
+    A level counts when its four columns exist AND at least one snapshot
+    carries a finite price on each side. Size is allowed to be zero or
+    missing -- an empty level is a real state of the book -- but a level
+    with no price anywhere is not a level, it is a column.
+    """
     count = 0
     while all(
         f"{side}_{field}_{count}" in frame.columns
         for side in ("bid", "ask")
         for field in ("price", "size")
     ):
+        has_data = all(
+            bool(
+                np.isfinite(
+                    pd.to_numeric(frame[f"{side}_price_{count}"], errors="coerce")
+                ).any()
+            )
+            for side in ("bid", "ask")
+        )
+        if not has_data:
+            break
         count += 1
     return count
 
@@ -173,11 +196,38 @@ def book_metrics(book: pd.DataFrame, *, levels: Optional[int] = None) -> Dict[st
             "imbalance is real, but every question about what sits behind "
             "the touch has no data behind it."
         )
-    disagree = np.nanmean(np.sign(touch_imbalance) != np.sign(cumulative_imbalance))
-    if disagree > 0.2:
+    # COMPARED ONLY WHERE BOTH ARE A DIRECTION.
+    #
+    # `np.sign(a) != np.sign(b)` yields a BOOL array, and `nanmean` never
+    # skips a bool -- there is no NaN in one. So every snapshot where an
+    # imbalance was undefined counted as a disagreement, because
+    # `sign(nan) != sign(nan)` is True. On an all-zero-size book, where
+    # both imbalances are None, this reported "Touch and cumulative
+    # imbalance point opposite ways in 100% of snapshots ... fills badly"
+    # -- a confident directional claim about a book with no data in it.
+    #
+    # A sign of exactly 0 is an evenly balanced side, not a direction, so
+    # those are excluded too rather than counted as pointing the other way.
+    touch_sign = np.sign(touch_imbalance)
+    cumulative_sign = np.sign(cumulative_imbalance)
+    comparable = (
+        np.isfinite(touch_imbalance)
+        & np.isfinite(cumulative_imbalance)
+        & (touch_sign != 0)
+        & (cumulative_sign != 0)
+    )
+    n_comparable = int(comparable.sum())
+    disagree = (
+        float(np.mean(touch_sign[comparable] != cumulative_sign[comparable]))
+        if n_comparable
+        else 0.0
+    )
+    if disagree > 0.2 and n_comparable:
         warnings.append(
             f"Touch and cumulative imbalance point opposite ways in "
-            f"{disagree:.0%} of snapshots. They answer different questions -- "
+            f"{disagree:.0%} of the {n_comparable} snapshots where both are "
+            f"defined and neither is exactly balanced. They answer different "
+            f"questions -- "
             "the touch predicts the next tick, the cumulative predicts where "
             "size ends up -- and a book bid at the touch with weight behind "
             "the offer is exactly the one that ticks up and fills badly."
