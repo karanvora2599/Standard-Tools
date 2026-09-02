@@ -2021,3 +2021,98 @@ class TestBothBackendsAgreeOnAnUndefinedSharpe:
         ).read_text(encoding="utf-8")
         assert "periods_per_year) : 0.0;" not in source
         assert source.count("periods_per_year) : kNaN;") == 2
+
+
+class TestTheOnlyWritingToolIsContained:
+    """`export_audit_bundle` is the one tool in the provenance set that
+    writes, and `out_path` was a free string chosen by a model, resolved
+    directly. Its own code notes "Overwrote an existing file at {out_path}",
+    so a bundle could land anywhere the process can reach and clobber what
+    it found. `backtest/artifacts.py` and `modeling/artifacts.py` both guard
+    this exact shape with `_resolved_within_runs_dir`; this did not.
+
+    Found the hard way: once `strategy_type` stopped being a bare `str` the
+    adversarial sweep began actually executing this tool, and it wrote two
+    zips into the REPOSITORY ROOT named from its fuzz values --
+    `zzz_not_a_valid_choice` and a Japanese/emoji filename -- which were
+    then committed.
+    """
+
+    @pytest.mark.parametrize(
+        "escape",
+        ["../escape.zip", "../../escape.zip", "sub/../../../escape.zip"],
+    )
+    def test_a_relative_path_climbing_out_is_refused(self, escape):
+        from standard_quant_tools.agent.runtimes.meta.tools import (
+            _contained_bundle_path,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="escapes"):
+            _contained_bundle_path(escape)
+
+    def test_an_absolute_path_is_allowed(self, tmp_path):
+        """Confining these to the sandbox was my first attempt and it was
+        wrong: a bundle exists to be handed to someone outside this
+        process, and the existing tests write to a tmp_path."""
+        from standard_quant_tools.agent.runtimes.meta.tools import (
+            _contained_bundle_path,
+        )
+
+        target = tmp_path / "bundle.zip"
+        assert _contained_bundle_path(str(target)) == target
+
+    def test_an_absolute_path_into_a_missing_directory_is_refused(self, tmp_path):
+        from standard_quant_tools.agent.runtimes.meta.tools import (
+            _contained_bundle_path,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="does not exist"):
+            _contained_bundle_path(str(tmp_path / "nope" / "bundle.zip"))
+
+    def test_an_existing_destination_is_refused_not_overwritten(self, tmp_path):
+        """The actual hole. `out_path` is a free string chosen by a model
+        and the old code noted "Overwrote an existing file at {out_path}"
+        when it clobbered one. An audit bundle is evidence."""
+        from standard_quant_tools.agent.runtimes.meta.tools import (
+            _contained_bundle_path,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        existing = tmp_path / "already.zip"
+        existing.write_bytes(b"PK")
+        with pytest.raises(ValidationError, match="already exists"):
+            _contained_bundle_path(str(existing))
+
+    @pytest.mark.parametrize(
+        "name", ["ok.zip", "sub/ok.zip", "zzz_not_a_valid_choice", "日本語"]
+    )
+    def test_a_bare_name_does_not_land_in_the_working_directory(
+        self, name, tmp_path, monkeypatch
+    ):
+        """The symptom that exposed all of this: two of these exact fuzz
+        values were written into the repository root and committed."""
+        from standard_quant_tools.agent.runtimes.meta.tools import (
+            _contained_bundle_path,
+        )
+
+        monkeypatch.setenv("SQT_RUNS_DIR", str(tmp_path))
+        resolved = _contained_bundle_path(name)
+        assert resolved.is_relative_to((tmp_path / "bundles").resolve())
+
+    def test_no_fuzz_artifact_sits_in_the_repository_root(self):
+        """Anything the surface tests write into the repo root is a tool
+        writing outside where it should."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        strays = [
+            p.name
+            for p in root.iterdir()
+            if p.is_file()
+            and p.suffix == ""
+            and p.name not in {"LICENSE", "Makefile", "Dockerfile", "a"}
+            and p.read_bytes()[:2] == b"PK"
+        ]
+        assert strays == [], f"zip artifacts written into the repo root: {strays}"

@@ -4548,8 +4548,12 @@ class ExportAuditBundleInput(BaseModel):
     out_path: str = Field(
         ...,
         description=(
-            "Destination .zip path. This tool WRITES a new file; it never "
-            "modifies or removes anything in the audit log."
+            "Destination .zip path. A bare name or relative path is "
+            "written under SQT_RUNS_DIR/bundles rather than the working "
+            "directory; an absolute path is allowed, since a bundle is "
+            "for handing to someone outside this process. An existing "
+            "destination is REFUSED, not overwritten -- a bundle is "
+            "evidence. This tool never modifies the audit log itself."
         ),
     )
 

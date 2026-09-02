@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import logging
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -401,6 +402,68 @@ def verify_audit_integrity(
     )
 
 
+def _contained_bundle_path(requested: str) -> Path:
+    """
+    Where an audit bundle may be written.
+
+    TWO RULES, and neither is "must live in the sandbox". Exporting a bundle
+    is for handing to someone outside this process, so an absolute
+    destination is the point of the tool and confining it there would be
+    wrong -- my first attempt did exactly that and broke the tests that use
+    a tmp_path.
+
+    What was actually wrong is narrower:
+
+      1. IT OVERWROTE. `out_path` is a free string chosen by a model and the
+         old code resolved it directly, noting "Overwrote an existing file
+         at {out_path}" when it clobbered something. This is the only tool
+         in the provenance set that writes; refusing an existing
+         destination bounds the damage to creating new files.
+
+      2. A BARE NAME LANDED IN THE WORKING DIRECTORY. Once the adversarial
+         sweep began actually executing this tool -- which it only started
+         doing when `strategy_type` stopped being a bare `str` -- it wrote
+         two zips into the REPOSITORY ROOT named from its fuzz values,
+         `zzz_not_a_valid_choice` and a Japanese/emoji filename, and they
+         were committed. A relative name now resolves under the runs
+         directory instead of wherever the process happens to be standing.
+    """
+    candidate = Path(requested)
+    if candidate.is_absolute():
+        resolved = candidate
+        if not resolved.parent.exists():
+            raise ValidationError(
+                f"export_audit_bundle: the directory for out_path "
+                f"{requested!r} does not exist. This tool writes a bundle; "
+                "it does not create the tree around it."
+            )
+    else:
+        root = Path(
+            os.environ.get(
+                "SQT_RUNS_DIR",
+                str(Path.home() / ".cache" / "standard_quant_tools" / "runs"),
+            )
+        ).resolve()
+        bundles = root / "bundles"
+        resolved = (bundles / candidate).resolve()
+        if not resolved.is_relative_to(bundles):
+            raise ValidationError(
+                f"export_audit_bundle: out_path {requested!r} resolves to "
+                f"{resolved}, which escapes {bundles}. Give a name, or an "
+                "absolute path if the bundle belongs somewhere specific."
+            )
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    if resolved.exists():
+        raise ValidationError(
+            f"export_audit_bundle: {resolved} already exists and this will "
+            "not overwrite it. An audit bundle is evidence; silently "
+            "replacing one is exactly what the audit log exists to make "
+            "impossible. Choose another name or remove that file yourself."
+        )
+    return resolved
+
+
 def export_audit_bundle(
     input_data: ExportAuditBundleInput,
 ) -> ExportAuditBundleResult:
@@ -413,10 +476,22 @@ def export_audit_bundle(
     removed. Retention operations that could destroy evidence (gc, seal,
     hold) stay CLI-only on purpose.
     """
-    out_path = Path(input_data.out_path)
+    # CONTAINED, like every other write in this library.
+    #
+    # `out_path` is a free string chosen by a model, and this is the only
+    # tool in the provenance set that writes. It resolved that string
+    # directly and wrote there -- so a bundle could land anywhere the
+    # process can reach, and the branch below shows it OVERWRITES what it
+    # finds. `backtest/artifacts.py` and `modeling/artifacts.py` both guard
+    # exactly this shape with `_resolved_within_runs_dir`; this did not.
+    #
+    # Found because the adversarial sweep began actually executing this
+    # tool once `strategy_type` stopped being a bare `str`, and it wrote
+    # two zips into the repository root named from its fuzz values --
+    # `zzz_not_a_valid_choice` and a Japanese/emoji filename -- which then
+    # got committed.
+    out_path = _contained_bundle_path(input_data.out_path)
     notes: List[str] = []
-    if out_path.exists():
-        notes.append(f"Overwrote an existing file at {out_path}.")
     written = _export_bundle(input_data.start_date, input_data.end_date, out_path)
     size = int(Path(written).stat().st_size)
     logger.debug("[export_audit_bundle] wrote %s (%d bytes)", written, size)
