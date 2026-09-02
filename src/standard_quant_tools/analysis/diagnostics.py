@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
@@ -187,13 +188,9 @@ def _f_sf(statistic: float, d1: int, d2: int) -> float:
 
 
 def _clean(series: pd.Series, who: str, minimum: int = 30) -> pd.Series:
-    values = pd.Series(series).astype(float).dropna()
-    if len(values) < minimum:
-        raise ValidationError(
-            f"{who}: {len(values)} usable observations, and this needs at "
-            f"least {minimum}."
-        )
-    return values
+    """See `_series.clean_series` -- four modules had a private copy of this
+    and they disagreed about infinity."""
+    return clean_series(series, "series", who, minimum=minimum)
 
 
 # ── autocorrelation ─────────────────────────────────────────────────────

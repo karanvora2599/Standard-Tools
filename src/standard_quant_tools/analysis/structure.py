@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -45,10 +46,9 @@ MIN_SEGMENT = 20
 
 
 def _clean(series: pd.Series, name: str) -> pd.Series:
-    values = pd.Series(series).astype(float).dropna()
-    if values.empty:
-        raise ValidationError(f"{name}: no usable observations")
-    return values
+    """See `_series.clean_series`. This module is why it exists: a single
+    infinity turned a series with no breaks into one with three."""
+    return clean_series(series, "series", name, minimum=1)
 
 
 # ── change points ───────────────────────────────────────────────────────

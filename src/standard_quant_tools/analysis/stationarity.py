@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -52,14 +53,20 @@ _KPSS_CRITICAL = {0.01: 0.739, 0.05: 0.463, 0.10: 0.347}
 
 
 def _clean(series, name: str) -> np.ndarray:
-    values = pd.Series(series).astype(float).dropna().to_numpy()
-    if values.size < 20:
-        raise ValidationError(
-            f"{name}: {values.size} usable observations is too few. Every "
-            "test here has an asymptotic distribution and none of them mean "
-            "anything on a sample this short."
-        )
-    return values
+    """See `_series.clean_series`. An infinity used to reach the regression
+    and come back out of numpy as `LinAlgError: SVD did not converge`,
+    which names neither the input nor the value that caused it."""
+    return clean_series(
+        series,
+        "series",
+        name,
+        minimum=20,
+        as_array=True,
+        note=(
+            "Every test here has an asymptotic distribution and none of "
+            "them mean anything on a sample this short."
+        ),
+    )
 
 
 def adf_statistic(values: np.ndarray, lags: int = 1) -> float:

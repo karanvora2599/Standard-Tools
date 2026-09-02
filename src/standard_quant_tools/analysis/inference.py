@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import (
     cvar,
@@ -84,14 +85,10 @@ STATISTICS = (
 
 
 def _clean(values: Sequence[float], who: str, minimum: int = 30) -> np.ndarray:
-    array = np.asarray([float(v) for v in values], dtype=float)
-    array = array[np.isfinite(array)]
-    if array.size < minimum:
-        raise ValidationError(
-            f"{who}: {array.size} usable observations, and this needs at "
-            f"least {minimum}."
-        )
-    return array
+    """See `_series.clean_series`. This copy filtered infinities out with
+    `np.isfinite` and said nothing, so the answer came back computed on a
+    smaller sample than the caller passed."""
+    return clean_series(values, "values", who, minimum=minimum, as_array=True)
 
 
 def _statistic(values: np.ndarray, name: str, periods: int = TRADING_DAYS) -> float:
