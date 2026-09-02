@@ -1,10 +1,10 @@
 import logging
-import math
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._resampling import block_indices
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
 
@@ -98,16 +98,13 @@ def simulate_forward_paths(
         )
     else:
         rng = np.random.default_rng(seed)
-        n_blocks = math.ceil(horizon_days / block_size)
-        max_start = n - block_size
 
         # (n_simulations, horizon_days) matrix of simulated equity paths
         paths = np.empty((n_simulations, horizon_days), dtype=float)
         for i in range(n_simulations):
-            starts = rng.integers(0, max_start + 1, size=n_blocks)
-            resampled = np.concatenate([values[s : s + block_size] for s in starts])[
-                :horizon_days
-            ]
+            # Resamples n historical observations into a horizon_days path,
+            # so the target length is passed explicitly -- see `_resampling`.
+            resampled = values[block_indices(n, block_size, rng, horizon_days)]
             paths[i, :] = initial_capital * np.cumprod(1.0 + resampled)
 
     terminal = paths[:, -1]
@@ -198,15 +195,12 @@ def simulate_forward_paths_terminal(
         )
     else:
         rng = np.random.default_rng(seed)
-        n_blocks = math.ceil(horizon_days / block_size)
-        max_start = n - block_size
 
         terminal = np.empty(n_simulations, dtype=float)
         for i in range(n_simulations):
-            starts = rng.integers(0, max_start + 1, size=n_blocks)
-            resampled = np.concatenate([values[s : s + block_size] for s in starts])[
-                :horizon_days
-            ]
+            # Resamples n historical observations into a horizon_days path,
+            # so the target length is passed explicitly -- see `_resampling`.
+            resampled = values[block_indices(n, block_size, rng, horizon_days)]
             terminal[i] = initial_capital * np.prod(1.0 + resampled)
 
     terminal_returns = terminal / initial_capital - 1.0

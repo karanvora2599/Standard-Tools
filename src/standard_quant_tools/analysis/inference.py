@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._resampling import block_indices
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
@@ -149,32 +150,10 @@ def _statistic(values: np.ndarray, name: str, periods: int = TRADING_DAYS) -> fl
 
 
 def _block_indices(n: int, block_size: int, rng: np.random.Generator) -> np.ndarray:
-    """
-    Indices for one blocked resample, trimmed to the original length.
-
-    BUILT BY BROADCAST, not by concatenating a per-block list. This is
-    called once per bootstrap draw, so the comprehension it replaced ran
-    `ceil(n / block_size)` separate `np.arange` calls EVERY draw -- 358,000
-    of them for one default 2,000-draw call on 2,500 observations, which
-    profiled at 87% of `bootstrap_statistic`'s total runtime. The
-    statistic being bootstrapped was 11%. Nobody profiles the index
-    construction, which is exactly why it was the cost.
-
-    `span` is clamped because `block_size` may exceed `n`. In that case the
-    old code drew every start at 0 and truncated each block to `n`, so the
-    clamp reproduces it rather than changing it; below that clamp every
-    start satisfies `s + span <= n` by construction, so no block ever ran
-    off the end and the old `min()` never bound.
-    """
-    if block_size <= 1:
-        return rng.integers(0, n, n)
-    span = min(block_size, n)
-    n_blocks = int(math.ceil(n / span))
-    starts = rng.integers(0, n - span + 1, n_blocks)
-    return (starts[:, None] + np.arange(span)).ravel()[:n]
-
-
-# ── error bars ──────────────────────────────────────────────────────────
+    """See `_resampling.block_indices`. This module measured the cost of
+    the concatenating version and fixed its own copy; three other call
+    sites kept it until the helper was shared."""
+    return block_indices(n, block_size, rng)
 
 
 def bootstrap_statistic(

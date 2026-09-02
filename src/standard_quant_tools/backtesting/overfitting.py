@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._resampling import block_indices
 from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
@@ -617,13 +618,11 @@ def reality_check(
     observed = float(np.max(excess.mean(axis=0)) * TRADING_DAYS)
 
     rng = np.random.default_rng(int(seed))
-    n_blocks = int(math.ceil(n / block_size))
     centred = excess - excess.mean(axis=0)
 
     maxima = np.empty(n_bootstrap)
     for b in range(n_bootstrap):
-        starts = rng.integers(0, n - block_size + 1, n_blocks)
-        rows = np.concatenate([np.arange(s, s + block_size) for s in starts])[:n]
+        rows = block_indices(n, block_size, rng)
         maxima[b] = np.max(centred[rows].mean(axis=0))
     p_value = float((maxima >= observed / TRADING_DAYS).mean())
 

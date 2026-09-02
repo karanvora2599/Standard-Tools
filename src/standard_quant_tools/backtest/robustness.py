@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._resampling import block_indices
 from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
@@ -98,14 +99,11 @@ def block_bootstrap_ci(
 
     rng = np.random.default_rng(seed)
     values = returns.to_numpy(dtype=float)
-    n_blocks = math.ceil(n / block_size)
-    max_start = n - block_size
-
     point_estimate = float(metric_fn(returns))
     boot_metrics = np.empty(n_iterations, dtype=float)
     for i in range(n_iterations):
-        starts = rng.integers(0, max_start + 1, size=n_blocks)
-        resampled = np.concatenate([values[s : s + block_size] for s in starts])[:n]
+        # Same starts, same stream, same indices -- see `_resampling`.
+        resampled = values[block_indices(n, block_size, rng)]
         boot_metrics[i] = metric_fn(pd.Series(resampled))
 
     alpha = 1.0 - confidence

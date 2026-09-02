@@ -97,11 +97,15 @@ MUTATIONS: List[Mutation] = [
         "tests/backtesting/test_trade_analysis.py",
     ),
     Mutation(
+        # Moved here from analysis/inference.py, which used to hold its
+        # own copy of the block index construction. Setting `span` to 1
+        # is the same mutation the old anchor made: every block becomes
+        # one observation, so the resample is IID and the serial
+        # correlation the block bootstrap exists to preserve is gone.
         "bootstrap: force an IID resample regardless of block_size",
-        SRC / "analysis/inference.py",
-        "    if block_size <= 1:\n        return rng.integers(0, n, n)",
-        "    return rng.integers(0, n, n)\n    if block_size <= 1:\n"
-        "        return rng.integers(0, n, n)",
+        SRC / "_resampling.py",
+        "    span = min(max(int(block_size), 1), n)",
+        "    span = 1",
         "tests/analysis/test_inference.py",
     ),
     Mutation(
