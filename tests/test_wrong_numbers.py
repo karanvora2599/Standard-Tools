@@ -409,3 +409,76 @@ class TestArgumentsAreEitherHonouredOrRefused:
         for name in ("BLViewInput", "CostScenario"):
             model = getattr(agent_models, name)
             assert model.model_config.get("extra") == "forbid", name
+
+
+class TestThePythonFallbacksActuallyRun:
+    """`technical_indicators_panel`'s Bollinger fallback had never worked.
+
+    It selected ["Upper", "Middle", "Lower"] from a frame whose columns are
+    BB_Upper/BB_Middle/BB_Lower -- names this module declares itself, 194
+    lines above, under a comment promising they are "exactly the ones the
+    per-ticker wrappers use". Every call raised KeyError.
+
+    Nobody noticed because the native path is taken wherever the extension
+    builds, 507 of the suite's tests are gated on that extension, and CI
+    never verifies it loaded. With the extension blocked the suite still
+    reports a pass. This test forces the fallback so the gate cannot hide
+    it again.
+    """
+
+    INDICATORS = ["rsi", "atr", "adx", "bollinger_bands", "stochastic_oscillator"]
+
+    @staticmethod
+    def _panel(n: int = 120):
+        def frame(seed: int) -> pd.DataFrame:
+            rng = np.random.default_rng(seed)
+            close = 100 + np.cumsum(rng.normal(0, 1, n))
+            return pd.DataFrame(
+                {
+                    "Open": close,
+                    "High": close + 1,
+                    "Low": close - 1,
+                    "Close": close,
+                    "Volume": rng.integers(1e5, 1e6, n).astype(float),
+                },
+                index=pd.date_range("2024-01-01", periods=n, freq="D"),
+            )
+
+        return {"AAA": frame(1), "BBB": frame(2)}
+
+    @pytest.mark.parametrize("indicator", INDICATORS)
+    def test_the_fallback_runs_at_all(self, indicator):
+        import standard_quant_tools.indicators.panel as panel
+
+        saved_flag, saved_core = panel.HAS_CPP, panel._cpp_core
+        try:
+            panel.HAS_CPP, panel._cpp_core = False, None
+            got = panel.technical_indicators_panel(
+                self._panel(), indicators=[indicator]
+            )
+        finally:
+            panel.HAS_CPP, panel._cpp_core = saved_flag, saved_core
+        assert indicator in got
+
+    @pytest.mark.parametrize("indicator", INDICATORS)
+    def test_the_fallback_agrees_with_the_kernel(self, indicator):
+        """Running is necessary, not sufficient -- a fallback that returns
+        different numbers is the harder version of the same bug."""
+        import standard_quant_tools.indicators.panel as panel
+
+        if not panel.HAS_CPP:
+            pytest.skip("no native extension to compare against")
+
+        data = self._panel()
+        saved_flag, saved_core = panel.HAS_CPP, panel._cpp_core
+        try:
+            native = panel.technical_indicators_panel(data, indicators=[indicator])
+            panel.HAS_CPP, panel._cpp_core = False, None
+            fallback = panel.technical_indicators_panel(data, indicators=[indicator])
+        finally:
+            panel.HAS_CPP, panel._cpp_core = saved_flag, saved_core
+
+        left = np.asarray(native[indicator], dtype=float)
+        right = np.asarray(fallback[indicator], dtype=float)
+        assert left.shape == right.shape
+        assert np.allclose(left, right, rtol=1e-9, atol=1e-12, equal_nan=True)

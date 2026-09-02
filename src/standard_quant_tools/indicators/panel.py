@@ -248,8 +248,16 @@ def _panel_fallback(
         if "adx" in wanted:
             acc["adx"][i] = _adx(h, low_s, c, adx_period).to_numpy()
         if "bollinger_bands" in wanted:
+            # `bollinger_bands` returns BB_Upper/BB_Middle/BB_Lower -- the
+            # names this module already declares in _PANEL_SHAPES above,
+            # whose own comment promises they are "exactly the ones the
+            # per-ticker wrappers use". Asking
+            # for the unprefixed ones raised KeyError, so this fallback had
+            # never run: the native path is taken in every environment that
+            # builds the extension, and 507 of the suite's tests are gated
+            # on that extension without CI ever checking it loaded.
             acc["bollinger_bands"][i] = _bb(c, bollinger_period, bollinger_num_std)[
-                ["Upper", "Middle", "Lower"]
+                _PANEL_SHAPES["bollinger_bands"]
             ].to_numpy()
         if "stochastic_oscillator" in wanted:
             acc["stochastic_oscillator"][i] = _stoch(

@@ -39,6 +39,7 @@ vendor changing convention surfaces as a warning rather than as a wrong
 number.
 """
 
+from collections.abc import Mapping
 from typing import Dict, List, Optional
 
 __all__ = [
@@ -46,6 +47,7 @@ __all__ = [
     "FIELD_DEFINITIONS",
     "percent_to_fraction",
     "implausible_value_warnings",
+    "ratio_field",
 ]
 
 # What each field means once it leaves a provider, regardless of which one.
@@ -102,6 +104,23 @@ def percent_to_fraction(value: Optional[float]) -> Optional[float]:
     return float(value) / 100.0
 
 
+def ratio_field(ratios: object, field: str) -> object:
+    """
+    One field off a ratios record, whether it is an object or a dict.
+
+    The provider adapters build a ratios OBJECT; the agent tools take a
+    plain `dict` (their input models declare it). Code written for one shape
+    and handed the other does not fail -- `getattr` on a dict returns the
+    default -- it just reports that every field is missing. That is how
+    `validate_financial_ratios` came to answer "Nothing failed the
+    plausibility check" for a dividend_yield of 9.9, and how
+    `compare_ratio_frames` classified every field `no_overlap`.
+    """
+    if isinstance(ratios, Mapping):
+        return ratios.get(field)
+    return getattr(ratios, field, None)
+
+
 def implausible_value_warnings(ratios: object) -> List[str]:
     """
     Flag values that look like an unconverted percentage.
@@ -115,7 +134,14 @@ def implausible_value_warnings(ratios: object) -> List[str]:
     """
     warnings: List[str] = []
     for field in sorted(_FRACTION_FIELDS):
-        value = getattr(ratios, field, None)
+        # BOTH SHAPES. The provider adapters pass a ratios OBJECT, which is
+        # what `getattr` was written for. `validate_financial_ratios` passes
+        # a plain dict -- its input field is typed `dict` -- so every
+        # `getattr` returned None, every field was skipped, and the tool
+        # reported "Nothing failed the plausibility check" for a
+        # price_to_book of -4.0 and a dividend_yield of 9.9. The check could
+        # not fire at all on the surface an agent reaches.
+        value = ratio_field(ratios, field)
         if value is None:
             continue
         if abs(float(value)) > _IMPLAUSIBLE_FRACTION:

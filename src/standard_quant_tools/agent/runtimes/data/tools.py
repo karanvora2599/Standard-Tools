@@ -558,7 +558,10 @@ def compare_ratio_frames(
             relative_difference=row.get(
                 "relative_difference", row.get("relative_diff")
             ),
-            classification=row.get("classification"),
+            # `comparison.py` writes this key as "verdict"; reading only
+            # "classification" made every field null and n_disagreeing
+            # always 0, so a 100x unit mismatch reported as agreement.
+            classification=row.get("classification", row.get("verdict")),
         )
         for row in rows
     ]
@@ -571,7 +574,9 @@ def compare_ratio_frames(
         fields=fields,
         warnings=list(report.get("warnings", []))
         or [
-            "A classification of 'unit' is fixable by rescaling; a "
+            # The classifier emits no_overlap / agree / scale / definition.
+            # "unit" was never one of them.
+            "A classification of 'scale' is fixable by rescaling; a "
             "'definition' difference is not, and averaging the two sources "
             "would produce a number neither provider would stand behind."
         ],

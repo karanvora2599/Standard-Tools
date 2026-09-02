@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from standard_quant_tools.data.ratios import ratio_field
+
 logger = logging.getLogger(__name__)
 
 #: Relative difference below which two vendors are simply rounding
@@ -56,8 +58,11 @@ def _finite_pairs(left: Dict[str, Any], right: Dict[str, Any], field: str):
     """(entity, a, b) for entities where BOTH sides reported a number."""
     pairs = []
     for entity in sorted(set(left) & set(right)):
-        a = getattr(left[entity], field, None)
-        b = getattr(right[entity], field, None)
+        # `getattr` on a dict returns the default, so when the agent tools
+        # passed dicts every field came back None and every comparison was
+        # classified `no_overlap` -- n_disagreeing was structurally always 0.
+        a = ratio_field(left[entity], field)
+        b = ratio_field(right[entity], field)
         if a is None or b is None:
             continue
         try:
