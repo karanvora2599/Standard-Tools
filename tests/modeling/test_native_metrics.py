@@ -232,22 +232,90 @@ class TestStandardizeByDate:
         out = standardize_cross_sectional(frame, dates)
         assert out["f"].iloc[:4].eq(0.0).all()
 
-    def test_nan_poisons_its_whole_date(self, monkeypatch):
+    @staticmethod
+    def _contract(values, dates, clip_sigma=3.0):
         """
-        A quirk preserved deliberately. The Python path reduces with
-        np.add.reduceat, which propagates a NaN into the date's mean, and
-        then maps every non-finite result to 0.0 -- so one missing value
-        zeroes that date's ENTIRE column, not only its own row. The kernel
-        reproduces it exactly, because this is a speed change. In practice
-        it never fires: alignment drops NaN rows before the engine sees the
-        panel.
+        An INDEPENDENT oracle, written from panel_stats.hpp rather than from
+        either implementation.
+
+        `_agree` compares the two backends to each other, which cannot catch
+        a misunderstanding they share -- and one they shared survived here
+        for exactly that reason: both zeroed a whole date's cross-section
+        when any single entity was missing, while the header promised the
+        opposite. Backend parity and contract conformance are two different
+        questions and need two different oracles.
+        """
+        values = np.asarray(values, dtype=float)
+        dates = np.asarray(dates)
+        out = np.full(values.shape, np.nan)
+        for date in pd.unique(dates):
+            rows = dates == date
+            segment = values[rows]
+            present = ~np.isnan(segment)
+            if not present.any():
+                continue
+            spread = float(np.nanstd(segment, ddof=1)) if present.sum() > 1 else 0.0
+            if spread > 0.0:
+                z = (segment[present] - np.nanmean(segment)) / spread
+            else:
+                # No dispersion: every PRESENT entity sits exactly at the mean.
+                z = np.zeros(int(present.sum()))
+            here = np.full(segment.shape, np.nan)
+            here[present] = np.clip(z, -clip_sigma, clip_sigma)
+            out[rows] = here
+        return out
+
+    def test_a_missing_entity_does_not_move_the_others(self, monkeypatch):
+        """
+        THE DEFECT THIS EXISTS TO CATCH, and it was shipped, deliberately,
+        with a comment calling it a wart.
+
+        One NaN used to poison the date's mean, and the non-finite sweep
+        then wrote 0.0 for every entity in that date -- reporting each
+        PRESENT name as sitting exactly at the cross-sectional mean, which
+        panel_stats.hpp names as the specific thing that must not happen.
+        Its justification was that alignment drops NaN rows before the
+        engine sees a panel; `load_external_panel` retired that premise,
+        because an externally computed panel keeps its warm-up NaNs.
         """
         dates = np.repeat(pd.date_range("2020-01-01", periods=2), 4)
         frame = pd.DataFrame({"x": [1.0, 2.0, np.nan, 4.0, 1.0, 2.0, 3.0, 4.0]})
         self._agree(frame, dates, monkeypatch)
-        out = standardize_cross_sectional(frame, dates)
-        assert out["x"].iloc[:4].eq(0.0).all(), "the whole poisoned date is 0.0"
-        assert not out["x"].iloc[4:].eq(0.0).any(), "the clean date is unaffected"
+
+        out = standardize_cross_sectional(frame, dates)["x"].to_numpy()
+        expected = self._contract(frame["x"].to_numpy(), dates)
+        assert np.allclose(out, expected, equal_nan=True)
+
+        # Stated concretely, so the regression is unmistakable: the three
+        # present names keep their ordering and spread, and only the absent
+        # one is absent.
+        assert np.isnan(out[2]), "the missing entity stays missing"
+        assert not np.isclose(out[0], 0.0), "a present entity is not zeroed"
+        assert out[0] < out[1] < out[3], "their ordering survives"
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            [1.0, 2.0, np.nan, 4.0],
+            [np.nan, np.nan, np.nan, np.nan],
+            [np.nan, np.nan, 2.0, np.nan],
+            [2.0, 2.0, 2.0, 2.0],
+            [2.0, 2.0, np.nan, 2.0],
+            [-5.0, 0.0, 5.0, np.nan],
+        ],
+    )
+    def test_the_contract_holds_on_every_degenerate_cross_section(
+        self, values, monkeypatch
+    ):
+        """Checked against the header, not against the other backend."""
+        dates = np.repeat(pd.date_range("2020-01-01", periods=1), 4)
+        frame = pd.DataFrame({"x": values})
+        self._agree(frame, dates, monkeypatch)
+        assert np.allclose(
+            standardize_cross_sectional(frame, dates)["x"].to_numpy(),
+            self._contract(np.asarray(values, dtype=float), dates),
+            equal_nan=True,
+        )
 
     def test_ragged_dates(self, monkeypatch):
         rng = np.random.default_rng(12)

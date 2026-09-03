@@ -556,44 +556,61 @@ bool standardize_by_date(const double* values,
         }
 
         for (std::size_t c = 0; c < n_cols; ++c) {
+            // NaN IS SKIPPED BY THE MOMENTS, which is what panel_stats.hpp
+            // has always promised. It used to be propagated instead, to
+            // match a wart on the Python side: one NaN poisoned the date's
+            // mean and the non-finite sweep then wrote 0.0 for EVERY entity
+            // in that date -- reporting each present name as sitting exactly
+            // at the cross-sectional mean, the one fabricated observation
+            // the header says must not happen.
+            //
+            // That was deliberate, and its stated justification was "in
+            // practice it never fires: alignment drops NaN rows before the
+            // panel reaches the engine." `load_external_panel` retired that
+            // premise -- an externally computed panel keeps its warm-up
+            // NaNs -- so the wart became reachable. Changed on the Python
+            // side first, then here, with the tests, as that note asked.
+            //
+            // Only the finite values are compacted into `column`, so the
+            // pairwise summation still sees a dense run and keeps agreeing
+            // with pandas in the last bits.
+            std::size_t n_valid = 0;
             for (std::size_t i = 0; i < n; ++i) {
-                column[i] = values[order[base + i] * n_cols + c];
+                const double v = values[order[base + i] * n_cols + c];
+                if (!std::isnan(v)) column[n_valid++] = v;
             }
             const double* buffer = column.data();
 
-            // NaN is NOT skipped here, and that is a deliberate match rather
-            // than an oversight. The Python path reduces with
-            // np.add.reduceat, which propagates a NaN into the whole date's
-            // mean, and then maps every non-finite result to 0.0 -- so one
-            // missing value zeroes that date's ENTIRE column, not just its
-            // own row. That is a wart, and it is reproduced exactly because
-            // this kernel is a speed change and has no business moving a
-            // number. In practice it never fires: alignment drops NaN rows
-            // before the panel reaches the engine. If the rule is ever worth
-            // changing, it should change on the Python side first, with both
-            // paths and the tests moving together.
             const double mean =
-                pairwise_sum([buffer](std::size_t i) { return buffer[i]; }, 0, n) /
-                static_cast<double>(n);
+                n_valid ? pairwise_sum([buffer](std::size_t i) { return buffer[i]; },
+                                       0, n_valid) /
+                              static_cast<double>(n_valid)
+                        : std::numeric_limits<double>::quiet_NaN();
             // max(n-1, 1) rather than n-1, matching the Python's
-            // np.maximum(widths - 1.0, 1.0): a single-row date divides by
-            // one instead of zero, and is then caught by the std > 0 test.
-            const double denom = static_cast<double>(n > 1 ? n - 1 : 1);
+            // np.maximum(n_valid - 1.0, 1.0): a single usable entity divides
+            // by one instead of zero, and is then caught by the std > 0 test.
+            const double denom = static_cast<double>(n_valid > 1 ? n_valid - 1 : 1);
             const double sum_sq = pairwise_sum(
                 [buffer, mean](std::size_t i) {
                     const double delta = buffer[i] - mean;
                     return delta * delta;
                 },
-                0, n);
+                0, n_valid);
             const double stdev = std::sqrt(sum_sq / denom);
-            // No dispersion means every entity sits exactly at the mean, so
-            // the standardized value is 0.0 by definition -- not NaN, which
-            // would drop the whole date downstream.
+            // No dispersion means every PRESENT entity sits exactly at the
+            // mean, so its standardized value is 0.0 by definition -- not
+            // NaN, which would drop the whole date downstream.
             const bool usable = (stdev > 0.0) && std::isfinite(stdev);
 
             for (std::size_t i = 0; i < n; ++i) {
                 const std::size_t index = order[base + i] * n_cols + c;
-                double z = usable ? (values[index] - mean) / stdev : 0.0;
+                const double raw = values[index];
+                if (std::isnan(raw)) {
+                    // Absent stays absent.
+                    out[index] = raw;
+                    continue;
+                }
+                double z = usable ? (raw - mean) / stdev : 0.0;
                 if (!std::isfinite(z)) z = 0.0;
                 if (clip_sigma > 0.0) {
                     z = std::min(std::max(z, -clip_sigma), clip_sigma);

@@ -209,21 +209,44 @@ def standardize_cross_sectional(
 
     starts = np.flatnonzero(np.r_[True, codes_sorted[1:] != codes_sorted[:-1]])
     counts = np.diff(np.r_[starts, codes_sorted.size]).astype(np.float64)
-    widths = counts[:, None]
 
     # Per-date mean and (ddof=1) standard deviation, one reduceat pass per
     # statistic over the whole block rather than a groupby per column.
+    #
+    # NaN IS SKIPPED BY THE MOMENTS AND PRESERVED IN THE OUTPUT. It did not
+    # used to be: a plain reduceat propagates one NaN into the whole date's
+    # mean, and the final non-finite sweep then mapped every entity in that
+    # date to 0.0 -- so one missing name reported every OTHER name as
+    # sitting exactly at the cross-sectional mean. That is the specific
+    # fabricated observation panel_stats.hpp says this must not produce.
+    #
+    # It was known, deliberate and documented as a wart in panel_stats.cpp,
+    # on the reasoning that "in practice it never fires: alignment drops NaN
+    # rows before the panel reaches the engine." `load_external_panel` broke
+    # that premise -- an externally computed panel keeps its warm-up NaNs --
+    # so the wart became reachable and had to go.
+    row_counts = counts.astype(np.int64)
+    present = ~np.isnan(block)
+    n_valid = np.add.reduceat(present, starts, axis=0).astype(np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
-        mean = np.add.reduceat(block, starts, axis=0) / widths
-        centered = block - np.repeat(mean, counts.astype(np.int64), axis=0)
-        sum_sq = np.add.reduceat(centered * centered, starts, axis=0)
-        variance = sum_sq / np.maximum(widths - 1.0, 1.0)
+        total = np.add.reduceat(np.where(present, block, 0.0), starts, axis=0)
+        mean = total / np.where(n_valid > 0.0, n_valid, np.nan)
+        centered = block - np.repeat(mean, row_counts, axis=0)
+        sum_sq = np.add.reduceat(
+            np.where(present, centered * centered, 0.0), starts, axis=0
+        )
+        variance = sum_sq / np.maximum(n_valid - 1.0, 1.0)
         std = np.sqrt(variance)
         std = np.where(std > 0.0, std, np.nan)
-        standardized = centered / np.repeat(std, counts.astype(np.int64), axis=0)
+        standardized = centered / np.repeat(std, row_counts, axis=0)
 
-    # A flat cross-section leaves every entity exactly at the mean.
-    standardized = np.where(np.isfinite(standardized), standardized, 0.0)
+    # A PRESENT entity in a cross-section with no dispersion -- flat, or a
+    # single usable name -- sits exactly at the mean, so it is 0.0 rather
+    # than NaN, which would drop the whole date downstream. An ABSENT one
+    # stays absent.
+    standardized = np.where(
+        present, np.where(np.isfinite(standardized), standardized, 0.0), np.nan
+    )
     if clip_sigma > 0:
         np.clip(standardized, -clip_sigma, clip_sigma, out=standardized)
 

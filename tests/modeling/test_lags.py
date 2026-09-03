@@ -288,3 +288,27 @@ class TestThroughTheBuilder:
             "technical.rsi__lag3",
         }
         assert set(manifest.feature_importance_summary) <= set(manifest.feature_ids)
+
+
+class TestLagColumnsAreCheckedLikeAnyOtherFeature:
+    def test_the_finite_check_covers_them(self) -> None:
+        """
+        THE DEFECT THIS EXISTS TO CATCH. `build_model_dataset` refuses a
+        panel containing infinities, because inf reaching sklearn either
+        raises something cryptic or silently produces garbage. That check
+        listed the requested features and not the lag columns derived from
+        them -- and checking the source is not enough: it runs on the panel
+        AFTER alignment drops rows, so a bar carrying inf that was dropped
+        for another feature's NaN still hands its value to the next bar's
+        lag column, which survives.
+        """
+        import inspect
+
+        from standard_quant_tools.modeling.dataset import builder
+
+        source = inspect.getsource(builder.build_dataset)
+        assert "numeric_cols = list(expanded_names)" in source, (
+            "the finite check must cover the EXPANDED column list, or lag "
+            "columns bypass it"
+        )
+        assert "[fs.output_name for fs in spec.features] + (" not in source

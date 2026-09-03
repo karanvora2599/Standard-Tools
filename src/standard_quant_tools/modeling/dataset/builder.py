@@ -539,9 +539,13 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # straight into sklearn, which either raises a cryptic error or
     # silently produces garbage. Same enforcement point this codebase
     # already uses pervasively elsewhere (indicators, analysis, backtest).
-    numeric_cols = [fs.output_name for fs in spec.features] + (
-        ["target"] if include_target else []
-    )
+    # `expanded_names`, not the bare feature list: a LAG column is not
+    # covered by checking its source. The source is checked on the panel
+    # AFTER alignment has dropped rows, so a bar carrying inf that was
+    # dropped for some other feature's NaN still supplies its value to the
+    # next bar's lag column, which survives -- inf reaching sklearn through
+    # exactly the door this check exists to close.
+    numeric_cols = list(expanded_names) + (["target"] if include_target else [])
     for col in numeric_cols:
         require_finite_array(
             long_panel[col].to_numpy(dtype=float), col, "build_model_dataset"

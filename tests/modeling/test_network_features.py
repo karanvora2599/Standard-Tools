@@ -25,6 +25,7 @@ import pytest
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.features.network import (
     MIN_WINDOW,
+    _prim_degrees,
     _avg_correlation,
     _avg_correlation_at,
     _mst_degree,
@@ -248,3 +249,59 @@ class TestRegisteredAndUsable:
             "network.avg_correlation",
             "network.mst_degree",
         ]
+
+
+class TestAZeroDistanceEdgeIsStillAnEdge:
+    """
+    THE DEFECT THIS EXISTS TO CATCH. `scipy.sparse.csgraph`'s dense MST
+    reads a stored 0 as "no edge", and a perfectly correlated pair has
+    Mantegna distance sqrt(2(1-1)) = 0 -- so the edge the construction most
+    wants was the one silently dropped. Reachable through a dual listing, a
+    symbol repeated in a universe, or stale repeated prices.
+    """
+
+    def test_two_identical_series_are_joined_not_orphaned(self) -> None:
+        rng = np.random.default_rng(40)
+        base = rng.normal(0, 1, 300)
+        index = pd.date_range("2022-01-03", periods=300, freq="B")
+        degrees = _mst_degree_at(
+            pd.DataFrame({"A": base, "B": base.copy()}, index=index)
+        )
+        # A two-node spanning tree has exactly one edge; {0, 0} is not a
+        # tree, and it is what the scipy version returned.
+        assert degrees.to_dict() == {"A": 1.0, "B": 1.0}
+
+    def test_a_duplicate_inside_a_universe_keeps_the_tree_spanning(self) -> None:
+        rng = np.random.default_rng(41)
+        index = pd.date_range("2022-01-03", periods=300, freq="B")
+        columns = {f"E{i}": rng.normal(0, 1, 300) for i in range(6)}
+        columns["E1"] = columns["E0"].copy()
+        degrees = _mst_degree_at(pd.DataFrame(columns, index=index))
+        assert degrees.sum() == 2.0 * (len(degrees) - 1), "must span 6 nodes"
+        # The duplicate attaches to its twin at distance zero rather than
+        # being routed around.
+        assert degrees["E1"] >= 1.0
+        assert (degrees > 0).all(), "no entity is left out of the tree"
+
+    def test_prim_matches_a_hand_computed_tree(self) -> None:
+        """A path graph, where the spanning tree is the graph itself."""
+        distance = np.array(
+            [
+                [0.0, 1.0, 9.0, 9.0],
+                [1.0, 0.0, 2.0, 9.0],
+                [9.0, 2.0, 0.0, 3.0],
+                [9.0, 9.0, 3.0, 0.0],
+            ]
+        )
+        assert _prim_degrees(distance).tolist() == [1.0, 2.0, 2.0, 1.0]
+
+    def test_a_zero_weight_edge_is_chosen_over_a_positive_one(self) -> None:
+        distance = np.array(
+            [
+                [0.0, 0.0, 5.0],
+                [0.0, 0.0, 5.0],
+                [5.0, 5.0, 0.0],
+            ]
+        )
+        # Nodes 0 and 1 are at distance 0, so that edge must be in the tree.
+        assert _prim_degrees(distance).sum() == 4.0

@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.sparse.csgraph import minimum_spanning_tree
 
 from standard_quant_tools.error import ValidationError
 
@@ -99,6 +98,49 @@ def _avg_correlation_at(window_slice: pd.DataFrame):
     return pd.Series(means, index=matrix.columns)
 
 
+def _prim_degrees(distance: np.ndarray) -> np.ndarray:
+    """
+    Spanning-tree degree per node, by Prim over a DENSE distance matrix.
+
+    WHY NOT `scipy.sparse.csgraph.minimum_spanning_tree`. It reads a stored
+    zero as "no edge", and a perfectly correlated pair has Mantegna distance
+    sqrt(2(1-1)) = 0 -- so the single edge the construction most wants is
+    the one silently discarded. Two entities that move identically returned
+    degrees {0, 0}, and a two-node spanning tree has exactly one edge, so
+    the only possible answer was {1, 1}. In a larger universe the edge count
+    stayed right and the tree rerouted around the duplicate, corrupting
+    precisely the topology this feature exists to measure. Reachable through
+    a dual listing, a symbol repeated in a universe, or stale repeated
+    prices.
+
+    Prim carries no sparsity convention, so zero is an ordinary weight. It
+    is also faster here: the matrix is dense by construction, and building
+    a CSR graph to run Kruskal over it is work with nothing to show for it.
+    """
+    n = distance.shape[0]
+    degrees = np.zeros(n, dtype="float64")
+    if n < 2:
+        return degrees
+    in_tree = np.zeros(n, dtype=bool)
+    best = np.full(n, np.inf)
+    parent = np.full(n, -1, dtype=np.int64)
+    best[0] = 0.0
+    for _ in range(n):
+        candidate = np.where(in_tree, np.inf, best)
+        node = int(np.argmin(candidate))
+        if not np.isfinite(candidate[node]):
+            break  # a disconnected component; the rest have no edge to add
+        in_tree[node] = True
+        if parent[node] >= 0:
+            degrees[node] += 1.0
+            degrees[parent[node]] += 1.0
+        weights = distance[node]
+        closer = (~in_tree) & (weights < best)
+        best[closer] = weights[closer]
+        parent[closer] = node
+    return degrees
+
+
 def _mst_degree_at(window_slice: pd.DataFrame):
     """Each entity's degree in the correlation-distance spanning tree."""
     matrix = _correlation(window_slice)
@@ -106,16 +148,12 @@ def _mst_degree_at(window_slice: pd.DataFrame):
         return None
     rho = matrix.to_numpy(dtype="float64")
     # An unestimable pair gets the maximum distance rather than zero: zero
-    # would read as "perfectly correlated" and pull the tree through a pair
-    # that was never measured.
+    # is the CLOSEST possible pair, so using it for "never measured" would
+    # pull the tree straight through a pair nobody observed.
     rho = np.where(np.isfinite(rho), rho, -1.0)
     distance = np.sqrt(np.clip(2.0 * (1.0 - rho), 0.0, None))
     np.fill_diagonal(distance, 0.0)
-    tree = minimum_spanning_tree(distance).toarray()
-    # csgraph returns the tree directed and one-sided, so an edge appears
-    # once; degree counts it from both ends.
-    adjacency = (tree > 0) | (tree.T > 0)
-    return pd.Series(adjacency.sum(axis=1).astype("float64"), index=matrix.columns)
+    return pd.Series(_prim_degrees(distance), index=matrix.columns)
 
 
 def _rolling_network(
