@@ -61,6 +61,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - install-shape error
 
 from standard_quant_tools import __version__ as _sqt_version
 from standard_quant_tools.error import QuantError
+from standard_quant_tools.mcp import progress as _progress
 from standard_quant_tools.mcp import prompts as _prompts
 from standard_quant_tools.mcp import resources as _resources
 from standard_quant_tools.mcp.catalog import (
@@ -261,7 +262,7 @@ class StandardToolsServer:
 
     async def call_tool(
         self,
-        _ctx: ServerRequestContext[Any],
+        ctx: ServerRequestContext[Any],
         params: types.CallToolRequestParams,
     ) -> types.CallToolResult:
         entry = self.entries.get(params.name)
@@ -274,10 +275,15 @@ class StandardToolsServer:
         try:
             # The library's tools are synchronous and some are slow, so they
             # run on a worker thread -- otherwise one backtest blocks the
-            # event loop and the server stops answering pings.
-            result = await anyio.to_thread.run_sync(
-                lambda: dispatch(entry.name, arguments)
-            )
+            # event loop and the server stops answering pings. That same
+            # decision is what leaves the loop free to emit the heartbeat
+            # below while the work proceeds.
+            async with _progress.report_liveness(
+                ctx, entry.name, interval=self.config.heartbeat_seconds
+            ):
+                result = await anyio.to_thread.run_sync(
+                    lambda: dispatch(entry.name, arguments)
+                )
         except QuantError as exc:
             # The library's own errors are written to be self-correcting, so
             # they go back verbatim rather than being flattened to

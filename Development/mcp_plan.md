@@ -600,5 +600,17 @@ constructing an object the SDK rejects, which all 46 in-process tests had
 passed over. §5's "the server holds no logic" survived contact — nothing in
 `standard_quant_tools/mcp/` computes anything.
 
-Phase 3 (progress notifications, cancellation, the process-pool matrix,
-dynamic toolsets, HTTP transport) remains unbuilt and remains deferred.
+Phase 3 was listed here as unbuilt in full. Two of its items have since
+landed: the **HTTP transport** (`mcp/http.py`) and **progress
+notifications** (`mcp/progress.py`, `--heartbeat`) — the latter carrying
+elapsed time and no `total`, because the server dispatches an opaque
+synchronous call and any completion estimate would be invented.
+
+**Cancellation, the process-pool matrix and dynamic toolsets remain
+unbuilt.** Cancellation is not independent of the pool: the tools are
+synchronous CPU-bound Python and a thread cannot be killed, so a cancelled
+request can stop waiting but cannot stop working. Abandoning the thread
+would also leave it writing into the runs directory behind a caller who
+believes the call is over. Doing it properly means running tools in a
+subprocess that can be terminated, which is why the plan listed the two
+together.

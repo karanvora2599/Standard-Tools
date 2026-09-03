@@ -14,6 +14,60 @@ that preceded them found that eleven of the thirteen L2 features a bigger
 plan proposed were already shipped — so the work was to feed what exists
 rather than to build it again.
 
+### Minutes of silence are indistinguishable from a hung server
+
+`--enable-long-running` exposes `scan_pairs` (measured at 5.31 minutes over
+a 2,000-ticker universe) and `run_backtest_optimization`. Hiding them by
+default was half a solution: enabled, they ran as silence, and a client's
+usual response to silence is a timeout that abandons work about to finish.
+The tools were reachable and not really usable.
+
+The server now emits `notifications/progress` every `--heartbeat` seconds
+while a tool runs.
+
+**No `total`, ever.** The server dispatches an opaque synchronous call into
+the library; there is no progress hook, so any completion estimate would be
+invented. `progress` with no `total` is exactly how the protocol says
+"still working, completion unknown", and a client renders it as an
+indeterminate spinner. A fabricated total renders as a BAR, and a bar that
+stops at 90% is worse than no bar -- it converts "I do not know" into a
+specific false claim.
+
+**Elapsed seconds, because the protocol requires the value to increase.**
+Any fraction-of-work estimate can be revised downward and would violate
+that; elapsed time cannot.
+
+**Only when asked, and never at the caller's expense.** Nothing is sent
+without a `progressToken`. If the stream is closed or the client has gone,
+the notification is dropped and the tool still returns -- failing a call
+because its progress note could not be delivered would turn a cosmetic
+problem into a lost result.
+
+**A defect this introduced, caught by its own test.** A task group re-raises
+whatever escaped it WRAPPED in an ExceptionGroup. `call_tool` catches
+QuantError to return the library's own self-correcting message verbatim,
+and wrapped, that except clause stopped matching: `describe_tool` with a bad
+argument went from
+
+    ValidationError: 2 validation errors for DescribeToolInput
+    tool_name -- Field required
+
+to
+
+    ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+
+for exactly the clients that asked for progress, and no others. Every
+self-correcting message the server exists to pass through would have
+collapsed the same way. `report_liveness` now unwraps a single-exception
+group, so adding a heartbeat cannot change what a block raises.
+
+**What this is not.** It is not cancellation. The tools are synchronous
+CPU-bound Python and a thread cannot be killed, so a client that gives up
+stops listening while the work runs to completion. Stopping it needs the
+process pool Phase 3 still has open -- abandoning the thread would leave it
+writing into the runs directory behind a caller who believes the call is
+over.
+
 ### Three defects in the estimators and diagnostics just added
 
 Found by going back over the newest code rather than by a failing test,

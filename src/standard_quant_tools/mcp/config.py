@@ -57,6 +57,11 @@ from standard_quant_tools.mcp.catalog import (
 #: reported in every truncated result so nothing is ever silently dropped.
 DEFAULT_INLINE_LIMIT = 4096
 
+#: Seconds between liveness notifications while a tool runs. Only sent
+#: when the client supplies a progressToken; see mcp/progress.py for why
+#: they carry elapsed time and no total.
+DEFAULT_HEARTBEAT_SECONDS = 5.0
+
 #: The context a client may be told it is spending, in bytes, or None for
 #: no ceiling at all. **Uncapped by default.**
 #:
@@ -130,6 +135,7 @@ class ServerConfig:
     tool_detail: str = "auto"
     detail_budget: int = DEFAULT_DETAIL_BUDGET
     enable_long_running: bool = False
+    heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS
     transport: str = "stdio"
     host: str = "127.0.0.1"
     port: int = DEFAULT_HTTP_PORT
@@ -231,6 +237,19 @@ def build_parser() -> argparse.ArgumentParser:
             "context (321 KB across all 198 tools) and is off by default: "
             "structuredContent is returned either way, and the declaration "
             "only helps clients that validate against it."
+        ),
+    )
+    parser.add_argument(
+        "--heartbeat",
+        type=float,
+        default=DEFAULT_HEARTBEAT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Seconds between liveness notifications while a tool runs. Sent "
+            "only to clients that supplied a progressToken, and they carry "
+            "elapsed time with NO total -- the server dispatches an opaque "
+            "call and cannot know how far through it is. 0 disables them. "
+            f"Default: {DEFAULT_HEARTBEAT_SECONDS}."
         ),
     )
     parser.add_argument(
@@ -557,6 +576,8 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
         raise SystemExit(f"sqt-mcp: {exc}") from None
     if args.inline_limit < 0:
         raise SystemExit("sqt-mcp: --inline-limit must be >= 0")
+    if args.heartbeat < 0:
+        raise SystemExit("sqt-mcp: --heartbeat must be >= 0")
 
     warnings: List[str] = []
     transport = _resolve_transport(args, warnings)
@@ -573,6 +594,7 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
         tool_detail=args.tool_detail,
         detail_budget=args.detail_budget,
         enable_long_running=bool(args.enable_long_running),
+        heartbeat_seconds=float(args.heartbeat),
         warnings=tuple(warnings),
         **transport,
         **dirs,
@@ -657,6 +679,12 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
         f"  output schemas    : {'declared' if config.include_output_schemas else 'omitted (structuredContent still sent)'}",
         f"  inline limit      : {config.inline_limit_bytes} bytes",
         f"  long-running tools: {'enabled' if config.enable_long_running else 'hidden'}",
+        f"  heartbeat: "
+        + (
+            f"every {config.heartbeat_seconds:g}s when a client asks"
+            if config.heartbeat_seconds > 0
+            else "off"
+        ),
     ]
     for attr, env_var, _purpose in _ENV_DIRS:
         value = getattr(config, attr)

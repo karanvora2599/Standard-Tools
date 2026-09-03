@@ -97,6 +97,26 @@ def _exposes_coefficients(estimator_cls: type) -> bool:
     return hasattr(estimator_cls, "coef_")
 
 
+def _probes_true(estimator_cls: type, attribute: str) -> bool:
+    """
+    Whether a DEFAULT instance really exposes `attribute`.
+
+    `hasattr` on the class is not the same question when sklearn guards a
+    method with `available_if`: the descriptor is present on the class and
+    only raises when accessed on an instance whose configuration does not
+    support it. Falls back to the class check when the estimator cannot be
+    constructed without arguments, which is the best answer available then.
+
+    A conditional capability is reported for the DEFAULT configuration --
+    an estimator can still be configured out of it, and the registry's
+    allowlist is what keeps that from happening silently.
+    """
+    try:
+        return hasattr(estimator_cls(), attribute)
+    except Exception:  # pragma: no cover - estimator needs constructor args
+        return hasattr(estimator_cls, attribute)
+
+
 class ModelAdapter:
     """Base adapter: the flat-matrix, `fit(X, y)` case every sklearn
     estimator satisfies. Subclasses override only what differs."""
@@ -170,7 +190,14 @@ class ModelAdapter:
             "score_has_scale": self.score_has_scale,
             "supports_sample_weight": "sample_weight" in fit_params,
             "supports_partial_fit": hasattr(estimator_cls, "partial_fit"),
-            "supports_probability": hasattr(estimator_cls, "predict_proba"),
+            # NOT hasattr on the class. sklearn guards some methods with
+            # `available_if`, a descriptor that EXISTS on the class and
+            # raises only on instance access -- so SGDClassifier reported
+            # supports_probability=True while an instance carrying its
+            # default hinge loss has no predict_proba at all. Probing a
+            # default instance describes the estimator as it would actually
+            # be built, which is what this dict claims to do.
+            "supports_probability": _probes_true(estimator_cls, "predict_proba"),
             "exposes_coefficients": _exposes_coefficients(estimator_cls),
             # A property on the class, so hasattr sees it before fitting.
             # Correctly False for HistGradientBoosting, which genuinely has

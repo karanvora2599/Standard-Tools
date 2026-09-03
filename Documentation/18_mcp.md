@@ -421,6 +421,7 @@ own decisions is not audited by it.
 | `--inline-limit` | `4096` | Results larger than this are stored and returned as a summary plus a `sqt://result/...` link. |
 | `--output-schemas` | off | Declare `outputSchema` per tool. **Roughly doubles the context cost.** `structuredContent` is returned either way, so this only helps clients that validate against the schema. |
 | `--enable-long-running` | off | Expose `scan_pairs` and `run_backtest_optimization`. |
+| `--heartbeat` | `5.0` | Seconds between liveness notifications while a tool runs. Sent only to clients that supplied a `progressToken`. `0` disables them. |
 | `--print-budget` | — | Print the per-runtime and per-category tables above, and exit. |
 | `--transport` | `stdio` | `stdio` or `http`. See [Running as a service](#running-as-a-service-http). |
 | `--host` | `127.0.0.1` | Bind address. Anything else needs a token and `--allow-host`. |
@@ -448,6 +449,42 @@ default client timeout, and a timeout that fires after most of the work is
 done is worse than not offering the tool. `run_screener` is *not* hidden —
 its runtime is set by the universe you pass rather than being long by
 nature — but it carries a runtime note in its description.
+
+### Liveness, and why there is no percentage
+
+Hiding those tools was only half the problem. Enabled, they ran as minutes
+of silence — which to a client is indistinguishable from a hung server, and
+the usual response is a timeout that abandons work about to finish.
+
+While a tool runs, the server now emits `notifications/progress` every
+`--heartbeat` seconds, carrying **elapsed seconds and no `total`**. That is
+deliberate and it is the whole design:
+
+- The server dispatches an opaque synchronous call into the library. There
+  is no progress hook, so any completion estimate would be invented.
+- `progress` with no `total` is exactly how the protocol says *still
+  working, completion unknown*, and clients render it as an indeterminate
+  spinner. A fabricated total renders as a **bar**, and a bar that stops at
+  90% is worse than no bar — it turns "I do not know" into a specific false
+  claim.
+- The protocol requires `progress` to increase for a token. Elapsed time
+  does by construction; a revised fraction-of-work estimate can go
+  backwards.
+
+Notifications go out **only** if the client supplied a `progressToken` —
+sending them unrequested is noise aimed at a client that never said it
+could display them. A heartbeat is also a courtesy and never a cost: if the
+stream is closed or the client has gone, the notification is dropped and
+the tool still returns its result.
+
+This works because `call_tool` already runs the library on a worker thread
+so one backtest cannot block the event loop; that same decision leaves the
+loop free to send heartbeats while the work proceeds.
+
+**What this is not.** It is not cancellation. The library's tools are
+synchronous CPU-bound Python, and a thread cannot be killed — stopping one
+mid-flight needs the process pool that Phase 3 still has open. A client
+that gives up stops *listening*; the work continues to completion.
 
 ---
 
