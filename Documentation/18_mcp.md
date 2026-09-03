@@ -145,12 +145,12 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 207 tools cost about **349 KB of schema, ~89,000 tokens**, held for the
+The 207 tools cost about **350 KB of schema, ~90,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
-1,726 bytes and the session ceiling that used to be 180,000 would buy about 104 tools.
+1,730 bytes and the session ceiling that used to be 180,000 would buy about 104 tools.
 There are 207. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
@@ -169,7 +169,7 @@ sqt-mcp --print-budget
 ```
 runtime              tools    bytes   ~tokens
 backtest                35   82,037    20,509
-modeling                20   59,803    14,950
+modeling                20   60,622    15,155
 research                42   47,772    11,943
 delta_one               18   38,529     9,632
 portfolio               18   32,094     8,023
@@ -178,12 +178,12 @@ feature_lab              9   22,121     5,530
 data                    17   18,956     4,739
 derivatives             12   17,878     4,469
 meta                    19   14,489     3,622
-all                    207  357,191    89,297
+all                    207  358,010    89,502
 
   a client is served ONE runtime: backtest is the most expensive at 82,037 bytes (23% of the total).
 
 category             tools    bytes   ~tokens
-modeling                20   59,803    14,950
+modeling                20   60,622    15,155
 delta_one               18   38,529     9,632
 backtest_validation     21   38,114     9,528
 backtest_execution      12   37,041     9,260
@@ -215,17 +215,17 @@ preference wearing a limit's clothes.
 What replaces it is measurement. `--print-budget` reports what each runtime
 costs, `estimate_tool_cost` reports it to an agent, and `--tool-detail auto`
 keeps the served size well under the full-detail figure without anyone
-having to pick a threshold: `backtest` serves at 34 KB against 73 KB full.
+having to pick a threshold: `backtest` serves at 42 KB against 89 KB full.
 
 **Tool count and cost are barely related**, which is the useful thing to
-know when picking. `analysis` carries 12 tools for 13.8 KB; `custom_signal`
-carries 2 for 6.7 KB -- a sixth of the tools for half the bytes. `modeling`
-and `backtest_validation` are two categories out of thirteen and a third of
-the surface between them. Choosing by how many tools a category holds gets
-the budget almost exactly backwards.
+know when picking. `analysis` carries 14 tools for 16.9 KB; `custom_signal`
+carries 2 for 6.7 KB — a seventh of the tools for two-fifths of the bytes.
+`modeling` and `backtest_validation` are two categories out of fifteen and
+more than a quarter of the surface between them. Choosing by how many tools
+a category holds gets the budget almost exactly backwards.
 
-The default — `screener,analysis,quant_research,discovery`, 53 tools,
-~13k tokens — covers screening, risk and technical snapshots, the
+The default — `screener,analysis,quant_research,discovery`, 55 tools,
+~15k tokens — covers screening, risk and technical snapshots, the
 factor/cointegration/Hurst research path, the statistical diagnostics
 (stationarity, structural breaks, bootstrap intervals, seasonality), and
 the offline discovery tools.
@@ -596,9 +596,9 @@ rate limit whether or not anything is mutated. See
 
 ## Architecture notes
 
-**Ten runtimes, one server.** Twelve of the fourteen categories come from
-the 152-tool analysis surface, spread across seven runtimes; the other two
-are the separate 17-tool `modeling` and 9-tool `feature_lab` runtimes. They
+**Ten runtimes, one server.** Thirteen of the fifteen categories come from
+the 178-tool analysis surface, spread across eight runtimes; the other two
+are the separate 20-tool `modeling` and 9-tool `feature_lab` runtimes. They
 stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
 dispatcher, so schemas and executor are never chosen separately, and a tool
 served from `research` is executed by a table holding only research tools —

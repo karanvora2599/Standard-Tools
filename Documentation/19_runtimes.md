@@ -155,8 +155,8 @@ a changelog nobody reads, embedded in an error message everybody does.
 
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
-decision, though the budget forced it: at roughly 1,638 bytes per tool over
-the wire the session ceiling buys about 110 tools and the library has 200,
+decision, though the budget forced it: at roughly 1,730 bytes per tool over
+the wire the session ceiling buys about 104 tools and the library has 207,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 

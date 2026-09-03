@@ -93,12 +93,12 @@ like a library bug rather than a request the data could not support.
 
 **Inputs are synthesized from the schema**, not hand-written. A hand-written
 fixture list covers the tools that existed when it was written — which makes
-the newest tools, where the bugs are, precisely the ones never fuzzed. 202
-of 203 tools get a valid baseline and ten mutation families per numeric
+the newest tools, where the bugs are, precisely the ones never fuzzed. All
+207 tools get a valid baseline and ten mutation families per numeric
 argument: empty, single-element, all-identical, all-zero, NaN, infinity,
 1e300, 1e-300, negated, truncated.
 
-**The one tool without a baseline is named, and that is the point.** For
+**A tool without a baseline is named, and that is the point.** For
 most of this layer's life the collector wrapped synthesis in
 `except Exception: continue`, so a tool the synthesizer could not build left
 the fuzz set silently — the parametrization simply got smaller, which looks
@@ -108,8 +108,9 @@ six modeling tools. The floor guard that was supposed to notice asked for
 100 synthesizable tools out of a surface that had 178, so there were 78
 tools of headroom for the gap to grow in.
 
-`EXPECTED_UNSYNTHESIZABLE` now declares every absence with its reason, and
-two guards hold it in place: an undeclared gap fails, and a declared gap
+`EXPECTED_UNSYNTHESIZABLE` declares every absence with its reason, and is at
+present EMPTY -- every one of the 207 tools is synthesizable, so every
+one is fuzzed. Two guards hold it that way: an undeclared gap fails, and a declared gap
 that has since been fixed also fails, so the list cannot become a place
 exemptions accumulate. The floor is expressed against the live surface
 rather than a constant, because a fixed number turns into slack the moment

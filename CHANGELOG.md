@@ -14,6 +14,62 @@ that preceded them found that eleven of the thirteen L2 features a bigger
 plan proposed were already shipped — so the work was to feed what exists
 rather than to build it again.
 
+### The guard matched three phrasings, and the count rotted in the other four
+
+A sweep of all 19,000 lines of documentation against the live registries.
+The interesting part is not the wrong numbers -- it is that a guard already
+existed for exactly this and let them through.
+
+`test_every_whole_surface_count_is_current` matched "The N tools", "Every
+one of the N tools" and "Serving all N tools". The docs also say "returns
+174 LLM-callable tools", "handing the model all 174 tools", "the 174-tool
+surface" and "index of all 200 tools" -- and every one of those rotted
+across several releases while the guard passed on every run.
+
+**What was wrong.** The analysis facade was quoted as 174 in seven files and
+is 178. `modeling` was quoted as 17 or 16 and is 20. The MCP architecture
+note described a 152-tool surface across seven runtimes and eight
+categories; it is 178 across eight runtimes and thirteen. The README's
+per-runtime table was wrong on three rows at once -- `data` 14 against 17,
+`modeling` 17 against 20, `microstructure` 16 against 17 -- because the
+identical table in `19_runtimes.md` was guarded and the README's was not.
+`25_testing.md` still described "the one tool without a baseline" when
+`EXPECTED_UNSYNTHESIZABLE` has been empty for some time and all 207 tools
+are fuzzed. Test counts, schema sizes and the per-category figures were all
+from earlier surfaces.
+
+**Two figures were not merely stale, they were incomparable.** The README
+quoted full-detail sizes from `--print-budget`, which counts bare schema
+bytes, beside `--tool-detail auto` sizes from the server, which count the
+envelope actually sent -- in one sentence, as if one instrument had produced
+both. Measured consistently, `auto` is never larger than `full`; measured
+the way the README had it, six of the ten runtimes came out larger under
+`auto` than under `full`, which is nonsense that reads as a real finding.
+Both numbers are now labelled with the instrument that produced them.
+
+**A guard that forbade the right answer.** `test_wrong_numbers.py` kept a
+list of phrases that must not reappear in the source, and "178 tools" was
+on it -- correct when the facade was a different size, and now a rule
+against stating the truth. Removed, with the reason recorded: a guard that
+outlaws the current answer teaches the next person to write something
+vaguer to get past it.
+
+**What replaces the narrow guard.** Any three-digit count of tools anywhere
+in the docs must now be one of the two real surface sizes. That works
+because every scoped count is two digits -- the largest runtime is
+`research` at 42 -- so a three-digit number here is always a claim about
+the whole surface or about the facade. Genuine exceptions (a capacity
+figure, a sentence explicitly about history) are declared with their reason
+rather than pattern-matched away, so the list cannot become a place stale
+numbers hide. The runtime-table check now covers the README as well as
+`19_runtimes.md`. Verified by injecting a stale count and watching it fail
+with the file, line and value.
+
+**What was checked and found correct**, so it is not guessed at next time:
+every cross-document link and anchor, every feature id, every registered
+estimator, every provider name, and every tool -- all 23 features, 17
+estimators and 207 tools appear in the documentation.
+
 ### Minutes of silence are indistinguishable from a hung server
 
 `--enable-long-running` exposes `scan_pairs` (measured at 5.31 minutes over

@@ -278,7 +278,7 @@ class TestCountsInProseAreReal:
     }
 
     def test_every_spelled_out_runtime_count_is_current(self, runtimes):
-        """
+        r"""
         THE HOLE EVERY OTHER GUARD IN THIS CLASS LEFT OPEN.
 
         The rest match `(\d+)`. Every runtime guide opens by SPELLING its
@@ -359,10 +359,19 @@ class TestCountsInProseAreReal:
                 )
         assert not wrong, wrong
 
-    def test_the_runtime_table_counts_match(self, runtimes):
-        """19_runtimes.md carries a per-runtime table, and every row is a
-        claim about a number that changes whenever a tool is added."""
-        text = (DOCS / "19_runtimes.md").read_text(encoding="utf-8")
+    @pytest.mark.parametrize("source", ["19_runtimes.md", "README.md"])
+    def test_the_runtime_table_counts_match(self, runtimes, source):
+        """
+        Both files carry a per-runtime table, and every row is a claim about
+        a number that changes whenever a tool is added.
+
+        The README was NOT checked here until it had drifted on three rows
+        at once -- `data` said 14 against 17, `modeling` 17 against 20,
+        `microstructure` 16 against 17. One table being guarded and an
+        identical one beside it not being guarded is how that happens.
+        """
+        path = README if source == "README.md" else DOCS / source
+        text = path.read_text(encoding="utf-8")
         wrong = []
         for name, rt in runtimes.items():
             row = re.search(rf"^\| `{name}` \| (\d+) \|", text, re.MULTILINE)
@@ -370,7 +379,7 @@ class TestCountsInProseAreReal:
                 wrong.append(f"{name}: no row")
             elif int(row.group(1)) != len(rt):
                 wrong.append(f"{name}: doc says {row.group(1)}, actual {len(rt)}")
-        assert not wrong, wrong
+        assert not wrong, f"{source}: {wrong}"
 
 
 class TestLinksResolve:
@@ -439,3 +448,73 @@ class TestTheDescriptionsAreUsable:
             lowered = description.lower()
             assert "fetch the chain" not in lowered
             assert "download the option" not in lowered
+
+
+class TestNoStaleWholeSurfaceCountSurvivesInAnyPhrasing:
+    """
+    THE ROT THIS EXISTS TO CATCH, and why the previous guard missed it.
+
+    `test_every_whole_surface_count_is_current` matched three phrasings --
+    "The N tools", "Every one of the N tools", "Serving all N tools". The
+    docs also say "returns 174 LLM-callable tools", "all 174 tools", "the
+    174-tool surface" and "index of all 200 tools", and every one of those
+    rotted undetected across several releases while the guard passed.
+
+    This checks the SHAPE instead of the phrasing: any three-digit count of
+    tools anywhere in the documentation must be one of the two real surface
+    sizes. That works because every scoped count is two digits -- the
+    largest runtime is `research` at 42 -- so a three-digit number in this
+    library is always a claim about the whole surface or about the analysis
+    facade, and there is no third option to confuse it with.
+
+    Genuine exceptions are declared with a reason rather than pattern-matched
+    away, the same discipline `EXPECTED_UNSYNTHESIZABLE` applies, so the
+    list cannot quietly become a place stale numbers go to hide.
+    """
+
+    #: (file, number) -> why this three-digit count is not a surface claim.
+    ALLOWED = {
+        ("18_mcp.md", 104): "capacity: 180,000 bytes divided by the average "
+        "schema size, not a count of anything that exists",
+        ("19_runtimes.md", 104): "the same capacity figure",
+        ("25_testing.md", 157): "history: the surface size BEFORE tests/docs "
+        "existed, in a sentence that says so",
+    }
+
+    def test_every_three_digit_tool_count_is_a_real_surface(self, all_tools):
+        from standard_quant_tools.agent.tools import TOOL_CATEGORY
+
+        real = {len(all_tools), len(TOOL_CATEGORY)}
+        stale = []
+        for doc in sorted(DOCS.glob("*.md")) + [README]:
+            text = doc.read_text(encoding="utf-8", errors="ignore")
+            for match in re.finditer(r"(\d{3})[ -]tools?\b", text):
+                value = int(match.group(1))
+                if value in real:
+                    continue
+                if (doc.name, value) in self.ALLOWED:
+                    continue
+                line = text[: match.start()].count("\n") + 1
+                stale.append(f"{doc.name}:{line} says {value}")
+        assert not stale, (
+            f"the surface is {sorted(real)} tools (whole, then analysis "
+            f"facade); these say otherwise: {stale}"
+        )
+
+    def test_the_allowlist_holds_no_entry_that_is_now_a_real_count(self, all_tools):
+        """An exemption that became true is an exemption nobody needs."""
+        from standard_quant_tools.agent.tools import TOOL_CATEGORY
+
+        real = {len(all_tools), len(TOOL_CATEGORY)}
+        stale = [key for key in self.ALLOWED if key[1] in real]
+        assert not stale, f"remove these, they are real counts now: {stale}"
+
+    def test_the_allowlist_is_still_needed(self):
+        """A declared exception whose text has gone is dead weight."""
+        unused = []
+        for (name, value), reason in self.ALLOWED.items():
+            doc = DOCS / name if (DOCS / name).exists() else README
+            text = doc.read_text(encoding="utf-8", errors="ignore")
+            if not re.search(rf"{value}[ -]tools?\b", text):
+                unused.append(f"{name}:{value} ({reason})")
+        assert not unused, f"no longer present, so delete: {unused}"

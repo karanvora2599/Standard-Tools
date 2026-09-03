@@ -1753,9 +1753,12 @@ class TestUserVisibleCountsAreReal:
     than a general count checker, so it fails loudly if one comes back.
     """
 
+    # "178 tools" and "all 178" were on this list and have been REMOVED:
+    # 178 is now the correct size of the analysis facade, so forbidding the
+    # phrase would reject a true statement. A guard that outlaws the current
+    # answer is worse than no guard -- it teaches the next person to write
+    # something vaguer to get past it.
     STALE = [
-        "178 tools",
-        "all 178",
         "145 tools",
         "eight runtimes",
         "62 tools regardless",
@@ -1785,7 +1788,7 @@ class TestUserVisibleCountsAreReal:
         assert len(runtimes) == 10
         assert sum(len(r.tool_names) for r in runtimes.values()) == 207
         assert len(build_catalog()) == 207
-        # 204 minus the 18 modeling and 9 feature_lab tools, which are
+        # 207 minus the 20 modeling and 9 feature_lab tools, which are
         # deliberately outside the analysis facade.
         assert len(TOOL_CATEGORY) == 178
 
