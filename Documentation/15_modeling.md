@@ -883,6 +883,41 @@ over the lag columns is the same hypothesis class with no dependency, and
 it runs inside the walk-forward loop that already exists. That is the whole
 reason torch is not a dependency of this package.
 
+Measured on a panel built so the label depends on `f[t]`, `f[t-1]` and
+`f[t-2]` — 2,988 rows, walk-forward, 5-bar embargo:
+
+| model | OOS r2 | IC |
+|---|---|---|
+| ridge, current value only | 0.2857 | 0.5405 |
+| **ridge, + 2 lags** | **0.5499** | **0.7428** |
+| mlp, + 2 lags | 0.5346 | 0.7339 |
+
+The window nearly doubles R2, and the MLP **loses** to ridge on a linear
+truth. Both facts are the point: history is worth having, and a network is
+not free. If an MLP over the lag columns cannot beat a ridge over the same
+columns, a TCN's extra machinery has even less to justify it.
+
+### Why there is no multi-output estimator
+
+`MultiOutputRegressor` fits one estimator per output, so it is
+arithmetically identical to running N experiments against a panel
+registered with N labels — which `TargetSpec.horizons` already does, over
+the same rows and folds. Only a shared-parameter model computes anything
+new, so that is what was measured, on three labels driven by one shared
+latent — the most favourable case such a model can be given:
+
+| model | h1 | h5 | h20 |
+|---|---|---|---|
+| 3 independent MLPs | 0.5299 | 0.3331 | 0.1993 |
+| 1 shared-head MLP | 0.5300 | 0.3331 | 0.2034 |
+
+**+0.0014 mean R2.** Against that, the OOS frame would grow a column per
+horizon, `ModelManifest.target_id` would stop being a single value, and
+`portfolio_eval`'s pivot, the backtest bridge and `score_predictions` would
+all change shape. Run the horizons as separate experiments instead — they
+already share the panel, the rows and the folds, which is what made them
+comparable in the first place.
+
 ### The two optional boosters, and why they are worth installing
 
 Measured on this pipeline — 50 entities, 73,400 panel rows, one

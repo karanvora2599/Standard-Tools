@@ -14,6 +14,69 @@ that preceded them found that eleven of the thirteen L2 features a bigger
 plan proposed were already shipped — so the work was to feed what exists
 rather than to build it again.
 
+### Measured: the lag window, and the multi-output decision
+
+A panel built so the label depends on the recent PATH of a feature --
+`0.25*f[t] + 0.45*f[t-1] + 0.30*f[t-2]` plus noise, 2,988 rows over 6
+entities, walk-forward with a 250-bar train window and a 5-bar embargo. The
+history IS the signal by construction, so a model denied it cannot reach
+the achievable R2 however flexible it is.
+
+| model | OOS r2 | IC |
+|---|---|---|
+| ridge, current value only | 0.2857 | 0.5405 |
+| **ridge, + 2 lags** | **0.5499** | **0.7428** |
+| mlp, current value only | 0.2833 | 0.5389 |
+| mlp, + 2 lags | 0.5346 | 0.7339 |
+| sgd (huber), + 2 lags | 0.5513 | 0.7432 |
+
+**The window nearly doubles R2.** That is the case for `FeatureSpec.lags`,
+and it is the whole case for sequence modelling here.
+
+**The MLP does not beat ridge, it loses to it** -- 0.5346 against 0.5499 on
+a truth that is linear, which this one is. That is the honest result and it
+is worth stating plainly: a network is not free, and on a panel this size
+its extra capacity is spent on noise. It earns its keep when the
+relationship is not linear, and the way to find out is to run both, which
+costs one extra call.
+
+**This is also the strongest argument against a torch dependency.** If an
+MLP over the lag columns cannot beat a ridge over the same columns, the
+additional machinery a TCN brings -- weight sharing across lag positions --
+has even less to justify it at this depth.
+
+#### Why there is no multi-output estimator
+
+Fitting one model that predicts several horizons at once has exactly one
+form that is not already available. `MultiOutputRegressor` fits one
+estimator per output, so it is arithmetically identical to running N
+experiments against a panel registered with N labels -- which
+`TargetSpec.horizons` and `register_external_panel(targets=[...])` already
+do, over the same rows and the same folds. Only a model that SHARES
+parameters across outputs, such as a network with N heads, computes
+anything new.
+
+So that is what was measured, on three labels driven by one shared latent
+plus independent noise -- the single most favourable case a shared
+representation can be given:
+
+| model | h1 | h5 | h20 |
+|---|---|---|---|
+| 3 independent MLPs | 0.5299 | 0.3331 | 0.1993 |
+| 1 shared-head MLP, 3 outputs | 0.5300 | 0.3331 | 0.2034 |
+| 3 independent ridges | 0.5510 | 0.3406 | 0.1964 |
+
+**Sharing gains +0.0014 mean R2.** Against that: the out-of-sample
+prediction frame grows a column per horizon, `ModelManifest.target_id`
+stops being a single value, and `portfolio_eval`'s pivot, the backtest
+bridge and `score_predictions` all change shape. Three independent ridges
+beat both networks on two of the three horizons anyway.
+
+The measurement is a spike, not a validation -- one split, one
+architecture, synthetic data. It does not need to be more than that: the
+effect it found is 0.0014 and the change it would justify touches five
+modules and every persisted prediction frame.
+
 ### The window has to be in the columns, so torch is not a dependency
 
 `engine.py` hands every estimator a 2-D X whose rows are (date, entity)
