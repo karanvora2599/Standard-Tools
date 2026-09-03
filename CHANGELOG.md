@@ -14,6 +14,43 @@ that preceded them found that eleven of the thirteen L2 features a bigger
 plan proposed were already shipped — so the work was to feed what exists
 rather than to build it again.
 
+### Three defects in the estimators and diagnostics just added
+
+Found by going back over the newest code rather than by a failing test,
+which is why they are worth writing down: each produced a plausible result
+or a confusing crash rather than an error anybody would attribute.
+
+**A bare `sgd` classifier could not finish training.** sklearn's
+SGDClassifier defaults to `loss='hinge'`, which has no `predict_proba` --
+and `adapters.score` asks every classifier for one on every fold. So
+`EstimatorSpec(type="sgd")` trained for three folds and then died inside
+sklearn's internals with `AttributeError: This 'SGDClassifier' has no
+attribute 'predict_proba'`, pointing at nothing the caller wrote. Every
+other classifier in the registry works with no params at all; this one
+shipped not working.
+
+Registered now as a subclass defaulting to `log_loss`, and `hinge`,
+`squared_hinge` and `perceptron` are removed from the allowlist rather than
+left as choices that cannot work. Offering an option that fails after
+training, from inside a dependency, is worse than not offering it.
+
+**A "<NA>" bucket in the error breakdown.** `qcut` returns NA for a row
+whose feature is missing, and those rows have perfectly good residuals --
+so they grouped into a bucket labelled `<NA>` reported alongside the real
+deciles, and one large enough could be named the WORST bucket. Every
+rolling feature has a warm-up window, so every real panel produces them.
+They are dropped from the table and counted in `rows_without_feature`
+instead: "we do not know this row's spread" is not a spread decile, and
+silently analysing fewer rows than the caller believes is its own kind of
+wrong answer.
+
+**Numeric buckets sorted as strings.** Bucket labels are strings so one
+table can hold entities, periods and decile numbers, and sorted
+lexicographically bucket 10 lands between 1 and 2. Deciles are 0-9 today so
+nothing was visibly wrong -- this was a trap set for whoever raises
+`N_BUCKETS`, which is a module-level constant sitting there to be raised.
+Numeric labels now sort by value and everything else lexicographically.
+
 ### Measured: the lag window, and the multi-output decision
 
 A panel built so the label depends on the recent PATH of a feature --

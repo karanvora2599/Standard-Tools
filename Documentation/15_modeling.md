@@ -844,6 +844,11 @@ architecture is two bounded integers (`n_hidden_units`, `n_hidden_layers`)
 rather than sklearn's `hidden_layer_sizes` tuple, because the allowlist is
 a compute budget and an unbounded tuple is not boundable.
 
+For **classification**, `sgd` resolves to a subclass defaulting to
+`log_loss`. sklearn's own default is `hinge`, which has no `predict_proba`,
+and this library asks every classifier for one on every fold — so
+`hinge`, `squared_hinge` and `perceptron` are not in the allowlist at all.
+
 `sgd` is the incremental learner: a fold refit costs a pass or two rather
 than a full re-solve, and `learning_rate`/`eta0` are an optimizer-level
 expression of recency that composes with `weighting.method='time_decay'`

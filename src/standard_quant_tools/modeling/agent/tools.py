@@ -1273,6 +1273,15 @@ def analyze_model_errors(
 
     if attribution.get("feature_note"):
         warnings.append(attribution["feature_note"])
+    if attribution.get("rows_without_feature"):
+        missing = attribution["rows_without_feature"]
+        warnings.append(
+            f"NOTE: {missing:,} row(s) have no value for "
+            f"{input_data.feature!r} and are absent from the feature "
+            "breakdown -- a rolling feature has a warm-up window. They are "
+            "still counted in every other section, so the feature deciles "
+            "cover fewer rows than n_rows."
+        )
 
     findings = _diag.worst_buckets(attribution)
 

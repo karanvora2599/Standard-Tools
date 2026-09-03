@@ -30,6 +30,7 @@ from standard_quant_tools.modeling.agent.tools import analyze_model_errors
 from standard_quant_tools.modeling.diagnostics import (
     MIN_BUCKET_ROWS,
     N_BUCKETS,
+    _bucket_report,
     calibration,
     error_attribution,
     heteroskedasticity,
@@ -414,3 +415,66 @@ class TestThroughTheToolOnARealModel:
     def test_an_unregistered_model_is_refused(self) -> None:
         with pytest.raises(Exception):
             analyze_model_errors(AnalyzeModelErrorsInput(model_id="mdl_nope"))
+
+
+class TestABucketIsNotAPlaceToHideRows:
+    """
+    Two defects that made a breakdown quietly wrong rather than loud.
+    """
+
+    def test_rows_with_no_feature_value_are_counted_not_bucketed(self) -> None:
+        """
+        THE DEFECT. `qcut` returns NA for a row whose feature is missing,
+        and those rows have perfectly good residuals -- so they grouped
+        into a bucket labelled "<NA>" that was reported alongside the real
+        deciles and could be named the worst one. A feature with a warm-up
+        window produces those rows on every real panel.
+        """
+        rng = np.random.default_rng(20)
+        n = 300
+        feature = rng.normal(0, 1, n)
+        feature[:60] = np.nan  # a warm-up window, as any rolling feature has
+        frame = _joined(
+            {"AAA": rng.normal(0, 1, n)},
+            spread=lambda _e, i: feature[i],
+        )
+        report = error_attribution(frame, feature="spread")
+
+        labels = [row["decile"] for row in report["by_feature_decile"]]
+        assert "<NA>" not in labels
+        assert all(label.isdigit() for label in labels)
+        # Counted rather than silently dropped: analysing fewer rows than
+        # the caller believes is its own kind of wrong answer.
+        assert report["rows_without_feature"] == 60
+        assert sum(r["n"] for r in report["by_feature_decile"]) == n - 60
+
+    def test_a_null_bucket_cannot_become_a_finding(self) -> None:
+        """The "<NA>" bucket was large and bad enough to be reported."""
+        rng = np.random.default_rng(21)
+        n = 400
+        feature = rng.normal(0, 1, n)
+        feature[:150] = np.nan
+        residuals = rng.normal(0, 0.2, n)
+        residuals[:150] = rng.normal(0, 5.0, 150)  # and much worse
+        frame = _joined({"AAA": residuals}, spread=lambda _e, i: feature[i])
+        report = error_attribution(frame, feature="spread")
+        assert not any("NA" in line for line in worst_buckets(report))
+
+    def test_numeric_buckets_are_ordered_by_value_not_as_strings(self) -> None:
+        """
+        Decile labels are strings so one table can hold entities, periods
+        and numbers. Sorted as strings, bucket 10 lands between 1 and 2 --
+        a trap set for whoever raises N_BUCKETS, since deciles are 0-9
+        today.
+        """
+        rng = np.random.default_rng(22)
+        frame = _joined({"AAA": rng.normal(0, 1, 120)})
+        labels = pd.Series([str(i % 12) for i in range(120)], index=frame.index)
+        rows = _bucket_report(frame, labels, "bucket")
+        assert [r["bucket"] for r in rows] == [str(i) for i in range(12)]
+
+    def test_non_numeric_buckets_still_sort_lexicographically(self) -> None:
+        rng = np.random.default_rng(23)
+        frame = _joined({name: rng.normal(0, 1, 40) for name in ("CCC", "AAA", "BBB")})
+        rows = error_attribution(frame)["by_entity"]
+        assert [r["entity"] for r in rows] == ["AAA", "BBB", "CCC"]

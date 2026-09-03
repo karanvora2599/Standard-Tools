@@ -201,13 +201,37 @@ def calibration(actual: np.ndarray, predicted: np.ndarray, task: str) -> Dict[st
     }
 
 
+def _sort_key(row: Dict[str, Any], label: str):
+    """
+    Numeric buckets ordered by VALUE, everything else lexicographically.
+
+    Bucket labels are strings so they can be entities, periods or decile
+    numbers in one table. Sorting them all as strings puts decile 10
+    between 1 and 2, which silently misorders any breakdown with ten or
+    more numeric buckets -- deciles are 0-9 today, so this is a trap set
+    for whoever changes N_BUCKETS rather than a live fault.
+    """
+    value = str(row.get(label, ""))
+    return (0, int(value), "") if value.lstrip("-").isdigit() else (1, 0, value)
+
+
 def _bucket_report(
     joined: pd.DataFrame, key: pd.Series, label: str
 ) -> List[Dict[str, Any]]:
-    """Error statistics per bucket, with the count that qualifies them."""
+    """
+    Error statistics per bucket, with the count that qualifies them.
+
+    Rows whose bucket is NULL are DROPPED rather than grouped. `qcut`
+    returns NA for a row whose feature is missing, and those rows have
+    perfectly good residuals -- so they formed a bucket labelled "<NA>"
+    that was reported alongside the deciles and could be named as the
+    worst one. "We do not know this row's spread" is not a spread decile;
+    the count is reported by the caller instead.
+    """
     frame = joined.assign(_bucket=key)
+    frame = frame[frame["_bucket"].notna()]
     rows: List[Dict[str, Any]] = []
-    for name, group in frame.groupby("_bucket", sort=True, observed=True):
+    for name, group in frame.groupby("_bucket", sort=False, observed=True):
         residual = group["_residual"].to_numpy(dtype="float64")
         residual = residual[np.isfinite(residual)]
         if residual.size == 0:
@@ -224,6 +248,7 @@ def _bucket_report(
                 "thin": bool(residual.size < MIN_BUCKET_ROWS),
             }
         )
+    rows.sort(key=lambda row: _sort_key(row, label))
     return rows
 
 
@@ -278,10 +303,16 @@ def error_attribution(
                 "flag or a category is not a gradient -- break errors down "
                 "by a continuous feature, or group by the flag directly."
             )
-        out["by_feature_decile"] = _bucket_report(
-            joined, buckets.astype("Int64").astype(str), "decile"
-        )
+        labels = buckets.astype("Int64").astype(str).where(buckets.notna())
+        out["by_feature_decile"] = _bucket_report(joined, labels, "decile")
         out["feature"] = feature
+        # Dropped from the table above, so they are counted here instead of
+        # vanishing: a feature with a warm-up window leaves real rows with
+        # no value, and silently analysing fewer rows than the caller
+        # thinks is its own kind of wrong answer.
+        unbucketed = int(buckets.isna().sum())
+        if unbucketed:
+            out["rows_without_feature"] = unbucketed
         if produced < N_BUCKETS:
             out["feature_note"] = (
                 f"NOTE: {feature!r} produced {produced} buckets rather than "

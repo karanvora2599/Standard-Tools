@@ -79,14 +79,20 @@ _LOSS_REGRESSION = ParamBound(
     ),
 )
 
+#: ONLY the losses that yield a probability. sklearn offers 'hinge',
+#: 'squared_hinge' and 'perceptron' as well, and they are absent on
+#: purpose: a classifier registered here is asked for probabilities
+#: unconditionally -- `adapters.score` calls `positive_class_proba` on
+#: every fold -- so a hinge SGD raises a raw sklearn AttributeError from
+#: inside walk-forward, having already trained. Offering a choice that
+#: cannot work is worse than not offering it.
 _LOSS_CLASSIFICATION = ParamBound(
     "str",
-    choices=("hinge", "log_loss", "modified_huber", "squared_hinge", "perceptron"),
+    choices=("log_loss", "modified_huber"),
     note=(
-        "'log_loss' or 'modified_huber' for anything that needs a "
-        "probability -- 'hinge' (the default) has no predict_proba at all, "
-        "so a proba_threshold spec would fail at scoring time rather than "
-        "here."
+        "'hinge', 'squared_hinge' and 'perceptron' are deliberately not "
+        "offered: they have no predict_proba, and this library asks every "
+        "classifier for one."
     ),
 )
 
@@ -138,14 +144,56 @@ register_estimator(
         compatibility=(_elasticnet_needs_a_ratio,),
     ),
 )
+
+
+class ProbabilisticSGDClassifier(SGDClassifier):
+    """
+    SGDClassifier defaulting to a loss that can produce a probability.
+
+    sklearn's default is 'hinge', which has none. Every other classifier
+    in this registry works with no params at all, and this one did not: a
+    bare EstimatorSpec(type="sgd") trained for several folds and then died
+    inside `positive_class_proba` with an AttributeError from sklearn's
+    internals. The default is changed rather than the caller being asked
+    to know this, because a default that violates the contract the engine
+    enforces is not a default, it is a trap.
+    """
+
+    def __init__(
+        self,
+        loss: str = "log_loss",
+        penalty="l2",
+        alpha: float = 1e-4,
+        l1_ratio: float = 0.15,
+        fit_intercept: bool = True,
+        max_iter: int = 1000,
+        tol=1e-3,
+        learning_rate: str = "optimal",
+        eta0: float = 0.0,
+        random_state=None,
+    ):
+        super().__init__(
+            loss=loss,
+            penalty=penalty,
+            alpha=alpha,
+            l1_ratio=l1_ratio,
+            fit_intercept=fit_intercept,
+            max_iter=max_iter,
+            tol=tol,
+            learning_rate=learning_rate,
+            eta0=eta0,
+            random_state=random_state,
+        )
+
+
 register_estimator(
     "classification",
     "sgd",
-    SGDClassifier,
+    ProbabilisticSGDClassifier,
     EstimatorParamSchema(
         bounds={**_SHARED, "loss": _LOSS_CLASSIFICATION},
         compatibility=(_elasticnet_needs_a_ratio,),
     ),
 )
 
-__all__ = ["SGDClassifier", "SGDRegressor"]
+__all__ = ["ProbabilisticSGDClassifier", "SGDRegressor"]

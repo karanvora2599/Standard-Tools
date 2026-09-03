@@ -13,9 +13,13 @@ WHAT THESE PIN.
   2. The parameter allowlist is a compute budget, not a modelling opinion.
      An unbounded width or iteration count is an agent-triggerable way to
      pin the process.
-  3. An SGD classifier defaulting to 'hinge' has no predict_proba, so a
-     spec that thresholds a probability must fail where it can be
-     explained, not deep inside scoring.
+  3. sklearn's SGDClassifier defaults to loss='hinge', which has no
+     predict_proba -- and `adapters.score` asks every classifier for one on
+     every fold. A bare EstimatorSpec(type="sgd") therefore trained for
+     several folds and then died with a raw AttributeError from inside
+     sklearn. The default is changed and the unusable losses are removed
+     from the allowlist, because offering a choice that cannot work is
+     worse than not offering it.
 """
 
 from __future__ import annotations
@@ -116,10 +120,19 @@ class TestTheAllowlistIsAComputeBudget:
 
 class TestSGDIsRegisteredForBothTasks:
     def test_both_tasks_resolve(self) -> None:
-        from sklearn.linear_model import SGDClassifier, SGDRegressor
+        from sklearn.linear_model import SGDRegressor
+
+        from standard_quant_tools.modeling.estimators.online import (
+            ProbabilisticSGDClassifier,
+        )
 
         assert get_estimator_class("regression", "sgd") is SGDRegressor
-        assert get_estimator_class("classification", "sgd") is SGDClassifier
+        # Classification resolves to the subclass, not sklearn's own: its
+        # default loss has no predict_proba and this library asks every
+        # classifier for one. See TestTheBareSGDClassifierWorks.
+        assert get_estimator_class("classification", "sgd") is (
+            ProbabilisticSGDClassifier
+        )
 
     def test_the_robust_loss_is_reachable(self) -> None:
         """Squared error lets one 8-sigma day contribute 64x a 1-sigma one."""
@@ -237,3 +250,55 @@ class TestThroughTheEngine:
         report = analyze_model_errors(AnalyzeModelErrorsInput(model_id=result.model_id))
         assert report.n_rows > 0
         assert report.calibration["slope"] is not None
+
+
+class TestTheBareSGDClassifierWorks:
+    """
+    THE DEFECT. sklearn's SGDClassifier defaults to loss='hinge', which has
+    no predict_proba -- and `adapters.score` asks every classifier for one
+    on every fold. So `EstimatorSpec(type="sgd")` trained for several folds
+    and then died inside sklearn's internals with a bare AttributeError.
+    Every other classifier in the registry works with no params at all.
+    """
+
+    def test_the_default_loss_can_produce_a_probability(self) -> None:
+        from standard_quant_tools.modeling.estimators.online import (
+            ProbabilisticSGDClassifier,
+        )
+
+        model = clone(ProbabilisticSGDClassifier())
+        assert model.loss == "log_loss"
+        rng = np.random.default_rng(30)
+        X = rng.normal(size=(80, 3))
+        y = (X[:, 0] > 0).astype(int)
+        fitted = model.fit(X, y)
+        assert hasattr(fitted, "predict_proba")
+        assert fitted.predict_proba(X).shape == (80, 2)
+
+    def test_the_registry_uses_the_probability_capable_class(self) -> None:
+        from standard_quant_tools.modeling.estimators.online import (
+            ProbabilisticSGDClassifier,
+        )
+
+        assert get_estimator_class("classification", "sgd") is (
+            ProbabilisticSGDClassifier
+        )
+
+    @pytest.mark.parametrize("loss", ["hinge", "squared_hinge", "perceptron"])
+    def test_a_loss_without_probabilities_is_refused(self, loss) -> None:
+        """
+        Offering a choice that cannot work is worse than not offering it:
+        it fails after training, from inside sklearn, with no attribution.
+        """
+        with pytest.raises(ValidationError, match="log_loss"):
+            validate_params("classification", "sgd", {"loss": loss})
+
+    @pytest.mark.parametrize("loss", ["log_loss", "modified_huber"])
+    def test_the_probability_losses_are_accepted(self, loss) -> None:
+        validate_params("classification", "sgd", {"loss": loss})
+
+    def test_regression_keeps_its_full_loss_set(self) -> None:
+        """The restriction is about probabilities, so it is classification
+        only -- a regressor is never asked for one."""
+        for loss in ("squared_error", "huber", "epsilon_insensitive"):
+            validate_params("regression", "sgd", {"loss": loss})
