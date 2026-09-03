@@ -250,6 +250,7 @@ somewhere else — and unsplit, neither is visible.
 | `classify_trade_direction` | yes | Sign the tape, Lee-Ready or tick rule, published |
 | `get_quoted_spread_series` | yes | Spread and imbalance per quote, not averaged |
 | `get_effective_spread_series` | yes | What each trade paid, optionally split |
+| `get_order_book_metrics` | yes | Microprice, imbalance at the touch and cumulatively, and the depth slope -- what a top-of-book quote cannot say |
 | `get_microstructure_metrics` | yes | Quoted and effective spread, realized/impact split, Lee-Ready signed flow |
 | `get_trade_profile` | yes | Volume by trade size and time of day |
 | `detect_liquidity_events` | yes | When a liquidity regime *changed*, by CUSUM |

@@ -212,6 +212,153 @@ class TestCountsInProseAreReal:
                     )
         assert not wrong, wrong
 
+    #: The documents whose opening sentence is a claim about ONE runtime's
+    #: size. Not every "N tools" opener is: `23_inference.md` and
+    #: `24_overfitting.md` describe a SUBSET of `research` and `backtest`,
+    #: and `05_portfolio.md`/`12_options.md` say "Three tools"/"Two tools"
+    #: mid-document about a handful. Those are checked by the
+    #: self-consistency guard below instead, which needs no map.
+    RUNTIME_DOCS = {
+        "21_derivatives.md": "derivatives",
+        "22_microstructure.md": "microstructure",
+        "26_data.md": "data",
+        "27_meta.md": "meta",
+        "28_delta_one.md": "delta_one",
+    }
+
+    #: Enough to name any runtime this library will plausibly have. A count
+    #: past twenty means the map needs extending, and the test says so
+    #: rather than passing silently.
+    NUMBER_WORDS = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+        "twenty": 20,
+        "twenty-one": 21,
+        "twenty-two": 22,
+        "twenty-three": 23,
+        "twenty-four": 24,
+        "twenty-five": 25,
+        "twenty-six": 26,
+        "twenty-seven": 27,
+        "twenty-eight": 28,
+        "twenty-nine": 29,
+        "thirty": 30,
+        "thirty-one": 31,
+        "thirty-two": 32,
+        "thirty-three": 33,
+        "thirty-four": 34,
+        "thirty-five": 35,
+        "thirty-six": 36,
+        "thirty-seven": 37,
+        "thirty-eight": 38,
+        "thirty-nine": 39,
+        "forty": 40,
+        "forty-one": 41,
+        "forty-two": 42,
+        "forty-three": 43,
+        "forty-four": 44,
+        "forty-five": 45,
+    }
+
+    def test_every_spelled_out_runtime_count_is_current(self, runtimes):
+        """
+        THE HOLE EVERY OTHER GUARD IN THIS CLASS LEFT OPEN.
+
+        The rest match `(\d+)`. Every runtime guide opens by SPELLING its
+        count -- "Eighteen tools for the instruments that move one-for-one"
+        -- so a runtime could grow and its own front page keep the old
+        number indefinitely. Measured when this was written: five of these
+        documents were wrong at once, `22_microstructure.md` saying fifteen
+        for sixteen and `23_inference.md` saying twenty over a 19-row
+        table, and the suite was green on all of them.
+        """
+        stale = []
+        for name, runtime in self.RUNTIME_DOCS.items():
+            text = (DOCS / name).read_text(encoding="utf-8")
+            match = re.search(r"^([A-Z][a-z]+(?:-[a-z]+)?) tools\b", text, re.M)
+            if match is None:
+                stale.append(f"{name}: no spelled-out opening count")
+                continue
+            word = match.group(1).lower()
+            stated = self.NUMBER_WORDS.get(word)
+            if stated is None:
+                stale.append(f"{name}: no entry for {word!r}; extend NUMBER_WORDS")
+                continue
+            actual = len(runtimes[runtime])
+            if stated != actual:
+                stale.append(
+                    f"{name}: opens '{match.group(1)} tools' for the "
+                    f"{runtime} runtime, which has {actual}"
+                )
+        assert not stale, stale
+
+    def test_a_runtime_guide_lists_every_tool_it_owns(self, runtimes):
+        """
+        Stronger than the count, and it catches what the count cannot: a
+        guide can say the right NUMBER while omitting a tool and listing
+        something else. Both real failures here were of that shape --
+        `get_order_book_metrics` and `build_continuous_futures_series` were
+        each absent from their own runtime's table while the opener was
+        merely off by one, so fixing the number alone left the tool
+        undocumented.
+        """
+        missing = []
+        for name, runtime in self.RUNTIME_DOCS.items():
+            text = (DOCS / name).read_text(encoding="utf-8")
+            listed = set(re.findall(r"^\|\s*`([a-z_][a-z0-9_]*)`\s*\|", text, re.M))
+            for tool in sorted(set(runtimes[runtime].tool_names) - listed):
+                missing.append(f"{name}: no table row for `{tool}`")
+        assert not missing, missing
+
+    #: Guides that cover a SUBSET of a runtime, so their opening count is a
+    #: claim about their own table rather than about the runtime.
+    #: `23_inference.md` documents 19 of `research`'s 42; `24_overfitting.md`
+    #: 11 of `backtest`'s 35. The check is therefore self-consistency, which
+    #: needs no expected number maintained anywhere.
+    SUBSET_DOCS = ("23_inference.md", "24_overfitting.md")
+
+    def test_a_subset_guide_opens_with_the_size_of_its_own_table(self, all_tools):
+        """
+        `23_inference.md` opened "Twenty tools" above a table of nineteen.
+        Nothing checked it, because the runtime it draws from has 42 and no
+        guard compares a document against ITSELF.
+        """
+        wrong = []
+        for name in self.SUBSET_DOCS:
+            text = (DOCS / name).read_text(encoding="utf-8")
+            match = re.search(r"^([A-Z][a-z]+(?:-[a-z]+)?) tools", text, re.M)
+            assert match, f"{name}: no spelled-out opening count"
+            stated = self.NUMBER_WORDS.get(match.group(1).lower())
+            assert stated, f"{name}: extend NUMBER_WORDS for {match.group(1)!r}"
+            rows = {
+                tool
+                for tool in re.findall(r"^\|\s*`([a-z_][a-z0-9_]*)`\s*\|", text, re.M)
+                if tool in all_tools
+            }
+            if stated != len(rows):
+                wrong.append(
+                    f"{name}: opens '{match.group(1)} tools' but its table "
+                    f"lists {len(rows)}"
+                )
+        assert not wrong, wrong
+
     def test_the_runtime_table_counts_match(self, runtimes):
         """19_runtimes.md carries a per-runtime table, and every row is a
         claim about a number that changes whenever a tool is added."""

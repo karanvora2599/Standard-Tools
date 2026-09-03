@@ -158,6 +158,7 @@ shipping as guaranteed failures.
 | `fetch_financial_ratios` | A company's ratios, with implausible values flagged |
 | `get_dataset_metadata` | What the provider guarantees: adjusted, survivorship, point-in-time |
 | `infer_temporal_contract` | What a frame's own columns imply about timing |
+| `build_continuous_futures_series` | Stitch a futures chain into one series, returning the back-adjusted research series and the tradeable contract map SEPARATELY -- an adjusted price is fine for indicators and is not a price anyone could have traded |
 | `build_data_bundle` | Name several published frames as one unit |
 | `describe_data_bundle` | What a bundle contains and what its sources promise |
 | `validate_data_bundle` | Is this safe to model on, and what blocks it |
