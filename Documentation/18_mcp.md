@@ -145,13 +145,13 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 200 tools cost about **320 KB of schema, ~82,000 tokens**, held for the
+The 207 tools cost about **349 KB of schema, ~89,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
-1,638 bytes and the session ceiling that used to be 180,000 would buy about 110 tools.
-There are 178. **The whole surface has not fitted in one session since the
+1,726 bytes and the session ceiling that used to be 180,000 would buy about 104 tools.
+There are 207. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
 meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
@@ -169,40 +169,40 @@ sqt-mcp --print-budget
 ```
 runtime              tools    bytes   ~tokens
 backtest                35   82,037    20,509
-research                42   47,887    11,971
-modeling                17   47,874    11,968
+modeling                20   59,803    14,950
+research                42   47,772    11,943
 delta_one               18   38,529     9,632
 portfolio               18   32,094     8,023
-microstructure          16   20,274     5,068
+microstructure          17   23,512     5,878
+feature_lab              9   22,121     5,530
+data                    17   18,956     4,739
 derivatives             12   17,878     4,469
-data                    14   15,018     3,754
-meta                    19   14,371     3,592
-feature_lab              9   11,745     2,936
-all                    200  327,707    81,926
+meta                    19   14,489     3,622
+all                    207  357,191    89,297
 
-  a client is served ONE runtime: backtest is the most expensive at 82,037 bytes (25% of the total).
+  a client is served ONE runtime: backtest is the most expensive at 82,037 bytes (23% of the total).
 
 category             tools    bytes   ~tokens
-modeling                17   47,874    11,968
+modeling                20   59,803    14,950
 delta_one               18   38,529     9,632
 backtest_validation     21   38,114     9,528
 backtest_execution      12   37,041     9,260
 portfolio_risk          18   32,094     8,023
-quant_research          26   28,497     7,124
-microstructure          16   20,274     5,068
+quant_research          26   28,382     7,095
+microstructure          17   23,512     5,878
+feature_lab              9   22,121     5,530
+data                    17   18,956     4,739
 derivatives             12   17,878     4,469
 analysis                14   17,355     4,338
-data                    14   15,018     3,754
-feature_lab              9   11,745     2,936
-discovery               13   10,537     2,634
+discovery               13   10,655     2,663
 custom_signal            2    6,882     1,720
 provenance               6    3,834       958
 screener                 2    2,035       508
 ```
 
 **The total is a number nobody pays.** The row that matters is the runtime
-a client is actually served, and the most expensive of those is 73 KB at
-full detail — 27% of the whole surface.
+a client is actually served, and the most expensive of those is 80 KB at
+full detail — 23% of the whole surface.
 
 There is deliberately **no fixed per-runtime limit**. There was one, at
 72 KB, and it was the wrong shape for what it was guarding: what a client
@@ -243,7 +243,7 @@ Serve a runtime, or narrow inside one:
 sqt-mcp --runtime research                    # 42 tools, 35 KB served
 sqt-mcp --runtime backtest                    # 35 tools, 80 KB served
 sqt-mcp --runtime derivatives                 # 12 tools, 17 KB served
-sqt-mcp --runtime microstructure              # 16 tools, 20 KB served
+sqt-mcp --runtime microstructure              # 17 tools, 22 KB served
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
 sqt-mcp --runtime research --categories screener
 sqt-mcp --runtime all                         # ~63k tokens, and it says so
@@ -434,7 +434,7 @@ own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 200 tools has a typed Pydantic return, so the server can
+Every one of the 207 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. The plan assumed that was free; measured, it
@@ -538,7 +538,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 200 tools declares `readOnlyHint: true` and
+Every one of the 207 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 

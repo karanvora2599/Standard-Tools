@@ -3704,7 +3704,11 @@ class DataCapabilitiesResult(BaseModel):
         ),
     )
     quotes: bool = Field(
-        ..., description="Top-of-book bid/offer. No shipped provider offers depth."
+        ...,
+        description=(
+            "Top-of-book bid/offer. Depth is a separate call that only "
+            "provider='databento' serves."
+        ),
     )
     supported_intervals: Optional[List[str]] = Field(
         None, description="Bar intervals this provider accepts, if it declares a set."
@@ -4924,11 +4928,19 @@ class ConvertReferenceInput(BaseModel):
             "class as flat rather than short."
         ),
     )
-    task: Optional[Literal["regression", "classification"]] = Field(
+    # Spelled out rather than imported from `modeling.specs.Task`: the
+    # analysis models deliberately do not import the modeling package, and
+    # one import for one Literal is not worth coupling them. A test pins
+    # the two equal instead, so a task added on one side fails on the
+    # other rather than silently making a model untradeable -- which is
+    # what the missing 'ranking' did here.
+    task: Optional[Literal["regression", "classification", "ranking"]] = Field(
         None,
         description=(
             "predictions -> signal_panel: how to read the prediction "
-            "column. Required unless the reference carries a model_id."
+            "column. 'regression' and 'ranking' are read as continuous "
+            "scores by sign; 'classification' against proba_threshold. "
+            "Required unless the reference carries a model_id."
         ),
     )
     construction_method: str = Field(
@@ -5760,7 +5772,6 @@ class RegimeDetectionInput(BaseModel):
     start_date: str
     end_date: str
     n_regimes: int = Field(2, ge=2, le=5)
-    seed: int = Field(0, ge=0, description="So the labelling is reproducible.")
 
 
 class Regime(BaseModel):

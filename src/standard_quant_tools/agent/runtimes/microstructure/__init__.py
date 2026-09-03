@@ -48,6 +48,12 @@ from .estimator_tools import (  # noqa: F401
     get_intraday_volume_profile,
     get_order_flow_imbalance,
 )
+from .event_tools import (  # noqa: F401
+    EVENT_TOOL_CATEGORY,
+    EVENT_TOOL_DEFS,
+    EVENT_TOOL_DISPATCH,
+    get_order_event_metrics,
+)
 from .series_tools import (  # noqa: F401
     ClassifyTradesInput,
     EffectiveSpreadInput,
@@ -139,8 +145,9 @@ TOOL_DISPATCH.update(
 )
 TOOL_DISPATCH.update(ESTIMATOR_TOOL_DISPATCH)
 
-TOOL_DEFS = TOOL_DEFS + BOOK_TOOL_DEFS
+TOOL_DEFS = TOOL_DEFS + BOOK_TOOL_DEFS + EVENT_TOOL_DEFS
 TOOL_DISPATCH.update(BOOK_TOOL_DISPATCH)
+TOOL_DISPATCH.update(EVENT_TOOL_DISPATCH)
 
 TOOL_CATEGORY = {name: "microstructure" for name in TOOL_DISPATCH}
 

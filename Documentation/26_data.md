@@ -1,6 +1,6 @@
 # The Data Runtime
 
-Fourteen tools for getting the bytes and saying what they can support.
+Seventeen tools for getting the bytes and saying what they can support.
 
 Every other runtime answers a question about markets. This one answers where
 the data is — and it is the only runtime whose output is meant to be
@@ -140,11 +140,111 @@ reports missing bars, stale prices and price jumps. A second name for those
 would be exactly the confusable duplication the runtime split exists to
 prevent.
 
-**Order books.** `DataProvider.get_order_book` is a declared contract with
-canonical columns and no implementation — no shipped provider serves depth.
-A tool that always refuses is worse than no tool, so `get_microprice`,
-`get_depth_profile` and the rest wait on a real L2 provider rather than
-shipping as guaranteed failures.
+**Order book FETCHING.** `DataProvider.get_order_book` is still a declared
+contract with canonical columns and no implementation — no shipped provider
+serves depth, and a tool that always refuses is worse than no tool.
+
+That was never the only way to have a book, though, and only fetching was
+ever blocked. `register_external_dataset` takes depth you already hold — a
+vendor extract, an ITCH replay — and makes it resolvable without copying it,
+and `get_order_book_metrics` reads it through that reference. The analytics
+were written and tested against the column contract long before a source
+existed. What arrived is the source, not the analytics.
+
+## Data this library did not fetch
+
+Every other tool here fetches. These three do the opposite, and they exist
+because the fetch path has a ceiling the rest of the surface never has to
+notice.
+
+A provider call returns one whole `pd.DataFrame`, and `publish` then writes
+a second complete copy under `SQT_RUNS_DIR`. Two full materializations of
+the same bytes is fine for a decade of daily bars and impossible for an
+afternoon of L2 depth. The only concession to size anywhere else is
+`fetch_tick_tape`'s `limit`, which does not sample — it **truncates**, so
+every rate and total computed downstream understates the real one and
+nothing in the numbers says so.
+
+So `register_external_dataset` takes a Parquet or CSV file — or a directory
+read as one partitioned dataset — and stores a POINTER and a schema. Nothing
+is copied. Resolving the reference returns an `ExternalDataset` handle
+rather than a frame, deliberately: something frame-shaped would let a
+consumer written for a fetched panel pull forty gigabytes through an `.iloc`
+without anyone deciding to. Rows come out through `batches()`, and column
+projection means reading four columns of a sixty-column book reads four.
+
+| kind | what it holds |
+| --- | --- |
+| `order_book_panel` | L2 depth snapshots, the shape `get_order_book_metrics` reads |
+| `event_panel` | Rows carrying `event_time` and `available_time` |
+| `tick_tape` | Trades, with `price` and `size` |
+| `quote_panel` | Top of book, with `bid_price` and `ask_price` |
+
+The first two are external-only — nothing in this library produces one, so
+there is no in-memory publish path to preserve. The other two exist both
+ways on purpose: a tape `fetch_tick_tape` fetched and a tape bought from a
+vendor are the same content addressed differently, and one kind with two
+storages beats an `external_tick_tape` that would double the taxonomy and
+let a consumer accept one while refusing the other.
+
+### What registration does not promise
+
+That the file is still there, or still the same bytes, when someone resolves
+the reference. A published artifact is immutable because this library wrote
+it and refuses to overwrite it. An external file belongs to you and can be
+re-extracted underneath a live reference.
+
+So `describe_external_dataset` reports `changed_since_registration`, which
+has no equivalent anywhere else on this surface. The check behind it is a
+**fingerprint** — a digest of every file's name, size and mtime — spelled
+with a different key from a published artifact's `content_hash` because it
+is a weaker claim. It catches a re-extract, a truncated copy and a partially
+written file. It does not catch an edit preserving both size and mtime.
+Hashing the bytes would catch that too and would cost the full read this
+whole path exists to avoid, so the weaker check that always runs beats the
+stronger one nobody would wait for.
+
+### Schema at registration, rows at validation
+
+`register_external_dataset` checks columns and refuses a book with no
+`ask_size_0` before anything reads a row. It does **not** read the rows, and
+that gap is deliberate rather than lazy: a book with its bid and ask columns
+transposed has a perfectly valid schema. Every column is present, every
+value is a real price, and only the ORDER is wrong.
+
+`validate_external_dataset` is what catches that, scanning in batches and
+returning a verdict rather than raising — because three crossed books in
+nine million rows is fine and a third of them crossed is transposed columns,
+and only a count separates the two. It is the out-of-core sibling of
+`validate_pit_records`, which is capped at 5,000 rows passed inline through
+a tool call's JSON, and it calls the same `validate_pit_frame` checks per
+chunk rather than reimplementing them. The scan stops at `scan_limit` and
+says so; every count is reported against what was scanned, never against a
+total the scan never reached.
+
+### Databento
+
+A raw Databento export does not satisfy these contracts, and the refusal
+names the normalizer to run rather than leaving you to work it out. It
+spells `bid_price_0` as `bid_px_00`, and it carries two things that would
+each produce a confident wrong number:
+
+- **Fixed-point int64 prices**, scaled by 1e-9. A raw `bid_px_00` of
+  `100_010_000_000` is $100.01. Registered unscaled, every spread and
+  microprice is off by a factor of a billion — and stays finite and ordered,
+  so nothing looks broken.
+- **`UNDEF_PRICE` for an empty level**, which is int64 max. Scaled, that is
+  a **$9.2 billion quote** — so sentinels are masked *before* scaling,
+  after which a sentinel is just a large float and no longer identifiable.
+
+`standard_quant_tools.data.databento` handles both. It also drops trailing
+levels that are empty in every snapshot — left in, the dataset would declare
+ten levels while four hold nothing and `depth_slope` would regress against
+them — keeps `action`, `side`, `flags` and the per-level order counts a
+naive rename discards, and reports which of `ts_recv` and `ts_event` it
+used. Those two differ by the network, which is exactly the quantity a
+latency study measures, so the choice is never left implicit.
+
 
 ## The tools
 
@@ -164,6 +264,9 @@ shipping as guaranteed failures.
 | `validate_data_bundle` | Is this safe to model on, and what blocks it |
 | `validate_financial_ratios` | Check ratios you already hold, without fetching |
 | `compare_ratio_frames` | Two sources side by side, each gap classified |
+| `register_external_dataset` | Make a file you already hold resolvable, without copying it |
+| `describe_external_dataset` | Its schema and size, and whether it changed since registration |
+| `validate_external_dataset` | Scan it in batches for what would produce wrong numbers |
 
 Full argument lists: [20_tool_index.md](20_tool_index.md#data--data).
 

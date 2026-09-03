@@ -112,8 +112,9 @@ KINDS: Dict[str, Dict[str, str]] = {
             "Top-of-book quotes, timestamp-indexed, with `bid_price` and "
             "`ask_price` columns -- those exact names, not `bid`/`ask`, "
             "because the microstructure tools refuse without them. Top of "
-            "book only: no shipped provider exposes depth, so queue "
-            "position and resting size are not in here."
+            "book ONLY -- depth is an `order_book_panel`, a different kind. "
+            "Queue position and per-order resting size are in neither: they "
+            "need an order-level feed."
         ),
     },
     "data_bundle": {
@@ -145,7 +146,57 @@ KINDS: Dict[str, Dict[str, str]] = {
         "storage": "frame",
         "description": "Technical indicator values across a universe.",
     },
+    "order_book_panel": {
+        "storage": "external",
+        "description": (
+            "L2 depth snapshots -- `timestamp`, then `bid_price_{i}` / "
+            "`bid_size_{i}` / `ask_price_{i}` / `ask_size_{i}` per level, "
+            "level 0 the touch. EXTERNAL ONLY: a book is registered where it "
+            "lies and read in batches, never copied into the runs directory, "
+            "so resolving one returns a handle rather than a frame."
+        ),
+    },
+    "order_event_panel": {
+        "storage": "external",
+        "description": (
+            "Order-by-order events -- `timestamp`, `order_id`, `action` "
+            "(A add, C cancel, M modify, F fill, T trade, R clear), `side`, "
+            "`price`, `size`. A strictly deeper feed than an "
+            "`order_book_panel`: depth aggregates size per price level, and "
+            "that aggregation is what makes queue position, order lifetime "
+            "and a true cancellation rate impossible to recover. EXTERNAL "
+            "ONLY, and larger than a book by orders of magnitude."
+        ),
+    },
+    "event_panel": {
+        "storage": "external",
+        "description": (
+            "Rows in event time carrying the point-in-time contract: "
+            "`event_time` and `available_time`, which are different columns "
+            "because using the first as the second is the leak "
+            "point_in_time.py exists to prevent. EXTERNAL ONLY."
+        ),
+    },
 }
+
+#: Kinds that MAY live outside the runs directory, registered by path.
+#:
+#: Two of these (`order_book_panel`, `event_panel`) can only be external --
+#: nothing in this library produces one, so there is no in-memory publish
+#: path to preserve. The other two exist in both forms on purpose:
+#: `fetch_tick_tape` publishes a tape it fetched, and the same kind of tape
+#: bought from a vendor is the same content addressed a different way. One
+#: kind, two storages, rather than an `external_tick_tape` that would double
+#: the taxonomy and let a consumer accept one and refuse the other.
+EXTERNAL_KINDS = frozenset(
+    {
+        "order_book_panel",
+        "order_event_panel",
+        "event_panel",
+        "tick_tape",
+        "quote_panel",
+    }
+)
 
 _REF_RE = re.compile(
     rf"^{SCHEME}://(?P<kind>[a-z_]+)/(?P<run_id>[A-Za-z0-9_-]+)/(?P<name>[A-Za-z0-9_-]+)$"
@@ -249,6 +300,15 @@ def publish(
     """
     if kind not in KINDS:
         raise ValidationError(f"unknown kind {kind!r}; expected one of {sorted(KINDS)}")
+    if KINDS[kind]["storage"] == "external":
+        raise ValidationError(
+            f"kind {kind!r} cannot be published from memory -- it is stored "
+            "by reference to a file that stays where it is. Use "
+            "publish_external(path=...), which records a pointer and a "
+            "schema instead of copying the bytes. A book or an event tape "
+            "large enough to need this kind is large enough that copying it "
+            "into the runs directory is the thing to avoid."
+        )
     _validate_identifier(run_id, "run_id")
     _validate_identifier(name, "name")
 
@@ -287,6 +347,139 @@ def publish(
     )
 
     return f"{SCHEME}://{kind}/{run_id}/{name}"
+
+
+def _read_sidecar(run_id: str, name: str) -> Dict[str, Any]:
+    """What was recorded beside a published value, or an empty dict."""
+    sidecar = _resolved_within_runs_dir(_runs_dir() / run_id / _sidecar_name(name))
+    if not sidecar.exists():
+        return {}
+    try:
+        loaded = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a damaged sidecar is not fatal
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def publish_external(
+    path: str,
+    kind: str,
+    run_id: str,
+    name: str,
+    producer: Optional[str] = None,
+    fmt: Optional[str] = None,
+    overwrite: bool = False,
+) -> Tuple[str, Any]:
+    """
+    Register data that stays where it is, and return a reference to it.
+
+    The counterpart to `publish` for datasets too large to copy. What lands
+    in the runs directory is the sidecar and nothing else -- no Parquet, no
+    second copy -- so registering a forty-gigabyte book costs a schema read.
+
+    THE IMMUTABILITY PROMISE IS WEAKER HERE, and deliberately visible rather
+    than quietly dropped. `publish` can promise that resolving a reference
+    twice yields the same bytes, because this library wrote those bytes and
+    refuses to overwrite them. An external file belongs to the caller and can
+    be re-extracted underneath a live reference. The sidecar therefore
+    records a fingerprint at registration, and `describe` re-reads it, so a
+    file that moved or changed is REPORTED rather than silently resolving to
+    something else. The `(run_id, name)` collision rule is unchanged: a
+    second registration under the same pair is refused, because two datasets
+    answering to one reference is the failure that rule exists to prevent.
+
+    Returns the reference and the `ExternalDataset` handle, so a caller that
+    just registered something does not have to resolve it to learn its shape.
+    """
+    from standard_quant_tools.data import external as _external
+
+    if kind not in KINDS:
+        raise ValidationError(f"unknown kind {kind!r}; expected one of {sorted(KINDS)}")
+    if kind not in EXTERNAL_KINDS:
+        raise ValidationError(
+            f"kind {kind!r} cannot be registered by path; it is published "
+            f"from memory with publish(). Kinds that may live outside the "
+            f"runs directory: {sorted(EXTERNAL_KINDS)}."
+        )
+    _validate_identifier(run_id, "run_id")
+    _validate_identifier(name, "name")
+
+    handle = _external.inspect(path, kind=kind, fmt=fmt)
+    problems = _external.check_schema(kind, handle.columns)
+    if problems:
+        raise ValidationError(
+            f"{handle.path.name} does not have the shape a {kind!r} needs: "
+            + "; ".join(problems)
+            + ". Registering it anyway would move the failure from here to "
+            "whatever first tried to read a column that is not there."
+        )
+
+    sidecar = _resolved_within_runs_dir(_runs_dir() / run_id / _sidecar_name(name))
+    if sidecar.exists() and not overwrite:
+        raise ValidationError(
+            f"a dataset is already registered at run_id={run_id!r} "
+            f"name={name!r}. A reference names one dataset; pointing it at a "
+            "second would change what every existing holder resolves. Choose "
+            "a fresh run_id, or pass overwrite=True to invalidate them."
+        )
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        json.dumps(
+            {
+                "kind": kind,
+                "producer": producer,
+                "storage": "external",
+                "path": str(handle.path),
+                "format": handle.fmt,
+                "rows": handle.rows,
+                "columns": list(handle.columns),
+                "dtypes": handle.dtypes,
+                "n_files": handle.n_files,
+                "size_bytes": handle.size_bytes,
+                "fingerprint": handle.fingerprint,
+            },
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
+    return f"{SCHEME}://{kind}/{run_id}/{name}", handle
+
+
+def _resolve_external(reference: "Reference", sidecar: Dict[str, Any]) -> Any:
+    """Rebuild the handle a registration recorded, checking it still fits."""
+    from standard_quant_tools.data import external as _external
+
+    stored = sidecar.get("path")
+    if not stored:
+        raise ValidationError(
+            f"{reference.ref!r} is registered as external but its sidecar "
+            "records no path. The registration is unusable; register the "
+            "dataset again under a fresh name."
+        )
+    try:
+        # The row count recorded at registration is reused rather than
+        # recomputed. For CSV that count was a full scan, and paying for it
+        # again on every resolve would be a full read inside the mechanism
+        # built to avoid them. It is only trusted while the fingerprint
+        # still matches -- past that it describes bytes that are gone.
+        handle = _external.inspect(
+            str(stored),
+            kind=reference.kind,
+            fmt=sidecar.get("format"),
+            known_rows=sidecar.get("rows"),
+            count_rows=False,
+        )
+        if handle.fingerprint != sidecar.get("fingerprint"):
+            handle = _external.inspect(
+                str(stored), kind=reference.kind, fmt=sidecar.get("format")
+            )
+        return handle
+    except ValidationError as exc:
+        raise ValidationError(
+            f"{reference.ref!r} points at {stored}, which cannot be read now "
+            f"-- {exc} Nothing was copied when it was registered, so a "
+            "reference to external data is only as good as the file it names."
+        ) from exc
 
 
 def _load_path(run_id: str, name: str) -> pd.DataFrame:
@@ -334,6 +527,13 @@ def resolve(ref: str, expect: Optional[str] = None) -> Any:
             f"What was passed: {KINDS[reference.kind]['description']}"
         )
 
+    # The SIDECAR decides the storage, not the kind's default. A `tick_tape`
+    # exists both ways -- fetched and copied, or registered where it lies --
+    # and only the registration knows which this one is.
+    sidecar = _read_sidecar(reference.run_id, reference.name)
+    if sidecar.get("storage") == "external":
+        return _resolve_external(reference, sidecar)
+
     frame = _load_path(reference.run_id, reference.name)
     storage = KINDS[reference.kind]["storage"]
     if storage == "mapping":
@@ -352,16 +552,34 @@ def resolve(ref: str, expect: Optional[str] = None) -> Any:
 def describe(ref: str) -> Dict[str, Any]:
     """What a reference points at, without loading all of it."""
     reference = parse(ref)
+    recorded = _read_sidecar(reference.run_id, reference.name)
+    producer = recorded.get("producer")
+
+    if recorded.get("storage") == "external":
+        handle = _resolve_external(reference, recorded)
+        moved = handle.fingerprint != recorded.get("fingerprint")
+        return {
+            "ref": reference.ref,
+            "kind": reference.kind,
+            "description": KINDS[reference.kind]["description"],
+            "producer": producer,
+            "storage": "external",
+            "path": str(handle.path),
+            "format": handle.fmt,
+            # NOT a content hash, and the name says so. See
+            # data/external.py::fingerprint for why the weaker check that
+            # always runs beats the stronger one nobody would wait for.
+            "fingerprint": handle.fingerprint,
+            "changed_since_registration": bool(moved),
+            "rows": handle.rows,
+            "columns": [str(c) for c in handle.columns],
+            "n_files": handle.n_files,
+            "size_bytes": handle.size_bytes,
+            "index_start": None,
+            "index_end": None,
+        }
+
     frame = _load_path(reference.run_id, reference.name)
-    sidecar = _resolved_within_runs_dir(
-        _runs_dir() / reference.run_id / _sidecar_name(reference.name)
-    )
-    producer = None
-    if sidecar.exists():
-        try:
-            producer = json.loads(sidecar.read_text(encoding="utf-8")).get("producer")
-        except Exception:
-            producer = None
     path = _resolved_within_runs_dir(
         _runs_dir() / reference.run_id / f"{reference.name}.parquet"
     )
@@ -370,9 +588,12 @@ def describe(ref: str) -> Dict[str, Any]:
         "kind": reference.kind,
         "description": KINDS[reference.kind]["description"],
         "producer": producer,
+        "storage": "local",
         # So a consumer can prove it read what the producer wrote. Across a
         # fleet those are different processes at different times, and
-        # "same reference" is only as good as "same bytes".
+        # "same reference" is only as good as "same bytes". An externally
+        # registered dataset gets a `fingerprint` instead, which is a
+        # weaker claim deliberately spelled with a different key.
         "content_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
         "rows": int(len(frame)),
         "columns": [str(c) for c in frame.columns],
@@ -387,11 +608,13 @@ def kinds() -> Dict[str, str]:
 
 
 __all__ = [
+    "EXTERNAL_KINDS",
     "KINDS",
     "Reference",
     "describe",
     "kinds",
     "parse",
     "publish",
+    "publish_external",
     "resolve",
 ]

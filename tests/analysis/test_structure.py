@@ -450,8 +450,8 @@ class TestRegimes:
 
     def test_the_same_seed_gives_the_same_labels(self):
         series = pd.Series(np.random.default_rng(2).normal(0, 1, N), index=IDX)
-        first = detect_regimes(series, seed=4)
-        second = detect_regimes(series, seed=4)
+        first = detect_regimes(series)
+        second = detect_regimes(series)
         assert first["labels"] == second["labels"]
 
     def test_low_persistence_is_flagged_as_noise(self):

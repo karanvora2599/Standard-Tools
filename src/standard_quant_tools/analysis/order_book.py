@@ -43,7 +43,7 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
-__all__ = ["book_metrics", "depth_profile", "microprice"]
+__all__ = ["book_dynamics", "book_metrics", "depth_profile", "microprice"]
 
 
 def _levels_present(frame: pd.DataFrame) -> int:
@@ -253,6 +253,134 @@ def book_metrics(book: pd.DataFrame, *, levels: Optional[int] = None) -> Dict[st
         "mean_touch_size": _mean(touch_total),
         "mean_cumulative_size": _mean(cumulative_total),
         "depth_slope": slope,
+        "warnings": warnings,
+    }
+
+
+def book_dynamics(book: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Order-flow imbalance and update rates, BETWEEN consecutive snapshots.
+
+    `book_metrics` answers what a book holds at an instant. This answers
+    what changed, which is a different question and the one that predicts.
+
+    OFI IS NOT SIGNED VOLUME. `get_order_flow_imbalance` in this library
+    computes signed return times volume from BARS, which is a proxy for
+    this and a different quantity. What is computed here is the
+    Cont-Kukanov-Stoikov definition, from the book itself:
+
+        e_n = 1{P_b(n) >= P_b(n-1)} q_b(n) - 1{P_b(n) <= P_b(n-1)} q_b(n-1)
+            - 1{P_a(n) <= P_a(n-1)} q_a(n) + 1{P_a(n) >= P_a(n-1)} q_a(n-1)
+
+    Read it a term at a time. If the bid price ROSE, someone posted a more
+    aggressive bid and the whole new size is demand: +q_b(n). If it FELL,
+    the old bid was pulled or hit and the whole old size left: -q_b(n-1).
+    If it is unchanged both fire and the result is the size CHANGE, which
+    is the intuitive case and the only one a naive implementation gets
+    right. The ask terms are the mirror, negated because ask-side pressure
+    pushes the other way.
+
+    AT THE TOUCH, DELIBERATELY. This is the level-0 definition, which is
+    the one with published evidence behind it. A multi-level OFI is a
+    different quantity with a different decay, not a better version of
+    this one, so it is not silently substituted here.
+
+    A CROSSED OR INCOMPLETE SNAPSHOT breaks the pairwise comparison rather
+    than merely being odd, so the pairs it participates in are dropped and
+    counted. Interpolating across a gap would invent a book transition
+    nobody observed.
+    """
+    if not isinstance(book, pd.DataFrame) or len(book) < 2:
+        raise ValidationError(
+            "book dynamics need at least two snapshots: every measure here "
+            "is a comparison between consecutive states, and one snapshot "
+            "has nothing to compare with."
+        )
+    for column in ("bid_price_0", "bid_size_0", "ask_price_0", "ask_size_0"):
+        if column not in book.columns:
+            raise ValidationError(
+                f"book dynamics need {column!r}. This reads the "
+                "`DataProvider.get_order_book` contract at the touch."
+            )
+
+    bid_p = pd.to_numeric(book["bid_price_0"], errors="coerce").to_numpy(float)
+    bid_q = pd.to_numeric(book["bid_size_0"], errors="coerce").to_numpy(float)
+    ask_p = pd.to_numeric(book["ask_price_0"], errors="coerce").to_numpy(float)
+    ask_q = pd.to_numeric(book["ask_size_0"], errors="coerce").to_numpy(float)
+
+    usable = (
+        np.isfinite(bid_p)
+        & np.isfinite(bid_q)
+        & np.isfinite(ask_p)
+        & np.isfinite(ask_q)
+        & (bid_p < ask_p)
+    )
+    pair = usable[1:] & usable[:-1]
+    n_pairs = int(pair.sum())
+    warnings: List[str] = []
+    dropped = int(len(book) - 1 - n_pairs)
+    if dropped:
+        warnings.append(
+            f"NOTE: {dropped} of {len(book) - 1} consecutive pairs were "
+            "dropped -- one side was non-finite or the book was crossed. A "
+            "pairwise comparison across such a snapshot describes a "
+            "transition nobody observed."
+        )
+    if n_pairs == 0:
+        raise ValidationError(
+            "no usable consecutive pair: every snapshot has a non-finite "
+            "touch or a crossed book, so no transition can be measured."
+        )
+
+    prev_bid_p, curr_bid_p = bid_p[:-1][pair], bid_p[1:][pair]
+    prev_bid_q, curr_bid_q = bid_q[:-1][pair], bid_q[1:][pair]
+    prev_ask_p, curr_ask_p = ask_p[:-1][pair], ask_p[1:][pair]
+    prev_ask_q, curr_ask_q = ask_q[:-1][pair], ask_q[1:][pair]
+
+    contribution = (
+        (curr_bid_p >= prev_bid_p) * curr_bid_q
+        - (curr_bid_p <= prev_bid_p) * prev_bid_q
+        - (curr_ask_p <= prev_ask_p) * curr_ask_q
+        + (curr_ask_p >= prev_ask_p) * prev_ask_q
+    )
+
+    mid = (bid_p + ask_p) / 2.0
+    mid_moves = int((np.diff(mid[usable]) != 0).sum()) if usable.sum() > 1 else 0
+    spread_changes = (
+        int((np.diff((ask_p - bid_p)[usable]) != 0).sum()) if usable.sum() > 1 else 0
+    )
+
+    seconds = None
+    if "timestamp" in book.columns:
+        stamps = pd.to_datetime(book["timestamp"], errors="coerce").dropna()
+        if len(stamps) > 1:
+            span = (stamps.max() - stamps.min()).total_seconds()
+            seconds = float(span) if span > 0 else None
+    if seconds is None:
+        warnings.append(
+            "NOTE: no usable timestamp span, so the per-second rates are "
+            "null rather than zero. Zero would read as a still book."
+        )
+
+    total = float(contribution.sum())
+    return {
+        "n_snapshots": int(len(book)),
+        "n_pairs": n_pairs,
+        "n_pairs_dropped": dropped,
+        "elapsed_seconds": seconds,
+        # The window total, which is the quantity the literature regresses
+        # a price change on. The mean is reported beside it because the
+        # total scales with how long you looked.
+        "ofi": total,
+        "ofi_per_update": float(contribution.mean()),
+        "ofi_per_second": (total / seconds) if seconds else None,
+        # How hard the book is being worked. Counting SNAPSHOTS measures
+        # the sampling rate if the feed is sampled, which is why the count
+        # is reported beside the rate rather than only the rate.
+        "updates_per_second": (len(book) / seconds) if seconds else None,
+        "mid_changes": mid_moves,
+        "mid_changes_per_second": (mid_moves / seconds) if seconds else None,
+        "spread_changes": spread_changes,
         "warnings": warnings,
     }
 

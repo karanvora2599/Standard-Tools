@@ -39,7 +39,7 @@ import pytest
 #: test_adversarial_inputs.py.
 pytestmark = pytest.mark.slow
 
-from .synth import Unsynthesizable, build_arguments, names_a_path
+from .synth import names_a_path, synthesize
 
 
 def _seeded_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
@@ -51,9 +51,10 @@ def _seeded_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
         for tool_name, _description, model in runtime.tool_defs:
             if "seed" not in model.model_fields:
                 continue
-            try:
-                arguments = build_arguments(model)
-            except (Unsynthesizable, Exception):
+            arguments, _reason = synthesize(model)
+            if arguments is None:
+                # Reported by test_adversarial_inputs' declared-gap guard,
+                # which is the one place that knows the whole skip list.
                 continue
             out.append((runtime_name, tool_name, arguments))
     return out
@@ -65,6 +66,10 @@ def _seeded_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
 #: different property, and the audit trail's `verify_replay` is what tests
 #: it: it pins the DATA as well as the arguments.
 FETCHES_DATA = {"symbol", "symbols", "ticker", "tickers", "benchmark", "universe"}
+
+#: Pinned for any offline tool that advertises a seed, so "call it twice"
+#: asks about the code rather than about the generator.
+OFFLINE_SEED = 20260902
 
 
 def _offline_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
@@ -93,6 +98,20 @@ def _offline_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
     Reproducibility for a writer is a real property. It is a different
     one — about the bytes on disk rather than the returned dict — and
     `tests/audit/` is where it is checked.
+
+    A tool advertising a `seed` gets one PINNED here rather than being
+    excluded. Left unset, `run_terminal_monte_carlo` is a bootstrap over a
+    fresh generator and correctly says so in its own warnings — "No seed,
+    so this answer is not reproducible" — and asserting that it repeats
+    itself would be testing the harness's oversight rather than the tool.
+    Pinned, it tests the property that matters: same arguments AND same
+    seed, same answer. `TestSeedsAreHonoured` below covers the other
+    direction, that a DIFFERENT seed changes the answer.
+
+    This went unnoticed because the only offline stochastic tool on the
+    surface takes a polymorphic data source, which the synthesizer could
+    not build until it learned cross-field validators -- so the tool was
+    silently outside this layer entirely.
     """
     from standard_quant_tools.agent.runtimes import all_runtimes
 
@@ -103,10 +122,13 @@ def _offline_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
                 continue
             if names_a_path(model):
                 continue
-            try:
-                arguments = build_arguments(model)
-            except (Unsynthesizable, Exception):
+            arguments, _reason = synthesize(model)
+            if arguments is None:
+                # Named by test_adversarial_inputs' declared-gap guard,
+                # which owns the whole skip list.
                 continue
+            if "seed" in model.model_fields:
+                arguments = {**arguments, "seed": OFFLINE_SEED}
             out.append((runtime_name, tool_name, arguments))
     return out
 

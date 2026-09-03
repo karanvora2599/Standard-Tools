@@ -9,13 +9,15 @@ models nest structured params for the existing 46-tool surface.
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..specs import (
     DatasetSpec,
     ModelSpec,
     PortfolioSimSpec,
     PredictionTransformSpec,
+    TargetType,
+    Task,
     _parse_date,
 )
 
@@ -57,6 +59,243 @@ class ListFeaturesResult(BaseModel):
 
 
 # ── build_model_dataset ────────────────────────────────────────────────
+
+
+class ExternalTarget(BaseModel):
+    """One label column in an externally computed panel."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "What to call this horizon -- 'h1s', 'h30s'. Becomes a panel "
+            "column, and is what run_model_experiment selects by."
+        ),
+    )
+    column: str = Field(..., description="The column in the file holding it.")
+    horizon: int = Field(
+        ...,
+        gt=0,
+        description=(
+            "Bars ahead THIS label was measured over. Per target, because "
+            "that is the whole point of declaring several."
+        ),
+    )
+    target_type: TargetType = Field(
+        "forward_return",
+        description=(
+            "What this column already holds. Recorded, never recomputed -- "
+            "which is what lets a microstructure label say what it is: a "
+            "markout, a fill probability, a time to fill. Mislabelling one "
+            "as a forward return puts a false claim in the manifest and "
+            "leaves the task/target check unable to tell a probability from "
+            "a return."
+        ),
+    )
+    label_end_column: Optional[str] = Field(
+        None,
+        description=(
+            "Column holding when THIS label's window closes, for a label "
+            "that can end early."
+        ),
+    )
+
+
+class BuildEnsembleInput(BaseModel):
+    """Several registered models, combined into one prediction series."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_ids: List[str] = Field(
+        ...,
+        min_length=2,
+        max_length=20,
+        description=(
+            "Registered models to combine. Their OUT-OF-SAMPLE predictions "
+            "are what gets combined -- each row predicted by a fold that did "
+            "not train on it -- so the combination is honest whatever it "
+            "does with them."
+        ),
+    )
+    method: Literal["rank_mean", "mean", "median", "weighted"] = Field(
+        "rank_mean",
+        description=(
+            "'rank_mean' (default) converts each model to a within-date rank "
+            "first, so every model contributes its ORDERING and none "
+            "contributes its variance -- two models on different scales "
+            "would otherwise average into a number dominated by whichever "
+            "has the wider spread, which is its units and not its skill. "
+            "'mean' and 'median' combine the raw levels; 'weighted' takes "
+            "the weights from you rather than learning them."
+        ),
+    )
+    weights: Optional[List[float]] = Field(
+        None,
+        description=(
+            "One per model, in the same order. Only read by "
+            "method='weighted', and REFUSED with any other method rather "
+            "than ignored."
+        ),
+    )
+    run_id: str = Field(..., description="Groups this workflow's artifacts.")
+    name: str = Field(..., description="Names the combined series within the run.")
+
+
+class BuildEnsembleResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    ref: str = Field(
+        ...,
+        description=(
+            "An `sqt://predictions/...` reference to the combined series. "
+            "Score it with score_predictions, or backtest it through "
+            "convert_reference -- it is an ordinary prediction frame."
+        ),
+    )
+    model_ids: List[str] = Field(default_factory=list)
+    method: str = ""
+    task: str = ""
+    n_rows: int = 0
+    rows_per_model: Dict[str, int] = Field(default_factory=dict)
+    rows_covered_by_all: int = Field(
+        0,
+        description="Rows every model predicted. Only these are combined, so "
+        "a model validated over a shorter window shortens the ensemble.",
+    )
+    correlations: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Pairwise correlation between the base models' predictions. The "
+            "number that says whether the ensemble was worth building: two "
+            "models correlated at 0.98 average into approximately either of "
+            "them, which the ensemble's own score cannot show you."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
+class RegisterExternalPanelInput(BaseModel):
+    """A finished feature matrix, and the one thing it cannot carry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(
+        ...,
+        description=(
+            "A Parquet or CSV file, or a directory read as one partitioned "
+            "dataset, holding a long panel: one row per (bar, entity) with "
+            "the feature columns and the label already computed. Nothing is "
+            "copied -- the dataset record points at this path."
+        ),
+    )
+    horizon: Optional[int] = Field(
+        None,
+        gt=0,
+        description=(
+            "Bars ahead the target was measured over, for a panel with ONE "
+            "label. Not inferable and not defaulted: the engine purges "
+            "training rows whose label window overlaps the test fold, and an "
+            "absent horizon silently disables that purge rather than "
+            "failing. Supply this or `targets`, never both."
+        ),
+    )
+    targets: Optional[List[ExternalTarget]] = Field(
+        None,
+        min_length=1,
+        description=(
+            "Several labels in ONE panel, each with its own horizon. This is "
+            "the microstructure case: a book is labelled at 1s, 5s and 30s "
+            "simultaneously off identical features, and building one dataset "
+            "per horizon would recompute and re-store the same matrix three "
+            "times. Registered together they also stay COMPARABLE -- every "
+            "model then sees the same rows and the same folds. "
+            "run_model_experiment picks one by name."
+        ),
+    )
+    target_type: TargetType = Field(
+        "forward_return",
+        description="What the target column already holds. Recorded, not recomputed.",
+    )
+    interval: str = Field(
+        "1d",
+        min_length=1,
+        description=(
+            "Bar interval of the panel's own rows -- '1d', '1s', '100ms'. "
+            "Recorded on the spec, because `horizon` counts BARS of it and "
+            "a horizon of 20 means a month at '1d' and two seconds at "
+            "'100ms'."
+        ),
+    )
+    date_column: str = Field("date", description="Column identifying the bar.")
+    entity_column: str = Field("entity", description="Column identifying the symbol.")
+    target_column: str = Field("target", description="Column holding the label.")
+    label_end_column: Optional[str] = Field(
+        None,
+        description=(
+            "Column holding when each label's window CLOSES. Supply it for a "
+            "label that can end early -- a triple barrier -- so the purge "
+            "uses the real end rather than the nominal horizon. Omit it for "
+            "a fixed horizon."
+        ),
+    )
+    feature_columns: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Which columns are features. Omitted, every column that is not "
+            "the date, entity, target or label end is taken as one."
+        ),
+    )
+    source: str = Field(
+        "external",
+        description="Where the panel came from, recorded on the dataset.",
+    )
+    file_format: Optional[Literal["parquet", "csv"]] = Field(
+        None, description="Override the format inferred from the suffix."
+    )
+
+    @model_validator(mode="after")
+    def _one_way_of_declaring_labels(self) -> "RegisterExternalPanelInput":
+        if (self.horizon is None) == (self.targets is None):
+            raise ValueError(
+                "declare the panel's labels with EITHER `horizon` (one "
+                "label, named by target_column) OR `targets` (several, each "
+                "with its own horizon) -- not both and not neither. Both "
+                "would make the precedence rule part of the contract, and "
+                "neither leaves the purge with no horizon to purge on."
+            )
+        return self
+
+
+class RegisterExternalPanelResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(..., description="Pass to run_model_experiment.")
+    rows: int = 0
+    entities: List[str] = Field(default_factory=list)
+    feature_ids: List[str] = Field(default_factory=list)
+    target_id: str = Field("", description="The PRIMARY target's id.")
+    targets: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every label this panel carries, by name. The first is the "
+            "primary; run_model_experiment trains on it unless told another."
+        ),
+    )
+    start: Optional[str] = None
+    end: Optional[str] = None
+    interval: str = ""
+    source_path: str = Field("", description="Where the panel stayed.")
+    fingerprint: str = Field(
+        "",
+        description=(
+            "Name, size and mtime of the files behind it -- not a content "
+            "hash. The content hash is recorded separately and IS verified "
+            "on every load, because the engine reads the whole panel anyway."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 class BuildModelDatasetInput(BaseModel):
@@ -129,6 +368,15 @@ class RunModelExperimentInput(BaseModel):
 
     dataset_id: str = Field(..., description="An id returned by build_model_dataset.")
     spec: ModelSpec
+    target: Optional[str] = Field(
+        None,
+        description=(
+            "Which label to train on, for a dataset registered with several. "
+            "Omitted, the primary is used. Rows whose CHOSEN label is null "
+            "are dropped for this experiment only, so a long horizon costs "
+            "its own rows and not the shorter ones'."
+        ),
+    )
 
 
 class RunModelExperimentResult(BaseModel):
@@ -483,9 +731,7 @@ class ListModelsInput(BaseModel):
     # the one choosing the names.
     model_config = ConfigDict(extra="forbid")
 
-    task: Optional[Literal["regression", "classification", "ranking"]] = Field(
-        None, description="Only models trained for this task."
-    )
+    task: Optional[Task] = Field(None, description="Only models trained for this task.")
     limit: int = Field(50, gt=0, le=500, description="Most recent first.")
 
 
@@ -724,7 +970,7 @@ class ScorePredictionsInput(BaseModel):
             "outside this library score the same way."
         ),
     )
-    task: Literal["regression", "classification", "ranking"] = Field(
+    task: Task = Field(
         ...,
         description=(
             "How to read the prediction column. Scoring a raw forward-return "
@@ -902,5 +1148,133 @@ class JoinPointInTimeResult(BaseModel):
         description="Fraction of panel rows that received a value, per field. "
         "A low number is not a failure -- it is how much of the panel "
         "predates the first release.",
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
+class AnalyzeModelErrorsInput(BaseModel):
+    """Where a registered model is wrong, not merely how wrong on average."""
+
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    model_id: str = Field(
+        ...,
+        description=(
+            "A model registered by run_model_experiment. Its OUT-OF-SAMPLE "
+            "predictions are the ones analysed -- each row predicted by a "
+            "fold that did not train on it -- so these errors are the errors "
+            "the model would have made."
+        ),
+    )
+    feature: Optional[str] = Field(
+        None,
+        description=(
+            "A column of the model's dataset panel to break errors down by, "
+            "in deciles. This is the conditional question: does the model "
+            "fail when the spread is wide, when volatility is high, when the "
+            "book is thin. Omit it for the unconditional breakdowns only."
+        ),
+    )
+    period: Literal["M", "Q", "Y"] = Field(
+        "M",
+        description=(
+            "Calendar granularity for the by-period breakdown: month, "
+            "quarter or year. Use a coarser one on a short sample, where "
+            "monthly buckets are too thin to say anything."
+        ),
+    )
+    top_n: int = Field(
+        5,
+        ge=1,
+        le=50,
+        description=(
+            "How many buckets to return from each end of a breakdown, worst "
+            "and best by RMSE. A 500-name universe produces 500 entity rows "
+            "and the extremes are the whole finding; the rest are counted, "
+            "not listed."
+        ),
+    )
+
+
+class AnalyzeModelErrorsResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    task: str = ""
+    target_id: str = ""
+    n_rows: int = Field(
+        0,
+        description="Out-of-sample rows that matched an outcome in the "
+        "dataset panel. The predictions frame carries no target column, so "
+        "the actuals are joined back from the panel the model was fit on.",
+    )
+    residuals: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Shape of actual-minus-predicted: mean error (a non-zero mean is "
+            "BIAS, which no amount of rank skill corrects), MAE, RMSE, the "
+            "5th/95th percentiles, skew and excess kurtosis. A fat residual "
+            "tail means the model is usually close and occasionally very "
+            "wrong, which sizing from its average error will not survive."
+        ),
+    )
+    calibration: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Whether the prediction's SCALE is right, which is a separate "
+            "question from whether its ordering is. Regression/ranking: the "
+            "slope and intercept of actual regressed on predicted -- slope 1, "
+            "intercept 0 is calibrated, and below 1 means the predictions are "
+            "spread wider than the outcomes. Classification: Brier score, "
+            "expected calibration error and the reliability bins."
+        ),
+    )
+    heteroskedasticity: Optional[float] = Field(
+        None,
+        description=(
+            "Correlation between the absolute error and the prediction's "
+            "magnitude. Positive means the model is least reliable exactly "
+            "where it is most confident -- the direction that costs money, "
+            "since the large predictions are the ones sized on."
+        ),
+    )
+    residual_autocorrelation: Optional[float] = Field(
+        None,
+        description=(
+            "Lag-1 residual autocorrelation, averaged over entities rather "
+            "than computed on the stacked panel. EXPECTED to be positive for "
+            "an overlapping target: a 20-bar forward return sampled every bar "
+            "shares 19 bars with its neighbour, so consecutive residuals are "
+            "correlated by construction. Read it as how few INDEPENDENT "
+            "observations there were, not as misspecification."
+        ),
+    )
+    by_entity: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Worst and best entities by RMSE, each with its row "
+        "count -- a bias measured on nine rows is not a bias, so `thin` "
+        "marks buckets under the floor.",
+    )
+    by_period: List[Dict[str, Any]] = Field(default_factory=list)
+    by_prediction_decile: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Where in its OWN range the model is wrong. Accurate in "
+        "the middle and wrong at the extremes is backwards for trading, "
+        "because the extremes are the positions you take.",
+    )
+    by_feature_decile: List[Dict[str, Any]] = Field(default_factory=list)
+    buckets_omitted: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Buckets computed but not listed, per breakdown, because "
+        "only the extremes were returned.",
+    )
+    findings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The sentences the breakdown exists to produce -- which bucket "
+            "is materially worse than the rest, and whether the model is "
+            "biased or mis-scaled. Empty means the errors are spread evenly, "
+            "which is itself the answer."
+        ),
     )
     warnings: List[str] = Field(default_factory=list)

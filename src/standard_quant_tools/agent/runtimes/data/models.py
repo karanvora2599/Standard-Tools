@@ -188,6 +188,74 @@ class ValidateDataBundleInput(DataBundleRefInput):
     )
 
 
+class RegisterExternalDatasetInput(BaseModel):
+    """Where the data is, and what it claims to be."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(
+        ...,
+        description=(
+            "A Parquet or CSV file, or a directory read as one partitioned "
+            "dataset. Nothing is copied, so this has to be readable from "
+            "wherever this library runs."
+        ),
+    )
+    kind: Literal["order_book_panel", "event_panel", "tick_tape", "quote_panel"] = (
+        Field(
+            ...,
+            description=(
+                "What the dataset holds. Checked against its columns at "
+                "registration, so a mismatch fails here rather than inside "
+                "whatever first read a column that is not there."
+            ),
+        )
+    )
+    run_id: str = Field(..., description="Groups this workflow's artifacts.")
+    name: str = Field(..., description="Names this dataset within the run.")
+    file_format: Optional[Literal["parquet", "csv"]] = Field(
+        None,
+        description=(
+            "Override the format inferred from the suffix. Needed for an "
+            "extract whose name does not end in .parquet or .csv."
+        ),
+    )
+    source: str = Field(
+        "unknown",
+        description="Who supplied it, recorded on the registration.",
+    )
+
+
+class ExternalDatasetRefInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ref: str = Field(..., description="A reference from register_external_dataset.")
+    preview_rows: int = Field(
+        5,
+        ge=0,
+        le=50,
+        description=(
+            "How many leading rows to return for looking at. Bounded hard: "
+            "a preview is for seeing the shape, and anything that has to be "
+            "right about the whole dataset reads it in batches instead."
+        ),
+    )
+
+
+class ValidateExternalDatasetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ref: str = Field(..., description="A reference from register_external_dataset.")
+    scan_limit: int = Field(
+        2_000_000,
+        gt=0,
+        le=200_000_000,
+        description=(
+            "Stop after this many rows. A verdict over a bounded prefix "
+            "reports what it covered; a full scan of a billion-row tape is "
+            "not something to do inside one tool call."
+        ),
+    )
+
+
 class ValidateFinancialRatiosInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ratios: dict = Field(
@@ -212,6 +280,7 @@ class CompareRatioFramesInput(BaseModel):
 
 __all__ = [
     "BuildDataBundleInput",
+    "ExternalDatasetRefInput",
     "BundleFrame",
     "CompareRatioFramesInput",
     "DataBundleRefInput",
@@ -224,7 +293,9 @@ __all__ = [
     "FetchReturnsPanelInput",
     "FetchTickTapeInput",
     "InferTemporalContractInput",
+    "RegisterExternalDatasetInput",
     "ValidateDataBundleInput",
+    "ValidateExternalDatasetInput",
     "ValidateFinancialRatiosInput",
 ]
 

@@ -20,9 +20,21 @@ inside one tool died there and the next runtime refetched it.
 WHAT IS DELIBERATELY ABSENT. Data QUALITY checks -- `get_data_quality_report`
 in `research` already reports missing bars, stale prices and price jumps, and
 a second name for those is the confusable duplication runtimes exist to
-prevent. Order books, because `DataProvider.get_order_book` is a contract no
-shipped provider implements and a tool that always refuses is worse than no
-tool.
+prevent. Order book FETCHING, still -- but for a different reason than
+before. `DataProvider.get_order_book` now HAS an implementation:
+`DatabentoProvider` serves depth from its depth dataset. A fetch tool in
+this runtime would have to answer for every provider, and nine of ten
+refuse, so the way in is the one below.
+
+WHAT CHANGED THAT FOR. Fetching a book and HAVING one are different problems,
+and only the first was ever blocked. `register_external_dataset` takes depth the
+caller already holds -- a vendor extract, an ITCH replay, a Nasdaq Basic
+tape -- and makes it resolvable without copying it, which is what the fetch
+path could never do: every provider call materializes a whole frame and
+`publish` then writes a second complete copy under SQT_RUNS_DIR. That is
+survivable for a decade of daily bars and not for an afternoon of depth. So
+these three tools store a pointer and a schema, and read in batches, which
+is also why they are the only tools in this runtime that fetch nothing.
 """
 
 from .models import (
@@ -31,6 +43,7 @@ from .models import (
     ContinuousFuturesInput,
     DataBundleRefInput,
     DatasetMetadataInput,
+    ExternalDatasetRefInput,
     FetchFinancialRatiosInput,
     FetchOhlcvInput,
     FetchOhlcvPanelInput,
@@ -38,7 +51,9 @@ from .models import (
     FetchReturnsPanelInput,
     FetchTickTapeInput,
     InferTemporalContractInput,
+    RegisterExternalDatasetInput,
     ValidateDataBundleInput,
+    ValidateExternalDatasetInput,
     ValidateFinancialRatiosInput,
 )
 from .tools import (
@@ -46,6 +61,7 @@ from .tools import (
     build_data_bundle,
     compare_ratio_frames,
     describe_data_bundle,
+    describe_external_dataset,
     fetch_financial_ratios,
     fetch_ohlcv,
     fetch_ohlcv_panel,
@@ -54,7 +70,9 @@ from .tools import (
     fetch_tick_tape,
     get_dataset_metadata,
     infer_temporal_contract,
+    register_external_dataset,
     validate_data_bundle,
+    validate_external_dataset,
     validate_financial_ratios,
 )
 
@@ -105,9 +123,10 @@ TOOL_DEFS = [
         "fetch_quote_panel",
         "Fetch top-of-book quotes and publish them as a quote_panel "
         "reference, which is what signing trades by the Lee-Ready rule needs "
-        "alongside a tape. Top of book ONLY: no shipped provider exposes "
-        "depth, so queue position and resting size at a level are not "
-        "recoverable from this and should not be inferred from it.",
+        "alongside a tape. Top of book ONLY -- depth is a different call, "
+        "and provider='databento' serves it through get_order_book. Queue "
+        "position is in neither: it needs an order-level feed and cannot be "
+        "inferred from aggregated size at a level.",
         FetchQuotePanelInput,
     ),
     (
@@ -138,6 +157,43 @@ TOOL_DEFS = [
         "say what is present and never what a source guarantees; prefer "
         "get_dataset_metadata whenever the data came from a known provider.",
         InferTemporalContractInput,
+    ),
+    (
+        "register_external_dataset",
+        "Make a Parquet or CSV dataset already on your disk resolvable as an "
+        "`sqt://` reference WITHOUT copying it, for data too large to fetch "
+        "and republish -- L2 depth, a full tick tape, an event history. Every "
+        "other tool here fetches a frame and then writes a second complete "
+        "copy under the runs directory; a book cannot survive that twice. "
+        "Registration reads the schema, checks the columns the declared kind "
+        "requires, and stores a pointer. It does NOT read the rows, so a book "
+        "with its bid and ask columns transposed registers cleanly -- run "
+        "validate_external_dataset next.",
+        RegisterExternalDatasetInput,
+    ),
+    (
+        "describe_external_dataset",
+        "What a registered dataset holds -- columns, dtypes, row count, depth "
+        "levels, file count and size -- plus whether the file has changed "
+        "since it was registered. That last field has no equivalent for a "
+        "published artifact and is the price of not copying: this library "
+        "wrote and froze its own artifacts, but an external file belongs to "
+        "you and can be re-extracted underneath a live reference. Returns a "
+        "bounded preview of leading rows for looking at, never the dataset.",
+        ExternalDatasetRefInput,
+    ),
+    (
+        "validate_external_dataset",
+        "Scan a registered dataset in batches and report what would produce "
+        "wrong numbers downstream, as a verdict with blocking reasons rather "
+        "than an exception -- because three crossed books in nine million "
+        "rows is fine and a third of them crossed is transposed columns, and "
+        "only a count separates the two. Checks are per kind: crossed and "
+        "empty books, non-positive trade prices and sizes, unparseable or "
+        "out-of-order timestamps, and for an event panel the available_time "
+        "versus event_time rule that makes a model look prescient. Bounded by "
+        "scan_limit, and says so when it stops early.",
+        ValidateExternalDatasetInput,
     ),
     (
         "build_data_bundle",
@@ -215,6 +271,18 @@ TOOL_DISPATCH = {
         infer_temporal_contract,
         InferTemporalContractInput,
     ),
+    "register_external_dataset": (
+        register_external_dataset,
+        RegisterExternalDatasetInput,
+    ),
+    "describe_external_dataset": (
+        describe_external_dataset,
+        ExternalDatasetRefInput,
+    ),
+    "validate_external_dataset": (
+        validate_external_dataset,
+        ValidateExternalDatasetInput,
+    ),
     "build_data_bundle": (build_data_bundle, BuildDataBundleInput),
     "describe_data_bundle": (describe_data_bundle, DataBundleRefInput),
     "validate_data_bundle": (validate_data_bundle, ValidateDataBundleInput),
@@ -240,6 +308,7 @@ __all__ = [
     "build_data_bundle",
     "compare_ratio_frames",
     "describe_data_bundle",
+    "describe_external_dataset",
     "fetch_financial_ratios",
     "fetch_ohlcv",
     "fetch_ohlcv_panel",
@@ -248,6 +317,8 @@ __all__ = [
     "fetch_tick_tape",
     "get_dataset_metadata",
     "infer_temporal_contract",
+    "register_external_dataset",
     "validate_data_bundle",
+    "validate_external_dataset",
     "validate_financial_ratios",
 ]

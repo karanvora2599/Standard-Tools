@@ -80,6 +80,7 @@ from standard_quant_tools.agent.runtimes.data import (
     build_data_bundle,
     compare_ratio_frames,
     describe_data_bundle,
+    describe_external_dataset,
     fetch_financial_ratios,
     fetch_ohlcv,
     fetch_ohlcv_panel,
@@ -88,7 +89,9 @@ from standard_quant_tools.agent.runtimes.data import (
     fetch_tick_tape,
     get_dataset_metadata,
     infer_temporal_contract,
+    register_external_dataset,
     validate_data_bundle,
+    validate_external_dataset,
     validate_financial_ratios,
 )
 from standard_quant_tools.agent.runtimes.delta_one import (
@@ -157,6 +160,7 @@ from standard_quant_tools.agent.runtimes.microstructure import (
     get_implementation_shortfall,
     get_intraday_volume_profile,
     get_order_book_metrics,
+    get_order_event_metrics,
     get_order_flow_imbalance,
     get_quoted_spread_series,
 )

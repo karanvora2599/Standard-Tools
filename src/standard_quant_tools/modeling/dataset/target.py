@@ -15,7 +15,9 @@ Pydantic boundary before anything here runs.
 import numpy as np
 import pandas as pd
 
-from ..specs import TargetSpec
+from standard_quant_tools.error import ValidationError
+
+from ..specs import TARGET_KINDS, TargetSpec
 
 # Targets that cannot be computed from one entity's prices alone.
 CROSS_SECTIONAL_TARGETS = frozenset(
@@ -47,6 +49,18 @@ def build_target(close: pd.Series, spec: TargetSpec) -> pd.Series:
     manufacturing a "went down" observation for bars whose outcome simply
     has not happened yet. Alignment drops NaN rows instead.
     """
+    kind = TARGET_KINDS.get(spec.type)
+    if kind is not None and not kind.buildable:
+        raise ValidationError(
+            f"target type {spec.type!r} cannot be built from a price series: "
+            f"{kind.description} Nothing in a Close column determines it -- "
+            "it is a function of the book, of orders, or of fills. Compute "
+            "it where that data lives and bring the panel in with "
+            "register_external_panel, which records what a label IS rather "
+            "than recomputing it. A bar-derived approximation would be a "
+            "number with nothing behind it."
+        )
+
     # `_horizon_volatility` 30 lines below already passes this. Without
     # it, pandas pads across a data gap and FABRICATES a supervised
     # label: close=[100, 101, nan, nan, 90, ...] with horizon=2 gave
@@ -70,8 +84,19 @@ def build_target(close: pd.Series, spec: TargetSpec) -> pd.Series:
         return forward_return / _horizon_volatility(close, spec)
     if spec.type == "triple_barrier":
         return _triple_barrier(close, spec)
-    direction = (forward_return > spec.threshold).astype(float)
-    return direction.where(forward_return.notna())
+    if spec.type == "forward_direction":
+        direction = (forward_return > spec.threshold).astype(float)
+        return direction.where(forward_return.notna())
+    # NOT a fallthrough. This used to be a bare `else` producing a direction
+    # target, so any type added to the Literal and forgotten here came back
+    # silently binarized -- a continuous label arriving as 1.0/0.0 with
+    # nothing raising. The refusal names the file to fix.
+    raise ValidationError(
+        f"target type {spec.type!r} is declared in TARGET_KINDS as buildable "
+        "but has no branch in build_target. Add one in "
+        "modeling/dataset/target.py; until then it would silently come back "
+        "as a binarized direction target."
+    )
 
 
 def _horizon_volatility(close: pd.Series, spec: TargetSpec) -> pd.Series:

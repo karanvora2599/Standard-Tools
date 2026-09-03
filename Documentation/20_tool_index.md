@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 200 below.
+advertises 155 of the 207 below.
 
 
 ## The runtimes
@@ -35,15 +35,15 @@ advertises 155 of the 200 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 80 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `modeling` | 20 | 59 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
-| `modeling` | 17 | 47 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| `microstructure` | 16 | 20 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
-| `data` | 14 | 15 KB | *(one surface)* | [26_data.md](26_data.md) |
+| `data` | 17 | 19 KB | *(one surface)* | [26_data.md](26_data.md) |
+| `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 9 | 11 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **200** | | | |
+| `feature_lab` | 9 | 22 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| **Total** | **207** | | | |
 
 ---
 
@@ -186,7 +186,7 @@ When the process generating a series CHANGED, by binary segmentation on the mean
 Label each observation with a volatility regime, by a Gaussian mixture. A MIXTURE rather than a hidden Markov model: it has no transition matrix, so it flips on single observations where an HMM would smooth, and `persistence` reports how often it does -- below about 0.8 the labels describe noise. Regimes come back sorted by volatility so regime 0 is always the calm one.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `n_regimes`, `seed`
+**Optional:** `n_regimes`
 
 #### `estimate_tail_index`
 
@@ -608,6 +608,150 @@ Backtest a pre-computed signal panel across a ticker universe, combined into por
 
 ---
 
+## `modeling` — Modeling
+
+Build, validate and score a statistical model from this library's own features: dataset construction, leakage-purged walk-forward fitting, the model registry, and evaluation of out-of-sample predictions. One ordered pipeline rather than a set of interchangeable tools.
+
+#### `analyze_features`
+
+Score a built dataset's FEATURES before fitting anything: coverage, turnover, cross-sectional IC and ICIR, decile spread and monotonicity, which features are near-duplicates of one another, and a lead-lag causality screen for features whose information arrives too early. Use this to choose features; use inspect_model(view='feature_importance') to see what one fitted model then leaned on.
+
+**Required:** `dataset_id`  
+**Optional:** `features`, `n_quantiles`, `cluster_threshold`, `include_leakage`, `leakage_max_shift`
+
+#### `analyze_model_errors`
+
+WHERE a registered model is wrong, not merely how wrong on average. An R2 cannot separate a broadly mediocre model from one that is excellent except in the conditions you trade -- those have the same headline number and opposite consequences. Breaks the out-of-sample errors down by entity, by period, by the model's OWN prediction decile, and optionally by the decile of any feature in its panel, which is the breakdown that turns 'the model is mediocre' into 'the model fails when the spread is wide'. Also reports CALIBRATION, a separate question from accuracy: a model can rank perfectly and still be systematically too confident, which is invisible in an R2 or an IC and changes every position size computed from it. Residual autocorrelation is reported and is EXPECTED to be positive for an overlapping label rather than being a defect.
+
+**Required:** `model_id`  
+**Optional:** `feature`, `period`, `top_n`
+
+#### `build_model_dataset`
+
+Fetch OHLCV, compute requested features/target, persist the panel.
+
+**Required:** `spec`
+
+#### `build_model_ensemble`
+
+Combine several registered models into one prediction series, and publish it as an `sqt://predictions` reference that score_predictions and the backtest bridge read like any other. What gets combined is each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold that did not train on them -- so the combination cannot inherit the optimism that makes naive stacking look excellent until it meets a new day. The default is rank_mean rather than mean, because two models on different scales average into a number dominated by whichever has the wider spread, which is its units and not its skill. Reports the pairwise correlation between the base models: two agreeing at 0.98 combine into approximately either of them, and the ensemble's own score cannot show you that.
+
+**Required:** `model_ids`, `run_id`, `name`  
+**Optional:** `method`, `weights`
+
+#### `check_leakage`
+
+Ask whether a set of features is temporally safe to fit on — before building a dataset with them. Optionally reports a built dataset's recorded point-in-time coverage too.
+
+*No required arguments.*  
+**Optional:** `feature_ids`, `dataset_id`
+
+#### `compare_models`
+
+Rank registered models side by side on their out-of-sample metrics. Models are ranked within their own task, never across tasks, because those metrics are not on a common scale.
+
+**Required:** `model_ids`  
+**Optional:** `metric`
+
+#### `evaluate_model_portfolio`
+
+Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transform predictions into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure.
+
+**Required:** `model_id`  
+**Optional:** `transform`, `portfolio`
+
+#### `explain_dataset_row_loss`
+
+Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.
+
+**Required:** `dataset_id`
+
+#### `inspect_model`
+
+Inspect a registered model's summary/importance/validation/lineage.
+
+**Required:** `model_id`  
+**Optional:** `view`
+
+#### `join_point_in_time`
+
+Attach point-in-time records to a built dataset, each panel row getting the most recent record AVAILABLE by then. Strictly backward and inclusive: a filing released before a bar's close is usable on it, one released after is not, and a row with nothing available yet gets NaN rather than zero or the eventual value. A restatement is a second row with the same event_time and a later available_time, and the join returns whichever version was current at each date.
+
+**Required:** `dataset_id`, `records`  
+**Optional:** `fields`, `entity_scoped`, `prefix`, `max_staleness_days`
+
+#### `list_datasets`
+
+Every built dataset panel, newest first, with row/entity/feature counts and date span.
+
+*No required arguments.*  
+**Optional:** `limit`
+
+#### `list_features`
+
+Which features this library can build, what each one measures, and what it costs to compute. Call it BEFORE build_model_dataset rather than guessing names -- a feature name that does not exist is a failed call and an error round trip, which costs more than reading the catalogue does. The feature_lab runtime then answers what each one is worth once the dataset exists.
+
+*No required arguments.*  
+**Optional:** `category`
+
+#### `list_modeling_capabilities`
+
+What this modeling runtime can do: tasks, estimators and the capabilities of each (sample weights, probabilities, query groups, coefficients, feature importance), features, target types, validation schemes, preprocessing and weighting options, and which optional libraries are installed. Call this before choosing a model rather than assuming an estimator is available.
+
+*No required arguments.*  
+**Optional:** `include_estimators`
+
+#### `list_models`
+
+Every registered model, newest first, with its task, estimator, headline out-of-sample metric and source dataset. Call this when you need a model_id you do not already hold.
+
+*No required arguments.*  
+**Optional:** `task`, `limit`
+
+#### `register_external_panel`
+
+Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have.
+
+**Required:** `path`  
+**Optional:** `horizon`, `targets`, `target_type`, `interval`, `date_column`, `entity_column`, `target_column`, `label_end_column`, `feature_columns`, `source`, `file_format`
+
+#### `run_model_experiment`
+
+Fit + walk-forward validate + register a model from a persisted dataset.
+
+**Required:** `dataset_id`, `spec`  
+**Optional:** `target`
+
+#### `score_model`
+
+Run a registered model forward and get its predictions for a universe as of a date. The step that turns a fitted model into something a backtest can consume, and the one where point-in-time discipline matters most: the `as_of` date is what stops the model seeing features that did not exist yet. Raw probabilities from a tree ensemble are NOT calibrated, so a 0.9 threshold may select no rows at all -- check the distribution before thresholding.
+
+**Required:** `model_id`, `as_of`, `universe`  
+**Optional:** `lookback_days`, `max_staleness_days`
+
+#### `score_predictions`
+
+Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns. Works on predictions this library never produced.
+
+**Required:** `predictions_ref`, `task`  
+**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`
+
+#### `validate_model_spec`
+
+Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Fetches nothing and fits nothing.
+
+**Required:** `spec`  
+**Optional:** `dataset_id`
+
+#### `validate_pit_records`
+
+Check point-in-time records BEFORE joining them onto anything. The error worth catching is the two timestamps the wrong way round: event_time is when a fact is ABOUT, available_time is when it could first be ACTED ON, and swapped they make every model look prescient. Also reports median_publication_lag_days -- exactly how much hindsight a naive join on event_time would have handed you. Fetches nothing.
+
+**Required:** `records`  
+**Optional:** `entity_scoped`
+
+---
+
 ## `meta` — Discovery & Provenance
 
 Questions about the library and the session rather than about a market: what this library accepts and what the data provider can serve, and what a past tool call did and whether it still reproduces.
@@ -1004,125 +1148,124 @@ Recover whichever of financing, dividend or borrow a quoted forward implies, giv
 
 ---
 
-## `modeling` — Modeling
+## `data` — Data
 
-Build, validate and score a statistical model from this library's own features: dataset construction, leakage-purged walk-forward fitting, the model registry, and evaluation of out-of-sample predictions. One ordered pipeline rather than a set of interchangeable tools.
+Get the data and publish it as an `sqt://` reference every other runtime can read: OHLCV for one name or a whole universe, return panels, tick tapes and quote panels, provider guarantees, temporal contracts, and bundles that pair frames with what their sources promise. Fetches; does not analyze.
 
-#### `analyze_features`
+#### `build_continuous_futures_series`
 
-Score a built dataset's FEATURES before fitting anything: coverage, turnover, cross-sectional IC and ICIR, decile spread and monotonicity, which features are near-duplicates of one another, and a lead-lag causality screen for features whose information arrives too early. Use this to choose features; use inspect_model(view='feature_importance') to see what one fitted model then leaned on.
+Stitch a chain of futures contracts into one continuous series, and publish TWO references rather than one. The adjusted series is a research instrument and is not a price -- back-adjustment changes every historical level, and a difference-adjusted series can go negative on a contract that never traded below zero -- so sizing a position from it means sizing against a number nobody could have transacted at. The second reference carries which contract was actually active each date and what it actually traded at.
 
-**Required:** `dataset_id`  
-**Optional:** `features`, `n_quantiles`, `cluster_threshold`, `include_leakage`, `leakage_max_shift`
+**Required:** `contracts`, `run_id`, `name`  
+**Optional:** `roll_rule`, `adjustment`, `days_before_expiry`
 
-#### `build_model_dataset`
+#### `build_data_bundle`
 
-Fetch OHLCV, compute requested features/target, persist the panel.
+Name several already-published frames as one unit and publish the manifest as a data_bundle reference. A bundle holds references rather than copies, so it cannot diverge from the frames it names, and it pairs each frame with what its source can say about timing -- which is the pairing a point-in-time join depends on and which a bare frame throws away.
 
-**Required:** `spec`
+**Required:** `frames`, `run_id`, `name`
 
-#### `check_leakage`
+#### `compare_ratio_frames`
 
-Ask whether a set of features is temporally safe to fit on — before building a dataset with them. Optionally reports a built dataset's recorded point-in-time coverage too.
+Two providers' ratios side by side, with each disagreement CLASSIFIED rather than merely measured: a unit mismatch is fixable by rescaling, a definition difference is not, and averaging across the second kind produces a number neither provider would stand behind. Takes the values as arguments, so it works for sources this library cannot fetch.
 
-*No required arguments.*  
-**Optional:** `feature_ids`, `dataset_id`
+**Required:** `left`, `right`  
+**Optional:** `left_name`, `right_name`, `fields`
 
-#### `compare_models`
+#### `describe_data_bundle`
 
-Rank registered models side by side on their out-of-sample metrics. Models are ranked within their own task, never across tasks, because those metrics are not on a common scale.
+What frames a bundle names, how many rows and columns each has, and what each source can promise about revisions and point-in-time availability. Use it to see what a bundle actually contains before building a dataset on it, rather than after a model has already been fitted on whatever was in there.
 
-**Required:** `model_ids`  
-**Optional:** `metric`
+**Required:** `ref`
 
-#### `evaluate_model_portfolio`
+#### `describe_external_dataset`
 
-Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transform predictions into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure.
+What a registered dataset holds -- columns, dtypes, row count, depth levels, file count and size -- plus whether the file has changed since it was registered. That last field has no equivalent for a published artifact and is the price of not copying: this library wrote and froze its own artifacts, but an external file belongs to you and can be re-extracted underneath a live reference. Returns a bounded preview of leading rows for looking at, never the dataset.
 
-**Required:** `model_id`  
-**Optional:** `transform`, `portfolio`
+**Required:** `ref`  
+**Optional:** `preview_rows`
 
-#### `explain_dataset_row_loss`
+#### `fetch_financial_ratios`
 
-Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.
+Fetch a company's financial ratios and flag the ones that are implausible on their face -- a negative price-to-book, a dividend yield above a plausible ceiling. The flag is a weak signal in one direction only: it catches values that are obviously wrong, never values that are merely incorrect.
 
-**Required:** `dataset_id`
+**Required:** `symbol`
 
-#### `inspect_model`
+#### `fetch_ohlcv`
 
-Inspect a registered model's summary/importance/validation/lineage.
+Fetch one symbol's OHLCV bars and publish them as an `sqt://` price_panel reference rather than returning the rows inline. Reach for this when the bars themselves are the thing another tool needs -- an indicator series, a custom signal, a panel join -- instead of going through an analysis tool that wants to do something else with them. The reference is what crosses runtimes; the frame never has to enter the conversation.
 
-**Required:** `model_id`  
-**Optional:** `view`
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
+**Optional:** `interval`
 
-#### `join_point_in_time`
+#### `fetch_ohlcv_panel`
 
-Attach point-in-time records to a built dataset, each panel row getting the most recent record AVAILABLE by then. Strictly backward and inclusive: a filing released before a bar's close is usable on it, one released after is not, and a row with nothing available yet gets NaN rather than zero or the eventual value. A restatement is a second row with the same event_time and a later available_time, and the join returns whichever version was current at each date.
+Fetch a whole universe's OHLCV in one call and publish it stacked long, with an `entity` column, as a price_panel reference. Tickers that returned nothing are named in `warnings` and are ABSENT from the panel rather than present as NaN, which matters because a complete-case join downstream will not see them at all.
 
-**Required:** `dataset_id`, `records`  
-**Optional:** `fields`, `entity_scoped`, `prefix`, `max_staleness_days`
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
+**Optional:** `interval`
 
-#### `list_datasets`
+#### `fetch_quote_panel`
 
-Every built dataset panel, newest first, with row/entity/feature counts and date span.
+Fetch top-of-book quotes and publish them as a quote_panel reference, which is what signing trades by the Lee-Ready rule needs alongside a tape. Top of book ONLY -- depth is a different call, and provider='databento' serves it through get_order_book. Queue position is in neither: it needs an order-level feed and cannot be inferred from aggregated size at a level.
 
-*No required arguments.*  
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
 **Optional:** `limit`
 
-#### `list_features`
+#### `fetch_returns_panel`
 
-Which features this library can build, what each one measures, and what it costs to compute. Call it BEFORE build_model_dataset rather than guessing names -- a feature name that does not exist is a failed call and an error round trip, which costs more than reading the catalogue does. The feature_lab runtime then answers what each one is worth once the dataset exists.
+Fetch a universe and publish a wide date-by-ticker frame of returns as a returns_panel reference. This is the shape most panel analysis wants -- PCA, correlation, factor regressions and portfolio construction all consume it directly -- so computing it once and handing over the reference avoids every consumer rebuilding it from prices.
 
-*No required arguments.*  
-**Optional:** `category`
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
+**Optional:** `interval`
 
-#### `list_modeling_capabilities`
+#### `fetch_tick_tape`
 
-What this modeling runtime can do: tasks, estimators and the capabilities of each (sample weights, probabilities, query groups, coefficients, feature importance), features, target types, validation schemes, preprocessing and weighting options, and which optional libraries are installed. Call this before choosing a model rather than assuming an estimator is available.
+Fetch individual trades and publish them as a tick_tape reference, for the microstructure tools that measure rather than estimate. Needs a provider with a tick feed. A tape is large, so `limit` caps it -- and when the cap is hit the result says so, because a truncated tape makes every rate and total computed from it understate the real one.
 
-*No required arguments.*  
-**Optional:** `include_estimators`
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
+**Optional:** `limit`
 
-#### `list_models`
+#### `get_dataset_metadata`
 
-Every registered model, newest first, with its task, estimator, headline out-of-sample metric and source dataset. Call this when you need a model_id you do not already hold.
+What the active provider GUARANTEES about the data it serves: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates.
 
-*No required arguments.*  
-**Optional:** `task`, `limit`
+**Required:** `symbol`  
+**Optional:** `interval`
 
-#### `run_model_experiment`
+#### `infer_temporal_contract`
 
-Fit + walk-forward validate + register a model from a persisted dataset.
+Read a published frame's own columns and report what they imply about when each row became knowable. For data this library did not fetch -- a vendor extract, another system's output -- where no provider contract exists. Inference reads COLUMNS, so it can only say what is present and never what a source guarantees; prefer get_dataset_metadata whenever the data came from a known provider.
 
-**Required:** `dataset_id`, `spec`
+**Required:** `ref`  
+**Optional:** `source`, `frame_kind`, `entity_scoped`
 
-#### `score_model`
+#### `register_external_dataset`
 
-Run a registered model forward and get its predictions for a universe as of a date. The step that turns a fitted model into something a backtest can consume, and the one where point-in-time discipline matters most: the `as_of` date is what stops the model seeing features that did not exist yet. Raw probabilities from a tree ensemble are NOT calibrated, so a 0.9 threshold may select no rows at all -- check the distribution before thresholding.
+Make a Parquet or CSV dataset already on your disk resolvable as an `sqt://` reference WITHOUT copying it, for data too large to fetch and republish -- L2 depth, a full tick tape, an event history. Every other tool here fetches a frame and then writes a second complete copy under the runs directory; a book cannot survive that twice. Registration reads the schema, checks the columns the declared kind requires, and stores a pointer. It does NOT read the rows, so a book with its bid and ask columns transposed registers cleanly -- run validate_external_dataset next.
 
-**Required:** `model_id`, `as_of`, `universe`  
-**Optional:** `lookback_days`, `max_staleness_days`
+**Required:** `path`, `kind`, `run_id`, `name`  
+**Optional:** `file_format`, `source`
 
-#### `score_predictions`
+#### `validate_data_bundle`
 
-Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns. Works on predictions this library never produced.
+Whether a bundle is safe to model on, returned as a verdict with the blocking reasons rather than raised as an error, because the answer is usually yes-with-caveats and a caller needs the caveats to decide. `require_pit` defaults to false: no shipped provider reports point-in-time for every frame kind, so requiring it refuses almost everything -- set it when a leakage-free join is the point.
 
-**Required:** `predictions_ref`, `task`  
-**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`
+**Required:** `ref`  
+**Optional:** `require_pit`
 
-#### `validate_model_spec`
+#### `validate_external_dataset`
 
-Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Fetches nothing and fits nothing.
+Scan a registered dataset in batches and report what would produce wrong numbers downstream, as a verdict with blocking reasons rather than an exception -- because three crossed books in nine million rows is fine and a third of them crossed is transposed columns, and only a count separates the two. Checks are per kind: crossed and empty books, non-positive trade prices and sizes, unparseable or out-of-order timestamps, and for an event panel the available_time versus event_time rule that makes a model look prescient. Bounded by scan_limit, and says so when it stops early.
 
-**Required:** `spec`  
-**Optional:** `dataset_id`
+**Required:** `ref`  
+**Optional:** `scan_limit`
 
-#### `validate_pit_records`
+#### `validate_financial_ratios`
 
-Check point-in-time records BEFORE joining them onto anything. The error worth catching is the two timestamps the wrong way round: event_time is when a fact is ABOUT, available_time is when it could first be ACTED ON, and swapped they make every model look prescient. Also reports median_publication_lag_days -- exactly how much hindsight a naive join on event_time would have handed you. Fetches nothing.
+Check ratios you already hold -- from a vendor, a spreadsheet, another system -- for values that are implausible on their face, without fetching anything. The same check fetch_financial_ratios applies, available for data this library has no provider for.
 
-**Required:** `records`  
-**Optional:** `entity_scoped`
+**Required:** `ratios`
 
 ---
 
@@ -1215,10 +1358,17 @@ Quoted and effective spread MEASURED from trades and quotes, with the effective 
 
 #### `get_order_book_metrics`
 
-Depth-book statistics a top-of-book quote cannot give: the microprice, imbalance at the touch AND cumulatively, and how fast liquidity thins with distance. The midpoint ignores size, so a book with 5,000 bid and 100 offered reads the same as its mirror and the second is about to trade higher. Touch and cumulative imbalance routinely disagree, and a book bid at the touch with weight behind the offer is exactly the one that ticks up and fills badly. Takes the book as an argument; no provider here serves depth.
+Depth-book statistics a top-of-book quote cannot give: the microprice, imbalance at the touch AND cumulatively, and how fast liquidity thins with distance. The midpoint ignores size, so a book with 5,000 bid and 100 offered reads the same as its mirror and the second is about to trade higher. Touch and cumulative imbalance routinely disagree, and a book bid at the touch with weight behind the offer is exactly the one that ticks up and fills badly. Takes the book inline for a small one, or an `sqt://order_book_panel` reference for a real session, which is read off disk in batches because millions of snapshots cannot travel through a tool argument.
 
-**Required:** `snapshots`  
-**Optional:** `levels`, `include_profile`
+*No required arguments.*  
+**Optional:** `snapshots`, `ref`, `max_snapshots`, `levels`, `include_dynamics`, `include_profile`
+
+#### `get_order_event_metrics`
+
+Order-level statistics a depth book cannot produce: how much size rests AHEAD of an order at its own price level when it arrives, how long orders live before they are cancelled or filled, cancels per add and per trade, and event intensity by action. Aggregated depth destroys all four -- 5,000 shares at the bid may be one order or two hundred, and size that disappears may have been cancelled or filled, which mean opposite things about who wanted to trade. Orders already resting when the window opened are counted and EXCLUDED from the lifetime averages rather than folded in as instantaneous, which would bias every average toward impatience precisely where the long-resting orders are. Takes events inline or as an `sqt://order_event_panel` reference.
+
+*No required arguments.*  
+**Optional:** `events`, `ref`, `max_events`
 
 #### `get_order_flow_imbalance`
 
@@ -1239,106 +1389,6 @@ How volume distributes across trade sizes and times of day, from tick data. Answ
 
 **Required:** `symbol`, `start`, `end`  
 **Optional:** `size_buckets`, `intraday_freq`, `limit`, `source`
-
----
-
-## `data` — Data
-
-Get the data and publish it as an `sqt://` reference every other runtime can read: OHLCV for one name or a whole universe, return panels, tick tapes and quote panels, provider guarantees, temporal contracts, and bundles that pair frames with what their sources promise. Fetches; does not analyze.
-
-#### `build_continuous_futures_series`
-
-Stitch a chain of futures contracts into one continuous series, and publish TWO references rather than one. The adjusted series is a research instrument and is not a price -- back-adjustment changes every historical level, and a difference-adjusted series can go negative on a contract that never traded below zero -- so sizing a position from it means sizing against a number nobody could have transacted at. The second reference carries which contract was actually active each date and what it actually traded at.
-
-**Required:** `contracts`, `run_id`, `name`  
-**Optional:** `roll_rule`, `adjustment`, `days_before_expiry`
-
-#### `build_data_bundle`
-
-Name several already-published frames as one unit and publish the manifest as a data_bundle reference. A bundle holds references rather than copies, so it cannot diverge from the frames it names, and it pairs each frame with what its source can say about timing -- which is the pairing a point-in-time join depends on and which a bare frame throws away.
-
-**Required:** `frames`, `run_id`, `name`
-
-#### `compare_ratio_frames`
-
-Two providers' ratios side by side, with each disagreement CLASSIFIED rather than merely measured: a unit mismatch is fixable by rescaling, a definition difference is not, and averaging across the second kind produces a number neither provider would stand behind. Takes the values as arguments, so it works for sources this library cannot fetch.
-
-**Required:** `left`, `right`  
-**Optional:** `left_name`, `right_name`, `fields`
-
-#### `describe_data_bundle`
-
-What frames a bundle names, how many rows and columns each has, and what each source can promise about revisions and point-in-time availability. Use it to see what a bundle actually contains before building a dataset on it, rather than after a model has already been fitted on whatever was in there.
-
-**Required:** `ref`
-
-#### `fetch_financial_ratios`
-
-Fetch a company's financial ratios and flag the ones that are implausible on their face -- a negative price-to-book, a dividend yield above a plausible ceiling. The flag is a weak signal in one direction only: it catches values that are obviously wrong, never values that are merely incorrect.
-
-**Required:** `symbol`
-
-#### `fetch_ohlcv`
-
-Fetch one symbol's OHLCV bars and publish them as an `sqt://` price_panel reference rather than returning the rows inline. Reach for this when the bars themselves are the thing another tool needs -- an indicator series, a custom signal, a panel join -- instead of going through an analysis tool that wants to do something else with them. The reference is what crosses runtimes; the frame never has to enter the conversation.
-
-**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `interval`
-
-#### `fetch_ohlcv_panel`
-
-Fetch a whole universe's OHLCV in one call and publish it stacked long, with an `entity` column, as a price_panel reference. Tickers that returned nothing are named in `warnings` and are ABSENT from the panel rather than present as NaN, which matters because a complete-case join downstream will not see them at all.
-
-**Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
-**Optional:** `interval`
-
-#### `fetch_quote_panel`
-
-Fetch top-of-book quotes and publish them as a quote_panel reference, which is what signing trades by the Lee-Ready rule needs alongside a tape. Top of book ONLY: no shipped provider exposes depth, so queue position and resting size at a level are not recoverable from this and should not be inferred from it.
-
-**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `limit`
-
-#### `fetch_returns_panel`
-
-Fetch a universe and publish a wide date-by-ticker frame of returns as a returns_panel reference. This is the shape most panel analysis wants -- PCA, correlation, factor regressions and portfolio construction all consume it directly -- so computing it once and handing over the reference avoids every consumer rebuilding it from prices.
-
-**Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
-**Optional:** `interval`
-
-#### `fetch_tick_tape`
-
-Fetch individual trades and publish them as a tick_tape reference, for the microstructure tools that measure rather than estimate. Needs a provider with a tick feed. A tape is large, so `limit` caps it -- and when the cap is hit the result says so, because a truncated tape makes every rate and total computed from it understate the real one.
-
-**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `limit`
-
-#### `get_dataset_metadata`
-
-What the active provider GUARANTEES about the data it serves: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates.
-
-**Required:** `symbol`  
-**Optional:** `interval`
-
-#### `infer_temporal_contract`
-
-Read a published frame's own columns and report what they imply about when each row became knowable. For data this library did not fetch -- a vendor extract, another system's output -- where no provider contract exists. Inference reads COLUMNS, so it can only say what is present and never what a source guarantees; prefer get_dataset_metadata whenever the data came from a known provider.
-
-**Required:** `ref`  
-**Optional:** `source`, `frame_kind`, `entity_scoped`
-
-#### `validate_data_bundle`
-
-Whether a bundle is safe to model on, returned as a verdict with the blocking reasons rather than raised as an error, because the answer is usually yes-with-caveats and a caller needs the caveats to decide. `require_pit` defaults to false: no shipped provider reports point-in-time for every frame kind, so requiring it refuses almost everything -- set it when a leakage-free join is the point.
-
-**Required:** `ref`  
-**Optional:** `require_pit`
-
-#### `validate_financial_ratios`
-
-Check ratios you already hold -- from a vendor, a spreadsheet, another system -- for values that are implausible on their face, without fetching anything. The same check fetch_financial_ratios applies, available for data this library has no provider for.
-
-**Required:** `ratios`
 
 ---
 

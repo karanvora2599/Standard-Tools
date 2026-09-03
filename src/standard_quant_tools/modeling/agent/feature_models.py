@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from typing_extensions import Annotated
 
+from ..specs import ModelSpec
+
 
 def _finite_or_none(value: Any) -> Optional[float]:
     """
@@ -689,7 +691,7 @@ class FeatureAblationInput(BaseModel):
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
     )
-    spec: Any = Field(
+    spec: ModelSpec = Field(
         ...,
         description="The ModelSpec to refit. Use the same spec the real "
         "experiment uses -- an ablation of a different model answers a "

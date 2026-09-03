@@ -1,5 +1,756 @@
 # Changelog
 
+## The book finally arrives — 200 to 204 tools
+
+`get_order_book_metrics` has computed the microprice, touch and cumulative
+imbalance, the depth profile and the depth slope since long before anything
+could feed it. `DataProvider.get_order_book` declared the columns and raised
+`NotImplementedError` in every shipped provider, and `book_tools.py` said so
+in its own docstring: "no shipped provider serves depth." The analytics were
+written, tested and correct against a book that had never once arrived.
+
+This is the data path, not more analytics. Three new tools, and the audit
+that preceded them found that eleven of the thirteen L2 features a bigger
+plan proposed were already shipped — so the work was to feed what exists
+rather than to build it again.
+
+### The window has to be in the columns, so torch is not a dependency
+
+`engine.py` hands every estimator a 2-D X whose rows are (date, entity)
+observations carrying NO entity identity. That is not an oversight -- it is
+the contract that lets ridge, LightGBM and an SGD learner be swapped for
+one another without the engine knowing anything about them. A recurrent or
+convolutional model cannot reconstruct per-entity sequences from it, so the
+history has to arrive as COLUMNS whatever architecture reads it.
+
+`FeatureSpec.lags` is that. `lags=[1, 2, 3]` adds a feature's value 1, 2
+and 3 bars ago as its own columns, and every estimator in the registry gets
+access to history rather than one that ships with special plumbing.
+
+**Shifted within the entity, before stacking.** Applied after `stack_long`
+a shift crosses the entity boundary and hands AAA a value belonging to BBB.
+The panel that results is perfectly well-formed, every aggregate downstream
+looks normal, and nothing later catches it. Pinned by a test that asserts,
+for every entity in a real built panel, that lag1 equals that entity's own
+previous bar -- and that states the wrong answer explicitly beside it.
+
+**A negative lag is refused, not clamped.** It is a shift FORWARD: next
+week's value of a feature on this week's row. Every leakage check in this
+library reasons about the TARGET, so not one of them would see it, and the
+model it produces looks brilliant. The refusal names the value the caller
+probably meant.
+
+**Once the window is in the columns, a TCN adds weight sharing across lag
+positions** -- which pays at hundreds of timesteps and thousands of series,
+not at the depth a daily panel supports. `mlp` over the lag columns is the
+same hypothesis class with no dependency and runs inside the walk-forward
+loop that already exists. torch is installed on this machine and is still
+not a dependency of this package, which is the decision rather than the
+absence of one.
+
+**The architecture is two bounded integers.** sklearn takes
+`hidden_layer_sizes` as a tuple, which the parameter allowlist cannot bound
+-- and an unbounded tuple is exactly the resource-exhaustion path
+`bounds.py` exists to close. Width and depth are ints instead. The subclass
+that maps them rederives the tuple at fit time, because `clone` rebuilds
+from `get_params` and the tuple is not a param: without that, every fold
+would have trained sklearn's default 100-unit layer while the manifest
+recorded the width that was asked for. The engine clones per fold, so that
+is the normal path and not an edge case.
+
+### Online modelling was mostly already here
+
+Walk-forward already refits on every fold, and `validation/weights.py`
+already implements exponential time decay. Those are the two things "online
+learning" means for correctness on a panel, and adding a second mechanism
+for either would have been the same feature twice.
+
+What was actually missing is an estimator cheap enough to refit often with
+a step size the caller controls, so `sgd` is registered for both tasks.
+
+**`partial_fit` is deliberately not reachable from a ModelSpec.** The
+engine's guarantee is that every out-of-sample prediction comes from an
+estimator that never saw that row or anything overlapping it. A warm-started
+estimator carries state from every previous fold, including rows inside the
+current fold's purge and embargo window. The speed is real; the guarantee
+it costs is the one every number downstream depends on.
+
+### Two network features chosen for what they are not
+
+`network.avg_correlation` and `network.mst_degree` describe where an entity
+sits in the correlation graph its universe forms.
+
+**Eigenvector centrality is deliberately absent.** Up to normalisation it
+IS the leading eigenvector of the correlation matrix, which
+`factors.pca_loading` has computed since this package had features at all.
+Registering it under a graph-theoretic name would be one number with two
+explanations.
+
+The two that ARE here are not recoverable from PC1. Mean correlation is
+scale-free where a loading is variance-weighted -- multiplying a series by
+100 changes its variance contribution entirely and its mean correlation not
+at all, which is pinned by test. MST degree is local topology: a star
+universe has a hub of degree n-1 and spokes of degree 1, a chain has no
+hub at all, and the two can share a PC1.
+
+**The edge weight is a distance, not a correlation.** `sqrt(2(1-rho))`, the
+Mantegna metric -- zero only at rho=1 and obeying the triangle inequality,
+which a raw correlation does not. A spanning tree over a non-metric weight
+spans nothing in particular. An unestimable pair gets the MAXIMUM distance
+rather than zero, since zero would read as perfect correlation and route
+the tree through a pair nobody measured.
+
+### An R2 cannot tell you where a model is wrong
+
+`score_predictions` reports an R2, an IC and a predict-the-mean baseline,
+and those answer whether the model beat a constant. They cannot separate a
+broadly mediocre model from one that is excellent everywhere except the
+conditions you trade -- those two have the SAME headline number and
+opposite consequences. Nothing in `modeling/` computed a residual, a
+calibration curve or an error breakdown before this.
+
+`analyze_model_errors` does. It breaks the out-of-sample errors down by
+entity, by period, by the model's own prediction decile, and by the decile
+of any feature in its panel -- the last being the one that pays, because it
+turns "the model is mediocre" into "the model fails when the spread is
+wide", and only the second of those is something you can act on.
+
+**The join it depends on.** The persisted out-of-sample frame carries
+`date`, `entity` and `prediction` and NO outcome, so every number here
+exists only because the actuals are fetched back from the dataset panel the
+model was fit on. Which panel is not a guess: the manifest's `target_id` is
+matched against the panel's declared labels, and an ambiguous match REFUSES
+rather than taking the first -- residuals against the wrong horizon look
+completely normal and describe a different model.
+
+**Calibration is a separate question from accuracy.** A regression can rank
+perfectly and be systematically over-confident, its predictions spread
+twice as wide as the outcomes they predict. Regressing the actual on the
+predicted says so -- slope 1 is calibrated, 0.5 means everything sized
+directly from the prediction over-trades by two. Measured on a series and
+its exact double: slope 0.5000, dispersion ratio 2.0000, and an R2 that
+notices nothing.
+
+**Residual autocorrelation is computed within each entity.** Stacking the
+panel first would measure the row ordering, since consecutive rows in a
+long panel are different entities on the same date. Pinned by a panel whose
+stacked residuals alternate and correlate at MINUS 0.9, and whose real
+within-entity autocorrelation is zero. It is also reported with the caveat
+that a positive value is EXPECTED for an overlapping label -- an h-bar
+forward return sampled every bar shares h-1 bars with its neighbour -- so
+it reads as how few independent observations there were, not as
+misspecification.
+
+**Thin buckets are shown and not ranked.** The worst bucket of any
+breakdown is almost always the emptiest one, and a finding computed without
+a row-count floor reports noise with a decimal point. Buckets under 30 rows
+are marked `thin`, listed in the table, and excluded from the findings.
+
+**A flag is not a gradient.** `qcut(duplicates="drop")` does not raise on a
+two-valued column -- it silently returns two buckets, which would have been
+reported as deciles. The bucket count is checked rather than the exception,
+because the exception never comes: under three buckets refuses, and between
+three and ten says out loud that these are not tenths of the sample.
+
+**Output stays bounded.** A 500-name universe would return 500 rows of
+table, so each breakdown returns its worst and best `top_n` and counts what
+it omitted.
+
+### Registered where it lies, never copied
+
+Every other path into this library goes provider call -> one whole
+DataFrame -> `publish` -> a second complete copy under `SQT_RUNS_DIR`. Two
+full materializations survive a decade of daily bars and not an afternoon of
+depth. The only concession to size anywhere else is `fetch_tick_tape`'s
+`limit`, which does not sample -- it TRUNCATES, so every rate and total
+computed downstream understates the real one and nothing in the numbers says
+so.
+
+`register_external_dataset` stores a pointer and a schema. A 400,000-row,
+73 MB mbp-10 export registers into a single 400-byte sidecar and is read in
+batches, with column projection so that reading four columns of a
+sixty-column book reads four. `resolve()` hands back an `ExternalDataset`
+handle rather than a frame, deliberately: something frame-shaped would let a
+consumer written for a fetched panel pull the whole file through an `.iloc`
+without anyone deciding to.
+
+This extends the existing `sqt://` mechanism rather than paralleling it. Two
+new kinds (`order_book_panel`, `event_panel`) are external-only; `tick_tape`
+and `quote_panel` now exist in both storages, because a tape `fetch_tick_tape`
+fetched and a tape bought from a vendor are the same content addressed
+differently. The sidecar records which storage a given reference used, so
+the kind stays one concept instead of growing an `external_` twin.
+
+### The promise that had to get weaker, and says so
+
+A published artifact is immutable because this library wrote it. An external
+file belongs to the caller and can be re-extracted under a live reference,
+so `describe_external_dataset` reports `changed_since_registration` -- a
+field with no equivalent anywhere else on the surface. It is backed by a
+`fingerprint` (every file's name, size and mtime), spelled with a different
+key from a published artifact's `content_hash` because it is a weaker claim:
+it catches a re-extract, a truncated copy and a partially written file, and
+not an edit preserving both size and mtime. Hashing the bytes would catch
+that too and would cost the full read this path exists to avoid.
+
+### Schema at registration, rows at validation
+
+Registration refuses a book with no `ask_size_0` before reading a row. It
+does NOT read the rows, and the gap is the point: **a book with its bid and
+ask columns transposed has a perfectly valid schema.** Every column present,
+every value a real price, only the order wrong.
+
+`validate_external_dataset` catches that, scanning in batches and returning a
+verdict rather than raising -- three crossed books in nine million rows is
+fine and a third of them crossed is transposed columns, and only a count
+separates the two. It is the out-of-core sibling of `validate_pit_records`,
+which is capped at 5,000 rows passed inline through a tool call's JSON, and
+it calls the same `validate_pit_frame` per chunk rather than reimplementing
+the temporal rules. So the swapped `event_time`/`available_time` leak --
+records "available BEFORE the period they describe ended" -- is now caught
+in a file of any size by the same check that has always caught it in forty
+rows.
+
+### Databento, and three ways to be silently wrong
+
+None of these raises. Each produces finite, ordered, plausible-looking
+numbers, which is what earns them a module and 39 tests that need no API key:
+
+- **Fixed-point int64 prices.** A raw `bid_px_00` of 250,002,273,815 is
+  $250.0023. Read as dollars, every spread and microprice is off by a factor
+  of a billion. Detection reads the DTYPE first and cross-checks magnitude in
+  BOTH directions, because an integer column of plausible dollar magnitudes
+  is a rounded export and dividing it by 1e9 is the same error mirrored.
+- **`UNDEF_PRICE` is int64 max, not null.** Scaled, an empty level becomes a
+  **$9.2 billion quote**. Sentinels are masked BEFORE scaling, after which a
+  sentinel is just a large float and no longer identifiable.
+- **A trailing empty level is not a level.** An mbp-10 subscription on a name
+  that never shows ten levels returns four real ones and six of sentinel;
+  once masked, the columns are still there, the dataset DECLARES ten, and
+  `depth_slope` regresses size against distance over levels holding nothing.
+  Trailing empties are dropped and counted. A gap BELOW a live level is
+  reported instead, because that is a malformed book rather than a thin one
+  and renumbering around it would hide that.
+
+`ts_recv` and `ts_event` differ by the network, which is exactly what a
+latency study measures, so which one was used is reported on every call
+rather than chosen silently. `action`, `side`, `flags` and the per-level
+order counts are kept -- they are what make cancellation rate and a
+queue-position proxy computable later, and precisely what a naive rename
+discards. And the vendor's own `F_MAYBE_BAD_BOOK` and `F_BAD_TS_RECV` flags
+are surfaced: the venue reporting that it could not keep the book consistent
+is worth more than any check invented here.
+
+A raw export is refused with the normalizer named. "Missing column
+`bid_price_0`" would send someone hunting for data that is sitting right
+there under another name.
+
+### Measured
+
+A 400,000-snapshot, 10-level export: refused raw, normalized (3.2M sentinels
+masked, levels 8-9 dropped as empty), registered without copying, validated
+across 7 batches at 100% coverage, and read back as a mean spread of 0.4622
+bps, a microprice of 250.9017 and a depth slope of 5,543.5 resting units per
+basis point. Inline and by-reference agree to floating-point equality.
+
+`18_mcp.md`'s budget tables are regenerated from `print_budget()` and every
+unchanged runtime is byte-identical to what was published, which is what
+confirms the two rows that moved moved for a reason.
+
+### A feature matrix this library did not build
+
+`build_model_dataset` fetches OHLCV, computes registry features and writes a
+panel. When the features already exist -- a C++ pipeline over an L2 feed, a
+warehouse query, another system -- there is nothing to fetch and nothing to
+compute, and the only thing between that matrix and `run_model_experiment`
+was the dataset record.
+
+`register_external_panel` writes the record and nothing else. Measured on a
+four-entity, 260-date panel: the dataset directory holds
+`dataset_meta.json` and `dataset_spec.json` and NO `panel.parquet`. The
+matrices this exists for are often partitioned directories, and flattening
+one into a single copied panel is the materialization the external-dataset
+contract was built to avoid.
+
+**Integrity is not the price of that.** The engine loads the panel whole
+either way, so `hash_dataframe` runs on the loaded FRAME rather than on the
+file, and a referenced panel is verified on every load exactly as strictly
+as a built one. What changes is the failure mode, and both are now pinned by
+test: an edited file fails loudly with a hash mismatch, and a moved one
+stops loading with a message saying why. A built panel could never do
+either, because this library owned it.
+
+**The horizon is required and is not defaulted.** A panel arrives with a
+`target` column and no statement of what that column means. The engine needs
+the horizon for the target-overlap purge -- the rule stopping a label
+spanning bars t..t+h from being trained on beside a fold boundary inside
+that span -- and a missing horizon does not fail. It disables the purge
+silently. That is the one thing about an external panel this tool refuses to
+guess.
+
+The spec it synthesizes is a real `DatasetSpec`, not a placeholder:
+`run_model_experiment` verifies its hash, bundles it into the registered
+model and reads its universe and interval into the lineage, so a decorative
+one would put a false claim in all three.
+
+`DatasetSpec.provider` gains `"external"` and `"databento"`. The first is
+not a provider -- it is the honest label for a panel with no fetch behind
+it, and `score_model` reads it to refuse by name rather than hunting for
+feature definitions that do not exist. The second removes a monkey-patch: a
+sibling project widens this exact Literal at import time and its own
+docstring calls upstream "the cleaner home", noting the trap that makes the
+patch fragile -- a nested model's core schema is INLINED into its parents,
+so rebuilding `DatasetSpec` alone leaves every tool-input model still
+advertising the old enum.
+
+Verified end to end on a panel with planted signal: `alpha` predicts the
+target and `noise` does not, and a ridge fitted through
+`run_model_experiment` on the registered dataset reported an out-of-sample
+r2 of 0.796. A pipeline that mismapped a column would still have "run".
+
+### Several horizons in one panel
+
+A microstructure panel is labelled at 100ms, 1s, 5s and 30s at once, off
+IDENTICAL features. One dataset per horizon would recompute and re-store the
+same matrix four times, and -- worse -- the four models would stop being
+comparable, because each would have been aligned separately against its own
+label's coverage.
+
+`register_external_panel` now takes `targets`: several labels, each with its
+own horizon, from one file. The panel carries them as `target__<name>`, and
+the PRIMARY is also written to plain `target`, so a multi-horizon panel is
+still an ordinary panel to everything that has only ever seen one label --
+`explain_dataset_row_loss`, the feature report, the engine itself.
+`run_model_experiment` gained `target` to pick one.
+
+**The engine did not change.** Selection is a rename plus a drop performed
+before the dataset dict is handed over, so `engine.py` reads `target` and
+`label_end_date` exactly as it always has.
+
+**Rows are dropped by the CHOSEN label, per experiment.** A 30-second
+horizon has more unclosed rows at the end of a sample than a 1-second one,
+and dropping on the union would make every short-horizon model pay for the
+longest one's warm-down. Each experiment drops only its own and reports how
+many; `target_id` follows the selection, so a registered model records the
+horizon it actually learned rather than the panel's first one. Selecting a
+label whose `label_end_date` is absent drops the primary's rather than
+applying it, because a purge computed against another horizon's window is
+worse than a purge computed on the nominal horizon.
+
+Measured on a panel built so `alpha` predicts the 1-bar label strongly, the
+5-bar one weakly and the 20-bar one not at all -- one file, three labels,
+three ridges through the same folds:
+
+    label   rows fitted   OOS r2
+    h1          1,040     +0.9929
+    h5          1,020     +0.8478
+    h20           960     -0.0034
+
+The row counts fall by exactly each horizon's own unclosed tail (0, 20 and
+80 rows = 4 entities x 0/5/20 bars). A selector quietly training on the
+wrong column would still have returned three models and three numbers; only
+the ORDERING says the right label was used.
+
+**What this is not.** One estimator emitting several horizons at once --
+multi-OUTPUT -- is a different change and is not done. It would alter the
+out-of-sample prediction schema, `ModelManifest.target_id`, and every
+consumer of a single `prediction` column including `portfolio_eval`'s
+date-by-entity pivot. What is here gives one panel, N comparable models and
+the horizon curve; a joint fit does not.
+
+### Book-update OFI, and the four L2 features are done
+
+`get_order_flow_imbalance` in this library computes signed return times
+volume from BARS. That is a proxy for order-flow imbalance and a different
+quantity, and the audit that opened this work listed the real one -- the
+Cont-Kukanov-Stoikov definition, from the book itself -- as one of four
+features that genuinely did not exist here.
+
+`book_dynamics` computes it, and `get_order_book_metrics(include_dynamics=
+True)` surfaces it. NO new tool: a second tool with a name near
+`get_order_flow_imbalance` is the confusable duplication the runtime split
+exists to prevent, so the measure lands on the tool that already reads a
+book.
+
+The definition reduces to a size DIFFERENCE only when the price is
+unchanged, which is exactly the case a naive implementation gets right:
+
+    bid price rises   the whole NEW size is demand        +q_b(n)
+    bid price falls   the whole OLD size left             -q_b(n-1)
+    bid price equal   the difference                      q_b(n) - q_b(n-1)
+
+All three are pinned by test against hand-computed transitions, because an
+implementation that only handles the third passes any test written from the
+intuition and is wrong on the two interesting book states.
+
+A crossed or non-finite snapshot poisons the PAIRS it participates in, and
+those are dropped and counted rather than interpolated across -- an
+interpolated pair describes a transition nobody observed.
+
+**That completes the four.** Queue position, cancellation rate and quote
+intensity came from the order feed; book-update OFI comes from the book.
+The audit's other nine were already shipped, which is why this is four
+functions rather than a feature library.
+
+### Ensembles that cannot cheat
+
+The usual way stacking goes wrong is fitting the combiner on base
+predictions the base models made about their own TRAINING rows. Those are
+optimistic in a way the combiner cannot see and will exploit, and the result
+looks excellent until it meets a new day.
+
+`build_model_ensemble` cannot make that mistake, because the only
+predictions it reads are the out-of-sample ones `run_model_experiment`
+already persists -- each row predicted by a fold that did not train on it.
+It publishes an ordinary `sqt://predictions` reference, so `score_predictions`
+and the backtest bridge read the result with no new machinery.
+
+**rank_mean is the default, not mean.** Two models predicting the same thing
+on different scales average into a number dominated by whichever has the
+wider spread -- a fact about its units, not its skill. Measured: a series
+and its exact negative at 1000x scale average to something tracking the
+loud one, and rank-average to zero, which is the honest answer for two
+models that disagree completely.
+
+**What it refuses.** Averaging a classifier's probability with a regressor's
+return, which is arithmetic on incomparable units -- the same rule
+`compare_models` applies to ranking across tasks. A model listed twice,
+because silent double-weighting is a weighting decision disguised as a typo.
+Weights passed with a method that ignores them, because quietly dropping
+them is how an ensemble ends up not being the one anybody designed.
+
+**What it reports.** The pairwise correlation between the base models, which
+is the number that says whether the ensemble was worth building. Two models
+agreeing at 0.98 combine into approximately either of them, and the
+ensemble's own score cannot show you that -- it looks exactly like a good
+single model. Above 0.95 it says so out loud.
+
+Coverage is reported too: only rows EVERY model predicted are combined, so a
+model validated over a shorter window silently shortens the ensemble unless
+the per-model row counts are visible.
+
+### Order-by-order: the four measures a depth book cannot produce
+
+Depth aggregates size per price level, and that aggregation is the ceiling.
+A book showing 5,000 shares at the bid cannot say whether it is one order or
+two hundred, which arrived first, or whether size that vanished was
+cancelled or filled -- and cancelled and filled mean opposite things about
+who wanted to trade.
+
+`DataProvider.get_order_events` is a new optional capability with its own
+declared column contract, implemented by `DatabentoProvider` alone from the
+market-by-order schema. `analysis/order_events.py` computes from it, and
+`get_order_event_metrics` (microstructure, 16 -> 17 tools) exposes it inline
+or through an `sqt://order_event_panel` reference:
+
+- QUEUE AHEAD -- resting size at an order's own price level when it arrives,
+  the number that decides whether a passive order fills. Computed in one
+  pass with a per-(side, price) accumulator rather than a book rebuild.
+- ORDER LIFETIME -- add to cancel or fill, reported separately for the two
+  because they answer different questions.
+- CANCEL-TO-ADD and CANCEL-TO-TRADE -- exact, where a snapshot cannot tell
+  the two apart at all.
+- EVENT INTENSITY by action.
+
+**Censoring is counted, not folded in.** An order already resting when the
+window opened has no add in it, so its true lifetime exceeds anything the
+window can see; it is counted separately and EXCLUDED from the averages.
+Folding it in as time-since-window-open would drag every average downward,
+worst for exactly the long-resting orders a queue study is about. Orders
+still open at the close are reported for the same reason. A CLEAR resets the
+queue accumulators rather than carrying depth across a boundary where none
+existed, and a MODIFY is counted without adjusting queue depth because
+whether it loses priority is the venue's rule, not this library's.
+
+Every measure is pinned against a fixture with a hand-computable answer -- a
+queue of exactly 300 ahead, a lifetime of exactly 5 seconds, three cancels
+per four adds -- because "it returned a float" is not evidence for a queue
+statistic.
+
+Four liquidity labels join the target registry alongside them:
+`future_depth`, `future_ofi`, `future_volume`, `future_trade_intensity`.
+Eighteen target types now, twelve of which no Close series can build.
+
+### The first depth provider
+
+`DataProvider.get_order_book` has been a declared contract with canonical
+columns and no implementation since it was written -- "NOT IMPLEMENTED BY
+ANY PROVIDER IN THIS LIBRARY". Every depth measure in
+`analysis/order_book.py` was built and tested against synthetic books shaped
+to that contract. `DatabentoProvider` serves a real one, and
+`book_metrics` reads it without translation, which is what the declared
+contract was for.
+
+Twelve places in the source and docs said no provider serves depth. All
+twelve now say which one does, and which call -- a false claim in a tool
+description is what an agent reads.
+
+**Operational knowledge reused rather than rediscovered.** A sibling
+project has run Databento in production and its provider says in its own
+docstring that upstream "is the cleaner home", monkey-patching only because
+it cannot edit here. Taken from it: dataset PREFERENCE rather than one name
+(consolidated where it reaches, venue where it does not, depth venue for the
+deepest history); `end` anchored to the dataset's published edge rather than
+to wall-clock now, which is what makes a weekend request return Friday
+instead of failing; the `ohlcv-1d` finalization walk-back, because daily
+bars finalize a day or two behind the edge the range endpoint reports; and
+remembering entitlement denials, because a 403 is a fact about the
+subscription rather than about the request.
+
+**Prices were NOT taken from it.** That project scales by a magnitude test
+on the last row -- `1e9 if close > 1e7 else 1.0` -- reading one value to
+decide the units of a whole frame. `data/databento.py` decides from the
+dtype, cross-checks magnitude in both directions, masks the int64-max
+sentinels BEFORE scaling, and reports which of ts_recv/ts_event it used. It
+also reads the vendor's own `F_MAYBE_BAD_BOOK` flag, which that project does
+not.
+
+**Two honest fields.** `adjusted=False`, because Databento serves what the
+venue published -- a split is a real -50% bar, and every other provider here
+reports True, so this is the one that will surprise someone.
+`point_in_time=False`, because corrections are issued; they are announced
+rather than silent, which is better than most, but "announced" is not the
+guarantee that field asks about. Fundamentals are refused rather than
+returned empty, which would be indistinguishable from a company that has
+none.
+
+**42 tests, all offline.** The client is injected, so dataset preference,
+the finalization walk-back, denial memory, the inclusive end date and the
+symbol mapping are all exercised without a key, a network or an
+entitlement -- which is the only way those parts get tested more than once.
+
+### Eight labels this library records and cannot build
+
+`TargetSpec.type` went from six types to fourteen. The eight new ones are
+microstructure and execution labels -- `future_mid_return`,
+`future_microprice_return`, `future_markout`, `next_mid_direction`,
+`future_spread`, `fill_probability`, `time_to_fill`, `adverse_selection` --
+and NONE of them is a function of closing prices. A markout is measured
+from a fill; a fill probability needs queue position and cancellations.
+
+`build_target` refuses every one by name and says to compute it where the
+book is and register the panel. It does not approximate: a fill probability
+derived from daily bars would be a number with nothing behind it, and would
+look exactly like a number with something behind it.
+
+What this buys is that an externally computed label can say what it IS.
+Before it, a fill probability had to be registered as `forward_return` -- a
+false claim in the manifest, and one that left the task/target check unable
+to tell a probability from a return. Measured end to end: a panel labelled
+`fill_probability` now fits under a classifier at 0.6+ accuracy and is
+REFUSED for a regressor. That refusal is the one that matters, because a
+regressor on a 0/1 label does not error -- it fits and reports a
+meaningless R2.
+
+**One registry, not five literals.** `TARGET_KINDS` is the only place that
+says what a label is: its tasks, whether it is buildable, whether it is
+continuous. The engine's compatibility map is now DERIVED from it -- it was
+three hand-written sets, two of which were copies of each other kept in
+sync by hand -- and the threshold rule reads `continuous` off it rather
+than the four-of-six list it had inlined.
+
+This is the lesson from the task literal applied one file over, and it was
+overdue: of the four copies of the target literal, TWO were added by the
+external-panel work in this same changelog entry. A hand-written `Literal`
+still exists because one cannot be built from a dict at type-check time,
+and a test pins the two equal.
+
+**A silent fallthrough closed.** `build_target` ended in a bare `else`
+producing a direction target, so any type added to the Literal and
+forgotten there came back binarized -- a continuous label arriving as
+1.0/0.0 with nothing raising. Every buildable type now has an explicit
+branch and anything unhandled raises, naming the file to fix.
+
+### `ranking` was first-class in the spec and refused by both consumers
+
+`ModelSpec.task` has accepted `ranking` since it was added, the estimator
+registry carries two rankers, and `15_modeling.md` calls it the right task
+for a cross-sectional problem. Both functions that turn predictions into
+positions rejected it outright:
+
+    bridge.oos_predictions_to_signal_panel   task must be 'regression' or
+    portfolio_eval.predictions_to_score_panel 'classification'
+
+So a ranker could be trained, registered and inspected, and never traded or
+evaluated as a portfolio. `predictions_to_score_panel`'s own docstring even
+said "Ranking is unaffected (a constant shift is monotone)" -- describing
+behaviour its guard three lines below made unreachable.
+
+A ranker emits a relative SCORE, which is the same shape a regressor's
+magnitude is, so both now read it identically: sign for the side, deadband
+around zero, no 0.5 recentering. Only a probability gets recentered.
+
+**The cause was a repeated literal.** The task set was written five times
+in two different widths -- three said regression/classification/ranking and
+two said regression/classification. The narrow pair was not a different
+opinion; it was where ranking had been forgotten. There is now one
+`TASKS`/`Task` in `modeling/specs.py` and one `SCORE_TASKS` naming the
+tasks whose prediction is a continuous score. The one copy that stays
+spelled out is in `agent/models.py`, because the analysis models
+deliberately do not import the modeling package -- and a test pins the two
+equal so the next task cannot go missing from one side.
+
+### The compatibility check that skipped itself
+
+`_check_task_target_compatibility` did `allowed = MAP.get(task)` and then
+`if allowed is None or target_type in allowed: return`. An unrecognized
+task returned CLEAN. The one check standing between a task and a target it
+cannot consume opted out for precisely the task nobody had thought about
+yet, which is the only task that needs it -- and a regressor fitted on a
+0/1 target does not error, it fits happily and reports a meaningless R2.
+
+Unreachable today, because the Literal constrains the value. It is now a
+refusal naming the map and the file to add the task to, so widening the
+taxonomy fails at the map that was not updated rather than at the model
+that was fitted. A companion test walks every entry of `TASKS` and fails
+the moment one has no map entry.
+
+### Every tool on the surface is now fuzzed
+
+`run_feature_ablation` was the last declared gap: its `spec` field was
+annotated `typing.Any`, so the synthesizer had no shape to build from --
+and the MCP server had no schema to advertise either. The tool's own body
+already did `ModelSpec(**input_data.spec)`, so typing the field as
+`ModelSpec` lost nothing (pydantic still accepts a dict or an instance) and
+fixed both. It also turned out to be an unresolved ForwardRef once typed:
+the module never imported `ModelSpec`, so the model loaded but was not
+fully defined and `model_json_schema()` raised.
+
+`EXPECTED_UNSYNTHESIZABLE` is now empty. **204 of 204**, up from 178 of 203
+at the start of this work. The stale-exemption guard is what reported the
+list had outlived its reason, which is the job it was written for.
+
+### The same horizons on the built path
+
+`TargetSpec` gained `horizons`, so `build_model_dataset` labels one feature
+computation at several distances the way `register_external_panel` already
+did. Both routes write the target set in the SAME shape, so `_select_target`
+needs no branch for where a panel came from.
+
+Purely additive: a single-horizon spec -- every spec written before this --
+produces a byte-identical panel, and two existing tests
+(`test_panel_has_expected_columns`,
+`test_panel_is_identical_to_the_pre_change_defaults`) caught the first
+attempt, which emitted a duplicate `target__h5` beside `target` for every
+dataset in existence. `horizon` and `horizons` normalize onto each other so
+`spec.target.horizon` still reads the primary at all six sites that consume
+it, and alignment drops on the primary only.
+
+The validator had to be made IDEMPOTENT rather than exactly-one. A
+normalized spec dumps BOTH fields, and `dataset_spec_hash` rebuilds a spec
+from its own dump to re-derive the hash -- so an exactly-one rule made a
+spec unable to survive its own serialization, which is how 165 tests failed
+at once. What is still refused is the pair DISAGREEING.
+
+**An upgrade note, because it is a real break.** `dataset_spec_hash` covers
+every field, so adding one changes the hash of every spec including
+already-persisted ones. A dataset built before this release fails
+`run_model_experiment`'s spec-hash check with nothing edited. The remedy is
+unchanged -- rebuild -- and the message now names an upgrade as a cause so
+it does not read as an accusation.
+
+### A gap in the determinism layer, found by the reworked fuzzer
+
+`run_terminal_monte_carlo` failed "call it twice, get the same answer". The
+tool is correct: `seed` is optional, and unset it warns "No seed, so this
+answer is not reproducible. Set one before quoting a number anybody will act
+on." The HARNESS was wrong -- `_offline_tools` never set a seed, so it was
+asserting determinism on a tool that documents itself as random.
+
+It had never shown up because the only offline stochastic tool on the
+surface takes a polymorphic data source, which the synthesizer could not
+build until it learned cross-field validators. The tool was outside the
+layer entirely. `_offline_tools` now pins a seed, which tests the property
+that matters -- same arguments AND same seed, same answer -- while
+`TestSeedsAreHonoured` continues to test the other direction. Measured:
+unseeded twice gives 10027.28 and 10049.21, seeded twice gives 10045.14
+both times, and seeds 1 and 999983 give 10038.91 and 10039.47.
+
+### A correction to the entry above
+
+`18_mcp.md`'s schema-budget tables were reported as regenerated from
+`print_budget()` and verified line by line. That verification was vacuous:
+`print_budget` writes to STDERR, the check captured only stdout, and an
+empty capture trivially satisfies "every line appears in the doc". The
+tables had been hand-edited and were carrying stale figures. They are now
+regenerated from a capture that reads both streams, and the derived prose --
+total KB, tokens, per-tool average, the heaviest runtime's share -- is
+recomputed from the same numbers rather than left behind.
+
+### The fuzz suite was testing 178 of 203 tools and could not say so
+
+`_synthesizable()` wrapped every input build in
+`except (Unsynthesizable, pydantic.ValidationError, Exception): continue`.
+The trailing `Exception` made the first two decorative and swallowed
+everything, so a tool the synthesizer could not build left the fuzz set
+SILENTLY -- the parametrization simply got smaller, which in pytest output
+is indistinguishable from a full one. Twenty-five tools were outside every
+adversarial and determinism check, including `get_order_book_metrics`, all
+four tools taking a polymorphic data source, and six modeling tools.
+
+`synth.py`'s own docstring had claimed the opposite for its whole life: "a
+tool skipped for a missing field is visible in the skip list." There was no
+skip list. The floor guard that should have caught the drift asked for 100
+synthesizable tools out of a surface that had 178 -- 78 tools of headroom
+for the gap to grow in, and it had grown into all of it.
+
+**202 of 203 now synthesize.** The 25 came from eight distinct causes, each
+fixed rather than exempted:
+
+- `max_length` was never read, so a 12-scenario field got 300 items.
+- A parameter grid was built as three keys of 300 values -- 27 million
+  combinations, which every optimizer here refuses by design.
+- `SYMBOLS` holds six names, so `len(weights)=300` never matched
+  `len(tickers)=6`; universe-aligned fields now generate at the symbol
+  count, which also keeps a fuzz case from triggering 300 fetches.
+- Ticker-keyed mappings used the first three symbols beside six tickers.
+- Cross-field validators ("exactly one of symbol / ref / values") cannot be
+  satisfied by filling required fields alone, so `build` now tries the
+  required set, then each optional in turn, then all of them, and re-raises
+  the ORIGINAL refusal if none constructs.
+- Two id fields on one model both got `"a"`, so a diff was against itself.
+- Repeated nested models were identical, so tools rejecting duplicate
+  labels or duplicate feature ids refused their own synthesized input.
+- `as_of`, `start` and `end` were not recognized as date-shaped names.
+
+**Dates are now a RANGE.** Both ends resolved to `_DATES[0]`, so every
+windowed tool in the fuzz set received a zero-length window and only ever
+exercised its empty-range path. They now span 400 business days, enough for
+a 252-day lookback. That is most of why this layer went from ~90 seconds to
+~4.5 minutes, and it is the change that made the suite find something.
+
+**The skip is now loud.** `EXPECTED_UNSYNTHESIZABLE` declares each absence
+with its reason -- currently one, `run_feature_ablation`, whose `spec` field
+is typed `typing.Any` and therefore advertises no schema to the MCP server
+either. Two guards hold the list honest: an undeclared gap fails, and a
+declared gap that has since been fixed also fails, so exemptions cannot
+accumulate past their reason. Both were verified to fail on exactly the
+defect they exist for and to pass again when reverted. The floor is now
+expressed against the live surface instead of a constant.
+
+### What the reworked suite found
+
+`detect_regimes` advertised a `seed` that could not affect its output. The
+library built `np.random.default_rng(seed)` and never used it -- the comment
+on the next line explains why, and it is a good reason: the mixture is
+initialized on QUANTILES because "a random start on financial data converges
+to the same answer most of the time and to a degenerate one occasionally,
+and reproducibility matters more here than the small chance of a better
+optimum."
+
+The deterministic initialization is right. Advertising a seed on top of it
+is not: an agent reading that schema believes varying the seed explores
+alternative fits. Measured across six seeds, the result was identical on
+well-separated regimes, on barely separated ones, and on noise with no
+regime structure at all. **The field is removed** -- from the tool input,
+from the library signature, and with it the dead `rng`. This is a BREAKING
+change for any caller passing `seed` to `detect_regimes`, which under
+`extra="forbid"` now refuses by name rather than accepting a value it
+ignores.
+
+The tool was already in the fuzz set. It was reachable only once the
+synthesized window stopped being zero-length.
+
 ## Delta One, a correctness pass, and the CI gap — 157 to 200 tools, eight runtimes to ten
 
 Forty-three new tools, two new execution boundaries, and roughly thirty

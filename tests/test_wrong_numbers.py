@@ -28,14 +28,10 @@ object. That is what makes this class worse than a crash.
 
 from __future__ import annotations
 
-
 import math
 
-
 import numpy as np
-
 import pandas as pd
-
 import pytest
 
 
@@ -129,9 +125,7 @@ class TestSeriesMetricsGetTheSeriesTheyDocument:
             SeriesMetricsInput,
             calculate_series_metrics,
         )
-
         from standard_quant_tools.metrics.return_metrics import cagr
-
         from standard_quant_tools.metrics.risk_metrics import (
             calmar_ratio,
             max_drawdown,
@@ -510,9 +504,7 @@ class TestArgumentsAreEitherHonouredOrRefused:
         from pydantic import BaseModel
 
         from standard_quant_tools import modeling
-
         from standard_quant_tools.agent import models as agent_models
-
         from standard_quant_tools.modeling import specs
 
         offenders = []
@@ -826,7 +818,6 @@ class TestBoundsOnTheProductNotJustTheFactors:
         from standard_quant_tools.analysis.derivatives import (
             implied_forward_price,
         )
-
         from standard_quant_tools.error import ValidationError
 
         rng = np.random.default_rng(0)
@@ -867,7 +858,6 @@ class TestBoundsOnTheProductNotJustTheFactors:
         from standard_quant_tools.analysis.derivatives import (
             implied_forward_price,
         )
-
         from standard_quant_tools.error import ValidationError
 
         with pytest.raises(ValidationError):
@@ -900,7 +890,6 @@ class TestBoundsOnTheProductNotJustTheFactors:
         """The earlier fix bounded the rate and the sum. Not the product."""
 
         from standard_quant_tools.delta_one.swaps import total_return_future
-
         from standard_quant_tools.error import ValidationError
 
         with pytest.raises(ValidationError):
@@ -972,7 +961,6 @@ class TestDeltaOneAgreesWithItsOwnCarryIdentity:
         """r - q - b = 0. This reported 600 bps and $6,000,000 on 100mm."""
 
         from standard_quant_tools.delta_one.carry import forward_price
-
         from standard_quant_tools.delta_one.expressions import compare_expressions
 
         reference = forward_price(
@@ -1262,7 +1250,6 @@ class TestDrawdownPeaksIncludeTheStartingValue:
         from standard_quant_tools.agent.runtimes.backtest.trade_tools import (
             MonteCarloTradesResult,
         )
-
         from standard_quant_tools.backtesting.trade_analysis import (
             monte_carlo_trade_paths,
         )
@@ -1329,7 +1316,6 @@ class TestATotalLossIsNotNegativeEquity:
         of -2.283, deeper than a total loss."""
 
         from standard_quant_tools.backtest.engine import run_strategy
-
         from standard_quant_tools.error import ValidationError
 
         frame = self._frame([20.0, 20.0, 20.0, 60.0, 50.0, 45.0])
@@ -1386,7 +1372,6 @@ class TestPctChangeDoesNotPadAcrossAGap:
         docstring says it exists to prevent this."""
 
         from standard_quant_tools.modeling.dataset.target import build_target
-
         from standard_quant_tools.modeling.specs import TargetSpec
 
         close = pd.Series([100.0, 101.0, np.nan, np.nan, 90.0, 91.0, 92.0, 93.0])
@@ -1414,9 +1399,7 @@ class TestPctChangeDoesNotPadAcrossAGap:
         prose, and every substring filter I tried admitted it."""
 
         import ast
-
         import importlib
-
         import inspect
 
         source = inspect.getsource(importlib.import_module(module))
@@ -1800,9 +1783,11 @@ class TestUserVisibleCountsAreReal:
 
         runtimes = _build()
         assert len(runtimes) == 10
-        assert sum(len(r.tool_names) for r in runtimes.values()) == 200
-        assert len(build_catalog()) == 200
-        assert len(TOOL_CATEGORY) == 174
+        assert sum(len(r.tool_names) for r in runtimes.values()) == 207
+        assert len(build_catalog()) == 207
+        # 204 minus the 18 modeling and 9 feature_lab tools, which are
+        # deliberately outside the analysis facade.
+        assert len(TOOL_CATEGORY) == 178
 
     def test_every_long_running_name_is_a_real_tool(self):
         """The help text named one that is not."""

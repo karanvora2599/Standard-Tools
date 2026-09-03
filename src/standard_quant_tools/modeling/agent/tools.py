@@ -52,7 +52,7 @@ from ..features.registry import list_features as _list_features
 from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
 from ..registry.model_registry import load_manifest
 from ..scoring import score_model as _score_model
-from ..specs import DatasetSpec
+from ..specs import DatasetSpec, FeatureSpec, TargetSpec
 from .dataset_tools import (  # noqa: F401
     ExplainRowLossInput,
     explain_dataset_row_loss,
@@ -60,6 +60,10 @@ from .dataset_tools import (  # noqa: F401
 from .models import (
     AnalyzeFeaturesInput,
     AnalyzeFeaturesResult,
+    AnalyzeModelErrorsInput,
+    AnalyzeModelErrorsResult,
+    BuildEnsembleInput,
+    BuildEnsembleResult,
     BuildModelDatasetInput,
     BuildModelDatasetResult,
     CheckLeakageInput,
@@ -87,6 +91,8 @@ from .models import (
     ModelSummary,
     PitRecordsInput,
     PitValidationResult,
+    RegisterExternalPanelInput,
+    RegisterExternalPanelResult,
     RunModelExperimentInput,
     RunModelExperimentResult,
     ScoreModelInput,
@@ -157,6 +163,7 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
         {
             "feature_ids": built["feature_ids"],
             "target_id": built["target_id"],
+            "targets": built.get("targets", []),
             "data_hash": built["data_hash"],
             # spec_hash was computed by build_dataset and then discarded.
             # Persisted so a model can be tied to the exact feature/target
@@ -190,6 +197,296 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
     )
 
 
+def build_model_ensemble(input_data: BuildEnsembleInput) -> BuildEnsembleResult:
+    """Combine registered models' out-of-sample predictions into one series."""
+    from ..ensemble import combine_predictions
+
+    combined = combine_predictions(
+        input_data.model_ids,
+        method=input_data.method,
+        weights=input_data.weights,
+    )
+    ref = publish(
+        combined["predictions"],
+        kind="predictions",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="build_model_ensemble",
+    )
+    warnings = list(combined["warnings"])
+    hottest = max(combined["correlations"].values(), default=None)
+    if hottest is not None and hottest > 0.95:
+        pair = max(combined["correlations"], key=combined["correlations"].get)
+        warnings.append(
+            f"WARNING: {pair} are correlated at {hottest:.3f}. An ensemble of "
+            "models that agree is approximately either of them, and the "
+            "diversification a combination is supposed to buy is not there -- "
+            "which the ensemble's own score will not show you."
+        )
+    return BuildEnsembleResult(
+        ref=ref,
+        model_ids=combined["model_ids"],
+        method=combined["method"],
+        task=combined["task"],
+        n_rows=combined["n_rows"],
+        rows_per_model=combined["rows_per_model"],
+        rows_covered_by_all=combined["rows_covered_by_all"],
+        correlations=combined["correlations"],
+        warnings=warnings,
+    )
+
+
+def register_external_panel(
+    input_data: RegisterExternalPanelInput,
+) -> RegisterExternalPanelResult:
+    """Register a feature matrix computed elsewhere as a modeling dataset."""
+    from ..dataset.external_panel import load_external_panel
+
+    if input_data.targets:
+        declared = [
+            {
+                "name": target.name,
+                "column": target.column,
+                "horizon": target.horizon,
+                "target_type": target.target_type,
+                "label_end_column": target.label_end_column,
+            }
+            for target in input_data.targets
+        ]
+    else:
+        declared = [
+            {
+                "name": "primary",
+                "column": input_data.target_column,
+                "horizon": input_data.horizon,
+                "target_type": input_data.target_type,
+                "label_end_column": input_data.label_end_column,
+            }
+        ]
+
+    loaded = load_external_panel(
+        input_data.path,
+        date_column=input_data.date_column,
+        entity_column=input_data.entity_column,
+        targets=declared,
+        feature_columns=input_data.feature_columns,
+        fmt=input_data.file_format,
+    )
+    primary = declared[0]
+    panel = loaded["panel"]
+    handle = loaded["handle"]
+
+    # A real DatasetSpec, synthesized from what the panel actually holds.
+    # Not decoration: run_model_experiment verifies its hash, bundles it
+    # into the registered model, and reads `universe`/`interval` into the
+    # lineage. Writing a placeholder would put a false claim in all three.
+    spec = DatasetSpec(
+        universe=loaded["entities"],
+        start=loaded["start"],
+        end=loaded["end"],
+        features=[FeatureSpec(id=column) for column in loaded["feature_ids"]],
+        target=TargetSpec(type=primary["target_type"], horizon=primary["horizon"]),
+        provider="external",
+        interval=input_data.interval,
+    )
+
+    dataset_id = f"ds_{uuid.uuid4().hex[:12]}"
+    directory = _artifacts.run_dir(dataset_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    _artifacts.save_json(directory, "dataset_spec", spec.model_dump())
+
+    warnings = list(loaded["warnings"])
+    warnings.append(
+        "REGISTERED BY REFERENCE. No copy of this panel was written -- the "
+        f"dataset reads {handle.path} on every load. Its CONTENT hash is "
+        "recorded and verified each time, so an edit fails loudly; but if "
+        "the file is moved or deleted the dataset stops loading."
+    )
+    warnings.append(
+        "score_model cannot run on a model trained from this dataset. "
+        "Scoring rebuilds features from the bundled spec, and these "
+        "features were computed outside this library, so there is nothing "
+        "to rebuild them from. Score by registering a new panel for the "
+        "scoring window and calling score_predictions."
+    )
+
+    if len(declared) > 1:
+        warnings.append(
+            f"{len(declared)} labels registered: "
+            + ", ".join(f"{d['name']}(h={d['horizon']})" for d in declared)
+            + f". run_model_experiment trains on {primary['name']!r} unless "
+            "given `target`. Every model then sees the same rows and the "
+            "same folds, which is what makes the horizons comparable."
+        )
+
+    _artifacts.save_json(
+        directory,
+        "dataset_meta",
+        {
+            "feature_ids": loaded["feature_ids"],
+            "target_id": f"{primary['target_type']}:{primary['horizon']}",
+            "targets": declared,
+            "data_hash": hash_dataframe(panel),
+            "spec_hash": dataset_spec_hash(spec),
+            "entities": loaded["entities"],
+            "provider": "external",
+            "interval": input_data.interval,
+            "warnings": warnings,
+            # Nothing was aligned here -- the panel arrived aligned -- so
+            # there is no per-column row loss to attribute. An empty map is
+            # the honest answer; explain_dataset_row_loss reports it as
+            # such rather than implying no rows were ever lost upstream.
+            "drop_attribution": {},
+            "entities_fetched": loaded["entities"],
+            # How to read the panel again. Stored as the ORIGINAL column
+            # names rather than the rename map, so reloading takes the same
+            # code path as registering did and cannot drift from it.
+            "storage": "external",
+            "panel_path": str(handle.path),
+            "panel_format": handle.fmt,
+            "panel_fingerprint": handle.fingerprint,
+            "panel_columns": {
+                "date_column": input_data.date_column,
+                "entity_column": input_data.entity_column,
+                "target_column": input_data.target_column,
+                "label_end_column": input_data.label_end_column,
+                "feature_columns": loaded["feature_ids"],
+            },
+            "source": input_data.source,
+        },
+    )
+
+    return RegisterExternalPanelResult(
+        dataset_id=dataset_id,
+        rows=int(len(panel)),
+        entities=loaded["entities"],
+        feature_ids=loaded["feature_ids"],
+        target_id=f"{primary['target_type']}:{primary['horizon']}",
+        targets=[str(d["name"]) for d in declared],
+        start=loaded["start"],
+        end=loaded["end"],
+        interval=input_data.interval,
+        source_path=str(handle.path),
+        fingerprint=handle.fingerprint,
+        warnings=warnings,
+    )
+
+
+def _select_target(panel, meta, requested, dataset_id: str):
+    """
+    Point the panel's `target` at the label this experiment asked for.
+
+    A panel registered with several horizons carries them all as
+    `target__<name>`, with the primary duplicated onto plain `target` so
+    every consumer that has only ever seen one keeps working. Selecting is
+    therefore a rename plus a drop, and the ENGINE is unchanged -- it reads
+    `target` and `label_end_date` exactly as it always has.
+
+    Rows are dropped by the CHOSEN label. A 30-second horizon has more
+    unclosed rows at the end of a sample than a 1-second one, and dropping
+    on the union would make every short-horizon model pay for the longest
+    one's warm-down.
+    """
+    from ..dataset.external_panel import label_end_column_for, target_column_for
+
+    declared = meta.get("targets") or []
+    names = [str(d["name"]) for d in declared]
+    notes = []
+
+    if requested is None:
+        if len(names) > 1:
+            notes.append(
+                f"NOTE: this dataset carries {len(names)} labels {names}; "
+                f"trained on the primary, {names[0]!r}. Pass `target` to fit "
+                "another."
+            )
+        return panel, meta["target_id"], notes
+
+    if not declared:
+        raise ValidationError(
+            f"target={requested!r} was asked for, but dataset "
+            f"{dataset_id!r} carries a single unnamed label. Only a dataset "
+            "registered with `targets` can be selected from."
+        )
+    if requested not in names:
+        raise ValidationError(
+            f"dataset {dataset_id!r} has no label named {requested!r}. It "
+            f"carries {names}."
+        )
+
+    chosen = declared[names.index(requested)]
+    column = target_column_for(requested)
+    if column not in panel.columns:
+        raise ValidationError(
+            f"dataset {dataset_id!r} records a label {requested!r} that its "
+            f"panel does not contain ({column!r} is absent). The file behind "
+            "it has changed shape since registration."
+        )
+
+    out = panel.copy()
+    out["target"] = out[column]
+    ends = label_end_column_for(requested)
+    if ends in out.columns:
+        out["label_end_date"] = out[ends]
+    elif "label_end_date" in out.columns:
+        # The primary's label-end would otherwise be applied to a different
+        # horizon's rows, which is a purge computed against the wrong window.
+        out = out.drop(columns=["label_end_date"])
+
+    before = len(out)
+    out = out[out["target"].notna()]
+    dropped = before - len(out)
+    if dropped:
+        notes.append(
+            f"NOTE: {dropped:,} of {before:,} rows have no {requested!r} "
+            "label and were dropped for THIS experiment only. A longer "
+            "horizon has more unclosed rows at the end of a sample; dropping "
+            "on the union would make every shorter horizon pay for it."
+        )
+    if out.empty:
+        raise ValidationError(
+            f"every row's {requested!r} label is null, so there is nothing "
+            "to fit. Check the horizon against the panel's own span."
+        )
+    return (
+        out.reset_index(drop=True),
+        f"{chosen.get('target_type', 'forward_return')}:{chosen['horizon']}",
+        notes,
+    )
+
+
+def _load_external_panel_for(meta, dataset_id: str):
+    """Re-read a referenced panel through the path that registered it."""
+    from ..dataset.external_panel import load_external_panel
+
+    columns = meta.get("panel_columns") or {}
+    path = meta.get("panel_path")
+    if not path:
+        raise ValidationError(
+            f"dataset {dataset_id!r} is recorded as external but names no "
+            "panel_path. The registration is unusable; register the panel "
+            "again."
+        )
+    try:
+        return load_external_panel(
+            str(path),
+            date_column=columns.get("date_column", "date"),
+            entity_column=columns.get("entity_column", "entity"),
+            targets=meta.get("targets"),
+            target_column=columns.get("target_column", "target"),
+            label_end_column=columns.get("label_end_column"),
+            feature_columns=columns.get("feature_columns"),
+            fmt=meta.get("panel_format"),
+        )["panel"]
+    except ValidationError as exc:
+        raise ValidationError(
+            f"dataset {dataset_id!r} points at {path}, which cannot be read "
+            f"now -- {exc} Nothing was copied when it was registered, so an "
+            "externally referenced dataset is only as good as the file it "
+            "names."
+        ) from exc
+
+
 def _load_dataset_panel(dataset_id: str):
     """
     Load a persisted dataset panel, verifying it is the one that was built.
@@ -213,8 +510,16 @@ def _load_dataset_panel(dataset_id: str):
             "dataset_meta.json is written last, so its absence also means a "
             "previous build_model_dataset call did not complete."
         )
-    panel = _artifacts.load_artifact(str(directory / "panel.parquet"))
     meta = _artifacts.load_json(str(meta_path))
+    # An externally registered panel has no panel.parquet -- the whole point
+    # is that nothing was copied. The hash check below is UNCHANGED and runs
+    # on both, because it hashes the loaded frame rather than the file: the
+    # engine reads the panel whole either way, so integrity costs one pass
+    # over data already in memory.
+    if meta.get("storage") == "external":
+        panel = _load_external_panel_for(meta, dataset_id)
+    else:
+        panel = _artifacts.load_artifact(str(directory / "panel.parquet"))
 
     # The panel is reloaded from disk and its hash was recorded at build
     # time, but nothing previously re-derived it -- so an edited
@@ -247,6 +552,9 @@ def run_model_experiment(
         input_data.spec.estimator.type,
     )
     panel, meta, directory = _load_dataset_panel(input_data.dataset_id)
+    panel, selected_target_id, selection_notes = _select_target(
+        panel, meta, input_data.target, input_data.dataset_id
+    )
 
     # dataset_spec.json gets the same treatment panel.parquet just got, and
     # for a sharper reason. The panel is only READ during training, but the
@@ -267,13 +575,18 @@ def run_model_experiment(
                 f"the hash recorded when it was built (expected {stored_spec_hash}, found "
                 f"{actual_spec_hash}). The panel was built from the original spec, so "
                 "training would register a model whose bundled feature definitions differ "
-                "from the data it learned on — rebuild the dataset instead."
+                "from the data it learned on — rebuild the dataset instead. "
+                "An UPGRADE can also cause this without anything being edited: "
+                "the hash covers every field of the spec, so a release that "
+                "adds one (TargetSpec.horizons did) changes it for every "
+                "dataset persisted before that release. Rebuilding is the "
+                "same remedy either way."
             )
 
     dataset = {
         "panel": panel,
         "feature_ids": meta["feature_ids"],
-        "target_id": meta["target_id"],
+        "target_id": selected_target_id,
         "data_hash": meta["data_hash"],
         "spec_hash": stored_spec_hash,
         # Bundled into the model so it becomes self-contained -- see
@@ -282,7 +595,7 @@ def run_model_experiment(
         # .get, not [...]: datasets built before coverage diagnostics
         # existed have no such key, and a missing warning list is not the
         # same claim as an empty one -- see ModelManifest.dataset_warnings.
-        "warnings": meta.get("warnings", []),
+        "warnings": list(meta.get("warnings", [])) + selection_notes,
     }
     result = _run_experiment(dataset, input_data.spec, dataset_id=input_data.dataset_id)
     # Republished with a content kind so the rest of the interconnect can
@@ -844,7 +1157,237 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
 # ── Registration (mirrors agent.tools.get_agent_tools()/_TOOL_DISPATCH,
 # but a separate registry — never merged into that one) ────────────────
 
+
+def _label_name_for_target_id(meta, target_id: str):
+    """
+    Which declared label a registered model was actually fit on.
+
+    A manifest records `target_id` -- "forward_return:5" -- and a panel
+    registered with several horizons carries its labels by NAME. The two are
+    joined by reconstructing the id from each declaration, which is exact
+    when the declarations differ and ambiguous when two of them describe the
+    same type and horizon. Ambiguous returns None rather than picking the
+    first: the wrong label produces residuals against the wrong outcome, and
+    every number downstream would be confidently wrong.
+    """
+    declared = meta.get("targets") or []
+    matches = [
+        str(d["name"])
+        for d in declared
+        if f"{d.get('target_type', 'forward_return')}:{d['horizon']}" == target_id
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _trim(rows, top_n: int):
+    """Worst and best buckets by RMSE, with the middle counted not listed."""
+    if len(rows) <= 2 * top_n:
+        return sorted(rows, key=lambda r: -r["rmse"]), 0
+    ordered = sorted(rows, key=lambda r: -r["rmse"])
+    return ordered[:top_n] + ordered[-top_n:], len(ordered) - 2 * top_n
+
+
+def analyze_model_errors(
+    input_data: AnalyzeModelErrorsInput,
+) -> AnalyzeModelErrorsResult:
+    """Residuals, calibration and error attribution for a registered model.
+
+    The persisted out-of-sample frame carries date, entity and prediction
+    and NO outcome, so the actuals are joined back from the dataset panel
+    the model was fit on -- which is also what makes a breakdown by feature
+    decile possible, since the panel is where the features live."""
+    import numpy as np
+    import pandas as pd
+
+    from .. import diagnostics as _diag
+    from ..ensemble import load_oos_predictions
+
+    manifest = load_manifest(input_data.model_id)
+    predictions = load_oos_predictions(input_data.model_id)
+    panel, meta, _directory = _load_dataset_panel(manifest.dataset_id)
+
+    warnings: List[str] = []
+    label = _label_name_for_target_id(meta, manifest.target_id)
+    if label is not None:
+        panel, _target_id, notes = _select_target(
+            panel, meta, label, manifest.dataset_id
+        )
+        warnings.extend(notes)
+    elif (meta.get("targets") or []) and "target" not in panel.columns:
+        raise ValidationError(
+            f"model {input_data.model_id!r} was fit on target_id="
+            f"{manifest.target_id!r}, and dataset {manifest.dataset_id!r} "
+            "declares no single label matching it. Residuals cannot be "
+            "computed against a label that cannot be identified -- the wrong "
+            "one would produce numbers that look fine and describe a "
+            "different outcome."
+        )
+
+    if "target" not in panel.columns:
+        raise ValidationError(
+            f"dataset {manifest.dataset_id!r} has no 'target' column, so "
+            "there are no outcomes to compare this model's predictions "
+            "against."
+        )
+
+    actuals = panel[["date", "entity", "target"]].copy()
+    actuals["date"] = pd.to_datetime(actuals["date"])
+    actuals["entity"] = actuals["entity"].astype(str)
+    features = [
+        c for c in panel.columns if c not in {"date", "entity", "label_end_date"}
+    ]
+    if input_data.feature is not None:
+        if input_data.feature not in panel.columns:
+            raise ValidationError(
+                f"feature={input_data.feature!r} is not a column of dataset "
+                f"{manifest.dataset_id!r}. Its panel carries {features[:15]}"
+                f"{' ...' if len(features) > 15 else ''}."
+            )
+        actuals[input_data.feature] = panel[input_data.feature].to_numpy()
+
+    joined = predictions.merge(actuals, on=["date", "entity"], how="inner")
+    if joined.empty:
+        raise ValidationError(
+            f"none of this model's {len(predictions):,} out-of-sample rows "
+            f"match a row in dataset {manifest.dataset_id!r}. The predictions "
+            "and the panel do not describe the same (date, entity) universe."
+        )
+    if len(joined) < len(predictions):
+        warnings.append(
+            f"NOTE: {len(predictions) - len(joined):,} of {len(predictions):,} "
+            "predicted rows found no outcome in the panel and are excluded. "
+            "Rows at the end of the sample have an unclosed label."
+        )
+
+    joined["_predicted"] = pd.to_numeric(joined["prediction"], errors="coerce")
+    joined["_actual"] = pd.to_numeric(joined["target"], errors="coerce")
+    joined["_residual"] = joined["_actual"] - joined["_predicted"]
+
+    actual = joined["_actual"].to_numpy(dtype="float64")
+    predicted = joined["_predicted"].to_numpy(dtype="float64")
+    residuals = _diag.residual_summary(actual, predicted)
+    calibration = _diag.calibration(actual, predicted, manifest.task)
+    attribution = _diag.error_attribution(
+        joined, feature=input_data.feature, period=input_data.period
+    )
+
+    if attribution.get("feature_note"):
+        warnings.append(attribution["feature_note"])
+
+    findings = _diag.worst_buckets(attribution)
+
+    # Bias, qualified by how uncertain the mean itself is. The t-statistic
+    # below OVERSTATES significance whenever the label overlaps -- the
+    # autocorrelation reported alongside is the measure of by how much --
+    # so the threshold is deliberately blunt rather than a p-value.
+    n, std = residuals["n"], residuals["std_error"]
+    if n > 30 and std and np.isfinite(std) and std > 0:
+        t_stat = residuals["mean_error"] / (std / np.sqrt(n))
+        if abs(t_stat) > 3:
+            direction = "LOW" if residuals["mean_error"] > 0 else "HIGH"
+            findings.append(
+                f"the model reads systematically {direction}: mean error "
+                f"{residuals['mean_error']:.6g} over {n:,} rows (t={t_stat:.1f}). "
+                "This is bias, and no amount of rank skill corrects it -- a "
+                "constant offset would."
+            )
+
+    slope = calibration.get("slope")
+    if slope is not None and np.isfinite(slope):
+        if slope < 0:
+            findings.append(
+                f"calibration slope {slope:.3f} is NEGATIVE: out of sample "
+                "the predictions point the wrong way. Trading them inverted "
+                "is not the fix -- a sign that flips out of sample usually "
+                "means the fit found something that was not there."
+            )
+        elif not 0.5 <= slope <= 2.0:
+            findings.append(
+                f"calibration slope {slope:.3f}, against 1.0 for a calibrated "
+                "model. "
+                + (
+                    "The predictions are spread wider than the outcomes, so "
+                    "anything sized directly from them over-trades."
+                    if slope < 1
+                    else "The predictions are compressed relative to the "
+                    "outcomes, so sizing from them under-trades."
+                )
+            )
+
+    ece = calibration.get("expected_calibration_error")
+    if ece is not None and ece > 0.1:
+        findings.append(
+            f"expected calibration error {ece:.3f}: the stated probabilities "
+            "are not the observed frequencies, so any threshold applied to "
+            "them fires somewhere other than where you set it."
+        )
+
+    autocorrelation = _diag.residual_autocorrelation(joined)
+    if autocorrelation is not None and autocorrelation > 0.3:
+        warnings.append(
+            f"NOTE: residual autocorrelation is {autocorrelation:.3f}. For an "
+            "overlapping label this is EXPECTED and not a defect -- an "
+            "h-bar forward return sampled every bar shares h-1 bars with its "
+            "neighbour. It does mean the effective sample is smaller than "
+            f"{n:,} rows, so read every t-statistic here as optimistic."
+        )
+
+    trimmed = {}
+    omitted = {}
+    for key in (
+        "by_entity",
+        "by_period",
+        "by_prediction_decile",
+        "by_feature_decile",
+    ):
+        rows, dropped = _trim(attribution.get(key, []), input_data.top_n)
+        trimmed[key] = rows
+        if dropped:
+            omitted[key] = dropped
+
+    thin = sum(1 for rows in trimmed.values() for r in rows if r.get("thin"))
+    if thin:
+        warnings.append(
+            f"NOTE: {thin} listed bucket(s) hold fewer than "
+            f"{_diag.MIN_BUCKET_ROWS} rows and are marked `thin`. They are "
+            "excluded from the findings above, because the worst bucket of a "
+            "breakdown is almost always the emptiest one."
+        )
+
+    return AnalyzeModelErrorsResult(
+        model_id=input_data.model_id,
+        task=manifest.task,
+        target_id=manifest.target_id,
+        n_rows=int(len(joined)),
+        residuals=residuals,
+        calibration=calibration,
+        heteroskedasticity=_diag.heteroskedasticity(actual, predicted),
+        residual_autocorrelation=autocorrelation,
+        buckets_omitted=omitted,
+        findings=findings,
+        warnings=warnings,
+        **trimmed,
+    )
+
+
 _MODELING_TOOL_DEFS: List[tuple] = [
+    (
+        "analyze_model_errors",
+        "WHERE a registered model is wrong, not merely how wrong on average. "
+        "An R2 cannot separate a broadly mediocre model from one that is "
+        "excellent except in the conditions you trade -- those have the same "
+        "headline number and opposite consequences. Breaks the out-of-sample "
+        "errors down by entity, by period, by the model's OWN prediction "
+        "decile, and optionally by the decile of any feature in its panel, "
+        "which is the breakdown that turns 'the model is mediocre' into 'the "
+        "model fails when the spread is wide'. Also reports CALIBRATION, a "
+        "separate question from accuracy: a model can rank perfectly and "
+        "still be systematically too confident, which is invisible in an R2 "
+        "or an IC and changes every position size computed from it. "
+        "Residual autocorrelation is reported and is EXPECTED to be positive "
+        "for an overlapping label rather than being a defect.",
+        AnalyzeModelErrorsInput,
+    ),
     (
         "explain_dataset_row_loss",
         'Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.',
@@ -859,6 +1402,38 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "join_point_in_time",
         "Attach point-in-time records to a built dataset, each panel row getting the most recent record AVAILABLE by then. Strictly backward and inclusive: a filing released before a bar's close is usable on it, one released after is not, and a row with nothing available yet gets NaN rather than zero or the eventual value. A restatement is a second row with the same event_time and a later available_time, and the join returns whichever version was current at each date.",
         JoinPointInTimeInput,
+    ),
+    (
+        "build_model_ensemble",
+        "Combine several registered models into one prediction series, and "
+        "publish it as an `sqt://predictions` reference that score_predictions "
+        "and the backtest bridge read like any other. What gets combined is "
+        "each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold "
+        "that did not train on them -- so the combination cannot inherit the "
+        "optimism that makes naive stacking look excellent until it meets a "
+        "new day. The default is rank_mean rather than mean, because two "
+        "models on different scales average into a number dominated by "
+        "whichever has the wider spread, which is its units and not its "
+        "skill. Reports the pairwise correlation between the base models: "
+        "two agreeing at 0.98 combine into approximately either of them, and "
+        "the ensemble's own score cannot show you that.",
+        BuildEnsembleInput,
+    ),
+    (
+        "register_external_panel",
+        "Register a feature matrix computed OUTSIDE this library -- by a C++ "
+        "pipeline over an L2 feed, a warehouse query, another system -- as a "
+        "modeling dataset, without copying it. Use this when the features "
+        "already exist and build_model_dataset has nothing to fetch or "
+        "compute. `horizon` is required and is the one thing not inferable "
+        "from the file: the engine purges training rows whose label window "
+        "overlaps the test fold, and a missing horizon disables that purge "
+        "silently rather than failing. The panel's content hash is recorded "
+        "and verified on every load, so an edited file fails loudly; a moved "
+        "one stops loading. score_model cannot run on a model trained this "
+        "way, because rebuilding features needs definitions this library "
+        "does not have.",
+        RegisterExternalPanelInput,
     ),
     (
         "validate_model_spec",
@@ -1248,12 +1823,18 @@ def join_point_in_time(input_data: JoinPointInTimeInput) -> JoinPointInTimeResul
 
 
 MODELING_TOOL_DISPATCH = {
+    "analyze_model_errors": (analyze_model_errors, AnalyzeModelErrorsInput),
     "explain_dataset_row_loss": (
         explain_dataset_row_loss,
         ExplainRowLossInput,
     ),
     "validate_pit_records": (validate_pit_records, PitRecordsInput),
     "join_point_in_time": (join_point_in_time, JoinPointInTimeInput),
+    "build_model_ensemble": (build_model_ensemble, BuildEnsembleInput),
+    "register_external_panel": (
+        register_external_panel,
+        RegisterExternalPanelInput,
+    ),
     "validate_model_spec": (validate_model_spec, ValidateModelSpecInput),
     "score_predictions": (score_predictions, ScorePredictionsInput),
     "list_features": (list_features, ListFeaturesInput),

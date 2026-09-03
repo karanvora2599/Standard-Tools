@@ -122,10 +122,10 @@ one of 13 category keys. Each category belongs to exactly one runtime.
 | `backtest_validation` | 21 | `backtest` | Optimize/validate/diagnose — grid search, walk-forward, regime-adaptive, robustness, Monte Carlo, cost sweep, drawdown table, and the overfitting layer (deflated Sharpe, PBO, purged combinatorial CV, reality check) |
 | `custom_signal` | 2 | `backtest` | Backtest a signal computed outside this library |
 | `portfolio_risk` | 18 | `portfolio` | Risk decomposition, portfolio construction/optimization, sizing, capacity, stress testing, liquidity, trade cost |
-| `microstructure` | 16 | `microstructure` | Spreads MEASURED from tick data, the eight bar-based estimators for when there is no tick feed, and a check of the OHLCV proxies against them |
+| `microstructure` | 17 | `microstructure` | Spreads MEASURED from tick data, the eight bar-based estimators for when there is no tick feed, and a check of the OHLCV proxies against them |
 | `delta_one` | 18 | `delta_one` | Carry, basis, futures curves and rolls, hedge sizing, baskets and replication, ETF fair value, swaps and TRFs, and the comparison that normalizes six ways of holding one exposure |
 | `derivatives` | 12 | `derivatives` | Option pricing and second-order greeks, multi-leg payoffs, smile/term-structure fitting, put-call parity, delta-hedge simulation |
-| `data` | 14 | `data` | Fetch OHLCV, return panels, tick tapes and quotes, build continuous futures, and publish them as `sqt://` references every other runtime reads |
+| `data` | 17 | `data` | Fetch OHLCV, return panels, tick tapes and quotes, build continuous futures, register external datasets too large to copy, and publish them all as `sqt://` references every other runtime reads |
 | `discovery` | 13 | `meta` | What the library accepts and what the provider can serve; describe or validate a tool call before making it; the handoff reference map |
 | `provenance` | 6 | `meta` | Read and verify the decision log. Read-only by design |
 

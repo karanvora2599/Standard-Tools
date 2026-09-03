@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 17 modeling tools
+## The 20 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -56,6 +56,9 @@ because the order is the point.
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback) |
 | `check_leakage` | a feature set → whether it is temporally safe to fit on, answered **before** a dataset is built with it |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
+| `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve |
+| `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building |
+| `analyze_model_errors` | a `model_id` → where its errors are, by entity, period, prediction decile and any feature's decile, plus whether its SCALE is right. The question an R2 cannot answer |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
 | `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
 | `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing |
@@ -572,6 +575,163 @@ they qualify, and the build-time tool response is transient. An empty list
 on an older model is indistinguishable from "no warnings" by design:
 absence of a recorded warning is not evidence the condition did not hold.
 
+
+## A panel this library did not build
+
+`build_model_dataset` fetches OHLCV, computes registry features and writes a
+panel. That is the right path when the features are this library's own. It is
+the wrong path when they are not — when a C++ pipeline over an L2 feed, a
+warehouse query or another system has already produced the feature matrix,
+there is nothing to fetch and nothing to compute, and the only thing between
+that matrix and `run_model_experiment` is the dataset record.
+
+`register_external_panel` writes the record and nothing else. The panel stays
+where it was written — no `panel.parquet` is copied under `SQT_RUNS_DIR`,
+because the matrices this exists for are often partitioned directories and
+copying one is exactly the materialization the external-dataset contract was
+built to avoid.
+
+**Integrity is not weakened by that.** The engine loads the panel whole
+either way, so the content hash is computed on the loaded frame rather than
+on the file, and an externally referenced panel is verified on every load
+exactly as strictly as a built one. What changes is the failure mode: an
+edited file fails loudly with a hash mismatch, and a moved or deleted one
+stops loading. A built panel could never do either, because this library
+owned it.
+
+### The horizon is required
+
+A panel arrives with a `target` column and no statement of what that column
+means. The engine needs the horizon for the target-overlap purge — the rule
+that stops a label spanning bars t..t+h from being trained on beside a fold
+boundary inside that span. It cannot be inferred from the data, and
+defaulting it would not fail; it would **silently disable the purge**. So it
+is required, and it is the one thing about an external panel this tool
+refuses to guess.
+
+Supply `label_end_column` as well for a label that can end early — a triple
+barrier — so the purge uses the real end rather than the nominal horizon.
+
+### What it costs
+
+`score_model` cannot run on a model trained this way, and refuses by name
+rather than failing deeper. Scoring rebuilds features from the model's
+bundled spec, and these features were computed outside this library, so
+there are no definitions to rebuild them from. Score by registering a panel
+covering the scoring window and calling `score_predictions`, which exists for
+predictions this library never produced.
+
+`DatasetSpec.provider` gains `"external"` to mark such a dataset — not a
+provider at all, but the honest label for a panel with no fetch behind it. It
+also gains `"databento"`, which a sibling project had been monkey-patching
+onto this field at import time; that project's own docstring records upstream
+as "the cleaner home", along with the pydantic trap that makes the patch
+fragile — a nested model's schema is inlined into its parents, so rebuilding
+`DatasetSpec` alone leaves every tool-input model advertising the old enum.
+
+---
+
+### Several horizons, one panel
+
+A microstructure panel is labelled at 100 ms, 1 s, 5 s and 30 s at once, off
+identical features. Registering one dataset per horizon would recompute and
+re-store the same feature matrix four times — and worse, the four models
+would stop being comparable, because each would have been aligned
+separately against its own label's coverage.
+
+So `targets` declares them together:
+
+```python
+register_external_panel(
+    path="/data/nvda_20260302.parquet",
+    targets=[
+        {"name": "h1s",  "column": "ret_1s",  "horizon": 1},
+        {"name": "h5s",  "column": "ret_5s",  "horizon": 5},
+        {"name": "h30s", "column": "ret_30s", "horizon": 30},
+    ],
+    interval="1s",
+)
+```
+
+The panel carries each as `target__<name>`, and the **primary** — the first
+— is also written to plain `target`, so a multi-horizon panel is still an
+ordinary panel to everything that has only ever seen one label.
+`run_model_experiment` then selects:
+
+```python
+run_model_experiment(dataset_id=..., spec=..., target="h5s")
+```
+
+**Rows are dropped by the CHOSEN label, per experiment.** A 30-second
+horizon has more unclosed rows at the end of a sample than a 1-second one.
+Dropping on the union would make every short-horizon model pay for the
+longest one's warm-down, so each experiment drops only its own and says how
+many. `target_id` follows the selection, so the registered model records the
+horizon it actually learned.
+
+Measured on a panel built so that `alpha` predicts the 1-bar label strongly,
+the 5-bar one weakly and the 20-bar one not at all — one file, three
+labels, three ridges through the same folds:
+
+| label | rows fitted | OOS r² |
+|---|---|---|
+| `h1` | 1,040 | +0.9929 |
+| `h5` | 1,020 | +0.8478 |
+| `h20` | 960 | −0.0034 |
+
+The row counts fall by exactly each horizon's own unclosed tail. A selector
+that quietly trained on the wrong column would still have returned three
+models and three numbers; only the ordering says the right label was used.
+
+#### The same thing on the built path
+
+`TargetSpec` takes `horizons` as well, so a dataset built here gets the
+identical treatment — features computed once, labelled at several distances:
+
+```python
+build_model_dataset(spec=DatasetSpec(
+    universe=[...],
+    features=[...],
+    target=TargetSpec(type="forward_return", horizons=[1, 5, 20]),
+))
+```
+
+The panel then carries `target__h1`, `target__h5`, `target__h20` and a
+`label_end_date__h<n>` for each, and `run_model_experiment(target="h5")`
+selects exactly as it does for a registered panel. The metadata is written
+in the same shape from both routes, so the selector needs no branch for
+where the panel came from.
+
+**Purely additive.** A single-horizon spec — which is every spec written
+before `horizons` existed — produces a byte-identical panel: no
+`target__h5` duplicate beside `target`, and an empty target list, because
+one label is not a choice. `horizon` and `horizons` normalize onto each
+other, so `spec.target.horizon` still reads the primary everywhere it
+always did: the forward return, the volatility scaling, the barrier walk,
+the label-end dates, the target id and the engine's purge.
+
+Alignment drops on the **primary** label only. The 20-bar label has no
+value on the last 20 bars of each entity, and those rows survive as NaN
+rather than costing the 1-bar model its data; the experiment drops its own
+when it selects.
+
+> **One upgrade note.** `dataset_spec_hash` covers every field of the spec,
+> so adding `horizons` changes the hash of every spec — including ones
+> already persisted. A dataset built before this release will fail
+> `run_model_experiment`'s spec-hash check even though nothing was edited.
+> The remedy is the one the message already gives, rebuild the dataset, and
+> the message now names an upgrade as a cause so it does not read as an
+> accusation.
+
+
+**What this is not.** One estimator emitting several horizons at once —
+multi-OUTPUT — is a different change and is not done. It would alter the
+out-of-sample prediction schema, `ModelManifest.target_id` and every
+consumer of a single `prediction` column, including `portfolio_eval`'s
+date × entity pivot. What is here gives one panel, N comparable models, and
+the horizon curve; a joint fit does not.
+
+
 ---
 
 ## Point-in-time safety
@@ -648,21 +808,80 @@ look forward", not "this dataset is point-in-time correct".
 
 ---
 
+### Universe-scope network features
+
+`network.avg_correlation` and `network.mst_degree` describe where an entity
+sits in the correlation graph its universe forms, refit on a rolling window
+like the PCA factors beside them.
+
+They are chosen for what they are **not**: eigenvector centrality of a
+correlation matrix is its leading eigenvector, which `factors.pca_loading`
+already computes — registering it again under a graph name would be one
+number with two explanations. Mean correlation is scale-free where a PC1
+loading is variance-weighted, so a loud name loads heavily without
+necessarily moving *with* anything. MST degree is local topology: a hub is
+a name others route through, and a universe can have a flat PC1 and a
+highly centralised tree. Edges are weighted by the Mantegna distance
+`sqrt(2(1-rho))`, which is a true metric; a spanning tree over a raw
+correlation spans nothing in particular.
+
 ## Estimators
 
 `modeling.estimators.registry.ESTIMATOR_REGISTRY` — an explicit allowlist,
 keyed by `(task, name)`:
 
 - **regression** (scikit-learn): `linear`, `ridge`, `lasso`, `elastic_net`,
-  `hist_gradient_boosting`, `random_forest`, `gradient_boosting`,
-  `quantile`, `quantile_gradient_boosting`
+  `huber`, `hist_gradient_boosting`, `random_forest`, `gradient_boosting`,
+  `quantile`, `quantile_gradient_boosting`, `mlp`, `sgd`
 - **classification** (scikit-learn): `logistic`, `hist_gradient_boosting`,
-  `random_forest`, `gradient_boosting`
+  `random_forest`, `gradient_boosting`, `mlp`, `sgd`
+- **ranking, when installed**: `lightgbm_ranker`, `xgboost_ranker`
 - **both, when installed**: `lightgbm`, `xgboost`
+
+`mlp` is the non-linear-over-a-window estimator — see **Sequence models**
+below for why that is what a sequence model reduces to here. Its
+architecture is two bounded integers (`n_hidden_units`, `n_hidden_layers`)
+rather than sklearn's `hidden_layer_sizes` tuple, because the allowlist is
+a compute budget and an unbounded tuple is not boundable.
+
+`sgd` is the incremental learner: a fold refit costs a pass or two rather
+than a full re-solve, and `learning_rate`/`eta0` are an optimizer-level
+expression of recency that composes with `weighting.method='time_decay'`
+rather than replacing it. Both need scaled inputs, which the engine's
+per-fold winsorize-and-zscore already provides.
 
 `engine.run_experiment` refuses any estimator type not in this registry —
 no arbitrary `sklearn` import, no `exec()`. An LLM builds a declarative
 `ModelSpec`; the engine decides exactly how it executes.
+
+### Sequence models, and why there is no TCN
+
+The engine hands every estimator a 2-D `X` whose rows are (date, entity)
+observations carrying **no entity identity** — the contract that lets
+ridge, LightGBM and an SGD learner be swapped for one another without the
+engine knowing anything about them. A recurrent or convolutional model
+cannot reconstruct per-entity sequences from that, so the window has to
+arrive as columns regardless of architecture. `FeatureSpec.lags` is how:
+
+```python
+FeatureSpec(id="technical.rsi", lags=[1, 2, 3])
+# -> technical.rsi, technical.rsi__lag1, __lag2, __lag3
+```
+
+Lags are shifted **within each entity**, before the panel is stacked, so a
+lag can only ever reach that entity's own earlier bars. Applied after
+stacking it would hand one symbol another's history — a panel that looks
+entirely normal and is wrong. A **negative** lag is refused rather than
+clamped: it is a shift forward, putting a future value on today's row, and
+every leakage check in this library reasons about the *target*, so none of
+them would catch it.
+
+Once the window is in the columns, what a sequence architecture adds is
+weight sharing across lag positions, which pays at hundreds of timesteps
+and thousands of series — not at the depth a daily panel supports. `mlp`
+over the lag columns is the same hypothesis class with no dependency, and
+it runs inside the walk-forward loop that already exists. That is the whole
+reason torch is not a dependency of this package.
 
 ### The two optional boosters, and why they are worth installing
 
@@ -1014,6 +1233,71 @@ conservative barrier test: a level touched and reversed inside one bar is
 not counted.
 
 ---
+
+### Labels this library records but cannot build
+
+Six of the fourteen target types are computed from a Close series.
+**Eight are not, and could not be.** A markout is measured from a fill, a
+fill probability needs queue position and cancellations, a spread forecast
+needs the book. No column of closing prices contains any of them.
+
+| Type | Task | What it is |
+| --- | --- | --- |
+| `future_mid_return` | regression, ranking | Return of the MIDPOINT. Not a trade-price return — the mid moves without a trade, and it is where a passive order is measured from |
+| `future_microprice_return` | regression, ranking | Return of the size-weighted touch price. Leads the mid when the book is lopsided, which is when the mid is least informative |
+| `future_markout` | regression, ranking | Mid move measured FROM a fill, signed by the side taken |
+| `next_mid_direction` | classification | Whether the midpoint's next move is up or down |
+| `future_spread` | regression, ranking | The quoted spread at t+horizon — what it will COST to cross, not where the price goes |
+| `fill_probability` | classification | Whether a passive order at a stated level fills within the horizon |
+| `time_to_fill` | regression | How long it waits. **Censored by construction** — an order that never fills has no time, and recording it as the horizon biases every estimate toward patience |
+| `adverse_selection` | regression, ranking | How far the mid moves against a fill after it happens |
+
+`build_target` **refuses** every one of them by name, and says to compute it
+where the book is and bring the panel in with `register_external_panel`. It
+does not approximate. A fill probability derived from daily bars would be a
+number with nothing behind it, and it would look exactly like a number with
+something behind it.
+
+What the taxonomy buys is that an externally computed label can say what it
+**is**. Before this, a fill probability had to be registered as
+`forward_return` — a false claim in the manifest, and one that left the
+task/target check unable to tell a probability from a return. Now:
+
+```python
+register_external_panel(
+    path="/data/passive_fills.parquet",
+    target_column="filled",
+    target_type="fill_probability",
+    horizon=1,
+    interval="1s",
+)
+```
+
+trains under a classifier and is **refused** for a regressor — which is the
+refusal that matters, because a regressor fitted on a 0/1 label does not
+error. It fits happily and reports a meaningless R².
+
+### One registry, not five literals
+
+`TARGET_KINDS` in `modeling/specs.py` is the only place that says what a
+label is: which tasks consume it, whether this library can build it, and
+whether it is continuous. Every consumer reads it — the engine's
+compatibility check is *derived* from it rather than restating it, the
+threshold rule reads `continuous` off it, and `build_target` reads
+`buildable`.
+
+That is not tidiness. The task set had been written five times in two
+different widths, and the narrow copies were where `ranking` had been
+forgotten — a model that could be trained and never traded. The target set
+was on the same path with four copies, two of them added the same week.
+A hand-written `Literal` still exists, because one cannot be built from a
+dict at type-check time, and a test pins the two equal.
+
+`build_target`'s final branch is now explicit. It used to end in a bare
+`else` that produced a direction target, so any type added to the Literal
+and forgotten there came back silently **binarized** — a continuous label
+arriving as 1.0/0.0 with nothing raising.
+
 
 ## Preprocessing: pooled vs cross-sectional
 

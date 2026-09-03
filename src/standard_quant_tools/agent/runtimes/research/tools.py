@@ -1857,7 +1857,7 @@ def detect_regimes(input_data: RegimeDetectionInput) -> RegimeDetectionResult:
     series = _price_series(
         input_data.symbol, input_data.start_date, input_data.end_date, "returns"
     )
-    result = _regimes(series, n_regimes=input_data.n_regimes, seed=input_data.seed)
+    result = _regimes(series, n_regimes=input_data.n_regimes)
     return RegimeDetectionResult(
         symbol=input_data.symbol,
         n_regimes=result["n_regimes"],

@@ -8,7 +8,7 @@ the ones above it.
 |---|---|---|---|
 | Per-module correctness | `tests/<package>/` | Wrong answers | ~3 min |
 | Whole-surface invariants | `tests/surface/test_invariants.py` | A tool registered halfway | 6 s |
-| Adversarial fuzzing | `tests/surface/test_adversarial_inputs.py` | Unhandled exceptions, NaN in output | ~90 s |
+| Adversarial fuzzing | `tests/surface/test_adversarial_inputs.py` | Unhandled exceptions, NaN in output | ~4.5 min |
 | Metamorphic relations | `tests/surface/test_metamorphic.py` | Consistently-wrong answers | 4 s |
 | Determinism and purity | `tests/surface/test_determinism.py` | Ignored seeds, mutated arguments | ~7 min |
 | Documentation | `tests/docs/` | Stale counts, undocumented tools, dead links | 6 s |
@@ -93,10 +93,35 @@ like a library bug rather than a request the data could not support.
 
 **Inputs are synthesized from the schema**, not hand-written. A hand-written
 fixture list covers the tools that existed when it was written — which makes
-the newest tools, where the bugs are, precisely the ones never fuzzed. 139
-tools get a valid baseline and ten mutation families per numeric argument:
-empty, single-element, all-identical, all-zero, NaN, infinity, 1e300,
-1e-300, negated, truncated.
+the newest tools, where the bugs are, precisely the ones never fuzzed. 202
+of 203 tools get a valid baseline and ten mutation families per numeric
+argument: empty, single-element, all-identical, all-zero, NaN, infinity,
+1e300, 1e-300, negated, truncated.
+
+**The one tool without a baseline is named, and that is the point.** For
+most of this layer's life the collector wrapped synthesis in
+`except Exception: continue`, so a tool the synthesizer could not build left
+the fuzz set silently — the parametrization simply got smaller, which looks
+exactly like a full one. Twenty-five tools were outside every check here:
+`get_order_book_metrics`, all four tools taking a polymorphic data source,
+six modeling tools. The floor guard that was supposed to notice asked for
+100 synthesizable tools out of a surface that had 178, so there were 78
+tools of headroom for the gap to grow in.
+
+`EXPECTED_UNSYNTHESIZABLE` now declares every absence with its reason, and
+two guards hold it in place: an undeclared gap fails, and a declared gap
+that has since been fixed also fails, so the list cannot become a place
+exemptions accumulate. The floor is expressed against the live surface
+rather than a constant, because a fixed number turns into slack the moment
+the surface grows past it.
+
+**Dates are a range, not a point.** Both ends of a synthesized window used
+to resolve to the same day, so every windowed tool in the fuzz set was
+handed a zero-length window and only ever exercised its empty-range path.
+They now span 400 business days — enough for a 252-day lookback — which is
+most of why this layer went from ~90 s to ~4.5 min, and the first run of it
+found `detect_regimes` advertising a `seed` that could not affect its
+output.
 
 ### What this found
 

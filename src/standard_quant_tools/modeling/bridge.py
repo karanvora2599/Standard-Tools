@@ -71,6 +71,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.specs import SCORE_TASKS, TASKS, Task
 
 from . import artifacts as _artifacts
 from .registry.model_registry import load_manifest
@@ -184,7 +185,7 @@ def _assert_continuous_calendar(
 
 def oos_predictions_to_signal_panel(
     oos_predictions_uri: "str | None" = None,
-    task: "Literal['regression', 'classification'] | None" = None,
+    task: "Task | None" = None,
     proba_threshold: float = 0.5,
     deadband: float = 0.0,
     long_only: bool = True,
@@ -285,9 +286,9 @@ def oos_predictions_to_signal_panel(
     # `if task == "regression": ... else: classification`, so task="banana"
     # fell through into classifier semantics and thresholded raw
     # forward-return predictions against a probability cutoff.
-    if task not in ("regression", "classification"):
+    if task not in TASKS:
         raise ValidationError(
-            f"task must be 'regression' or 'classification', got {task!r}. "
+            f"task must be one of {list(TASKS)}, got {task!r}. "
             "(The type annotation is not enforced at runtime; an unrecognized "
             "value previously fell through into classification handling.)"
         )
@@ -318,7 +319,14 @@ def oos_predictions_to_signal_panel(
     dates = predictions_df["date"].dt.strftime("%Y-%m-%d")
     raw = predictions_df["prediction"].to_numpy(dtype=float)
 
-    if task == "regression":
+    if task in SCORE_TASKS:
+        # A RANKER lands here too, and did not used to. Its prediction is a
+        # relative score, the same shape a regressor's magnitude is, so the
+        # sign says which side and the deadband suppresses the noise around
+        # zero identically. Refusing it meant a ranking model -- which
+        # ModelSpec makes first-class, and which the library documents as
+        # the right task for a cross-sectional problem -- could be trained
+        # and then never turned into a position.
         direction = np.sign(raw)
         direction[np.abs(raw) <= deadband] = 0.0
     else:

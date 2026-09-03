@@ -341,7 +341,7 @@ def _stationarity_warnings(verdict, n, ratios) -> List[str]:
 
 
 def detect_regimes(
-    series: pd.Series, *, n_regimes: int = 2, max_iterations: int = 100, seed: int = 0
+    series: pd.Series, *, n_regimes: int = 2, max_iterations: int = 100
 ) -> Dict[str, Any]:
     """
     Label each observation with a volatility regime, by a Gaussian mixture
@@ -364,12 +364,18 @@ def detect_regimes(
     if n_regimes < 2 or n_regimes > 5:
         raise ValidationError("detect_regimes: n_regimes must be between 2 and 5")
 
-    rng = np.random.default_rng(seed)
     n = len(values)
     # Initialize on quantiles rather than at random: a random start on
     # financial data converges to the same answer most of the time and to a
     # degenerate one occasionally, and reproducibility matters more here
     # than the small chance of a better optimum.
+    #
+    # THERE IS THEREFORE NO SEED, and there used to be one. It built an
+    # `np.random.default_rng` that the line below has always made pointless,
+    # and the tool advertised it as a parameter -- so an agent varying it to
+    # explore alternative fits got the identical answer every time. Six
+    # seeds returned one result on well-separated regimes, on barely
+    # separated ones, and on noise with no regime structure at all.
     quantiles = np.quantile(values, np.linspace(0.1, 0.9, n_regimes))
     means = quantiles.copy()
     variances = np.full(n_regimes, float(values.var(ddof=1)))

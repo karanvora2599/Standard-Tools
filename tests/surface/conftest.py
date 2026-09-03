@@ -12,7 +12,7 @@ That makes the suite's runtime a function of how much the developer has
 run it before. Measured here after a day of repeated runs: a 375 MB audit
 directory, 355 MB of it written that same day, and three tools costing
 15.4s, 7.8s and 7.2s for ONE call each. Against a fresh directory the same
-three are milliseconds. `25_testing.md` records this layer at ~90 seconds,
+three are milliseconds. `25_testing.md` records this layer at ~4.5 minutes,
 which is what it costs on a clean machine and nowhere near what it had
 grown to.
 

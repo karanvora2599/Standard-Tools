@@ -54,6 +54,17 @@ class DataFactory:
             return BloombergProvider(host=host, port=port)
         elif source == "polygon":
             return PolygonProvider(api_key=api_key)
+        elif source == "databento":
+            # The only provider here that serves DEPTH. Its credential comes
+            # from DATABENTO_API_KEY rather than `api_key`, for the reason
+            # its module docstring gives: a key passed through a spec would
+            # be persisted, hashed into a model's lineage, and written into
+            # decision records.
+            from standard_quant_tools.data.databento_provider import (
+                DatabentoProvider,
+            )
+
+            return DatabentoProvider(api_key=api_key)
         elif source == "alpaca":
             raise NotImplementedError("Alpaca provider is not yet implemented.")
         else:

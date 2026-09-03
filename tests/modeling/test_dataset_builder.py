@@ -407,3 +407,87 @@ class TestTheTemporalContractIsCarriedAsABundle:
             builder.validate_bundle = original
 
         assert seen.get("require_pit") is False
+
+
+class TestSeveralHorizonsFromOneBuild:
+    """
+    `horizons` computes the features ONCE and labels them at several
+    distances. The alternative -- one dataset per horizon -- recomputes the
+    same feature matrix N times and, worse, aligns each separately, so the
+    resulting models are no longer comparable.
+    """
+
+    def test_a_single_horizon_panel_is_unchanged(self, patched_multi_factory):
+        """
+        Purely additive. Every spec written before `horizons` existed has
+        one horizon, and emitting a duplicate `target__h5` beside `target`
+        for those would change the shape of every dataset in existence to
+        no purpose.
+        """
+        built = build_dataset(_spec())
+        extra = [c for c in built["panel"].columns if c.startswith("target__")]
+        assert extra == []
+        assert built["targets"] == []
+
+    def test_every_horizon_becomes_a_column(self, patched_multi_factory):
+        built = build_dataset(_spec(target=TargetSpec(horizons=[1, 5, 20])))
+        panel = built["panel"]
+        for name in ("h1", "h5", "h20"):
+            assert f"target__{name}" in panel.columns
+            assert f"label_end_date__{name}" in panel.columns
+        assert [t["name"] for t in built["targets"]] == ["h1", "h5", "h20"]
+
+    def test_the_primary_is_the_shortest_and_is_the_plain_target(
+        self, patched_multi_factory
+    ):
+        built = build_dataset(_spec(target=TargetSpec(horizons=[20, 1, 5])))
+        assert built["target_id"] == "forward_return:1"
+        panel = built["panel"]
+        assert panel["target"].equals(panel["target__h1"])
+
+    def test_each_column_is_that_horizons_forward_return(self, patched_multi_factory):
+        """
+        The columns must differ, and differ CORRECTLY. A loop that rebuilt
+        the same horizon three times would produce three identical columns
+        and every test above would still pass.
+        """
+        built = build_dataset(_spec(target=TargetSpec(horizons=[1, 5])))
+        panel = built["panel"]
+        assert not panel["target__h1"].equals(panel["target__h5"])
+        # A 5-bar forward return is wider than a 1-bar one on the same bars.
+        assert panel["target__h5"].std() > panel["target__h1"].std()
+
+    def test_a_longer_horizon_keeps_its_own_unclosed_rows(self, patched_multi_factory):
+        """
+        Alignment drops on the PRIMARY label only. The 20-bar label has no
+        value on the last 20 bars per entity, and those rows survive as
+        NaN rather than costing the 1-bar model its data.
+        """
+        built = build_dataset(_spec(target=TargetSpec(horizons=[1, 20])))
+        panel = built["panel"]
+        assert panel["target__h1"].notna().all()
+        assert panel["target__h20"].isna().any()
+
+    def test_the_label_end_dates_differ_by_horizon(self, patched_multi_factory):
+        built = build_dataset(_spec(target=TargetSpec(horizons=[1, 20])))
+        panel = built["panel"].dropna(
+            subset=["label_end_date__h1", "label_end_date__h20"]
+        )
+        assert (panel["label_end_date__h20"] > panel["label_end_date__h1"]).all(), (
+            "a 20-bar label must finish observing after a 1-bar one, or the "
+            "walk-forward purge is computed against the wrong window"
+        )
+
+    def test_the_spec_round_trips(self, patched_multi_factory):
+        """`dataset_spec_hash` rebuilds a spec from its own dump to re-derive
+        the hash, so a spec that cannot survive that is unusable."""
+        from standard_quant_tools.modeling.dataset.builder import dataset_spec_hash
+
+        spec = _spec(target=TargetSpec(horizons=[1, 5, 20]))
+        rebuilt = DatasetSpec(**spec.model_dump())
+        assert dataset_spec_hash(rebuilt) == dataset_spec_hash(spec)
+        assert rebuilt.target.horizons == [1, 5, 20]
+
+    def test_too_many_horizons_is_refused(self):
+        with pytest.raises(Exception):
+            TargetSpec(horizons=list(range(1, 20)))

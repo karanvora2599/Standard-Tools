@@ -6,7 +6,7 @@
 > `sqt://` reference that every other runtime reads instead of refetching,
 > is [26_data.md](26_data.md).
 
-The data layer wraps yfinance (and, optionally, a Bloomberg Terminal via Desktop API, or Polygon.io's REST API) with caching, retry logic, and Pydantic-validated outputs. All providers implement the same `DataProvider` ABC so swapping sources requires zero changes to downstream code.
+The data layer wraps yfinance (and, optionally, a Bloomberg Terminal via Desktop API, Polygon.io's REST API, or Databento Historical — the only one that serves L2 depth) with caching, retry logic, and Pydantic-validated outputs. All providers implement the same `DataProvider` ABC so swapping sources requires zero changes to downstream code.
 
 ---
 
@@ -540,10 +540,20 @@ produces millions of trades a day, so following `next_url` automatically
 would turn one call into an unbounded download. `limit` caps the page
 (50,000 is Polygon's own maximum); narrow the time range for more.
 
-**No depth.** `get_quotes` is top of book. No shipped provider offers an
-order book, so nothing in this library sees resting size below the touch —
-which is why `get_liquidity_metrics` estimates spread with Corwin-Schultz
-and Amihud and says plainly that they are proxies.
+**Depth, from exactly one provider.** `get_quotes` is top of book
+everywhere. `get_order_book` is a different call, and `DatabentoProvider` is
+its only implementation — the others refuse by name rather than returning
+top-of-book twice and calling it depth, which would produce a one-level book
+whose imbalance is zero by construction.
+
+That is why `get_liquidity_metrics` still estimates spread with
+Corwin-Schultz and Amihud and still says plainly that they are proxies:
+those exist for the case where depth is absent, which is every provider but
+one and every symbol outside a Databento subscription.
+
+**Queue position is in neither.** It needs an order-level feed (MBO), not
+aggregated size at a level, and inferring it from depth would be a guess
+wearing a measurement's clothes.
 
 ---
 

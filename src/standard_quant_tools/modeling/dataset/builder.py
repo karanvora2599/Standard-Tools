@@ -41,6 +41,7 @@ from ..features.params import resolve_params
 from ..features.registry import get_feature
 from ..specs import DatasetSpec
 from .alignment import build_returns_panel, stack_features_only, stack_long
+from .lags import expand_lags, expanded_feature_ids, lags_by_output_name
 from .coverage import (
     alignment_warnings,
     entity_coverage_warnings,
@@ -382,7 +383,18 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     per_entity_features: Dict[str, pd.DataFrame] = {}
     target_by_entity: Dict[str, pd.Series] = {}
     label_end_by_entity: Dict[str, pd.Series] = {}
+    # {horizon name: {entity: Series}} -- every requested horizon, off the
+    # same features. Empty for a single-horizon spec, which is every spec
+    # written before `horizons` existed.
+    extra_targets: Dict[str, Dict[str, pd.Series]] = {}
+    extra_label_ends: Dict[str, Dict[str, pd.Series]] = {}
     feature_names = [fs.output_name for fs in spec.features]
+    # {column: its lags} for the per-entity expansion below, and the
+    # full expanded column list, generated in ONE place so the panel's
+    # column order, X's column order and the importance vector's order
+    # cannot drift apart.
+    lags_requested = lags_by_output_name(spec.features)
+    expanded_names = expanded_feature_ids(spec.features)
     # Every feature function re-validates the OHLCV columns it is handed,
     # which is correct at a public boundary and pure repeat work here: this
     # loop passes the SAME ohlcv["Close"] to each of N features for each of
@@ -423,7 +435,14 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                     )
                 else:
                     columns[fs.output_name] = universe_outputs[fs.output_name][symbol]
-            per_entity_features[symbol] = pd.DataFrame(columns)
+            # Lags are added HERE -- on one entity's own frame, on its
+            # own bar index -- so a shift can only reach that entity's
+            # earlier rows. After stack_long it would cross the entity
+            # boundary and hand one symbol another's history, which
+            # produces a plausible panel and no visible symptom.
+            per_entity_features[symbol] = expand_lags(
+                pd.DataFrame(columns), lags_requested
+            )
             if include_target:
                 target_by_entity[symbol] = build_target(ohlcv["Close"], spec.target)
                 # Recorded per row, per entity, from that entity's OWN bar
@@ -432,10 +451,36 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                 label_end_by_entity[symbol] = build_label_end_dates(
                     ohlcv["Close"], spec.target
                 )
+                # One label per requested horizon, off the SAME features
+                # -- but ONLY when more than one was asked for. A
+                # single-horizon spec is every spec written before
+                # `horizons` existed, and emitting `target__h5` beside
+                # `target` for those would duplicate a column and change the
+                # panel shape of every dataset in existence to no purpose.
+                # `spec.target` is cloned rather than mutated so each build
+                # reads a genuine TargetSpec -- every target builder takes
+                # one and reads `horizon` off it.
+                for horizon, name in zip(
+                    spec.target.horizons if len(spec.target.horizons or []) > 1 else [],
+                    spec.target.horizon_names,
+                ):
+                    at_horizon = spec.target.model_copy(
+                        update={"horizon": horizon, "horizons": [horizon]}
+                    )
+                    extra_targets.setdefault(name, {})[symbol] = build_target(
+                        ohlcv["Close"], at_horizon
+                    )
+                    extra_label_ends.setdefault(name, {})[symbol] = (
+                        build_label_end_dates(ohlcv["Close"], at_horizon)
+                    )
 
     if include_target:
         long_panel, drop_attribution = stack_long(
-            per_entity_features, target_by_entity, label_end_by_entity
+            per_entity_features,
+            target_by_entity,
+            label_end_by_entity,
+            extra_targets,
+            extra_label_ends,
         )
         # A rank within the date, and a return measured against the
         # universe average, are defined against the OTHER entities present
@@ -526,7 +571,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         # Panel column names (alias where given, id otherwise) -- these are
         # what the model is actually trained on and what the manifest must
         # record, not the underlying registry ids.
-        "feature_ids": [fs.output_name for fs in spec.features],
+        "feature_ids": expanded_names,
         "data_hash": data_hash,
         "spec_hash": dataset_spec_hash(spec),
         # What the frames in this dataset can and cannot support, as one
@@ -535,5 +580,26 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     }
     result["target_id"] = (
         f"{spec.target.type}:{spec.target.horizon}" if include_target else None
+    )
+    # The same shape register_external_panel records, so `_select_target`
+    # does not need to know whether the panel was built here or handed in.
+    # Empty for a single-horizon spec: there is one label, it is `target`,
+    # and there is nothing to select between. Reporting a one-entry list
+    # would advertise a choice that does not exist.
+    result["targets"] = (
+        [
+            {
+                "name": name,
+                "column": f"target__{name}",
+                "horizon": horizon,
+                "target_type": spec.target.type,
+                "label_end_column": f"label_end_date__{name}",
+            }
+            for horizon, name in zip(
+                spec.target.horizons or [], spec.target.horizon_names
+            )
+        ]
+        if include_target and len(spec.target.horizons or []) > 1
+        else []
     )
     return result

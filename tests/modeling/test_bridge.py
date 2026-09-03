@@ -428,3 +428,132 @@ class TestRuntimeArgumentValidation:
         uri = self._preds()
         panel = oos_predictions_to_signal_panel(uri, task="regression", deadband=0.0)
         assert panel == {"AAA": {"2024-01-01": 1.0}, "BBB": {"2024-01-01": -1.0}}
+
+
+class TestRankingIsNotSecondClass:
+    """
+    `ModelSpec` has made ranking a first-class task since it was added, and
+    the docs call it the right task for a cross-sectional problem. Both
+    consumers that turn predictions into positions refused it, so a ranker
+    could be trained and never traded.
+    """
+
+    def test_the_task_literals_agree_across_the_package_boundary(self) -> None:
+        """
+        `agent/models.py` spells the task set out rather than importing it,
+        because the analysis models deliberately do not import modeling.
+        This is what stops the two drifting -- which is exactly how
+        'ranking' went missing from one of them.
+        """
+        import typing
+
+        from standard_quant_tools.agent.models import ConvertReferenceInput
+        from standard_quant_tools.modeling.specs import TASKS
+
+        annotation = ConvertReferenceInput.model_fields["task"].annotation
+        spelled = set()
+        for arg in typing.get_args(annotation):
+            spelled.update(a for a in typing.get_args(arg) if isinstance(a, str))
+        assert spelled == set(TASKS), (
+            f"agent/models.py spells {sorted(spelled)} and modeling.specs "
+            f"declares {sorted(TASKS)}; a task in one and not the other "
+            "means a model that can be fitted and not traded"
+        )
+
+    def test_a_ranking_score_becomes_a_direction(self, tmp_path) -> None:
+        """A ranker emits a relative score, so its sign says which side --
+        the same reading a regressor's magnitude gets."""
+        import os
+        import pathlib
+
+        import pandas as pd
+
+        from standard_quant_tools.modeling.bridge import (
+            oos_predictions_to_signal_panel,
+        )
+
+        frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02"] * 3 + ["2024-01-03"] * 3),
+                "entity": ["AAA", "BBB", "CCC"] * 2,
+                "prediction": [0.4, -0.3, 0.0, -0.5, 0.2, 0.1],
+            }
+        )
+        runs = pathlib.Path(os.environ["SQT_RUNS_DIR"])
+        runs.mkdir(parents=True, exist_ok=True)
+        path = runs / "oos_ranking.parquet"
+        frame.to_parquet(path)
+        panel = oos_predictions_to_signal_panel(
+            oos_predictions_uri=str(path), task="ranking", long_only=False
+        )
+        assert panel["AAA"]["2024-01-02"] == 1.0
+        assert panel["BBB"]["2024-01-02"] == -1.0
+        assert panel["CCC"]["2024-01-02"] == 0.0
+
+    def test_ranking_and_regression_read_a_score_identically(self, tmp_path) -> None:
+        import os
+        import pathlib
+
+        import pandas as pd
+
+        from standard_quant_tools.modeling.bridge import (
+            oos_predictions_to_signal_panel,
+        )
+
+        frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02"] * 3),
+                "entity": ["AAA", "BBB", "CCC"],
+                "prediction": [0.4, -0.3, 0.05],
+            }
+        )
+        runs = pathlib.Path(os.environ["SQT_RUNS_DIR"])
+        runs.mkdir(parents=True, exist_ok=True)
+        path = runs / "oos_same.parquet"
+        frame.to_parquet(path)
+        as_ranking = oos_predictions_to_signal_panel(
+            oos_predictions_uri=str(path), task="ranking", long_only=False
+        )
+        as_regression = oos_predictions_to_signal_panel(
+            oos_predictions_uri=str(path), task="regression", long_only=False
+        )
+        assert as_ranking == as_regression
+
+    def test_a_ranking_score_panel_is_not_recentered(self) -> None:
+        """Only a probability gets the 0.5 shift. A ranker's score is
+        already centred on the cross-section."""
+        import pandas as pd
+
+        from standard_quant_tools.modeling.portfolio_eval import (
+            predictions_to_score_panel,
+        )
+
+        frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+                "entity": ["AAA", "BBB"],
+                "prediction": [0.4, -0.3],
+            }
+        )
+        ranked = predictions_to_score_panel(frame, task="ranking")
+        regressed = predictions_to_score_panel(frame, task="regression")
+        assert ranked.equals(regressed)
+        assert ranked.loc[pd.Timestamp("2024-01-02"), "AAA"] == 0.4
+
+    def test_an_unknown_task_is_still_refused_by_name(self) -> None:
+        import pandas as pd
+
+        from standard_quant_tools.error import ValidationError
+        from standard_quant_tools.modeling.portfolio_eval import (
+            predictions_to_score_panel,
+        )
+
+        frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02"]),
+                "entity": ["AAA"],
+                "prediction": [0.4],
+            }
+        )
+        with pytest.raises(ValidationError, match="task must be one of"):
+            predictions_to_score_panel(frame, task="banana")

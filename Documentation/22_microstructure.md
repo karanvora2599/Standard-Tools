@@ -1,6 +1,6 @@
 # Microstructure
 
-Sixteen tools for what the market will charge you to trade, in two halves
+Seventeen tools for what the market will charge you to trade, in two halves
 that answer the same question at two data fidelities — plus three that
 publish the intermediate series the summary tools used to discard.
 
@@ -251,6 +251,7 @@ somewhere else — and unsplit, neither is visible.
 | `get_quoted_spread_series` | yes | Spread and imbalance per quote, not averaged |
 | `get_effective_spread_series` | yes | What each trade paid, optionally split |
 | `get_order_book_metrics` | yes | Microprice, imbalance at the touch and cumulatively, and the depth slope -- what a top-of-book quote cannot say |
+| `get_order_event_metrics` | Queue position, order lifetime, cancels per add and event intensity — from an ORDER feed, which a depth snapshot cannot produce |
 | `get_microstructure_metrics` | yes | Quoted and effective spread, realized/impact split, Lee-Ready signed flow |
 | `get_trade_profile` | yes | Volume by trade size and time of day |
 | `detect_liquidity_events` | yes | When a liquidity regime *changed*, by CUSUM |
@@ -266,6 +267,52 @@ somewhere else — and unsplit, neither is visible.
 
 Full argument lists:
 [20_tool_index.md](20_tool_index.md#microstructure--microstructure).
+
+## What a depth book still cannot tell you
+
+Everything above reads a BOOK: snapshots of aggregated size per price level.
+That aggregation is the ceiling. A book showing 5,000 shares at the bid
+cannot say
+
+- whether that is one order or two hundred,
+- which of them arrived first, or
+- whether size that disappeared was **cancelled** or **filled** — and those
+  mean opposite things about who wanted to trade.
+
+`get_order_event_metrics` reads an ORDER feed instead: every add, cancel,
+modify and fill, each with the venue's own `order_id`. `DatabentoProvider`
+serves it through `get_order_events` (market-by-order), and it is a strictly
+deeper feed than `get_order_book`.
+
+| Measure | Why a book cannot produce it |
+| --- | --- |
+| **Queue ahead** | Resting size at an order's own price level when it arrives — the number that decides whether a passive order fills. Depth gives the level total and cannot say how much is in front of you |
+| **Order lifetime** | Time from add to cancel or fill. No snapshot equivalent exists at all |
+| **Cancel-to-add, cancel-to-trade** | A snapshot sees size vanish and cannot tell a cancel from a fill |
+| **Event intensity by action** | A snapshot stream measures the SAMPLING rate when sampled and the update rate when not, and nothing in the frame says which |
+
+### Censoring is counted, not folded in
+
+An order already resting when the window opened has no add in it. Its true
+lifetime is longer than anything the window can see, so it is counted
+separately (`terminated_without_an_add`) and **excluded** from the lifetime
+averages. Folding it in as the time since the window started would drag
+every average downward — worst for exactly the long-resting orders a queue
+study is about. Orders still open at the close are reported as
+`still_resting` for the same reason.
+
+A `CLEAR` wipes the book, so the queue accumulators reset on one rather than
+carrying depth across a boundary where none existed. A `MODIFY` is counted
+but does not adjust queue depth: whether it loses priority depends on the
+venue's own rule, and guessing would be worse than saying so.
+
+### Size
+
+Market-by-order is one record per order event. An active name produces
+millions in a session where mbp-10 produces thousands, so the reference path
+is the normal one — pull it once, write it, and register it as an
+`sqt://order_event_panel` rather than re-fetching a metered feed.
+
 
 ## Related
 

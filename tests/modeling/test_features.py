@@ -398,6 +398,11 @@ class TestFeatureRegistry:
             "statistical.hurst",
             "factors.pca_loading",
             "factors.pca_factor_return",
+            # Correlation-NETWORK, deliberately not eigenvector centrality:
+            # that is the leading eigenvector of the same matrix, which
+            # factors.pca_loading already is.
+            "network.avg_correlation",
+            "network.mst_degree",
         }
         assert expected_ids <= set(FEATURE_REGISTRY.keys())
         assert expected_ids == set(FEATURE_REGISTRY.keys())

@@ -719,7 +719,8 @@ def describe_data_capabilities(
         )
     if quotes:
         notes.append(
-            "Quotes are TOP OF BOOK only. No shipped provider offers depth, "
+            "Quotes are TOP OF BOOK only. Only provider='databento' offers "
+            "depth, through a separate get_order_book call, "
             "so queue position and resting size at a level are out of reach."
         )
 

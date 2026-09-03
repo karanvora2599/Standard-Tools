@@ -129,6 +129,23 @@ def score_model(
     # no change in model_id.
     original_spec_dict = load_dataset_spec(model_id)
 
+    # A panel registered from outside carries no recipe. Every column in it
+    # was computed by something this library has never seen, so the feature
+    # rebuild below has nothing to rebuild FROM -- it would look up ids like
+    # "ofi_100ms" in FEATURE_REGISTRY, find nothing, and fail several frames
+    # deeper with a message about an unknown feature rather than about the
+    # actual situation. Refused here, by name, with the thing to do instead.
+    if original_spec_dict.get("provider") == "external":
+        raise ValidationError(
+            f"model {model_id!r} was trained on an externally registered "
+            "panel, so score_model cannot run: scoring rebuilds features "
+            "from the model's bundled spec, and these features were "
+            "computed outside this library. Register a panel covering the "
+            "scoring window with register_external_panel, predict with the "
+            "estimator directly, and use score_predictions -- which was "
+            "built for predictions this library never produced."
+        )
+
     # ── Feature implementations must still be the trained ones ────────────
     # The manifest recorded each column's implementation hash at
     # registration, but nothing compared it against today's code. So

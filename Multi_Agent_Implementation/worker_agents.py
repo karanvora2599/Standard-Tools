@@ -110,6 +110,7 @@ _MODEL_RESEARCH_TOOLS = [
     "list_modeling_capabilities",
     "list_features",
     "build_model_dataset",
+    "register_external_panel",
     "validate_pit_records",
     "join_point_in_time",
     "analyze_features",
@@ -123,6 +124,8 @@ _MODEL_RESEARCH_TOOLS = [
 ]
 _MODEL_BUILDER_TOOLS = [
     "run_model_experiment",
+    "analyze_model_errors",
+    "build_model_ensemble",
     "inspect_model",
     "score_model",
     "evaluate_model_portfolio",
@@ -790,6 +793,13 @@ build_model_dataset: fetch OHLCV, compute the requested features and
 target, and persist the panel. Returns a dataset_id. THAT ID IS THE
 HANDOFF — report it verbatim, because the Model Builder Agent cannot fit
 anything without it.
+register_external_panel: the same handoff for a feature matrix computed
+somewhere else — a C++ pipeline, a warehouse, another system. Nothing is
+fetched and nothing is computed; the panel is not copied. `horizon` is
+required because the walk-forward purge needs it and it cannot be inferred
+from the file. Declare `targets` instead to register several labels at
+different horizons from ONE file, which the Model Builder Agent then
+selects between with `target`.
 analyze_features: score a BUILT dataset's features before any model is
 fitted — coverage, dispersion, IC and rank IC, autocorrelation, a lead-lag
 IC curve, a redundancy matrix, and a leakage screen. The overview; it

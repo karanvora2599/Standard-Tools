@@ -127,6 +127,80 @@ class BundleVerdictResult(_Result):
     )
 
 
+class ExternalDatasetResult(_Result):
+    """A dataset registered where it lies: what it is, and how big."""
+
+    ref: str = Field(..., description="Resolve this from any runtime.")
+    kind: str = ""
+    path: str = Field("", description="Where the data actually is. Not copied.")
+    file_format: str = ""
+    rows: Optional[int] = Field(
+        None,
+        description=(
+            "Exact. Free for Parquet, which carries it in the footer; a "
+            "full scan for CSV, which does not."
+        ),
+    )
+    columns: List[str] = Field(default_factory=list)
+    dtypes: Dict[str, str] = Field(default_factory=dict)
+    n_files: int = 0
+    size_bytes: int = 0
+    levels: Optional[int] = Field(
+        None,
+        description=(
+            "Complete depth levels, for an order_book_panel. A level needs "
+            "all four of its columns; counting stops at the first gap, "
+            "because a price with no size is not a level."
+        ),
+    )
+    fingerprint: str = Field(
+        "",
+        description=(
+            "Digest of every file's name, size and mtime -- NOT a content "
+            "hash. It catches a re-extract or a truncated copy; it does not "
+            "catch an edit that preserves size and mtime. Hashing the bytes "
+            "would cost the full read this whole path exists to avoid."
+        ),
+    )
+    changed_since_registration: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the file moved or changed since it was registered. An "
+            "external file belongs to the caller and can be re-extracted "
+            "under a live reference, which a copied artifact cannot."
+        ),
+    )
+    preview: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Leading rows, for looking at."
+    )
+
+
+class ExternalValidationResult(_Result):
+    """Whether a registered dataset is safe to model on, and what blocks it."""
+
+    ref: str = ""
+    kind: str = ""
+    usable: bool = False
+    blocking: List[str] = Field(
+        default_factory=list,
+        description="Reasons this dataset would produce wrong numbers.",
+    )
+    rows_scanned: int = 0
+    rows_total: Optional[int] = None
+    coverage: Stat = Field(
+        None, description="Fraction of the dataset the scan actually read."
+    )
+    batches: int = 0
+    truncated: bool = Field(
+        False,
+        description=(
+            "The scan hit scan_limit. Every count is over what was scanned, "
+            "not over the whole dataset."
+        ),
+    )
+    stats: Dict[str, Any] = Field(default_factory=dict)
+
+
 class RatioFieldComparison(BaseModel):
     model_config = ConfigDict(extra="forbid")
     field_name: str
@@ -156,6 +230,8 @@ __all__ = [
     "BundleVerdictResult",
     "DataBundleResult",
     "DatasetMetadataResult",
+    "ExternalDatasetResult",
+    "ExternalValidationResult",
     "FetchResult",
     "FinancialRatiosResult",
     "RatioComparisonResult",

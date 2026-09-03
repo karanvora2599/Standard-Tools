@@ -17,7 +17,7 @@ WHAT IT DOES NOT DO. Nothing here synthesizes ticks from bars. A "trade"
 derived from an OHLCV row is a fiction that every measure below would then
 treat as fact, so a caller without a tick feed gets an error naming the
 missing capability rather than a number. Quotes are TOP OF BOOK, because
-no shipped provider offers depth; queue position and resting size at a
+only provider='databento' offers depth; queue position and resting size at a
 level are out of reach, not approximated.
 
 THE SIGNING PROBLEM. Every spread decomposition needs to know whether a

@@ -245,3 +245,70 @@ class TestPreprocessingLeakageDiscipline:
         # Clipped to train's ~[1,5] range before z-scoring, so nowhere
         # near the raw magnitude of 1000 in z-score units.
         assert transformed_test["x"].abs().max() < 10
+
+
+class TestTheCompatibilityMapCannotSkipItself:
+    """
+    `_check_task_target_compatibility` used to `return` for a task it had
+    no entry for. That is the one check standing between a task and a
+    target it cannot consume -- and it opted out for exactly the task
+    nobody had thought about yet, which is the only task that needs it.
+
+    A regressor fitted on a 0/1 target does not error. It fits happily and
+    reports a meaningless R2, which is why this is worth a test rather than
+    a comment.
+    """
+
+    def test_an_unmapped_task_raises_instead_of_passing(self) -> None:
+        from standard_quant_tools.error import ValidationError
+        from standard_quant_tools.modeling.engine import (
+            _check_task_target_compatibility,
+        )
+
+        with pytest.raises(ValidationError, match="no entry in the task/target"):
+            _check_task_target_compatibility("survival", "forward_return:5")
+
+    def test_the_message_names_where_to_add_it(self) -> None:
+        from standard_quant_tools.error import ValidationError
+        from standard_quant_tools.modeling.engine import (
+            _check_task_target_compatibility,
+        )
+
+        with pytest.raises(ValidationError) as caught:
+            _check_task_target_compatibility("survival", "forward_return:5")
+        assert "_check_task_target_compatibility" in str(caught.value)
+        assert "modeling/engine.py" in str(caught.value)
+
+    def test_every_declared_task_has_an_entry(self) -> None:
+        """The guard above only helps if it fires on a task somebody added.
+        This one fails at the moment TASKS grows past the map."""
+        from standard_quant_tools.modeling.engine import (
+            _check_task_target_compatibility,
+        )
+        from standard_quant_tools.modeling.specs import TASKS
+
+        # No single target suits every task -- a classifier needs a
+        # discrete one -- so each is paired with a target it accepts. What
+        # is being asserted is that the call REACHES the compatibility
+        # decision, rather than the map having no entry for the task.
+        compatible = {
+            "regression": "forward_return:5",
+            "classification": "forward_direction:5",
+            "ranking": "forward_return:5",
+        }
+        missing = [task for task in TASKS if task not in compatible]
+        assert not missing, (
+            f"{missing} declared in TASKS but not paired here; add the "
+            "target it consumes so this guard keeps covering every task"
+        )
+        for task in TASKS:
+            _check_task_target_compatibility(task, compatible[task])
+
+    def test_a_real_mismatch_still_refuses(self) -> None:
+        from standard_quant_tools.error import ValidationError
+        from standard_quant_tools.modeling.engine import (
+            _check_task_target_compatibility,
+        )
+
+        with pytest.raises(ValidationError, match="expects one of"):
+            _check_task_target_compatibility("classification", "forward_return:5")

@@ -70,6 +70,7 @@ from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio,
     sortino_ratio,
 )
+from standard_quant_tools.modeling.specs import TASKS
 
 from . import artifacts as _artifacts
 from .bridge import _assert_continuous_calendar, _validate_predictions_frame
@@ -105,11 +106,16 @@ def predictions_to_score_panel(
     date x entity panel every sizing function expects.
 
     Classification predictions are recentered to `proba - 0.5` rather than
-    left as a raw positive-class probability. Ranking is unaffected (a
-    constant shift is monotone), but it makes `method="sign"` mean the
-    same thing for both tasks: positive score = the model is bullish. A
+    left as a raw positive-class probability. It makes `method="sign"` mean
+    the same thing for every task: positive score = the model is bullish. A
     raw probability is in [0, 1], so its sign is +1 for every name and
     every date — a "long everything" portfolio that looks like a signal.
+
+    A RANKING model's predictions pass through unchanged, like a
+    regressor's, because a ranker emits a relative score and not a
+    probability. This docstring used to say ranking was "unaffected" while
+    the guard below refused it outright, so a ranker could be trained and
+    never evaluated as a portfolio.
 
     Missing (entity, date) pairs stay NaN here rather than being filled
     with 0.0. Zero is a real score — it is the middle of the cross-section
@@ -118,10 +124,8 @@ def predictions_to_score_panel(
     weighting step treats NaN as "not in the cross-section on that date"
     and gives it zero WEIGHT, which is the honest reading.
     """
-    if task not in ("regression", "classification"):
-        raise ValidationError(
-            f"task must be 'regression' or 'classification', got {task!r}."
-        )
+    if task not in TASKS:
+        raise ValidationError(f"task must be one of {list(TASKS)}, got {task!r}.")
     _validate_predictions_frame(predictions_df, source)
     panel = predictions_df.pivot(index="date", columns="entity", values="prediction")
     panel = panel.sort_index()

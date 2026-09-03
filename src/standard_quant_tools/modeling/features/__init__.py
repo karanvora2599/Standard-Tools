@@ -1,11 +1,12 @@
 """Importing this package registers every built-in feature into
 FEATURE_REGISTRY as a side effect — the same registration-on-import
 pattern the individual technical.py/market.py/risk.py/statistical.py/
-factors.py modules rely on."""
+factors.py/network.py modules rely on."""
 
 from . import (  # noqa: F401  (registration side effect)
     factors,
     market,
+    network,
     risk,
     statistical,
     technical,

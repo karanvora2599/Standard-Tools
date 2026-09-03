@@ -118,6 +118,8 @@ def _stack(
     per_entity_features: Dict[str, pd.DataFrame],
     target_by_entity: Optional[Dict[str, pd.Series]] = None,
     label_end_by_entity: Optional[Dict[str, pd.Series]] = None,
+    extra_targets: Optional[Dict[str, Dict[str, pd.Series]]] = None,
+    extra_label_ends: Optional[Dict[str, Dict[str, pd.Series]]] = None,
 ) -> pd.DataFrame:
     """The long frame, before any row is dropped."""
     frames = []
@@ -127,6 +129,10 @@ def _stack(
             frame["target"] = target_by_entity[entity]
         if label_end_by_entity is not None:
             frame[LABEL_END_COL] = label_end_by_entity[entity]
+        for name, by_entity in (extra_targets or {}).items():
+            frame[f"target__{name}"] = by_entity[entity]
+        for name, by_entity in (extra_label_ends or {}).items():
+            frame[f"label_end_date__{name}"] = by_entity[entity]
         frame["entity"] = entity
         frame["date"] = frame.index
         frames.append(frame.reset_index(drop=True))
@@ -137,6 +143,8 @@ def stack_long(
     per_entity_features: Dict[str, pd.DataFrame],
     target_by_entity: Dict[str, pd.Series],
     label_end_by_entity: Dict[str, pd.Series] | None = None,
+    extra_targets: Dict[str, Dict[str, pd.Series]] | None = None,
+    extra_label_ends: Dict[str, Dict[str, pd.Series]] | None = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     per_entity_features: {entity: DataFrame(index=date, columns=feature_ids)}.
@@ -153,16 +161,34 @@ def stack_long(
     of the target's forward horizon). `attribution` says which column cost
     which rows; see attribute_drops.
     """
-    long_panel = _stack(per_entity_features, target_by_entity, label_end_by_entity)
+    long_panel = _stack(
+        per_entity_features,
+        target_by_entity,
+        label_end_by_entity,
+        extra_targets,
+        extra_label_ends,
+    )
     reserved = ("date", "entity", "target", LABEL_END_COL)
-    feature_cols = [c for c in long_panel.columns if c not in reserved]
+    label_cols = [
+        c
+        for c in long_panel.columns
+        if c.startswith("target__") or c.startswith("label_end_date__")
+    ]
+    feature_cols = [
+        c for c in long_panel.columns if c not in reserved and c not in label_cols
+    ]
 
     attribution = attribute_drops(long_panel, feature_cols, target_col="target")
 
+    # Dropped on the PRIMARY label only. A longer horizon has more unclosed
+    # rows at the end of a sample, and dropping on the union would make
+    # every shorter-horizon model pay for the longest one's warm-down. The
+    # experiment drops its own when it selects -- see _select_target.
     long_panel = long_panel.dropna(subset=feature_cols + ["target"])
     ordered = ["date", "entity"] + feature_cols + ["target"]
     if label_end_by_entity is not None:
         ordered.append(LABEL_END_COL)
+    ordered.extend(label_cols)
     panel = long_panel[ordered].sort_values(["date", "entity"]).reset_index(drop=True)
     return panel, attribution
 

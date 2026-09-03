@@ -175,28 +175,30 @@ class DataProvider(ABC):
         """
         L2 depth snapshots: price and resting size at each level, per update.
 
-        NOT IMPLEMENTED BY ANY PROVIDER IN THIS LIBRARY. The refusal is
-        explicit and by name, exactly as `get_trades` refuses, because the
-        alternative -- returning top-of-book twice and calling it depth --
-        would silently produce a book with one level and an imbalance of
-        zero, which reads as a balanced market rather than as missing data.
+        IMPLEMENTED BY `DatabentoProvider` ONLY, from its depth dataset.
+        Every other provider refuses explicitly and by name, exactly as
+        `get_trades` refuses -- because the alternative, returning
+        top-of-book twice and calling it depth, would silently produce a
+        book with one level and an imbalance of zero, which reads as a
+        balanced market rather than as missing data.
 
-        Declared before any implementation on purpose. The analysis that
-        consumes a book (microprice, order-flow imbalance, depth slope) can
-        be written and tested against synthetic books now, so that when a
-        source arrives the correctness-critical part already exists rather
-        than being invented under deadline. That is the same sequencing
-        `point_in_time.py` used for the availability join, and for the same
-        reason.
+        Declared before any implementation on purpose, and the sequencing
+        paid off. The analysis that consumes a book (microprice,
+        order-flow imbalance, depth slope) was written and tested against
+        synthetic books shaped to THIS contract, so when a source finally
+        arrived the correctness-critical part already existed rather than
+        being invented under deadline. `point_in_time.py` used the same
+        sequencing for the availability join.
 
         Columns, when a provider does implement it: `timestamp`, then
         `bid_price_{i}` / `bid_size_{i}` / `ask_price_{i}` / `ask_size_{i}`
         for i in 0..levels-1, level 0 being the touch.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} does not serve L2 order book data. No "
-            "provider in this library does yet. Call "
-            "describe_data_capabilities to see what this provider can "
+            f"{type(self).__name__} does not serve L2 order book data. "
+            "DatabentoProvider does, from its depth dataset -- use "
+            "provider='databento' with DATABENTO_API_KEY set. Call "
+            "describe_data_capabilities to see what THIS provider can "
             "serve; do not substitute top-of-book quotes, which have one "
             "level and would report every book as perfectly balanced."
         )
@@ -289,6 +291,50 @@ class DataProvider(ABC):
             "recoverable from an OHLCV row."
         )
 
+    #: Canonical column layout for an ORDER feed, the same way
+    #: ORDER_BOOK_COLUMNS does for depth. `order_id` and `action` are what
+    #: make it an order feed: aggregated depth cannot say whether 5,000
+    #: shares is one order or two hundred, nor tell a cancel from a fill,
+    #: and those mean opposite things about who wanted to trade.
+    ORDER_EVENT_COLUMNS = (
+        "timestamp",
+        "order_id",
+        "action",
+        "side",
+        "price",
+        "size",
+    )
+
+    def get_order_events(
+        self,
+        symbol: str,
+        start_date,
+        end_date,
+        limit=None,
+    ):
+        """
+        Order-by-order events: every add, cancel, modify and fill.
+
+        IMPLEMENTED BY `DatabentoProvider` ONLY, from its depth dataset's
+        market-by-order schema. This is a strictly deeper feed than
+        `get_order_book`, and the difference is not depth but IDENTITY: a
+        book snapshot aggregates size per price level, and that aggregation
+        is what makes queue position, order lifetime and a true
+        cancellation rate impossible to recover.
+
+        Columns, when a provider implements it: `timestamp`, `order_id`,
+        `action` (A add, C cancel, M modify, F fill, T trade, R clear),
+        `side` (B/A), `price`, `size`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not serve order-by-order data. "
+            "DatabentoProvider does, through its market-by-order schema -- "
+            "use provider='databento' with DATABENTO_API_KEY set. Depth "
+            "snapshots are not a substitute: aggregated size per level "
+            "cannot say how much of it is ahead of your order, nor "
+            "distinguish a cancel from a fill."
+        )
+
     def get_quotes(
         self,
         symbol: str,
@@ -302,10 +348,11 @@ class DataProvider(ABC):
         Returns a DataFrame indexed by timestamp with at least `bid_price`,
         `bid_size`, `ask_price` and `ask_size`.
 
-        This is TOP OF BOOK only. No shipped provider offers depth, so
-        nothing in this library sees the order book, and anything needing
-        queue position or resting size at a level is out of reach rather
-        than approximated.
+        This is TOP OF BOOK only, whichever provider serves it. Depth is
+        a different call -- `get_order_book`, which DatabentoProvider
+        implements. Queue position and per-order resting size are in
+        NEITHER: they need an order-level feed, and inferring them from
+        aggregated depth would be a guess wearing a measurement's clothes.
 
         Raises:
             NotImplementedError: this provider has no quote feed.

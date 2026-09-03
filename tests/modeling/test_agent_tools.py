@@ -137,6 +137,21 @@ class TestModelingDispatch:
         tools = get_modeling_tools()
         assert {t["function"]["name"] for t in tools} == {
             "explain_dataset_row_loss",
+            # A DECISION, not plumbing: whether to model on a matrix
+            # computed outside this library, and what its label means.
+            # build_model_dataset cannot express it -- there is nothing
+            # to fetch and nothing to compute -- and the horizon it
+            # requires is not inferable from the file.
+            "register_external_panel",
+            # A decision, not plumbing: whether several models are better
+            # together, and on what scale they are combined -- a level
+            # average of models on different scales is dominated by
+            # whichever has the wider spread.
+            "build_model_ensemble",
+            # Not whether the model is good -- WHERE it is wrong. An
+            # aggregate score cannot separate a broadly mediocre model
+            # from one that is excellent except where you trade.
+            "analyze_model_errors",
             "list_features",
             "list_modeling_capabilities",
             "build_model_dataset",

@@ -1,5 +1,7 @@
 from .dispatch import modeling_dispatch
 from .models import (
+    BuildEnsembleInput,
+    BuildEnsembleResult,
     BuildModelDatasetInput,
     BuildModelDatasetResult,
     EvaluateModelPortfolioInput,
@@ -9,6 +11,8 @@ from .models import (
     InspectModelResult,
     ListFeaturesInput,
     ListFeaturesResult,
+    RegisterExternalPanelInput,
+    RegisterExternalPanelResult,
     RunModelExperimentInput,
     RunModelExperimentResult,
     ScoreModelInput,
@@ -17,16 +21,20 @@ from .models import (
 from .tools import (
     MODELING_TOOL_DISPATCH,
     build_model_dataset,
+    build_model_ensemble,
     evaluate_model_portfolio,
     get_modeling_tools,
     inspect_model,
     list_features,
+    register_external_panel,
     run_model_experiment,
     score_model,
 )
 
 __all__ = [
     "MODELING_TOOL_DISPATCH",
+    "BuildEnsembleInput",
+    "BuildEnsembleResult",
     "BuildModelDatasetInput",
     "BuildModelDatasetResult",
     "EvaluateModelPortfolioInput",
@@ -36,16 +44,20 @@ __all__ = [
     "InspectModelResult",
     "ListFeaturesInput",
     "ListFeaturesResult",
+    "RegisterExternalPanelInput",
+    "RegisterExternalPanelResult",
     "RunModelExperimentInput",
     "RunModelExperimentResult",
     "ScoreModelInput",
     "ScoreModelResult",
     "build_model_dataset",
+    "build_model_ensemble",
     "evaluate_model_portfolio",
     "get_modeling_tools",
     "inspect_model",
     "list_features",
     "modeling_dispatch",
+    "register_external_panel",
     "run_model_experiment",
     "score_model",
 ]

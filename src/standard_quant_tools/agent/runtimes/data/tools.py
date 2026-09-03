@@ -20,14 +20,18 @@ WHAT IT IS NOT. It is not a second home for data QUALITY checks --
 `get_data_quality_report` in `research` already reports missing bars, stale
 prices and price jumps, and a second name for those would be exactly the
 confusable duplication the runtime split exists to avoid. It also does not
-fetch order books: `DataProvider.get_order_book` is a declared contract that
-no shipped provider implements, and a tool that always refuses is worse than
-no tool.
+fetch order books, though one provider now serves them:
+`DatabentoProvider.get_order_book` is the only implementation, and a fetch
+tool here would have to answer for every provider. Depth comes in through
+`register_external_dataset`, which takes a book from wherever it was
+captured -- a Databento pull the caller made themselves included.
 """
 
 from __future__ import annotations
 
+import datetime
 import logging
+import math
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -35,6 +39,8 @@ import pandas as pd
 from standard_quant_tools.data.bundle import DataBundle, validate_bundle
 from standard_quant_tools.data.comparison import compare_ratio_sources
 from standard_quant_tools.data.continuous import build_continuous_futures
+from standard_quant_tools.data.external import book_levels
+from standard_quant_tools.data.external_validation import validate_external
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.data.ratios import implausible_value_warnings
 from standard_quant_tools.data.temporal import contract_for_frame
@@ -44,13 +50,15 @@ from standard_quant_tools.portfolio.portfolio import (
     fetch_returns_sync,
 )
 
-from ..handoff import publish, resolve
+from ..handoff import describe as _handoff_describe
+from ..handoff import publish, publish_external, resolve
 from .models import (
     BuildDataBundleInput,
     CompareRatioFramesInput,
     ContinuousFuturesInput,
     DataBundleRefInput,
     DatasetMetadataInput,
+    ExternalDatasetRefInput,
     FetchFinancialRatiosInput,
     FetchOhlcvInput,
     FetchOhlcvPanelInput,
@@ -58,7 +66,9 @@ from .models import (
     FetchReturnsPanelInput,
     FetchTickTapeInput,
     InferTemporalContractInput,
+    RegisterExternalDatasetInput,
     ValidateDataBundleInput,
+    ValidateExternalDatasetInput,
     ValidateFinancialRatiosInput,
 )
 from .results import (
@@ -67,6 +77,8 @@ from .results import (
     ContinuousFuturesResult,
     DataBundleResult,
     DatasetMetadataResult,
+    ExternalDatasetResult,
+    ExternalValidationResult,
     FetchResult,
     FinancialRatiosResult,
     RatioComparisonResult,
@@ -319,8 +331,9 @@ def fetch_quote_panel(input_data: FetchQuotePanelInput) -> FetchResult:
         "fetch_quote_panel",
     )
     warnings = [
-        "Top of book only. No shipped provider exposes depth, so queue "
-        "position and resting size at a level are not recoverable from this."
+        "Top of book only. Depth is a different call -- "
+        "provider='databento' serves it through get_order_book -- and queue "
+        "position is in neither, because it needs an order-level feed."
     ]
     if input_data.limit is not None and len(frame) >= input_data.limit:
         warnings.append(
@@ -649,4 +662,182 @@ def build_continuous_futures_series(
         start=built["start"],
         end=built["end"],
         warnings=built["warnings"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# External datasets: data the caller already has, addressed where it lies.
+#
+# These three are the only tools in this runtime that do not fetch. That is
+# the point of them -- the fetch path materializes a whole frame and then
+# copies it a second time into the runs directory, which is exactly what a
+# day of L2 depth cannot survive. Registration stores a pointer and a schema
+# and reads nothing else.
+# ---------------------------------------------------------------------------
+
+
+def _json_safe(value: Any) -> Any:
+    """One preview cell, in a form `json.dumps(allow_nan=False)` accepts."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (pd.Timestamp, datetime.datetime, datetime.date)):
+        return str(value)
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _json_safe(item())
+        except (TypeError, ValueError):  # pragma: no cover - exotic dtypes
+            pass
+    return str(value)
+
+
+def _preview(handle: Any, rows: int) -> List[Dict[str, Any]]:
+    if rows <= 0:
+        return []
+    frame = handle.head(rows)
+    return [
+        {str(k): _json_safe(v) for k, v in record.items()}
+        for record in frame.to_dict(orient="records")
+    ]
+
+
+def _external_result(
+    ref: str,
+    handle: Any,
+    *,
+    preview_rows: int = 0,
+    changed: Optional[bool] = None,
+    warnings: Optional[List[str]] = None,
+) -> ExternalDatasetResult:
+    notes = list(warnings or [])
+    levels: Optional[int] = None
+    if handle.kind == "order_book_panel":
+        levels = book_levels(handle.columns)
+        if levels == 1:
+            notes.append(
+                "WARNING: one complete depth level, so this is top of book "
+                "however it was labelled. depth_slope is null on a one-level "
+                "book and cumulative imbalance collapses to touch imbalance."
+            )
+    if handle.rows is not None and handle.rows == 0:
+        notes.append("WARNING: the dataset has a valid schema and no rows.")
+    if changed:
+        notes.append(
+            "WARNING: this file has moved or changed since it was "
+            "registered. Nothing was copied, so the reference resolves to "
+            "whatever is at the path NOW -- which is not necessarily what "
+            "was validated under it."
+        )
+    return ExternalDatasetResult(
+        ref=ref,
+        kind=handle.kind,
+        path=str(handle.path),
+        file_format=handle.fmt,
+        rows=handle.rows,
+        columns=[str(c) for c in handle.columns],
+        dtypes=dict(handle.dtypes),
+        n_files=int(handle.n_files),
+        size_bytes=int(handle.size_bytes),
+        levels=levels,
+        fingerprint=handle.fingerprint,
+        changed_since_registration=changed,
+        preview=_preview(handle, preview_rows),
+        warnings=notes,
+    )
+
+
+def register_external_dataset(
+    input_data: RegisterExternalDatasetInput,
+) -> ExternalDatasetResult:
+    """Make data on the caller's own disk resolvable, without copying it."""
+    ref, handle = publish_external(
+        input_data.path,
+        kind=input_data.kind,
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer=f"register_external_dataset:{input_data.source}",
+        fmt=input_data.file_format,
+    )
+    warnings = [
+        "REGISTERED, NOT COPIED. The schema was checked; the rows were not. "
+        "Run validate_external_dataset before modeling on this -- a book "
+        "with its bid and ask columns the wrong way round has a perfectly "
+        "valid schema."
+    ]
+    if handle.fmt == "csv" and handle.rows is not None:
+        warnings.append(
+            "NOTE: CSV carries no row count, so counting them was a full "
+            "scan. Parquet answers the same question from its footer, and "
+            "is worth converting to for anything read more than once."
+        )
+    return _external_result(ref, handle, warnings=warnings)
+
+
+def describe_external_dataset(
+    input_data: ExternalDatasetRefInput,
+) -> ExternalDatasetResult:
+    """What a registered dataset holds, and whether it changed underneath."""
+    described = _handoff_describe(input_data.ref)
+    if described.get("storage") != "external":
+        raise ValidationError(
+            f"{input_data.ref!r} is a published artifact, not an external "
+            "registration, so there is no path or fingerprint to report. "
+            "Use describe_data_bundle for a bundle, or resolve it directly."
+        )
+    handle = resolve(input_data.ref)
+    return _external_result(
+        input_data.ref,
+        handle,
+        preview_rows=input_data.preview_rows,
+        changed=bool(described.get("changed_since_registration")),
+    )
+
+
+def validate_external_dataset(
+    input_data: ValidateExternalDatasetInput,
+) -> ExternalValidationResult:
+    """Scan a registered dataset in batches and report what would break."""
+    described = _handoff_describe(input_data.ref)
+    if described.get("storage") != "external":
+        raise ValidationError(
+            f"{input_data.ref!r} is a published artifact rather than an "
+            "external registration. Anything this library published is "
+            "already in memory-sized form; validate_data_bundle and "
+            "validate_pit_records cover those."
+        )
+    handle = resolve(input_data.ref)
+    report = validate_external(
+        handle,
+        kind=handle.kind,
+        scan_limit=input_data.scan_limit,
+    )
+    warnings = list(report.warnings)
+    if described.get("changed_since_registration"):
+        warnings.insert(
+            0,
+            "WARNING: this file changed since it was registered, so this "
+            "verdict is about the bytes on disk now, not about whatever was "
+            "there when the reference was minted.",
+        )
+    return ExternalValidationResult(
+        ref=input_data.ref,
+        kind=report.kind,
+        usable=bool(report.usable),
+        blocking=list(report.blocking),
+        rows_scanned=int(report.rows_scanned),
+        rows_total=report.rows_total,
+        coverage=report.coverage(),
+        batches=int(report.batches),
+        truncated=bool(report.truncated),
+        stats=dict(report.stats),
+        warnings=warnings,
     )

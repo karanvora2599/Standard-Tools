@@ -30,7 +30,7 @@ from .features.transforms import (
     standardize_cross_sectional,
 )
 from .registry.model_registry import new_model_id, save_model
-from .specs import ModelSpec
+from .specs import TASKS, ModelSpec, targets_for_task
 from .validation.diagnostics import fold_feature_importance, summarize_importance
 from .validation.metrics import (
     aggregate_cross_sectional_ic,
@@ -172,27 +172,27 @@ def _check_task_target_compatibility(task: str, target_id: "str | None") -> None
     if not target_id or ":" not in target_id:
         return
     target_type = target_id.split(":", 1)[0]
-    # Several target types are continuous and several are discrete, so the
-    # check is against the SET a task can consume rather than one name.
-    allowed = {
-        "regression": {
-            "forward_return",
-            "forward_return_vol_scaled",
-            "forward_return_rank",
-            "forward_return_market_neutral",
-        },
-        "classification": {"forward_direction", "triple_barrier"},
-        # A ranker consumes the same continuous targets a regressor does and
-        # grades them itself -- see validation/ranking.py for why the grading
-        # cannot be skipped and why it has to happen per date.
-        "ranking": {
-            "forward_return",
-            "forward_return_vol_scaled",
-            "forward_return_rank",
-            "forward_return_market_neutral",
-        },
-    }.get(task)
-    if allowed is None or target_type in allowed:
+    # DERIVED from the target registry rather than restated here. This map
+    # was three hand-written sets, so every label added anywhere had to be
+    # remembered in this file too -- and a ranker consumes the same
+    # continuous labels a regressor does, which meant two of the three sets
+    # were duplicates of each other kept in sync by hand.
+    allowed = set(targets_for_task(task)) if task in TASKS else None
+    if allowed is None:
+        # NOT a pass. An unrecognized task used to return here, so the one
+        # check standing between a task and an incompatible target skipped
+        # itself for exactly the task nobody had thought about yet -- and a
+        # regressor on a 0/1 target fits happily and reports meaningless
+        # R2. The Literal makes this unreachable today; it is here so that
+        # widening the taxonomy fails LOUDLY at the map that was not
+        # updated rather than quietly at the model that was fitted.
+        raise ValidationError(
+            f"run_model_experiment: task={task!r} has no entry in the "
+            "task/target compatibility map, so nothing can say whether "
+            f"{target_type!r} is a target it can consume. Add the task to "
+            "_check_task_target_compatibility in modeling/engine.py."
+        )
+    if target_type in allowed:
         return
     raise ValidationError(
         f"run_model_experiment: task={task!r} expects one of "

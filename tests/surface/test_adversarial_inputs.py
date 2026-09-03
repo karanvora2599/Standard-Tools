@@ -45,7 +45,9 @@ from typing import Any, Dict, List, Tuple
 import pydantic
 import pytest
 
-#: Roughly 90 seconds: 139 tools x ~40 mutations each. Marked `slow` so
+#: Roughly four and a half minutes: 202 tools x ~40 mutations each, over
+#: real 400-business-day windows rather than the zero-length ones this
+#: layer used to synthesize. Marked `slow` so
 #: `-m "not slow"` skips it while iterating; the default run includes it,
 #: because a fuzzing suite nobody runs by default is a fuzzing suite
 #: nobody runs.
@@ -53,7 +55,7 @@ pytestmark = pytest.mark.slow
 
 from standard_quant_tools.error import QuantError
 
-from .synth import Unsynthesizable, build_arguments, is_finite_json
+from .synth import is_finite_json, synthesize_surface
 
 #: A refusal. Anything outside this set is an unhandled exception.
 CLEAN_REFUSAL = (QuantError, pydantic.ValidationError, ValueError)
@@ -82,19 +84,23 @@ def _every_tool() -> List[Tuple[str, str, type]]:
     ]
 
 
-def _synthesizable() -> List[Tuple[str, str, Dict[str, Any]]]:
-    """Tools whose arguments can be invented, with a valid baseline."""
-    out = []
-    for runtime_name, tool_name, model in _every_tool():
-        try:
-            out.append((runtime_name, tool_name, build_arguments(model)))
-        except (Unsynthesizable, pydantic.ValidationError, Exception):
-            continue
-    return out
-
-
-TOOLS = _synthesizable()
+TOOLS, SKIPPED = synthesize_surface()
 TOOL_IDS = [f"{r}:{t}" for r, t, _ in TOOLS]
+
+#: Tools with no synthesized baseline, and why. DECLARED, because the
+#: alternative was what this file did for its whole life: swallow the
+#: failure and carry on with a smaller parametrization that looks exactly
+#: like a full one.
+#:
+#: An entry here is a real gap, not a pardon.
+#:
+#: EMPTY, and it has been non-empty exactly once. `run_feature_ablation`
+#: sat here because its `spec` field was annotated `typing.Any` -- which
+#: also meant the MCP server advertised no schema for it, so the fuzzer's
+#: inability to invent one was a symptom rather than the problem. Typing it
+#: as the `ModelSpec` the tool already constructs fixed both, and the
+#: stale-exemption guard below is what said so.
+EXPECTED_UNSYNTHESIZABLE: dict[str, str] = {}
 
 
 def _call(runtime_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
@@ -155,15 +161,62 @@ class TestTheBaselineHolds:
     def test_a_synthesized_input_is_handled_cleanly(self, runtime, tool, arguments):
         _assert_clean(runtime, tool, arguments, "a valid synthesized input")
 
+    def test_every_tool_without_a_baseline_is_declared(self):
+        """
+        THE GUARD THAT WAS MISSING, and the reason 25 tools sat outside
+        every check in this file without anyone noticing.
+
+        Collection swallowed `Exception` and continued, so a tool the
+        synthesizer could not build produced a SMALLER parametrization —
+        which is indistinguishable from a full one in the output. The floor
+        that was supposed to catch this asked for 100 synthesizable tools
+        out of a surface that had 178, leaving 78 tools of headroom for the
+        gap to grow in silently.
+
+        Now every absence is named. Adding a tool the synthesizer cannot
+        build fails HERE, at the tool, rather than reducing the coverage of
+        every other test in the file.
+        """
+        undeclared = {
+            name: reason
+            for _runtime, name, reason in SKIPPED
+            if name not in EXPECTED_UNSYNTHESIZABLE
+        }
+        assert not undeclared, (
+            "these tools have no synthesized baseline and are therefore in "
+            "NO adversarial or determinism check, which the suite will not "
+            f"otherwise tell you: {undeclared}. Either teach synth.py the "
+            "shape, or add the tool to EXPECTED_UNSYNTHESIZABLE with the "
+            "reason."
+        )
+
+    def test_no_declared_gap_has_quietly_been_fixed(self):
+        """
+        The other direction. A tool that becomes synthesizable should leave
+        the list, or the list becomes a place where exemptions accumulate
+        and outlive their reason.
+        """
+        live = {name for _runtime, name, _reason in SKIPPED}
+        stale = sorted(set(EXPECTED_UNSYNTHESIZABLE) - live)
+        assert not stale, (
+            f"{stale} can be synthesized now and should be removed from "
+            "EXPECTED_UNSYNTHESIZABLE so the list keeps meaning something"
+        )
+
     def test_the_synthesizer_covers_most_of_the_surface(self):
         """
         A guard on the guard. If a refactor breaks the synthesizer, every
         test in this file silently passes on an empty parametrization —
         which looks exactly like success.
+
+        Expressed against the LIVE surface rather than a constant: 100 was
+        chosen when the library had far fewer tools, and a fixed floor turns
+        into slack the moment the surface grows past it.
         """
-        assert len(TOOLS) >= 100, (
-            f"only {len(TOOLS)} tools could be synthesized; the "
-            "fuzzing surface has collapsed and these tests are now vacuous"
+        total = len(_every_tool())
+        assert len(TOOLS) >= total - len(EXPECTED_UNSYNTHESIZABLE), (
+            f"{len(TOOLS)} of {total} tools synthesized, but only "
+            f"{len(EXPECTED_UNSYNTHESIZABLE)} are declared unsynthesizable"
         )
 
 

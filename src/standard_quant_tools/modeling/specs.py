@@ -8,12 +8,14 @@ tool surface.
 """
 
 import math
-from typing import Dict, List, Literal, Optional
+from dataclasses import dataclass
+from typing import Annotated, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .features.base import RESERVED_PANEL_COLUMNS
+from .limits import MAX_LAG, MAX_LAGS_PER_FEATURE
 
 
 def _parse_date(value: str, field_name: str) -> pd.Timestamp:
@@ -25,6 +27,251 @@ def _parse_date(value: str, field_name: str) -> pd.Timestamp:
         return pd.Timestamp(value)
     except (ValueError, TypeError) as exc:
         raise ValueError(f"{field_name}={value!r} is not a valid date: {exc}") from None
+
+
+@dataclass(frozen=True)
+class TargetKind:
+    """One supervised label: what consumes it, and who can build it."""
+
+    #: The tasks that can be fitted against it. A continuous label suits a
+    #: regressor and a ranker; a discrete one suits a classifier. This is
+    #: read by the engine's compatibility check rather than restated there.
+    tasks: Tuple[str, ...]
+    #: Whether `build_target` can produce it from a Close series. FALSE for
+    #: every microstructure and execution label: none is a function of
+    #: closing prices, and pretending otherwise would silently hand back a
+    #: forward return under another name.
+    buildable: bool
+    #: Continuous labels reject a `threshold`, which only means something
+    #: for a binarized one.
+    continuous: bool
+    description: str
+
+
+#: Every label this library understands, and the ONE place that says so.
+#:
+#: WHY A REGISTRY AND NOT FIVE LITERALS. The task set was written five times
+#: in two widths, and the narrow copies were where `ranking` had been
+#: forgotten -- a model that could be fitted and never traded. The target
+#: set was on the same path: four copies, two of them added in the same
+#: week this was written. A type declared here is a type every consumer
+#: sees, and the Literal below is pinned equal to it by test.
+#:
+#: EXTERNAL-ONLY IS NOT A GAP. A markout, a fill probability or a time to
+#: fill is a function of the order book and of orders, not of closing
+#: prices. `build_target` refuses them by name and says to compute them
+#: where the book is and register the panel -- which is a real answer,
+#: whereas a bar-derived approximation of a fill probability would be a
+#: number with nothing behind it.
+TARGET_KINDS: Dict[str, TargetKind] = {
+    "forward_return": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=True,
+        continuous=True,
+        description="The return from t to t+horizon.",
+    ),
+    "forward_direction": TargetKind(
+        tasks=("classification",),
+        buildable=True,
+        continuous=False,
+        description="That forward return binarized against `threshold`.",
+    ),
+    "forward_return_vol_scaled": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=True,
+        continuous=True,
+        description="Forward return over the entity's own trailing volatility.",
+    ),
+    "forward_return_rank": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=True,
+        continuous=True,
+        description="Its rank within the date's cross-section, in [-0.5, 0.5].",
+    ),
+    "forward_return_market_neutral": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=True,
+        continuous=True,
+        description="Forward return minus that date's equal-weighted mean.",
+    ),
+    "triple_barrier": TargetKind(
+        tasks=("classification",),
+        buildable=True,
+        continuous=False,
+        description="Which barrier is touched first: up, down, or neither.",
+    ),
+    # ── microstructure labels, computed where the book is ─────────────
+    "future_mid_return": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "Return of the MIDPOINT over the horizon. Not the same as a "
+            "trade-price return: the mid moves without a trade and is where "
+            "a passive order is measured from."
+        ),
+    ),
+    "future_microprice_return": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "Return of the size-weighted touch price. Leads the mid when the "
+            "book is lopsided, which is exactly when the mid is least "
+            "informative."
+        ),
+    ),
+    "future_markout": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "Mid move measured FROM a fill, signed by the side taken. The "
+            "standard read on whether a trade was well-placed."
+        ),
+    ),
+    "next_mid_direction": TargetKind(
+        tasks=("classification",),
+        buildable=False,
+        continuous=False,
+        description="Whether the midpoint's next move is up or down.",
+    ),
+    "future_spread": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "The quoted spread at t+horizon. A liquidity forecast rather "
+            "than a price one -- what it will COST to cross, not where the "
+            "price goes."
+        ),
+    ),
+    "future_depth": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "Resting size at t+horizon. What will be THERE to trade against, "
+            "which a spread forecast does not answer -- a tight quote for a "
+            "hundred shares and a tight quote for fifty thousand cost the "
+            "same to cross and are not the same liquidity."
+        ),
+    ),
+    "future_ofi": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "Signed order-flow imbalance over the horizon, from book "
+            "updates. Predicting FLOW rather than price: the quantity that "
+            "moves the price, one step earlier."
+        ),
+    ),
+    "future_volume": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "Traded volume over the horizon. Bar volume can approximate this "
+            "at daily frequency, but not at the horizons this exists for, "
+            "where the question is how much prints in the next thirty "
+            "seconds."
+        ),
+    ),
+    "future_trade_intensity": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "Trades per unit time over the horizon. Distinct from volume: "
+            "one block and two hundred odd lots are the same volume and "
+            "completely different information."
+        ),
+    ),
+    "fill_probability": TargetKind(
+        tasks=("classification",),
+        buildable=False,
+        continuous=False,
+        description=(
+            "Whether a passive order resting at a stated level fills within "
+            "the horizon. Needs queue position and cancellations, so no "
+            "bar-derived series can produce it."
+        ),
+    ),
+    "time_to_fill": TargetKind(
+        tasks=("regression",),
+        buildable=False,
+        continuous=True,
+        description=(
+            "How long that order waits before filling. CENSORED by "
+            "construction -- an order that never fills has no time, and "
+            "recording it as the horizon rather than as unfilled biases "
+            "every estimate toward patience."
+        ),
+    ),
+    "adverse_selection": TargetKind(
+        tasks=("regression", "ranking"),
+        buildable=False,
+        continuous=True,
+        description=(
+            "How much the mid moves against a fill after it happens. The "
+            "cost of being the one who was willing to trade."
+        ),
+    ),
+}
+
+#: The same set as a Literal, so a bad value is refused at the schema
+#: boundary. Written out because a Literal cannot be built from a dict at
+#: type-check time; `test_the_target_literal_matches_the_registry` fails the
+#: moment the two disagree.
+TargetType = Literal[
+    "forward_return",
+    "forward_direction",
+    "forward_return_vol_scaled",
+    "forward_return_rank",
+    "forward_return_market_neutral",
+    "triple_barrier",
+    "future_mid_return",
+    "future_microprice_return",
+    "future_markout",
+    "next_mid_direction",
+    "future_spread",
+    "future_depth",
+    "future_ofi",
+    "future_volume",
+    "future_trade_intensity",
+    "fill_probability",
+    "time_to_fill",
+    "adverse_selection",
+]
+
+#: Labels no Close series can produce.
+EXTERNAL_TARGETS = tuple(
+    name for name, kind in TARGET_KINDS.items() if not kind.buildable
+)
+
+
+def targets_for_task(task: str) -> Tuple[str, ...]:
+    """Every label a given task can be fitted against."""
+    return tuple(name for name, kind in TARGET_KINDS.items() if task in kind.tasks)
+
+
+#: The supervised tasks this library fits, declared ONCE.
+#:
+#: It was written five times, in two widths: three copies said
+#: regression/classification/ranking and two said
+#: regression/classification. The narrow pair was not a different opinion,
+#: it was a place ranking had been forgotten -- which is exactly the drift
+#: a repeated literal produces and the reason this name exists.
+TASKS = ("regression", "classification", "ranking")
+Task = Literal["regression", "classification", "ranking"]
+
+#: Tasks whose prediction is a CONTINUOUS SCORE rather than a probability.
+#: A ranker emits a relative score exactly as a regressor emits a
+#: magnitude, so everything downstream that asks "which side is this" reads
+#: the sign of both the same way. Classification is the odd one out, being
+#: bounded in [0, 1] with a decision boundary in the middle.
+SCORE_TASKS = ("regression", "ranking")
 
 
 class FeatureSpec(BaseModel):
@@ -53,6 +300,35 @@ class FeatureSpec(BaseModel):
             "keyed one column per feature id."
         ),
     )
+
+    lags: List[Annotated[int, Field(ge=1, le=MAX_LAG)]] = Field(
+        default_factory=list,
+        max_length=MAX_LAGS_PER_FEATURE,
+        description=(
+            "Bars of HISTORY of this feature to add as extra columns, e.g. "
+            "[1, 2, 3] adds its value 1, 2 and 3 bars ago as "
+            "`<name>__lag1/2/3`. This is how a sequence reaches the "
+            "estimator: the engine hands every estimator a 2-D matrix with "
+            "no entity identity, so a model that wants yesterday's value "
+            "cannot reconstruct it and the window has to be in the columns. "
+            "Shifted within each entity, so a lag never reaches another "
+            "entity's rows. A NEGATIVE lag is refused rather than clamped: "
+            "it is a shift forward, which puts a future value on today's row "
+            "and survives every leakage check that reasons about the target. "
+            "Costs warm-up -- the deepest lag decides where the panel can "
+            "start -- and columns, which multiply."
+        ),
+    )
+
+    @field_validator("lags", mode="before")
+    @classmethod
+    def _lags_are_backward_and_bounded(cls, v):
+        # Returned sorted and de-duplicated so [2, 1] and [1, 2] build the
+        # SAME panel and hash to the same dataset id -- an ordering
+        # difference must not silently create a second dataset.
+        from .dataset.lags import validate_lags
+
+        return validate_lags(v)
 
     @field_validator("alias")
     @classmethod
@@ -84,14 +360,7 @@ class TargetSpec(BaseModel):
     # `valid: True` while the embargo the caller asked for was 0.
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal[
-        "forward_return",
-        "forward_direction",
-        "forward_return_vol_scaled",
-        "forward_return_rank",
-        "forward_return_market_neutral",
-        "triple_barrier",
-    ] = Field(
+    type: TargetType = Field(
         "forward_return",
         description=(
             "'forward_return' (default) — continuous forward return, for "
@@ -115,9 +384,81 @@ class TargetSpec(BaseModel):
             "downstream signal path reads is P(up)."
         ),
     )
-    horizon: int = Field(
-        ..., gt=0, description="Bars ahead the target return is measured over."
+    horizon: Optional[int] = Field(
+        None, gt=0, description="Bars ahead the target return is measured over."
     )
+    horizons: Optional[List[int]] = Field(
+        None,
+        min_length=1,
+        max_length=12,
+        description=(
+            "Several horizons from ONE build, for when the same features "
+            "answer the same question at more than one distance -- a "
+            "microstructure panel labelled at 1, 5 and 30 bars at once. The "
+            "features are computed once and the panel carries every label as "
+            "`target__h<n>`, which is also what makes the resulting models "
+            "COMPARABLE: each sees the same rows and the same folds. "
+            "run_model_experiment picks one with `target`. Supply this or "
+            "`horizon`, never both."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_way_of_saying_how_far(self) -> "TargetSpec":
+        """
+        Normalize so BOTH are always populated after validation.
+
+        `horizon` is read in six places -- the forward return, the
+        volatility scaling, the barrier walk, the label-end dates, the
+        target id and the engine's purge -- and leaving it None for a
+        multi-horizon spec would mean touching all six. Setting it to the
+        first horizon instead means every one of them keeps working
+        unchanged and reads the PRIMARY, which is exactly what they should
+        read when no target has been selected.
+        """
+        if self.horizon is None and self.horizons is None:
+            raise ValueError(
+                "a target needs `horizon` (one distance) or `horizons` "
+                "(several from one build); got neither, which leaves the "
+                "walk-forward purge with no label window to purge on."
+            )
+        if self.horizon is not None and self.horizons is not None:
+            # BOTH set is the NORMALIZED state, not a contradiction: this
+            # validator populates the other one, and a spec is round-tripped
+            # through `model_dump()` constantly -- `dataset_spec_hash`
+            # rebuilds one to re-derive the hash, and every persisted
+            # dataset_spec.json is read back the same way. Rejecting it
+            # outright made a spec unable to survive its own serialization.
+            #
+            # What is still rejected is the pair DISAGREEING, which is a
+            # caller saying two different things about the same label.
+            first = sorted({int(h) for h in self.horizons})[0]
+            if int(self.horizon) != first:
+                raise ValueError(
+                    f"horizon={self.horizon} and horizons={self.horizons} "
+                    "disagree: the primary horizon is the smallest of "
+                    f"`horizons` ({first}). Supply one or the other, or make "
+                    "them agree."
+                )
+        if self.horizons is None:
+            object.__setattr__(self, "horizons", [int(self.horizon)])
+        else:
+            ordered = sorted({int(h) for h in self.horizons})
+            if len(ordered) != len(self.horizons):
+                raise ValueError(
+                    f"horizons={self.horizons} repeats a value. Each becomes "
+                    "a panel column, and two of one would overwrite rather "
+                    "than add."
+                )
+            object.__setattr__(self, "horizons", ordered)
+            object.__setattr__(self, "horizon", ordered[0])
+        return self
+
+    @property
+    def horizon_names(self) -> List[str]:
+        """The panel name of each horizon; the first is the primary."""
+        return [f"h{h}" for h in (self.horizons or [])]
+
     threshold: float = Field(
         0.0,
         description=(
@@ -147,13 +488,12 @@ class TargetSpec(BaseModel):
 
     @model_validator(mode="after")
     def _threshold_only_for_direction(self) -> "TargetSpec":
-        continuous = {
-            "forward_return",
-            "forward_return_vol_scaled",
-            "forward_return_rank",
-            "forward_return_market_neutral",
-        }
-        if self.type in continuous and self.threshold != 0.0:
+        # Read off the registry rather than restated. The set used to be
+        # inlined here and listed four of the six types that existed then,
+        # so a new continuous label would have silently been allowed a
+        # threshold that means nothing for it.
+        kind = TARGET_KINDS.get(self.type)
+        if kind is not None and kind.continuous and self.threshold != 0.0:
             raise ValueError(
                 "threshold applies to a binarized target ('forward_direction' "
                 f"or 'triple_barrier'); {self.type!r} is a continuous value."
@@ -190,18 +530,25 @@ class DatasetSpec(BaseModel):
         description="Benchmark symbol — only consumed by features that need one "
         "(e.g. risk.rolling_beta).",
     )
-    provider: Literal["yfinance", "polygon", "bloomberg"] = Field(
-        "yfinance",
-        description=(
-            "Data provider for this dataset. Previously hardcoded to the "
-            "DataFactory default, so a model could not be built on anything "
-            "else and its lineage never recorded which source it came from. "
-            "Credentials are deliberately NOT part of this spec — it is "
-            "persisted to disk, hashed into the model's lineage and written "
-            "into decision records, so an api_key field here would leak the "
-            "key into all three. Providers read their own credentials from "
-            "the environment (e.g. SQT_POLYGON_API_KEY)."
-        ),
+    provider: Literal["yfinance", "polygon", "bloomberg", "databento", "external"] = (
+        Field(
+            "yfinance",
+            description=(
+                "Data provider for this dataset. Previously hardcoded to the "
+                "DataFactory default, so a model could not be built on anything "
+                "else and its lineage never recorded which source it came from. "
+                "Credentials are deliberately NOT part of this spec — it is "
+                "persisted to disk, hashed into the model's lineage and written "
+                "into decision records, so an api_key field here would leak the "
+                "key into all three. Providers read their own credentials from "
+                "the environment (e.g. SQT_POLYGON_API_KEY). "
+                "'external' is not a provider at all: it marks a panel whose "
+                "features were computed OUTSIDE this library and registered by "
+                "register_external_panel, so nothing here can rebuild them — "
+                "which is why score_model refuses such a model by name rather "
+                "than recomputing features it does not have the definitions for."
+            ),
+        )
     )
     interval: str = Field(
         "1d",
@@ -579,7 +926,7 @@ class ModelSpec(BaseModel):
     # `valid: True` while the embargo the caller asked for was 0.
     model_config = ConfigDict(extra="forbid")
 
-    task: Literal["regression", "classification", "ranking"]
+    task: Task
     estimator: EstimatorSpec
     validation: ValidationSpec
     preprocessing: PreprocessingSpec = Field(default_factory=PreprocessingSpec)
