@@ -151,7 +151,10 @@ from standard_quant_tools.backtest.sizing import (
     vol_scaled,
     zscore_normalized,
 )
-from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+from standard_quant_tools.backtest.strategies import (
+    RUNNABLE,
+    STRATEGY_REGISTRY,
+)
 from standard_quant_tools.backtest.walk_forward import (
     longest_losing_streak,
     parameter_turnover,
@@ -218,44 +221,60 @@ def _apply_signal_fill_policy(
     return reindexed.fillna(0.0)  # "flat"
 
 
-def run_sma_backtest(input_data: BacktestInput) -> BacktestResult:
-    """SMA crossover backtest: long when fast SMA > slow SMA."""
+def _dispatch_backtest(input_data: BacktestInput, default: str) -> BacktestResult:
+    """Run whichever strategy `strategy_type` names.
+
+    These four tools used to hardcode one strategy each and ignore
+    `strategy_type` -- a **required** field whose enum lists every strategy.
+    Asking `run_sma_backtest` for `buy_and_hold` returned an SMA crossover,
+    which matters most precisely where it is most likely to happen: that is how
+    a baseline gets fetched, so the wrong number becomes the benchmark every
+    active strategy is judged against. `BacktestResult` carries no strategy
+    name, so nothing in the payload contradicted the caller either.
+
+    `default` is the tool's namesake, used only when a caller somehow omits the
+    field. Since it is required by the schema that is close to unreachable, but
+    a tool named for a strategy should not silently run a different one either.
+    """
+    name = getattr(input_data, "strategy_type", None) or default
+    if name == "custom_signal":
+        raise ValidationError(
+            "custom_signal supplies its own signal series and cannot be run from "
+            "this tool. Use run_custom_signal_backtest."
+        )
+    # RUNNABLE, not STRATEGY_REGISTRY: a caller may name the baseline here, and
+    # only here. A *search* over the registry must not be able to select it —
+    # see the note beside BASELINE_REGISTRY.
+    if name not in RUNNABLE:
+        raise ValidationError(
+            f"Unknown strategy '{name}'. Available: {sorted(RUNNABLE)}"
+        )
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )
-    signals = STRATEGY_REGISTRY["sma_crossover"](df, **input_data.parameters)
+    signals = RUNNABLE[name](df, **input_data.parameters)
     return _run_backtest(input_data, df, signals)
+
+
+def run_sma_backtest(input_data: BacktestInput) -> BacktestResult:
+    """Backtest one strategy, named by strategy_type. Defaults to SMA crossover."""
+    return _dispatch_backtest(input_data, "sma_crossover")
 
 
 def run_rsi_backtest(input_data: BacktestInput) -> BacktestResult:
-    """RSI mean-reversion backtest: enter long at oversold, exit at overbought."""
-    provider = DataFactory.get_provider()
-    df = provider.get_ohlcv(
-        input_data.symbol, input_data.start_date, input_data.end_date
-    )
-    signals = STRATEGY_REGISTRY["rsi_mean_reversion"](df, **input_data.parameters)
-    return _run_backtest(input_data, df, signals)
+    """Backtest one strategy, named by strategy_type. Defaults to RSI mean reversion."""
+    return _dispatch_backtest(input_data, "rsi_mean_reversion")
 
 
 def run_macd_backtest(input_data: BacktestInput) -> BacktestResult:
-    """MACD crossover backtest: long when MACD line crosses above signal line."""
-    provider = DataFactory.get_provider()
-    df = provider.get_ohlcv(
-        input_data.symbol, input_data.start_date, input_data.end_date
-    )
-    signals = STRATEGY_REGISTRY["macd_crossover"](df, **input_data.parameters)
-    return _run_backtest(input_data, df, signals)
+    """Backtest one strategy, named by strategy_type. Defaults to MACD crossover."""
+    return _dispatch_backtest(input_data, "macd_crossover")
 
 
 def run_bollinger_backtest(input_data: BacktestInput) -> BacktestResult:
-    """Bollinger Band mean-reversion: enter at lower band, exit at middle band."""
-    provider = DataFactory.get_provider()
-    df = provider.get_ohlcv(
-        input_data.symbol, input_data.start_date, input_data.end_date
-    )
-    signals = STRATEGY_REGISTRY["bollinger_reversion"](df, **input_data.parameters)
-    return _run_backtest(input_data, df, signals)
+    """Backtest one strategy, named by strategy_type. Defaults to Bollinger reversion."""
+    return _dispatch_backtest(input_data, "bollinger_reversion")
 
 
 def run_buy_and_hold(input_data: BuyAndHoldInput) -> BacktestResult:

@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.backtest.strategy_params import resolve_strategy_params
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi
 from standard_quant_tools.indicators.trend import adx, macd, sma
 from standard_quant_tools.indicators.volatility import bollinger_bands
@@ -380,6 +381,33 @@ def _adx_trend_signals(
     return result
 
 
+def _buy_and_hold_signals(df: pd.DataFrame, **params) -> pd.Series:
+    """
+    Long every bar. The baseline every active strategy is measured against.
+
+    It lives in the registry rather than only inside `run_buy_and_hold` so that
+    the grid, the strategy matrix, walk-forward and the optimiser can all use
+    the same baseline -- previously it was reachable through one tool, and a
+    comparison that cannot include the baseline is a comparison against nothing.
+
+    No parameters and no warmup: the signal is 1.0 from the first bar, which is
+    what makes it a *hold*. Any indicator-based strategy is flat during its own
+    lookback, and a baseline that shared that gap would understate the very
+    thing it exists to measure.
+    """
+    if params:
+        # Not silently swallowed. `list_strategies` reports this as a synthetic
+        # label with no parameter contract, so a parameter passed to it is a
+        # caller who believes there is a knob here, and there is not.
+        raise ValidationError(
+            "buy_and_hold takes no parameters; got "
+            f"{sorted(params)}. It is long every bar by definition."
+        )
+    result = pd.Series(1.0, index=df.index)
+    _log_signals("buy_and_hold", result)
+    return result
+
+
 # INTERNAL ONLY -- never call these directly.
 #
 # These are the UNVALIDATED signal functions. STRATEGY_REGISTRY wraps each one
@@ -436,3 +464,28 @@ def _validating(name: str, fn):
 STRATEGY_REGISTRY = {
     name: _validating(name, fn) for name, fn in _RAW_STRATEGIES.items()
 }
+
+# Baselines are NOT strategies, and the distinction is load-bearing.
+#
+# `STRATEGY_REGISTRY` is read by the grid, walk-forward, the optimiser and the
+# regime-adaptive sweep as *the set of strategies a search may choose between*.
+# A baseline is what that search is measured against, so putting it in there
+# lets a selector "choose" to hold — which is not a finding, it is the
+# null hypothesis wearing a strategy's name. It also breaks the contract that
+# every registry name is accepted by `WalkForwardInput.strategy`, and gives a
+# parameter sweep something with no parameters to sweep.
+#
+# It is still wrapped by `_validating`, so passing it a parameter is an error
+# rather than a knob that quietly does nothing.
+BASELINE_REGISTRY = {
+    # Not wrapped by `_validating`: that resolves against STRATEGY_PARAM_SCHEMA,
+    # and a baseline deliberately has no entry there — `list_strategies` reports
+    # it as a synthetic label *because* it has no parameter contract. It
+    # validates its own emptiness instead.
+    "buy_and_hold": _buy_and_hold_signals,
+}
+
+#: Everything a caller may name as a `strategy_type`: the strategies, plus the
+#: baselines. Only the dispatch path should use this — a *search* must see the
+#: strategies alone.
+RUNNABLE = {**STRATEGY_REGISTRY, **BASELINE_REGISTRY}
