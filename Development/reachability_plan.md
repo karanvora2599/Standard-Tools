@@ -12,6 +12,67 @@ directly here, **[A]** agent-reported and read but not re-run.
 
 ---
 
+## Status: executed, and five of its own claims were wrong
+
+Every tier below is done. The surface is 208 tools now, not 207 — T1 added
+one — and the facade is 179.
+
+**Read this section before trusting a number further down.** The plan was
+written from a sweep in which claims that did not drive a code change were
+not re-measured. Acting on them turned five into corrections, and two share
+a single cause worth naming.
+
+### The mistake that produced two of them
+
+`n_workers` (§3) and numba (§4.4) were both reported as creating nothing and
+running never. Both measurements were taken with the C++ extension present,
+which is the normal install — and in both cases the "dead" code is the
+`else:` arm of `if HAS_CPP`. "Never runs" there means the fast path is
+working, not that the slow path is dead.
+
+Deleting either, as this plan recommended, would have removed real capability
+from the exact configuration that needs it: a machine where the extension
+failed to build. **A measurement of what executes is not a measurement of
+what is reachable**, and the difference is a whole install configuration.
+
+### The corrections
+
+| § | the plan said | measured |
+|---|---|---|
+| 2.3 | `predictions→score_panel` gives 124 long / 0 short vs 52/72 | Not reproducible. Two of three sizers recentre, so the end weights were 100/100 — which is *why* it survived. The real defect was `task` accepted and ignored, and `vol_scaled` advertised and unable to run at all |
+| 2.4 | two implementations disagree on degenerate input | They do, but one is the superseded predecessor the other was *built on*, with zero callers. Deleted, not reconciled |
+| 3 | delete `n_workers` — creates zero processes | It creates a real pool when `HAS_CPP` is false. Forcing that, the measurement hung spawning eight Windows processes. Kept; descriptions corrected. Chasing it found the actual defect: the C++ gate's comment claims it is scoped to `fill_price="close"` and the condition never checked, because the kernel gained `grid_ref_arr` and the comment was left behind |
+| 4.1 | `_POOLED_NATIVE_MIN_ROWS` is correctly placed, the contrast case | Same defect as the other gate, and worse: 2.39× at 200 rows against 1.43× at 12,600. Both gates won **hardest where they were forbidden**, because the conversion each guarded against is a smaller share of a small panel's cost, not larger |
+| 4.4 | numba is a hard dependency whose JIT paths are 80% dead | Eight of ten are the C++ fallback. All ten call sites checked. Kept, with the reasoning recorded in `pyproject.toml` |
+| 5 | `backtesting/` is a trap resolving as a namespace package | Live code — two runtime modules and eight test files import it. The real defect was narrower: the only subpackage here without an `__init__.py` |
+
+§4.5 changed shape rather than being wrong: `HAS_SCIPY` is unfalsifiable as
+described, but the defect underneath is that **six modules import scipy
+directly and it was never declared**, reaching the environment only
+transitively.
+
+### Two more, from my own work rather than the plan's
+
+**§1.5's demonstration was imprecise.** I first showed the change-point
+penalty with a *volatility* change, and this detector splits on the mean —
+those breaks came from sample-mean noise. Re-measured on a genuine level
+shift, the finding is stronger: clearing the old default on 500 daily
+returns needs a drift change of **0.28 per day**.
+
+**§2.2's fix created a dead end.** Refusing a level series was right, and
+left the caller told to run `.pct_change()` on a reference, which is not
+possible. `convert_reference` gained `equity_curve → returns_panel`.
+
+### What did not need correcting
+
+§1.1 through §1.4, §2.1, §2.2, §2.5, §2.6, §3.1, §4.2, §4.3 and the rest of
+§5 held up under measurement, several of them starker than written — the
+`SPEARMAN` fallback is a 1.0000 → 0.6457 swing in a headline metric, and the
+zero-copy kernels turned out to *refuse* the only input that would have
+justified them.
+
+---
+
 ## 0. The shape of the result
 
 **The wiring is clean.** This is worth stating first because it bounds the

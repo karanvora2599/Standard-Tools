@@ -52,7 +52,7 @@ because the order is the point.
 
 | Tool | Input → Output |
 |---|---|
-| `list_modeling_capabilities` | → tasks, estimators and what each supports (sample weights, probabilities, query groups, coefficients, importances), features, targets, validation schemes, preprocessing, weighting, and which optional libraries are installed |
+| `list_modeling_capabilities` | → tasks, estimators and what each supports (sample weights, probabilities, query groups, coefficients, importances), features, validation schemes, preprocessing, weighting, and which optional libraries are installed. `targets` splits into **`buildable`** (the six `build_model_dataset` can derive from a Close series) and **`external_only`** (the twelve that are functions of the book, of orders or of fills, and arrive through `register_external_panel`) — it used to list all eighteen flat, which is a worse place to overstate than a tool is, since an agent reads this INSTEAD of trying things |
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback) |
 | `check_leakage` | a feature set → whether it is temporally safe to fit on, answered **before** a dataset is built with it |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |

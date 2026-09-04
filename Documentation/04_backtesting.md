@@ -617,7 +617,7 @@ results = backtest_grid(
     initial_capital=10_000,
     commission_pct=0.001,
     sort_by="sharpe_ratio",            # default: best Sharpe first
-    n_workers=4,                       # default: os.cpu_count()
+    n_workers=4,                       # only matters without the C++ extension
 )
 
 # 3 × 4 = 12 combinations, sorted best → worst Sharpe
@@ -650,6 +650,16 @@ results = backtest_grid(df, strategy="adx_trend",
 ```
 
 Pass `n_workers=1` to run sequentially (no subprocess overhead — useful in notebooks).
+
+> **`n_workers` does nothing on a normal install**, and that is not a bug.
+> The C++ batch path below runs the whole sweep in one call with no
+> subprocessing at all, and `_sqt_core` is built by `pip install` — so the
+> `ProcessPoolExecutor` is reached only where the extension is absent or
+> failed to build. Measured: zero pools created at any setting with the
+> extension present, and a real pool without it. The knob is the genuine
+> control for that second case; it is not a speed dial for the first.
+> `list_modeling_capabilities` reports `native_extension` if you need to
+> know which case you are in.
 
 **Validation:** `backtest_grid` applies the same checks as `run_strategy`
 (see [Running a Backtest](#running-a-backtest) above) — `initial_capital`

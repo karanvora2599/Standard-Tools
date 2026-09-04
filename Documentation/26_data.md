@@ -237,13 +237,43 @@ each produce a confident wrong number:
   a **$9.2 billion quote** — so sentinels are masked *before* scaling,
   after which a sentinel is just a large float and no longer identifiable.
 
-`standard_quant_tools.data.databento` handles both. It also drops trailing
-levels that are empty in every snapshot — left in, the dataset would declare
-ten levels while four hold nothing and `depth_slope` would regress against
-them — keeps `action`, `side`, `flags` and the per-level order counts a
-naive rename discards, and reports which of `ts_recv` and `ts_event` it
-used. Those two differ by the network, which is exactly the quantity a
-latency study measures, so the choice is never left implicit.
+`prepare_vendor_extract` handles both, and is the step before
+`register_external_dataset`:
+
+```
+prepare_vendor_extract  →  register_external_dataset  →  get_order_book_metrics
+   raw vendor file          sqt://order_book_panel/…      get_order_event_metrics
+```
+
+It also drops trailing levels that are empty in every snapshot — left in,
+the dataset would declare ten levels while four hold nothing and
+`depth_slope` would regress against them — keeps `action`, `side`, `flags`
+and the per-level order counts a naive rename discards, and reports which of
+`ts_recv` and `ts_event` it used. Those two differ by the network, which is
+exactly the quantity a latency study measures, so the choice is never left
+implicit.
+
+**The judgements come back in `notes`, not in a log.** Two of them change
+the numbers and neither is recoverable from the output — which timestamp
+became `timestamp`, and whether prices were divided by a billion — so a
+converted file that looks fine is not evidence that the right choices were
+made. `dry_run` reports both without writing anything, which is worth doing
+before committing a session of depth to disk.
+
+Output is always Parquet whatever went in. The conversion's whole value is
+correct dtypes — datetime64 stamps, floats that have been de-scaled — and
+CSV would discard them and reintroduce the ambiguity just resolved.
+
+`kind` selects the normalizer: `order_book_panel` from MBP-10 depth,
+`order_event_panel` from MBO order-by-order events, `quote_panel` from
+MBP-1/TBBO/BBO, `tick_tape` from trades. `event_panel` is absent on purpose
+— it is a point-in-time contract rather than a market-data shape, and no
+vendor normalizer produces one.
+
+> This tool exists because the refusal above used to name a remedy nothing
+> could run. `check_schema` said to convert "with
+> `standard_quant_tools.data.databento.normalize_book()`" — a module with 39
+> tests, four normalizers, and no entry point on the tool surface at all.
 
 
 ## The tools

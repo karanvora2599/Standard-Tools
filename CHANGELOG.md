@@ -1,5 +1,193 @@
 # Changelog
 
+## What can be called, what is accepted, and what answers wrongly — 207 to 208 tools
+
+A sweep asking three questions of the whole surface that ordinary testing
+does not: can each tool be REACHED, does each argument DO anything, and does
+each answer MEAN what it says. The suite was green throughout; none of this
+was failing.
+
+The wiring turned out to be sound, which bounded the search. All tools route
+through their own runtime, the facade is exactly the union of eight of them,
+and every input model forbids extras — so a misspelled argument is refused,
+not dropped. The defects were in doors, values and stale guards.
+
+### A finished, tested subsystem with no door onto the surface
+
+`data/databento.py` is 643 lines with 39 dedicated tests and had zero
+references from anywhere under `agent/` — not even an export from
+`data/__init__`. Four normalizers mapping exactly onto the four external
+kinds `register_external_dataset` mints, and no way to run any of them.
+
+What made it worse than an omission: `external.check_schema` already told
+callers the fix, by name — convert "with
+`standard_quant_tools.data.databento.normalize_book()`, which also masks the
+sentinels and scales the prices — registering it unconverted would put $9.2
+billion quotes in your book." The remedy was named and could not be executed.
+
+`prepare_vendor_extract` is that door. One tool across all four normalizers,
+so the pair reads as one pipeline. The two judgements that change the numbers
+come back in `notes` rather than being made silently, because neither is
+recoverable from the output: which column became `timestamp`, and whether
+prices were divided by a billion. Verified end to end: a raw `bid_px_00` of
+99990068385 becomes a `bid_price_0` of 99.990068385, and `mean_spread` comes
+out 0.02 rather than 20,000,000.
+
+The empty-level rule was the part that needed care. `normalize_book` drops a
+trailing level empty in EVERY snapshot, which no single batch knows, so the
+depth is decided in its own pass and forced for the writing pass. The first
+version reimplemented "empty" instead of sharing it and diverged three ways —
+it tested only the bid, so a level with no bid but a live ask was dropped (2
+levels kept where the library keeps 3); it carried an invented floor; and it
+lost the malformed-book warning entirely. `level_is_empty` and
+`split_empty_levels` are shared now, and the streamed result is asserted
+equal to one in-memory call at three batch sizes.
+
+### A kind with a contract, a validator, a reader and a consumer, that nothing could mint
+
+`get_order_event_metrics` resolves `expect="order_event_panel"`. That kind
+had a column contract, a description, a place in `EXTERNAL_KINDS`, a batched
+reader and a consumer — and the only tool that mints an external reference
+offered `event_panel` instead, a different kind entirely. No reference of it
+could exist.
+
+Adding the string was not the whole fix: the column contract omitted `price`,
+so a panel would register and then fail inside the metrics; the validator had
+no handler at all, so `feed()` no-opped and a panel was pronounced usable
+without its timestamps checked; and `check_schema`'s "name the fix" map would
+have told an MBO export to run `normalize_book`, which produces a different
+kind. A guard now asserts the register tool's `Literal` equals
+`EXTERNAL_KINDS`, which had drifted apart for exactly one kind with nothing
+comparing them.
+
+### Numbers that were wrong, and looked ordinary
+
+**A Sharpe measured against 0% while the search used the caller's rate.**
+`run_regime_adaptive_backtest` passed `risk_free_rate` to `backtest_grid` and
+then rebuilt `BacktestInput` field by field without it — selecting on one
+assumption and reporting on another. Two sibling sites already carried this
+fix under a comment naming the bug, which raised the better question: why did
+the sweep that fixed seventeen tools stop short? The predicate scanned a
+result model's OWN field names for "sharpe", and `RegimeAdaptiveResult`'s
+number is one level down inside `backtest`. Made recursive, it finds five
+such tools — and two of them had no rate field at all, so the invariant "a
+tool that reports a Sharpe must let a caller say what it is measured against"
+was false for two tools and passed anyway. `compare_strategies` is the one
+that matters: it RANKS by Sharpe.
+
+**An equity curve measured as returns: 302.5466 against a true 0.2953.**
+`resolve_source` converts a symbol to returns and says why — handing a tool
+prices "would produce a Sharpe off by orders of magnitude with nothing
+looking wrong". That sentence was true of the other two paths and was not
+applied to them. Scale-invariance is what made it silent: mean/std does not
+care whether the curve starts at 10,000, at 100 or at 1.0, so every base
+reports the same wrong number and none looks like a scaling mistake. Worse,
+protection depended on which metrics you asked for — a raw curve overflows
+`(1+x).cumprod()`, so requesting a drawdown was safe and requesting the ratio
+the tool exists for was not.
+
+Refusing it left a dead end, since the message said to run `.pct_change()` on
+a reference. `convert_reference` gained `equity_curve → returns_panel`, which
+drops the first bar rather than carrying a fabricated flat period — a curve
+begins after its first return is applied, and on one fixture that single
+unrecoverable observation is +2.0 sigma and moves the Sharpe by 7.9%.
+
+**A rank correlation becoming a linear one, from a capitalisation.**
+
+    cross_sectional_ic(method='spearman')   mean IC = 1.0000
+    cross_sectional_ic(method='SPEARMAN')   mean IC = 0.6457
+
+`'kendall'`, `'banana'` and `''` did the same. Six fields across the surface
+branched on an exact string and gave everything else the else-arm. Fixed in
+the library as well as the schema, so a direct caller cannot silently get
+Pearson either.
+
+**A change-point detector that could not report a break.** `penalty`
+defaulted to 10.0 and a split's gain is bounded by the residual sum of
+squares it removes from, so an absolute penalty means different things at
+different scales. On 500 daily returns, clearing 10.0 needs a drift change of
+0.28 PER DAY. It did not fail — it reported the series homogeneous, which is
+a statement about the market where the truth was a statement about units. The
+penalty is derived from the series now, with k=3 chosen on measurement: over
+200 seeds, k=1 gives 47/200 false breaks in pure noise, k=2 gives 4/200, k=3
+gives 0/200 at 91.5% power.
+
+### Arguments accepted and ignored
+
+`profile_feature` took `include_ic_decay` and `max_shift`, one with a cost
+rationale attached, and `FeatureProfile` had nowhere for a curve to land:
+every combination returned byte-identical output. Implemented by sharing one
+builder with `get_feature_ic_decay`, so the nested object is exactly what
+that tool returns.
+
+`compare_artifacts` took two labels and read neither. It had no tests at all,
+which is how a field stays inert from the day it was written.
+
+`list_modeling_capabilities` advertised 18 target types and 6 are buildable.
+`TARGET_KINDS` already carried `buildable` per label and calls itself "the
+ONE place that says so"; the report was not reading it. That is a worse place
+to be wrong than a tool is — an agent reads the capability report INSTEAD of
+trying things, so an overstatement is a plan built on a tool that cannot do
+what it was told.
+
+### Guards that outlived the measurement that justified them
+
+`_NATIVE_MIN_ROWS = 50_000` was written when the kernel genuinely lost on
+small panels — 0.4x on 12,600 rows, because its conversion went through
+pandas. `_as_int64_ns` removed the loss and the threshold never moved.
+Re-measured, outputs matching to 1e-12: 9.1x at 10 rows, 5.1x at 2,520, 3.0x
+at 12,600. No crossover left to gate at. The cost was not hypothetical —
+per-fold rows are `train_window * entities`, so a 200-name universe on a
+252-day window is 49,392, 608 short, and the kernel written for the fold loop
+fired once per run.
+
+`_POOLED_NATIVE_MIN_ROWS = 5_000` was the same defect, and the analysis had
+called it the correctly-placed contrast case: 2.39x at 200 rows against 1.43x
+at 12,600. Both gates won HARDEST where they were forbidden, because the
+conversion each protected against is a smaller share of a small panel's cost,
+not larger. Both removed, with benchmarks pinning a floor at the blocked
+sizes.
+
+### Six kernels built to avoid a copy pybind11 was not making
+
+The `_zerocopy` bindings are gone: six exports, 53 lines of helper machinery,
+a 253-line test file, 383 lines of `bindings.cpp`. Every candidate caller
+reaches the kernels through `.to_numpy(dtype=np.float64)`, so the array is
+already conforming and `forcecast` does not copy it. Measured against the
+copying sibling: +30.3% at 1,500 rows (on a 12-microsecond call), -8.9% at
+100,000, +0.3% at 1,000,000. And handed a non-contiguous slice — the one case
+where a copy has to happen — the zero-copy binding REFUSES, so it cannot save
+the copy when there is one to save.
+
+A stale extension is otherwise indistinguishable from an absent one: every
+kernel is `hasattr`-guarded, which is right, and means an old build loads
+cleanly and runs the slow path for what it lacks. Observed: a `.pyd` exporting
+40 of 42 symbols, costing ~18x on the two it was missing, with nothing saying
+so. `list_modeling_capabilities` reports the count now.
+
+### What the analysis itself got wrong
+
+Five of its claims did not survive measurement, and two shared one cause:
+both `n_workers` and numba were measured with the C++ extension present, and
+"never runs" read as "dead". In both cases the code is the `else:` arm of
+`if HAS_CPP` — the fallback. Deleting either, as recommended, would have
+removed real capability from the exact configuration that needs it.
+
+Chasing why `n_workers` made no pool even with `fill_price="next_open"` found
+the actual defect: the C++ gate's comment says it is "scoped to
+fill_price='close' — the compiled kernel only knows Close prices", and the
+condition never checked, because the kernel gained a `grid_ref_arr` carrying
+Open and HL2 and the comment was left behind.
+
+`backtesting/` was listed as a namespace-package trap and is live code, used
+by two runtime modules and eight test files; the real defect was that it is
+the only subpackage here without an `__init__.py`. And scipy, reported as an
+unfalsifiable flag, turned out to be imported directly by six modules and
+never declared — reaching the environment only as a transitive dependency.
+
+The corrections are recorded in `Development/reachability_plan.md` alongside
+the claims they replace.
+
 ## The book finally arrives — 200 to 204 tools
 
 `get_order_book_metrics` has computed the microprice, touch and cumulative
