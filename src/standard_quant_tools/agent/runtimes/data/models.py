@@ -300,6 +300,41 @@ __all__ = [
 ]
 
 
+#: Typical |value| above this is not a fractional return. An equity curve
+#: at any base -- 10 000, 100, or normalized to 1.0 -- clears it; a daily
+#: return series sits five or six orders of magnitude below it. Median
+#: rather than max, so one genuine +200% day does not trip it.
+_MAX_PLAUSIBLE_TYPICAL_RETURN = 1.0
+
+
+def _refuse_if_not_returns(series, what: str):
+    """Refuse a series that cannot be returns, naming the likely cause.
+
+    Deliberately ONE rule, and a blunt one. The tempting second rule --
+    refuse a series with no negative observation -- would refuse a
+    money-market or T-bill return series, which really is all-positive and
+    really does have an enormous Sharpe against a 0% rate. Being unable to
+    measure a real series is worse than the narrower guard, so the softer
+    signal lives where there is a warnings channel to carry it.
+    """
+    from standard_quant_tools.error import ValidationError
+
+    finite = series[series.notna()]
+    if finite.empty:
+        return
+    typical = float(finite.abs().median())
+    if typical > _MAX_PLAUSIBLE_TYPICAL_RETURN:
+        raise ValidationError(
+            f"{what}: this is a RETURN series, and the typical |value| here "
+            f"is {typical:.4g} -- a {typical * 100:.0f}% move per period. "
+            "That is a level series (an equity curve, or prices), not "
+            "returns. A Sharpe taken on levels is scale-invariant and comes "
+            "back two to three orders of magnitude too high with nothing "
+            "looking wrong. Convert first -- `.pct_change().dropna()` -- or "
+            "name a reference that already holds returns."
+        )
+
+
 def resolve_source(source: "DataSource", *, what: str = "series"):
     """
     Turn a `DataSource` into a pandas Series, whichever origin it named.
@@ -314,6 +349,18 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
     because every consumer of this helper so far wants returns and a tool
     that silently handed one prices would produce a Sharpe off by orders of
     magnitude with nothing looking wrong.
+
+    THAT REASONING GUARDED ONE OF THE THREE PATHS. `values` took whatever it
+    was given and `ref` resolved ANY kind -- no `expect=` -- so an
+    `sqt://equity_curve` reference, which is levels, arrived here and was
+    treated as returns. Measured: a series whose true annualized Sharpe is
+    0.2953 reported 302.5466, at every base, with no warning, because
+    mean/std is scale-invariant. Whether it was caught depended on which
+    METRICS were asked for: a raw curve overflows `(1+x).cumprod()` and
+    `max_drawdown`'s own validator refuses the infinities, so asking for a
+    drawdown protected you and asking for a Sharpe alone did not.
+
+    `_refuse_if_not_returns` closes that, on all three paths.
     """
     import pandas as pd
 
@@ -323,6 +370,7 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
         series = pd.Series(source.values, dtype="float64")
         if series.empty:
             raise ValidationError(f"{what}: `values` was empty.")
+        _refuse_if_not_returns(series, what)
         return series
 
     if source.ref is not None:
@@ -346,6 +394,7 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
         series = pd.Series(data).astype("float64")
         if series.empty:
             raise ValidationError(f"{what}: {source.ref!r} resolved to nothing.")
+        _refuse_if_not_returns(series, f"{what}: {source.ref!r}")
         return series
 
     from standard_quant_tools.data.factory import DataFactory

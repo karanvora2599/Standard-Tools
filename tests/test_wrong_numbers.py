@@ -175,6 +175,136 @@ class TestSeriesMetricsGetTheSeriesTheyDocument:
         assert got["calmar_ratio"] > 0
 
 
+class TestALevelSeriesIsNotAcceptedAsReturns:
+    """`resolve_source` converts a SYMBOL to returns and says why: handing a
+
+    tool prices "would produce a Sharpe off by orders of magnitude with
+
+    nothing looking wrong". It then left the other two paths open. `values`
+
+    took whatever it was given and `ref` resolved any kind at all, so an
+
+    equity curve arrived and was measured as if it were returns."""
+
+    @staticmethod
+    def _returns(seed=3, mu=-0.0004):
+        return pd.Series(np.random.default_rng(seed).normal(mu, 0.011, 500))
+
+    def _metrics(self, values, **kw):
+        from standard_quant_tools.agent.runtimes.research.reference_tools import (
+            SeriesMetricsInput,
+            calculate_series_metrics,
+        )
+
+        return calculate_series_metrics(
+            SeriesMetricsInput(
+                series={"values": [float(v) for v in values]},
+                metrics=kw.pop("metrics", ["sharpe_ratio"]),
+                **kw,
+            )
+        )
+
+    def test_the_true_sharpe_is_still_reported_for_returns(self):
+        returns = self._returns()
+
+        truth = float(returns.mean() / returns.std(ddof=1) * np.sqrt(252))
+
+        got = self._metrics(returns)
+
+        assert got.values["sharpe_ratio"] == pytest.approx(truth, rel=1e-9)
+
+        assert got.warnings == []
+
+    @pytest.mark.parametrize("base", [10_000.0, 100.0, 1.0])
+    def test_an_equity_curve_is_refused_at_every_base(self, base):
+        """Scale-invariance is what made this silent: mean/std is unchanged
+
+        by the base, so all three bases reported the SAME wrong 302.5466."""
+
+        from standard_quant_tools.error import ValidationError
+
+        curve = (1.0 + self._returns(mu=0.001)).cumprod() * base
+
+        with pytest.raises(ValidationError, match="level series"):
+            self._metrics(curve)
+
+    def test_which_metrics_you_asked_for_no_longer_decides_it(self):
+        """A raw curve overflows `(1+x).cumprod()`, so `max_drawdown`'s own
+
+        validator refused the infinities and a Sharpe-only call did not.
+
+        Protection depended on the metric list. Now both refuse."""
+
+        from standard_quant_tools.error import ValidationError
+
+        curve = (1.0 + self._returns()).cumprod() * 10_000.0
+
+        for metrics in (["sharpe_ratio"], ["max_drawdown"], ["sharpe_ratio", "cagr"]):
+            with pytest.raises(ValidationError):
+                self._metrics(curve, metrics=metrics)
+
+    def test_a_losing_normalized_curve_is_warned_about(self):
+        """The residual the hard guard deliberately misses: a curve that
+
+        spends its life below 1.0 has a typical |value| under 1. The ratio
+
+        gives it away instead."""
+
+        curve = (1.0 + self._returns()).cumprod()
+
+        assert float(curve.abs().median()) < 1.0  # clears the hard guard
+
+        got = self._metrics(curve)
+
+        assert any("mean/std" in w for w in got.warnings)
+
+    def test_an_all_positive_return_series_is_warned_not_refused(self):
+        """The false positive that shaped the guard. A T-bill series really
+
+        is all-positive with an enormous Sharpe against 0%, so a rule that
+
+        refused it would make a real series unmeasurable."""
+
+        rng = np.random.default_rng(0)
+
+        cash = pd.Series(np.full(500, 8e-5) + rng.normal(0, 2e-6, 500))
+
+        got = self._metrics(cash)
+
+        assert got.values["sharpe_ratio"] > 100
+
+        assert any("T-bill" in w for w in got.warnings)
+
+    def test_one_large_move_does_not_trip_the_guard(self):
+        """Median rather than max, so a genuine +200% day is still
+
+        measurable."""
+
+        returns = self._returns().copy()
+
+        returns.iloc[100] = 2.0
+
+        assert self._metrics(returns).values["sharpe_ratio"] is not None
+
+    def test_the_other_consumer_is_guarded_too(self):
+        """The guard sits in the shared resolver, so `run_terminal_monte_carlo`
+
+        -- which also documents its input as returns -- gets it for free."""
+
+        from standard_quant_tools.agent.runtimes.data.models import (
+            DataSource,
+            resolve_source,
+        )
+        from standard_quant_tools.error import ValidationError
+
+        curve = (1.0 + self._returns(mu=0.001)).cumprod() * 100.0
+
+        with pytest.raises(ValidationError, match="level series"):
+            resolve_source(
+                DataSource(values=curve.tolist()), what="run_terminal_monte_carlo"
+            )
+
+
 class TestRhoMatchesTheModelItIsQuotedFor:
     """Black-76's rho was the Black-Scholes formula. Under Black-76 the
 

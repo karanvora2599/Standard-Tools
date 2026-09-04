@@ -124,6 +124,25 @@ def calculate_series_metrics(input_data: SeriesMetricsInput) -> SeriesMetricsRes
             "it as a direction, not a number."
         )
 
+    # The residual case `resolve_source` deliberately does NOT refuse: an
+    # equity curve normalized to 1.0 that spends its life BELOW 1.0 -- a
+    # losing strategy -- has a typical |value| under 1 and clears the hard
+    # guard. What gives it away is the ratio: mean/std above 3 is an
+    # annualized Sharpe over 47. A warning rather than a refusal because a
+    # T-bill return series really does look like this.
+    spread = float(returns.std(ddof=1))
+    if spread > 0:
+        ratio = abs(float(returns.mean())) / spread
+        if ratio > 3.0:
+            warnings.append(
+                f"mean/std is {ratio:.1f}, an annualized Sharpe of about "
+                f"{ratio * (input_data.periods_per_year ** 0.5):.0f}. For a "
+                "return series that is implausible; the usual cause is a "
+                "LEVEL series (an equity curve) passed where returns were "
+                "expected. If these really are returns -- a cash or T-bill "
+                "series can look like this -- the number stands."
+            )
+
     values: Dict[str, Any] = {}
     for name in input_data.metrics:
         fn, wants_equity = _METRICS[name]
