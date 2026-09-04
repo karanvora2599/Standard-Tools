@@ -59,24 +59,20 @@ def winsorize(series: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd
 
 
 def zscore_time_series(series: pd.Series) -> pd.Series:
-    """Z-score `series` against its own mean/std (one entity across dates)."""
+    """Z-score `series` against its own mean/std (one entity across dates).
+
+    The cross-sectional counterpart is `standardize_cross_sectional`, which
+    works on a whole frame at a time rather than a column. A
+    `zscore_cross_sectional` used to sit here as well, with zero callers;
+    `standardize_cross_sectional` was built ON it and superseded it, and it
+    was left behind disagreeing with its own successor -- NaN for a
+    constant cross-section where the successor gives 0.0. Deleted rather
+    than reconciled: it was the predecessor, not an alternative.
+    """
     mean, std = series.mean(), series.std()
     if not std or pd.isna(std):
         return series * 0.0
     return (series - mean) / std
-
-
-def zscore_cross_sectional(
-    panel: pd.DataFrame, column: str, date_col: str = "date"
-) -> pd.Series:
-    """Z-score `column` within each date's cross-section (all entities on
-    the same date share one mean/std) — a different shape of operation
-    than zscore_time_series, so it takes the long panel plus a column
-    name rather than a single Series."""
-    grouped = panel.groupby(date_col)[column]
-    mean = grouped.transform("mean")
-    std = grouped.transform("std").replace(0, np.nan)
-    return (panel[column] - mean) / std
 
 
 def fit_preprocessing(train: pd.DataFrame) -> Dict[str, Dict[str, float]]:

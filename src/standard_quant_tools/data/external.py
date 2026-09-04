@@ -81,7 +81,17 @@ KIND_COLUMNS: Dict[str, Tuple[str, ...]] = {
         "ask_price_0",
         "ask_size_0",
     ),
-    "order_event_panel": ("timestamp", "order_id", "action", "side", "size"),
+    # Exactly `analysis.order_events.ORDER_EVENT_COLUMNS`. `price` was
+    # missing here, so a panel could satisfy REGISTRATION and then fail
+    # inside `order_event_metrics`, which requires all six.
+    "order_event_panel": (
+        "timestamp",
+        "order_id",
+        "action",
+        "side",
+        "price",
+        "size",
+    ),
     "event_panel": ("event_time", "available_time"),
     "tick_tape": ("price", "size"),
     "quote_panel": ("bid_price", "ask_price"),
@@ -419,6 +429,7 @@ def required_columns(kind: str) -> Tuple[str, ...]:
 #: kind -> the databento normalizer that produces it, for the refusal hint.
 _DATABENTO_NORMALIZER: Dict[str, str] = {
     "order_book_panel": "normalize_book",
+    "order_event_panel": "normalize_mbo",
     "quote_panel": "normalize_quotes",
     "tick_tape": "normalize_trades",
 }

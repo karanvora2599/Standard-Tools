@@ -201,15 +201,19 @@ class RegisterExternalDatasetInput(BaseModel):
             "wherever this library runs."
         ),
     )
-    kind: Literal["order_book_panel", "event_panel", "tick_tape", "quote_panel"] = (
-        Field(
-            ...,
-            description=(
-                "What the dataset holds. Checked against its columns at "
-                "registration, so a mismatch fails here rather than inside "
-                "whatever first read a column that is not there."
-            ),
-        )
+    kind: Literal[
+        "order_book_panel",
+        "order_event_panel",
+        "event_panel",
+        "tick_tape",
+        "quote_panel",
+    ] = Field(
+        ...,
+        description=(
+            "What the dataset holds. Checked against its columns at "
+            "registration, so a mismatch fails here rather than inside "
+            "whatever first read a column that is not there."
+        ),
     )
     run_id: str = Field(..., description="Groups this workflow's artifacts.")
     name: str = Field(..., description="Names this dataset within the run.")

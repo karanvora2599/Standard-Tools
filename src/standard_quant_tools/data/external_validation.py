@@ -175,6 +175,52 @@ class _Checker:
         self.bump("non_positive_price", int((price.fillna(-1) <= 0).sum()))
         self.bump("non_positive_size", int((size.fillna(-1) <= 0).sum()))
 
+    # ---- order_event_panel ----
+    def _check_order_event_panel(self, frame: pd.DataFrame) -> None:
+        """The kind that had no handler at all.
+
+        `feed()` dispatches by name and no-ops when there is none, so an
+        order-event panel would have been scanned and reported on without
+        even its timestamps being checked for order.
+
+        The vocabularies come from `analysis.order_events` rather than
+        being respelled here: that module is what will read the panel, so
+        an action letter this accepts and it rejects would be a
+        disagreement between the validator and the consumer.
+        """
+        from standard_quant_tools.analysis.order_events import (
+            ACTION_MEANINGS,
+            ASK,
+            BID,
+        )
+
+        self.check_order(frame, "timestamp")
+
+        action = frame["action"].astype("string").str.strip().str.upper()
+        self.bump("unknown_action", int((~action.isin(ACTION_MEANINGS)).sum()))
+
+        side = frame["side"].astype("string").str.strip().str.upper()
+        # A clear (R) carries no side, so an empty side is only counted
+        # against events that should have one.
+        sided = action != "R"
+        self.bump(
+            "unknown_side",
+            int((sided & ~side.isin({BID, ASK})).sum()),
+        )
+
+        self.bump("missing_order_id", int(frame["order_id"].isna().sum()))
+
+        size = pd.to_numeric(frame["size"], errors="coerce")
+        price = pd.to_numeric(frame["price"], errors="coerce")
+        # A cancel or clear legitimately carries no price; an ADD or a FILL
+        # without one is a row `order_event_metrics` cannot use.
+        priced = action.isin({"A", "M", "F", "T"})
+        self.bump(
+            "non_finite_price_on_priced_event",
+            int((priced & ~_finite_mask(price)).sum()),
+        )
+        self.bump("non_positive_size", int((size.fillna(-1) <= 0).sum()))
+
     # ---- quote_panel ----
     def _check_quote_panel(self, frame: pd.DataFrame) -> None:
         self.check_order(frame, "timestamp")

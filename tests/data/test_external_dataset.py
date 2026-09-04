@@ -561,3 +561,162 @@ class TestTheBookToolReadsAReference:
             OrderBookInput()
         with pytest.raises(pydantic.ValidationError, match="exactly one"):
             OrderBookInput(snapshots=[{"bid_price_0": 1.0}], ref="sqt://a/b/c")
+
+
+class TestTheOrderEventPanelCanBeRegisteredAtAll:
+    """One string, and a whole chain.
+
+    `event_tools.py` resolves with `expect="order_event_panel"`, the kind
+    has a column contract, a description and a place in `EXTERNAL_KINDS`,
+    and the batched reader handles it. The ONLY tool that mints an external
+    reference offered `event_panel` instead -- a different kind entirely,
+    `(event_time, available_time)`, the point-in-time contract -- and never
+    offered this one. So no reference of this kind could exist, and
+    `get_order_event_metrics`' `ref` path was unreachable.
+
+    The inline `events` path still worked, which is why nothing failed. But
+    that field's own description says a session of market-by-order "is
+    millions of records and cannot travel through a tool argument": what was
+    stranded was the only path that scales.
+    """
+
+    @staticmethod
+    def _events(n=200, seed=7):
+        rng = np.random.default_rng(seed)
+        stamps = pd.Timestamp("2024-03-01 14:30:00") + pd.to_timedelta(
+            np.sort(rng.integers(0, 600_000, n)), unit="ms"
+        )
+        actions = rng.choice(list("ACMFT"), n, p=[0.42, 0.34, 0.09, 0.10, 0.05])
+        return pd.DataFrame(
+            {
+                "timestamp": stamps,
+                "order_id": rng.integers(1, 90, n),
+                "action": actions,
+                "side": rng.choice(["B", "A"], n),
+                "price": (100 + rng.normal(0, 0.05, n)).round(2),
+                "size": rng.integers(1, 500, n),
+            }
+        )
+
+    def _register(self, frame, tmp_path, name="mbo"):
+        path = tmp_path / f"{name}.parquet"
+        frame.to_parquet(path, index=False)
+        return external.inspect(str(path), kind="order_event_panel")
+
+    def test_the_kind_is_offered_by_the_only_tool_that_mints_one(self):
+        from typing import get_args
+
+        from standard_quant_tools.agent.runtimes.data.models import (
+            RegisterExternalDatasetInput,
+        )
+
+        offered = set(
+            get_args(RegisterExternalDatasetInput.model_fields["kind"].annotation)
+        )
+        assert "order_event_panel" in offered
+
+    def test_every_external_kind_is_reachable(self):
+        """The guard that stops this recurring. A kind in `EXTERNAL_KINDS`
+        that the register tool does not offer is a kind no reference can
+        ever have, and the two drifted apart silently for exactly one."""
+        from typing import get_args
+
+        from standard_quant_tools.agent.runtimes.data.models import (
+            RegisterExternalDatasetInput,
+        )
+        from standard_quant_tools.agent.runtimes.handoff import EXTERNAL_KINDS
+
+        offered = set(
+            get_args(RegisterExternalDatasetInput.model_fields["kind"].annotation)
+        )
+        assert offered == set(EXTERNAL_KINDS), (
+            f"unmintable kinds: {sorted(set(EXTERNAL_KINDS) - offered)}; "
+            f"offered but not external: {sorted(offered - set(EXTERNAL_KINDS))}"
+        )
+
+    def test_the_column_contract_matches_what_will_read_it(self):
+        """`price` was missing from the registration contract, so a panel
+        could satisfy registration and then fail inside the metrics."""
+        from standard_quant_tools.analysis.order_events import ORDER_EVENT_COLUMNS
+
+        assert set(external.KIND_COLUMNS["order_event_panel"]) == set(
+            ORDER_EVENT_COLUMNS
+        )
+
+    def test_a_clean_panel_registers_and_validates(self, tmp_path):
+        report = validate_external(self._register(self._events(), tmp_path))
+        assert report.usable, report.blocking
+        assert report.rows_scanned == 200
+
+    def test_a_panel_missing_price_is_refused(self, tmp_path):
+        frame = self._events().drop(columns=["price"])
+        report = validate_external(self._register(frame, tmp_path, name="noprice"))
+        assert not report.usable
+        assert any("price" in problem for problem in report.blocking)
+
+    def test_a_raw_databento_export_is_told_which_normalizer_to_run(self):
+        """`check_schema` names the fix when it recognizes the vendor, and
+        the map it reads had no entry for this kind -- so an MBO export
+        would have been told to run `normalize_book`, which produces a
+        different kind entirely."""
+        from standard_quant_tools.data.external import _DATABENTO_NORMALIZER
+
+        assert _DATABENTO_NORMALIZER["order_event_panel"] == "normalize_mbo"
+
+    @pytest.mark.parametrize(
+        "column,values,stat,expected",
+        [
+            ("action", ["A", "Z", "C", "Q"], "unknown_action", 2),
+            ("side", ["B", "X", "A", "B"], "unknown_side", 1),
+            ("size", [10, 0, -5, 10], "non_positive_size", 2),
+        ],
+    )
+    def test_the_validator_has_a_handler_at_all(
+        self, tmp_path, column, values, stat, expected
+    ):
+        """`feed()` dispatches on `_check_{kind}` and no-ops when there is
+        none. This kind had none, so a panel would have been scanned and
+        pronounced on without even its timestamps being checked."""
+        frame = self._events(n=4)
+        frame[column] = values
+        report = validate_external(self._register(frame, tmp_path, name=column))
+        assert report.stats.get(stat) == expected
+
+    def test_a_cancel_without_a_price_is_not_counted_against_it(self, tmp_path):
+        """A cancel or a clear legitimately carries no price; an add or a
+        fill without one is a row the metrics cannot use."""
+        frame = self._events(n=4)
+        frame["action"] = ["A", "C", "F", "C"]
+        frame["price"] = [100.0, float("nan"), float("nan"), float("nan")]
+        report = validate_external(self._register(frame, tmp_path, name="cxlprice"))
+        assert report.stats.get("non_finite_price_on_priced_event") == 1
+
+    def test_the_reference_reaches_the_tool_that_was_stranded(
+        self, tmp_path, monkeypatch
+    ):
+        """The point of all of it."""
+        from standard_quant_tools.agent.runtimes import resolve
+
+        # The registry lives on disk and outlives a pytest session, so a
+        # test that publishes must own its runs directory -- the convention
+        # the rest of the suite already follows.
+        monkeypatch.setenv("SQT_RUNS_DIR", str(tmp_path / "runs"))
+
+        frame = self._events(n=500)
+        path = tmp_path / "mbo.parquet"
+        frame.to_parquet(path, index=False)
+        registered = resolve("data").dispatch(
+            "register_external_dataset",
+            {
+                "path": str(path),
+                "kind": "order_event_panel",
+                "run_id": "l2",
+                "name": "mbo",
+            },
+        )
+        assert registered["ref"].startswith("sqt://order_event_panel/")
+        metrics = resolve("microstructure").dispatch(
+            "get_order_event_metrics", {"ref": registered["ref"]}
+        )
+        assert metrics["n_events"] == 500
+        assert set(metrics["counts_by_action"]) <= set("ACMFTR")
