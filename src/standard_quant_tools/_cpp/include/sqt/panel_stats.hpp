@@ -191,6 +191,46 @@ bool rank_by_date(const double* values,
 
 
 /**
+ * The null distribution of a mean cross-sectional IC under within-date
+ * shuffling.
+ *
+ * For each of `n_permutations` draws: shuffle `values` inside each date,
+ * correlate against `target` within each date, and average those
+ * correlations over the dates that carry at least two rows. `out_null` gets
+ * one mean IC per draw.
+ *
+ * WHY THIS IS ONE CALL. Done from Python the loop is 200 shuffles, 200
+ * correlation calls and 200 round trips through pandas; measured at 18.6 s
+ * for 200 draws over 504,000 rows, of which about 6 s was Series
+ * construction alone. Fusing removes that entirely and lets the ranking
+ * happen ONCE: shuffling values inside a date permutes their ranks, so for
+ * spearman the ranks can be shuffled directly rather than recomputed per
+ * draw. That is the saving, and it cannot be expressed in numpy -- an
+ * attempt measured 0.6x because it replaces an O(n) counting sort with an
+ * O(n log n) one.
+ *
+ * `date_codes[i]` is row i's date index; rows need not be sorted. Rows whose
+ * target or value is not finite are dropped once, before any shuffling.
+ *
+ * SEEDING. `seed` reproduces a run WITHIN this backend only. This is not a
+ * reimplementation of numpy's PCG64 bit stream, so the Python fallback
+ * produces different draws from the same seed -- the same contract
+ * `simulate_forward_paths` states, and for the same reason.
+ *
+ * @return false if a working buffer could not be allocated.
+ */
+bool permutation_null_ic(const double* target,
+                         const double* values,
+                         const long long* date_codes,
+                         std::size_t n_rows,
+                         std::size_t n_dates,
+                         std::size_t n_permutations,
+                         unsigned long long seed,
+                         bool spearman,
+                         double* out_null);
+
+
+/**
  * Average uniqueness of each row's label, computed within its entity.
  *
  * Overlapping forward returns make consecutive rows largely redundant:

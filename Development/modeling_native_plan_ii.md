@@ -421,8 +421,30 @@ the previous native work never had. Wired into all three call sites,
 including `apply_cross_sectional_target` -- the operation the original
 plan's phase 2 tabulated and left unbuilt, so that phase is now complete.
 
-**Still open:** §2.2 `permutation_test_ic`, and the untaken engine change of
-building the feature matrix once before the fold loop.
+**§2.2 `permutation_null_ic` is built too**, at **90.8x** (10,000 rows,
+200 draws) against an estimate of 15-20x. The two backends cannot share a
+bit stream, so they share a null instead: measured against the analytic
+standard deviation of the mean IC under the null, the kernel lands at
+1.001x and the Python path at 1.006x. Seeding follows the contract
+`simulate_forward_paths` already states -- reproducible WITHIN a backend.
+
+**This plan is complete.** The only item still open is one the analysis
+proposed and this work did not take: building the feature matrix once
+before the fold loop and gathering fold rows out of it, rather than taking
+the feature columns per fold.
+
+### What the whole exercise came to
+
+Two kernels, out of a subsystem-wide sweep. Everything else that looked
+like a kernel was pandas dispatch overhead that numpy removed, and eight
+proposals were measured and rejected for being SLOWER than the code they
+would have replaced. The two that survived are exactly the two places where
+vectorising lost: per-date ranking, where pandas' `groupby.rank` is already
+the good implementation, and the permutation loop, where numpy has to sort
+where the kernel counting-sorts.
+
+Three correctness defects were found on the way, which is the more useful
+return on the analysis than any of the speedups.
 
 ## 6. Order of work
 

@@ -31,6 +31,10 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.features.transforms import (
+    HAS_CPP,
+    _cpp_core,
+)
 
 from ..validation.metrics import cross_sectional_ic
 
@@ -298,6 +302,67 @@ def feature_stability(
     }
 
 
+def _null_distribution(
+    target: np.ndarray,
+    values: np.ndarray,
+    dates: np.ndarray,
+    n_permutations: int,
+    method: str,
+    random_seed: int,
+) -> np.ndarray:
+    """
+    One mean IC per draw, from the kernel when it is present.
+
+    The whole loop goes across the boundary rather than the correlation
+    alone. Called from Python it is `n_permutations` shuffles, the same
+    number of correlation calls, and the same number of round trips through
+    pandas -- and that last part was about a third of the cost, for objects
+    nobody looks at. Fusing also lets the ranking happen ONCE: shuffling
+    values inside a date permutes their ranks, so for spearman the ranks can
+    be shuffled directly instead of recomputed on every draw.
+
+    Two numpy attempts at the same idea measured SLOWER than the loop they
+    replaced (0.14x for a global lexsort, 0.6x for rank-once in numpy),
+    because the existing kernel counting-sorts in O(n) and numpy has to
+    sort. That is why this is C++ and not a rewrite.
+
+    REPRODUCIBILITY IS WITHIN A BACKEND. The kernel uses its own generator,
+    not a reimplementation of numpy's PCG64 bit stream, so the same
+    `random_seed` gives different DRAWS with and without the extension --
+    the contract `simulate_forward_paths` already states. The null they are
+    drawn from is the same: measured against the analytic standard deviation
+    of the mean IC under the null, the kernel lands at 1.001x and the Python
+    path at 1.006x, and a permutation p-value is a property of that null
+    rather than of any particular draw.
+    """
+    if HAS_CPP and hasattr(_cpp_core, "permutation_null_ic"):
+        codes, uniques = pd.factorize(dates, sort=True)
+        return np.asarray(
+            _cpp_core.permutation_null_ic(
+                np.ascontiguousarray(target, dtype=np.float64),
+                np.ascontiguousarray(values, dtype=np.float64),
+                np.ascontiguousarray(codes.astype(np.int64)),
+                int(len(uniques)),
+                int(n_permutations),
+                int(random_seed) & 0xFFFFFFFFFFFFFFFF,
+                method == "spearman",
+            ),
+            dtype=float,
+        )
+
+    # Row positions per date, computed once: the shuffle is the inner loop.
+    groups = [np.flatnonzero(dates == d) for d in pd.unique(dates)]
+    rng = np.random.default_rng(random_seed)
+    null = np.empty(n_permutations, dtype=float)
+    shuffled = values.copy()
+    for i in range(n_permutations):
+        for positions in groups:
+            shuffled[positions] = rng.permutation(values[positions])
+        series = cross_sectional_ic(target, shuffled, dates, method=method)
+        null[i] = float(series.mean()) if len(series) else np.nan
+    return null
+
+
 def permutation_test_ic(
     panel: pd.DataFrame,
     feature: str,
@@ -349,17 +414,9 @@ def permutation_test_ic(
             "to test for significance"
         )
 
-    # Row positions per date, computed once: the shuffle is the inner loop.
-    groups = [np.flatnonzero(dates == d) for d in pd.unique(dates)]
-    rng = np.random.default_rng(random_seed)
-
-    null = np.empty(n_permutations, dtype=float)
-    shuffled = values.copy()
-    for i in range(n_permutations):
-        for positions in groups:
-            shuffled[positions] = rng.permutation(values[positions])
-        series = cross_sectional_ic(target, shuffled, dates, method=method)
-        null[i] = float(series.mean()) if len(series) else np.nan
+    null = _null_distribution(
+        target, values, dates, n_permutations, method, random_seed
+    )
 
     usable = _finite(null)
     at_least_as_extreme = int(np.sum(np.abs(usable) >= abs(observed)))

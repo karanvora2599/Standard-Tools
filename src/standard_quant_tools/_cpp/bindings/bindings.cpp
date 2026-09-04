@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -2218,6 +2219,63 @@ PYBIND11_MODULE(_sqt_core, m) {
         "each date, so several models' predictions rank in one call. NaN is\n"
         "skipped by the ranking and preserved in the output, and does not\n"
         "shift the ranks of the values that are present.");
+    m.def(
+        "permutation_null_ic",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> target,
+           py::array_t<double, py::array::c_style | py::array::forcecast> values,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+           py::ssize_t n_dates,
+           py::ssize_t n_permutations,
+           std::uint64_t seed,
+           bool spearman) -> py::array_t<double>
+        {
+            require_1d(target, "target");
+            require_1d(values, "values");
+            require_1d(date_codes, "date_codes");
+            if (target.size() != values.size() ||
+                target.size() != date_codes.size())
+                throw std::invalid_argument(
+                    "target, values and date_codes must be the same length");
+            if (n_dates < 0)
+                throw std::invalid_argument("n_dates must be >= 0");
+            if (n_permutations < 0)
+                throw std::invalid_argument("n_permutations must be >= 0");
+
+            py::array_t<double> out(n_permutations);
+            const double* t_ptr = target.data();
+            const double* v_ptr = values.data();
+            const long long* codes = date_codes.data();
+            const auto n_rows = static_cast<std::size_t>(target.size());
+            double* out_ptr = out.mutable_data();
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::permutation_null_ic(
+                    t_ptr, v_ptr, codes, n_rows,
+                    static_cast<std::size_t>(n_dates),
+                    static_cast<std::size_t>(n_permutations), seed, spearman,
+                    out_ptr);
+            }
+            if (!ok)
+                throw std::runtime_error(
+                    "permutation_null_ic: could not allocate a buffer");
+            return out;
+        },
+        py::arg("target"),
+        py::arg("values"),
+        py::arg("date_codes"),
+        py::arg("n_dates"),
+        py::arg("n_permutations"),
+        py::arg("seed"),
+        py::arg("spearman"),
+        "Null distribution of a mean cross-sectional IC under within-date\n"
+        "shuffling. One entry per draw: shuffle values inside each date,\n"
+        "correlate against target within each date, average over the dates\n"
+        "carrying at least two rows. For spearman the ranks are taken ONCE\n"
+        "and shuffled directly, since permuting values permutes their\n"
+        "ranks. `seed` reproduces a run within THIS backend only -- it is\n"
+        "not numpy's PCG64 stream, the same contract\n"
+        "simulate_forward_paths states.");
     m.def(
         "label_uniqueness",
         [](py::array_t<long long, py::array::c_style | py::array::forcecast> dates,

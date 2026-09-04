@@ -22,6 +22,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.modeling.analysis import feature_stability
+from standard_quant_tools.modeling.analysis.feature_stability import (
+    _null_distribution,
+)
 from standard_quant_tools.modeling.features import transforms
 from standard_quant_tools.modeling.features.transforms import (
     cross_sectional_counts,
@@ -557,3 +561,113 @@ class TestRankWithinDate:
         )
         assert kernel_ms < pandas_ms
         assert speedup >= 3.0, f"expected >= 3x, got {speedup:.1f}x"
+
+
+class TestPermutationNull:
+    """
+    The kernel the two backends CANNOT agree bit for bit, and why that is
+    still correct.
+
+    A permutation test is a Monte Carlo estimate. The kernel uses its own
+    generator rather than a reimplementation of numpy's PCG64 stream, so the
+    same seed produces different DRAWS with and without the extension --
+    exactly the contract `simulate_forward_paths` states. What must agree is
+    the null they are drawn FROM, so that is what these assert, against an
+    analytic value rather than against each other.
+    """
+
+    N_DATES = 200
+    PER_DATE = 50
+
+    @classmethod
+    def _noise_panel(cls, seed=0):
+        rng = np.random.default_rng(seed)
+        dates = np.repeat(np.arange(cls.N_DATES), cls.PER_DATE)
+        n = dates.size
+        # Pure noise: the null hypothesis is TRUE here, so the null
+        # distribution is the whole answer.
+        return dates, rng.normal(0, 1, n), rng.normal(0, 1, n)
+
+    @classmethod
+    def _analytic_sd(cls):
+        # Each date's spearman IC has variance about 1/(m-1); the mean of
+        # n_dates independent ones has that over n_dates.
+        return np.sqrt(1.0 / ((cls.PER_DATE - 1) * cls.N_DATES))
+
+    def test_the_null_has_the_width_theory_says(self) -> None:
+        dates, values, target = self._noise_panel()
+        null = _null_distribution(target, values, dates, 4000, "spearman", 1)
+        assert abs(null.mean()) < 3 * self._analytic_sd()
+        # A null that is too NARROW is the dangerous direction: it makes
+        # ordinary noise look significant.
+        assert 0.9 < null.std() / self._analytic_sd() < 1.1
+
+    def test_the_python_fallback_has_the_same_width(self, monkeypatch) -> None:
+        dates, values, target = self._noise_panel()
+        monkeypatch.setattr(feature_stability, "HAS_CPP", False)
+        null = _null_distribution(target, values, dates, 600, "spearman", 1)
+        monkeypatch.undo()
+        assert 0.85 < null.std() / self._analytic_sd() < 1.15
+
+    def test_a_seed_reproduces_a_run_within_the_backend(self) -> None:
+        dates, values, target = self._noise_panel()
+        first = _null_distribution(target, values, dates, 100, "spearman", 5)
+        second = _null_distribution(target, values, dates, 100, "spearman", 5)
+        assert np.array_equal(first, second)
+
+    def test_a_different_seed_draws_differently(self) -> None:
+        dates, values, target = self._noise_panel()
+        assert not np.array_equal(
+            _null_distribution(target, values, dates, 100, "spearman", 5),
+            _null_distribution(target, values, dates, 100, "spearman", 6),
+        )
+
+    def test_both_backends_reject_a_real_signal(self, monkeypatch) -> None:
+        """The p-value is what callers act on, so agree on THAT."""
+        rng = np.random.default_rng(3)
+        dates = np.repeat(np.arange(self.N_DATES), self.PER_DATE)
+        values = rng.normal(0, 1, dates.size)
+        target = 0.25 * values + rng.normal(0, 1, dates.size)
+        observed = float(
+            cross_sectional_ic(target, values, dates, method="spearman").mean()
+        )
+
+        def _p(null):
+            return (np.sum(np.abs(null) >= abs(observed)) + 1) / (null.size + 1)
+
+        native = _p(_null_distribution(target, values, dates, 400, "spearman", 2))
+        monkeypatch.setattr(feature_stability, "HAS_CPP", False)
+        python = _p(_null_distribution(target, values, dates, 400, "spearman", 2))
+        monkeypatch.undo()
+        assert native == python  # both bottom out at 1/(n+1) on a real signal
+        assert native < 0.01
+
+    def test_pearson_is_wired_through_too(self) -> None:
+        dates, values, target = self._noise_panel()
+        null = _null_distribution(target, values, dates, 500, "pearson", 1)
+        assert np.isfinite(null).all()
+        assert 0.85 < null.std() / self._analytic_sd() < 1.15
+
+    @pytest.mark.benchmark
+    def test_the_kernel_beats_the_python_loop(self, monkeypatch) -> None:
+        dates, values, target = self._noise_panel()
+        reps = 200
+
+        start = time.perf_counter()
+        _null_distribution(target, values, dates, reps, "spearman", 1)
+        kernel_s = time.perf_counter() - start
+
+        monkeypatch.setattr(feature_stability, "HAS_CPP", False)
+        start = time.perf_counter()
+        _null_distribution(target, values, dates, reps, "spearman", 1)
+        python_s = time.perf_counter() - start
+        monkeypatch.undo()
+
+        speedup = python_s / kernel_s
+        print(
+            f"\n  permutation_null_ic {dates.size:,} rows x {reps} draws: "
+            f"python {python_s:6.2f} s  kernel {kernel_s:5.3f} s  "
+            f"speedup {speedup:.1f}x"
+        )
+        assert kernel_s < python_s
+        assert speedup >= 5.0, f"expected >= 5x, got {speedup:.1f}x"

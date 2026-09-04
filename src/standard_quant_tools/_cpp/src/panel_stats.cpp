@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <new>
 #include <vector>
@@ -686,6 +687,166 @@ bool rank_by_date(const double* values,
                 out[rows[i] * n_cols + c] = ranks[i];
             }
         }
+    }
+
+    return !alloc_error;
+}
+
+
+namespace {
+
+/**
+ * splitmix64. Small, fast, and -- the point here -- identical on every
+ * platform, so a seed reproduces a run anywhere this builds. `std::shuffle`
+ * with a library distribution would not: the distribution's consumption of
+ * the engine is implementation-defined.
+ */
+inline std::uint64_t splitmix64(std::uint64_t& state) {
+    std::uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/**
+ * Unbiased index in [0, bound), by rejection.
+ *
+ * `r % bound` alone is biased whenever bound does not divide 2^64: the low
+ * residues get one extra representative each. Discarding the first
+ * `2^64 mod bound` outputs removes exactly that surplus. A Fisher-Yates
+ * built on a biased index does not produce a uniform permutation, and the
+ * whole point of this kernel is the shape of a null distribution.
+ */
+inline std::uint64_t bounded(std::uint64_t& state, std::uint64_t bound) {
+    if (bound <= 1) return 0;
+    const std::uint64_t threshold = (~bound + 1ULL) % bound;  // 2^64 mod bound
+    std::uint64_t r;
+    do {
+        r = splitmix64(state);
+    } while (r < threshold);
+    return r % bound;
+}
+
+}  // namespace
+
+bool permutation_null_ic(const double* target,
+                         const double* values,
+                         const long long* date_codes,
+                         std::size_t n_rows,
+                         std::size_t n_dates,
+                         std::size_t n_permutations,
+                         unsigned long long seed,
+                         bool spearman,
+                         double* out_null) {
+    if (out_null == nullptr || n_permutations == 0) return true;
+    for (std::size_t p = 0; p < n_permutations; ++p) {
+        out_null[p] = std::numeric_limits<double>::quiet_NaN();
+    }
+    if (n_rows == 0 || target == nullptr || values == nullptr ||
+        date_codes == nullptr)
+        return true;
+
+    const auto keep_all = [](std::size_t) { return true; };
+    std::vector<std::size_t> offsets, counts, order;
+    if (!bucket_by_date(date_codes, n_rows, n_dates, keep_all, offsets, counts,
+                        order))
+        return false;
+
+    // Per-date blocks, built ONCE: the target side never changes, and the
+    // value side is only ever permuted, so for spearman both are ranked
+    // here and never again.
+    std::vector<std::vector<double>> date_target, date_value;
+    try {
+        date_target.reserve(n_dates);
+        date_value.reserve(n_dates);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+
+    std::vector<double> xs, ys, rx, ry;
+    std::vector<std::size_t> scratch;
+    for (std::size_t d = 0; d < n_dates; ++d) {
+        const std::size_t n = counts[d];
+        const std::size_t base = offsets[d];
+        std::vector<double> tgt, val;
+        // A date carrying fewer than two ROWS is not emitted at all, which
+        // is the rule cross_sectional_ic applies before it looks at any
+        // value. Kept identical so this reports the same dates.
+        if (n >= 2) {
+            try {
+                tgt.reserve(n);
+                val.reserve(n);
+            } catch (const std::bad_alloc&) {
+                return false;
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t row = order[base + i];
+                const double a = target[row];
+                const double b = values[row];
+                if (std::isfinite(a) && std::isfinite(b)) {
+                    tgt.push_back(a);
+                    val.push_back(b);
+                }
+            }
+            if (spearman && tgt.size() >= 2) {
+                const std::size_t m = tgt.size();
+                rx.assign(m, 0.0);
+                ry.assign(m, 0.0);
+                average_ranks(tgt.data(), m, scratch, rx.data(), false);
+                average_ranks(val.data(), m, scratch, ry.data(), false);
+                tgt.assign(rx.begin(), rx.end());
+                val.assign(ry.begin(), ry.end());
+            }
+        }
+        try {
+            date_target.push_back(std::move(tgt));
+            date_value.push_back(std::move(val));
+        } catch (const std::bad_alloc&) {
+            return false;
+        }
+    }
+
+    bool alloc_error = false;
+    #pragma omp parallel for schedule(static) reduction(|| : alloc_error) \
+        if (sqt::omp_policy::worth_parallel(n_permutations, n_rows)) \
+        num_threads(sqt::omp_policy::max_threads() > 0 \
+                        ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    for (std::ptrdiff_t perm = 0; perm < static_cast<std::ptrdiff_t>(n_permutations);
+         ++perm) {
+        // Each draw seeds from the run seed and its own index, so the result
+        // does not depend on how the draws were scheduled across threads.
+        std::uint64_t state = seed ^ (0x9E3779B97F4A7C15ULL *
+                                      (static_cast<std::uint64_t>(perm) + 1));
+        std::vector<double> shuffled;
+        double total = 0.0;
+        std::size_t emitted = 0;
+        for (std::size_t d = 0; d < n_dates; ++d) {
+            if (counts[d] < 2) continue;
+            const std::vector<double>& tgt = date_target[d];
+            const std::vector<double>& val = date_value[d];
+            const std::size_t m = val.size();
+            double ic = 0.0;
+            if (m >= 2) {
+                try {
+                    shuffled.assign(val.begin(), val.end());
+                } catch (const std::bad_alloc&) {
+                    alloc_error = true;
+                    continue;
+                }
+                for (std::size_t i = m - 1; i > 0; --i) {
+                    const std::uint64_t j = bounded(state, static_cast<std::uint64_t>(i) + 1);
+                    std::swap(shuffled[i], shuffled[static_cast<std::size_t>(j)]);
+                }
+                ic = centered_correlation(tgt.data(), shuffled.data(), m);
+            }
+            if (std::isfinite(ic)) {
+                total += ic;
+                ++emitted;
+            }
+        }
+        out_null[static_cast<std::size_t>(perm)] =
+            emitted ? total / static_cast<double>(emitted)
+                    : std::numeric_limits<double>::quiet_NaN();
     }
 
     return !alloc_error;

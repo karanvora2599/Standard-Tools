@@ -355,6 +355,75 @@ static void test_rank_empty_panel_is_a_no_op() {
     expect_near(out[0], 7.0, 0.0, "nothing was written");
 }
 
+
+// -- permutation_null_ic ------------------------------------------------------
+
+static void test_permutation_is_reproducible_from_its_seed() {
+    std::printf("test_permutation_is_reproducible_from_its_seed\n");
+    const double target[] = {1.0, 2.0, 3.0, 4.0, 1.0, 4.0, 2.0, 3.0};
+    const double values[] = {4.0, 3.0, 2.0, 1.0, 2.0, 1.0, 4.0, 3.0};
+    const long long codes[] = {0, 0, 0, 0, 1, 1, 1, 1};
+    double a[16] = {0}, b[16] = {0};
+    expect(sqt::permutation_null_ic(target, values, codes, 8, 2, 16, 99ULL, true, a),
+           "first run succeeds");
+    expect(sqt::permutation_null_ic(target, values, codes, 8, 2, 16, 99ULL, true, b),
+           "second run succeeds");
+    bool identical = true;
+    for (int i = 0; i < 16; ++i) if (a[i] != b[i]) identical = false;
+    expect(identical, "the same seed reproduces the same draws");
+}
+
+static void test_permutation_seeds_differ() {
+    std::printf("test_permutation_seeds_differ\n");
+    const double target[] = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+    const double values[] = {6.0, 5.0, 4.0, 3.0, 2.0, 1.0};
+    const long long codes[] = {0, 0, 0, 0, 0, 0};
+    double a[32] = {0}, b[32] = {0};
+    sqt::permutation_null_ic(target, values, codes, 6, 1, 32, 1ULL, true, a);
+    sqt::permutation_null_ic(target, values, codes, 6, 1, 32, 2ULL, true, b);
+    bool any_difference = false;
+    for (int i = 0; i < 32; ++i) if (a[i] != b[i]) any_difference = true;
+    expect(any_difference, "a different seed draws differently");
+}
+
+static void test_permutation_stays_in_range() {
+    std::printf("test_permutation_stays_in_range\n");
+    const double target[] = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
+    const double values[] = {2.0, 8.0, 1.0, 5.0, 3.0, 7.0, 4.0, 6.0};
+    const long long codes[] = {0, 0, 0, 0, 1, 1, 1, 1};
+    double out[64] = {0};
+    expect(sqt::permutation_null_ic(target, values, codes, 8, 2, 64, 7ULL, true, out),
+           "success");
+    bool in_range = true;
+    for (int i = 0; i < 64; ++i) {
+        if (!(out[i] >= -1.0000001 && out[i] <= 1.0000001)) in_range = false;
+    }
+    expect(in_range, "a mean of correlations stays inside [-1, 1]");
+}
+
+static void test_permutation_skips_single_row_dates() {
+    std::printf("test_permutation_skips_single_row_dates\n");
+    // Date 1 has one row and contributes nothing; date 0 has three.
+    const double target[] = {1.0, 2.0, 3.0, 9.0};
+    const double values[] = {3.0, 1.0, 2.0, 9.0};
+    const long long codes[] = {0, 0, 0, 1};
+    double out[8] = {0};
+    expect(sqt::permutation_null_ic(target, values, codes, 4, 2, 8, 3ULL, true, out),
+           "success");
+    bool finite = true;
+    for (int i = 0; i < 8; ++i) if (!std::isfinite(out[i])) finite = false;
+    expect(finite, "a one-row date does not poison the mean");
+}
+
+static void test_permutation_zero_draws_is_a_no_op() {
+    std::printf("test_permutation_zero_draws_is_a_no_op\n");
+    double out[1] = {5.0};
+    expect(sqt::permutation_null_ic(nullptr, nullptr, nullptr, 0, 0, 0, 1ULL,
+                                    true, out),
+           "zero draws is success");
+    expect_near(out[0], 5.0, 0.0, "nothing was written");
+}
+
 int main() {
     std::printf("=== sqt panel_stats tests ===\n");
     test_quantile_is_linearly_interpolated();
@@ -377,6 +446,11 @@ int main() {
     test_rank_does_not_need_sorted_dates();
     test_rank_all_nan_date_is_all_nan();
     test_rank_empty_panel_is_a_no_op();
+    test_permutation_is_reproducible_from_its_seed();
+    test_permutation_seeds_differ();
+    test_permutation_stays_in_range();
+    test_permutation_skips_single_row_dates();
+    test_permutation_zero_draws_is_a_no_op();
 
     std::printf("\n%d assertion(s), %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;
