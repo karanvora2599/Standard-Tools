@@ -404,8 +404,19 @@ NOT to `check_leakage`: that tool's own note says the coverage figures
 "confirm the panel is the one that was built", which is only true because
 the hash was checked. It was not a free fix on both sites.
 
-**Still open:** step 3's `network.py` refit loop (3-6x) and both kernels
-(§2.1 `rank_by_date`, §2.2 `permutation_test_ic`).
+`network.py` is done too: `avg_correlation` 5.605 -> 2.164 s and
+`mst_degree` 6.105 -> 2.549 s at 2520 x 500, checksums identical. The
+analysis reported the masked-correlation replacement as agreeing to
+5.55e-16; on price-level data it returns **inf** and disagrees on which
+pairs are NaN, because `E[x^2] - E[x]^2` cancels into a negative variance.
+Centring per column fixes the inf and every NaN pattern and still leaves
+1e-8 at that scale, which is the input's own precision rather than anyone's
+bug -- so the fast path DECLINES when a column's mean exceeds a thousand
+times its spread and the caller falls back to pandas.
+
+**Still open:** both kernels (§2.1 `rank_by_date`, §2.2
+`permutation_test_ic`), and the untaken engine change of building the
+feature matrix once before the fold loop.
 
 ## 6. Order of work
 

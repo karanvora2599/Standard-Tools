@@ -73,12 +73,79 @@ def _validate(window: int, refit_every: int, feature_id: str) -> None:
         )
 
 
+#: Above this ratio of |column mean| to column standard deviation, centring
+#: a column throws away digits the input never carried -- `1e8 + x` stores
+#: `x` to about 1e-8 absolute, so no algorithm recovers it. The fast path
+#: below is exact well inside this and disagreed with pandas at 1e-8 beyond
+#: it, so it defers rather than differ. A returns panel, which is what this
+#: module is given, sits at a ratio near zero.
+_MAX_MEAN_TO_STD = 1e3
+
+
+def _pairwise_correlation(frame: pd.DataFrame, min_periods: int):
+    """
+    `DataFrame.corr(min_periods=...)` as four matrix products.
+
+    `min_periods` forces pandas down its pairwise `nancorr` path, which
+    walks column pairs in a Python-level loop: 188 ms for 1,000 entities
+    over a 126-bar window, against 62 ms here for the same numbers and the
+    same NaN pattern.
+
+    Each column is centred on its own mean before the products. Correlation
+    is invariant to a per-column shift, and without it the identity
+    `E[x^2] - E[x]^2` cancels: on a panel of price levels around 1e8 the
+    variance came out NEGATIVE and the result was `inf`.
+
+    Returns None when the panel is too ill-conditioned for that centring to
+    be exact, so the caller falls back to pandas rather than quietly
+    returning a different number.
+    """
+    values = frame.to_numpy(dtype=np.float64)
+    present = np.isfinite(values)
+    counts = present.sum(axis=0)
+    if not counts.any():
+        return None
+
+    filled = np.where(present, values, 0.0)
+    column_mean = filled.sum(axis=0) / np.where(counts > 0, counts, 1)
+    spread = np.sqrt(
+        np.maximum(
+            (np.where(present, values * values, 0.0)).sum(axis=0)
+            / np.where(counts > 0, counts, 1)
+            - column_mean**2,
+            0.0,
+        )
+    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        conditioning = np.abs(column_mean) / np.where(spread > 0, spread, np.inf)
+    if np.nanmax(conditioning, initial=0.0) > _MAX_MEAN_TO_STD:
+        return None
+
+    centred = np.where(present, values - column_mean, 0.0)
+    mask = present.astype(np.float64)
+    n_pairs = mask.T @ mask
+    sum_x = centred.T @ mask
+    sum_y = sum_x.T
+    sum_xy = centred.T @ centred
+    sum_xx = (centred * centred).T @ mask
+    sum_yy = sum_xx.T
+    with np.errstate(invalid="ignore", divide="ignore"):
+        covariance = sum_xy / n_pairs - (sum_x / n_pairs) * (sum_y / n_pairs)
+        var_x = np.maximum(sum_xx / n_pairs - (sum_x / n_pairs) ** 2, 0.0)
+        var_y = np.maximum(sum_yy / n_pairs - (sum_y / n_pairs) ** 2, 0.0)
+        out = covariance / np.sqrt(var_x * var_y)
+    out[n_pairs < min_periods] = np.nan
+    return pd.DataFrame(out, index=frame.columns, columns=frame.columns)
+
+
 def _correlation(window_slice: pd.DataFrame):
     """Correlation over one window, or None if it is not estimable."""
     usable = window_slice.dropna(axis=1, how="all")
     if usable.shape[1] < MIN_ENTITIES:
         return None
-    matrix = usable.corr(min_periods=MIN_WINDOW)
+    matrix = _pairwise_correlation(usable, MIN_WINDOW)
+    if matrix is None:
+        matrix = usable.corr(min_periods=MIN_WINDOW)
     if matrix.isna().all(axis=None):
         return None
     return matrix

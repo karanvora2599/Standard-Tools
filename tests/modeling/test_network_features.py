@@ -25,6 +25,8 @@ import pytest
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.features.network import (
     MIN_WINDOW,
+    _correlation,
+    _pairwise_correlation,
     _prim_degrees,
     _avg_correlation,
     _avg_correlation_at,
@@ -305,3 +307,65 @@ class TestAZeroDistanceEdgeIsStillAnEdge:
         )
         # Nodes 0 and 1 are at distance 0, so that edge must be in the tree.
         assert _prim_degrees(distance).sum() == 4.0
+
+
+class TestTheCorrelationFastPathAgreesOrDeclines:
+    """
+    `DataFrame.corr(min_periods=...)` walks column pairs in a Python-level
+    loop. The replacement is four matrix products -- but the identity it
+    uses, `E[x^2] - E[x]^2`, cancels badly on data whose mean dwarfs its
+    spread, so it declines those rather than returning a different number.
+    """
+
+    @staticmethod
+    def _panel(kind):
+        rng = np.random.default_rng(90)
+        base = rng.normal(0, 0.01, (300, 30))
+        columns = [f"c{i}" for i in range(30)]
+        if kind == "nan":
+            base[rng.random(base.shape) < 0.2] = np.nan
+        elif kind == "warmup":
+            for j in range(30):
+                base[: j * 9, j] = np.nan
+        elif kind == "constant":
+            base[:, 3] = 7.0
+        elif kind == "scales":
+            base = base * np.logspace(-6, 6, 30)
+        elif kind == "levels":
+            base = base + 1e8
+        elif kind == "tiny":
+            base = base * 1e-9 + 5.0
+        return pd.DataFrame(base, columns=columns).dropna(axis=1, how="all")
+
+    @pytest.mark.parametrize("kind", ["returns", "nan", "warmup", "constant", "scales"])
+    def test_it_matches_pandas_where_it_applies(self, kind) -> None:
+        frame = self._panel(kind)
+        fast = _pairwise_correlation(frame, MIN_WINDOW)
+        assert fast is not None, "this panel is well conditioned"
+        reference = frame.corr(min_periods=MIN_WINDOW).to_numpy()
+        got = fast.to_numpy()
+        # The NaN pattern is part of the answer: `min_periods` decides which
+        # pairs are reported at all.
+        assert np.array_equal(np.isnan(reference), np.isnan(got))
+        both = ~np.isnan(reference)
+        assert np.allclose(reference[both], got[both], atol=1e-12, rtol=0)
+
+    @pytest.mark.parametrize("kind", ["levels", "tiny"])
+    def test_it_declines_when_centring_would_lose_digits(self, kind) -> None:
+        """
+        `1e8 + x` stores x to about 1e-8 absolute, so the centred values
+        carry only half the digits they appear to. Measured against pandas
+        the fast path differed at 1e-8 there, so it defers instead.
+        """
+        assert _pairwise_correlation(self._panel(kind), MIN_WINDOW) is None
+
+    def test_the_caller_still_returns_a_matrix_when_it_declines(self) -> None:
+        """Declining is invisible to the caller apart from the time taken."""
+        frame = self._panel("levels")
+        matrix = _correlation(frame)
+        assert matrix is not None
+        assert np.allclose(
+            matrix.to_numpy(),
+            frame.corr(min_periods=MIN_WINDOW).to_numpy(),
+            equal_nan=True,
+        )
