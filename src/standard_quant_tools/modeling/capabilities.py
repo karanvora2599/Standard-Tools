@@ -144,7 +144,19 @@ def modeling_capabilities() -> Dict[str, Any]:
             "cryptography": _importable("cryptography"),
             "cvxpy": _importable("cvxpy"),
         },
+        # A SIBLING, not an entry in the map above. `optional_dependencies`
+        # is name -> bool and callers check it that way; nesting a dict in
+        # it broke that contract, which two tests caught immediately.
+        "native_extension_detail": _native_detail(),
     }
+
+
+#: How many symbols a current `_sqt_core` exports. Compared against what
+#: actually loaded, so an extension built before the newest kernels reports
+#: itself as stale rather than being discovered as an unexplained slowdown.
+#: Update this when a kernel is added -- `tests/cpp_bindings` asserts the two
+#: agree, so it cannot drift quietly.
+_EXPECTED_NATIVE_EXPORTS = 42
 
 
 def _importable(module: str) -> bool:
@@ -172,3 +184,44 @@ def _native_available() -> bool:
         return bool(transforms.HAS_CPP)
     except Exception:  # noqa: BLE001 - absence is the answer, not an error
         return False
+
+
+def _native_detail() -> Dict[str, Any]:
+    """What the loaded extension actually exports.
+
+    A STALE BUILD IS INDISTINGUISHABLE FROM AN ABSENT ONE without this. Every
+    kernel is guarded by `hasattr(_cpp_core, "<name>")` at import, which is
+    the right design -- a missing symbol falls back silently instead of
+    raising -- but it means an extension built before the last two kernels
+    were added loads cleanly, reports available, and runs the Python path for
+    whatever it does not carry. Observed here: a .pyd built for 3.11 exported
+    40 of the 42 symbols and cost about 18x on the two it lacked, with
+    nothing saying so.
+
+    So the count and the file come back too. An agent asking why a run is
+    slow can compare `exports` against `expected_exports` instead of
+    inferring it from a stopwatch.
+    """
+    detail: Dict[str, Any] = {
+        "available": _native_available(),
+        "exports": 0,
+        "expected_exports": _EXPECTED_NATIVE_EXPORTS,
+        "stale": False,
+        "path": None,
+    }
+    try:
+        from standard_quant_tools import _sqt_core  # type: ignore[attr-defined]
+    except ImportError:
+        return detail
+
+    names = [n for n in dir(_sqt_core) if not n.startswith("_")]
+    detail["exports"] = len(names)
+    detail["path"] = getattr(_sqt_core, "__file__", None)
+    detail["stale"] = len(names) < _EXPECTED_NATIVE_EXPORTS
+    if detail["stale"]:
+        detail["note"] = (
+            f"the loaded extension exports {len(names)} symbols where "
+            f"{_EXPECTED_NATIVE_EXPORTS} are expected, so some kernels are "
+            "falling back to Python silently. Rebuild it."
+        )
+    return detail

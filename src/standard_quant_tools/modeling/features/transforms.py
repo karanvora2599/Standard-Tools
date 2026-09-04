@@ -58,21 +58,17 @@ def winsorize(series: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd
     return series.clip(lower=lo, upper=hi)
 
 
-def zscore_time_series(series: pd.Series) -> pd.Series:
-    """Z-score `series` against its own mean/std (one entity across dates).
-
-    The cross-sectional counterpart is `standardize_cross_sectional`, which
-    works on a whole frame at a time rather than a column. A
-    `zscore_cross_sectional` used to sit here as well, with zero callers;
-    `standardize_cross_sectional` was built ON it and superseded it, and it
-    was left behind disagreeing with its own successor -- NaN for a
-    constant cross-section where the successor gives 0.0. Deleted rather
-    than reconciled: it was the predecessor, not an alternative.
-    """
-    mean, std = series.mean(), series.std()
-    if not std or pd.isna(std):
-        return series * 0.0
-    return (series - mean) / std
+# `zscore_time_series` and `zscore_cross_sectional` both stood here and both
+# are gone. The second was the predecessor `standardize_cross_sectional` was
+# built ON, left behind disagreeing with its own successor -- NaN for a
+# constant cross-section where the successor gives 0.0. The first survived
+# only because that one's docstring named it by contrast; with the contrast
+# deleted it had no reference in the repo at all, no test and no mention in
+# any document.
+#
+# The cross-sectional work lives in `standardize_cross_sectional`, which
+# takes a whole frame rather than a column and carries the sigma clipping
+# and the NaN rule that make it correct on a real panel.
 
 
 def fit_preprocessing(train: pd.DataFrame) -> Dict[str, Dict[str, float]]:

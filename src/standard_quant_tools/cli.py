@@ -64,7 +64,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from standard_quant_tools import audit
 
@@ -137,11 +137,23 @@ def _replay_exit_code(result: audit.ReplayResult) -> int:
     return 0
 
 
-def cmd_replay(request_id: str, audit_dir: Optional[Path] = None) -> str:
-    """Re-run the recorded call via audit.verify_replay() and format the result."""
+def _replay(request_id: str, audit_dir: Optional[Path] = None) -> Tuple[str, int]:
+    """Re-run a recorded call: the formatted report and the exit code.
+
+    Both, from one place. `main` used to repeat these three lines inline
+    because `cmd_replay` returns only the text and the CLI also needs the
+    code -- so the function with the test and the code that actually ran
+    were two copies, and a change to either would have left the test
+    passing on a path the CLI does not take.
+    """
     record = find_record(request_id, audit_dir)
     result = audit.verify_replay(record)
-    return _format_replay(result)
+    return _format_replay(result), _replay_exit_code(result)
+
+
+def cmd_replay(request_id: str, audit_dir: Optional[Path] = None) -> str:
+    """Re-run the recorded call via audit.verify_replay() and format the result."""
+    return _replay(request_id, audit_dir)[0]
 
 
 def cmd_compare(
@@ -371,10 +383,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         if args.command == "replay":
-            record = find_record(args.request_id, None)
-            result = audit.verify_replay(record)
-            print(_format_replay(result))
-            return _replay_exit_code(result)
+            report, exit_code = _replay(args.request_id, None)
+            print(report)
+            return exit_code
         elif args.command == "compare":
             print(cmd_compare(args.request_id_a, args.request_id_b))
         elif args.command == "report":
