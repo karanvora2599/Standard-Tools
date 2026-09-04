@@ -276,6 +276,85 @@ static void test_zero_rows_with_columns() {
     expect_near(fitted.stdev[0], 1.0, 0.0, "zero rows -> std 1.0");
 }
 
+
+// -- rank_by_date -------------------------------------------------------------
+
+static void test_rank_is_one_based_and_averages_ties() {
+    std::printf("test_rank_is_one_based_and_averages_ties\n");
+    // One date, four rows, one column: 5,5,5,9.
+    const double values[] = {5.0, 5.0, 5.0, 9.0};
+    const long long codes[] = {0, 0, 0, 0};
+    double out[4] = {0, 0, 0, 0};
+    const bool ok = sqt::rank_by_date(values, 4, 1, codes, 1, out);
+    expect(ok, "rank_by_date reports success");
+    // Ordinals 1,2,3 average to 2.0; the odd one out takes 4.
+    expect_near(out[0], 2.0, 0.0, "tied rows share the mean ordinal");
+    expect_near(out[1], 2.0, 0.0, "tied rows share the mean ordinal");
+    expect_near(out[2], 2.0, 0.0, "tied rows share the mean ordinal");
+    expect_near(out[3], 4.0, 0.0, "the untied row keeps its ordinal");
+}
+
+static void test_rank_skips_nan_and_preserves_it() {
+    std::printf("test_rank_skips_nan_and_preserves_it\n");
+    const double values[] = {10.0, kNaN, 30.0, 20.0};
+    const long long codes[] = {0, 0, 0, 0};
+    double out[4] = {0, 0, 0, 0};
+    expect(sqt::rank_by_date(values, 4, 1, codes, 1, out), "success");
+    expect(std::isnan(out[1]), "a missing value stays missing");
+    // The three present values rank 1..3 -- the absent one does not shift them.
+    expect_near(out[0], 1.0, 0.0, "present values rank among themselves");
+    expect_near(out[3], 2.0, 0.0, "present values rank among themselves");
+    expect_near(out[2], 3.0, 0.0, "present values rank among themselves");
+}
+
+static void test_rank_is_per_date_and_per_column() {
+    std::printf("test_rank_is_per_date_and_per_column\n");
+    // Two dates x two rows, two columns; row-major (n_rows, n_cols).
+    // date 0: col0 = 1,2   col1 = 9,8
+    // date 1: col0 = 5,4   col1 = 0,7
+    const double values[] = {1.0, 9.0, 2.0, 8.0, 5.0, 0.0, 4.0, 7.0};
+    const long long codes[] = {0, 0, 1, 1};
+    double out[8] = {0};
+    expect(sqt::rank_by_date(values, 4, 2, codes, 2, out), "success");
+    expect_near(out[0], 1.0, 0.0, "date 0 col 0");
+    expect_near(out[2], 2.0, 0.0, "date 0 col 0");
+    expect_near(out[1], 2.0, 0.0, "date 0 col 1 ranks independently");
+    expect_near(out[3], 1.0, 0.0, "date 0 col 1 ranks independently");
+    expect_near(out[4], 2.0, 0.0, "date 1 col 0");
+    expect_near(out[6], 1.0, 0.0, "date 1 col 0");
+    expect_near(out[5], 1.0, 0.0, "date 1 col 1");
+    expect_near(out[7], 2.0, 0.0, "date 1 col 1");
+}
+
+static void test_rank_does_not_need_sorted_dates() {
+    std::printf("test_rank_does_not_need_sorted_dates\n");
+    const double values[] = {1.0, 9.0, 2.0, 8.0};
+    const long long codes[] = {1, 0, 1, 0};
+    double out[4] = {0, 0, 0, 0};
+    expect(sqt::rank_by_date(values, 4, 1, codes, 2, out), "success");
+    expect_near(out[0], 1.0, 0.0, "interleaved dates rank within themselves");
+    expect_near(out[2], 2.0, 0.0, "interleaved dates rank within themselves");
+    expect_near(out[1], 2.0, 0.0, "interleaved dates rank within themselves");
+    expect_near(out[3], 1.0, 0.0, "interleaved dates rank within themselves");
+}
+
+static void test_rank_all_nan_date_is_all_nan() {
+    std::printf("test_rank_all_nan_date_is_all_nan\n");
+    const double values[] = {kNaN, kNaN};
+    const long long codes[] = {0, 0};
+    double out[2] = {0, 0};
+    expect(sqt::rank_by_date(values, 2, 1, codes, 1, out), "success");
+    expect(std::isnan(out[0]) && std::isnan(out[1]),
+           "a date with nothing present ranks nothing");
+}
+
+static void test_rank_empty_panel_is_a_no_op() {
+    std::printf("test_rank_empty_panel_is_a_no_op\n");
+    double out[1] = {7.0};
+    expect(sqt::rank_by_date(nullptr, 0, 1, nullptr, 0, out), "empty is success");
+    expect_near(out[0], 7.0, 0.0, "nothing was written");
+}
+
 int main() {
     std::printf("=== sqt panel_stats tests ===\n");
     test_quantile_is_linearly_interpolated();
@@ -292,6 +371,12 @@ int main() {
     test_apply_can_write_into_its_own_input();
     test_empty_panel_is_a_no_op();
     test_zero_rows_with_columns();
+    test_rank_is_one_based_and_averages_ties();
+    test_rank_skips_nan_and_preserves_it();
+    test_rank_is_per_date_and_per_column();
+    test_rank_does_not_need_sorted_dates();
+    test_rank_all_nan_date_is_all_nan();
+    test_rank_empty_panel_is_a_no_op();
 
     std::printf("\n%d assertion(s), %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;

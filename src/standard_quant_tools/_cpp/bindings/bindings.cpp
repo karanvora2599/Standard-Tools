@@ -2178,6 +2178,47 @@ PYBIND11_MODULE(_sqt_core, m) {
         "downstream. NaN inputs are skipped by the moments and preserved in\n"
         "the output.");
     m.def(
+        "rank_by_date",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> values,
+           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+           py::ssize_t n_dates) -> py::array_t<double>
+        {
+            auto buf = values.request();
+            if (buf.ndim != 2)
+                throw std::invalid_argument("values must be 2-D (n_rows, n_cols)");
+            if (date_codes.size() != buf.shape[0])
+                throw std::invalid_argument(
+                    "date_codes must have one entry per row of values");
+            if (n_dates < 0)
+                throw std::invalid_argument("n_dates must be >= 0");
+
+            const auto n_rows = static_cast<std::size_t>(buf.shape[0]);
+            const auto n_cols = static_cast<std::size_t>(buf.shape[1]);
+            py::array_t<double> out({buf.shape[0], buf.shape[1]});
+            const double* ptr = values.data();
+            const long long* codes = date_codes.data();
+            double* out_ptr = out.mutable_data();
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::rank_by_date(ptr, n_rows, n_cols, codes,
+                                       static_cast<std::size_t>(n_dates), out_ptr);
+            }
+            if (!ok)
+                throw std::runtime_error(
+                    "rank_by_date: could not allocate a buffer");
+            return out;
+        },
+        py::arg("values"),
+        py::arg("date_codes"),
+        py::arg("n_dates"),
+        "Average rank of every value within its own date's cross-section.\n\n"
+        "Ranks are 1-based and ties take the mean of the ordinals they span,\n"
+        "matching Series.rank(method='average'). Ranking is per COLUMN within\n"
+        "each date, so several models' predictions rank in one call. NaN is\n"
+        "skipped by the ranking and preserved in the output, and does not\n"
+        "shift the ranks of the values that are present.");
+    m.def(
         "label_uniqueness",
         [](py::array_t<long long, py::array::c_style | py::array::forcecast> dates,
            py::array_t<long long, py::array::c_style | py::array::forcecast> label_end,

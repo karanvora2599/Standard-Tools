@@ -17,6 +17,7 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from ..features.transforms import cross_sectional_counts, rank_within_date
 from ..specs import TARGET_KINDS, TargetSpec
 
 # Targets that cannot be computed from one entity's prices alone.
@@ -222,17 +223,26 @@ def apply_cross_sectional_target(
     grouped = out.groupby("date")[target_col]
     if spec.type == "forward_return_market_neutral":
         values = out[target_col] - grouped.transform("mean")
+        counts = grouped.transform("count")
     else:
         # rank -> [0, 1] by (rank - 1) / (n - 1), then centered on zero, so
         # the target is symmetric and scale-free regardless of how many
         # entities happen to be present that day.
-        ranks = grouped.rank(method="average")
-        counts = grouped.transform("count")
-        values = (ranks - 1.0) / (counts - 1.0) - 0.5
+        #
+        # Through the shared per-date ranking rather than `groupby.rank`.
+        # This is the operation `Development/modeling_native_plan.md` phase 2
+        # tabulated at 1.4 microseconds a row and then did not build; it is
+        # the same ranking the ensemble combiner and the feature report's
+        # turnover need, so all three now go through one kernel.
+        column = out[[target_col]]
+        dates = out["date"].to_numpy()
+        ranks = rank_within_date(column, dates)[target_col]
+        counts = cross_sectional_counts(column, dates)[target_col]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            values = (ranks - 1.0) / (counts - 1.0) - 0.5
         values = values.where(counts > 1)
 
-    single_entity = grouped.transform("count") <= 1
-    out[target_col] = values.where(~single_entity)
+    out[target_col] = values.where(counts > 1)
     return out
 
 

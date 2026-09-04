@@ -44,6 +44,10 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from ..features.transforms import (
+    cross_sectional_counts,
+    rank_within_date,
+)
 from ..validation.metrics import cross_sectional_ic, summarize_cross_sectional_ic
 
 logger = logging.getLogger(__name__)
@@ -178,11 +182,15 @@ def _rank_turnover(panel: pd.DataFrame, feature: str) -> float:
     frame = panel[["date", "entity", feature]].dropna()
     if frame.empty:
         return float("nan")
-    grouped = frame.groupby("date")[feature]
-    counts = grouped.transform("count")
+    # Through the shared per-date ranking, which the ensemble combiner and
+    # the cross-sectional rank target also use. Ranking within a date was
+    # written three times in this package before there was one of it.
+    column = frame[[feature]]
+    dates = frame["date"].to_numpy()
+    counts = cross_sectional_counts(column, dates)[feature]
     if (counts <= 1).all():
         return float("nan")
-    ranks = grouped.rank(method="average")
+    ranks = rank_within_date(column, dates)[feature]
     # (rank - 1) / (n - 1) maps to [0, 1]; a single-entity date has no
     # ordering to change and drops out.
     normalized = ((ranks - 1.0) / (counts - 1.0)).where(counts > 1)

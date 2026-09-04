@@ -164,6 +164,33 @@ bool standardize_by_date(const double* values,
 
 
 /**
+ * Average rank of every value within its own date's cross-section.
+ *
+ * `values` and `out` are row-major (n_rows, n_cols) and may alias.
+ * `date_codes[i]` is row i's date index; rows need not be sorted.
+ *
+ * Ranks are 1-based and ties take the mean of the ordinals they span --
+ * `Series.rank(method="average")`, which is what the callers here mean by
+ * a rank. Ranking is per COLUMN within each date, so a panel of several
+ * models' predictions is ranked in one call.
+ *
+ * NaN is skipped by the ranking and preserved in the output: a missing
+ * value has no position in an ordering, and giving it one would invent a
+ * view the model never expressed. Its presence does not shift the ranks of
+ * the values that ARE there -- a date with one name absent ranks the rest
+ * 1..n-1, exactly as pandas does.
+ *
+ * @return false if a working buffer could not be allocated.
+ */
+bool rank_by_date(const double* values,
+                  std::size_t n_rows,
+                  std::size_t n_cols,
+                  const long long* date_codes,
+                  std::size_t n_dates,
+                  double* out);
+
+
+/**
  * Average uniqueness of each row's label, computed within its entity.
  *
  * Overlapping forward returns make consecutive rows largely redundant:

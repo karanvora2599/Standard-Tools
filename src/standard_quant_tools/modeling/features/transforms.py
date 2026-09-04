@@ -142,6 +142,64 @@ def apply_preprocessing(
     return out
 
 
+def rank_within_date(frame: pd.DataFrame, dates: np.ndarray) -> pd.DataFrame:
+    """
+    Average rank of every value within its own date's cross-section.
+
+    `Series.rank(method="average")` per column per date: 1-based, ties take
+    the mean of the ordinals they span, NaN is skipped by the ranking and
+    preserved in the output. A missing name does not shift the ranks of the
+    names that are present.
+
+    This is the one place in the modelling layer where VECTORISATION LOST.
+    pandas' `groupby.rank` is already the good implementation -- a numpy
+    rewrite measured 395 ms against its 407 ms at three columns, and slower
+    at five -- so the only way past it was the kernel, which does the same
+    work in 22 ms. That is why this exists as a kernel and almost nothing
+    else in this layer does.
+
+    Three callers rank within a date and each had its own copy of the
+    pandas idiom: the ensemble combiner, the feature report's rank turnover,
+    and the cross-sectional rank target.
+    """
+    if frame.empty or frame.shape[1] == 0:
+        return frame.copy()
+
+    codes, uniques = pd.factorize(np.asarray(dates), sort=False)
+    if HAS_CPP and hasattr(_cpp_core, "rank_by_date"):
+        matrix = _native_matrix(frame)
+        if matrix is not None:
+            ranked = _cpp_core.rank_by_date(
+                matrix,
+                np.ascontiguousarray(codes.astype(np.int64)),
+                int(len(uniques)),
+            )
+            return pd.DataFrame(ranked, index=frame.index, columns=frame.columns)
+
+    grouped = frame.groupby(codes, sort=False)
+    return grouped.rank(method="average")
+
+
+def cross_sectional_counts(frame: pd.DataFrame, dates: np.ndarray) -> pd.DataFrame:
+    """
+    How many entities carried a value for each column on each date.
+
+    The companion to `rank_within_date`: a rank means nothing without the
+    size of the cross-section it was taken in, and every caller needs both.
+    """
+    codes, uniques = pd.factorize(np.asarray(dates), sort=False)
+    n_dates = int(len(uniques))
+    values = frame.to_numpy(dtype=np.float64)
+    present = ~np.isnan(values)
+    counts = np.empty_like(values)
+    for column in range(values.shape[1]):
+        per_date = np.bincount(codes[present[:, column]], minlength=n_dates).astype(
+            np.float64
+        )
+        counts[:, column] = per_date[codes]
+    return pd.DataFrame(counts, index=frame.index, columns=frame.columns)
+
+
 def fit_and_apply_preprocessing(
     train: pd.DataFrame, test: pd.DataFrame
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":

@@ -1,3 +1,6 @@
+import gc
+import time
+
 """
 The native correlation kernel must be invisible except in the clock.
 
@@ -20,6 +23,10 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.modeling.features import transforms
+from standard_quant_tools.modeling.features.transforms import (
+    cross_sectional_counts,
+    rank_within_date,
+)
 from standard_quant_tools.modeling.features.transforms import (
     standardize_cross_sectional,
 )
@@ -438,3 +445,115 @@ class TestLabelUniqueness:
         entities = np.repeat([f"E{i}" for i in range(200)], 300)
         out = weights_module.label_uniqueness_weights(dates, ends, entities)
         np.testing.assert_allclose(out, np.ones(n), rtol=0, atol=1e-12)
+
+
+class TestRankWithinDate:
+    """
+    The one kernel in this layer that exists because VECTORISATION LOST.
+    pandas' `groupby.rank` is already good -- a numpy rewrite measured 395 ms
+    against its 407 ms at three columns and worse at five -- so the parity
+    oracle here is pandas itself, and the contract oracle is what
+    panel_stats.hpp promises about NaN.
+    """
+
+    @staticmethod
+    def _panel(kind, n_dates=40, per_date=25, n_cols=3, seed=0):
+        rng = np.random.default_rng(seed)
+        n = n_dates * per_date
+        dates = np.repeat(np.arange(n_dates), per_date)
+        values = rng.normal(0, 1, (n, n_cols))
+        if kind == "nan":
+            values[rng.random(values.shape) < 0.2] = np.nan
+        elif kind == "ties":
+            values = rng.integers(0, 3, (n, n_cols)).astype(float)
+        elif kind == "constant":
+            values = np.full((n, n_cols), 4.0)
+        elif kind == "dead_column":
+            values[:, 1] = np.nan
+        elif kind == "dead_date":
+            values[dates == 7] = np.nan
+        elif kind == "negatives":
+            values = rng.integers(-3, 2, (n, n_cols)).astype(float)
+        frame = pd.DataFrame(values, columns=[f"m{i}" for i in range(n_cols)])
+        return frame, dates
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["clean", "nan", "ties", "constant", "dead_column", "dead_date", "negatives"],
+    )
+    def test_both_backends_match_pandas(self, kind, monkeypatch) -> None:
+        frame, dates = self._panel(kind)
+        expected = frame.groupby(dates, sort=False).rank(method="average")
+
+        native = rank_within_date(frame, dates).to_numpy()
+        monkeypatch.setattr(transforms, "HAS_CPP", False)
+        python = rank_within_date(frame, dates).to_numpy()
+        monkeypatch.undo()
+
+        assert np.array_equal(native, expected.to_numpy(), equal_nan=True)
+        assert np.array_equal(python, expected.to_numpy(), equal_nan=True)
+
+    def test_a_missing_name_does_not_shift_the_others(self) -> None:
+        """
+        The contract panel_stats.hpp states: NaN is skipped by the ranking
+        and preserved, and the values that ARE present rank 1..n-1.
+        """
+        frame = pd.DataFrame({"m0": [10.0, np.nan, 30.0, 20.0]})
+        dates = np.zeros(4, dtype=int)
+        ranked = rank_within_date(frame, dates)["m0"].to_numpy()
+        assert np.isnan(ranked[1])
+        assert ranked[0] == 1.0 and ranked[3] == 2.0 and ranked[2] == 3.0
+
+    def test_ties_take_the_mean_of_their_ordinals(self) -> None:
+        frame = pd.DataFrame({"m0": [5.0, 5.0, 5.0, 9.0]})
+        dates = np.zeros(4, dtype=int)
+        ranked = rank_within_date(frame, dates)["m0"].to_numpy()
+        # Ordinals 1,2,3 average to 2.0; the odd one out is 4.
+        assert ranked.tolist() == [2.0, 2.0, 2.0, 4.0]
+
+    def test_dates_need_not_be_sorted(self) -> None:
+        frame = pd.DataFrame({"m0": [1.0, 9.0, 2.0, 8.0]})
+        dates = np.array([1, 0, 1, 0])
+        ranked = rank_within_date(frame, dates)["m0"].to_numpy()
+        assert ranked.tolist() == [1.0, 2.0, 2.0, 1.0]
+
+    def test_counts_match_pandas(self, kind="nan") -> None:
+        frame, dates = self._panel(kind)
+        expected = frame.groupby(dates, sort=False).transform("count")
+        got = cross_sectional_counts(frame, dates)
+        assert np.array_equal(got.to_numpy(), expected.to_numpy().astype(float))
+
+    @pytest.mark.benchmark
+    def test_the_kernel_beats_pandas(self) -> None:
+        """
+        The plan this kernel came from found that `HAS_CPP` appeared nowhere
+        in `tests/bench/`, so the previous native work's speedup figures
+        could not be re-derived from committed code. This one ships with its
+        own gate.
+        """
+        frame, dates = self._panel("clean", n_dates=400, per_date=250, n_cols=3)
+
+        def _timed(fn, reps=3):
+            fn()
+            best = float("inf")
+            gc.disable()
+            try:
+                for _ in range(reps):
+                    start = time.perf_counter()
+                    fn()
+                    best = min(best, time.perf_counter() - start)
+            finally:
+                gc.enable()
+            return best * 1000.0
+
+        pandas_ms = _timed(
+            lambda: frame.groupby(dates, sort=False).rank(method="average")
+        )
+        kernel_ms = _timed(lambda: rank_within_date(frame, dates))
+        speedup = pandas_ms / kernel_ms
+        print(
+            f"\n  rank_by_date 100,000 x 3: pandas {pandas_ms:7.1f} ms  "
+            f"kernel {kernel_ms:6.1f} ms  speedup {speedup:.1f}x"
+        )
+        assert kernel_ms < pandas_ms
+        assert speedup >= 3.0, f"expected >= 3x, got {speedup:.1f}x"

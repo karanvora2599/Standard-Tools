@@ -624,6 +624,74 @@ bool standardize_by_date(const double* values,
 }
 
 
+bool rank_by_date(const double* values,
+                  std::size_t n_rows,
+                  std::size_t n_cols,
+                  const long long* date_codes,
+                  std::size_t n_dates,
+                  double* out) {
+    if (out == nullptr || n_cols == 0) return true;
+    if (n_rows == 0 || values == nullptr || date_codes == nullptr) return true;
+
+    // Every row is bucketed; missingness is handled per column inside the
+    // date, because a row with a NaN in one model's column still carries a
+    // usable prediction in another's.
+    const auto keep_all = [](std::size_t) { return true; };
+    std::vector<std::size_t> offsets, counts, order;
+    if (!bucket_by_date(date_codes, n_rows, n_dates, keep_all, offsets, counts,
+                        order))
+        return false;
+
+    bool alloc_error = false;
+
+    #pragma omp parallel for schedule(guided) reduction(|| : alloc_error)         if (sqt::omp_policy::worth_parallel(n_dates,                                             (n_rows / (n_dates ? n_dates : 1)) * n_cols))         num_threads(sqt::omp_policy::max_threads() > 0                         ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    for (std::ptrdiff_t date = 0; date < static_cast<std::ptrdiff_t>(n_dates); ++date) {
+        const auto d = static_cast<std::size_t>(date);
+        const std::size_t n = counts[d];
+        if (n == 0) continue;
+        const std::size_t base = offsets[d];
+
+        std::vector<double> column, ranks;
+        std::vector<std::size_t> rows, scratch;
+        try {
+            column.resize(n);
+            ranks.resize(n);
+            rows.resize(n);
+        } catch (const std::bad_alloc&) {
+            alloc_error = true;
+            continue;
+        }
+
+        for (std::size_t c = 0; c < n_cols; ++c) {
+            // Compact the values that exist, remembering where each came
+            // from, so the ranking sees a dense run and the absent rows can
+            // be written back as NaN.
+            std::size_t n_valid = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t row = order[base + i];
+                const double v = values[row * n_cols + c];
+                if (!std::isnan(v)) {
+                    column[n_valid] = v;
+                    rows[n_valid] = row;
+                    ++n_valid;
+                }
+                out[row * n_cols + c] = std::numeric_limits<double>::quiet_NaN();
+            }
+            if (n_valid == 0) continue;
+            // The per-date segments are small, so the parallel sort inside
+            // average_ranks is not wanted here -- this loop is already the
+            // parallel region.
+            average_ranks(column.data(), n_valid, scratch, ranks.data(), false);
+            for (std::size_t i = 0; i < n_valid; ++i) {
+                out[rows[i] * n_cols + c] = ranks[i];
+            }
+        }
+    }
+
+    return !alloc_error;
+}
+
+
 bool label_uniqueness(const long long* dates,
                       const long long* label_end,
                       const long long* entity_codes,

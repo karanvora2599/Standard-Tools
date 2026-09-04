@@ -414,9 +414,15 @@ Centring per column fixes the inf and every NaN pattern and still leaves
 bug -- so the fast path DECLINES when a column's mean exceeds a thousand
 times its spread and the caller falls back to pandas.
 
-**Still open:** both kernels (§2.1 `rank_by_date`, §2.2
-`permutation_test_ic`), and the untaken engine change of building the
-feature matrix once before the fold loop.
+**§2.1 `rank_by_date` is built.** 55.7 ms -> 3.4 ms on 100,000 rows by 3
+columns, **16.5x**, against an estimate of 30-45x taken from a proxy. It
+ships with the `HAS_CPP`-toggling benchmark §5 requires, which is the gate
+the previous native work never had. Wired into all three call sites,
+including `apply_cross_sectional_target` -- the operation the original
+plan's phase 2 tabulated and left unbuilt, so that phase is now complete.
+
+**Still open:** §2.2 `permutation_test_ic`, and the untaken engine change of
+building the feature matrix once before the fold loop.
 
 ## 6. Order of work
 
