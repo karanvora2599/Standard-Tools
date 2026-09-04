@@ -1823,6 +1823,16 @@ class CompareStrategiesInput(BaseModel):
         "close",
         description="'close' (default) or 'next_open' — see BacktestInput.fill_price.",
     )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
+    )
 
 
 class CompareStrategiesResult(BaseModel):
@@ -2389,6 +2399,16 @@ class SignalPanelBacktestInput(BaseModel):
     max_abs_weight: float = Field(
         1.0,
         description="Bound used only when signal_type='target_weight' (ignored otherwise).",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
+            "0.0 (default) measures total return per unit of risk, not "
+            "EXCESS return."
+        ),
     )
 
     @model_validator(mode="after")

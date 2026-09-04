@@ -77,6 +77,7 @@ def run_signal_panel_backtest(
     include_trade_log: bool = False,
     fill_price: str = "close",
     signal_calendar_policy: str = "hold",
+    risk_free_rate: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Backtest a pre-computed signal panel across a ticker universe.
@@ -95,6 +96,10 @@ def run_signal_panel_backtest(
         benchmark_returns: optional benchmark return series for portfolio-level
                       Information Ratio (passed through to portfolio_metrics).
         include_trade_log: passed through to run_strategy per ticker.
+        risk_free_rate: annualized rate for Sharpe/Sortino, applied BOTH per
+                      ticker and at the portfolio level so the per-ticker
+                      rows and the combined row are measured against the
+                      same thing.
         fill_price:   "close" (default) or "next_open" — passed through to
                       run_strategy for every ticker; see its docstring.
         signal_calendar_policy: what to do when a ticker's signal series is
@@ -173,12 +178,15 @@ def run_signal_panel_backtest(
             slippage_pct=slippage_pct,
             include_trade_log=include_trade_log,
             fill_price=fill_price,
+            risk_free_rate=risk_free_rate,
         )
         per_ticker_results[ticker] = result
         # Realized per-bar strategy return, recovered from the equity curve —
         # mathematically identical to the internal strategy_returns series,
         # without needing run_strategy to expose it separately.
-        returns_cols[ticker] = result["equity_curve"].pct_change(fill_method=None).fillna(0.0)
+        returns_cols[ticker] = (
+            result["equity_curve"].pct_change(fill_method=None).fillna(0.0)
+        )
 
     returns_df = pd.DataFrame(returns_cols).dropna(how="any")
 
@@ -210,7 +218,12 @@ def run_signal_panel_backtest(
     if abs(total_w - 1.0) > 1e-6:
         raise ValidationError(f"weights must sum to 1.0, got {total_w:.6f}")
 
-    metrics = portfolio_metrics(returns_df, w, benchmark_returns=benchmark_returns)
+    metrics = portfolio_metrics(
+        returns_df,
+        w,
+        risk_free_rate=risk_free_rate,
+        benchmark_returns=benchmark_returns,
+    )
     portfolio_returns = build_portfolio(returns_df, w)
 
     logger.debug(

@@ -34,7 +34,7 @@ advertises 155 of the 207 below.
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `backtest` | 35 | 80 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `modeling` | 20 | 59 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
@@ -362,7 +362,7 @@ Run, optimize, validate and diagnose a trading strategy — the library's built-
 Run all four strategies on the same symbol and return ranked results vs buy-and-hold.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `sma_parameters`, `rsi_parameters`, `macd_parameters`, `bollinger_parameters`, `fill_price`
+**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `sma_parameters`, `rsi_parameters`, `macd_parameters`, `bollinger_parameters`, `fill_price`, `risk_free_rate`
 
 #### `run_backtest_compact`
 
@@ -604,7 +604,7 @@ Backtest a signal computed outside this library (your own alpha model) on one sy
 Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `signal_panel`, `signal_panel_ref`, `weights`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `benchmark`, `include_trade_log`, `fill_price`, `signal_type`, `max_abs_weight`
+**Optional:** `signal_panel`, `signal_panel_ref`, `weights`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `benchmark`, `include_trade_log`, `fill_price`, `signal_type`, `max_abs_weight`, `risk_free_rate`
 
 ---
 

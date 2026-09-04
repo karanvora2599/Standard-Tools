@@ -22,9 +22,12 @@ invisible at rf = 0 and is exactly what would make a grid disagree with a
 single run.
 """
 
+from typing import Any, Optional, get_args
+
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import BaseModel
 
 from standard_quant_tools.agent.models import (
     AnalysisInput,
@@ -38,6 +41,52 @@ from standard_quant_tools.backtest import engine
 from standard_quant_tools.metrics.risk_metrics import sharpe_ratio, sortino_ratio
 
 RATES = [0.0, 0.01, 0.02, 0.045, 0.10]
+
+
+def _reports_a_sharpe(model: Any, _depth: int = 0, _seen: Optional[set] = None) -> bool:
+    """Does this result model expose a Sharpe ANYWHERE, nesting included?
+
+    The predicate this replaces looked only at a result's own field names,
+    and five tools carry their Sharpe one level down -- inside a nested
+    `BacktestResult`, a list of per-strategy rows, or a per-ticker mapping.
+    `RegimeAdaptiveResult`'s own fields are symbol/regime/hurst/.../backtest;
+    not one of them contains "sharpe", so the sweep that fixed seventeen
+    tools never saw it, and `run_regime_adaptive_backtest` went on reporting
+    a Sharpe measured against 0% while carrying a `risk_free_rate` field
+    that the structural test was satisfied to find.
+
+    Two of the five had no rate field at all.
+    """
+    if _seen is None:
+        _seen = set()
+    if model in _seen or _depth > 4:
+        return False
+    _seen.add(model)
+    for field_name, field in (getattr(model, "model_fields", {}) or {}).items():
+        if "sharpe" in field_name:
+            return True
+        annotation = field.annotation
+        # Unwrap one level of Optional/List/Dict to reach the model inside.
+        candidates = (annotation,) + tuple(get_args(annotation) or ())
+        for candidate in candidates:
+            inner = candidate
+            for sub in get_args(candidate) or ():
+                if isinstance(sub, type) and issubclass(sub, BaseModel):
+                    inner = sub
+            if isinstance(inner, type) and issubclass(inner, BaseModel):
+                if _reports_a_sharpe(inner, _depth + 1, _seen):
+                    return True
+    return False
+
+
+def _sharpe_reporting_tools():
+    """(tool name, input model) for every tool that reports a Sharpe."""
+    import inspect
+
+    for name, (fn, model) in _TOOL_DISPATCH.items():
+        annotation = inspect.signature(fn).return_annotation
+        if _reports_a_sharpe(annotation):
+            yield name, model
 
 
 @pytest.fixture
@@ -211,19 +260,43 @@ class TestTheToolSurfaceExposesIt:
     def test_every_sharpe_reporting_tool_takes_a_rate(self):
         """The invariant that replaced the old one. Previously fourteen
         tools reported a Sharpe they could not qualify; a tool that reports
-        one now must let a caller say what it is measured against."""
-        import inspect
+        one now must let a caller say what it is measured against.
 
-        offenders = []
-        for name, (fn, model) in _TOOL_DISPATCH.items():
-            annotation = inspect.signature(fn).return_annotation
-            fields = set(getattr(annotation, "model_fields", {}) or {})
-            if any("sharpe" in f for f in fields):
-                if "risk_free_rate" not in model.model_fields:
-                    offenders.append(name)
+        Scoped by the RECURSIVE predicate, which is the point: the shallow
+        one missed five tools whose Sharpe sits one level down, and two of
+        those five had no rate field at all."""
+        offenders = [
+            name
+            for name, model in _sharpe_reporting_tools()
+            if "risk_free_rate" not in model.model_fields
+        ]
         assert not offenders, (
             f"these tools report a Sharpe with no way to set the rate it is "
             f"measured against: {offenders}"
+        )
+
+    def test_the_predicate_actually_sees_through_nesting(self):
+        """Guarding the guard. If this regresses to a shallow field scan the
+        test above passes vacuously for exactly the tools that broke."""
+        from standard_quant_tools.agent.models import (
+            CompareStrategiesResult,
+            RegimeAdaptiveResult,
+        )
+
+        # No field of its own contains "sharpe" -- it is inside `backtest`.
+        assert not any("sharpe" in f for f in RegimeAdaptiveResult.model_fields)
+        assert _reports_a_sharpe(RegimeAdaptiveResult)
+        # And through a List[StrategyComparison].
+        assert not any("sharpe" in f for f in CompareStrategiesResult.model_fields)
+        assert _reports_a_sharpe(CompareStrategiesResult)
+
+    def test_nesting_does_not_make_everything_a_sharpe_reporter(self):
+        """The recursion must not be so eager that the invariant becomes
+        trivially true for every tool on the surface."""
+        names = {name for name, _ in _sharpe_reporting_tools()}
+        assert len(names) < len(_TOOL_DISPATCH) / 2, (
+            f"{len(names)} of {len(_TOOL_DISPATCH)} tools counted as Sharpe "
+            f"reporters -- the predicate is over-matching"
         )
 
     def test_every_sharpe_rate_field_defaults_to_zero(self):
@@ -236,13 +309,7 @@ class TestTheToolSurfaceExposesIt:
         because there is no defensible default for discounting a cash flow.
         A blanket assertion over the name would force one of the two to be
         wrong."""
-        import inspect
-
-        for _name, (fn, model) in _TOOL_DISPATCH.items():
-            annotation = inspect.signature(fn).return_annotation
-            fields = set(getattr(annotation, "model_fields", {}) or {})
-            if not any("sharpe" in f for f in fields):
-                continue
+        for _name, model in _sharpe_reporting_tools():
             field = model.model_fields["risk_free_rate"]
             assert field.default == 0.0, model.__name__
 
@@ -292,4 +359,133 @@ class TestTheToolSurfaceExposesIt:
                     end_date="2023-01-01",
                     strategy_type="sma_crossover",
                     risk_free_rate=bad,
+                )
+
+
+class TestTheNestedSharpeToolsHonourItInFact:
+    """Structure is not behaviour.
+
+    `test_every_sharpe_reporting_tool_takes_a_rate` asserts the FIELD
+    exists. `RegimeAdaptiveInput` had it, and the tool dropped it anyway --
+    rebuilding `BacktestInput` field by field sixteen lines after handing
+    the same rate to `backtest_grid`, so one call SELECTED parameters on the
+    caller's rate and REPORTED a Sharpe measured against zero.
+
+    These tools are the ones whose Sharpe is nested, which is why the
+    original sweep never reached them. The assertion is the general one the
+    plan names: vary one input, assert the output moves.
+    """
+
+    #: Keys that identify a row, tried in order. A list POSITION is not an
+    #: identity here: `compare_strategies` sorts by `sort_by`, which defaults
+    #: to sharpe_ratio, so raising the rate reorders the list and
+    #: `strategies[1]` is a different strategy in the two runs. Comparing
+    #: positionally reports that reordering as a leak into the trading.
+    _IDENTITY_KEYS = ("strategy", "strategy_type", "name", "ticker", "symbol")
+
+    @classmethod
+    def _walk(cls, obj, leaf, path=""):
+        """(stable path, value) for every `leaf` field, keyed by identity."""
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == leaf and isinstance(value, (int, float)):
+                    yield f"{path}.{key}", value
+                else:
+                    yield from cls._walk(value, leaf, f"{path}.{key}")
+        elif isinstance(obj, list):
+            for i, value in enumerate(obj):
+                tag = f"[{i}]"
+                if isinstance(value, dict):
+                    for id_key in cls._IDENTITY_KEYS:
+                        if isinstance(value.get(id_key), str):
+                            tag = f"[{value[id_key]}]"
+                            break
+                yield from cls._walk(value, leaf, f"{path}{tag}")
+
+    @classmethod
+    def _sharpes(cls, obj, path=""):
+        return cls._walk(obj, "sharpe_ratio", path)
+
+    @pytest.fixture
+    def backtest_runtime(self, monkeypatch, prices):
+        class _Stub:
+            def get_ohlcv(self, *a, **k):
+                return prices
+
+            async def get_ohlcv_async(self, *a, **k):
+                return prices
+
+        monkeypatch.setattr(
+            "standard_quant_tools.agent.runtimes.backtest.tools."
+            "DataFactory.get_provider",
+            staticmethod(lambda *a, **k: _Stub()),
+        )
+        return resolve("backtest")
+
+    @pytest.fixture
+    def panel_signal(self, prices):
+        rng = np.random.default_rng(11)
+        values = (rng.random(len(prices)) > 0.5).astype(float)
+        return {d.strftime("%Y-%m-%d"): float(v) for d, v in zip(prices.index, values)}
+
+    def _cases(self, panel_signal):
+        window = {"start_date": "2022-01-01", "end_date": "2023-08-01"}
+        return {
+            "run_regime_adaptive_backtest": {"symbol": "TEST", **window},
+            "run_backtest_compact": {
+                "symbol": "TEST",
+                "strategy_type": "sma_crossover",
+                **window,
+            },
+            "run_strategy_matrix": {
+                "tickers": ["TEST"],
+                "strategies": ["sma_crossover"],
+                **window,
+            },
+            "compare_strategies": {"symbol": "TEST", **window},
+            "run_signal_panel_backtest": {
+                "tickers": ["TEST"],
+                "signal_panel": {"TEST": panel_signal},
+                **window,
+            },
+        }
+
+    def test_every_reported_sharpe_moves_with_the_rate(
+        self, backtest_runtime, panel_signal
+    ):
+        inert = []
+        for tool, kwargs in self._cases(panel_signal).items():
+            at_zero = dict(self._sharpes(backtest_runtime.dispatch(tool, dict(kwargs))))
+            at_five = dict(
+                self._sharpes(
+                    backtest_runtime.dispatch(tool, {**kwargs, "risk_free_rate": 0.05})
+                )
+            )
+            assert at_zero, f"{tool} reported no Sharpe at all"
+            for field, value in at_zero.items():
+                if abs(value - at_five[field]) <= 1e-9:
+                    inert.append(f"{tool}{field}")
+        assert not inert, (
+            f"these reported Sharpes did not move when the rate went from 0% "
+            f"to 5%, so the rate is being dropped somewhere: {inert}"
+        )
+
+    def test_the_rate_does_not_change_the_trading(self, backtest_runtime, panel_signal):
+        """The counterpart assertion. A rate that moved total_return would
+        mean it had leaked into the fills rather than the ratio."""
+        for tool, kwargs in self._cases(panel_signal).items():
+            at_zero = backtest_runtime.dispatch(tool, dict(kwargs))
+            at_five = backtest_runtime.dispatch(
+                tool, {**kwargs, "risk_free_rate": 0.05}
+            )
+
+            before = dict(self._walk(at_zero, "total_return"))
+            after = dict(self._walk(at_five, "total_return"))
+            assert set(before) == set(
+                after
+            ), f"{tool} reported a different set of rows at the two rates"
+            for field, value in before.items():
+                assert value == pytest.approx(after[field], abs=1e-9), (
+                    f"{tool}{field} changed with the risk-free rate -- it has "
+                    f"leaked into the trading, not just the ratio"
                 )

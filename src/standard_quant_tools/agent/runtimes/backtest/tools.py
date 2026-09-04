@@ -331,6 +331,7 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
     bh = _run_backtest(bh_input, df, bh_signals)
 
@@ -357,6 +358,10 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
+            # `sort_by` defaults to sharpe_ratio and also offers
+            # sortino_ratio, so without this the RANKING itself silently
+            # assumed a 0% rate -- not just the number beside each row.
+            risk_free_rate=input_data.risk_free_rate,
         )
         bt = _run_backtest(bt_input, df, signals)
         comparisons.append(
@@ -474,6 +479,12 @@ def run_regime_adaptive_backtest(
         initial_capital=input_data.initial_capital,
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
+        # Rebuilding the input field by field drops whatever it is not told
+        # about, and this dropped the rate -- so the grid search four lines
+        # above SELECTED on the caller's rate while the result REPORTED a
+        # Sharpe measured against 0%. Two numbers from one call, under two
+        # different assumptions.
+        risk_free_rate=input_data.risk_free_rate,
     )
     bt_result = _run_backtest(dummy_input, df, signals)
 
@@ -1125,6 +1136,7 @@ def run_signal_panel_backtest(
         benchmark_returns=bench_returns,
         include_trade_log=input_data.include_trade_log,
         fill_price=input_data.fill_price,
+        risk_free_rate=input_data.risk_free_rate,
     )
 
     per_ticker: Dict[str, BacktestResult] = {}
