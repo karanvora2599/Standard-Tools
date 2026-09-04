@@ -22,6 +22,7 @@ CONVERSIONS: Tuple[Tuple[str, str], ...] = (
     ("predictions", "score_panel"),
     ("score_panel", "weight_panel"),
     ("signal_panel", "score_panel"),
+    ("equity_curve", "returns_panel"),
 )
 
 
@@ -200,9 +201,73 @@ def _signal_panel_to_score_panel(input_data, source):
     ]
 
 
+def _equity_curve_to_returns(input_data, source):
+    """An equity curve into the returns every metric tool actually wants.
+
+    THE REFUSAL THAT NEEDED A REMEDY. An `equity_curve` is levels -- the
+    kind says so, "account value per bar" -- and `calculate_series_metrics`
+    documents its input as a RETURN series. Handing it the curve used to
+    produce a Sharpe of 302 against a true 0.30, because mean/std of a level
+    series is scale-invariant and looks like an ordinary ratio.
+
+    `resolve_source` refuses that now, and told the caller to "convert first
+    -- .pct_change().dropna()", which is not something an agent holding a
+    REFERENCE can do. That made the refusal a dead end: right answer,
+    nowhere to go. This is the way out.
+
+    `returns_panel` rather than a new series kind. It is documented as a
+    wide frame of per-asset returns and a single asset is the degenerate
+    case of that; `resolve_source` already unwraps a one-column frame. A
+    `return_series` kind would double the taxonomy for one shape, which is
+    the trade `handoff.py` declines elsewhere for the same reason.
+    """
+    from standard_quant_tools.agent.runtimes import handoff
+
+    curve = handoff.resolve(input_data.ref, expect="equity_curve")
+    if isinstance(curve, pd.DataFrame):
+        if curve.shape[1] != 1:
+            raise ValidationError(
+                f"{input_data.ref!r} resolves to {curve.shape[1]} columns; an "
+                "equity curve is one series."
+            )
+        curve = curve.iloc[:, 0]
+    curve = pd.Series(curve).astype("float64")
+    if len(curve) < 2:
+        raise ValidationError(
+            f"{input_data.ref!r} has {len(curve)} point(s); a return needs a "
+            "prior value to be measured against."
+        )
+
+    non_positive = int((curve <= 0).sum())
+    returns = curve.pct_change(fill_method=None).dropna()
+    if returns.empty:
+        raise ValidationError(
+            f"{input_data.ref!r} produced no finite returns -- every bar was "
+            "null or unchanged from a null."
+        )
+
+    notes = [
+        f"{len(curve)} equity points -> {len(returns)} returns. The FIRST BAR "
+        "IS DROPPED: it has no prior value, and carrying it as 0.0 would add "
+        "a fabricated flat period that pulls the mean toward zero and the "
+        "volatility down with it.",
+        "Simple returns, not log. The metrics that consume this compound "
+        "them back with (1 + r).cumprod(), so a log return would restate the "
+        "curve it came from.",
+    ]
+    if non_positive:
+        notes.append(
+            f"WARNING: {non_positive} equity value(s) were <= 0, so the "
+            "returns around them are not meaningful -- an account that "
+            "reached zero has no percentage change to report."
+        )
+    return returns.to_frame(name="return"), notes
+
+
 _HANDLERS = {
     ("predictions", "signal_panel"): _predictions_to_signal_panel,
     ("predictions", "score_panel"): _predictions_to_score_panel,
     ("score_panel", "weight_panel"): _score_panel_to_weight_panel,
     ("signal_panel", "score_panel"): _signal_panel_to_score_panel,
+    ("equity_curve", "returns_panel"): _equity_curve_to_returns,
 }

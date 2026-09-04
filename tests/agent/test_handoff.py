@@ -414,3 +414,124 @@ class TestVolScaledWasAdvertisedAndCouldNotRun:
             },
         )
         assert result["kind"] == "weight_panel"
+
+
+class TestAnEquityCurveCanBecomeTheReturnsEveryMetricWants:
+    """The remedy a refusal was pointing at before it existed.
+
+    An `equity_curve` is levels -- the kind says "account value per bar" --
+    and `calculate_series_metrics` documents its input as a RETURN series.
+    Handed the curve it reported a Sharpe of 302 against a true 0.30,
+    because mean/std of a level series is scale-invariant and reads as an
+    ordinary ratio at any base.
+
+    `resolve_source` refuses that now. But its message said to convert with
+    `.pct_change().dropna()`, which is not something an agent holding a
+    REFERENCE can do, so the fix turned a wrong answer into a dead end.
+    """
+
+    @pytest.fixture
+    def curve_and_returns(self):
+        rng = np.random.default_rng(3)
+        index = pd.bdate_range("2022-01-03", periods=400)
+        returns = pd.Series(rng.normal(0.0003, 0.011, 400), index=index)
+        return (1 + returns).cumprod() * 10_000.0, returns
+
+    def _publish(self, curve):
+        return handoff.publish(curve, "equity_curve", "fleet", "eq")
+
+    def _convert(self, ref, name="rets"):
+        return resolve("meta").dispatch(
+            "convert_reference",
+            {
+                "ref": ref,
+                "to_kind": "returns_panel",
+                "run_id": "fleet",
+                "name": name,
+            },
+        )
+
+    def test_the_curve_itself_is_still_refused(self, curve_and_returns):
+        curve, _ = curve_and_returns
+        with pytest.raises(ValidationError, match="level series"):
+            resolve("research").dispatch(
+                "calculate_series_metrics",
+                {"series": {"ref": self._publish(curve)}, "metrics": ["sharpe_ratio"]},
+            )
+
+    def test_the_refusal_names_a_remedy_that_exists(self, curve_and_returns):
+        """It used to name one an agent cannot perform on a reference."""
+        curve, _ = curve_and_returns
+        with pytest.raises(ValidationError) as exc:
+            resolve("research").dispatch(
+                "calculate_series_metrics",
+                {"series": {"ref": self._publish(curve)}, "metrics": ["sharpe_ratio"]},
+            )
+        message = str(exc.value)
+        assert "convert_reference" in message
+        assert "returns_panel" in message
+
+    def test_the_conversion_is_exact(self, curve_and_returns):
+        """Not approximately: the recovered returns ARE the originals from
+        the second bar on."""
+        curve, returns = curve_and_returns
+        converted = self._convert(self._publish(curve))
+        frame = handoff.resolve(converted["ref"])
+        np.testing.assert_allclose(
+            frame.iloc[:, 0].to_numpy(),
+            returns.iloc[1:].to_numpy(),
+            rtol=0,
+            atol=1e-12,
+        )
+
+    def test_the_first_bar_is_dropped_and_that_is_not_a_bug(self, curve_and_returns):
+        """A curve starts AFTER its first return is applied, so that return
+        is not recoverable from it. On this fixture the first bar is +2.0
+        sigma, which moves the Sharpe from 0.9628 to 0.8870 -- a real loss,
+        unavoidable, and the reason the note says so rather than carrying a
+        0.0 that would fabricate a flat period."""
+        curve, returns = curve_and_returns
+        converted = self._convert(self._publish(curve))
+        assert converted["rows"] == len(returns) - 1
+        assert any("FIRST BAR IS DROPPED" in n for n in converted["notes"])
+
+    def test_the_converted_reference_is_accepted_by_the_metrics_tool(
+        self, curve_and_returns
+    ):
+        """The whole point: the chain now completes."""
+        curve, returns = curve_and_returns
+        converted = self._convert(self._publish(curve))
+        out = resolve("research").dispatch(
+            "calculate_series_metrics",
+            {"series": {"ref": converted["ref"]}, "metrics": ["sharpe_ratio"]},
+        )
+        expected = float(
+            returns.iloc[1:].mean() / returns.iloc[1:].std(ddof=1) * np.sqrt(252)
+        )
+        assert out["values"]["sharpe_ratio"] == pytest.approx(expected, rel=1e-6)
+
+    def test_a_one_point_curve_is_refused(self):
+        ref = handoff.publish(
+            pd.Series([100.0], index=pd.bdate_range("2022-01-03", periods=1)),
+            "equity_curve",
+            "fleet",
+            "tiny",
+        )
+        with pytest.raises(ValidationError, match="prior value"):
+            self._convert(ref, name="tiny_out")
+
+    def test_a_curve_that_reached_zero_is_warned_about(self):
+        values = pd.Series(
+            [100.0, 50.0, 0.0, 0.0, 10.0],
+            index=pd.bdate_range("2022-01-03", periods=5),
+        )
+        ref = handoff.publish(values, "equity_curve", "fleet", "blown")
+        converted = self._convert(ref, name="blown_out")
+        assert any("<= 0" in n for n in converted["notes"])
+
+    def test_it_says_the_returns_are_simple_not_log(self, curve_and_returns):
+        """The consumers compound with (1 + r).cumprod(), so a log return
+        would restate the curve it came from."""
+        curve, _ = curve_and_returns
+        converted = self._convert(self._publish(curve))
+        assert any("not log" in n for n in converted["notes"])

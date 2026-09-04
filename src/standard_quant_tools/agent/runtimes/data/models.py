@@ -437,8 +437,12 @@ def _refuse_if_not_returns(series, what: str):
             "That is a level series (an equity curve, or prices), not "
             "returns. A Sharpe taken on levels is scale-invariant and comes "
             "back two to three orders of magnitude too high with nothing "
-            "looking wrong. Convert first -- `.pct_change().dropna()` -- or "
-            "name a reference that already holds returns."
+            "looking wrong. If you passed values, convert them first with "
+            "`.pct_change().dropna()`. If you passed a REFERENCE -- which "
+            "you cannot call pandas on -- run convert_reference from "
+            "`equity_curve` to `returns_panel`, which drops the first bar "
+            "rather than carrying it as a fabricated flat period, and hand "
+            "the reference it returns to this tool instead."
         )
 
 
