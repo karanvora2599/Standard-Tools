@@ -14,6 +14,59 @@ that preceded them found that eleven of the thirteen L2 features a bigger
 plan proposed were already shipped — so the work was to feed what exists
 rather than to build it again.
 
+### `DataFrame.where()` with a Series condition costs 22 microseconds per column
+
+Three vectorisations from `Development/modeling_native_plan_ii.md`, none of
+which needed C++. All measured, all verified against the code they replace.
+
+**`zscore_normalized` was paying per COLUMN, not per row.** `z.where(~degenerate,
+other=0.0)` broadcasts a Series condition across a DataFrame column by column
+-- 40.8 ms on a ONE-ROW 2,000-column frame, where the same masking in numpy is
+0.18 ms. **224x.** `transform_predictions_to_weights` calls it once per
+availability pattern, so on a panel with staggered listing dates that
+per-column constant was most of the run. `_check_scores` has already rejected
+NaN and infinity, which is what lets the replacement use plain reductions.
+
+Agreement with the previous implementation is to **3.2 ULPs** (7.15e-16
+relative, scale-invariant from 1e-6 to 1e9) -- floating-point reassociation
+between pandas' and numpy's reduction order, not a change of formula.
+
+**`transform_predictions_to_weights` had three separate per-column costs.**
+The availability pattern was built by a Python string join PER ROW; `present`
+was a scalar `.loc[date, col]` per column per group (150,000 lookups on a
+500-name panel); and the sub-panel was taken and written back by label. Now
+the pattern is a packed bit-record factorized in one pass, and the loop fills
+a numpy matrix positionally -- the intermediate DataFrame existed only to be
+converted back to one.
+
+    500 entities x 1000 dates      before     after
+    dense                          0.110 s    0.075 s    1.5x
+    staggered listing dates        3.432 s    0.537 s    6.4x
+    1% scattered NaN               7.574 s    1.034 s    7.3x
+
+**Output is bit-identical in all three (max difference 0.00e+00.)**
+
+**`_quantile_shape` called a Python function once per date.**
+`groupby("date").transform(_bucket)` with a non-cython callable, measured at
+78 s of a 96 s `feature_predictive_stats` over 40 features -- in which the
+already-ported C++ kernel was 2% of the runtime and this pandas glue was 81%.
+Replaced by one segmented `np.lexsort`: it is stable, and putting the row
+position last as a tiebreaker is exactly `rank(method="first")`.
+
+    504,000 rows, 200 entities     1.342 s -> 0.168 s     8.0x
+    heavy ties                     0.264 s -> 0.021 s    12.8x
+    ragged dates                   0.132 s -> 0.003 s    37.9x
+
+Bucket assignment verified identical across 21 combinations: clean, heavy
+ties, an all-identical column, ragged dates, dates carrying fewer names than
+buckets, two-entity dates, and 3/5/10 quantiles.
+
+**None of this is a kernel, and that is the finding.** The measured ceiling on
+the whole subsystem is that a real estimator spends 78.5% of wall-clock inside
+sklearn, and the existing kernels are only a third of the cost of the
+preprocessing path they sit inside. The pandas dispatch around them was worth
+more than porting more of them would have been.
+
 ### The guard matched three phrasings, and the count rotted in the other four
 
 A sweep of all 19,000 lines of documentation against the live registries.

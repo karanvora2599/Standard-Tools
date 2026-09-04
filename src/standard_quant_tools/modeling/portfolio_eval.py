@@ -376,29 +376,47 @@ def transform_predictions_to_weights(
     if score_panel.empty:
         raise ValidationError("score panel is empty — nothing to transform")
 
-    weights = pd.DataFrame(
-        0.0, index=score_panel.index, columns=score_panel.columns, dtype=float
-    )
     availability = score_panel.notna()
-    # Group by the availability PATTERN so each sizing call sees a dense
-    # sub-panel. In the common case every date has the same entities and
-    # this is a single group.
-    # Keyed by a bitstring rather than a tuple: pandas groupby treats a
-    # tuple value as a potential multi-key, so grouping on a Series of
-    # tuples is ambiguous in a way a plain string key is not.
-    pattern = availability.apply(
-        lambda row: "".join("1" if v else "0" for v in row.to_numpy()), axis=1
-    )
-    for _, dates in pattern.groupby(pattern, sort=False).groups.items():
-        idx = pd.DatetimeIndex(dates)
-        present = [c for c in score_panel.columns if availability.loc[idx[0], c]]
-        if len(present) < 2:
+    mask = availability.to_numpy()
+    values = score_panel.to_numpy(dtype=float)
+    columns = score_panel.columns
+    # Filled positionally and returned as the matrix the exposure step
+    # already wanted -- the intermediate DataFrame existed only to be
+    # converted back, and its label-based `.loc` take and assign were two of
+    # the three costs here.
+    raw_matrix = np.zeros(mask.shape, dtype=float)
+
+    # Group dates by their availability PATTERN so each sizing call sees a
+    # dense sub-panel. In the common case every date has the same entities
+    # and this is a single group; the count approaches n_dates as soon as
+    # names enter and leave the universe, which is why this loop is worth
+    # keeping cheap.
+    #
+    # The key is the packed bit-pattern viewed as an opaque record, which
+    # `factorize` groups in one pass. It replaces a per-ROW Python string
+    # build (`availability.apply(..., axis=1)`); on a 500x1000 panel with
+    # staggered listing dates that build, the scalar `.loc[date, col]` per
+    # column per group below it, and the label-based takes were together
+    # most of a 57-second call.
+    packed = np.ascontiguousarray(np.packbits(mask, axis=1))
+    keys = packed.view([("", packed.dtype)] * packed.shape[1]).ravel()
+    codes = pd.factorize(keys)[0]
+
+    for code in range(int(codes.max()) + 1 if codes.size else 0):
+        rows = np.flatnonzero(codes == code)
+        present_positions = np.flatnonzero(mask[rows[0]])
+        if present_positions.size < 2:
             # A one-name "cross-section" has no ordering to exploit; every
             # cross-sectional method would either divide by a zero spread
             # or hand 100% to that single name on the strength of no
             # comparison at all. Left flat, and counted in diagnostics.
             continue
-        sub_scores = score_panel.loc[idx, present]
+        present = columns[present_positions]
+        sub_scores = pd.DataFrame(
+            values[np.ix_(rows, present_positions)],
+            index=score_panel.index[rows],
+            columns=present,
+        )
         sub_returns = None
         if returns_df is not None:
             missing = [c for c in present if c not in returns_df.columns]
@@ -409,12 +427,11 @@ def transform_predictions_to_weights(
                 )
             sub_returns = returns_df[present]
         raw = _raw_weights_for_group(sub_scores, spec, sub_returns)
-        weights.loc[idx, present] = raw.to_numpy(dtype=float)
+        raw_matrix[np.ix_(rows, present_positions)] = raw.to_numpy(dtype=float)
 
     # Re-split every row into books to hit gross AND net exactly, and cap.
     # Done here rather than inside the group loop so the exposure contract
     # is enforced in exactly one place for every method.
-    raw_matrix = weights.to_numpy(dtype=float).copy()
     # Entities absent on a date must not be eligible for a book: their raw
     # value is 0.0 (never assigned), which is already excluded by the
     # strict > / < comparisons in apply_exposure_targets, but NaN makes

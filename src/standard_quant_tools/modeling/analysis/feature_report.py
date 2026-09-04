@@ -259,17 +259,38 @@ def _quantile_shape(
             "n_quantiles": float(n_quantiles),
         }
 
-    def _bucket(group: pd.Series) -> pd.Series:
-        # Rank-then-cut rather than qcut on raw values: a feature with heavy
-        # ties (a discretized or clipped column) makes qcut raise or produce
-        # unequal buckets, and the rank is what the bucketing means anyway.
-        count = group.notna().sum()
-        if count < n_quantiles:
-            return pd.Series(np.nan, index=group.index)
-        ranks = group.rank(method="first")
-        return np.ceil(ranks * n_quantiles / count).clip(1, n_quantiles)
+    # Rank-then-cut rather than qcut on raw values: a feature with heavy
+    # ties (a discretized or clipped column) makes qcut raise or produce
+    # unequal buckets, and the rank is what the bucketing means anyway.
+    #
+    # Done as one segmented sort rather than `groupby(...).transform(fn)`
+    # with a Python callable, which pandas invokes once per date and which
+    # measured at 78 s of a 96 s `feature_predictive_stats` call over 40
+    # features. `np.lexsort` is stable and the row position is the last
+    # key, which is exactly `rank(method="first")`: ties break by order of
+    # appearance.
+    values = frame[feature].to_numpy(dtype=float)
+    date_codes = pd.factorize(frame["date"], sort=False)[0]
+    n_rows = values.size
+    positions = np.arange(n_rows)
+    order = np.lexsort((positions, values, date_codes))
+    ordered_codes = date_codes[order]
 
-    buckets = frame.groupby("date")[feature].transform(_bucket)
+    starts = np.flatnonzero(np.r_[True, ordered_codes[1:] != ordered_codes[:-1]])
+    sizes = np.diff(np.r_[starts, n_rows])
+    per_row_size = np.repeat(sizes, sizes)
+    # 1-based rank within the date, in the sorted layout.
+    within = positions - np.repeat(starts, sizes) + 1
+
+    with np.errstate(invalid="ignore"):
+        ordered_buckets = np.clip(
+            np.ceil(within * n_quantiles / per_row_size), 1, n_quantiles
+        ).astype(float)
+    # A date with fewer entities than buckets cannot be cut into them.
+    ordered_buckets[per_row_size < n_quantiles] = np.nan
+
+    buckets = np.empty(n_rows, dtype=float)
+    buckets[order] = ordered_buckets
     frame = frame.assign(_bucket=buckets).dropna(subset=["_bucket"])
     if frame.empty:
         return {

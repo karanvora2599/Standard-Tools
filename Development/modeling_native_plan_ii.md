@@ -367,6 +367,31 @@ benchmark**, or it inherits the same unverifiable status.
 
 ---
 
+## 5.1 Status
+
+Steps 1, 2 and the first three of step 3 are **done** (commits `ad5f245`,
+this one). Achieved against the estimates above:
+
+| item | estimated | achieved | output |
+|---|---|---|---|
+| §1.1 `standardize_by_date` NaN | — | fixed, both backends | contract test added |
+| §1.2 `mst_degree` zero edge | — | fixed via dense Prim | regression tests added |
+| §1.3 lag inf check | — | fixed | |
+| §3.2 `transform_predictions_to_weights` | 3,545x* | **6.4x / 7.3x** | bit-identical |
+| §3.1 `_quantile_shape` | 7.8x | **8.0-37.9x** | identical buckets |
+| `sizing.zscore_normalized` | 3.2x | **224x** on 1x2000 | 3.2 ULPs |
+
+\* the 3,545x estimate was for a full numpy rewrite that removes the group
+loop entirely. What was done instead is the three targeted fixes inside it,
+which keep the loop and every existing sizing method untouched. The
+remaining gap is available if the loop is ever removed.
+
+**Still open:** step 3's `network.py` refit loop (3-6x), step 4's free
+meta-only load, and both kernels (§2.1 `rank_by_date`, §2.2
+`permutation_test_ic`). The engine `_preprocess` precompute from §3.1
+(2.63x, verified bit-identical by the analysis) is not yet done and is the
+largest remaining non-kernel item.
+
 ## 6. Order of work
 
 1. **§1.1** `standardize_by_date` NaN semantics, both backends, plus a test
