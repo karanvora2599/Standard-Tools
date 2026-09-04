@@ -154,9 +154,12 @@ def modeling_capabilities() -> Dict[str, Any]:
 #: How many symbols a current `_sqt_core` exports. Compared against what
 #: actually loaded, so an extension built before the newest kernels reports
 #: itself as stale rather than being discovered as an unexplained slowdown.
-#: Update this when a kernel is added -- `tests/cpp_bindings` asserts the two
-#: agree, so it cannot drift quietly.
-_EXPECTED_NATIVE_EXPORTS = 42
+#: Update this when a kernel is added or removed -- `tests/cpp_bindings`
+#: asserts the two agree, so it cannot drift quietly.
+#:
+#: 42 until the six `_zerocopy` bindings came out; they had no caller in
+#: `src/` and wiring them was measured at a mean saving of zero.
+_EXPECTED_NATIVE_EXPORTS = 36
 
 
 def _importable(module: str) -> bool:
