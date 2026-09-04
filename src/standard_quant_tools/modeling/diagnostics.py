@@ -73,11 +73,16 @@ def residual_summary(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, Any
     residual = actual[mask] - predicted[mask]
     n = int(residual.size)
     std = float(residual.std(ddof=1)) if n > 1 else float("nan")
-    centred = residual - residual.mean()
     skew = kurt = None
     if n > 3 and std > 0:
-        skew = float((centred**3).mean() / std**3)
-        kurt = float((centred**4).mean() / std**4 - 3.0)
+        # `Series.skew`/`.kurt` rather than raw population moments over a
+        # ddof=1 spread, which is a hybrid of two conventions and agreed
+        # with neither. `analysis/feature_report.py` reports the pandas
+        # bias-corrected pair, and two numbers called "skew" in one package
+        # should not disagree.
+        as_series = pd.Series(residual)
+        skew = float(as_series.skew())
+        kurt = float(as_series.kurt())
     return {
         "n": n,
         # A non-zero mean residual is BIAS: the model is systematically
@@ -117,20 +122,55 @@ def heteroskedasticity(actual: np.ndarray, predicted: np.ndarray) -> Optional[fl
 
 def residual_autocorrelation(joined: pd.DataFrame) -> Optional[float]:
     """
-    Lag-1 residual autocorrelation, computed WITHIN each entity.
+    Lag-1 residual autocorrelation, over pairs POOLED across entities.
 
-    Stacking the panel first would measure the row ordering rather than the
-    series: consecutive rows in a long panel are different entities on the
-    same date, and their residuals have no reason to relate.
+    Two things this is careful about, both of which it used to get wrong.
+
+    THE PAIRS ARE WEIGHTED BY HOW MANY THERE ARE. Averaging one correlation
+    per entity gives an entity with three observations the same say as one
+    with a thousand, and a three-row entity is almost pure noise. Measured
+    on a panel of one 996-row entity at +0.796 and one 3-row entity, the
+    average reported -0.102 -- a sign flip, from 0.3% of the rows. Pooling
+    the pairs weights each entity by the evidence it actually carries.
+
+    A PAIR IS TWO ADJACENT BARS, NOT TWO SURVIVING VALUES. Dropping the
+    non-finite residuals first and then pairing what remains joins bars
+    either side of a gap, so a "lag-1" pair could span an arbitrary
+    stretch. The pair is formed on adjacent rows and dropped if either end
+    is missing.
+
+    Stacking the panel without grouping at all would be worse still: it
+    measures the row ordering, since consecutive rows in a long panel are
+    different entities on the same date.
     """
-    values: List[float] = []
+    lagged: List[np.ndarray] = []
+    current: List[np.ndarray] = []
     for _entity, group in joined.groupby("entity", sort=False):
         residual = group.sort_values("date")["_residual"].to_numpy(dtype="float64")
-        residual = residual[np.isfinite(residual)]
-        if residual.size < 3 or residual.std() == 0:
+        if residual.size < 2:
             continue
-        values.append(float(np.corrcoef(residual[:-1], residual[1:])[0, 1]))
-    return float(np.mean(values)) if values else None
+        # Centred on this entity's OWN mean before the pairs are pooled.
+        # Without it the pooled correlation measures the spread BETWEEN
+        # entities rather than persistence within them: a panel of one name
+        # biased high throughout and another biased low contributes pairs
+        # that are (+1, +1) and (-1, -1), which correlate at 0.99 while
+        # neither name's own residuals are autocorrelated at all.
+        finite = np.isfinite(residual)
+        if not finite.any():
+            continue
+        residual = residual - residual[finite].mean()
+        earlier, later = residual[:-1], residual[1:]
+        usable = np.isfinite(earlier) & np.isfinite(later)
+        if usable.any():
+            lagged.append(earlier[usable])
+            current.append(later[usable])
+    if not lagged:
+        return None
+    earlier = np.concatenate(lagged)
+    later = np.concatenate(current)
+    if earlier.size < 3 or earlier.std() == 0 or later.std() == 0:
+        return None
+    return float(np.corrcoef(earlier, later)[0, 1])
 
 
 def calibration(actual: np.ndarray, predicted: np.ndarray, task: str) -> Dict[str, Any]:
@@ -153,6 +193,33 @@ def calibration(actual: np.ndarray, predicted: np.ndarray, task: str) -> Dict[st
         return {"n": int(a.size)}
 
     if task == "classification":
+        # A Brier score and an ECE are only defined for a 0/1 outcome and a
+        # probability. Given a regressor's output they still return numbers
+        # -- 1.84 and 0.76 on standard normals, which look like ordinary
+        # bad calibration and are arithmetic on nothing. Reported as
+        # undefined rather than computed, because the caller cannot tell
+        # the difference from the number alone.
+        binary = np.isin(a, (0.0, 1.0)).all()
+        in_unit = bool(((p >= 0.0) & (p <= 1.0)).all())
+        if not binary or not in_unit:
+            wrong = []
+            if not binary:
+                wrong.append("the outcome is not 0/1")
+            if not in_unit:
+                wrong.append(
+                    f"predictions run {p.min():.4g} to {p.max():.4g}, " "outside [0, 1]"
+                )
+            return {
+                "n": int(a.size),
+                "note": (
+                    "calibration was not computed: " + " and ".join(wrong) + ". "
+                    "A Brier score and an expected calibration error describe "
+                    "a probability against a binary outcome; on anything else "
+                    "they return a plausible number that means nothing. Score "
+                    "this model as a regression, or check that task= matches "
+                    "the target it was fit on."
+                ),
+            }
         brier = float(((p - a) ** 2).mean())
         bins = np.clip(np.digitize(p, np.linspace(0, 1, 11)[1:-1]), 0, 9)
         rows = []

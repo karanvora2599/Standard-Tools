@@ -251,3 +251,39 @@ class TestSingleEntityDatesHaveNoCrossSection:
         registry("b", _predictions(lambda i, j: 4.0, entities=["AAA"]))
         report = combine_predictions(["a", "b"], method="mean")
         assert report["predictions"]["prediction"].iloc[0] == pytest.approx(3.0)
+
+
+class TestTheReportedCorrelationSaysWhatItIs:
+    def test_rank_mean_reports_a_rank_correlation(self, registry) -> None:
+        """
+        THE DEFECT. `correlations` was taken on whatever `values` happened
+        to be -- the RANKED panel under rank_mean and the raw one otherwise
+        -- so one field meant a Spearman-like number in one call and a
+        Pearson one in the next, with nothing saying which.
+        """
+        rng = np.random.default_rng(70)
+        base = rng.normal(0, 1, (40, 4))
+        registry("a", _predictions(lambda i, j: base[i, j]))
+        registry("b", _predictions(lambda i, j: base[i, j] ** 3))
+        ranked = combine_predictions(["a", "b"], method="rank_mean")
+        assert ranked["correlation_basis"] == "rank"
+
+    def test_the_level_methods_report_a_level_correlation(self, registry) -> None:
+        rng = np.random.default_rng(71)
+        base = rng.normal(0, 1, (40, 4))
+        registry("a", _predictions(lambda i, j: base[i, j]))
+        registry("b", _predictions(lambda i, j: base[i, j] ** 3))
+        for method in ("mean", "median"):
+            report = combine_predictions(["a", "b"], method=method)
+            assert report["correlation_basis"] == "level"
+
+    def test_the_two_bases_genuinely_differ(self, registry) -> None:
+        """A monotone transform leaves the ranks alone and moves the levels,
+        which is exactly why the field had to say which one it is."""
+        rng = np.random.default_rng(72)
+        base = rng.normal(0, 1, (40, 4))
+        registry("a", _predictions(lambda i, j: base[i, j]))
+        registry("b", _predictions(lambda i, j: base[i, j] ** 3))
+        rank = combine_predictions(["a", "b"], method="rank_mean")["correlations"]
+        level = combine_predictions(["a", "b"], method="mean")["correlations"]
+        assert rank["a|b"] > level["a|b"] + 0.05

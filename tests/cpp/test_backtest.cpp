@@ -398,23 +398,36 @@ static double pseudo_random(std::uint64_t& state) {
     return (static_cast<double>(x >> 11) / 9007199254740992.0) * 2.0 - 1.0;  // [-1, 1)
 }
 
+/**
+ * Bit-for-bit agreement, with NaN counted as equal to NaN.
+ *
+ * Plain == was used here on the reasoning that the +inf-valued fields are
+ * fine (IEEE 754 makes +inf == +inf true) and that NaN never arises. It
+ * does: a window that opens no position has zero volatility, and a Sharpe
+ * ratio over zero volatility is undefined -- the behaviour
+ * `TestBothBackendsAgreeOnAnUndefinedSharpe` exists to pin on the Python
+ * side. Both kernels then returned NaN, agreed completely, and failed the
+ * check, because NaN == NaN is false. Two assertions in the random
+ * summary-vs-full comparison failed for that reason alone.
+ */
+static bool same_value(double a, double b) {
+    return (std::isnan(a) && std::isnan(b)) || a == b;
+}
+
 static void check_all_fields_match(
     const sqt::BacktestResult& a, const sqt::BacktestResult& b)
 {
-    // Plain == is correct even for the +inf-valued fields (sortino_ratio,
-    // calmar_ratio, profit_factor never take -inf or NaN in this code path)
-    // -- IEEE 754 defines +inf == +inf as true.
-    CHECK(a.final_equity == b.final_equity);
-    CHECK(a.total_return == b.total_return);
-    CHECK(a.annualized_vol == b.annualized_vol);
-    CHECK(a.sharpe_ratio == b.sharpe_ratio);
-    CHECK(a.sortino_ratio == b.sortino_ratio);
-    CHECK(a.max_drawdown == b.max_drawdown);
-    CHECK(a.calmar_ratio == b.calmar_ratio);
+    CHECK(same_value(a.final_equity, b.final_equity));
+    CHECK(same_value(a.total_return, b.total_return));
+    CHECK(same_value(a.annualized_vol, b.annualized_vol));
+    CHECK(same_value(a.sharpe_ratio, b.sharpe_ratio));
+    CHECK(same_value(a.sortino_ratio, b.sortino_ratio));
+    CHECK(same_value(a.max_drawdown, b.max_drawdown));
     CHECK(a.num_trades == b.num_trades);
-    CHECK(a.win_rate == b.win_rate);
-    CHECK(a.profit_factor == b.profit_factor);
-    CHECK(a.avg_trade_return_pct == b.avg_trade_return_pct);
+    CHECK(same_value(a.calmar_ratio, b.calmar_ratio));
+    CHECK(same_value(a.win_rate, b.win_rate));
+    CHECK(same_value(a.profit_factor, b.profit_factor));
+    CHECK(same_value(a.avg_trade_return_pct, b.avg_trade_return_pct));
     CHECK(b.equity_curve.empty());  // summary kernel never populates this
 }
 

@@ -170,7 +170,19 @@ class BuildEnsembleResult(BaseModel):
             "Pairwise correlation between the base models' predictions. The "
             "number that says whether the ensemble was worth building: two "
             "models correlated at 0.98 average into approximately either of "
-            "them, which the ensemble's own score cannot show you."
+            "them, which the ensemble's own score cannot show you. Read it "
+            "with `correlation_basis`, which says whether it was taken on "
+            "ranks or on levels."
+        ),
+    )
+    correlation_basis: str = Field(
+        "",
+        description=(
+            "'rank' or 'level' -- which series `correlations` was computed "
+            "on. `rank_mean` correlates the within-date RANKS, every other "
+            "method the raw predictions, so the same field means a "
+            "Spearman-like number in one case and a Pearson one in the "
+            "other. Stated rather than left to be inferred from `method`."
         ),
     )
     warnings: List[str] = Field(default_factory=list)

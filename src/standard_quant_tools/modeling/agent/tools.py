@@ -232,6 +232,7 @@ def build_model_ensemble(input_data: BuildEnsembleInput) -> BuildEnsembleResult:
         rows_per_model=combined["rows_per_model"],
         rows_covered_by_all=combined["rows_covered_by_all"],
         correlations=combined["correlations"],
+        correlation_basis=combined["correlation_basis"],
         warnings=warnings,
     )
 
@@ -1352,6 +1353,9 @@ def analyze_model_errors(
                     "outcomes, so sizing from them under-trades."
                 )
             )
+
+    if calibration.get("note"):
+        warnings.append("NOTE: " + calibration["note"])
 
     ece = calibration.get("expected_calibration_error")
     if ece is not None and ece > 0.1:

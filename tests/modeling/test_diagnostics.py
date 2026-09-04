@@ -478,3 +478,133 @@ class TestABucketIsNotAPlaceToHideRows:
         frame = _joined({name: rng.normal(0, 1, 40) for name in ("CCC", "AAA", "BBB")})
         rows = error_attribution(frame)["by_entity"]
         assert [r["entity"] for r in rows] == ["AAA", "BBB", "CCC"]
+
+
+class TestTheAutocorrelationIsWeightedAndAdjacent:
+    """
+    Three ways a lag-1 autocorrelation over a panel goes wrong, all of
+    which this reported at some point.
+    """
+
+    def test_a_three_row_entity_does_not_outvote_a_thousand_row_one(self) -> None:
+        """
+        THE DEFECT. Averaging one correlation per entity gives a three-row
+        entity the same say as a thousand-row one. Measured, a 3-row entity
+        moved the reported figure from +0.796 to -0.102 -- a sign flip from
+        0.3% of the rows. Pooling the pairs weights each entity by the
+        evidence it carries.
+        """
+        rng = np.random.default_rng(60)
+        index = pd.date_range("2024-01-01", periods=1000, freq="B")
+        overlapping = pd.Series(rng.normal(0, 1, 1000)).rolling(5).mean().dropna()
+        big = pd.DataFrame(
+            {
+                "date": index[: len(overlapping)],
+                "entity": "BIG",
+                "_residual": overlapping.to_numpy(),
+            }
+        )
+        tiny = pd.DataFrame(
+            {"date": index[:3], "entity": "TINY", "_residual": [1.0, -1.0, 1.0]}
+        )
+        alone = residual_autocorrelation(big)
+        together = residual_autocorrelation(pd.concat([big, tiny], ignore_index=True))
+        assert (
+            abs(together - alone) < 0.05
+        ), "three rows must not move a thousand-row estimate materially"
+
+    def test_pooling_does_not_pick_up_the_spread_between_entities(self) -> None:
+        """
+        The other half. Pooling the pairs WITHOUT centring each entity
+        measures how far apart the entities sit rather than how persistent
+        each one is: a name biased high and a name biased low contribute
+        (+1, +1) and (-1, -1) pairs, which correlate near 1.0 while neither
+        name's own residuals are autocorrelated at all.
+        """
+        rng = np.random.default_rng(61)
+        index = pd.date_range("2024-01-01", periods=200, freq="B")
+        frame = pd.concat(
+            [
+                pd.DataFrame(
+                    {
+                        "date": index,
+                        "entity": "HIGH",
+                        "_residual": 1.0 + rng.normal(0, 0.1, 200),
+                    }
+                ),
+                pd.DataFrame(
+                    {
+                        "date": index,
+                        "entity": "LOW",
+                        "_residual": -1.0 + rng.normal(0, 0.1, 200),
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
+        assert abs(residual_autocorrelation(frame)) < 0.2
+
+    def test_a_pair_is_two_adjacent_bars_not_two_surviving_values(self) -> None:
+        """
+        Dropping the missing residuals and then pairing what is left joins
+        bars either side of a gap, so a "lag-1" pair could span months.
+        """
+        index = pd.date_range("2024-01-01", periods=600, freq="B")
+        frame = pd.DataFrame(
+            {
+                "date": [index[0], index[1], index[500], index[501]],
+                "entity": "A",
+                "_residual": [1.0, np.nan, np.nan, 2.0],
+            }
+        )
+        # Two isolated observations, no adjacent finite pair anywhere.
+        assert residual_autocorrelation(frame) is None
+
+
+class TestTheMomentsMatchTheRestOfThePackage:
+    def test_skew_and_kurtosis_are_the_pandas_ones(self) -> None:
+        """
+        They were population third and fourth moments over a ddof=1 spread
+        -- a hybrid of two conventions agreeing with neither, and differing
+        from `analysis/feature_report.py`, which reports the pandas
+        bias-corrected pair. Two numbers called "skew" in one package
+        should not disagree.
+        """
+        rng = np.random.default_rng(62)
+        residual = rng.standard_t(5, 5000)
+        summary = residual_summary(residual, np.zeros(5000))
+        series = pd.Series(residual)
+        assert summary["skew"] == pytest.approx(series.skew())
+        assert summary["excess_kurtosis"] == pytest.approx(series.kurt())
+
+
+class TestCalibrationRefusesWhatIsNotAProbability:
+    def test_a_regressors_output_is_not_scored_as_one(self) -> None:
+        """
+        THE DEFECT. Given standard normals for both sides it returned a
+        Brier of 1.84 and an ECE of 0.76 -- numbers that read as ordinary
+        bad calibration and are arithmetic on nothing. A Brier score above
+        1 is not even attainable by a real probability.
+        """
+        rng = np.random.default_rng(63)
+        report = calibration(
+            rng.normal(0, 1, 500), rng.normal(0, 1, 500), "classification"
+        )
+        assert "brier_score" not in report
+        assert "not 0/1" in report["note"]
+        assert "outside [0, 1]" in report["note"]
+
+    def test_a_binary_outcome_with_out_of_range_scores_is_refused(self) -> None:
+        rng = np.random.default_rng(64)
+        actual = rng.integers(0, 2, 400).astype(float)
+        report = calibration(actual, rng.normal(0, 1, 400), "classification")
+        assert "brier_score" not in report
+        assert "outside [0, 1]" in report["note"]
+
+    def test_a_real_probability_is_still_scored(self) -> None:
+        rng = np.random.default_rng(65)
+        predicted = rng.uniform(0.02, 0.98, 2000)
+        actual = (rng.uniform(size=2000) < predicted).astype(float)
+        report = calibration(actual, predicted, "classification")
+        assert 0.0 <= report["brier_score"] <= 1.0
+        assert report["expected_calibration_error"] < 0.05

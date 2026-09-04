@@ -275,6 +275,11 @@ def combine_predictions(
         "rows_per_model": per_model_rows,
         "rows_covered_by_all": covered,
         "correlations": _pairwise_correlation(values),
+        # WHICH correlation, because it is not the same one every time.
+        # `values` is the RANKED panel under rank_mean and the raw one
+        # otherwise, so the number silently changed meaning with the
+        # method -- Spearman-like against Pearson -- under one key.
+        "correlation_basis": "rank" if method == "rank_mean" else "level",
         "warnings": warnings,
     }
 

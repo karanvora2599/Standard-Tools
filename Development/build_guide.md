@@ -46,7 +46,7 @@ is not built — all existing tests continue to pass either way.
 
 ## 1. Prerequisites
 
-Root `CMakeLists.txt` requires CMake **>= 3.15**. `pyproject.toml` requires
+Root `CMakeLists.txt` requires CMake **>= 3.19**. `pyproject.toml` requires
 Python **>= 3.10**. Both are still accurate as of this writing — no change
 needed to build against the current `pyproject.toml`.
 
@@ -636,7 +636,9 @@ Python automatically picks up the correct suffix
 needed across platforms.
 
 **Editable installs**  
-`pip install -e .` installs the pure-Python package via flit_core. The C++
+`pip install -e .` builds the extension through scikit-build-core (it used to
+go through flit_core, which is why an editable install used to produce no
+`.pyd` at all). The C++
 extension is built separately with cmake and lands in the same directory, so
 both are always importable together after a single `pip install -e .` +
 `cmake --build build --config Release`.
