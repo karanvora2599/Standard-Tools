@@ -57,7 +57,7 @@ because the order is the point.
 | `check_leakage` | a feature set → whether it is temporally safe to fit on, answered **before** a dataset is built with it |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
 | `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve |
-| `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building |
+| `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels |
 | `analyze_model_errors` | a `model_id` → where its errors are, by entity, period, prediction decile and any feature's decile, plus whether its SCALE is right. The question an R2 cannot answer |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
 | `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
@@ -807,6 +807,40 @@ not *detected* — only disclosed. Treat `PIT_SAFE` as "this formula doesn't
 look forward", not "this dataset is point-in-time correct".
 
 ---
+
+### What `analyze_model_errors` reports, precisely
+
+Three of its numbers are easy to read as something they are not, so they
+say what they are.
+
+**Residual autocorrelation is pooled over pairs, centred per entity.** Not
+an average of per-entity correlations: that gives an entity with three
+observations the same say as one with a thousand, and measured on a panel
+of one 996-row entity at +0.796 plus one 3-row entity it reported −0.102 —
+a sign flip from 0.3% of the rows. Pooling weights each entity by the pairs
+it contributes. The centring matters just as much in the other direction:
+pooled without it, a name biased high and a name biased low contribute
+(+1, +1) and (−1, −1) pairs and correlate at 0.99 while neither is
+autocorrelated at all.
+
+A pair is two ADJACENT bars. Dropping the missing residuals and then
+pairing what survives joins bars either side of a gap, so a "lag-1" pair
+could span months.
+
+And a positive value is EXPECTED for an overlapping label rather than being
+a defect — an h-bar forward return sampled every bar shares h−1 bars with
+its neighbour. Read it as how few independent observations there were.
+
+**`skew` and `excess_kurtosis` are the pandas bias-corrected pair**, the
+same ones `profile_feature` reports. They were population moments over a
+ddof=1 spread, which is a hybrid of two conventions and matched neither.
+
+**Calibration refuses what is not a probability.** A Brier score and an
+expected calibration error describe a probability against a binary outcome;
+handed a regressor's output they returned 1.84 and 0.76, which read as
+ordinary bad calibration and are arithmetic on nothing — a Brier above 1 is
+not attainable by a real probability at all. The report says why it
+declined instead, and the tool surfaces it as a warning.
 
 ### Universe-scope network features
 
@@ -2290,6 +2324,8 @@ five native kernels followed.
 | `cross_sectional_correlation` | per-date IC | 3.0–6.2× |
 | `cross_sectional_correlation` | pooled `Series.corr("spearman")` | 1.6–3.0× |
 | `label_uniqueness` | `label_uniqueness_weights` | 8–23× |
+| `rank_by_date` | `groupby.rank(method="average")` | 4.4–22× |
+| `permutation_null_ic` | the whole permutation loop | 68–88× |
 
 End to end, `run_experiment` against the pure-Python path: **1.92×/2.05×**
 pooled, **1.59×/1.82×** cross-sectional, **2.23×/2.55×** weighted, at

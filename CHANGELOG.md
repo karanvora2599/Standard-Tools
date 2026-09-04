@@ -14,6 +14,162 @@ that preceded them found that eleven of the thirteen L2 features a bigger
 plan proposed were already shipped — so the work was to feed what exists
 rather than to build it again.
 
+### Five numbers that looked like measurements and were not
+
+Correctness notes the modelling analysis raised and the performance work
+left alone, each reproduced before it was touched.
+
+**A three-row entity flipped the sign of a thousand-row one.**
+`residual_autocorrelation` averaged one correlation PER ENTITY, so three
+observations counted as much as a thousand. On a panel of one 996-row entity
+autocorrelated at +0.796 and one 3-row entity it reported **-0.102** -- a
+sign flip, from 0.3% of the rows. It pools the lag-1 pairs now, which weights
+each entity by the evidence it carries: +0.778 on the same panel.
+
+Pooling naively would have swapped one error for another, and the existing
+test caught it: without centring each entity first, the pooled correlation
+measures how far APART the entities sit rather than how persistent each is.
+A name biased high and a name biased low contribute (+1, +1) and (-1, -1)
+pairs and correlate at 0.99 while neither is autocorrelated at all.
+
+It also dropped the non-finite residuals and THEN paired what survived,
+which joins bars either side of a gap -- a "lag-1" pair could span months.
+
+**Two numbers called "skew" disagreed.** `skew` and `excess_kurtosis` were
+population third and fourth moments over a ddof=1 spread: a hybrid of two
+conventions agreeing with neither, and differing from
+`analysis/feature_report.py`, which reports the pandas bias-corrected pair.
+
+**The calibration branch scored anything given to it.** Standard normals on
+both sides returned a Brier of 1.84 and an ECE of 0.76 -- readable as
+ordinary bad calibration, arithmetic on nothing, and a Brier above 1 is not
+attainable by a real probability at all. It says why it declined now, and
+`analyze_model_errors` surfaces that as a warning.
+
+**The ensemble's `correlations` changed meaning with the method.** It was
+taken on whatever `values` happened to be -- the RANKED panel under
+`rank_mean`, the raw one otherwise -- so one field was Spearman-like in one
+call and Pearson in the next with nothing saying which. It reports
+`correlation_basis` alongside now.
+
+**And two C++ assertions had been failing in the committed tree.**
+`a.sharpe_ratio == b.sharpe_ratio`, under a comment asserting that Sharpe
+never takes NaN. It does: a window that opens no position has zero
+volatility, which is the behaviour `TestBothBackendsAgreeOnAnUndefinedSharpe`
+pins on the Python side. Both kernels returned NaN, agreed completely, and
+failed because NaN == NaN is false. 2708/2710 -> 2710/2710, with the kernels
+untouched -- they were right all along.
+
+### Two kernels, out of a whole subsystem swept for them
+
+`Development/modeling_native_plan_ii.md` measured the `modeling` and
+`feature_lab` surfaces for C++ opportunities and found two, which is the
+result worth reporting. Everything else that looked like a kernel was pandas
+dispatch overhead that numpy removed, and eight proposals were measured and
+REJECTED for being slower than the code they would have replaced.
+
+The ceiling explains why: with a real estimator, 78.5% of a run is inside
+sklearn, and the kernels that already existed were only a third of the cost
+of the preprocessing path they sat in.
+
+**`rank_by_date`, 4.4-22x.** The one modelling operation where vectorising
+lost -- a numpy rewrite of the ensemble's ranking measured 395 ms against
+pandas' `groupby.rank` at 407 ms, and slower at five models. pandas' is
+already the good implementation; C++ was the only way past it. An
+extraction rather than new arithmetic: `average_ranks()` already implemented
+`Series.rank(method="average")` tie semantics and `bucket_by_date()` already
+counting-sorted rows by date. NaN is skipped by the ranking and preserved,
+so a missing name leaves the present ones ranking 1..n-1 rather than
+shifting them.
+
+Three call sites had three copies of the same pandas idiom and now share
+one: the ensemble combiner, the feature report's rank turnover, and
+`apply_cross_sectional_target` -- the operation the FIRST native plan
+tabulated in phase 2 at 1.4 microseconds a row and then neither built nor
+declined. That phase is finally complete.
+
+**`permutation_null_ic`, 68-88x.** The whole permutation loop, not the
+correlation alone: about a third of the cost was constructing per-draw
+pandas Series nobody reads. Fusing also lets the ranking happen once, since
+shuffling values inside a date permutes their ranks. Two numpy attempts at
+that same idea measured 0.14x and 0.6x, because the existing kernel
+counting-sorts in O(n) and numpy has to sort.
+
+**The two backends cannot share a bit stream, so they share a null.** A C++
+shuffle is not numpy's PCG64, so the same seed draws differently with and
+without the extension -- the contract `simulate_forward_paths` already
+states. What has to agree is the null they are drawn FROM, and that is what
+the tests assert, against an analytic value rather than against each other:
+on pure noise the mean IC has standard deviation sqrt(1/((m-1)*n_dates)),
+and across three seeds at 4,000 draws the kernel lands at 1.001x that and
+the Python path at 1.006x. An early 6% gap between the two was sampling
+noise at 400 draws -- worth checking, because a null that is too NARROW is
+the direction that turns ordinary noise into a discovery.
+
+The bounded random is rejection-sampled rather than a plain modulo, which
+over-represents the low residues and would make Fisher-Yates non-uniform;
+splitmix64 rather than a library distribution, whose consumption of its
+engine is implementation-defined. Each draw seeds from the run seed and its
+own index, so the answer does not depend on how OpenMP scheduled them.
+
+Both ship with a `HAS_CPP`-toggling benchmark, which is the gate the
+previous native work never had -- `HAS_CPP` appears nowhere in
+`tests/bench/`, so that plan's speedup figures could not be re-derived from
+committed code.
+
+### The rest of it was pandas, and the fold loop copied its block twice
+
+**The preflight read and hashed half a million rows to fetch four JSON
+keys.** `validate_model_spec` cost 0.571 s on a 500,000-row dataset and
+spent all of it in `_load_dataset_panel` -- reading the Parquet, re-deriving
+the content hash, binding the frame to `_panel`, and using four keys out of
+the metadata. It reads the metadata now: **0.571 s -> 0.000 s**.
+
+`check_leakage` does the same thing and deliberately still does. Its own
+note tells the caller the coverage figures "confirm the panel is the one
+that was built", and that sentence is only true because the hash was
+checked. The analysis called both sites a free fix; one of them is a stated
+guarantee, and an audit tool is the last place to stop paying for one.
+
+**The fold loop selected the training block and then dropped from it**, a
+second full copy at 11.5 ms per 100,000 rows -- the largest single piece of
+per-fold overhead. The target-overlap purge is decided on panel-wide arrays
+and folded into the row mask now, so the fold is taken once. Features are
+gathered out of one panel-wide C-contiguous matrix built before the loop
+instead of a column selection plus the C-order copy the kernels need.
+Best-of-5 over 11 folds: **5.9%** with the purge active, 1.9% without,
+predictions hashing identically on both paths.
+
+The gap between those two numbers is the useful part. Nearly all of the win
+is the purge, and the purge only runs when the dataset carries
+`label_end_date`; a first A/B measured 1.9% and read as a miss until the
+test panel turned out not to have that column, so the branch just rewritten
+never ran.
+
+**`_preprocess` evaluated `train_frame[feature_ids]` twice** on the pooled
+path, once to fit and once to apply, and each call converted it separately.
+`to_numpy` hands back the column block transposed, so the
+`ascontiguousarray` the kernels need is a full copy: 3.7 ms, twice a fold,
+on every fold and every search candidate. 10-11% end to end, predictions
+identical -- not the 2.63x the analysis reported, which was fold PREPARATION
+measured in isolation rather than the run it sits in.
+
+**`network.py`'s correlation.** `DataFrame.corr(min_periods=...)` walks
+column pairs in a Python loop; four matrix products do it in a third of the
+time. `avg_correlation` 5.605 -> 2.164 s and `mst_degree` 6.105 -> 2.549 s
+at 2520 x 500, checksums identical.
+
+The analysis reported that replacement as agreeing to 5.55e-16, and it does
+on the data it was measured against. On price levels around 1e8 it returns
+**inf** and disagrees on which pairs are NaN, because `E[x^2] - E[x]^2`
+cancels into a negative variance. Centring each column first -- correlation
+is shift-invariant -- removes the inf and fixes every NaN pattern, and still
+leaves 1e-8 at that scale, which is the input's own precision rather than
+anyone's bug. So the fast path DECLINES when a column's mean exceeds a
+thousand times its spread and the caller falls back to pandas. A returns
+panel, which is what this module is handed, sits near zero and always takes
+it.
+
 ### `DataFrame.where()` with a Series condition costs 22 microseconds per column
 
 Three vectorisations from `Development/modeling_native_plan_ii.md`, none of

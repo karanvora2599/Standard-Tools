@@ -87,6 +87,20 @@ headline; the end-to-end number is the one that matters to a user.
 
 ## 3. Phases
 
+> **Status note, added later.** Phase 2 listed four cross-sectional
+> operations and three were built; `apply_cross_sectional_target` (per-date
+> average rank, tabulated below at 1.4 µs/row) was neither built nor
+> declined, and stayed pure pandas. It is now served by the `rank_by_date`
+> kernel described in `modeling_native_plan_ii.md` §2.1, together with the
+> ensemble combiner and the feature report's rank turnover — three call
+> sites that had three copies of the same idiom. **Phase 2 is complete.**
+>
+> That plan also records that this one's speedup figures were not
+> reproducible from committed code: `HAS_CPP` appears nowhere in
+> `tests/bench/`, so nothing here could toggle the native path. Both kernels
+> added there ship with an in-suite benchmark that can.
+
+
 Ordered so each is independently shippable and independently measurable.
 
 ### Phase 1 — `panel_preprocess`: fused fit and apply

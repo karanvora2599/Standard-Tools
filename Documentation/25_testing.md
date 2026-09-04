@@ -1,12 +1,13 @@
 # The testing regime
 
-Seven layers, each catching a class of defect the others cannot. The
+Eight layers, each catching a class of defect the others cannot. The
 arrangement is deliberate: every layer exists because something got through
 the ones above it.
 
 | Layer | Where | What it catches | Runtime |
 |---|---|---|---|
 | Per-module correctness | `tests/<package>/` | Wrong answers | ~3 min |
+| Parity vs contract | `tests/modeling/test_native_metrics.py` | Two backends agreeing on the WRONG answer | 6 s |
 | Whole-surface invariants | `tests/surface/test_invariants.py` | A tool registered halfway | 6 s |
 | Adversarial fuzzing | `tests/surface/test_adversarial_inputs.py` | Unhandled exceptions, NaN in output | ~4.5 min |
 | Metamorphic relations | `tests/surface/test_metamorphic.py` | Consistently-wrong answers | 4 s |
@@ -51,6 +52,50 @@ that always finds a break carries authority it has not earned. Where a
 statistic claims a false-positive rate, that rate is *measured over many
 draws* rather than asserted on one seed — a single draw cannot tell a
 broken test from an unlucky one.
+
+## Layer 1b — parity is not conformance
+
+Every C++ kernel has a twin test that toggles the module's own `HAS_CPP`
+and runs both paths on the same input. That catches a kernel drifting from
+the Python it replaced, which is what it was built for, and it is
+structurally incapable of catching the two of them being wrong together.
+
+**It missed one for exactly that reason.** `standardize_by_date` zeroed a
+whole date's cross-section whenever any single entity was missing —
+reporting every PRESENT name as sitting exactly at the cross-sectional
+mean, which `panel_stats.hpp` names as the specific fabricated observation
+it must not produce. Both backends did it, agreed completely, and passed
+parity on every run. A test even asserted the behaviour, under the name
+`test_nan_poisons_its_whole_date`.
+
+It was not undiscovered — `panel_stats.cpp` called it a wart and reproduced
+it deliberately, on the reasoning that "in practice it never fires:
+alignment drops NaN rows before the panel reaches the engine". Registering
+an externally computed panel retired that premise, because such a panel
+keeps its warm-up NaNs.
+
+So a kernel now gets **two oracles, answering two different questions**:
+
+| oracle | question | catches |
+|---|---|---|
+| the other backend, via `HAS_CPP` | do the two implementations agree? | drift between them |
+| an independent one, written from the header | is the agreed answer right? | a shared misunderstanding |
+
+`test_native_metrics.py::TestStandardizeByDate._contract` is the second
+kind: it computes the documented behaviour from scratch rather than from
+either implementation. `TestRankWithinDate` uses pandas as the parity
+oracle and the header's NaN rule as the contract one, and
+`TestPermutationNull` — where the two backends *cannot* agree, since a C++
+shuffle is not numpy's PCG64 — asserts the analytic standard deviation of
+the null instead, which is the property both are supposed to have.
+
+**And each kernel ships a benchmark that can toggle the backend.** The
+first native plan instructed readers to reproduce its speedups with
+`tests/bench/bench_modeling.py`; `HAS_CPP` appears nowhere in
+`tests/bench/`, so none of its figures could be re-derived from committed
+code. `rank_by_date` and `permutation_null_ic` each carry a
+`@pytest.mark.benchmark` test that times both paths back to back and
+asserts a floor multiple, so the claim and the check are the same artifact.
 
 ## Layer 2 — whole-surface invariants
 
