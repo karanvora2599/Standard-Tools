@@ -388,13 +388,40 @@ def cusum(
     # on a window with nothing in it. The same flat window answered
     # differently depending on the constant's binary representation.
     if has_no_dispersion(reference.to_numpy(), std):
+        # THE SAME SHAPE AS THE NORMAL RETURN. This early return carried
+        # `reason` and four keys, and `ChannelResult` requires `severity`
+        # and `peak_statistic`, so every channel that reached it raised a
+        # validation error instead of reporting a non-detection -- on a flat
+        # market, which is exactly when a liquidity detector is asked to
+        # run. It also left `degenerate_baseline` at False, the one field
+        # that exists to say what had happened.
+        #
+        # And it reported nothing to judge from. The NEARLY-constant branch
+        # below tells the reader to "judge the shock from THAT, not from the
+        # statistic" and hands them the level change to do it with; the
+        # absolutely-constant case is where that advice matters most, since
+        # a flat baseline followed by a jump has no other measure at all.
+        after = values.iloc[n_reference:]
+        after_mean = float(after.mean()) if len(after) else float("nan")
         return {
             "triggered": False,
-            "reason": (
-                "the reference window is constant, so there is no scale to "
-                "measure a change against. This is a statement about the "
-                "window, not evidence that nothing happened."
-            ),
+            "severity": "none",
+            "peak_statistic": 0.0,
+            "degenerate_baseline": True,
+            "baseline_mean": mean,
+            "baseline_std": std,
+            "mean_after_reference": after_mean,
+            "shift": float(after_mean - mean),
+            "shift_in_reference_sd": None,
+            "notes": [
+                "the reference window is CONSTANT, so there is no scale to "
+                "measure a change against and no statistic was computed. "
+                "This is a statement about the window, not evidence that "
+                f"nothing happened. The level went from {mean:.6g} to "
+                f"{after_mean:.6g} -- `shift` is the only measure of the "
+                "move here, and `severity` is 'none' because nothing was "
+                "measurable, not because nothing moved."
+            ],
             "n_observations": int(len(values)),
             "n_reference": int(n_reference),
         }

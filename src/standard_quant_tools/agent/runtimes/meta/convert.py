@@ -180,14 +180,9 @@ def _score_panel_to_weight_panel(input_data, source):
     weights = sizers[input_data.construction_method](
         frame, gross_leverage=input_data.gross_leverage
     )
-    panel = {
-        str(column): {
-            str(index): float(value)
-            for index, value in weights[column].dropna().items()
-        }
-        for column in weights.columns
-    }
-    return panel, [
+    # `publish` takes the frame directly now; this hand-rolled copy of
+    # `handoff._frame_to_mapping` was the second of three.
+    return weights, [
         f"Weights built by backtest.sizing.{input_data.construction_method}, "
         "the same constructor run_portfolio_simulation would have used — "
         "not a reimplementation of it."

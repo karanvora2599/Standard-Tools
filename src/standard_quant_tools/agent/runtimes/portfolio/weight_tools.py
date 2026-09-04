@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
@@ -55,7 +55,14 @@ class ConstructWeightsInput(BaseModel):
             "through the conversation."
         ),
     )
-    method: str = Field("rank", description=f"One of: {', '.join(METHODS)}.")
+    # A bare `str` here put the valid values only in the prose. The body
+    # refused an unknown one, so nothing silently mis-ran -- but a model
+    # reading the schema saw "string" and learned the four names only if it
+    # read the description, and 'Rank' failed at call time rather than at
+    # validation time. Literal puts them in the schema.
+    method: Literal["rank", "top_bottom", "zscore", "vol_scaled"] = Field(
+        "rank", description=f"One of: {', '.join(METHODS)}."
+    )
     gross_leverage: float = Field(
         1.0, gt=0, description="Total absolute weight, summed across names."
     )

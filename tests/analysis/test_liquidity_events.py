@@ -173,6 +173,86 @@ class TestADegenerateBaselineIsLabelled:
         assert any("denominator near zero" in w for w in report["warnings"])
 
 
+def _frozen_market(n=1500, *, shock=False, shock_at=0.6):
+    """A market with NO dispersion at all in its reference window.
+
+    `_market(live_spread=False)` still walks the mid, so the spread varies
+    in its last bits and lands on the NEARLY-constant branch. This one pins
+    the mid too, so the reference window's standard deviation is exactly
+    zero and the absolutely-constant branch is the one that runs.
+    """
+    stamps = pd.date_range("2024-03-01 09:30", periods=n, freq="1s")
+    on = (np.arange(n) >= int(n * shock_at)) if shock else np.zeros(n, bool)
+    half = np.where(on, 0.25, 0.01)
+    quotes = pd.DataFrame(
+        {
+            "timestamp": stamps,
+            "bid_price": 100.0 - half,
+            "ask_price": 100.0 + half,
+            "bid_size": 500.0,
+            "ask_size": 500.0,
+        }
+    )
+    trades = pd.DataFrame({"timestamp": stamps, "price": 100.0, "size": 100.0})
+    return trades, quotes
+
+
+class TestAConstantBaselineStillReportsAResult:
+    """The sibling of the class above, and the branch it never reached.
+
+    `has_no_dispersion` catches a reference window whose standard deviation
+    is exactly zero -- a dead market, which is precisely when a liquidity
+    detector gets asked to run. That branch returned four keys and a
+    `reason`, and `ChannelResult` requires `severity` and `peak_statistic`,
+    so every channel reaching it raised a validation error instead of
+    reporting a non-detection.
+
+    It also left `degenerate_baseline` at False -- the one field that exists
+    to say what had happened -- and reported nothing to judge the move from,
+    which is the advice the near-constant branch gives.
+    """
+
+    def _spread(self, **kwargs):
+        _trades, quotes = _frozen_market(**kwargs)
+        return detect_liquidity_events(channels=["spread"], quotes=quotes, freq="30s")[
+            "results"
+        ][0]
+
+    def test_the_branch_under_test_is_the_absolute_one(self):
+        result = self._spread()
+        assert result["baseline_std"] == 0.0
+        assert any("CONSTANT" in note for note in result["notes"])
+
+    def test_it_carries_the_fields_the_result_model_requires(self):
+        """The defect exactly: these two are required and were absent."""
+        result = self._spread()
+        assert result["severity"] == "none"
+        assert result["peak_statistic"] == 0.0
+
+    def test_it_says_the_baseline_was_degenerate(self):
+        assert self._spread()["degenerate_baseline"] is True
+
+    def test_severity_none_is_explained_as_unmeasurable(self):
+        """'none' here means nothing could be measured, not that nothing
+        moved. A reader who takes it the other way has the answer
+        backwards."""
+        note = " ".join(self._spread(shock=True)["notes"])
+        assert "not because nothing moved" in note
+
+    def test_a_real_shock_off_a_frozen_baseline_is_still_measurable(self):
+        """The case that matters. A pinned spread that blows out has no
+        statistic available, so `shift` is the only measure there is -- and
+        the branch used to report nothing at all."""
+        calm = self._spread()
+        shocked = self._spread(shock=True)
+        assert calm["shift"] == pytest.approx(0.0, abs=1e-12)
+        assert shocked["shift"] > 0.1
+        assert shocked["mean_after_reference"] > shocked["baseline_mean"]
+
+    def test_it_does_not_claim_a_detection_it_could_not_make(self):
+        assert self._spread(shock=True)["triggered"] is False
+
+
 class TestItFindsTheRightChannel:
     def test_liquidity_channels_fire_while_price_does_not(self):
         """The plan's own example, and the reason the tool exists: the book
@@ -245,10 +325,31 @@ class TestTheCusumItself:
             assert crossing >= result["n_reference"]
 
     def test_a_constant_series_reports_no_scale_rather_than_no_event(self):
+        """The same two sentences, moved from `reason` into `notes`.
+
+        `ChannelResult` has no `reason` field and ignores extras, so this
+        explanation -- the whole account of why nothing was detected -- was
+        dropped on the way to the caller even when it was produced. `notes`
+        is a real field, so it arrives now."""
         result = cusum(pd.Series([3.0] * 60))
         assert not result["triggered"]
-        assert "no scale" in result["reason"]
-        assert "not evidence that nothing happened" in result["reason"]
+        assert "reason" not in result
+        note = " ".join(result["notes"])
+        assert "no scale" in note
+        assert "not evidence that nothing happened" in note
+
+    def test_a_constant_series_still_fills_the_required_fields(self):
+        """What made this a crash rather than a quiet omission."""
+        from standard_quant_tools.agent.models import ChannelResult
+
+        result = cusum(pd.Series([3.0] * 60))
+        required = {
+            name
+            for name, field in ChannelResult.model_fields.items()
+            if field.is_required() and name != "channel"
+        }
+        assert required <= set(result), f"missing {sorted(required - set(result))}"
+        ChannelResult(channel="test", **result)
 
     def test_too_short_a_series_is_refused(self):
         with pytest.raises(ValidationError, match="at least 10"):

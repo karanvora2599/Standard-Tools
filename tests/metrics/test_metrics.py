@@ -532,7 +532,15 @@ class TestTheDispersionGuardReachedTheRestOfTheLibrary:
 
         result = cusum(pd.Series([constant] * 180))
         assert result["triggered"] is False
-        assert "constant" in result["reason"]
+        # The explanation moved from `reason` into `notes`, which is a field
+        # `ChannelResult` actually has -- `reason` was dropped on the way to
+        # the caller, so the account of why nothing was detected never
+        # arrived even when it was produced.
+        assert "constant" in " ".join(result["notes"]).lower()
+        # And the branch fills what the result model requires, which it did
+        # not: every channel reaching it raised instead of reporting.
+        assert result["severity"] == "none"
+        assert result["peak_statistic"] == 0.0
 
     @pytest.mark.parametrize("constant", [0.001, 0.07, 5.0])
     def test_rolling_sharpe_stability_refuses_a_flat_series(self, constant):

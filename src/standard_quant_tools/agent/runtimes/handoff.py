@@ -314,9 +314,34 @@ def publish(
 
     storage = KINDS[kind]["storage"]
     if storage == "mapping":
+        # A DATE-BY-ENTITY FRAME IS ACCEPTED AS WELL AS THE MAPPING, because
+        # it is already the stored shape: the dict is converted straight
+        # into one on the next line, and `resolve` hands a mapping back
+        # either way. Refusing it meant every producer holding a frame had
+        # to remember `_frame_to_mapping` first, and one of them did not --
+        # `construct_weights_from_scores` was broken on ALL FOUR of its
+        # methods, with a message that reads as a problem with the data
+        # rather than with its container.
+        #
+        # A frame goes through the mapping on its way in rather than being
+        # stored directly, so the two entry points cannot drift -- it is
+        # keyed and NaN-dropped by exactly the function `resolve` uses on
+        # the way out.
+        #
+        # That makes the keys whatever `str()` gives, which for a
+        # DatetimeIndex is "2024-01-02 00:00:00" and not "2024-01-02". Not
+        # normalized here on purpose: `_frame_to_mapping` has always keyed
+        # that way on the resolve side, and changing it would silently
+        # rewrite the keys of every mapping already published. Every panel
+        # in this system arrives through `_mapping_to_frame`, whose index is
+        # already the caller's own strings, so the two agree in practice.
+        if isinstance(data, pd.DataFrame):
+            data = _frame_to_mapping(data)
         if not isinstance(data, dict) or not data:
             raise ValidationError(
-                f"kind {kind!r} expects a non-empty " "{ticker: {date: value}} mapping"
+                f"kind {kind!r} expects a non-empty "
+                "{ticker: {date: value}} mapping, or the date-by-entity "
+                "DataFrame of the same thing"
             )
         payload: Any = _mapping_to_frame(data)
     elif storage == "series":

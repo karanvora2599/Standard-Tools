@@ -388,3 +388,69 @@ class TestSpreadProxyCheck:
                 },
             )
         assert "ground truth" in str(exc.value)
+
+
+class TestADeadMarketIsReportedNotRaised:
+    """`detect_liquidity_events` crashed on a flat market.
+
+    `cusum`'s absolutely-constant branch returned `triggered`, `reason`,
+    `n_observations` and `n_reference`. `ChannelResult` requires `severity`
+    and `peak_statistic`, so building the result raised a validation error
+    and the tool returned nothing at all — on the input a liquidity
+    detector is most likely to be pointed at.
+
+    `reason` was not carried either: `ChannelResult` has no such field and
+    ignores extras, so the explanation was dropped on the way out even when
+    it was produced.
+    """
+
+    @staticmethod
+    def _flat(n=2400, *, blow_out=False):
+        """One price, one size, and a spread pinned to the cent."""
+        half = [0.25 if (blow_out and i >= int(n * 0.6)) else 0.01 for i in range(n)]
+        quotes = [(i, 100.0 - half[i], 100.0 + half[i], 500, 500) for i in range(n)]
+        trades = [(i, 100.0, 100) for i in range(n)]
+        return _tape(trades, quotes)
+
+    def _run(self, tick_provider, channels, **kwargs):
+        trades, quotes = self._flat(**kwargs)
+        tick_provider(trades, quotes)
+        return dispatch(
+            "detect_liquidity_events",
+            {
+                "symbol": "X",
+                "start_date": "2024-03-01",
+                "end_date": "2024-03-02",
+                "channels": channels,
+                "freq": "30s",
+            },
+        )
+
+    def test_a_flat_market_returns_a_report(self, tick_provider):
+        report = self._run(tick_provider, ["spread", "mid_return"])
+        assert report["n_triggered"] == 0
+        assert report["results"], "no channel reported at all"
+
+    def test_every_channel_that_ran_is_labelled_degenerate(self, tick_provider):
+        report = self._run(tick_provider, ["spread", "mid_return"])
+        for result in report["results"]:
+            assert result["degenerate_baseline"] is True, result["channel"]
+            assert result["severity"] == "none"
+
+    def test_the_explanation_reaches_the_caller(self, tick_provider):
+        """It lived in a key the result model does not have."""
+        report = self._run(tick_provider, ["spread"])
+        note = " ".join(report["results"][0]["notes"])
+        assert "CONSTANT" in note
+        assert "not because nothing moved" in note
+
+    def test_a_blowout_off_a_frozen_baseline_reports_its_shift(self, tick_provider):
+        """No statistic is available, so `shift` is the only measure of a
+        spread that went from two cents to fifty. It used to be an
+        exception."""
+        report = self._run(tick_provider, ["spread"], blow_out=True)
+        result = report["results"][0]
+        assert result["triggered"] is False
+        assert result["degenerate_baseline"] is True
+        assert result["shift"] > 0.1
+        assert result["mean_after_reference"] > result["baseline_mean"]
