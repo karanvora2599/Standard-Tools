@@ -23,6 +23,7 @@ folder, and each has a test class here:
 
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -268,3 +269,148 @@ class TestGenerality:
         ref = handoff.publish(panel, "signal_panel", "fleet", "sig")
         assert json.loads(json.dumps({"ref": ref}))["ref"] == ref
         assert handoff.resolve(json.loads(json.dumps(ref)), expect="signal_panel")
+
+
+class TestTheScorePanelConversionHonoursTheTaskToo:
+    """`predictions -> signal_panel` REFUSES without `task`, because "a
+    regression prediction thresholded as a probability produces a
+    nonsensical but valid-looking panel, which is a wrong answer rather
+    than an error."
+
+    `predictions -> score_panel` accepted the same argument and ignored it.
+    The consequence is the mirror image: a classifier's predictions are
+    probabilities, so every score is positive and the sign carries no
+    direction at all. Two of the three sizers downstream recentre
+    cross-sectionally and hide it -- which is why this survived.
+    """
+
+    @pytest.fixture
+    def probabilities(self):
+        """A classifier's output: probabilities, all in [0, 1]."""
+        rng = np.random.default_rng(0)
+        return pd.DataFrame(
+            [
+                {"date": d, "entity": e, "prediction": float(rng.uniform(0.2, 0.8))}
+                for d in pd.bdate_range("2024-01-02", periods=20)
+                for e in ("AAA", "BBB", "CCC", "DDD")
+            ]
+        )
+
+    def _convert(self, ref, **kw):
+        return resolve("meta").dispatch(
+            "convert_reference",
+            {"ref": ref, "run_id": "fleet", "name": kw.pop("name", "out"), **kw},
+        )
+
+    def _values(self, ref, kind):
+        panel = handoff.resolve(ref, expect=kind)
+        return np.array([v for per in panel.values() for v in per.values()])
+
+    def test_a_classifier_score_panel_carries_a_sign(self, probabilities):
+        produced = handoff.publish(probabilities, "predictions", "fleet", "oos")
+        converted = self._convert(
+            produced, to_kind="score_panel", task="classification", name="sp"
+        )
+        values = self._values(converted["ref"], "score_panel")
+        assert (values < 0).any(), "no score is negative -- nothing predicts down"
+        assert (values > 0).any()
+        assert any("recentred" in n for n in converted["notes"])
+
+    def test_a_regression_panel_is_passed_through_unchanged(self, probabilities):
+        """A regression prediction of a forward return is ALREADY signed;
+        recentring it by a probability threshold would be the same class of
+        mistake in the other direction."""
+        produced = handoff.publish(probabilities, "predictions", "fleet", "oos")
+        converted = self._convert(
+            produced, to_kind="score_panel", task="regression", name="sp"
+        )
+        values = self._values(converted["ref"], "score_panel")
+        assert values.min() == pytest.approx(
+            float(probabilities.prediction.min()), rel=1e-9
+        )
+
+    def test_omitting_the_task_says_what_it_could_not_know(self, probabilities):
+        """Not a refusal here, unlike the signal panel: a score panel of raw
+        predictions is a legitimate thing to want. But the note has to name
+        the case it cannot distinguish."""
+        produced = handoff.publish(probabilities, "predictions", "fleet", "oos")
+        converted = self._convert(produced, to_kind="score_panel", name="sp")
+        assert any("task" in n and "classification" in n for n in converted["notes"])
+
+    def test_recentring_survives_into_the_weights(self, probabilities):
+        produced = handoff.publish(probabilities, "predictions", "fleet", "oos")
+        scores = self._convert(
+            produced, to_kind="score_panel", task="classification", name="sp"
+        )
+        weights = self._convert(
+            scores["ref"],
+            to_kind="weight_panel",
+            construction_method="rank_weighted",
+            name="wp",
+        )
+        values = self._values(weights["ref"], "weight_panel")
+        assert (values > 0).any() and (values < 0).any()
+
+
+class TestVolScaledWasAdvertisedAndCouldNotRun:
+    """It is in the `sizers` dict and named in the refusal message for a bad
+    `construction_method`, so the tool tells a caller it is available -- and
+    then raised a bare `TypeError: vol_scaled() missing 1 required
+    positional argument: 'returns_df'`, which reads as a bug in the library
+    rather than an argument that cannot work.
+
+    It cannot work: `vol_scaled` divides each name's score by that name's
+    trailing realized volatility, and a score panel carries no returns.
+    """
+
+    @pytest.fixture
+    def score_ref(self):
+        rng = np.random.default_rng(1)
+        frame = pd.DataFrame(
+            [
+                {"date": d, "entity": e, "prediction": float(rng.normal())}
+                for d in pd.bdate_range("2024-01-02", periods=10)
+                for e in ("AAA", "BBB", "CCC")
+            ]
+        )
+        produced = handoff.publish(frame, "predictions", "fleet", "oos")
+        return resolve("meta").dispatch(
+            "convert_reference",
+            {
+                "ref": produced,
+                "to_kind": "score_panel",
+                "run_id": "fleet",
+                "name": "sp",
+                "task": "regression",
+            },
+        )["ref"]
+
+    def test_it_refuses_with_a_reason_not_a_type_error(self, score_ref):
+        with pytest.raises(ValidationError) as exc:
+            resolve("meta").dispatch(
+                "convert_reference",
+                {
+                    "ref": score_ref,
+                    "to_kind": "weight_panel",
+                    "run_id": "fleet",
+                    "name": "wp",
+                    "construction_method": "vol_scaled",
+                },
+            )
+        message = str(exc.value)
+        assert "trailing realized volatility" in message
+        assert "run_portfolio_simulation" in message, "no alternative offered"
+
+    @pytest.mark.parametrize("method", ["rank_weighted", "zscore_normalized"])
+    def test_the_two_that_do_work_still_do(self, score_ref, method):
+        result = resolve("meta").dispatch(
+            "convert_reference",
+            {
+                "ref": score_ref,
+                "to_kind": "weight_panel",
+                "run_id": "fleet",
+                "name": f"wp_{method}",
+                "construction_method": method,
+            },
+        )
+        assert result["kind"] == "weight_panel"

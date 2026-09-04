@@ -99,14 +99,44 @@ def _predictions_to_score_panel(input_data, source):
         raise ValidationError(
             f"a predictions frame needs {sorted(required)}; missing {sorted(missing)}"
         )
-    panel: Dict[str, Dict[str, float]] = {}
-    for row in frame.itertuples(index=False):
-        panel.setdefault(str(row.entity), {})[str(row.date)] = float(row.prediction)
-    return panel, [
+    # `task` was accepted and ignored here, while the SIGNAL panel
+    # conversion refuses without it -- and for the reason that applies just
+    # as well to this one: "a regression prediction thresholded as a
+    # probability produces a nonsensical but valid-looking panel, which is
+    # a wrong answer rather than an error." A classifier's predictions are
+    # probabilities, so every score is positive and the sign carries no
+    # direction. Two of the three sizers downstream recentre and hide it;
+    # `vol_scaled` does not, and neither does any consumer that reads the
+    # sign directly.
+    offset = 0.0
+    notes = [
         "Scores are the raw predictions, unscaled. They are only meaningful "
         "cross-sectionally unless the model was trained to a calibrated "
         "target."
     ]
+    if input_data.task == "classification":
+        offset = float(input_data.proba_threshold)
+        notes.append(
+            f"Classification: probabilities recentred by subtracting "
+            f"proba_threshold ({offset:g}), so a score's SIGN is the "
+            "predicted direction. Raw probabilities are all positive, which "
+            "reads as an all-long book to any consumer that does not "
+            "recentre cross-sectionally."
+        )
+    elif input_data.task is None:
+        notes.append(
+            "`task` was not given, so the predictions are passed through "
+            "unchanged. If these came from a CLASSIFIER they are "
+            "probabilities in [0, 1] and every score is positive -- pass "
+            "task='classification' to have them recentred."
+        )
+
+    panel: Dict[str, Dict[str, float]] = {}
+    for row in frame.itertuples(index=False):
+        panel.setdefault(str(row.entity), {})[str(row.date)] = (
+            float(row.prediction) - offset
+        )
+    return panel, notes
 
 
 def _score_panel_to_weight_panel(input_data, source):
@@ -128,6 +158,22 @@ def _score_panel_to_weight_panel(input_data, source):
         raise ValidationError(
             f"construction_method must be one of {sorted(sizers)}, got "
             f"{input_data.construction_method!r}"
+        )
+    # `vol_scaled` divides each score by that name's TRAILING REALIZED
+    # VOLATILITY, which a score panel does not carry -- it needs a returns
+    # frame aligned to the same columns. It was listed as available and
+    # then raised a bare `TypeError: vol_scaled() missing 1 required
+    # positional argument: 'returns_df'`, so the tool advertised an option
+    # that could never work and failed in a way that read as a bug in the
+    # library rather than a wrong argument.
+    if input_data.construction_method == "vol_scaled":
+        raise ValidationError(
+            "construction_method='vol_scaled' cannot be built from a score "
+            "panel alone: it divides each name's score by that name's "
+            "trailing realized volatility, and a score panel carries no "
+            "returns to measure that from. Use 'rank_weighted' or "
+            "'zscore_normalized' here, or size with vol scaling inside "
+            "run_portfolio_simulation, which has the price history."
         )
     scores = handoff.resolve(input_data.ref, expect="score_panel")
     frame = pd.DataFrame(scores)
