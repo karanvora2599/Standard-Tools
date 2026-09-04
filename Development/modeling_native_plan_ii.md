@@ -428,10 +428,20 @@ standard deviation of the mean IC under the null, the kernel lands at
 1.001x and the Python path at 1.006x. Seeding follows the contract
 `simulate_forward_paths` already states -- reproducible WITHIN a backend.
 
-**This plan is complete.** The only item still open is one the analysis
-proposed and this work did not take: building the feature matrix once
-before the fold loop and gathering fold rows out of it, rather than taking
-the feature columns per fold.
+**This plan is complete.** The last item -- building the feature matrix
+once before the fold loop -- is done, together with folding the
+target-overlap purge into the row mask rather than selecting the fold and
+then dropping from the selection, which was a second full copy of the block
+and the largest single piece of per-fold overhead at 11.5 ms per 100,000
+rows. Measured best-of-5 over 11 folds: **5.9%** with the purge active,
+1.9% without, predictions hashing identically on both paths including a
+20-bar label at embargo 0.
+
+The gap between those two numbers is worth keeping: nearly all of the win
+is the purge, and the purge only runs when the dataset carries
+`label_end_date`. A first A/B measured 1.9% and read as a miss until the
+test panel turned out to have no such column, so the rewritten branch never
+ran.
 
 ### What the whole exercise came to
 

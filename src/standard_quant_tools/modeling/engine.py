@@ -208,6 +208,8 @@ def _preprocess(
     train_frame: pd.DataFrame,
     test_frame: pd.DataFrame,
     feature_ids: List[str],
+    train_features: "pd.DataFrame | None" = None,
+    test_features: "pd.DataFrame | None" = None,
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
     Normalize the feature columns for one fold.
@@ -224,8 +226,16 @@ def _preprocess(
     # the pooled path -- once to fit and once to apply -- and the take is
     # about 4.9 ms on a 100,000 x 20 block, paid on every fold of every run
     # and every candidate of every hyperparameter search.
-    train_features = train_frame[feature_ids]
-    test_features = test_frame[feature_ids]
+    #
+    # The outer fold loop hands these in already gathered out of one
+    # panel-wide float64 matrix, which skips the column take and the
+    # C-order copy entirely. The hyperparameter search does not, because
+    # its inner folds are slices of a frame rather than of the panel, so it
+    # selects here as before.
+    if train_features is None:
+        train_features = train_frame[feature_ids]
+    if test_features is None:
+        test_features = test_frame[feature_ids]
 
     if model_spec.preprocessing.normalization == "cross_sectional":
         clip = model_spec.preprocessing.clip_sigma
@@ -417,6 +427,15 @@ def run_experiment(
     # also keeps working for splitters whose folds are not contiguous
     # (purged K-fold) -- an interval slice would not.
     date_code = np.searchsorted(dates.to_numpy(), panel["date"].to_numpy())
+    # The whole panel's features as ONE C-contiguous float64 matrix, built
+    # here rather than per fold. A fold then gathers its rows with a numpy
+    # take (5.5 ms on 100,000 rows) instead of a pandas column selection
+    # plus the C-order copy the kernels need (7.2 + 4.2 ms).
+    feature_matrix = np.ascontiguousarray(panel[feature_ids].to_numpy(dtype=np.float64))
+    # The purge is decided on these rather than on a copied sub-frame; see
+    # the fold loop for why that removes a whole frame copy per fold.
+    panel_dates = panel["date"].to_numpy()
+    panel_label_end = panel[LABEL_END_COL].to_numpy() if has_label_end else None
     for train_pos, test_pos in splitter.split(dates):
         train_dates = dates[train_pos]
         test_dates = dates[test_pos]
@@ -424,8 +443,8 @@ def run_experiment(
         in_train[train_pos] = True
         in_test = np.zeros(len(dates), dtype=bool)
         in_test[test_pos] = True
-        train_df = panel[in_train[date_code]]
-        test_df = panel[in_test[date_code]]
+        train_mask = in_train[date_code]
+        test_mask = in_test[date_code]
 
         # ── Target-overlap purge ──────────────────────────────────────────
         # A forward-return label on training row t is only finished once
@@ -439,7 +458,7 @@ def run_experiment(
         # Purging on the row's own recorded label_end_date rather than on
         # an integer offset also handles entities on different calendars,
         # where t+horizon entity bars != t+horizon global panel dates.
-        if has_label_end and not train_df.empty and len(test_dates) > 0:
+        if has_label_end and train_mask.any() and len(test_dates) > 0:
             first_test_date = test_dates[0]
             last_test_date = test_dates[-1]
             # A training row is purged when the bars its label spans
@@ -450,12 +469,20 @@ def run_experiment(
             # previous rule; it is written in full because purged k-fold
             # puts training rows on BOTH sides of the test block, and there
             # the rows after it must not be purged for the wrong reason.
-            overlaps = (train_df[LABEL_END_COL] >= first_test_date) & (
-                train_df["date"] <= last_test_date
+            # Computed on the panel-wide arrays and folded into the row
+            # mask, so the fold is taken ONCE. Selecting and then dropping
+            # made a second full copy of the training block -- 11.5 ms on
+            # 100,000 rows, the largest single piece of per-fold overhead.
+            overlaps = (
+                train_mask
+                & (panel_label_end >= first_test_date)
+                & (panel_dates <= last_test_date)
             )
-            keep = ~overlaps
             n_purged_total += int(overlaps.sum())
-            train_df = train_df[keep]
+            train_mask = train_mask & ~overlaps
+
+        train_df = panel[train_mask]
+        test_df = panel[test_mask]
 
         if train_df.empty or test_df.empty:
             skipped.append(
@@ -486,7 +513,22 @@ def run_experiment(
             )
             continue
 
-        train_X, test_X = _preprocess(model_spec, train_df, test_df, feature_ids)
+        train_X, test_X = _preprocess(
+            model_spec,
+            train_df,
+            test_df,
+            feature_ids,
+            pd.DataFrame(
+                feature_matrix[train_mask],
+                index=train_df.index,
+                columns=feature_ids,
+            ),
+            pd.DataFrame(
+                feature_matrix[test_mask],
+                index=test_df.index,
+                columns=feature_ids,
+            ),
+        )
         sample_weight = _fold_sample_weights(model_spec, train_df)
 
         fold_params = model_spec.estimator.params
