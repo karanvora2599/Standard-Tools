@@ -386,11 +386,26 @@ loop entirely. What was done instead is the three targeted fixes inside it,
 which keep the loop and every existing sizing method untouched. The
 remaining gap is available if the loop is ever removed.
 
-**Still open:** step 3's `network.py` refit loop (3-6x), step 4's free
-meta-only load, and both kernels (§2.1 `rank_by_date`, §2.2
-`permutation_test_ic`). The engine `_preprocess` precompute from §3.1
-(2.63x, verified bit-identical by the analysis) is not yet done and is the
-largest remaining non-kernel item.
+Since done as well:
+
+| item | estimated | achieved | output |
+|---|---|---|---|
+| §3.1 engine `_preprocess` | 2.63x* | **10-11% end to end** | predictions hash identical |
+| §3 item 6, meta-only load | "free" | **0.571 s -> 0.000 s** | see caveat |
+
+\* 2.63x was fold PREPARATION measured in isolation. Fold preparation is
+not the whole run, and 10-11% is what a caller experiences. Both numbers
+are right about different things. The larger change the analysis proposed
+-- building the feature matrix once before the loop and gathering fold rows
+out of it -- is untaken and still available.
+
+The meta-only load was applied to `validate_model_spec` and deliberately
+NOT to `check_leakage`: that tool's own note says the coverage figures
+"confirm the panel is the one that was built", which is only true because
+the hash was checked. It was not a free fix on both sites.
+
+**Still open:** step 3's `network.py` refit loop (3-6x) and both kernels
+(§2.1 `rank_by_date`, §2.2 `permutation_test_ic`).
 
 ## 6. Order of work
 

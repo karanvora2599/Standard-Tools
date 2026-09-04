@@ -487,6 +487,34 @@ def _load_external_panel_for(meta, dataset_id: str):
         ) from exc
 
 
+def _load_dataset_meta(dataset_id: str):
+    """
+    A dataset's recorded metadata, WITHOUT reading or hashing its panel.
+
+    `_load_dataset_panel` verifies the panel against the hash recorded at
+    build time, which costs 0.5 s per million rows at 24 columns and 1.7 s
+    at 84 -- three to six times what reading the Parquet costs. That is the
+    right price for anything that USES the data. It is the wrong price for
+    a caller that wants four keys out of a JSON file, which is what
+    `validate_model_spec` was paying: it read and hashed the whole panel,
+    bound it to `_panel`, and discarded it.
+
+    Deliberately NOT used by `check_leakage`, whose own note tells the
+    caller the coverage figures "confirm the panel is the one that was
+    built". That sentence is only true because the hash was checked, so
+    that tool keeps paying for it.
+    """
+    directory = _artifacts.run_dir(dataset_id)
+    meta_path = directory / "dataset_meta.json"
+    if not meta_path.exists():
+        raise ValidationError(
+            f"no dataset with dataset_id={dataset_id!r} — "
+            "dataset_meta.json is written last, so its absence also means a "
+            "previous build_model_dataset call did not complete."
+        )
+    return _artifacts.load_json(str(meta_path)), directory
+
+
 def _load_dataset_panel(dataset_id: str):
     """
     Load a persisted dataset panel, verifying it is the one that was built.
@@ -993,7 +1021,9 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
 
     if input_data.dataset_id is not None:
         try:
-            _panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
+            # Metadata only: this branch reads `feature_ids` and nothing
+            # else, so it does not need the panel loaded or verified.
+            meta, _directory = _load_dataset_meta(input_data.dataset_id)
         except ValidationError as exc:
             problems.append(SpecProblem(where="dataset_id", problem=str(exc)))
         else:

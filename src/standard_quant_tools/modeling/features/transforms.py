@@ -142,6 +142,51 @@ def apply_preprocessing(
     return out
 
 
+def fit_and_apply_preprocessing(
+    train: pd.DataFrame, test: pd.DataFrame
+) -> "tuple[pd.DataFrame, pd.DataFrame]":
+    """
+    Fit winsorize/zscore statistics on `train` and apply them to both,
+    materialising each frame exactly ONCE.
+
+    Identical in result to `fit_preprocessing` followed by two
+    `apply_preprocessing` calls. It exists because that sequence converts
+    the training block to a C-contiguous matrix twice: `to_numpy` returns
+    the column block transposed, so it is F-contiguous, and the
+    `ascontiguousarray` the kernel needs is a full copy. On a 100,000 x 20
+    training block that copy measured 3.7 ms, paid twice per fold, on every
+    fold of every walk-forward run and every candidate of every
+    hyperparameter search.
+
+    Falls back to the public pair whenever the fast path does not apply, so
+    there is exactly one implementation of the arithmetic.
+    """
+    train_matrix = _native_matrix(train) if HAS_CPP else None
+    test_matrix = _native_matrix(test) if HAS_CPP else None
+    same_columns = list(train.columns) == list(test.columns)
+    if train_matrix is None or test_matrix is None or not same_columns:
+        stats = fit_preprocessing(train)
+        return apply_preprocessing(train, stats), apply_preprocessing(test, stats)
+
+    native = _cpp_core.fit_preprocess_stats(train_matrix, _WINSOR_LOW, _WINSOR_HIGH)
+    lo = np.asarray(native["lo"], dtype=np.float64)
+    hi = np.asarray(native["hi"], dtype=np.float64)
+    mean = np.asarray(native["mean"], dtype=np.float64)
+    std = np.asarray(native["std"], dtype=np.float64)
+    return (
+        pd.DataFrame(
+            _cpp_core.apply_preprocess_stats(train_matrix, lo, hi, mean, std),
+            index=train.index,
+            columns=train.columns,
+        ),
+        pd.DataFrame(
+            _cpp_core.apply_preprocess_stats(test_matrix, lo, hi, mean, std),
+            index=test.index,
+            columns=test.columns,
+        ),
+    )
+
+
 def standardize_cross_sectional(
     frame: pd.DataFrame, dates: np.ndarray, clip_sigma: float = 3.0
 ) -> pd.DataFrame:
