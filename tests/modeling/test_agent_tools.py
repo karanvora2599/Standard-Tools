@@ -216,3 +216,83 @@ class TestArchitecturalSeparationFromExistingAgentSurface:
         existing_names = {t["function"]["name"] for t in get_agent_tools()}
         modeling_names = {t["function"]["name"] for t in get_modeling_tools()}
         assert not modeling_names & existing_names
+
+
+class TestTheCapabilityReportDoesNotOverstate:
+    """An agent reads this INSTEAD of trying things.
+
+    `targets` was `_literal_options(TargetSpec, "type")` -- all eighteen
+    names, flat. Six can be built from a price series; the other twelve
+    raise "cannot be built from a price series" inside build_model_dataset,
+    because they are functions of the book, of orders or of fills.
+
+    That is a worse place to be wrong than a tool is. A tool that overstates
+    costs one failed call. A capability report that overstates is a plan
+    built on a tool that cannot do what it was told, and `TARGET_KINDS`
+    already carried the answer -- it calls itself "the ONE place that says
+    so" and the report was not reading it.
+    """
+
+    @staticmethod
+    def _report():
+        from standard_quant_tools.modeling.capabilities import modeling_capabilities
+
+        return modeling_capabilities()
+
+    def test_buildable_is_what_build_target_can_actually_build(self):
+        from standard_quant_tools.modeling.specs import TARGET_KINDS
+
+        targets = self._report()["targets"]
+        assert set(targets["buildable"]) == {
+            name for name, kind in TARGET_KINDS.items() if kind.buildable
+        }
+        assert set(targets["external_only"]) == {
+            name for name, kind in TARGET_KINDS.items() if not kind.buildable
+        }
+
+    def test_the_two_halves_are_disjoint_and_complete(self):
+        targets = self._report()["targets"]
+        buildable, external = set(targets["buildable"]), set(targets["external_only"])
+        assert not buildable & external
+        assert buildable | external == set(targets["all"])
+
+    def test_it_still_reports_every_name(self):
+        """Narrowing the report to the buildable six would be the opposite
+        error: those twelve are real labels, reachable through
+        register_external_panel."""
+        from standard_quant_tools.modeling.specs import TARGET_KINDS
+
+        assert set(self._report()["targets"]["all"]) == set(TARGET_KINDS)
+
+    def test_an_external_only_target_really_is_refused(self, patched_multi_factory):
+        """The claim under test, checked against the thing that enforces
+        it rather than against the registry that describes it."""
+        from standard_quant_tools.error import ValidationError
+
+        external = self._report()["targets"]["external_only"]
+        assert "future_mid_return" in external
+        spec = _dataset_spec()
+        spec = spec.model_copy(
+            update={"target": TargetSpec(type="future_mid_return", horizon=5)}
+        )
+        with pytest.raises(ValidationError, match="cannot be built"):
+            build_model_dataset(BuildModelDatasetInput(spec=spec))
+
+    def test_the_note_names_the_way_in_for_the_others(self):
+        note = self._report()["targets"]["note"]
+        assert "register_external_panel" in note
+
+    def test_the_detail_explains_each_one(self):
+        detail = self._report()["targets"]["detail"]
+        assert len(detail) == len(self._report()["targets"]["all"])
+        for name, entry in detail.items():
+            assert entry["description"], name
+            assert entry["tasks"], name
+
+    def test_optional_dependencies_cover_what_can_be_missing(self):
+        """It reported three, so an agent could not learn from it that the
+        bloomberg provider or the signing path were unavailable -- it would
+        find out by making a call that failed."""
+        deps = self._report()["optional_dependencies"]
+        assert {"scipy", "numba", "polars", "blpapi", "cryptography"} <= set(deps)
+        assert all(isinstance(v, bool) for v in deps.values())

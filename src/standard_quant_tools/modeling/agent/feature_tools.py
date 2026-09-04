@@ -131,6 +131,42 @@ def _pick_representative(
     return sorted(members, key=key)[0]
 
 
+def _ic_decay_result(
+    panel,
+    *,
+    dataset_id: str,
+    feature: str,
+    max_shift: int,
+    method: str,
+) -> FeatureICDecayResult:
+    """The lead-lag curve as a result model.
+
+    Extracted so `profile_feature` reaches the same computation rather than
+    growing a second one -- `include_ic_decay`'s own description says
+    "get_feature_ic_decay is the same computation on its own", and it has to
+    stay true.
+    """
+    result = lead_lag_ic_curve(panel, feature, max_shift=max_shift, method=method)
+    # Sorted NUMERICALLY. The underlying dict is keyed by stringified
+    # shifts, and sorting those as text puts "-10" before "-2".
+    points = [
+        ICDecayPoint(shift=int(shift), ic=float(ic))
+        for shift, ic in sorted(result["curve"].items(), key=lambda kv: int(kv[0]))
+    ]
+    peak = max(points, key=lambda p: abs(p.ic)) if points else None
+    return FeatureICDecayResult(
+        dataset_id=dataset_id,
+        feature=feature,
+        curve=points,
+        ic_at_zero=float(result["ic_at_zero"]),
+        peak_shift=peak.shift if peak else 0,
+        peak_ratio=float(result["peak_ratio"]),
+        persistence=float(result["persistence"]),
+        flagged=bool(result["flagged"]),
+        reason=str(result["reason"]),
+    )
+
+
 def profile_feature(input_data: AnalyzeFeatureInput) -> FeatureProfile:
     """
     Profile ONE feature: how well populated it is, how fast it turns over,
@@ -157,10 +193,26 @@ def profile_feature(input_data: AnalyzeFeatureInput) -> FeatureProfile:
         panel, [feature], n_quantiles=input_data.n_quantiles
     )[feature]
 
+    # The two arguments that were accepted and dropped. Off by default
+    # because the cost their description advertises is real: the curve is
+    # (2 * max_shift + 1) extra IC passes over the panel.
+    decay = (
+        _ic_decay_result(
+            panel,
+            dataset_id=input_data.dataset_id,
+            feature=feature,
+            max_shift=input_data.max_shift,
+            method="spearman",
+        )
+        if input_data.include_ic_decay
+        else None
+    )
+
     return FeatureProfile(
         feature=feature,
         distribution=FeatureDistribution(**distribution),
         predictive=FeaturePredictive(**predictive),
+        ic_decay=decay,
     )
 
 
@@ -269,30 +321,12 @@ def get_feature_ic_decay(input_data: FeatureICDecayInput) -> FeatureICDecayResul
     panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
     _require_feature(panel, input_data.feature, input_data.dataset_id)
 
-    result = lead_lag_ic_curve(
+    return _ic_decay_result(
         panel,
-        input_data.feature,
-        max_shift=input_data.max_shift,
-        method=input_data.method,
-    )
-    # Sorted NUMERICALLY. The underlying dict is keyed by stringified
-    # shifts, and sorting those as text puts "-10" before "-2".
-    points = [
-        ICDecayPoint(shift=int(shift), ic=float(ic))
-        for shift, ic in sorted(result["curve"].items(), key=lambda kv: int(kv[0]))
-    ]
-    peak = max(points, key=lambda p: abs(p.ic)) if points else None
-
-    return FeatureICDecayResult(
         dataset_id=input_data.dataset_id,
         feature=input_data.feature,
-        curve=points,
-        ic_at_zero=float(result["ic_at_zero"]),
-        peak_shift=peak.shift if peak else 0,
-        peak_ratio=float(result["peak_ratio"]),
-        persistence=float(result["persistence"]),
-        flagged=bool(result["flagged"]),
-        reason=str(result["reason"]),
+        max_shift=input_data.max_shift,
+        method=input_data.method,
     )
 
 

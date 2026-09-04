@@ -43,6 +43,9 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.validation.metrics import (
+    check_ic_method,
+)
 
 from ..features.transforms import (
     cross_sectional_counts,
@@ -522,6 +525,7 @@ def lead_lag_ic_curve(
     and a uniformly shifted feature is just a different feature. It is a
     SCREEN, not a proof: it tells an agent where to look.
     """
+    check_ic_method(method, what="lead_lag_ic_curve")
     if max_shift < 1:
         raise ValidationError(f"max_shift must be >= 1, got {max_shift}")
 

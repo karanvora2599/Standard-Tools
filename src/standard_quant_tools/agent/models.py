@@ -1104,7 +1104,7 @@ class RegimeAdaptiveInput(BaseModel):
         1,
         ge=1,
         le=256,
-        description="Worker processes for grid search (default 1 for agent use).",
+        description="Worker processes for the Python grid loop. HAS NO EFFECT on a normal install: the native batch path runs the whole sweep in one call with no subprocessing, and it ships with `pip install`, so raising this buys nothing. Kept because it is the real control where the extension is absent or failed to build. `list_modeling_capabilities` reports `native_extension` if you need to know which case you are in.",
     )
     risk_free_rate: float = Field(
         0.0,
@@ -1953,7 +1953,10 @@ class BacktestOptInput(BaseModel):
         description="Number of top parameter combinations to return (default 5, max 20).",
     )
     n_workers: int = Field(
-        1, ge=1, le=256, description="CPU workers for parallel grid search (default 1)."
+        1,
+        ge=1,
+        le=256,
+        description="Worker processes for the Python grid loop. HAS NO EFFECT on a normal install: the native batch path runs the whole sweep in one call with no subprocessing, and it ships with `pip install`, so raising this buys nothing. Kept because it is the real control where the extension is absent or failed to build. `list_modeling_capabilities` reports `native_extension` if you need to know which case you are in.",
     )
     fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
@@ -5770,7 +5773,7 @@ class StationarityInput(BaseModel):
     symbol: str
     start_date: str
     end_date: str
-    on: str = Field(
+    on: Literal["price", "returns"] = Field(
         "price",
         description="'price' tests the level for a unit root — the usual "
         "question for a spread. 'returns' tests the increments.",

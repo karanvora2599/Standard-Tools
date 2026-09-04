@@ -877,16 +877,26 @@ def backtest_grid(
         slippage_pct:   Slippage per trade side (fraction).
         sort_by:        Output column to rank results by (default: 'sharpe_ratio').
         ascending:      Sort direction (default: False = best first).
-        n_workers:      Worker processes. Defaults to os.cpu_count().
-                        Pass 1 to run sequentially (no subprocess overhead).
-                        Ignored (forced to 1) for a custom callable when the
-                        C++ extension is not built — arbitrary callables
+        n_workers:      Worker processes for the PYTHON grid loop, defaulting
+                        to os.cpu_count(); pass 1 to run sequentially.
+                        HAS NO EFFECT ON A NORMAL INSTALL. The C++ batch path
+                        below runs the whole sweep in one call with no
+                        subprocessing, and `_sqt_core` is built by
+                        `pip install`, so the pool is reached only where the
+                        extension is absent or failed. Measured: zero pools
+                        created at any setting with the extension present,
+                        and a real pool without it.
+                        Also forced to 1 for a custom callable when the
+                        extension is not built — arbitrary callables
                         (lambdas, closures) are frequently unpicklable across
                         the ProcessPoolExecutor spawn boundary.
         fill_price:     "close" (default), "next_open", or "hl2_exploratory" — see
-                        run_strategy. Forces the Python path for the latter
-                        two (the C++ batch kernel only knows Close prices)
-                        regardless of n_workers/HAS_CPP.
+                        run_strategy. All three take the C++ batch path: it
+                        passes the Open or HL2 reference array alongside the
+                        closes. The note that used to sit here, that the
+                        latter two "force the Python path" because "the C++
+                        batch kernel only knows Close prices", was left
+                        behind by the change that added `grid_ref_arr`.
 
     Returns:
         pd.DataFrame with one row per parameter combination, sorted by sort_by.
@@ -950,7 +960,8 @@ def backtest_grid(
     # ── C++ batch path ────────────────────────────────────────────────────────
     # Generate all signal arrays in Python, then ship the entire batch to C++
     # in a single call — no subprocess overhead, no per-combo boundary crossing.
-    # Scoped to fill_price="close" — the compiled kernel only knows Close prices.
+    # NOT scoped to fill_price="close": `grid_ref_arr` below carries the Open
+    # or HL2 series for the other two, so every fill price takes this path.
     if HAS_CPP and _cpp_core is not None:
         # Checked before the try/except below -- that except catches
         # Exception broadly (to fall back to the Python grid loop on any

@@ -351,6 +351,22 @@ def publish(
             else data
         )
     else:
+        # A `frame` kind holds an arbitrary DataFrame -- a predictions table
+        # is date/entity/prediction columns, not {ticker: {date: value}} --
+        # so a mapping is NOT converted here the way it is for a mapping
+        # kind. Guessing which shape was meant would publish a silently
+        # wrong frame. But it must not fall through either: passing a dict
+        # on to `save_artifact` raised `AttributeError: 'dict' object has no
+        # attribute 'empty'` from three frames down, which reads as a bug in
+        # the library rather than the wrong container.
+        if not isinstance(data, pd.DataFrame):
+            raise ValidationError(
+                f"kind {kind!r} stores a DataFrame and got a "
+                f"{type(data).__name__}. Unlike a mapping kind, this one is "
+                "not converted for you: a frame kind holds arbitrary "
+                "columns, so there is no one right way to read a mapping "
+                "into it. Build the frame you mean and publish that."
+            )
         payload = data
 
     try:

@@ -26,7 +26,7 @@ is reviewable and one that is a diff of the whole package.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from typing_extensions import Annotated
@@ -147,6 +147,63 @@ class FeaturePredictive(BaseModel):
     )
 
 
+class ICDecayPoint(BaseModel):
+    """One point on the lead-lag curve."""
+
+    model_config = _NO_PROTECTED
+
+    shift: int = Field(
+        ...,
+        description="Bars the FEATURE was displaced by. Negative means the "
+        "feature was moved back in time (made staler); positive means it was "
+        "advanced, which is only physically meaningful as a test.",
+    )
+    ic: Stat
+
+
+class FeatureICDecayResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    feature: str
+    curve: List[ICDecayPoint] = Field(
+        ...,
+        description="IC against the same target at each shift, ordered from "
+        "most negative shift to most positive.",
+    )
+    ic_at_zero: Stat = Field(
+        ..., description="The IC as the feature is actually aligned."
+    )
+    peak_shift: int = Field(
+        ...,
+        description="The shift with the strongest absolute IC. Anything other "
+        "than a smooth decay away from a sensible peak is worth reading the "
+        "reason for.",
+    )
+    peak_ratio: Stat = Field(
+        ...,
+        description="|IC at the peak| divided by the mean |IC| elsewhere. A "
+        "large value means the alignment is knife-edged, which is what "
+        "look-ahead looks like.",
+    )
+    persistence: Stat = Field(
+        ...,
+        description="How much IC survives one bar of staleness. A feature "
+        "whose IC vanishes when delayed by a bar cannot be traded on a bar "
+        "delay.",
+    )
+    flagged: bool = Field(
+        ...,
+        description="True when the curve has the shape of look-ahead rather "
+        "than of a real signal.",
+    )
+    reason: str = Field(
+        ...,
+        description="Why it was or was not flagged, in words. This is the "
+        "part an agent should surface to a human before trusting the feature.",
+    )
+
+
 class FeatureProfile(BaseModel):
     """One feature, both halves."""
 
@@ -155,6 +212,20 @@ class FeatureProfile(BaseModel):
     feature: str
     distribution: FeatureDistribution
     predictive: FeaturePredictive
+    # `include_ic_decay` and `max_shift` were accepted and dropped: this
+    # model had nowhere for a curve to land, so the two arguments were in
+    # the schema an agent reads, with a cost rationale attached, and every
+    # combination of them returned byte-identical output.
+    #
+    # It is `FeatureICDecayResult` rather than a trimmed copy of it, so what
+    # arrives here is exactly what get_feature_ic_decay returns -- the same
+    # object from the same function, reached in one call instead of two.
+    ic_decay: Optional[FeatureICDecayResult] = Field(
+        None,
+        description="The lead-lag IC curve, present only when "
+        "include_ic_decay was set. Identical to get_feature_ic_decay's "
+        "result for this feature.",
+    )
 
 
 # ── redundancy ──────────────────────────────────────────────────────────
@@ -227,63 +298,6 @@ class FeatureRedundancyResult(BaseModel):
 # ── IC decay / lead-lag ─────────────────────────────────────────────────
 
 
-class ICDecayPoint(BaseModel):
-    """One point on the lead-lag curve."""
-
-    model_config = _NO_PROTECTED
-
-    shift: int = Field(
-        ...,
-        description="Bars the FEATURE was displaced by. Negative means the "
-        "feature was moved back in time (made staler); positive means it was "
-        "advanced, which is only physically meaningful as a test.",
-    )
-    ic: Stat
-
-
-class FeatureICDecayResult(BaseModel):
-    model_config = _NO_PROTECTED
-
-    dataset_id: str
-    feature: str
-    curve: List[ICDecayPoint] = Field(
-        ...,
-        description="IC against the same target at each shift, ordered from "
-        "most negative shift to most positive.",
-    )
-    ic_at_zero: Stat = Field(
-        ..., description="The IC as the feature is actually aligned."
-    )
-    peak_shift: int = Field(
-        ...,
-        description="The shift with the strongest absolute IC. Anything other "
-        "than a smooth decay away from a sensible peak is worth reading the "
-        "reason for.",
-    )
-    peak_ratio: Stat = Field(
-        ...,
-        description="|IC at the peak| divided by the mean |IC| elsewhere. A "
-        "large value means the alignment is knife-edged, which is what "
-        "look-ahead looks like.",
-    )
-    persistence: Stat = Field(
-        ...,
-        description="How much IC survives one bar of staleness. A feature "
-        "whose IC vanishes when delayed by a bar cannot be traded on a bar "
-        "delay.",
-    )
-    flagged: bool = Field(
-        ...,
-        description="True when the curve has the shape of look-ahead rather "
-        "than of a real signal.",
-    )
-    reason: str = Field(
-        ...,
-        description="Why it was or was not flagged, in words. This is the "
-        "part an agent should surface to a human before trusting the feature.",
-    )
-
-
 # ── inputs ──────────────────────────────────────────────────────────────
 
 
@@ -350,7 +364,7 @@ class FeatureICDecayInput(BaseModel):
     max_shift: int = Field(
         5, ge=1, le=60, description="Bars either side to displace the feature."
     )
-    method: str = Field(
+    method: Literal["spearman", "pearson"] = Field(
         "spearman",
         description="Correlation used for the IC: 'spearman' (default, rank) "
         "or 'pearson'.",
@@ -516,7 +530,7 @@ class FeatureDriftInput(BaseModel):
         description="YYYY-MM-DD boundary between the two windows. Defaults to "
         "the median date, which splits by TIME rather than row count.",
     )
-    method: str = Field(
+    method: Literal["spearman", "pearson"] = Field(
         "spearman",
         description="Correlation for the IC halves: 'spearman' or " "'pearson'.",
     )
@@ -584,7 +598,9 @@ class FeatureStabilityInput(BaseModel):
         "shuffled: a feature's usual problem is that it worked in one regime, "
         "and interleaved folds average exactly that away.",
     )
-    method: str = Field("spearman", description="'spearman' or 'pearson'.")
+    method: Literal["spearman", "pearson"] = Field(
+        "spearman", description="'spearman' or 'pearson'."
+    )
 
 
 class FeatureStabilityResult(BaseModel):
@@ -628,7 +644,9 @@ class PermutationTestInput(BaseModel):
         "to about 0.005, which is enough to separate 'real' from 'noise' and "
         "not enough to defend a 0.001 claim. Cost is linear in this.",
     )
-    method: str = Field("spearman", description="'spearman' or 'pearson'.")
+    method: Literal["spearman", "pearson"] = Field(
+        "spearman", description="'spearman' or 'pearson'."
+    )
     random_seed: int = Field(
         0, ge=0, description="Seed, so the p-value is reproducible."
     )

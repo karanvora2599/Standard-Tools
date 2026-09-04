@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, mean_absolute_error, r2_score, roc_auc_score
 
+from standard_quant_tools.error import ValidationError
+
 # Optional native fast path. The Python below stays the reference and the
 # test oracle; with the extension absent every function here still works.
 #
@@ -157,6 +159,32 @@ def _rank_rows(block: np.ndarray) -> np.ndarray:
     return out
 
 
+#: The two correlations the IC path implements. Spelled out because the
+#: branch that reads them is `method == "spearman"`, whose else-arm is
+#: Pearson -- so every other string, including "SPEARMAN" and "kendall",
+#: silently returned Pearson. Measured on a monotone but non-linear
+#: relation: 1.0000 for "spearman", 0.6457 for "SPEARMAN".
+IC_METHODS = ("spearman", "pearson")
+
+
+def check_ic_method(method: str, *, what: str = "cross_sectional_ic") -> str:
+    """Refuse a correlation this does not implement, rather than defaulting.
+
+    A silent fallback to Pearson is the worst available behaviour here: the
+    caller asked for a rank correlation, got a linear one, and every number
+    downstream is a plausible wrong answer.
+    """
+    if method not in IC_METHODS:
+        raise ValidationError(
+            f"{what}: method={method!r} is not implemented; expected one of "
+            f"{list(IC_METHODS)}. The comparison is case-sensitive, so "
+            "'Spearman' and 'SPEARMAN' are refused rather than quietly "
+            "computing a Pearson correlation -- which is what they used to "
+            "do, and which reads as an ordinary IC."
+        )
+    return method
+
+
 def cross_sectional_ic(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -199,6 +227,7 @@ def cross_sectional_ic(
     |diff| 1.1e-16 spearman, 2.2e-14 pearson, ties and ragged panels
     included).
     """
+    check_ic_method(method, what="cross_sectional_ic")
     y_true = np.asarray(y_true, dtype=np.float64)
     y_pred = np.asarray(y_pred, dtype=np.float64)
     dates = np.asarray(dates)

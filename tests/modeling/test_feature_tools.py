@@ -140,6 +140,84 @@ class TestAnalyzeFeature:
             AnalyzeFeatureInput(dataset_id=dataset, feature="x", n_quantile=5)  # typo
 
 
+class TestTheDecayArgumentsDoSomething:
+    """`include_ic_decay` and `max_shift` were accepted and dropped.
+
+    `FeatureProfile` had three fields and nowhere for a curve to land, so
+    both arguments sat in the schema an agent reads -- one of them with a
+    cost rationale attached, "off by default because it costs
+    (2 * max_shift + 1) extra IC passes" -- and every combination of them
+    returned byte-identical output.
+
+    The property these tests assert is the general one the whole pass is
+    about: vary an input, and the output has to move.
+    """
+
+    def test_off_by_default(self, dataset, features):
+        result = profile_feature(
+            AnalyzeFeatureInput(dataset_id=dataset, feature=features[0])
+        )
+        assert result.ic_decay is None
+
+    def test_asking_for_it_produces_a_curve(self, dataset, features):
+        result = profile_feature(
+            AnalyzeFeatureInput(
+                dataset_id=dataset, feature=features[0], include_ic_decay=True
+            )
+        )
+        assert result.ic_decay is not None
+        assert result.ic_decay.curve
+        assert result.ic_decay.feature == features[0]
+
+    def test_max_shift_sets_the_width(self, dataset, features):
+        """The second dropped argument. The curve runs from -max_shift to
+        +max_shift, so it is 2n+1 points -- which is exactly the cost the
+        description quotes."""
+        for shift in (2, 5):
+            result = profile_feature(
+                AnalyzeFeatureInput(
+                    dataset_id=dataset,
+                    feature=features[0],
+                    include_ic_decay=True,
+                    max_shift=shift,
+                )
+            )
+            assert len(result.ic_decay.curve) == 2 * shift + 1
+            assert min(p.shift for p in result.ic_decay.curve) == -shift
+            assert max(p.shift for p in result.ic_decay.curve) == shift
+
+    def test_it_is_the_same_answer_the_standalone_tool_gives(self, dataset, features):
+        """Not a second implementation of the curve. The field's own
+        description says get_feature_ic_decay is the same computation, and
+        both now call one builder, so the nested object is that tool's
+        result exactly."""
+        inside = profile_feature(
+            AnalyzeFeatureInput(
+                dataset_id=dataset,
+                feature=features[0],
+                include_ic_decay=True,
+                max_shift=4,
+            )
+        ).ic_decay
+        alone = get_feature_ic_decay(
+            FeatureICDecayInput(dataset_id=dataset, feature=features[0], max_shift=4)
+        )
+        assert inside.model_dump() == alone.model_dump()
+
+    def test_the_rest_of_the_profile_is_unchanged_by_it(self, dataset, features):
+        """It adds a section; it does not alter the two that were there."""
+        without = profile_feature(
+            AnalyzeFeatureInput(dataset_id=dataset, feature=features[0])
+        )
+        with_decay = profile_feature(
+            AnalyzeFeatureInput(
+                dataset_id=dataset, feature=features[0], include_ic_decay=True
+            )
+        )
+        assert without.distribution.model_dump() == with_decay.distribution.model_dump()
+        assert without.predictive.model_dump() == with_decay.predictive.model_dump()
+
+
 class TestFeatureRedundancy:
     def test_every_feature_lands_in_exactly_one_cluster(self, dataset, features):
         result = get_feature_redundancy(FeatureRedundancyInput(dataset_id=dataset))

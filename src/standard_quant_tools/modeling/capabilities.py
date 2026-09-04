@@ -20,7 +20,7 @@ from typing import Any, Dict, List
 from .adapters import available_tasks, get_adapter
 from .estimators.registry import ESTIMATOR_REGISTRY, allowed_params
 from .features.registry import list_features as _list_features
-from .specs import TargetSpec, ValidationSpec
+from .specs import TARGET_KINDS, TargetSpec, ValidationSpec
 
 
 def _literal_options(model: Any, field: str) -> List[str]:
@@ -80,7 +80,43 @@ def modeling_capabilities() -> Dict[str, Any]:
             "by_namespace": dict(sorted(by_namespace.items())),
             "ids": sorted(d.id for d in features),
         },
-        "targets": _literal_options(TargetSpec, "type"),
+        # FROM THE REGISTRY, not from the Literal. `TARGET_KINDS` calls
+        # itself "the ONE place that says so" and carries `buildable` and a
+        # description per label; reporting `_literal_options` instead listed
+        # all 18 names flat, and only 6 can be built from a price series.
+        # The other 12 raise "cannot be built from a price series" inside
+        # build_model_dataset.
+        #
+        # This is a worse place to be wrong than a tool is. An agent reads
+        # the capability report INSTEAD of trying things, so an overstatement
+        # here is not one failed call, it is a plan built on a tool that
+        # cannot do what it was told.
+        "targets": {
+            "buildable": sorted(
+                name for name, kind in TARGET_KINDS.items() if kind.buildable
+            ),
+            "external_only": sorted(
+                name for name, kind in TARGET_KINDS.items() if not kind.buildable
+            ),
+            "all": _literal_options(TargetSpec, "type"),
+            "note": (
+                "`buildable` is what build_model_dataset can derive from a "
+                "Close series. `external_only` labels are functions of the "
+                "book, of orders or of fills -- nothing in a Close column "
+                "determines them -- so they arrive through "
+                "register_external_panel, which records what a label IS "
+                "rather than recomputing it."
+            ),
+            "detail": {
+                name: {
+                    "buildable": kind.buildable,
+                    "tasks": list(kind.tasks),
+                    "continuous": kind.continuous,
+                    "description": kind.description,
+                }
+                for name, kind in sorted(TARGET_KINDS.items())
+            },
+        },
         "validation": {
             "methods": _literal_options(ValidationSpec, "method"),
             "walk_forward_schemes": _literal_options(ValidationSpec, "scheme"),
@@ -93,12 +129,37 @@ def modeling_capabilities() -> Dict[str, Any]:
             "uniqueness_and_time_decay",
         ],
         "hyperparameter_search": ["grid", "random"],
+        # Widened. It reported three, so an agent could not learn from it
+        # that the bloomberg provider or the audit signing path are
+        # unavailable in this environment -- and would discover that by
+        # making a call that fails.
         "optional_dependencies": {
             "lightgbm": boosting.HAS_LIGHTGBM,
             "xgboost": boosting.HAS_XGBOOST,
             "native_extension": _native_available(),
+            "scipy": _importable("scipy"),
+            "numba": _importable("numba"),
+            "polars": _importable("polars"),
+            "blpapi": _importable("blpapi"),
+            "cryptography": _importable("cryptography"),
+            "cvxpy": _importable("cvxpy"),
         },
     }
+
+
+def _importable(module: str) -> bool:
+    """Whether an optional dependency is present, without importing it.
+
+    `find_spec` rather than `import`: importing torch or blpapi to answer a
+    capability question costs seconds and, for a vendor SDK, can try to open
+    a session.
+    """
+    from importlib.util import find_spec
+
+    try:
+        return find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _native_available() -> bool:

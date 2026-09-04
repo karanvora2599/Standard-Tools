@@ -82,8 +82,14 @@ class CompareArtifactsInput(BaseModel):
         "unchanged. The default is machine-precision; raise it to ignore "
         "differences you consider noise.",
     )
-    label_a: str = Field("a")
-    label_b: str = Field("b")
+    label_a: str = Field(
+        "a",
+        description="What to call the first side when reporting. 'baseline' "
+        "and 'candidate' read better than 'a' and 'b' in a report a human "
+        "will see, and the difference entries key on 'a'/'b' regardless, so "
+        "this is naming rather than structure.",
+    )
+    label_b: str = Field("b", description="What to call the second side.")
 
 
 class RuntimeCost(BaseModel):
@@ -134,6 +140,11 @@ class FieldDifference(BaseModel):
 
 
 class CompareArtifactsResult(_Result):
+    # Echoed back because the difference entries key on 'a' and 'b'
+    # whatever the caller called them -- without this the labels would name
+    # the sides in the prose and nothing would say which key is which.
+    label_a: str = "a"
+    label_b: str = "b"
     identical: bool = False
     n_differences: int = 0
     n_fields_compared: int = 0
@@ -303,13 +314,14 @@ def compare_artifacts(input_data: CompareArtifactsInput) -> CompareArtifactsResu
             differences.append({"path": key, "kind": "changed", "a": left, "b": right})
     differences.sort(key=lambda d: (d.get("relative_change") or 0.0), reverse=True)
 
+    label_a, label_b = input_data.label_a, input_data.label_b
     warnings: List[str] = []
     if not differences:
         warnings.append(
-            "The two artifacts are identical to the given tolerance. That is "
-            "evidence the computation reproduces, not proof -- an identical "
-            "result from an identical cached input says nothing about the "
-            "computation at all."
+            f"{label_a} and {label_b} are identical to the given tolerance. "
+            "That is evidence the computation reproduces, not proof -- an "
+            "identical result from an identical cached input says nothing "
+            "about the computation at all."
         )
     else:
         changed = [d for d in differences if d["kind"] == "changed"]
@@ -317,10 +329,11 @@ def compare_artifacts(input_data: CompareArtifactsInput) -> CompareArtifactsResu
         if structural:
             warnings.append(
                 f"{len(structural)} STRUCTURAL difference(s) -- fields "
-                "present in one and not the other, or with a changed type. "
-                "Those usually mean a version change rather than a numerical "
-                "one, and they are worth resolving before reading the value "
-                "differences."
+                f"present in {label_a} and not {label_b} (or the reverse), "
+                "or with a changed type. Those usually mean a version change "
+                "rather than a numerical one, and they are worth resolving "
+                "before reading the value differences. In `differences`, "
+                f"`a` is {label_a} and `b` is {label_b}."
             )
         if changed:
             warnings.append(
@@ -329,6 +342,8 @@ def compare_artifacts(input_data: CompareArtifactsInput) -> CompareArtifactsResu
                 "change, so the largest movers are first."
             )
     return CompareArtifactsResult(
+        label_a=label_a,
+        label_b=label_b,
         identical=not differences,
         n_differences=len(differences),
         n_fields_compared=len(keys),

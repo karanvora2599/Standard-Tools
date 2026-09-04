@@ -31,6 +31,9 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.validation.metrics import (
+    check_ic_method,
+)
 from standard_quant_tools.modeling.features.transforms import (
     HAS_CPP,
     _cpp_core,
@@ -138,6 +141,7 @@ def feature_drift(
     equal halves by TIME rather than by row count -- an entity that joins
     the universe late should not drag the boundary.
     """
+    check_ic_method(method, what="feature_drift")
     _require(panel, feature)
     frame = panel[["date", "entity", feature, "target"]].dropna(
         subset=["date", feature]
@@ -227,6 +231,7 @@ def feature_stability(
     whose IC has the same sign as the full-sample IC. A mean IC of 0.04 at
     0.5 sign consistency is a coin flip with a good average.
     """
+    check_ic_method(method, what="regime_stability")
     _require(panel, feature)
     if n_blocks < 2:
         raise ValidationError("n_blocks must be at least 2")
@@ -392,6 +397,7 @@ def permutation_test_ic(
     200 permutations cannot distinguish "p < 0.005" from "p = 0", and
     printing 0.0 claims a precision the sample size does not have.
     """
+    check_ic_method(method, what="permutation_test")
     _require(panel, feature)
     if n_permutations < 1:
         raise ValidationError("n_permutations must be at least 1")

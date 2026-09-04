@@ -189,7 +189,12 @@ class TestCapabilityReport:
         caps = modeling_capabilities()
         assert set(caps["tasks"]) == set(available_tasks())
         assert len(caps["estimators"]) == len(ESTIMATOR_REGISTRY)
-        assert "forward_return" in caps["targets"]
+        # `targets` reports buildability now rather than a flat name list:
+        # six of the eighteen can be built from a price series and the
+        # report used to advertise all eighteen the same way.
+        assert "forward_return" in caps["targets"]["all"]
+        assert "forward_return" in caps["targets"]["buildable"]
+        assert "future_mid_return" in caps["targets"]["external_only"]
         assert "purged_kfold" in caps["validation"]["methods"]
 
     def test_optional_dependencies_are_reported_explicitly(self):
@@ -198,7 +203,12 @@ class TestCapabilityReport:
         from standard_quant_tools.modeling.capabilities import modeling_capabilities
 
         deps = modeling_capabilities()["optional_dependencies"]
-        assert set(deps) == {"lightgbm", "xgboost", "native_extension"}
+        # The three it always reported, plus the ones whose absence an agent
+        # could not otherwise learn about -- it would discover a missing
+        # blpapi or cvxpy by making a call that failed, which is exactly the
+        # "silently shorter" failure this test was written against.
+        assert {"lightgbm", "xgboost", "native_extension"} <= set(deps)
+        assert {"scipy", "numba", "polars", "blpapi", "cvxpy"} <= set(deps)
         assert all(isinstance(v, bool) for v in deps.values())
 
     def test_is_json_safe(self):
