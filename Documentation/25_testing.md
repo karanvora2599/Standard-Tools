@@ -1,6 +1,6 @@
 # The testing regime
 
-Eight layers, each catching a class of defect the others cannot. The
+Nine layers, each catching a class of defect the others cannot. The
 arrangement is deliberate: every layer exists because something got through
 the ones above it.
 
@@ -96,6 +96,51 @@ first native plan instructed readers to reproduce its speedups with
 code. `rank_by_date` and `permutation_null_ic` each carry a
 `@pytest.mark.benchmark` test that times both paths back to back and
 asserts a floor multiple, so the claim and the check are the same artifact.
+
+## Layer 1c — the configuration that could not be run
+
+Seventeen modules each decide `HAS_CPP` for themselves by probing
+`_sqt_core`. That is the right design — a kernel added later falls back on
+its own rather than all-or-nothing — but for a long time it meant the
+**no-extension configuration could not be executed at all**. Every fallback
+was reachable only by monkeypatching one module's flag inside one test, so
+roughly half the C++-adjacent code had no end-to-end coverage.
+
+```bash
+SQT_DISABLE_NATIVE=1 pytest        # every kernel on its Python path
+```
+
+One name made unimportable flips all seventeen, because they all import the
+same one, and each takes the `except ImportError` branch it already had. No
+module needed changing.
+
+**It found nothing wrong, which is the useful result.** 6,514 passed, 519
+skipped, zero failures — the extra skips are the parity and benchmark tests
+that `importorskip` the extension, correctly. The run takes 11:22 against
+6:54, which is the compiled path's contribution measured at suite scale
+rather than per kernel.
+
+### Why this is a testing concern and not a packaging one
+
+It is also what stops the codebase being surveyed wrongly. Instrument which
+functions execute, on a machine where the extension is present, and every
+fallback reports as dead. A reachability analysis of this package did exactly
+that and recommended deleting two of them — `n_workers`'s `ProcessPoolExecutor`
+and eight of the ten `@njit` kernels. Neither is dead code. Both are the
+`else:` arm of `if HAS_CPP`, and deleting either would have removed the
+faster path from the one configuration that has no other.
+
+**A measurement of what EXECUTES is not a measurement of what is REACHABLE**,
+and the gap between them is an entire install configuration. Anything that
+counts calls to decide what is live has to be run twice.
+
+`tests/test_fallback_configuration.py` holds the switch to that: it asserts
+every listed module honours it, that the default is still native (a
+regression there would invalidate every published performance figure), that
+both paths compute the same answers, and — the drift guard — that the list of
+native-aware modules in the test IS the set found by scanning `src/`. That
+last one failed on its first run and was right to: the list I wrote by hand
+was missing `indicators.panel` and `indicators.volatility`.
 
 ## Layer 2 — whole-surface invariants
 
