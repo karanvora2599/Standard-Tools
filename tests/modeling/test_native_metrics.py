@@ -396,16 +396,18 @@ class TestLabelUniqueness:
         np.testing.assert_allclose(native, python, rtol=0, atol=1e-12)
         assert np.isclose(native.mean(), 1.0), "weights are normalized to mean 1"
 
-    def test_matches_python_above_the_threshold(self, monkeypatch):
-        """Big enough that the native path actually engages."""
-        from standard_quant_tools.modeling.validation import weights as weights_module
-
+    def test_matches_python_on_a_large_panel(self, monkeypatch):
+        """There is no threshold any more -- the row-count guard is gone,
+        because the kernel wins at every size once `_as_int64_ns` removed
+        the pandas round trip it used to pay for. Both sizes are kept: the
+        two paths have to agree on each."""
         dates, ends, entities = self._panel(250, 252)
-        assert dates.size >= weights_module._NATIVE_MIN_ROWS
         self._agree(dates, ends, entities, monkeypatch)
 
-    def test_matches_python_below_the_threshold(self, monkeypatch):
-        """Small panels take the Python path; they must still be right."""
+    def test_matches_python_on_a_small_one(self, monkeypatch):
+        """This used to be the Python path by construction. It is the
+        kernel now, so the agreement it asserts is a real comparison rather
+        than a function against itself."""
         dates, ends, entities = self._panel(5, 60)
         self._agree(dates, ends, entities, monkeypatch)
 
@@ -671,3 +673,121 @@ class TestPermutationNull:
         )
         assert kernel_s < python_s
         assert speedup >= 5.0, f"expected >= 5x, got {speedup:.1f}x"
+
+
+class TestNeitherKernelNeedsARowCountGuard:
+    """Two guards existed and both had outlived their measurement.
+
+    `_NATIVE_MIN_ROWS = 50_000` on `label_uniqueness_weights` was written
+    when the kernel genuinely lost on small panels -- 0.4x on 12,600 rows,
+    because the argument conversion went through pandas. `_as_int64_ns`
+    removed that conversion and the threshold never moved, so the kernel
+    written for the FOLD LOOP fired once per run: per-fold rows are
+    `train_window * entities`, and a 200-name universe on a 252-day window
+    is 49,392 -- 608 rows short.
+
+    `_POOLED_NATIVE_MIN_ROWS = 5_000` on the pooled IC said the pandas call
+    was "competitive" below it. It is not, and the margin runs the other
+    way: the kernel wins by MORE below the old threshold than above it,
+    because the conversion the guard protected against is a smaller share of
+    a small panel's cost, not a larger one.
+
+    These assert the floor at sizes both guards used to block, so a guard
+    cannot come back without a measurement that contradicts them.
+    """
+
+    @staticmethod
+    def _timed(fn, reps=7):
+        fn()
+        best = float("inf")
+        gc.disable()
+        try:
+            for _ in range(reps):
+                start = time.perf_counter()
+                fn()
+                best = min(best, time.perf_counter() - start)
+        finally:
+            gc.enable()
+        return best * 1000.0
+
+    @staticmethod
+    def _uniqueness_panel(n_dates, n_entities):
+        days = pd.date_range("2015-01-01", periods=n_dates, freq="B")
+        dates = np.repeat(days.to_numpy("datetime64[ns]"), n_entities)
+        entities = np.tile(
+            np.array([f"T{i:04d}" for i in range(n_entities)], dtype=object), n_dates
+        )
+        return dates, dates + np.timedelta64(5, "D"), entities
+
+    @pytest.mark.benchmark
+    @pytest.mark.parametrize("n_dates,n_entities", [(252, 20), (252, 100)])
+    def test_uniqueness_wins_below_the_old_threshold(
+        self, monkeypatch, n_dates, n_entities
+    ):
+        from standard_quant_tools.modeling.validation import weights as weights_module
+
+        dates, ends, entities = self._uniqueness_panel(n_dates, n_entities)
+        assert dates.size < 50_000, "this size used to be blocked"
+
+        kernel_ms = self._timed(
+            lambda: weights_module.label_uniqueness_weights(dates, ends, entities)
+        )
+        monkeypatch.setattr(weights_module, "HAS_CPP", False)
+        python_ms = self._timed(
+            lambda: weights_module.label_uniqueness_weights(dates, ends, entities)
+        )
+        monkeypatch.undo()
+
+        speedup = python_ms / kernel_ms
+        print(
+            f"\nlabel_uniqueness {dates.size:,} rows: "
+            f"{python_ms:.3f} ms -> {kernel_ms:.3f} ms ({speedup:.2f}x)"
+        )
+        assert speedup > 1.5, (
+            f"the kernel is only {speedup:.2f}x at {dates.size} rows; the guard "
+            "was removed because it was 3-9x here"
+        )
+
+    @pytest.mark.benchmark
+    @pytest.mark.parametrize("n_dates,width", [(100, 20), (126, 20)])
+    def test_pooled_ic_wins_below_its_old_threshold(self, monkeypatch, n_dates, width):
+        from standard_quant_tools.modeling.validation import metrics as metrics_module
+
+        rng = np.random.default_rng(0)
+        dates = np.repeat(
+            pd.bdate_range("2020-01-02", periods=n_dates).to_numpy(), width
+        )
+        y_true = pd.Series(rng.normal(size=dates.size))
+        y_pred = pd.Series(rng.normal(size=dates.size))
+        stamps = pd.Series(dates)
+        assert dates.size < 5_000, "this size used to be blocked"
+
+        call = lambda: metrics_module.cross_sectional_ic(  # noqa: E731
+            y_true, y_pred, stamps, method="spearman"
+        )
+        kernel_ms = self._timed(call)
+        monkeypatch.setattr(metrics_module, "HAS_CPP", False)
+        python_ms = self._timed(call)
+        monkeypatch.undo()
+
+        speedup = python_ms / kernel_ms
+        print(
+            f"\npooled IC {dates.size:,} rows: "
+            f"{python_ms:.3f} ms -> {kernel_ms:.3f} ms ({speedup:.2f}x)"
+        )
+        assert speedup > 1.2, (
+            f"the kernel is only {speedup:.2f}x at {dates.size} rows; the guard "
+            "was removed because it was ~2x here"
+        )
+
+    def test_both_paths_still_agree_at_a_size_that_used_to_be_gated(self, monkeypatch):
+        """Speed is not the point if the answers differ. This is the size
+        the kernel never used to run at, so the agreement was untested."""
+        from standard_quant_tools.modeling.validation import weights as weights_module
+
+        dates, ends, entities = self._uniqueness_panel(60, 20)
+        native = weights_module.label_uniqueness_weights(dates, ends, entities)
+        monkeypatch.setattr(weights_module, "HAS_CPP", False)
+        python = weights_module.label_uniqueness_weights(dates, ends, entities)
+        monkeypatch.undo()
+        np.testing.assert_allclose(native, python, rtol=0, atol=1e-12)

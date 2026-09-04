@@ -55,13 +55,25 @@ try:
 except ImportError:
     pass
 
-# Below this the kernel LOSES: the argument conversion and its per-entity
-# setup cost more than the Python loop saves, measured at 0.4x on a
-# 12,600-row panel before this guard existed. A fast path that is slower is
-# a bug, so it is gated rather than left to be discovered by whoever runs a
-# small universe. The crossover measured between 12,600 and 126,000 rows;
-# the threshold sits comfortably above the losing end.
-_NATIVE_MIN_ROWS = 50_000
+# THE GUARD THAT USED TO BE HERE IS GONE, and the reason it existed is
+# worth keeping. The kernel once LOST on small panels -- 0.4x on 12,600
+# rows -- because the argument conversion went through pandas. "A fast path
+# that is slower is a bug", so it was gated at 50,000 rows.
+#
+# `_as_int64_ns` removed that conversion and the loss with it, and the
+# threshold never moved. Re-measured, outputs matching to 1e-12 at every
+# size:
+#
+#       10 rows   9.1x        2,520 rows   5.1x
+#      100 rows   7.5x       12,600 rows   3.0x
+#      500 rows   7.9x       25,200 rows   4.2x
+#
+# There is no crossover left to gate at: it wins everywhere, and it won by
+# MORE below the old threshold than above it. The guard's cost was not
+# hypothetical either -- per-fold rows are `train_window * entities`, so a
+# 200-name universe on a 252-day window is 49,392 rows and landed 608 short,
+# which meant the kernel written for the fold loop fired once per run, on
+# the final whole-panel refit.
 
 
 def _as_int64_ns(values: np.ndarray) -> np.ndarray:
@@ -109,7 +121,7 @@ def label_uniqueness_weights(
 
     entity_codes = pd.factorize(entities, sort=False)[0]
 
-    if HAS_CPP and n >= _NATIVE_MIN_ROWS:
+    if HAS_CPP:
         # Timestamps rather than integer offsets because `horizon` counts
         # each ENTITY's own bars: with entities on different calendars,
         # t+horizon of one entity is not t+horizon of the global date axis.

@@ -33,10 +33,18 @@ try:
 except ImportError:
     pass
 
-# Below this the pandas/scipy call is competitive and the array conversion
-# is a real share of the cost, so the fast path is not worth taking. Measured
-# crossover is well under this; the margin is deliberate.
-_POOLED_NATIVE_MIN_ROWS = 5_000
+# THE SECOND GUARD OF THE SAME KIND, and it went the same way. The note
+# here said the pandas/scipy call was "competitive" below 5,000 rows and
+# that the margin was deliberate. Re-measured, on the shapes this actually
+# receives:
+#
+#      200 rows   2.39x        5,040 rows   1.77x
+#    2,520 rows   2.03x       25,200 rows   1.53x
+#
+# The kernel wins at every size, and it wins by MORE below the threshold
+# than above it -- the conversion the guard was protecting against is a
+# smaller share of a small panel's cost, not a larger one. Nothing is gated
+# now.
 
 
 def positive_class_proba(estimator: Any, X: np.ndarray) -> np.ndarray:
@@ -68,12 +76,7 @@ def _safe_corr(true_s: pd.Series, pred_s: pd.Series, method: str) -> float:
     already a couple of passes over the data and the kernel does not beat it
     by enough to justify the conversion.
     """
-    if (
-        HAS_CPP
-        and method == "spearman"
-        and len(true_s) >= _POOLED_NATIVE_MIN_ROWS
-        and len(true_s) == len(pred_s)
-    ):
+    if HAS_CPP and method == "spearman" and len(true_s) == len(pred_s):
         try:
             y_true = np.ascontiguousarray(true_s.to_numpy(dtype=np.float64))
             y_pred = np.ascontiguousarray(pred_s.to_numpy(dtype=np.float64))
