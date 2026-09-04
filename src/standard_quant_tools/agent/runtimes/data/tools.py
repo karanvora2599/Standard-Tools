@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime
 import logging
 import math
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -66,6 +67,7 @@ from .models import (
     FetchReturnsPanelInput,
     FetchTickTapeInput,
     InferTemporalContractInput,
+    PrepareVendorExtractInput,
     RegisterExternalDatasetInput,
     ValidateDataBundleInput,
     ValidateExternalDatasetInput,
@@ -84,6 +86,7 @@ from .results import (
     RatioComparisonResult,
     RatioFieldComparison,
     TemporalContractResult,
+    VendorExtractResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -752,6 +755,258 @@ def _external_result(
         changed_since_registration=changed,
         preview=_preview(handle, preview_rows),
         warnings=notes,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Vendor extracts — the conversion that had no door
+# ──────────────────────────────────────────────────────────────────
+
+#: kind -> the normalizer in `data.databento` that produces it. The module
+#: is 643 lines with 39 dedicated tests and had ZERO references anywhere
+#: under `agent/`: a finished, tested conversion layer with no entry point
+#: on the tool surface. `external.check_schema` already told callers to run
+#: these functions by name when it recognized a raw export, which made the
+#: refusal a dead end -- it named a remedy nothing could execute.
+_NORMALIZERS = {
+    "order_book_panel": "normalize_book",
+    "order_event_panel": "normalize_mbo",
+    "quote_panel": "normalize_quotes",
+    "tick_tape": "normalize_trades",
+}
+
+
+def _normalize_batch(kind: str, frame, *, price_scale, timestamp, levels, keep_empty):
+    """One batch through the normalizer this kind names."""
+    from standard_quant_tools.data import databento
+
+    fn = getattr(databento, _NORMALIZERS[kind])
+    if kind == "order_book_panel":
+        return fn(
+            frame,
+            price_scale=price_scale,
+            timestamp=timestamp,
+            levels=levels,
+            keep_empty_levels=keep_empty,
+        )
+    return fn(frame, price_scale=price_scale, timestamp=timestamp)
+
+
+def prepare_vendor_extract(
+    input_data: PrepareVendorExtractInput,
+) -> VendorExtractResult:
+    """
+    A raw vendor extract -> this library's contract, with its judgements
+    reported rather than made silently.
+
+    THE STEP BEFORE register_external_dataset, and the one that had no
+    tool. A Databento export spells the same quantity `bid_px_00` where
+    this library spells it `bid_price_0`, stamps rows `ts_recv` rather than
+    `timestamp`, sends prices as int64 nanodollars, and fills absent levels
+    with int64-max rather than null. Registering it unconverted fails on
+    the column names if you are lucky and puts $9.2 billion quotes in your
+    book if you are not.
+
+    Two of the decisions here CHANGE THE NUMBERS and neither is recoverable
+    from the output: which timestamp became `timestamp`, and whether prices
+    were divided by a billion. They come back in `notes` for that reason.
+    """
+    import pandas as pd
+
+    from standard_quant_tools.data import external
+    from standard_quant_tools.data.databento import (
+        book_depth,
+        level_is_empty,
+        looks_like_databento,
+        split_empty_levels,
+    )
+
+    out_path = Path(input_data.out_path)
+    if not input_data.dry_run and out_path.exists():
+        raise ValidationError(
+            f"{out_path} already exists. A conversion writes a new file "
+            "rather than replacing one, because the old file may already be "
+            "registered and something may already hold a reference to it."
+        )
+
+    handle = external.inspect(
+        input_data.path, fmt=input_data.file_format, count_rows=False
+    )
+    source_columns = list(handle.columns)
+    available = (
+        book_depth(source_columns) if input_data.kind == "order_book_panel" else None
+    )
+
+    notes: List[str] = []
+    warnings: List[str] = []
+    seen: set = set()
+
+    def remember(new: List[str]) -> None:
+        # One message per distinct judgement. The same sentence about the
+        # price scale arrives with every batch and would otherwise produce
+        # a report that is one fact repeated a hundred times.
+        for line in new:
+            if line not in seen:
+                seen.add(line)
+                notes.append(line)
+
+    def batches():
+        return handle.batches(batch_rows=input_data.batch_rows)
+
+    # ── the book's trailing-empty-level rule needs the whole file ──────
+    #
+    # `normalize_book` drops a level that is empty in EVERY snapshot, which
+    # a single batch cannot know. So the depth is decided in its own pass
+    # and then FORCED for the writing pass, which makes every batch produce
+    # the same columns as well. Skipped entirely when the caller keeps the
+    # empty levels, which is the single-pass path.
+    levels = input_data.levels
+    keep_empty = input_data.keep_empty_levels
+    levels_kept: Optional[int] = None
+    if (
+        input_data.kind == "order_book_panel"
+        and not keep_empty
+        and not input_data.dry_run
+    ):
+        # EMPTINESS IS A FACT ABOUT THE WHOLE EXTRACT, not about a batch:
+        # a level absent from the first million rows may be quoted in the
+        # next. So a level counts as occupied if ANY batch had something in
+        # it, and what "empty" MEANS is imported rather than rewritten --
+        # `level_is_empty` requires both sides absent, and an earlier
+        # version of this loop tested only the bid, which would have dropped
+        # a one-sided level that `normalize_book` keeps.
+        occupied: set = set()
+        depth_seen = 0
+        rows_seen = 0
+        for batch in batches():
+            wide, batch_notes = _normalize_batch(
+                input_data.kind,
+                batch,
+                price_scale=input_data.price_scale,
+                timestamp=input_data.timestamp,
+                levels=levels,
+                keep_empty=True,
+            )
+            remember(batch_notes)
+            rows_seen += len(wide)
+            depth_seen = max(depth_seen, book_levels(wide.columns))
+            for level in range(depth_seen):
+                if not level_is_empty(wide, level):
+                    occupied.add(level)
+        empty = [level for level in range(depth_seen) if level not in occupied]
+        trailing, inner = split_empty_levels(empty, depth_seen)
+        kept = depth_seen - len(trailing)
+        if not kept:
+            raise ValidationError(
+                f"every one of the {depth_seen} level(s) is empty in all "
+                f"{rows_seen:,} snapshots, so there is no book here to "
+                "convert. Check that the source really carries depth, or "
+                "pass keep_empty_levels=true to write the vendor's columns "
+                "through unexamined."
+            )
+        if trailing:
+            remember(
+                [
+                    f"NOTE: levels {min(trailing)}-{max(trailing)} are empty "
+                    f"in every one of the {rows_seen:,} snapshots, so this "
+                    f"extract is {kept} levels deep, not {depth_seen}. Their "
+                    "columns were dropped -- left in, the dataset would "
+                    f"DECLARE {depth_seen} levels and depth_slope would "
+                    "regress against levels holding nothing. Pass "
+                    "keep_empty_levels=true to preserve the vendor's fixed "
+                    "width."
+                ]
+            )
+        if inner:
+            # `normalize_book` raises this on a single frame, and the
+            # streamed path lost it: both passes run with
+            # keep_empty_levels=True, and the library only speaks up when it
+            # is the one deciding.
+            warnings.append(
+                f"WARNING: level(s) {inner} are empty in every snapshot but "
+                "sit BELOW a level that has size. That is a malformed book "
+                "rather than a thin one, and the columns were kept so it "
+                "stays visible instead of being renumbered away."
+            )
+        levels, keep_empty, levels_kept = kept, True, kept
+
+    # ── convert, writing as we go ─────────────────────────────────────
+    writer = None
+    rows_written = 0
+    columns: List[str] = []
+    try:
+        for batch in batches():
+            converted, batch_notes = _normalize_batch(
+                input_data.kind,
+                batch,
+                price_scale=input_data.price_scale,
+                timestamp=input_data.timestamp,
+                levels=levels,
+                keep_empty=keep_empty,
+            )
+            remember(batch_notes)
+            if not columns:
+                columns = [str(c) for c in converted.columns]
+                if input_data.kind == "order_book_panel" and levels_kept is None:
+                    levels_kept = book_levels(converted.columns)
+            if input_data.dry_run:
+                rows_written = len(converted)
+                break
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            table = pa.Table.from_pandas(converted, preserve_index=False)
+            if writer is None:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                writer = pq.ParquetWriter(str(out_path), table.schema)
+            writer.write_table(table)
+            rows_written += len(converted)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if input_data.dry_run:
+        warnings.append(
+            f"DRY RUN: nothing was written. The notes describe what the "
+            f"first {rows_written} row(s) decided; a trailing empty level "
+            "cannot be detected from one batch, so `levels_kept` here is "
+            "what the vendor sent, not what a real conversion would keep."
+        )
+    missing = external.check_schema(input_data.kind, columns)
+    if missing:
+        warnings.append(
+            f"The converted columns still do not satisfy {input_data.kind!r}: "
+            f"{missing[0]}"
+        )
+
+    next_step = (
+        ""
+        if input_data.dry_run
+        else (
+            f"register_external_dataset(path={str(out_path)!r}, "
+            f"kind={input_data.kind!r}, run_id=..., name=..., "
+            "source='databento')"
+        )
+    )
+    logger.debug(
+        "[prepare_vendor_extract] %s -> %s  rows=%d  notes=%d",
+        input_data.path,
+        input_data.kind,
+        rows_written,
+        len(notes),
+    )
+    return VendorExtractResult(
+        out_path="" if input_data.dry_run else str(out_path),
+        kind=input_data.kind,
+        rows_written=rows_written,
+        columns=columns,
+        source_columns=source_columns[:24],
+        looked_like_databento=bool(looks_like_databento(source_columns)),
+        levels_available=available,
+        levels_kept=levels_kept,
+        notes=notes,
+        next_step=next_step,
+        warnings=warnings,
     )
 
 

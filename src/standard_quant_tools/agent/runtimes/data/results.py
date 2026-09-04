@@ -175,6 +175,59 @@ class ExternalDatasetResult(_Result):
     )
 
 
+class VendorExtractResult(_Result):
+    """A converted extract: where it went, and every judgement it made."""
+
+    out_path: str = Field(
+        "",
+        description=(
+            "The converted Parquet. Empty on a dry run, which writes "
+            "nothing. Hand this to register_external_dataset as `path`."
+        ),
+    )
+    kind: str = Field("", description="The kind it is now ready to register as.")
+    rows_written: int = 0
+    columns: List[str] = Field(default_factory=list)
+    source_columns: List[str] = Field(
+        default_factory=list,
+        description="The vendor's own spelling, for comparison. First 24.",
+    )
+    looked_like_databento: bool = Field(
+        False,
+        description=(
+            "Whether the source columns carry Databento's spelling. False "
+            "does not mean the conversion is wrong -- another vendor may "
+            "use the same shapes -- only that this was not recognized."
+        ),
+    )
+    levels_available: Optional[int] = Field(
+        None, description="Book only: complete depth levels in the source."
+    )
+    levels_kept: Optional[int] = Field(
+        None,
+        description=(
+            "Book only: how many survived. Below `levels_available` when a "
+            "trailing level was empty in every snapshot."
+        ),
+    )
+    notes: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every judgement the conversion made, in its own words -- which "
+            "timestamp was taken, what price scale was applied, how many "
+            "sentinels became null, which levels were dropped. Two of these "
+            "change the numbers and neither is inferable from the result, "
+            "which is why they are returned rather than logged. Deduplicated "
+            "across batches: the same sentence about each batch is one fact, "
+            "not a hundred."
+        ),
+    )
+    next_step: str = Field(
+        "",
+        description="The register_external_dataset call this file is ready for.",
+    )
+
+
 class ExternalValidationResult(_Result):
     """Whether a registered dataset is safe to model on, and what blocks it."""
 

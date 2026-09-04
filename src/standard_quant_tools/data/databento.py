@@ -292,6 +292,47 @@ def _resolve_timestamp(
     return converted, note
 
 
+def level_is_empty(frame: pd.DataFrame, level: int) -> bool:
+    """
+    Whether `level` carries nothing at all in `frame`.
+
+    BOTH sides. A level with no bid but a live ask is one-sided, which is a
+    real state in a thin book and not an absent level -- dropping it would
+    discard the side that was there.
+
+    Public because the streaming caller in `prepare_vendor_extract` cannot
+    reuse `normalize_book`'s decision: a level empty in one BATCH may be
+    populated in the next, so emptiness is a fact about the whole extract
+    and has to be accumulated. Two implementations of "empty" is how the
+    two would drift.
+    """
+    bid, ask = f"bid_price_{level}", f"ask_price_{level}"
+    if bid not in frame.columns or ask not in frame.columns:
+        return False
+    return bool(frame[bid].isna().all() and frame[ask].isna().all())
+
+
+def split_empty_levels(
+    empty: Sequence[int], depth: int
+) -> Tuple[List[int], List[int]]:
+    """
+    Empty levels split into the trailing run and everything else.
+
+    ONLY A TRAILING RUN MAY BE DROPPED. A gap in the middle -- level 3 empty
+    while level 4 has size -- is not a thin book, it is a malformed one, and
+    renumbering around it would hide that. So the two are separated here and
+    treated differently by every caller.
+    """
+    trailing: List[int] = []
+    for level in reversed(range(depth)):
+        if level in empty:
+            trailing.append(level)
+        else:
+            break
+    inner = [level for level in empty if level not in trailing]
+    return trailing, inner
+
+
 def normalize_book(
     frame: pd.DataFrame,
     *,
@@ -383,21 +424,8 @@ def normalize_book(
             out[column] = out[column] * factor
 
     if not keep_empty_levels:
-        empty = [
-            level
-            for level in range(depth)
-            if out[f"bid_price_{level}"].isna().all()
-            and out[f"ask_price_{level}"].isna().all()
-        ]
-        # Only a TRAILING run is dropped. A gap in the middle -- level 3
-        # empty while level 4 has size -- is not a thin book, it is a
-        # malformed one, and silently renumbering around it would hide that.
-        trailing: List[int] = []
-        for level in reversed(range(depth)):
-            if level in empty:
-                trailing.append(level)
-            else:
-                break
+        empty = [level for level in range(depth) if level_is_empty(out, level)]
+        trailing, inner = split_empty_levels(empty, depth)
         if trailing:
             drop: List[str] = []
             for level in trailing:
@@ -420,7 +448,6 @@ def normalize_book(
                 "levels holding nothing. Pass keep_empty_levels=True to "
                 "preserve the vendor's fixed width."
             )
-        inner = [level for level in empty if level not in trailing]
         if inner:
             notes.append(
                 f"WARNING: level(s) {inner} are empty in every snapshot but "

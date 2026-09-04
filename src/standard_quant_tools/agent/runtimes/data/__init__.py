@@ -51,6 +51,7 @@ from .models import (
     FetchReturnsPanelInput,
     FetchTickTapeInput,
     InferTemporalContractInput,
+    PrepareVendorExtractInput,
     RegisterExternalDatasetInput,
     ValidateDataBundleInput,
     ValidateExternalDatasetInput,
@@ -70,6 +71,7 @@ from .tools import (
     fetch_tick_tape,
     get_dataset_metadata,
     infer_temporal_contract,
+    prepare_vendor_extract,
     register_external_dataset,
     validate_data_bundle,
     validate_external_dataset,
@@ -157,6 +159,21 @@ TOOL_DEFS = [
         "say what is present and never what a source guarantees; prefer "
         "get_dataset_metadata whenever the data came from a known provider.",
         InferTemporalContractInput,
+    ),
+    (
+        "prepare_vendor_extract",
+        "Convert a RAW vendor extract into this library's contract, the step "
+        "BEFORE register_external_dataset. A Databento export spells the same "
+        "quantity `bid_px_00` where this library spells it `bid_price_0`, "
+        "stamps rows `ts_recv` rather than `timestamp`, sends prices as int64 "
+        "nanodollars and fills absent levels with int64-max rather than null "
+        "-- so registering it unconverted fails on the column names if you are "
+        "lucky and puts $9.2 billion quotes in your book if you are not. "
+        "Writes a new Parquet and REPORTS the two judgements that change the "
+        "numbers and cannot be recovered from the output: which timestamp "
+        "became `timestamp`, and whether prices were divided by a billion. "
+        "Use dry_run to see both before committing a large file.",
+        PrepareVendorExtractInput,
     ),
     (
         "register_external_dataset",
@@ -271,6 +288,10 @@ TOOL_DISPATCH = {
         infer_temporal_contract,
         InferTemporalContractInput,
     ),
+    "prepare_vendor_extract": (
+        prepare_vendor_extract,
+        PrepareVendorExtractInput,
+    ),
     "register_external_dataset": (
         register_external_dataset,
         RegisterExternalDatasetInput,
@@ -317,6 +338,7 @@ __all__ = [
     "fetch_tick_tape",
     "get_dataset_metadata",
     "infer_temporal_contract",
+    "prepare_vendor_extract",
     "register_external_dataset",
     "validate_data_bundle",
     "validate_external_dataset",

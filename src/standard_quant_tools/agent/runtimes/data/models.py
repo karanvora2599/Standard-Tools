@@ -230,6 +230,109 @@ class RegisterExternalDatasetInput(BaseModel):
     )
 
 
+class PrepareVendorExtractInput(BaseModel):
+    """A raw vendor extract, and what to turn it into."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(
+        ...,
+        description=(
+            "The RAW vendor file, as downloaded: a Parquet or CSV file, or "
+            "a directory read as one partitioned dataset. This is the "
+            "unconverted export -- `bid_px_00`, `ts_recv`, fixed-point "
+            "prices -- not something that would register successfully."
+        ),
+    )
+    kind: Literal[
+        "order_book_panel", "order_event_panel", "tick_tape", "quote_panel"
+    ] = Field(
+        ...,
+        description=(
+            "What to convert it INTO, which selects the normalizer: "
+            "`order_book_panel` from MBP-10 depth, `order_event_panel` from "
+            "MBO order-by-order events, `quote_panel` from MBP-1/TBBO/BBO, "
+            "`tick_tape` from trades. These are the kinds "
+            "register_external_dataset mints, so the converted file is "
+            "ready to register as this kind and nothing else. `event_panel` "
+            "is absent on purpose: it is a point-in-time contract, not a "
+            "market-data shape, and no vendor normalizer produces one."
+        ),
+    )
+    out_path: str = Field(
+        ...,
+        description=(
+            "Where to write the converted Parquet. ALWAYS Parquet, whatever "
+            "the input was: the conversion's whole value is correct dtypes "
+            "-- datetime64 timestamps, floats that have been de-scaled -- "
+            "and CSV would discard them and reintroduce the ambiguity that "
+            "was just resolved. Refused if something is already there."
+        ),
+    )
+    price_scale: Literal["auto", "fixed", "float"] = Field(
+        "auto",
+        description=(
+            "Databento sends prices as int64 nanodollars. 'auto' decides "
+            "from the dtype and magnitude and REPORTS what it decided; "
+            "'fixed' forces the 1e-9 divide, 'float' forces none. Getting "
+            "this wrong by a factor of a billion does not look like an "
+            "error, it looks like a market."
+        ),
+    )
+    timestamp: Literal["auto", "index", "ts_recv", "ts_event"] = Field(
+        "auto",
+        description=(
+            "Which column becomes `timestamp`. 'auto' prefers ts_recv (when "
+            "the venue's message reached the capture point) over ts_event "
+            "(when the venue says it happened) and says which it took. The "
+            "two differ by the wire, and which one is right depends on "
+            "whether you are modelling what was knowable or what occurred."
+        ),
+    )
+    levels: Optional[int] = Field(
+        None,
+        ge=1,
+        le=64,
+        description=(
+            "Book only: keep at most this many depth levels. Omit to keep "
+            "every COMPLETE level the extract has. Asking for more than are "
+            "present is a note, not an error."
+        ),
+    )
+    keep_empty_levels: bool = Field(
+        False,
+        description=(
+            "Book only. A trailing level empty in EVERY snapshot is dropped "
+            "by default, so the declared depth is the real depth -- an "
+            "mbp-10 subscription on a name that never shows ten levels "
+            "would otherwise report ten, and depth_slope would regress size "
+            "against distance over levels holding nothing. True preserves "
+            "the vendor's fixed width, for aligning several extracts whose "
+            "column set must match. Note that keeping them is the cheaper "
+            "path: deciding which are empty needs a pass over the rows."
+        ),
+    )
+    file_format: Optional[Literal["parquet", "csv"]] = Field(
+        None,
+        description="Override the INPUT format inferred from the suffix.",
+    )
+    dry_run: bool = Field(
+        False,
+        description=(
+            "Read the first batch, report what the conversion would decide "
+            "-- the price scale, the timestamp column, the depth -- and "
+            "write nothing. The two judgements that change the numbers are "
+            "worth seeing before committing a large file to disk."
+        ),
+    )
+    batch_rows: int = Field(
+        65_536,
+        gt=0,
+        le=1_000_000,
+        description="Rows converted at a time. Lower it for a wide book.",
+    )
+
+
 class ExternalDatasetRefInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ref: str = Field(..., description="A reference from register_external_dataset.")

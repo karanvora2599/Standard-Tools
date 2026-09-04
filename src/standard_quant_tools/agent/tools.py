@@ -89,6 +89,7 @@ from standard_quant_tools.agent.runtimes.data import (
     fetch_tick_tape,
     get_dataset_metadata,
     infer_temporal_contract,
+    prepare_vendor_extract,
     register_external_dataset,
     validate_data_bundle,
     validate_external_dataset,

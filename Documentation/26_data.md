@@ -1,6 +1,6 @@
 # The Data Runtime
 
-Seventeen tools for getting the bytes and saying what they can support.
+Eighteen tools for getting the bytes and saying what they can support.
 
 Every other runtime answers a question about markets. This one answers where
 the data is — and it is the only runtime whose output is meant to be
@@ -264,6 +264,7 @@ latency study measures, so the choice is never left implicit.
 | `validate_data_bundle` | Is this safe to model on, and what blocks it |
 | `validate_financial_ratios` | Check ratios you already hold, without fetching |
 | `compare_ratio_frames` | Two sources side by side, each gap classified |
+| `prepare_vendor_extract` | Convert a raw vendor export into this library's contract, reporting the judgements that change the numbers |
 | `register_external_dataset` | Make a file you already hold resolvable, without copying it |
 | `describe_external_dataset` | Its schema and size, and whether it changed since registration |
 | `validate_external_dataset` | Scan it in batches for what would produce wrong numbers |
