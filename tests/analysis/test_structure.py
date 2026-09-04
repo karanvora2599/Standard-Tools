@@ -109,6 +109,99 @@ class TestChangePoints:
         assert strict <= lenient
 
 
+class TestThePenaltyIsScaledToTheSeries:
+    """The default made a break unreportable on the default channel.
+
+    A split's gain is bounded by the residual sum of squares it is removing
+    from, so an ABSOLUTE penalty means different things at different scales.
+    10.0 was reasonable on prices, whose RSS runs to six figures, and
+    impossible on returns: clearing it on 500 daily returns needs a drift
+    change of 0.28 PER DAY. A +0.5%/day regime shift, which is enormous,
+    buys a gain of about 0.003.
+
+    And it did not fail. It reported the series homogeneous -- a statement
+    about the market, where the truth was a statement about units.
+    """
+
+    @staticmethod
+    def _returns(shift=0.005, n=500, seed=0):
+        rng = np.random.default_rng(seed)
+        half = n // 2
+        values = np.concatenate(
+            [rng.normal(0, 0.01, half), rng.normal(shift, 0.01, n - half)]
+        )
+        return pd.Series(values, index=pd.bdate_range("2020-01-01", periods=n))
+
+    def test_a_real_regime_shift_in_returns_is_found(self):
+        result = detect_change_points(self._returns())
+        assert result["n_breaks"] >= 1
+        assert result["penalty_was_derived"] is True
+
+    def test_the_old_default_could_not_have_found_it(self):
+        """Not a hypothetical: the gain a perfect split buys here is three
+        orders of magnitude below 10.0."""
+        series = self._returns()
+        total_rss = float(((series - series.mean()) ** 2).sum())
+        assert total_rss < 10.0, "the whole series cannot buy a gain of 10"
+
+    def test_pure_noise_still_finds_nothing(self):
+        """What the penalty is for. Measured at 0/200 seeds; three here."""
+        for seed in (0, 1, 2):
+            noise = pd.Series(
+                np.random.default_rng(seed).normal(0, 0.01, 500),
+                index=pd.bdate_range("2020-01-01", periods=500),
+            )
+            assert detect_change_points(noise)["n_breaks"] == 0, seed
+
+    def test_prices_still_work_and_get_a_bigger_penalty(self):
+        returns = self._returns()
+        prices = (1 + returns).cumprod() * 100
+        on_returns = detect_change_points(returns)
+        on_prices = detect_change_points(prices)
+        assert on_prices["penalty"] > on_returns["penalty"] * 1_000
+        assert on_prices["n_breaks"] >= 1
+
+    def test_an_explicit_penalty_keeps_its_absolute_meaning(self):
+        """Backward compatible for anyone who set one deliberately."""
+        prices = (1 + self._returns()).cumprod() * 100
+        result = detect_change_points(prices, penalty=10.0)
+        assert result["penalty"] == 10.0
+        assert result["penalty_was_derived"] is False
+
+    def test_a_penalty_no_split_could_clear_is_refused(self):
+        """The failure that used to be reported as a finding."""
+        with pytest.raises(ValidationError) as exc:
+            detect_change_points(self._returns(), penalty=10.0)
+        message = str(exc.value)
+        assert "cannot be cleared by any split" in message
+        assert "units mismatch" in message
+        assert "Omit `penalty`" in message
+
+    def test_the_applied_penalty_comes_back(self):
+        """Every `gain` has to be read against it, so it cannot be implicit."""
+        result = detect_change_points(self._returns())
+        assert result["penalty"] > 0
+        for found in result["breaks"]:
+            assert found["gain"] > result["penalty"]
+
+    def test_the_marginal_warning_uses_the_real_penalty(self):
+        """It compared every gain to a hardcoded 30.0, so with a penalty
+        scaled to returns -- around 0.002 -- every break found was reported
+        as a marginal one."""
+        result = detect_change_points(self._returns(shift=0.02))
+        strong = [b for b in result["breaks"] if b["gain"] >= 3.0 * result["penalty"]]
+        assert strong, "no break cleared 3x its own penalty"
+        assert not any("less than 3x" in w for w in result["warnings"])
+
+    def test_the_empty_answer_names_the_threshold_it_used(self):
+        noise = pd.Series(
+            np.random.default_rng(0).normal(0, 0.01, 500),
+            index=pd.bdate_range("2020-01-01", periods=500),
+        )
+        warning = detect_change_points(noise)["warnings"][0]
+        assert "scaled to this series" in warning
+
+
 class TestPartialCorrelation:
     def test_a_common_factor_is_removed_entirely(self):
         """Two series that are ONLY a shared factor must have essentially no

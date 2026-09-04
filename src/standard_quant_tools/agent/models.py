@@ -5598,13 +5598,24 @@ class ChangePointInput(BaseModel):
         description="Minimum observations either side of a break. A regime "
         "of three bars is noise with a label on it.",
     )
-    penalty: float = Field(
-        10.0,
+    penalty: Optional[float] = Field(
+        None,
         gt=0.0,
-        description="Improvement a split must buy to be kept. This is what "
-        "stops it finding a break in white noise.",
+        description=(
+            "Improvement a split must buy to be kept -- what stops it "
+            "finding a break in white noise. OMIT IT unless you know the "
+            "scale of your series: a split's gain is bounded by the "
+            "residual sum of squares it is removing from, so an absolute "
+            "penalty means different things on prices and on returns. The "
+            "old default of 10.0 was reasonable on prices and impossible on "
+            "returns -- clearing it on 500 daily returns needs a drift "
+            "change of 0.28 PER DAY -- so `on='returns'` could never report "
+            "a break. Left unset it is scaled to the series as "
+            "3 * variance * log(n). One no split could clear is refused "
+            "rather than answered with a confident 'no breaks'."
+        ),
     )
-    on: str = Field(
+    on: Literal["returns", "price"] = Field(
         "returns",
         description="'returns' (default) finds volatility and drift regimes; "
         "'price' finds level shifts, which on a trending series is almost "
@@ -5639,6 +5650,15 @@ class ChangePointResult(BaseModel):
     symbol: str
     n_observations: int
     n_breaks: int
+    penalty: float = Field(
+        0.0,
+        description="The penalty actually applied, which is the number every "
+        "`gain` should be read against.",
+    )
+    penalty_was_derived: bool = Field(
+        True,
+        description="True when it was scaled to the series rather than given.",
+    )
     breaks: List[ChangePoint] = Field(default_factory=list)
     segments: List[RegimeSegment] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)

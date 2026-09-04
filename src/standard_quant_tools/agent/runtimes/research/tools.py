@@ -1695,6 +1695,8 @@ def detect_change_points(input_data: ChangePointInput) -> ChangePointResult:
         symbol=input_data.symbol,
         n_observations=result["n_observations"],
         n_breaks=result["n_breaks"],
+        penalty=result["penalty"],
+        penalty_was_derived=result["penalty_was_derived"],
         breaks=[ChangePoint(**b) for b in result["breaks"]],
         segments=[RegimeSegment(**s) for s in result["segments"]],
         warnings=result["warnings"],
