@@ -442,7 +442,7 @@ class TestMackinnonPValueAccuracy:
     despite claiming ±0.01-0.02 accuracy. The replacement is the exact
     regression-surface algorithm statsmodels itself uses (same
     coefficients, same quadratic/cubic branch split, same normal-CDF
-    mapping), so it should match statsmodels.tsa.stattools.mackinnonp to
+    mapping), so it should match statsmodels.tsa.adfvalues.mackinnonp to
     near machine precision -- not just "broadly consistent" -- for
     engle_granger's own computed adf_statistic, across a real spread of
     statistics (weak to strong mean reversion), not just one lucky point.
@@ -450,7 +450,9 @@ class TestMackinnonPValueAccuracy:
 
     @requires_cpp
     def test_matches_statsmodels_across_a_range_of_statistics(self):
-        from statsmodels.tsa.stattools import mackinnonp
+        # statsmodels 0.15 stopped re-exporting it from stattools; it has
+        # always lived in adfvalues, which is where the surface table is.
+        from statsmodels.tsa.adfvalues import mackinnonp
 
         # y1 is (near-)constant so the step-1 OLS just centers y0 -- lets
         # y0's own AR(1) structure directly control the resulting ADF
@@ -497,7 +499,9 @@ class TestMackinnonPValueAccuracy:
         # critical value anchor both the old table and the new algorithm
         # agree on -- confirms the new algorithm didn't regress the one
         # point that was already exact.
-        from statsmodels.tsa.stattools import mackinnonp
+        # statsmodels 0.15 stopped re-exporting it from stattools; it has
+        # always lived in adfvalues, which is where the surface table is.
+        from statsmodels.tsa.adfvalues import mackinnonp
 
         expected = mackinnonp(-3.3377, regression="c", N=2)
         assert expected == pytest.approx(0.05, abs=0.001)

@@ -425,8 +425,13 @@ class TestADirectoryIsOneDataset:
     def test_partitions_are_read_together(self, runs_dir, tmp_path, book_frame):
         directory = tmp_path / "partitioned"
         directory.mkdir()
-        for index, chunk in enumerate(np.array_split(book_frame, 4)):
-            chunk.to_parquet(directory / f"part-{index}.parquet", index=False)
+        # np.array_split on a DataFrame returns ndarrays now, not frames.
+        # Split by position so the chunks stay pandas objects.
+        bounds = np.linspace(0, len(book_frame), 5).astype(int)
+        for index, (lo, hi) in enumerate(zip(bounds[:-1], bounds[1:])):
+            book_frame.iloc[lo:hi].to_parquet(
+                directory / f"part-{index}.parquet", index=False
+            )
         ref, handle = handoff.publish_external(
             str(directory), "order_book_panel", "run1", "parts"
         )

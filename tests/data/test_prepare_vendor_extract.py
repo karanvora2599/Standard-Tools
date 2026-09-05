@@ -57,9 +57,14 @@ def raw_book(mid):
     stamps = pd.Timestamp("2024-03-01 14:30") + pd.to_timedelta(
         np.arange(ROWS) * 7, unit="ms"
     )
+    # Databento stamps rows as int64 NANOSECONDS. `.astype("int64")` alone
+    # stopped meaning that in pandas 3, whose default resolution is
+    # datetime64[us] -- so the fixture silently started handing the
+    # converter microseconds, which it read as nanoseconds and placed in
+    # 1970. Say the unit rather than inheriting it.
     frame = {
-        "ts_recv": stamps.astype("int64"),
-        "ts_event": (stamps - pd.Timedelta("3ms")).astype("int64"),
+        "ts_recv": stamps.astype("datetime64[ns]").astype("int64"),
+        "ts_event": (stamps - pd.Timedelta("3ms")).astype("datetime64[ns]").astype("int64"),
     }
     for level in range(VENDOR_LEVELS):
         live = level < LIVE_LEVELS

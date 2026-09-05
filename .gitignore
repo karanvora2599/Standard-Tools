@@ -17,6 +17,9 @@ __pycache__/
 *.egg
 dist/
 build/
+# Per-interpreter build trees. The extension is built per Python ABI
+# (cp311, cp312, ...) and each needs its own configured tree.
+build*/
 .eggs/
 pip-wheel-metadata/
 

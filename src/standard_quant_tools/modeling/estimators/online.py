@@ -169,7 +169,11 @@ class ProbabilisticSGDClassifier(SGDClassifier):
         max_iter: int = 1000,
         tol=1e-3,
         learning_rate: str = "optimal",
-        eta0: float = 0.0,
+        # sklearn's own default, which moved from 0.0 to 0.01 when eta0's
+        # constraint tightened to exclude zero. `learning_rate="optimal"`
+        # never reads it, so this is about staying constructible, not about
+        # behaviour: pinned to sklearn's value rather than an invented one.
+        eta0: float = 0.01,
         random_state=None,
     ):
         super().__init__(
