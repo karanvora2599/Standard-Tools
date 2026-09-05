@@ -49,6 +49,8 @@ from standard_quant_tools.agent.models import (
     ExportAuditBundleResult,
     FieldDivergence,
     ListReferenceKindsInput,
+    ReadReferenceInput,
+    ReadReferenceResult,
     ListReferenceKindsResult,
     ListStrategiesInput,
     ListStrategiesResult,
@@ -794,6 +796,104 @@ def describe_reference(
         columns=described["columns"],
         index_start=described["index_start"],
         index_end=described["index_end"],
+    )
+
+
+#: The cap on `read_reference`. References exist to keep bulk values OUT of
+#: the conversation; a reader that could return ten thousand rows would undo
+#: the thing references are for. Sized to hold a quarter of dailies.
+_READ_REFERENCE_MAX_ROWS = 64
+
+
+def read_reference(input_data: ReadReferenceInput) -> ReadReferenceResult:
+    """
+    The actual values at chosen rows of a handoff reference.
+
+    `describe_reference` says what a reference holds; this says what is IN
+    it. Both exist because the honest answer to "what was NVDA's close on
+    2026-06-04" is a number, and until this tool there was no way to get one
+    out of a published frame -- the data crossed runtimes perfectly and was
+    unreadable by the agent that fetched it.
+
+    Bounded on purpose: ask for the rows you intend to cite, by date where
+    you know them. Over the cap the window is truncated and says so.
+    """
+    from standard_quant_tools.agent.runtimes import handoff
+
+    reference = handoff.parse(input_data.ref)
+    frame = handoff.resolve(input_data.ref)
+
+    # `resolve` returns whatever the kind carries. Only a table has rows to
+    # read; say so by name rather than failing on a missing attribute three
+    # frames down.
+    if not hasattr(frame, "index") or not hasattr(frame, "columns"):
+        raise ValueError(
+            f"{input_data.ref} carries kind '{reference.kind}', which is not "
+            "tabular — there are no rows to read. Use describe_reference."
+        )
+
+    total = int(len(frame))
+    columns = [str(c) for c in frame.columns]
+    missing_columns: list[str] = []
+    if input_data.columns:
+        wanted = [c for c in input_data.columns if c in columns]
+        missing_columns = [c for c in input_data.columns if c not in columns]
+        frame = frame[wanted]
+        columns = wanted
+
+    labels = [str(label) for label in frame.index]
+    missing: list[str] = []
+    if input_data.dates:
+        # Match on the rendered label so a caller can pass "2026-06-04"
+        # against a timestamp index without knowing its dtype.
+        by_label = {label: position for position, label in enumerate(labels)}
+        positions = []
+        for wanted_date in input_data.dates:
+            position = by_label.get(wanted_date)
+            if position is None:
+                # A date index renders as "2026-06-04 00:00:00"; accept the
+                # date alone, which is how anyone would ask for it.
+                matches = [i for i, label in enumerate(labels)
+                           if label.startswith(wanted_date)]
+                position = matches[0] if matches else None
+            if position is None:
+                missing.append(wanted_date)
+            else:
+                positions.append(position)
+    else:
+        positions = list(range(min(input_data.head, total)))
+        if input_data.tail:
+            positions += list(range(max(total - input_data.tail, len(positions)), total))
+
+    positions = sorted(set(positions))
+    truncated = len(positions) > _READ_REFERENCE_MAX_ROWS
+    positions = positions[:_READ_REFERENCE_MAX_ROWS]
+
+    rows: list[dict] = []
+    for position in positions:
+        row: dict = {"index": labels[position]}
+        for column in columns:
+            value = frame.iloc[position][column]
+            # A JSON result must not carry numpy scalars or NaN.
+            try:
+                value = value.item()
+            except AttributeError:
+                pass
+            if isinstance(value, float) and value != value:
+                value = None
+            row[column] = value
+        rows.append(row)
+
+    return ReadReferenceResult(
+        ref=reference.ref,
+        kind=reference.kind,
+        columns=columns,
+        rows=rows,
+        total_rows=total,
+        returned=len(rows),
+        truncated=truncated,
+        missing=missing,
+        missing_columns=missing_columns,
     )
 
 

@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 208 below.
+advertises 155 of the 209 below.
 
 
 ## The runtimes
@@ -35,15 +35,15 @@ advertises 155 of the 208 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `modeling` | 20 | 59 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| `meta` | 19 | 14 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 22 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **208** | | | |
+| **Total** | **209** | | | |
 
 ---
 
@@ -608,6 +608,149 @@ Backtest a pre-computed signal panel across a ticker universe, combined into por
 
 ---
 
+## `meta` — Discovery & Provenance
+
+Questions about the library and the session rather than about a market: what this library accepts and what the data provider can serve, and what a past tool call did and whether it still reproduces.
+
+### `discovery`
+
+#### `compare_artifacts`
+
+A field-by-field diff of two result objects, ordered by the size of the change. Answers the question that follows every re-run: did anything move, and what. Separates STRUCTURAL differences -- a field present in one and not the other -- from numerical ones, because the first usually means a version change and should be resolved before the second is read. An identical result is evidence of reproducibility and not proof of it: identical output from an identical cached input says nothing about the computation.
+
+**Required:** `a`, `b`  
+**Optional:** `tolerance`, `label_a`, `label_b`
+
+#### `compare_data_sources`
+
+Fetch the same fundamentals from two providers and report where they disagree, separating a SCALE difference (a constant ratio -- a missed unit conversion, fixable by arithmetic) from a DEFINITION difference (systematic with no constant ratio -- the two are computing different quantities and no conversion exists) from noise. FinancialRatios already documents that Polygon derives debt_to_equity from total liabilities and yfinance reports it as a percentage; this checks it rather than leaving it in a docstring. Fetches from both providers.
+
+**Required:** `symbols`  
+**Optional:** `left`, `right`, `fields`
+
+#### `convert_reference`
+
+Turn one kind of published value into another and publish the result: raw model predictions into a signal panel, scores into portfolio weights. This is what lets a producer and a consumer that were never written for each other compose.
+
+**Required:** `ref`, `to_kind`, `run_id`, `name`  
+**Optional:** `deadband`, `proba_threshold`, `long_only`, `task`, `construction_method`, `gross_leverage`
+
+#### `describe_data_capabilities`
+
+What a data provider can serve — tick trades, top-of-book quotes, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Fetches no market data. Call this before a tool that needs a capability the active provider may not have.
+
+*No required arguments.*  
+**Optional:** `source`
+
+#### `describe_reference`
+
+What a handoff reference points at — its content kind, shape, date span and which runtime published it. References are how bulk values cross runtimes without passing through the conversation.
+
+**Required:** `ref`
+
+#### `describe_runtime`
+
+What each runtime is for, which categories it owns, and which tools it holds. A runtime is an EXECUTION boundary rather than a hint: a tool from another runtime is unroutable, not merely discouraged. Use this before scoping a session, and after a refusal that named a runtime you did not expect.
+
+*No required arguments.*  
+**Optional:** `runtime`, `include_tool_names`
+
+#### `describe_temporal_contract`
+
+What a data source can say about WHEN its facts became knowable, asked BEFORE fetching anything. A quarterly filing describes 30 September and is published on 25 October, so a model that joins it on the quarter end carries three weeks of hindsight per row. Read pit_safe first — False means do not build this dataset from this source — then reproduces_history, which is stricter: a snapshot source joins without leaking the future and still shows a backtest restated numbers nobody had. Fetches nothing.
+
+*No required arguments.*  
+**Optional:** `source`, `frame_kind`
+
+#### `describe_tool`
+
+One tool's full contract — arguments, result fields, owning runtime, and whether calling it fetches data or writes an artifact. Works for tools this caller is not scoped to; describing a tool is not calling it.
+
+**Required:** `tool_name`  
+**Optional:** `include_schema`
+
+#### `estimate_tool_cost`
+
+What each runtime costs a client's context, in bytes and approximate tokens, before any call is made. Choosing a scope is a real decision with a real cost and this makes it visible -- the numbers come from the live registry rather than from documentation, so they are current whenever a schema changes. Output schemas are excluded by default because the server omits them by default; counting them would report a cost nobody pays.
+
+*No required arguments.*  
+**Optional:** `runtimes`, `include_output_schemas`
+
+#### `list_reference_kinds`
+
+Every content kind a handoff reference can carry and what converts to what — the map of which producer outputs can reach which consumer inputs. Offline.
+
+*No required arguments.*
+
+#### `list_strategies`
+
+Every built-in strategy's parameter contract: names, kinds, defaults, bounds and cross-parameter relations. Offline. Call this before guessing a strategy's parameters.
+
+*No required arguments.*  
+**Optional:** `strategy_type`
+
+#### `list_stress_scenarios`
+
+The named historical crash windows run_stress_test accepts, with each window's dates. Offline.
+
+*No required arguments.*
+
+#### `read_reference`
+
+The actual values at chosen rows of a handoff reference — by date, or the first/last N. `describe_reference` says what a reference holds; this says what is IN it. Bounded on purpose: ask for the rows you intend to cite, because references exist to keep bulk values out of the conversation.
+
+**Required:** `ref`  
+**Optional:** `dates`, `head`, `tail`, `columns`
+
+#### `validate_tool_call`
+
+Check arguments against a tool's schema WITHOUT calling it, including the strategy parameter contract that the JSON schema cannot express. Catches a hallucinated or out-of-range argument before it costs a fetch and a run.
+
+**Required:** `tool_name`  
+**Optional:** `arguments`
+
+### `provenance`
+
+#### `compare_decisions`
+
+Diff two recorded calls — tool, inputs, output hash, git commit — and say which of the candidate causes the evidence supports.
+
+**Required:** `request_id_a`, `request_id_b`
+
+#### `describe_artifact`
+
+Shape, date span, per-column statistics and both ends of a persisted Parquet artifact, by URI. Read what a run produced instead of re-running it.
+
+**Required:** `uri`  
+**Optional:** `preview_rows`
+
+#### `explain_decision`
+
+What one recorded tool call did: inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python), timing, and the git commit and package version it ran under.
+
+**Required:** `request_id`
+
+#### `export_audit_bundle`
+
+Package a date range of the audit log plus its chain index and manifest into one zip. Writes a new file; modifies no existing record.
+
+**Required:** `start_date`, `end_date`, `out_path`
+
+#### `replay_decision`
+
+Re-run a recorded call and classify the result: reproduced, data_changed (the inputs were revised, so a different answer is expected), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.
+
+**Required:** `request_id`
+
+#### `verify_audit_integrity`
+
+Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. Read-only.
+
+*No required arguments.*  
+**Optional:** `date`, `public_key_path`
+
+---
+
 ## `modeling` — Modeling
 
 Build, validate and score a statistical model from this library's own features: dataset construction, leakage-purged walk-forward fitting, the model registry, and evaluation of out-of-sample predictions. One ordered pipeline rather than a set of interchangeable tools.
@@ -749,142 +892,6 @@ Check point-in-time records BEFORE joining them onto anything. The error worth c
 
 **Required:** `records`  
 **Optional:** `entity_scoped`
-
----
-
-## `meta` — Discovery & Provenance
-
-Questions about the library and the session rather than about a market: what this library accepts and what the data provider can serve, and what a past tool call did and whether it still reproduces.
-
-### `discovery`
-
-#### `compare_artifacts`
-
-A field-by-field diff of two result objects, ordered by the size of the change. Answers the question that follows every re-run: did anything move, and what. Separates STRUCTURAL differences -- a field present in one and not the other -- from numerical ones, because the first usually means a version change and should be resolved before the second is read. An identical result is evidence of reproducibility and not proof of it: identical output from an identical cached input says nothing about the computation.
-
-**Required:** `a`, `b`  
-**Optional:** `tolerance`, `label_a`, `label_b`
-
-#### `compare_data_sources`
-
-Fetch the same fundamentals from two providers and report where they disagree, separating a SCALE difference (a constant ratio -- a missed unit conversion, fixable by arithmetic) from a DEFINITION difference (systematic with no constant ratio -- the two are computing different quantities and no conversion exists) from noise. FinancialRatios already documents that Polygon derives debt_to_equity from total liabilities and yfinance reports it as a percentage; this checks it rather than leaving it in a docstring. Fetches from both providers.
-
-**Required:** `symbols`  
-**Optional:** `left`, `right`, `fields`
-
-#### `convert_reference`
-
-Turn one kind of published value into another and publish the result: raw model predictions into a signal panel, scores into portfolio weights. This is what lets a producer and a consumer that were never written for each other compose.
-
-**Required:** `ref`, `to_kind`, `run_id`, `name`  
-**Optional:** `deadband`, `proba_threshold`, `long_only`, `task`, `construction_method`, `gross_leverage`
-
-#### `describe_data_capabilities`
-
-What a data provider can serve — tick trades, top-of-book quotes, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Fetches no market data. Call this before a tool that needs a capability the active provider may not have.
-
-*No required arguments.*  
-**Optional:** `source`
-
-#### `describe_reference`
-
-What a handoff reference points at — its content kind, shape, date span and which runtime published it. References are how bulk values cross runtimes without passing through the conversation.
-
-**Required:** `ref`
-
-#### `describe_runtime`
-
-What each runtime is for, which categories it owns, and which tools it holds. A runtime is an EXECUTION boundary rather than a hint: a tool from another runtime is unroutable, not merely discouraged. Use this before scoping a session, and after a refusal that named a runtime you did not expect.
-
-*No required arguments.*  
-**Optional:** `runtime`, `include_tool_names`
-
-#### `describe_temporal_contract`
-
-What a data source can say about WHEN its facts became knowable, asked BEFORE fetching anything. A quarterly filing describes 30 September and is published on 25 October, so a model that joins it on the quarter end carries three weeks of hindsight per row. Read pit_safe first — False means do not build this dataset from this source — then reproduces_history, which is stricter: a snapshot source joins without leaking the future and still shows a backtest restated numbers nobody had. Fetches nothing.
-
-*No required arguments.*  
-**Optional:** `source`, `frame_kind`
-
-#### `describe_tool`
-
-One tool's full contract — arguments, result fields, owning runtime, and whether calling it fetches data or writes an artifact. Works for tools this caller is not scoped to; describing a tool is not calling it.
-
-**Required:** `tool_name`  
-**Optional:** `include_schema`
-
-#### `estimate_tool_cost`
-
-What each runtime costs a client's context, in bytes and approximate tokens, before any call is made. Choosing a scope is a real decision with a real cost and this makes it visible -- the numbers come from the live registry rather than from documentation, so they are current whenever a schema changes. Output schemas are excluded by default because the server omits them by default; counting them would report a cost nobody pays.
-
-*No required arguments.*  
-**Optional:** `runtimes`, `include_output_schemas`
-
-#### `list_reference_kinds`
-
-Every content kind a handoff reference can carry and what converts to what — the map of which producer outputs can reach which consumer inputs. Offline.
-
-*No required arguments.*
-
-#### `list_strategies`
-
-Every built-in strategy's parameter contract: names, kinds, defaults, bounds and cross-parameter relations. Offline. Call this before guessing a strategy's parameters.
-
-*No required arguments.*  
-**Optional:** `strategy_type`
-
-#### `list_stress_scenarios`
-
-The named historical crash windows run_stress_test accepts, with each window's dates. Offline.
-
-*No required arguments.*
-
-#### `validate_tool_call`
-
-Check arguments against a tool's schema WITHOUT calling it, including the strategy parameter contract that the JSON schema cannot express. Catches a hallucinated or out-of-range argument before it costs a fetch and a run.
-
-**Required:** `tool_name`  
-**Optional:** `arguments`
-
-### `provenance`
-
-#### `compare_decisions`
-
-Diff two recorded calls — tool, inputs, output hash, git commit — and say which of the candidate causes the evidence supports.
-
-**Required:** `request_id_a`, `request_id_b`
-
-#### `describe_artifact`
-
-Shape, date span, per-column statistics and both ends of a persisted Parquet artifact, by URI. Read what a run produced instead of re-running it.
-
-**Required:** `uri`  
-**Optional:** `preview_rows`
-
-#### `explain_decision`
-
-What one recorded tool call did: inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python), timing, and the git commit and package version it ran under.
-
-**Required:** `request_id`
-
-#### `export_audit_bundle`
-
-Package a date range of the audit log plus its chain index and manifest into one zip. Writes a new file; modifies no existing record.
-
-**Required:** `start_date`, `end_date`, `out_path`
-
-#### `replay_decision`
-
-Re-run a recorded call and classify the result: reproduced, data_changed (the inputs were revised, so a different answer is expected), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.
-
-**Required:** `request_id`
-
-#### `verify_audit_integrity`
-
-Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. Read-only.
-
-*No required arguments.*  
-**Optional:** `date`, `public_key_path`
 
 ---
 

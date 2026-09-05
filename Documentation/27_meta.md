@@ -1,6 +1,6 @@
 # The Meta Runtime
 
-Nineteen tools that answer questions about **this library and this
+Twenty tools that answer questions about **this library and this
 session**, never about a market.
 
 Every other runtime tells you something about the world. This one tells you
@@ -89,6 +89,14 @@ inspected instead of the run being repeated.
 **`describe_reference`** does the same for a handoff reference: what kind
 it carries, its shape, and which runtime produced it.
 
+**`read_reference`** is the other half of it: the actual values at rows
+you name, by date or the first/last N. References exist to keep bulk values
+out of the conversation, and every reference tool honoured that so
+completely that an agent could fetch a price series, confirm its anchor
+dates and hand it to an analysis tool while never being able to state a
+close. The window is bounded on purpose — ask for the rows you intend to
+cite.
+
 **`convert_reference`** turns one kind of published value into another —
 raw model predictions into a signal panel, scores into weights. Only
 conversions that are genuinely well defined exist; there is deliberately no
@@ -139,6 +147,7 @@ point of view — it copies, never edits.
 | `compare_data_sources` | Two providers, one field: unit or definition difference |
 | `describe_artifact` | What a persisted Parquet artifact contains |
 | `describe_reference` | What a handoff reference points at |
+| `read_reference` | The actual values at chosen rows of one |
 | `convert_reference` | Turn one published kind into another |
 | `compare_artifacts` | Field-by-field diff of two results |
 | `explain_decision` | What one recorded call did |

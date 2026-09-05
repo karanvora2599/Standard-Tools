@@ -4879,6 +4879,87 @@ class DescribeReferenceResult(BaseModel):
     index_end: Optional[str] = None
 
 
+class ReadReferenceInput(BaseModel):
+    """Read actual values out of a reference, in a bounded window.
+
+    References exist so bulk values cross runtimes WITHOUT passing through
+    the conversation, and every reference tool honoured that by refusing to
+    return a single number: `describe_reference` gives shape, `convert`
+    gives another reference. So an agent could fetch OHLCV, confirm the
+    anchor dates were present, hand the frame to an analysis tool -- and
+    still not be able to state a closing price. A research worker hit
+    exactly that and submitted a typed null reading "This is an API
+    boundary, not a data gap"; the findings that did survive had back-solved
+    their prices from scalars, which an adversarial verifier correctly
+    graded overstated.
+
+    The bound is the whole design. This returns a window, never a frame:
+    ask for the rows you intend to cite.
+    """
+
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(
+        ...,
+        description=(
+            "A handoff reference (sqt://<kind>/<run_id>/<name>) returned by "
+            "any tool in any runtime."
+        ),
+    )
+    dates: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Specific index labels to read, e.g. the anchor dates of a "
+            "return window. Prefer this over head/tail when you know which "
+            "rows you need; labels that are absent come back in `missing` "
+            "rather than failing the call."
+        ),
+    )
+    head: int = Field(0, ge=0, description="Rows from the start.")
+    tail: int = Field(0, ge=0, description="Rows from the end.")
+    columns: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Restrict to these columns. Unknown names come back in "
+            "`missing_columns` rather than failing the call."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _default_to_both_ends(self) -> "ReadReferenceInput":
+        # A caller that names nothing wants a look at the data, and both
+        # ends of it is the most useful small answer.
+        if not self.dates and not self.head and not self.tail:
+            self.head = 5
+            self.tail = 5
+        return self
+
+
+class ReadReferenceResult(BaseModel):
+    ref: str
+    kind: str
+    columns: List[str] = Field(default_factory=list)
+    rows: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Each row as {index: label, <column>: value}, in index order.",
+    )
+    total_rows: int = Field(0, description="Rows in the whole reference.")
+    returned: int = 0
+    truncated: bool = Field(
+        False, description="True when the request was capped; narrow it and re-ask."
+    )
+    missing: List[str] = Field(
+        default_factory=list, description="Requested labels not present in the index."
+    )
+    missing_columns: List[str] = Field(default_factory=list)
+
+
 class ListReferenceKindsInput(BaseModel):
     """No arguments — the kind table is a module constant."""
 
