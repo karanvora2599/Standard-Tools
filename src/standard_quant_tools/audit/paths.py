@@ -17,12 +17,49 @@ def _audit_enabled() -> bool:
 
 
 def _audit_dir() -> Path:
-    return Path(
-        os.environ.get(
-            "SQT_AUDIT_DIR",
-            str(Path.home() / ".cache" / "standard_quant_tools" / "audit"),
+    """Where the decision record lives.
+
+    NOT under `~/.cache`, which is where this defaulted. A cache is by
+    definition the directory a user is invited to delete: `pip cache purge`,
+    every "free up disk space" tool, and half the cleanup scripts on the
+    internet empty it, and on Linux the XDG spec says an application must be
+    able to recreate anything in there. The audit trail is the opposite kind
+    of file -- it is the thing you cannot recreate, and the record a
+    regulator or an incident review reads. Storing it somewhere designed to
+    be cleared is a retention failure waiting for a disk-space warning.
+
+    `~/.local/state` is the XDG directory for exactly this: data that
+    persists between runs and is not a cache and not user documents.
+    `SQT_AUDIT_DIR` still overrides, and a deployment should point it at
+    something backed up.
+    """
+    override = os.environ.get("SQT_AUDIT_DIR")
+    if override:
+        return Path(override)
+
+    # An existing trail keeps its home. Changing where this points would
+    # otherwise orphan every record already written: the new directory starts
+    # empty, the chain appears to begin at genesis, and the index that exists
+    # to make a missing day detectable has nothing to compare against. That
+    # is the same event as a deletion, and it must not be caused by an
+    # upgrade. Say so once, loudly enough to be acted on.
+    legacy = Path.home() / ".cache" / "standard_quant_tools" / "audit"
+    if legacy.exists() and any(legacy.glob("*.jsonl")):
+        logger.warning(
+            "The audit trail is still under %s, which is a CACHE directory -- "
+            "cleanup tools empty it and the XDG spec says anything there is "
+            "disposable. It is being used anyway so the existing chain stays "
+            "continuous. Move it somewhere durable and set SQT_AUDIT_DIR.",
+            legacy,
         )
-    )
+        return legacy
+
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        return base / "standard_quant_tools" / "audit"
+    state = os.environ.get("XDG_STATE_HOME")
+    root = Path(state) if state else Path.home() / ".local" / "state"
+    return root / "standard_quant_tools" / "audit"
 
 
 _GENESIS_HASH = "0" * 16
