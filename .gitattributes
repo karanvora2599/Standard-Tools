@@ -1,0 +1,55 @@
+# Line endings are decided here rather than by each machine's core.autocrlf.
+#
+# Every tracked file in this repository is text -- 532 .py, 35 .md, 24 .cpp,
+# 15 .hpp, plus .yml/.toml/.txt and two extensionless licence files -- and
+# all of it is already stored with LF. Without this file that was true by
+# convention rather than by rule: with core.autocrlf=true a Windows checkout
+# rewrites the working copy to CRLF, and git then warns on every `add` that
+# it is about to do so. That is twenty-five lines of warning per commit in
+# this repository, and it is not free -- a warning nobody reads is where a
+# real one goes to hide.
+#
+# `text=auto eol=lf` keeps LF in the repository AND in the working tree, so
+# what the editor shows, what black writes and what gets committed are the
+# same bytes on every platform.
+
+* text=auto eol=lf
+
+# Named explicitly so a future binary addition cannot inherit the wildcard
+# by accident -- normalizing a .parquet or a .joblib corrupts it silently,
+# and the corruption survives in history.
+*.py     text eol=lf diff=python
+*.pyi    text eol=lf diff=python
+*.pyx    text eol=lf diff=python
+*.md     text eol=lf
+*.cpp    text eol=lf diff=cpp
+*.hpp    text eol=lf diff=cpp
+*.h      text eol=lf diff=cpp
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+*.txt    text eol=lf
+*.json   text eol=lf
+*.example text eol=lf
+.gitignore text eol=lf
+
+# Binary, should any arrive: never normalized, never diffed as text.
+*.parquet binary
+*.joblib  binary
+*.pkl     binary
+*.npy     binary
+*.npz     binary
+*.so      binary
+*.pyd     binary
+*.dll     binary
+*.dylib   binary
+*.zip     binary
+*.gz      binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
