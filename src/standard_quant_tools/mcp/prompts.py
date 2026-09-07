@@ -1,7 +1,7 @@
 """
 Workflow prompts: the reusable studies this library is for.
 
-A CORRECTION TO THE PLAN. `Development/mcp_plan.md` §7 proposed reusing the
+A CORRECTION TO THE ORIGINAL DESIGN, which proposed reusing the
 nine worker system prompts from `Multi_Agent_Implementation/worker_agents.py`
 verbatim, on the grounds that a sixth copy of the model-builder prompt is
 duplication. That does not survive contact with the protocol: an MCP prompt

@@ -1,5 +1,8 @@
 """Tests for the original 12 agent tools (mocked data provider)."""
 
+from unittest.mock import MagicMock
+
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -645,7 +648,39 @@ class TestRunFactorRegression:
 
 
 class TestRunCointegrationTest:
-    def test_returns_cointegration_result(self, patched_factory):
+    """Two symbols that are actually two symbols.
+
+    `mock_provider` returns the same `sample_ohlcv` for every ticker, so KO
+    and PEP were byte-identical series -- hedge ratio exactly 1, residual
+    exactly 0. These tests assert the SHAPE of the result (a finite
+    half-life, three critical values, a positive n_obs), and they were
+    getting that shape from a cointegration test run on a series against
+    itself, which `cointegration_test` now refuses because the two backends
+    invented different answers for it.
+
+    This fixture keeps the same assertions and gives them a pair with a real
+    spread to compute from.
+    """
+
+    @pytest.fixture
+    def cointegrating_pair(self, monkeypatch, sample_ohlcv):
+        rng = np.random.default_rng(11)
+        n = len(sample_ohlcv)
+        other = sample_ohlcv.copy()
+        # A genuine long-run relationship: same level, mean-reverting spread.
+        other["Close"] = (
+            sample_ohlcv["Close"].to_numpy() * 0.95 + 4.0 + rng.normal(0, 0.6, n)
+        )
+
+        def _by_symbol(symbol, *args, **kwargs):
+            return other if str(symbol).upper() == "PEP" else sample_ohlcv
+
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = _by_symbol
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+        return provider
+
+    def test_returns_cointegration_result(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",
@@ -656,7 +691,7 @@ class TestRunCointegrationTest:
         assert result.symbol_a == "KO"
         assert result.symbol_b == "PEP"
 
-    def test_cointegrated_is_bool(self, patched_factory):
+    def test_cointegrated_is_bool(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",
@@ -666,7 +701,7 @@ class TestRunCointegrationTest:
         result = run_cointegration_test(inp)
         assert isinstance(result.cointegrated, bool)
 
-    def test_p_value_bounded(self, patched_factory):
+    def test_p_value_bounded(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",
@@ -676,7 +711,7 @@ class TestRunCointegrationTest:
         result = run_cointegration_test(inp)
         assert 0.0 <= result.p_value <= 1.0
 
-    def test_signal_is_valid_string(self, patched_factory):
+    def test_signal_is_valid_string(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",
@@ -686,7 +721,7 @@ class TestRunCointegrationTest:
         result = run_cointegration_test(inp)
         assert result.signal in {"long_a_short_b", "short_a_long_b", "neutral"}
 
-    def test_half_life_is_finite_float(self, patched_factory):
+    def test_half_life_is_finite_float(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",
@@ -697,7 +732,7 @@ class TestRunCointegrationTest:
         assert isinstance(result.half_life_days, float)
         assert result.half_life_days <= 9999.0
 
-    def test_critical_values_have_three_levels(self, patched_factory):
+    def test_critical_values_have_three_levels(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",
@@ -707,7 +742,7 @@ class TestRunCointegrationTest:
         result = run_cointegration_test(inp)
         assert set(result.critical_values.keys()) == {"1%", "5%", "10%"}
 
-    def test_n_obs_positive(self, patched_factory):
+    def test_n_obs_positive(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",
@@ -717,7 +752,7 @@ class TestRunCointegrationTest:
         result = run_cointegration_test(inp)
         assert result.n_obs > 0
 
-    def test_hedge_ratio_is_float(self, patched_factory):
+    def test_hedge_ratio_is_float(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
             symbol_b="PEP",

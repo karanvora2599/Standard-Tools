@@ -63,9 +63,3 @@ def load_env(dotenv_path: Optional[str] = None) -> bool:
     if found:
         logger.debug("[config] loaded .env from %s", dotenv_path or Path.cwd() / ".env")
     return found
-
-
-def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
-    """Convenience wrapper: ensure .env is loaded, then read one variable."""
-    load_env()
-    return os.environ.get(name, default)

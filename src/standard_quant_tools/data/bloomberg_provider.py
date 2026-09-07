@@ -324,32 +324,6 @@ class BloombergProvider(DataProvider):
             raise APIError(f"Could not open Bloomberg service {_REFDATA_SERVICE!r}.")
         return session
 
-    def _send_request(self, request: Any) -> List[Any]:
-        """Open a session, send one request, collect every message across
-        every event until the final RESPONSE event, then close the session.
-        A fresh session per request trades a little latency for never
-        holding a stale/half-broken session across calls."""
-        session = self._open_session()
-        try:
-            session.sendRequest(request)
-            messages: List[Any] = []
-            while True:
-                event = session.nextEvent(30_000)  # 30s per-event timeout
-                for msg in event:
-                    messages.append(msg)
-                if event.eventType() == _blpapi.Event.RESPONSE:
-                    break
-                if event.eventType() == _blpapi.Event.TIMEOUT:
-                    raise APIError(
-                        f"Bloomberg request timed out waiting for a response "
-                        f"from {self._host}:{self._port}."
-                    )
-            return messages
-        finally:
-            session.stop()
-
-    # ── Historical data ─────────────────────────────────────────────────────
-
     def get_ohlcv(
         self,
         symbol: str,

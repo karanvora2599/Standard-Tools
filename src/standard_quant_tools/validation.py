@@ -69,6 +69,16 @@ def validate_dataframe(required_columns: Optional[list[str]] = None):
     Decorator to validate input DataFrame.
     Checks for empty DataFrame and missing columns.
 
+    NO CURRENT APPLICATION, and kept deliberately. A dead-code sweep flagged
+    it: `validate_series` is applied in eight modules and this one nowhere,
+    which is the profile of something to delete. Two things argue the other
+    way. It is a documented public decorator
+    (`Documentation/14_polars_support.md`), and `validate_series`' own
+    docstring points HERE for why `is_series_like` matters rather than a
+    bare `isinstance` -- so removing it would orphan the explanation its
+    sibling depends on, which is the dangling-reference defect that sweep
+    exists to find. If it is ever removed, move that paragraph first.
+
     Accepts a pandas or (when polars is installed) a polars DataFrame —
     `is_dataframe_like` checks both, so a polars.DataFrame is actually
     validated here rather than silently skipped (a bare

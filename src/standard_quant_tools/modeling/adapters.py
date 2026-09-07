@@ -66,14 +66,6 @@ class FitArrays:
     sample_weight: Optional[np.ndarray] = None
     group: Optional[np.ndarray] = None
 
-    def fit_kwargs(self) -> Dict[str, Any]:
-        kwargs: Dict[str, Any] = {}
-        if self.sample_weight is not None:
-            kwargs["sample_weight"] = self.sample_weight
-        if self.group is not None:
-            kwargs["group"] = self.group
-        return kwargs
-
 
 def _exposes_coefficients(estimator_cls: type) -> bool:
     """

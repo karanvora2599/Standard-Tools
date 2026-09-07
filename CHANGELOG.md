@@ -1,5 +1,158 @@
 # Changelog
 
+## Dead code, and the two live defects it was hiding
+
+A sweep of the whole repository for code nothing can reach — 246 source
+files, 213 test files, 62 example scripts, 27 C++ files. Five agents on
+non-overlapping definitions of "dead", every claim re-measured before it was
+acted on.
+
+**Four dimensions came back clean, which is the useful part.** The C++ layer
+has no dead declarations: all 73 header declarations either bind to Python
+or terminate in live callers. All 209 tools are servable through MCP, with
+no orphans and no empty runtime. Every tool-shaped name in the example trees
+resolves. The test suite has zero `@pytest.mark.skip` and zero `xfail`. That
+bounds the search, and what is left is specific.
+
+### A dead `except` clause, and the decile that was one bucket
+
+`duplicates="drop"` suppresses the only `ValueError` that `qcut` raises, so
+the handler guarding `by_prediction_decile` could not fire. It did not fail
+loudly — it let a degenerate prediction column through under a healthy name:
+
+    continuous predictions   -> 10 buckets
+    constant predictions     ->  1 bucket, labelled by_prediction_decile
+    two distinct values      ->  1 bucket
+
+A model collapsed to a constant is exactly the state this diagnostic exists
+to catch, described in the language of a working one.
+
+**The fix already existed fourteen lines below.** The `by_feature_decile`
+path checks the bucket count and refuses, under a comment reading "the count
+is checked rather than the exception, because the exception never comes".
+Its sibling was left behind, so one function refused a degenerate column on
+one path and mislabelled it on the other.
+
+It NOTES rather than raising, which is the one deliberate asymmetry: a
+feature is the caller's choice and refusing tells them to pick another,
+while the predictions are the model's own output, and refusing the whole
+attribution would withhold `by_entity` and `by_period`, which are still
+exactly right.
+
+### Two backends of one function, opposite verdicts
+
+`cointegration_test` on an exactly affine pair — a dual listing, an ETF
+against its sole holding, the same column twice in a screening universe:
+
+    native (C++)              p=0.2593  adf=-2.546   cointegrated=False
+    statsmodels fallback      p=0.0     adf=-inf     cointegrated=True
+
+On normal data the two agree to 1e-13, so this only bites where the residual
+degenerates. Neither answer is defensible: an ADF statistic asks whether a
+series reverts to its mean, and a series that IS its mean has no such
+question. statsmodels knows — it emits `CollinearityWarning: ... not
+reliable in this case` and returns a verdict over the top of it.
+
+So the degenerate pair is refused rather than answered, which is what this
+package does elsewhere for the same shape. Three attempts were needed and
+the two failures are worth recording. Importing `has_no_dispersion` closed
+an import cycle (`cointegration` -> `risk_metrics` -> `analysis.regression`
+-> `analysis` -> back), and it was the wrong test anyway: it asks whether a
+series is constant relative to ITS OWN magnitude, and a residual of 1e-14
+varies hugely against itself while being zero against a price near 100. The
+comparison that matters is against the series scale.
+
+The third attempt would have made the scan worse. `scan_cointegrated_pairs`
+calls the single test per pair with no `try/except`, so one dual listing
+would have cost the other 4,949 pairs — while the native path bypassed the
+guard entirely and kept answering, re-opening the disagreement one level up.
+One shared predicate now serves all three paths: the single test raises, the
+scan flags the row, and both backends return identical output on a universe
+containing a degenerate pair.
+
+The eight tests that failed on this were not a regression. `mock_provider`
+returns the same frame for every symbol, so KO and PEP were byte-identical
+and those tests had been asserting on a p-value computed from a series
+against itself.
+
+### Deleted
+
+`_send_request` (26 lines, private — the generic version abandoned when
+`_open_session`'s callers each grew their own send loop), `winsorize`,
+`config.get_env`, `Reference.is_typed`, `FitArrays.fit_kwargs`,
+`_SERIES_WINDOW`, `HAS_RANKING`, and a tracked zero-byte file named `=` that
+entered on a shell-redirect typo and survived three commits.
+
+`winsorize` makes three functions deleted from `features/transforms.py` for
+one reason: `fit_preprocessing` inlines the quantile-and-clip rather than
+calling the helper written for it, so the helper ages out while the
+operation stays. That note is now in the file where the arithmetic is.
+
+**One deletion was reversed on evidence.** `validate_dataframe` has zero
+applications where its sibling `validate_series` has 41 — the profile of
+something to remove. But `validate_series`' own docstring points at it for
+why `is_series_like` matters rather than a bare `isinstance`, so deleting it
+would orphan the explanation its sibling depends on. Kept, with the
+reasoning recorded in place.
+
+### The planning documents are gone
+
+Nine plan and analysis documents removed from `Development/`, about 5,300
+lines, and all 66 references to them rewritten rather than left dangling.
+That was the part that needed care: `performance_insights.md` alone was
+cited from `garch.py`, `monte_carlo.cpp`, `CMakeLists.txt`, four
+Documentation pages and the README. Deleting the files and leaving the
+pointers would have manufactured the exact defect the sweep exists to find —
+a named remedy that cannot be reached, which is how `check_schema` came to
+tell callers to run a function no tool could execute.
+
+`build_guide.md` stays: it is a live build guide cited by `CMakeLists.txt`
+and `CONTRIBUTING.md`, not a plan.
+
+### Found and not yet fixed
+
+Recorded here rather than in a plan document, so it is where the rest of the
+reasoning lives.
+
+- **`corwin_schultz_spread` exists twice**, `backtest/liquidity.py:42` and
+  `analysis/microstructure_estimators.py:250`. Identical arithmetic
+  (31.95786159285826 bps from both), and the first takes logs of `high/low`
+  with no positivity check: one bar with `high < low` returns 139.7 bps
+  against a true 32.0. Its consumer is `check_spread_proxy`, the tool whose
+  job is to say a backtest under-charged.
+- **`amihud_illiquidity`**, the same pair, sloppiness reversed:
+  `max(2, int(window))` silently accepts `window=-5`.
+- **`_annualized_sharpe` and `_sharpe`** have identical ASTs, both live,
+  agreeing on every input including degenerates — no drift yet, which is
+  what a duplicate looks like right up until it is not.
+- **`indicator_panel` is minted and unconsumable.**
+  `compute_indicator_panel` publishes one reference per indicator and
+  nothing anywhere resolves that kind, so an agent gets references no tool
+  will accept. **`feature_panel`** has neither producer nor consumer.
+- **`_finite_or_none` has 15 copies** in three spellings; `_runs_dir` /
+  `_validate_identifier` / `_IDENTIFIER_RE` are duplicated between
+  `backtest/artifacts.py` and `modeling/artifacts.py`, which are
+  path-security guards and the worst place to keep two copies — the import
+  path between them is already open and unused.
+- **`coverage_report`** (`modeling/dataset/point_in_time.py`) has no door,
+  while its two siblings in the same module are reachable through
+  `join_point_in_time`. Its docstring names the caller who currently gets
+  nothing: a point-in-time join legitimately produces NaN at the start of a
+  sample, and the alternative to saying so is a caller discovering it as an
+  unexplained drop in row count.
+
+### A note on method
+
+Two errors, both mine, both the kind that produces a confident false
+positive. Counting the FILES that contain a symbol is not counting its uses:
+`env_ll` and `min_work` looked orphaned until it turned out their callers
+are in the same header, terminating in 14 and 26 real call sites. And a
+symbol-reachability graph cannot find the class of gap that a missing tool
+represents — run against the tree before `prepare_vendor_extract` existed,
+it reports `normalize_book` as reachable, because it was, through a provider
+method behind a paid API key. What was missing was a capability shape, not a
+reference.
+
 ## What can be called, what is accepted, and what answers wrongly — 207 to 208 tools
 
 A sweep asking three questions of the whole surface that ordinary testing
@@ -185,8 +338,7 @@ the only subpackage here without an `__init__.py`. And scipy, reported as an
 unfalsifiable flag, turned out to be imported directly by six modules and
 never declared — reaching the environment only as a transitive dependency.
 
-The corrections are recorded in `Development/reachability_plan.md` alongside
-the claims they replace.
+Each correction is recorded above alongside the claim it replaces.
 
 ## The book finally arrives — 200 to 204 tools
 
@@ -250,9 +402,8 @@ untouched -- they were right all along.
 
 ### Two kernels, out of a whole subsystem swept for them
 
-`Development/modeling_native_plan_ii.md` measured the `modeling` and
-`feature_lab` surfaces for C++ opportunities and found two, which is the
-result worth reporting. Everything else that looked like a kernel was pandas
+A measured sweep of the `modeling` and `feature_lab` surfaces for C++
+opportunities found two, which is the result worth reporting. Everything else that looked like a kernel was pandas
 dispatch overhead that numpy removed, and eight proposals were measured and
 REJECTED for being slower than the code they would have replaced.
 
@@ -360,8 +511,7 @@ it.
 
 ### `DataFrame.where()` with a Series condition costs 22 microseconds per column
 
-Three vectorisations from `Development/modeling_native_plan_ii.md`, none of
-which needed C++. All measured, all verified against the code they replace.
+Three vectorisations out of that same sweep, none of which needed C++. All measured, all verified against the code they replace.
 
 **`zscore_normalized` was paying per COLUMN, not per row.** `z.where(~degenerate,
 other=0.0)` broadcasts a Series condition across a DataFrame column by column
@@ -1728,7 +1878,7 @@ agent doing feature work carried fourteen it would not.
 
 `sqt-mcp --runtime feature_lab` serves them for 11.5 KB.
 
-The split followed the rule in `Development/runtime_expansion_plan.md §3`:
+The split followed one rule:
 the cluster was **built inside `modeling` first** and moved once it reached
 the eight-tool floor, rather than being declared empty and filled later.
 Both sides clear the floor — `feature_lab` at 9, `modeling` at 14.
@@ -2295,7 +2445,7 @@ library module writes to stdout — stdio transport shares that channel with
 JSON-RPC, and a stray `print()` corrupts every session in a way that looks
 like a protocol bug rather than a Python one.
 
-`Development/mcp_plan.md` gains a "what the build found" section recording
+The MCP design notes gain a "what the build found" section recording
 the four plan assumptions that did not survive implementation, rather than
 being edited to match the outcome.
 
@@ -2487,7 +2637,7 @@ parameters, with the same defect fixed in `QuantileGradientBoostingRegressor`.
 
 ### Added (native kernels for the modeling layer)
 
-Five kernels in `_sqt_core`, from `Development/modeling_native_plan.md`. Each
+Five kernels in `_sqt_core`, from the modelling native plan. Each
 is an optional fast path with the Python implementation kept as both the
 reference and the test oracle, and each agrees with it to **8.9e-16 or
 better**.
@@ -2571,7 +2721,7 @@ extension is present.
 
 ### Added (modeling: six capability gaps closed)
 
-An analysis of `standard_quant_tools.modeling` (`Development/modeling_analysis.md`)
+An analysis of `standard_quant_tools.modeling`
 found the architecture sound and the gaps in breadth. All of these change what a
 model predicts, so all of them are opt-in behind an explicit spec field and every
 default is unchanged.
@@ -2667,7 +2817,7 @@ rather than of the *repeated* validation.
 ### Added (benchmarks)
 
 `tests/bench/bench_modeling.py` backs every figure in
-`Development/modeling_analysis.md`. Its `build` section attributes time to
+that analysis. Its `build` section attributes time to
 feature computation directly rather than A/B-ing whole builds: repeated on an
 ordinary workstation, a whole-build A/B of the same change returned ratios from
 0.62× to 1.39× — a spread wider than the effect being measured.
@@ -2734,7 +2884,7 @@ neither of which had any.
 
 ### Added (universe-scale performance)
 
-Measured baseline first, in `Development/optimization_plan.md`, with the two
+Measured baseline first, with the two
 harnesses that produced it committed under `tests/bench/`.
 
 - **`engle_granger` was the only kernel in the extension that was not linear
@@ -5425,12 +5575,12 @@ published forms and are correct as written.
   `HAS_CPP`/`_cpp_core` guard pattern as the rest of the extension. All four
   were subsequently built and their full test suites actually run (see the
   build-verification entry below) — real numbers, not projections, are in
-  `Development/performance_insights.md`.
+  the performance analysis.
   **Behavior note:** the Monte Carlo C++ path's RNG does not reproduce
   NumPy's PCG64 bit stream, so `random_seed` is only reproducible *within*
   one backend — the same seed gives different concrete numbers depending on
   whether `_sqt_core` is built (still bit-identical on repeat calls within
-  one backend). See `Development/performance_insights.md` and
+  one backend). See
   `Development/build_guide.md` for the full detail.
 
 - **C++ hardening, Tier 3 item 9 of an independent code review:** every
@@ -5455,7 +5605,7 @@ published forms and are correct as written.
   CMakeLists.txt`'s `bench_hurst`/`bench_backtest` targets. A default build
   (what CI and a fresh clone both use) now produces portable codegen; pass
   `-DSQT_NATIVE_ARCH=ON` for the extra local-dev speed this session's own
-  measured benchmarks in `performance_insights.md` were built with (no
+  measured benchmarks were built with (no
   re-benchmarking needed — the numbers already reflect `SQT_NATIVE_ARCH=ON`).
   Verified both configurations build clean and pass the full native ctest
   suite + Python suite.

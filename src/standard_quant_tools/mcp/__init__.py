@@ -2,7 +2,7 @@
 Standard Tools over the Model Context Protocol.
 
 Run it with the `sqt-mcp` entry point; see `Documentation/18_mcp.md` for
-client configuration and `Development/mcp_plan.md` for the measurements the
+client configuration, and the CHANGELOG for the measurements the
 design follows from.
 
 NOTE ON THE NAME. This package is `standard_quant_tools.mcp` and the SDK it

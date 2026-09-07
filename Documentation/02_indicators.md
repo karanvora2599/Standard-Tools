@@ -4,9 +4,9 @@ All indicators accept `pd.Series` (or `pd.DataFrame` for OHLCV-based indicators)
 
 Performance-critical indicators use a three-tier execution stack: **C++ extension** (`_sqt_core`) → **Numba JIT** → **pure Python fallback**. The C++ path is fastest and has no NumPy-version dependency. Numba requires `numba` installed with NumPy ≤ 2.0 (on NumPy 2.x the JIT is a no-op). All functions remain correct regardless of which tier is active — the selection is transparent to callers.
 
-The following indicators have a **C++ fast path** via `_sqt_core`: RSI, ADX, Parabolic SAR, Wilder's ATR, Bollinger Bands, and Stochastic Oscillator. `atr()` uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series. All C++ paths fall back to pure Python/pandas automatically when the extension is not built — the API is identical either way.
+The following indicators have a **C++ fast path** via `_sqt_core`: RSI, ADX, Parabolic SAR, Wilder's ATR, Bollinger Bands, and Stochastic Oscillator. `atr` uses a **NumPy single-pass** true range computation (`np.maximum`) that is 5.6× faster than the `pd.concat` approach on a 2 000-bar series. All C++ paths fall back to pure Python/pandas automatically when the extension is not built — the API is identical either way.
 
-Internally, when the AI-agent technical-analysis tool (`get_technical_analysis`) needs 2 or more of {RSI, ADX, Bollinger Bands, Stochastic Oscillator} at once, it uses a single fused native call (`technical_indicators()` in `_sqt_core`) instead of one C++ round trip per indicator — measured ~4.6× faster than calling the individual Python wrappers separately at that integration point (n=2 000; the win is eliminating redundant Python-side validation/logging/conversion overhead per call, not a faster indicator kernel — see `Development/performance_insights.md`). This is purely an internal optimization; the individual `rsi()`/`adx()`/`bollinger_bands()`/`stochastic_oscillator()` functions documented below are unaffected and still used standalone everywhere else.
+Internally, when the AI-agent technical-analysis tool (`get_technical_analysis`) needs 2 or more of {RSI, ADX, Bollinger Bands, Stochastic Oscillator} at once, it uses a single fused native call (`technical_indicators` in `_sqt_core`) instead of one C++ round trip per indicator — measured ~4.6× faster than calling the individual Python wrappers separately at that integration point (n=2 000; the win is eliminating redundant Python-side validation/logging/conversion overhead per call, not a faster indicator kernel). This is purely an internal optimization; the individual `rsi`/`adx`/`bollinger_bands`/`stochastic_oscillator` functions documented below are unaffected and still used standalone everywhere else.
 
 ---
 
@@ -164,7 +164,7 @@ df['overbought'] = df['RSI'] > 70
 
 ### Stochastic Oscillator *(C++ extension)*
 
-Uses a C++ fused sliding min+max pass — measured 2.6× faster than two separate pandas rolling operations (n=2 000; an earlier, unmeasured 5–15× projection appeared in this doc before `_sqt_core` was actually benchmarked — see `Development/performance_insights.md`). Falls back to pandas when the extension is not built.
+Uses a C++ fused sliding min+max pass — measured 2.6× faster than two separate pandas rolling operations (n=2 000; an earlier, unmeasured 5–15× projection appeared in this doc before `_sqt_core` was actually benchmarked). Falls back to pandas when the extension is not built.
 
 ```python
 from standard_quant_tools.indicators import stochastic_oscillator
@@ -187,7 +187,7 @@ out-of-bounds read rather than a catchable Python error).
 
 ### Bollinger Bands *(C++ extension)*
 
-Uses a C++ fused single-pass mean+std computation — one sliding window maintains both `Σx` and `Σx²`, computing mean and variance together rather than running two separate pandas rolling operations — measured 1.6× faster (n=2 000; an earlier, unmeasured 3–8× projection appeared in this doc before `_sqt_core` was actually benchmarked — see `Development/performance_insights.md`). Falls back to pandas when the extension is not built.
+Uses a C++ fused single-pass mean+std computation — one sliding window maintains both `Σx` and `Σx²`, computing mean and variance together rather than running two separate pandas rolling operations — measured 1.6× faster (n=2 000; an earlier, unmeasured 3–8× projection appeared in this doc before `_sqt_core` was actually benchmarked). Falls back to pandas when the extension is not built.
 
 ```python
 from standard_quant_tools.indicators import bollinger_bands
@@ -246,9 +246,9 @@ df['low_vol']  = atr_pct < atr_pct.rolling(60).quantile(0.40)
 df['high_vol'] = atr_pct > atr_pct.rolling(60).quantile(0.80)
 ```
 
-**Difference from `atr()`:**
+**Difference from `atr`:**
 
-| | `atr()` | `wilder_atr()` |
+| | `atr` | `wilder_atr` |
 |---|---|---|
 | Smoothing | Simple rolling mean | Wilder's exponential (SMA seed) |
 | NaN prefix | First `period` values | First `period−1` values |
@@ -366,7 +366,7 @@ from standard_quant_tools.indicators import (
     adx, parabolic_sar, obv, vwap, mfi
 )
 
-provider = DataFactory.get_provider()
+provider = DataFactory.get_provider
 df = provider.get_ohlcv("NVDA", "2023-01-01", "2024-01-01")
 
 # Trend
@@ -390,7 +390,7 @@ df['OBV']  = obv(df['Close'], df['Volume'])
 df['VWAP'] = vwap(df['High'], df['Low'], df['Close'], df['Volume'])
 df['MFI']  = mfi(df['High'], df['Low'], df['Close'], df['Volume'])
 
-print(df.tail())
+print(df.tail)
 ```
 
 

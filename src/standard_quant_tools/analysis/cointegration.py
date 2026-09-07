@@ -11,6 +11,57 @@ from standard_quant_tools.validation import require_finite_array
 
 logger = logging.getLogger(__name__)
 
+#: A spread this small relative to the price level is zero. An exact affine
+#: pair leaves a residual at float precision -- about 1e-13 of the series --
+#: so the threshold sits well above that and far below any real spread. Two
+#: series whose spread is a millionth of their price are the same series.
+_DEGENERATE_RTOL = 1e-9
+
+
+def _degenerate_pair_reason(a_vals: np.ndarray, b_vals: np.ndarray):
+    """Why this pair has no cointegration question to answer, or None.
+
+    ONE PREDICATE FOR EVERY PATH. `cointegration_test` raises on it and
+    `scan_cointegrated_pairs` flags the row instead -- a screen over a
+    hundred names must not die because two of them are the same listing --
+    but they must agree on WHICH pairs are answerable, or the scan and the
+    single test disagree about the same two series.
+
+    Not `has_no_dispersion`: that asks whether a series is constant relative
+    to its own magnitude, and a residual of 1e-14 varies hugely relative to
+    itself while being zero relative to a price near 100. The comparison
+    that matters is against the SERIES scale.
+    """
+    n = a_vals.size
+    if n == 0:
+        return None
+    b_scale = float(np.nanmax(np.abs(b_vals)))
+    if b_scale <= 0 or float(np.ptp(b_vals)) <= b_scale * _DEGENERATE_RTOL:
+        return (
+            "series_b is constant, so there is no relationship to regress "
+            "series_a onto -- the hedge ratio would be arbitrary and the "
+            "spread would just be series_a. Cointegration is a statement "
+            "about two series that both move."
+        )
+    design = np.column_stack([np.ones(n), b_vals])
+    beta, *_ = np.linalg.lstsq(design, a_vals, rcond=None)
+    residual = a_vals - design @ beta
+    a_scale = float(np.nanmax(np.abs(a_vals)))
+    if a_scale > 0 and float(np.ptp(residual)) <= a_scale * _DEGENERATE_RTOL:
+        return (
+            "the two series are an exact linear function of one another, so "
+            "the spread is a constant and there is no unit root to test for. "
+            "This is a dual listing, an ETF against its sole holding, or the "
+            "same column twice in a universe -- not a tradeable "
+            f"relationship (hedge ratio {float(beta[1]):.6g}). A p-value on "
+            "it would be arithmetic on a zero residual, and the two backends "
+            "disagreed about what to invent: the native kernel answered "
+            "p=0.2593/not cointegrated where statsmodels answered "
+            "p=0.0/cointegrated."
+        )
+    return None
+
+
 # ── C++ extension (optional fast path) ───────────────────────────────────────
 
 _cpp_core: Any = None
@@ -87,6 +138,25 @@ def cointegration_test(
     n = len(a_vals)
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "statsmodels"
     logger.debug("[cointegration] n_obs=%d  autolag=%s  path=%s", n, autolag, path)
+
+    # ── one guard, ahead of both backends ─────────────────────────────────────
+    #
+    # THE TWO PATHS RETURNED OPPOSITE VERDICTS HERE. On an exactly affine
+    # pair -- a dual listing, an ETF against its sole holding, the same
+    # column twice in a screening universe -- the residual is identically
+    # zero, and measured on the same input:
+    #
+    #     native (C++)              p=0.2593  adf=-2.546   cointegrated=False
+    #     statsmodels fallback      p=0.0     adf=-inf     cointegrated=True
+    #
+    # Neither is defensible. An ADF statistic asks whether a series reverts
+    # to its mean; a series that IS its mean has no such question to answer,
+    # and -2.546 and -inf are both inventions. statsmodels knows -- it emits
+    # `CollinearityWarning: ... Cointegration test is not reliable in this
+    # case` and returns a verdict over the top of it.
+    reason = _degenerate_pair_reason(a_vals, b_vals)
+    if reason is not None:
+        raise ValidationError(f"cointegration_test: {reason}")
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
     if HAS_CPP and _cpp_core is not None:
@@ -486,12 +556,32 @@ def scan_cointegrated_pairs(
         "C++" if (HAS_CPP and _cpp_core is not None) else "python-loop",
     )
 
+    # A SCAN FLAGS WHAT A SINGLE TEST REFUSES. `cointegration_test` raises on
+    # a degenerate pair, which is right for one question and wrong for a
+    # hundred: a universe containing one dual listing must not lose the other
+    # 4,949 pairs. Same predicate either way, so the scan and the single test
+    # never disagree about which pairs are answerable -- and it runs on BOTH
+    # backends, because the kernel does not see the guard above.
+    degenerate = {
+        (a, b): _degenerate_pair_reason(
+            frame[a].to_numpy(dtype=float), frame[b].to_numpy(dtype=float)
+        )
+        for a, b in pair_list
+    }
+
+    def _blank_row(n_obs: int):
+        nan = float("nan")
+        return [nan, nan, nan, 0, nan, nan, nan, nan, nan, n_obs, False]
+
     if HAS_CPP and _cpp_core is not None:
         # (n_tickers x n_bars), the layout the kernel indexes by row.
         panel = np.ascontiguousarray(frame.to_numpy(dtype=np.float64).T)
         pair_idx = np.array([(pos[a], pos[b]) for a, b in pair_list], dtype=np.int32)
         out = _cpp_core.batch_engle_granger(panel, pair_idx, max_lag, use_aic)
         df = pd.DataFrame(out, columns=_BATCH_COINT_COLUMNS, index=index)
+        for position, (a, b) in enumerate(pair_list):
+            if degenerate[(a, b)] is not None:
+                df.iloc[position] = _blank_row(int(df.iloc[position]["n_obs"]))
         df["optimal_lag"] = df["optimal_lag"].astype(int)
         df["n_obs"] = df["n_obs"].astype(int)
         df["cointegrated"] = df["cointegrated"].astype(bool)
@@ -500,6 +590,9 @@ def scan_cointegrated_pairs(
     # Pure-Python fallback: same columns, same order, one pair at a time.
     rows = []
     for a, b in pair_list:
+        if degenerate[(a, b)] is not None:
+            rows.append(_blank_row(len(frame)))
+            continue
         r = cointegration_test(frame[a], frame[b], autolag=autolag)
         rows.append(
             [

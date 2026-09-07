@@ -230,7 +230,7 @@ def apply_cross_sectional_target(
         # entities happen to be present that day.
         #
         # Through the shared per-date ranking rather than `groupby.rank`.
-        # This is the operation `Development/modeling_native_plan.md` phase 2
+        # This is the operation the first native plan's phase 2
         # tabulated at 1.4 microseconds a row and then did not build; it is
         # the same ranking the ensemble combiner and the feature report's
         # turnover need, so all three now go through one kernel.

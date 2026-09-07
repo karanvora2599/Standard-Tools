@@ -5,7 +5,7 @@ Desktop, Claude Code, an IDE, another agent framework — can use the library
 without going through the `Implementation/` scripts.
 
 The design and the measurements behind it are in
-[Development/mcp_plan.md](../Development/mcp_plan.md). This page is how to
+the CHANGELOG. This page is how to
 run it.
 
 ---

@@ -1,7 +1,7 @@
 """
 Where the modeling pipeline spends its time.
 
-Every figure quoted in Development/modeling_analysis.md comes from this
+Every modelling figure quoted in the CHANGELOG comes from this
 script, so a claim there can be re-checked rather than taken on trust. It
 builds a synthetic OHLCV universe in memory and patches DataFactory, so no
 measurement includes network time and the numbers are reproducible.

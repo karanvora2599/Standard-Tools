@@ -10,6 +10,7 @@ from standard_quant_tools.analysis.cointegration import (
     compute_spread,
     half_life,
     kalman_hedge_ratio,
+    scan_cointegrated_pairs,
     spread_zscore,
 )
 from standard_quant_tools.error import ValidationError
@@ -449,3 +450,92 @@ class TestKalmanHedgeRatioScale:
         elapsed = time.time() - t0
         assert elapsed < 10.0, f"2M-point Kalman filter took {elapsed:.2f}s"
         assert len(result) == n
+
+
+class TestADegeneratePairHasNoQuestionToAnswer:
+    """The two backends returned opposite verdicts on the same input.
+
+    On an exactly affine pair the residual is identically zero, and:
+
+        native (C++)          p=0.2593  adf=-2.546   cointegrated=False
+        statsmodels fallback  p=0.0     adf=-inf     cointegrated=True
+
+    Neither is defensible. An ADF statistic asks whether a series reverts to
+    its mean; a series that IS its mean has no such question, and -2.546 and
+    -inf are both inventions. statsmodels knows -- it emits
+    `CollinearityWarning: ... not reliable in this case` and answers anyway.
+
+    So this is refused rather than answered, which is what the package does
+    elsewhere for the same shape. An affine pair is not exotic: a dual
+    listing, an ETF against its sole holding, or the same column twice in a
+    screening universe.
+    """
+
+    @staticmethod
+    def _series(n=400, seed=7):
+        rng = np.random.default_rng(seed)
+        index = pd.bdate_range("2021-01-04", periods=n)
+        return pd.Series(100 + np.cumsum(rng.normal(0, 0.8, n)), index=index)
+
+    def test_an_exactly_affine_pair_is_refused(self):
+        a = self._series()
+        with pytest.raises(ValidationError, match="exact linear function"):
+            cointegration_test(a, 0.9 * a + 5.0)
+
+    def test_a_constant_series_is_refused(self):
+        a = self._series()
+        flat = pd.Series(np.full(len(a), 50.0), index=a.index)
+        with pytest.raises(ValidationError, match="series_b is constant"):
+            cointegration_test(a, flat)
+
+    def test_a_real_relationship_still_answers(self):
+        """The guard must not catch a pair with a genuine spread."""
+        a = self._series()
+        rng = np.random.default_rng(3)
+        b = 0.9 * a + 5.0 + rng.normal(0, 0.5, len(a))
+        result = cointegration_test(a, b)
+        assert result["cointegrated"] is True
+        assert result["p_value"] < 0.05
+
+    def test_an_independent_pair_still_answers(self):
+        a = self._series(seed=7)
+        b = self._series(seed=11)
+        result = cointegration_test(a, b)
+        assert result["cointegrated"] is False
+        assert 0.0 <= result["p_value"] <= 1.0
+
+    def test_a_scan_flags_the_pair_and_keeps_the_rest(self):
+        """A single test refuses; a scan must not. One dual listing in a
+        universe cannot be allowed to cost the other 4,949 pairs -- but the
+        two must agree about WHICH pairs are answerable, which is why they
+        share one predicate."""
+        base = self._series()
+        rng = np.random.default_rng(5)
+        frame = pd.DataFrame(
+            {
+                "AAA": base,
+                "BBB": 0.9 * base + 5.0,
+                "CCC": 0.9 * base + 5.0 + rng.normal(0, 0.5, len(base)),
+                "DDD": self._series(seed=11),
+            }
+        )
+        out = scan_cointegrated_pairs(frame)
+        assert len(out) == 6, "pairs were lost"
+        flagged = out.xs("AAA", level=0).loc["BBB"]
+        assert np.isnan(flagged["p_value"])
+        assert bool(flagged["cointegrated"]) is False
+        assert int(out["p_value"].notna().sum()) == 5
+
+    def test_the_two_backends_agree_about_what_is_answerable(self, monkeypatch):
+        """The property the guard exists to restore. Whether a pair can be
+        tested must not depend on whether the extension is built."""
+        import standard_quant_tools.analysis.cointegration as coint_module
+
+        a = self._series()
+        affine = 0.9 * a + 5.0
+
+        with pytest.raises(ValidationError):
+            cointegration_test(a, affine)
+        monkeypatch.setattr(coint_module, "HAS_CPP", False)
+        with pytest.raises(ValidationError):
+            cointegration_test(a, affine)

@@ -118,8 +118,6 @@ that were not worth doing:
 |---|---|
 | [Documentation/16_performance.md](Documentation/16_performance.md) | Every measured number, the OpenMP and AVX2 paths, the Python-level optimizations, and the honest disappointments kept beside their predictions |
 | [Documentation/17_correctness.md](Documentation/17_correctness.md) | The backend-parity contract that makes the two tiers substitutable, and the audit findings behind it |
-| [Development/performance_insights.md](Development/performance_insights.md) | Methodology, the benchmark scripts behind each figure, and the edge-case bugs found while measuring |
-| [Development/modeling_native_plan.md](Development/modeling_native_plan.md) | Why the modeling layer's native work stopped at three phases — the arithmetic ceiling, stated before the method |
 | [Development/build_guide.md](Development/build_guide.md) | Building the extension on Windows / Linux / macOS |
 
 ## Error Handling
@@ -197,7 +195,7 @@ ctest --test-dir build --config Release -V
 # Linux / macOS: ./build/tests/cpp/bench_hurst
 
 # Performance harnesses — minutes to run, so not part of the suite.
-# Every figure in Development/optimization_plan.md comes from one of these.
+# Every optimization figure in the CHANGELOG comes from one of these.
 SQT_NUM_THREADS=1 python tests/bench/bench_kernels.py   # per-kernel scaling, serial
 python tests/bench/bench_kernels.py                     # ... and parallel
 python tests/bench/bench_universe.py                    # 2,000-ticker shapes
@@ -264,11 +262,6 @@ NaN/Inf data contract is covered separately, in
 | `Documentation/26_data.md` | The data runtime: fetching as a reference other runtimes read, what a provider guarantees, temporal contracts for frames this library did not fetch, bundles, and the unit-versus-definition distinction in ratio comparison |
 | `Documentation/25_testing.md` | The seven-layer testing regime: planted-answer correctness, whole-surface invariants, schema-synthesized adversarial fuzzing, metamorphic relations, determinism and purity, generated documentation, and mutation testing — with what each layer has actually caught |
 | `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
-| `Development/performance_insights.md` | Algorithmic analysis: which components benefit from C++ and by how much |
-| `Development/optimization_plan.md` | The optimization backlog, each item with its measured outcome |
-| `Development/modeling_analysis.md` | Performance and capability analysis of the modeling layer |
-| `Development/modeling_native_plan.md` | The native-kernel plan for modeling, and the ceiling that stopped it at three phases |
-| `Development/mcp_plan.md` | The MCP server plan: the measured constraints, the design, and what was deferred |
 
 ---
 

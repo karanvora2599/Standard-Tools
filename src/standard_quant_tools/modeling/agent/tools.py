@@ -1302,6 +1302,8 @@ def analyze_model_errors(
         joined, feature=input_data.feature, period=input_data.period
     )
 
+    if attribution.get("prediction_note"):
+        warnings.append(attribution["prediction_note"])
     if attribution.get("feature_note"):
         warnings.append(attribution["feature_note"])
     if attribution.get("rows_without_feature"):

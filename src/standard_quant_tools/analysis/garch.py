@@ -105,7 +105,7 @@ def _garch11_variance_recursion(
     numba's JIT cold-start latency (a few hundred ms on the first call in
     any fresh process) and immunity to future numpy ABI breakage -- the
     same permanent rationale this codebase already uses for RSI/ADX/PSAR
-    (see Development/performance_insights.md).
+    (measured; see CHANGELOG for the figures).
     """
     if HAS_CPP and _cpp_core is not None:
         return _cpp_core.garch11_variance_recursion(resid_sq, omega, alpha, beta)

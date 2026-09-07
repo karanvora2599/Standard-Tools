@@ -19,7 +19,7 @@ namespace {
 // splitmix64 (Vigna) — cheap, well-distributed mixing function used to
 // derive an independent RNG seed per simulated path from a single base
 // seed, so paths need no shared mutable state and can run in parallel
-// (see performance_insights.md's OpenMP follow-on) with no locking.
+// (the OpenMP follow-on work) with no locking.
 std::uint64_t splitmix64(std::uint64_t& state) {
     std::uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;

@@ -15,7 +15,7 @@ run by hand (or by a dedicated CI job), not as part of the suite.
     python tests/bench/bench_modeling.py ic build      # or one section at a time
 
 The baseline these produced on 2026-08-21 is recorded in
-`Development/optimization_plan.md` section 2. That document is the reason these
+the optimization sweep's section 2. That work is the reason these
 exist: every figure in it comes from one of these two scripts, so a claim in the
 plan can be re-checked rather than taken on trust.
 
@@ -23,7 +23,7 @@ plan can be re-checked rather than taken on trust.
 out to 500/2,000 tickers. The multiplication is printed alongside the measured
 unit cost so the extrapolation is visible and checkable, not baked in.
 
-`bench_modeling.py` backs every figure in `Development/modeling_analysis.md`.
+`bench_modeling.py` backs every modelling figure in the CHANGELOG.
 It patches `DataFactory` with a synthetic in-memory universe, so no measurement
 includes network time. Its `build` section attributes time to feature
 computation directly rather than A/B-ing whole builds: repeated on an ordinary

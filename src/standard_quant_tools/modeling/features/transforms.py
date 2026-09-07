@@ -48,18 +48,14 @@ def _native_matrix(frame: pd.DataFrame) -> Optional[np.ndarray]:
         return None
 
 
-def winsorize(series: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd.Series:
-    """Clip `series` to its own [lower, upper] quantiles."""
-    if not (0.0 <= lower < upper <= 1.0):
-        raise ValidationError(
-            f"winsorize: need 0 <= lower < upper <= 1, got ({lower}, {upper})"
-        )
-    lo, hi = series.quantile(lower), series.quantile(upper)
-    return series.clip(lower=lo, upper=hi)
-
-
-# `zscore_time_series` and `zscore_cross_sectional` both stood here and both
-# are gone. The second was the predecessor `standardize_cross_sectional` was
+# `winsorize`, `zscore_time_series` and `zscore_cross_sectional` all stood
+# here and all three are gone -- which is the pattern worth noticing, not any
+# one of them. `winsorize` had zero callers because `fit_preprocessing`
+# below inlines the quantile-and-clip rather than calling the helper written
+# for it, so the helper aged out while the operation stayed. Reach for this
+# module's own functions before writing the arithmetic again.
+#
+# The other two went for a related reason. The second was the predecessor `standardize_cross_sectional` was
 # built ON, left behind disagreeing with its own successor -- NaN for a
 # constant cross-section where the successor gives 0.0. The first survived
 # only because that one's docstring named it by contrast; with the contrast

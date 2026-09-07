@@ -630,8 +630,7 @@ class TestDriftAndStabilityTools:
 
 
 class TestTheSplitFollowedTheRule:
-    """Development/runtime_expansion_plan.md section 3, checked rather than
-    asserted in prose."""
+    """The runtime split rule, checked rather than asserted in prose."""
 
     FEATURE_TOOLS = [
         "profile_feature",

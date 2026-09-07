@@ -336,18 +336,43 @@ def error_attribution(
     }
     predicted = _finite(joined["_predicted"])
     if np.isfinite(predicted).sum() >= N_BUCKETS:
-        try:
-            deciles = pd.qcut(
-                pd.Series(predicted, index=joined.index),
-                N_BUCKETS,
-                labels=False,
-                duplicates="drop",
+        # THE COUNT, NOT THE EXCEPTION -- the same rule the feature path
+        # below applies, and for the same reason. `duplicates="drop"`
+        # suppresses the only ValueError qcut raises, so the `except
+        # ValueError` that used to sit here could not fire: a constant
+        # prediction column produced ONE bucket and reported it as a decile,
+        # and two distinct values also produced one. That is a model which
+        # has collapsed, described in the language of a healthy one.
+        #
+        # It NOTES rather than raising, which is where it differs from the
+        # feature path. A feature is the caller's choice and refusing tells
+        # them to pick another; predictions are the model's output, and
+        # refusing the whole attribution would withhold `by_entity` and
+        # `by_period`, which are still exactly right. The collapse is worth
+        # reporting on its own, so it goes out as a note.
+        deciles = pd.qcut(
+            pd.Series(predicted, index=joined.index),
+            N_BUCKETS,
+            labels=False,
+            duplicates="drop",
+        )
+        produced = int(deciles.nunique(dropna=True))
+        if produced < 3:
+            distinct = int(pd.Series(predicted).nunique(dropna=True))
+            out["by_prediction_decile"] = []
+            out["prediction_note"] = (
+                f"predictions split into {produced} bucket(s), not "
+                f"{N_BUCKETS}: they take only {distinct} distinct value(s), "
+                "so there are no deciles to break the error down by. A "
+                "constant or near-constant prediction column is usually a "
+                "model that has collapsed -- which is worth knowing on its "
+                "own, and is why this is reported rather than silently "
+                "returning fewer buckets labelled as deciles."
             )
+        else:
             out["by_prediction_decile"] = _bucket_report(
                 joined, deciles.astype("Int64").astype(str), "decile"
             )
-        except ValueError:
-            out["by_prediction_decile"] = []
     if feature is not None:
         if feature not in joined.columns:
             raise ValidationError(

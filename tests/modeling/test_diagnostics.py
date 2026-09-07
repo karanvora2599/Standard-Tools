@@ -608,3 +608,82 @@ class TestCalibrationRefusesWhatIsNotAProbability:
         report = calibration(actual, predicted, "classification")
         assert 0.0 <= report["brier_score"] <= 1.0
         assert report["expected_calibration_error"] < 0.05
+
+
+class TestADecileIsTenBucketsOrItIsNotReported:
+    """The handler that could not fire, and the number it let through.
+
+    `duplicates="drop"` suppresses the only ValueError `qcut` raises, so the
+    `except ValueError` that guarded this path was unreachable. It did not
+    fail loudly; it let a degenerate prediction column through as a
+    "decile":
+
+        continuous predictions   -> 10 buckets
+        constant predictions     ->  1 bucket, labelled by_prediction_decile
+        two distinct values      ->  1 bucket
+
+    A model collapsed to a constant is exactly the state this diagnostic
+    exists to catch, and it was described in the language of a healthy one.
+
+    The rule is the one the FEATURE path 14 lines below already applied,
+    under a comment reading "the count is checked rather than the exception,
+    because the exception never comes". The sibling was left behind.
+    """
+
+    @staticmethod
+    def _panel(predicted):
+        rng = np.random.default_rng(0)
+        residuals = {f"T{i:02d}": rng.normal(0, 0.01, 40) for i in range(12)}
+        return _joined(residuals, predicted=predicted)
+
+    def test_a_healthy_column_still_gets_ten(self):
+        rng = np.random.default_rng(1)
+        frame = self._panel(lambda entity, i: rng.normal(0, 0.01))
+        out = error_attribution(frame)
+        assert len(out["by_prediction_decile"]) == 10
+        assert "prediction_note" not in out
+
+    @pytest.mark.parametrize(
+        "label,fn",
+        [
+            ("constant", lambda entity, i: 0.004),
+            ("two distinct values", lambda entity, i: 0.001 if i % 2 else 0.009),
+        ],
+    )
+    def test_a_degenerate_column_reports_nothing_rather_than_one_bucket(
+        self, label, fn
+    ):
+        out = error_attribution(self._panel(fn))
+        assert (
+            out["by_prediction_decile"] == []
+        ), f"{label}: buckets were reported as deciles"
+
+    def test_it_says_why_instead_of_going_quiet(self):
+        """Returning [] silently is the other way to be unhelpful. The note
+        names the likely cause, because a constant prediction column is a
+        finding about the model, not a shortage of data."""
+        out = error_attribution(self._panel(lambda entity, i: 0.004))
+        note = out["prediction_note"]
+        assert "distinct value" in note
+        assert "collapsed" in note
+
+    def test_the_other_sections_survive_it(self):
+        """Where this differs from the feature path, deliberately. A feature
+        is the caller's choice, so refusing tells them to pick another; the
+        predictions are the model's own output, and refusing the whole
+        attribution would withhold by_entity and by_period, which are
+        exactly right."""
+        out = error_attribution(self._panel(lambda entity, i: 0.004))
+        assert out["by_entity"]
+        assert out["by_period"]
+
+    def test_both_paths_agree_on_the_same_degeneracy(self):
+        """The asymmetry that started this: one path refused a constant
+        column and the other reported it as deciles."""
+        frame = self._panel(lambda entity, i: 0.004)
+        frame["flag"] = 1.0
+        # the feature path refuses outright
+        with pytest.raises(ValidationError, match="bucket"):
+            error_attribution(frame, feature="flag")
+        # the prediction path notes it -- neither invents a decile
+        assert error_attribution(frame)["by_prediction_decile"] == []

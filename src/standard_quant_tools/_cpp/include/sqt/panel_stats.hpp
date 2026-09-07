@@ -14,7 +14,7 @@
  *
  * WHAT IS DELIBERATELY NOT HERE. The DataFrame slicing, the parquet write
  * and sklearn's fit are the other half of a run and no kernel reaches them.
- * See Development/modeling_native_plan.md for the ceiling arithmetic: with
+ * The ceiling arithmetic behind this: with
  * preprocessing at ~50%, even an infinitely fast kernel caps the end-to-end
  * speedup at 2x.
  *

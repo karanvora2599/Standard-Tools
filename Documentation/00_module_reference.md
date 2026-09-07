@@ -109,14 +109,14 @@ Computed entirely from data a backtest already produces (`equity_curve`, `trade_
 
 ## Analysis (`standard_quant_tools.analysis`)
 
-12 functions across five areas. Several functions have a **C++ fast path** via `_sqt_core` — numbers below are measured, not projected (see [Development/performance_insights.md](../Development/performance_insights.md) for the full methodology and an earlier round of unmeasured projections that turned out to overstate several of these, since corrected):
+12 functions across five areas. Several functions have a **C++ fast path** via `_sqt_core` — numbers below are measured, not projected (see the CHANGELOG for the full methodology and an earlier round of unmeasured projections that turned out to overstate several of these, since corrected):
 - `calculate_beta` — 2-variable OLS via closed-form normal equations (1.4× vs. `np.linalg.lstsq` — a real but modest win, not the 10–20× originally projected before this was actually benchmarked)
 - `rolling_beta` — incremental O(1)-per-bar sum updates (4.7× vs. two pandas rolling passes), plus a further ~1.1–1.5× from an optional runtime AVX2+FMA dispatch path
 - `half_life` / `compute_spread` — same OLS kernel, same modest (~1.1×) speedup
 - `cointegration_test` — full Engle-Granger pipeline (23× vs. statsmodels at n=500; **86×** at n=2 000, because the ADF lag sweep now reads every candidate lag off a single nested factorization instead of factorizing once per lag)
 - `scan_cointegrated_pairs` — every pair of a universe in one native call, parallel across pairs. A 2 000-ticker screen is ~5 min at 2 000 bars rather than ~9.8 h looping `cointegration_test`
 - `hurst_exponent` / `rolling_hurst` — DFA + R/S + sliding window (83–131× / 274×)
-- `rolling_factor_loadings` — per-window rank-revealing QR with column pivoting (2.3–10× vs. per-window `lstsq`, larger at shorter windows). This deliberately replaced a much faster incremental-Cholesky path that was **wrong**: its pivot test compared every factor column against the intercept column's diagonal, so factor values around 1e-6 made the whole window read as singular and it returned all-NaN where NumPy returned correct coefficients. Correctness first — see `Development/optimization_plan.md` §5.2 for the plan to recover the speed without giving the rank policy back
+- `rolling_factor_loadings` — per-window rank-revealing QR with column pivoting (2.3–10× vs. per-window `lstsq`, larger at shorter windows). This deliberately replaced a much faster incremental-Cholesky path that was **wrong**: its pivot test compared every factor column against the intercept column's diagonal, so factor values around 1e-6 made the whole window read as singular and it returned all-NaN where NumPy returned correct coefficients. Correctness first §5.2 for the plan to recover the speed without giving the rank policy back
 
 ### Options Pricing, Greeks & Implied Volatility
 
@@ -252,7 +252,7 @@ results = backtest_grid(
     sort_by="sharpe_ratio",
     n_workers=4,                        # parallel ProcessPoolExecutor
 )
-print(results.head())   # 9 combinations ranked by Sharpe
+print(results.head)   # 9 combinations ranked by Sharpe
 ```
 
 **8 built-in strategies** (`backtest.strategies.STRATEGY_REGISTRY`): `sma_crossover`, `rsi_mean_reversion`, `macd_crossover`, `bollinger_reversion`, `donchian_breakout` (Turtle-style channel breakout), `momentum_timeseries` (trailing-return threshold, no state machine — the cheapest to evaluate), `vwap_reversion` (mean reversion to rolling VWAP — aimed at intraday/tick data), `adx_trend` (ADX-strength-filtered directional trend). The 4 newer ones don't have dedicated `run_*_backtest` tools — use them via `backtest_grid`, `get_backtest_diagnostics`, or `run_backtest_compact`, or call `STRATEGY_REGISTRY[name](df, **params)` directly. Every hysteresis-based strategy (`rsi_mean_reversion`, `bollinger_reversion`, `donchian_breakout`, `vwap_reversion`) runs its entry/exit tracking through a numba-JIT state machine — no interpreted Python loop regardless of series length; the other four need no per-bar state at all and are pure vectorized pandas/numpy. See [Documentation/04_backtesting.md](04_backtesting.md) for the full reference.
@@ -276,7 +276,7 @@ result = run_portfolio_simulation(
     use_impact_model=True,
     max_adv_participation=0.1,
 )
-print(result['final_equity'], result['leverage_curve'].mean())
+print(result['final_equity'], result['leverage_curve'].mean)
 ```
 
 Pluggable building blocks compose into `run_portfolio_simulation` (or can be used standalone):
@@ -322,7 +322,7 @@ result = mean_variance_optimize(returns_df, objective="max_sharpe", allow_short=
 print(result["weights"], result["converged"])
 
 # Risk parity — equal (or custom-budgeted) fractional contribution to variance.
-cov = (returns_df.cov() * 252).to_numpy()
+cov = (returns_df.cov * 252).to_numpy
 rp = risk_parity_weights(cov)
 print(rp["weights"], rp["risk_contributions"])
 
@@ -395,7 +395,7 @@ from standard_quant_tools.agent.models import (
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools()  # 180 tools ready for function calling
+tools = get_agent_tools  # 180 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -458,7 +458,7 @@ A second, independent 17-tool runtime — `list_modeling_capabilities`,
 `evaluate_model_portfolio` — for building walk-forward-validated
 statistical models from this library's own features (21 built-in:
 technical, market, risk, volume, statistical and PCA-derived factors),
-never merged into the 180-tool `get_agent_tools()`/`TOOL_CATEGORY` surface
+never merged into the 180-tool `get_agent_tools`/`TOOL_CATEGORY` surface
 above. A sibling `feature_lab` runtime holds 9 more, for interrogating
 those features before a model exists.
 
@@ -518,9 +518,9 @@ What you do with an option price once you have one. `pricing.py` answers
 | Function | Description |
 |---|---|
 | `option_greeks(...)` | Full greek set including vanna, volga, charm, speed — validated against central finite differences |
-| `analyze_strategy(legs, ...)` | Payoff, breakevens and aggregate greeks of an arbitrary multi-leg position |
+| `analyze_strategy(legs,...)` | Payoff, breakevens and aggregate greeks of an arbitrary multi-leg position |
 | `fit_volatility_smile(...)` | Quadratic in log-moneyness, with a Durrleman arbitrage check |
-| `volatility_cone(prices, ...)` | Realized-vol percentiles by horizon, with the independent-window count |
+| `volatility_cone(prices,...)` | Realized-vol percentiles by horizon, with the independent-window count |
 | `analyze_vol_term_structure(...)` | Contango/backwardation and the forward vols a calendar spread prices |
 | `check_put_call_parity(...)` | The model-free identity, with the implied dividend and forward for diagnosis |
 | `implied_forward_price(...)` | Carry forward with financing, dividend and borrow separated |
@@ -539,13 +539,13 @@ feed. Each names what it is a proxy for and how it fails.
 
 | Function | Description |
 |---|---|
-| `roll_spread(prices, ...)` | Effective spread from bid-ask bounce, with a `smallest_detectable_spread` floor |
+| `roll_spread(prices,...)` | Effective spread from bid-ask bounce, with a `smallest_detectable_spread` floor |
 | `corwin_schultz_spread(ohlc)` | Spread from the high-low range; reports the negative fraction |
-| `amihud_illiquidity(ohlcv, ...)` | Price move per dollar traded, reported as a percentile |
-| `kyle_lambda(ohlcv, ...)` | Market depth from signed order flow |
-| `order_flow_imbalance(ohlcv, ...)` | Signed imbalance, with non-overlapping persistence |
-| `estimate_vpin(ohlcv, ...)` | Flow one-sidedness in volume time |
-| `intraday_volume_profile(bars, ...)` | The U-shape, for scheduling |
+| `amihud_illiquidity(ohlcv,...)` | Price move per dollar traded, reported as a percentile |
+| `kyle_lambda(ohlcv,...)` | Market depth from signed order flow |
+| `order_flow_imbalance(ohlcv,...)` | Signed imbalance, with non-overlapping persistence |
+| `estimate_vpin(ohlcv,...)` | Flow one-sidedness in volume time |
+| `intraday_volume_profile(bars,...)` | The U-shape, for scheduling |
 | `implementation_shortfall(...)` | Perold decomposition: delay, impact, opportunity, fees |
 
 Deep guide: [22_microstructure.md](22_microstructure.md)
@@ -565,13 +565,13 @@ and standard deviation cannot see.
 | `decompose_returns(...)` | `inference` | Arithmetic vs geometric, and the volatility drag |
 | `test_normality(values)` | `inference` | Jarque-Bera plus the tail ratio that actually matters |
 | `estimate_tail_index(...)` | `inference` | Hill estimator; which moments exist |
-| `ljung_box(series, ...)` | `diagnostics` | Joint autocorrelation test across lags |
-| `seasonality(returns, ...)` | `diagnostics` | Calendar effects, Bonferroni corrected |
+| `ljung_box(series,...)` | `diagnostics` | Joint autocorrelation test across lags |
+| `seasonality(returns,...)` | `diagnostics` | Calendar effects, Bonferroni corrected |
 | `rolling_sharpe_stability(...)` | `diagnostics` | Did the edge decay, tested on non-overlapping halves |
-| `drawdown_profile(returns, ...)` | `diagnostics` | Every drawdown, with depth and duration separated |
-| `lead_lag_matrix(returns, ...)` | `diagnostics` | Cross-asset search, corrected for its own size |
+| `drawdown_profile(returns,...)` | `diagnostics` | Every drawdown, with depth and duration separated |
+| `lead_lag_matrix(returns,...)` | `diagnostics` | Cross-asset search, corrected for its own size |
 | `structural_break_test(...)` | `diagnostics` | Chow test at a known date |
-| `entropy_measures(series, ...)` | `diagnostics` | Nonlinear structure a linear test would miss |
+| `entropy_measures(series,...)` | `diagnostics` | Nonlinear structure a linear test would miss |
 | `detect_change_points(...)` | `structure` | Binary segmentation for an unknown break date |
 | `partial_correlation(...)` | `structure` | What survives removing the common drivers |
 | `granger_causality(...)` | `structure` | Temporal precedence, Bonferroni corrected |
@@ -612,7 +612,7 @@ actually exposed to.
 
 | Function | Description |
 |---|---|
-| `risk_parity(covariance, ...)` | Equal risk contribution, or an explicit risk budget |
+| `risk_parity(covariance,...)` | Equal risk contribution, or an explicit risk budget |
 | `hierarchical_risk_parity(returns)` | Allocation without inverting the covariance matrix |
 | `max_diversification(covariance)` | Maximizes the diversification ratio |
 | `factor_exposure_budget(...)` | What the portfolio is a bet on, once names collapse into factors |

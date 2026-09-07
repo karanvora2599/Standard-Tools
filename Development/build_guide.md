@@ -1,9 +1,9 @@
 # C++ Extension Build Guide
 
-## `pip install .` builds the extension
+## `pip install.` builds the extension
 
 The build backend is **scikit-build-core**, which drives this project's CMake
-build as part of a normal install. `pip install .` produces a platform wheel
+build as part of a normal install. `pip install.` produces a platform wheel
 containing `_sqt_core` when a C++ toolchain is present.
 
 It used to be `flit_core`, a pure-Python backend, so an install produced a
@@ -17,8 +17,8 @@ fallback). That is deliberate: the extension is an optional accelerator, so
 requiring a compiler would turn it into a hard dependency.
 
 ```bash
-pip install .                                      # builds it if it can
-pip install . -C cmake.define.SQT_REQUIRE_NATIVE=ON # fail if it cannot
+pip install.                                      # builds it if it can
+pip install. -C cmake.define.SQT_REQUIRE_NATIVE=ON # fail if it cannot
 ```
 
 Use `SQT_REQUIRE_NATIVE=ON` in CI — a silent skip there means a green build
@@ -27,7 +27,7 @@ that quietly tested only the fallback path.
 > The in-place developer build below is unchanged: `cmake -B build` still
 > writes the compiled module directly into `src/standard_quant_tools/` so
 > pytest picks it up without an install step. The wheel path adds a CMake
-> `install()` rule, because a wheel is staged in an isolated directory and
+> `install` rule, because a wheel is staged in an isolated directory and
 > carries only what CMake *installs* — without that rule the build succeeded
 > and produced a wheel with no extension in it.
 
@@ -107,7 +107,7 @@ compiled with MSVC.
 
 **Troubleshooting: `cl.exe` found, but linking fails with an RC error**
 If `cmake --build` gets past compiling (`.obj` files build fine) but fails at
-the link step with something like `RC Pass 1: command "rc /fo ..." failed...
+the link step with something like `RC Pass 1: command "rc /fo..." failed...
 no such file or directory`, the MSVC **compiler** is installed but the
 **Windows SDK** (which provides `rc.exe`/`mt.exe`, needed for linking any
 Windows binary, not just ones with actual `.rc` resource files) is not —
@@ -268,7 +268,7 @@ the compiled extension are automatically skipped when it is not built.
 ```
 pytest tests/cpp_bindings/test_cpp_hurst.py -v                  # Hurst + rolling Hurst
 pytest tests/cpp_bindings/test_cpp_indicators.py -v             # RSI, ADX, Parabolic SAR, Wilder's ATR
-pytest tests/cpp_bindings/test_cpp_new_indicators.py -v         # Bollinger Bands, Stochastic Oscillator, fused technical_indicators()
+pytest tests/cpp_bindings/test_cpp_new_indicators.py -v         # Bollinger Bands, Stochastic Oscillator, fused technical_indicators
 pytest tests/cpp_bindings/test_cpp_cointegration.py -v          # Engle-Granger cointegration + OLS
 pytest tests/cpp_bindings/test_cpp_backtest.py -v               # run_strategy + batch_run_strategy kernels
 pytest tests/cpp_bindings/test_cpp_regression.py -v             # rolling_beta (incl. AVX2 dispatch), rolling_factor_loadings
@@ -292,7 +292,7 @@ grows as tests are added.
 A separate gated test class outside these files, `TestNativeTradeStatsCorrectness`
 in `tests/backtest/test_backtest.py`, verifies `run_strategy`'s and `batch_run_strategy`'s
 native trade-log accounting against hand-computed values once `_sqt_core`
-is built — see `Development/performance_insights.md` for the trade-stat
+is built for the trade-stat
 parity background.
 
 ### C++ unit tests
@@ -397,7 +397,7 @@ Standard Tools/
 │           │   ├── platform.hpp             ← SQT_RESTRICT portable qualifier macro
 │           │   ├── isa_dispatch.hpp         ← Runtime CPUID feature detection (IsaFeatures{avx2,fma})
 │           │   ├── hurst.hpp                ← Hurst exponent / rolling Hurst API
-│           │   ├── indicators.hpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + fused technical_indicators() API
+│           │   ├── indicators.hpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + fused technical_indicators API
 │           │   ├── cointegration.hpp        ← OLS / ADF / Engle-Granger / Kalman (1-state, 2-state) API
 │           │   ├── backtest.hpp             ← run_strategy / run_strategy_summary / batch_run_strategy kernel API
 │           │   ├── rolling_regression.hpp   ← rolling_beta / rolling_factor_loadings API
@@ -408,7 +408,7 @@ Standard Tools/
 │           ├── src/
 │           │   ├── isa_dispatch.cpp         ← CPUID detection + test-only override hook
 │           │   ├── hurst.cpp                ← Hurst implementation (OpenMP across rolling windows, one-pass DFA)
-│           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + technical_indicators() implementation
+│           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + technical_indicators implementation
 │           │   ├── cointegration.cpp        ← OLS / ADF / cointegration / Kalman filter implementation
 │           │   ├── backtest.cpp             ← run_strategy / run_strategy_summary / batch_run_strategy (OpenMP across the grid) implementation
 │           │   ├── rolling_regression.cpp   ← incremental rolling beta (+ AVX2 dispatch) / factor loadings implementation
@@ -422,7 +422,7 @@ Standard Tools/
 └── tests/
     ├── test_cpp_hurst.py                    ← Python integration tests (Hurst)
     ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR/ATR)
-    ├── test_cpp_new_indicators.py           ← Python integration tests (Bollinger/Stochastic, fused technical_indicators())
+    ├── test_cpp_new_indicators.py           ← Python integration tests (Bollinger/Stochastic, fused technical_indicators)
     ├── test_cpp_cointegration.py            ← Python integration tests (cointegration+OLS+Kalman)
     ├── test_cpp_backtest.py                 ← Python integration tests (backtest + batch kernel, array-based batch return)
     ├── test_cpp_regression.py               ← Python integration tests (rolling beta incl. AVX2 dispatch, rolling factor loadings)
@@ -459,7 +459,7 @@ Standard Tools/
 | Wilder's ATR (SMA seed + Wilder's smooth) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
 | Bollinger Bands (fused Σx/Σx² pass) | `indicators.hpp` | `indicators.cpp` | `indicators/volatility.py` |
 | Stochastic Oscillator (fused min+max pass) | `indicators.hpp` | `indicators.cpp` | `indicators/momentum.py` |
-| Fused `technical_indicators()` — RSI/ADX/ATR/Bollinger/Stochastic in one native call | `indicators.hpp` | `indicators.cpp` | `agent/tools.py`'s technical-analysis tool (additive fast path when ≥2 fusable indicators requested) |
+| Fused `technical_indicators` — RSI/ADX/ATR/Bollinger/Stochastic in one native call | `indicators.hpp` | `indicators.cpp` | `agent/tools.py`'s technical-analysis tool (additive fast path when ≥2 fusable indicators requested) |
 | 2-variable OLS (`calculate_beta`, `half_life`, `compute_spread`) | `cointegration.hpp` | `cointegration.cpp` | `analysis/regression.py`, `analysis/cointegration.py` |
 | Engle-Granger cointegration (OLS + ADF + MacKinnon 2010) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 | Backtest kernel (`run_strategy` — equity curve + all 11 metrics) | `backtest.hpp` | `backtest.cpp` | `backtest/engine.py` |
@@ -481,7 +481,7 @@ Standard Tools/
 | Kalman filter, 1-state and 2-state (time-varying hedge ratio) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 | Donchian breakout / VWAP-reversion signal hysteresis | `signal_state_machines.hpp` | `signal_state_machines.cpp` | `backtest/strategies.py` |
 
-**`batch_run_strategy`'s return format changed** from a `py::list` of `py::dict` (one dict per grid combination) to a single `(num_tests, 11)` `py::array_t<double>` with a fixed column order (`_BATCH_METRIC_COLUMNS` in `engine.py`) — a direct C++-caller integration, not a public Python API most users touch directly (`backtest_grid()` still returns a `pd.DataFrame` either way).
+**`batch_run_strategy`'s return format changed** from a `py::list` of `py::dict` (one dict per grid combination) to a single `(num_tests, 11)` `py::array_t<double>` with a fixed column order (`_BATCH_METRIC_COLUMNS` in `engine.py`) — a direct C++-caller integration, not a public Python API most users touch directly (`backtest_grid` still returns a `pd.DataFrame` either way).
 
 **Monte Carlo RNG note:** the C++ path's RNG (splitmix64-derived per-path
 seeding + `std::mt19937_64`) does **not** reproduce NumPy's PCG64 bit
@@ -509,12 +509,12 @@ thread or left unconstrained).
 `sqt::run_strategy`'s own trade-log logic in `backtest.cpp` used to record entry
 one bar later than the true economic reference and exclude commission/slippage
 from each trade's return — a real bug in the native kernel itself.
-`backtest/engine.py`'s `run_strategy()` worked around it on the Python side: it
+`backtest/engine.py`'s `run_strategy` worked around it on the Python side: it
 always discards the C++ kernel's own `win_rate`/`profit_factor`/`num_trades`/
 `avg_trade_return_pct` and recomputes them in Python via
 `_build_trade_log`/`_compute_trade_stats` — the same fill-aware, cost-aware
 accounting used by the pure-Python path — so a caller gets identical trade
-statistics whether or not `_sqt_core` is built. `backtest_grid()`'s C++ batch
+statistics whether or not `_sqt_core` is built. `backtest_grid`'s C++ batch
 path (`batch_run_strategy`) has no such override — rebuilding a Python-side
 trade log per grid combination would defeat the point of the batch kernel's
 speed — so it depends entirely on the native kernel's own accounting.
@@ -532,9 +532,9 @@ since they share the same trade-log code in `backtest.cpp`.
 (Along the way, 4 of `tests/cpp/test_backtest.cpp`'s own hand-written
 expectations turned out to be wrong, based on a mistaken `prices[i]`-vs-
 `prices[i-1]` reference-price assumption unrelated to the fix being validated
-— those were corrected too; see `Development/performance_insights.md`'s
+— those were corrected too; see the CHANGELOG's
 Executive Summary for the full bug list.) `backtest/engine.py`'s Python-side
-override for `run_strategy()` is still kept in place — it's a working safety
+override for `run_strategy` is still kept in place — it's a working safety
 net, not a sign of remaining doubt — but a `batch_run_strategy` grid search
 sorted by `win_rate`/`profit_factor` can now be treated as trustworthy against
 a real compiled `_sqt_core`, not merely "unverified but probably fine."
@@ -600,7 +600,7 @@ the Kalman filter (1-state/2-state) was added to `cointegration.hpp`/
 1. `_cpp/include/sqt/indicators.hpp` — add declaration
 2. `_cpp/src/indicators.cpp` — add implementation
 3. `_cpp/bindings/bindings.cpp` — add `m.def(...)` for the new function (no new `#include` needed)
-4. `tests/cpp/test_indicators.cpp` — add test functions and call them in `main()`
+4. `tests/cpp/test_indicators.cpp` — add test functions and call them in `main`
 5. `tests/cpp_bindings/test_cpp_indicators.py` — add `TestCppNew` + `TestNewWrapper` test classes
 6. The relevant Python module — add `_cpp_core` guard if not present and add fast path
 
@@ -619,14 +619,14 @@ cmake --build build --config Release
 Both flags tune the binary for the exact CPU of the build machine — fine for
 local development, but the resulting binary can crash with an illegal-
 instruction fault on a different/older CPU lacking those ISA extensions. This
-is why the default build (`cmake -B build ...` with no extra flags, including
+is why the default build (`cmake -B build...` with no extra flags, including
 what CI uses) does **not** enable them: `SQT_NATIVE_ARCH` defaults to `OFF`,
 so a fresh clone always produces portable codegen. Opt in explicitly for
 local speed:
 ```
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_NATIVE_ARCH=ON
 ```
-This session's own measured benchmarks in `Development/performance_insights.md`
+This session's own measured benchmarks in the CHANGELOG
 were built with `SQT_NATIVE_ARCH=ON`. For a distributable wheel (PyPI), leave
 it off (the default) rather than substituting a manual baseline flag.
 
@@ -636,11 +636,11 @@ Python automatically picks up the correct suffix
 needed across platforms.
 
 **Editable installs**  
-`pip install -e .` builds the extension through scikit-build-core (it used to
+`pip install -e.` builds the extension through scikit-build-core (it used to
 go through flit_core, which is why an editable install used to produce no
 `.pyd` at all). The C++
 extension is built separately with cmake and lands in the same directory, so
-both are always importable together after a single `pip install -e .` +
+both are always importable together after a single `pip install -e.` +
 `cmake --build build --config Release`.
 
 **OpenMP (optional)**  
@@ -690,7 +690,7 @@ Python-level call paths (`run_strategy`, `batch_run_strategy`,
 `simulate_forward_paths`, the technical indicators) across realistic
 size/parameter ranges, not just the benchmark binaries' own fixed inputs:
 ```
-./build-pgo/tests/cpp/bench_backtest    # or .exe on Windows
+./build-pgo/tests/cpp/bench_backtest    # or.exe on Windows
 ./build-pgo/tests/cpp/bench_hurst
 python -c "
 from standard_quant_tools import _sqt_core as c

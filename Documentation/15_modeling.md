@@ -2349,8 +2349,7 @@ fitting entirely. That is a side effect, not the reason to choose it — see
     python tests/bench/bench_modeling.py            # everything
     python tests/bench/bench_modeling.py ic build   # one section
 
-Every figure in `Development/modeling_analysis.md` and
-`Development/modeling_native_plan.md` comes from that script. It patches
+Every modelling figure quoted anywhere comes from that script. It patches
 `DataFactory` with a synthetic in-memory universe, so no measurement includes
 network time.
 

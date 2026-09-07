@@ -5665,8 +5665,6 @@ class EstimateCovarianceResult(BaseModel):
 
 # ── structure and stationarity (research) ───────────────────────────────
 
-_SERIES_WINDOW = "Start/end dates bounding the price history to analyze."
-
 
 class ChangePointInput(BaseModel):
     model_config = ConfigDict(extra="forbid")

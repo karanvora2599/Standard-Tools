@@ -265,7 +265,6 @@ _register_quantile()
 HAS_LIGHTGBM = _register_lightgbm()
 HAS_XGBOOST = _register_xgboost()
 _register_rankers()
-HAS_RANKING = HAS_LIGHTGBM or HAS_XGBOOST
 
 if not (HAS_LIGHTGBM or HAS_XGBOOST):
     logger.debug(

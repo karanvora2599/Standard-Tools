@@ -231,10 +231,6 @@ class Reference:
     run_id: str
     name: str
 
-    @property
-    def is_typed(self) -> bool:
-        return self.kind in KINDS
-
 
 def parse(ref: str) -> Reference:
     """Split a reference, or explain why it is not one."""

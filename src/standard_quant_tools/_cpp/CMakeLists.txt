@@ -77,7 +77,7 @@ target_include_directories(_sqt_core PRIVATE include)
 # user's laptop) doesn't silently bake in an assumption about the build
 # machine's own CPU. Opt in explicitly for local development if you want the
 # extra speed -- this session's own measured benchmarks in
-# Development/performance_insights.md were built with it on.
+# the published performance figures were built with it on.
 option(SQT_NATIVE_ARCH
     "Optimize for the host CPU's instruction set (not portable to a different/older CPU)"
     OFF)
