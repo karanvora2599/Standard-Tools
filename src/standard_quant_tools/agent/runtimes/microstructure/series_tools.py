@@ -27,26 +27,20 @@ caller cannot tell from a bug.
 from __future__ import annotations
 
 import logging
-import math
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, List, Optional
 
 import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 from standard_quant_tools.analysis import microstructure as lib
 from standard_quant_tools.error import ValidationError
 
 from ..handoff import publish, resolve
 
 logger = logging.getLogger(__name__)
-
-
-def _finite_or_none(value: Any) -> Any:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value if math.isfinite(float(value)) else None
-    return value
-
-
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 

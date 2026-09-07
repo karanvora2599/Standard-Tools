@@ -8,49 +8,24 @@ convention as SQT_AUDIT_DIR/SQT_CACHE_DIR.
 """
 
 import os
-import re
 import uuid
 from pathlib import Path
 from typing import Union
 
 import pandas as pd
 
+from standard_quant_tools._runspath import (
+    resolve_within_runs_dir as _resolved_within_runs_dir,
+)
+from standard_quant_tools._runspath import runs_dir as _runs_dir
+from standard_quant_tools._runspath import validate_identifier as _validate_identifier
 from standard_quant_tools.error import ValidationError
 
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-def _runs_dir() -> Path:
-    return Path(
-        os.environ.get(
-            "SQT_RUNS_DIR",
-            str(Path.home() / ".cache" / "standard_quant_tools" / "runs"),
-        )
-    )
-
-
-def _validate_identifier(value: str, field_name: str) -> None:
-    """
-    run_id/name are LLM-reachable (e.g. BacktestCompactInput.run_id) and get
-    joined directly into a filesystem path — reject anything but a plain
-    slug so path separators, '..', null bytes, or a drive-letter/absolute
-    prefix can never make it into the path in the first place.
-    """
-    if not value or not _IDENTIFIER_RE.match(value):
-        raise ValidationError(
-            f"{field_name}={value!r} is not a valid identifier — only letters, "
-            "digits, '_', and '-' are allowed (no path separators, '..', or empty string)."
-        )
-
-
-def _resolved_within_runs_dir(path: Path) -> Path:
-    """Defense in depth on top of _validate_identifier: confirm the final
-    resolved path is actually inside SQT_RUNS_DIR before any read/write."""
-    root = _runs_dir().resolve()
-    resolved = path.resolve()
-    if not resolved.is_relative_to(root):
-        raise ValidationError(f"resolved path {resolved} escapes SQT_RUNS_DIR ({root})")
-    return resolved
+# These three were defined here and again in `modeling.artifacts`, identically
+# and independently -- a path-traversal guard kept in two places, where
+# hardening one silently leaves the other. They live in `_runspath` now. The
+# private names are kept because they are this module's published surface:
+# `agent.runtimes.handoff` imports all three from here.
 
 
 def save_artifact(

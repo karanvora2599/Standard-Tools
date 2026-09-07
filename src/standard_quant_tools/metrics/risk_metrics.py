@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -82,6 +83,40 @@ def has_no_dispersion(values: Any, std: Optional[float] = None) -> bool:
         return True
     scale = float(np.nanmax(np.abs(array))) if array.size else 0.0
     return scale > 0 and float(np.ptp(array)) <= scale * DISPERSION_RTOL
+
+
+def annualized_sharpe(values: np.ndarray, periods: int = 1) -> float:
+    """
+    Sharpe from a raw array: no risk-free rate, no Series, no decorator.
+
+    `sharpe_ratio` below is the one to call from outside this package. It
+    takes a Series, subtracts a risk-free rate, and is validated. This is
+    the primitive underneath, for the internal callers that have an
+    ndarray in hand and no rate to subtract -- a bootstrap resample, a
+    permutation draw, a fold's returns inside a cross-validation loop.
+
+    It existed three times before it existed here: `_annualized_sharpe` in
+    `analysis.diagnostics`, `_sharpe` in `backtesting.overfitting`, and a
+    nested `_sharpe` inside `backtesting.trade_analysis`. Statement for
+    statement the first two were the same function, and the docstring
+    explaining the relative dispersion test -- the whole reason the
+    `has_no_dispersion` call above is not `std <= 0` -- lived in one of
+    them.
+
+    `periods=1` leaves it un-annualized, which is what the trade-analysis
+    caller wants: a per-trade ratio has no time base to scale by, and
+    `sqrt(1)` is exactly the identity rather than an approximation of it.
+
+    Returns NaN, not 0.0, for a series with fewer than two points or no
+    dispersion. Zero would read as "measured, and there is no edge"; NaN is
+    "not measurable", and the agent layer's `Stat` type renders it as null.
+    """
+    if values.size < 2:
+        return float("nan")
+    std = float(values.std(ddof=1))
+    if has_no_dispersion(values, std):
+        return float("nan")
+    return float(values.mean() / std * math.sqrt(periods))
 
 
 @validate_series()

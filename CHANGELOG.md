@@ -1,5 +1,150 @@
 # Changelog
 
+## The last of the open list, and three claims that did not survive it
+
+Closing the rest of "found and not yet fixed". Three of the six items were
+recorded inaccurately, and in each case the inaccuracy would have produced
+the wrong fix.
+
+### One Sharpe, called from three places
+
+Recorded as "`_annualized_sharpe` and `_sharpe` have identical ASTs". There
+were **three**, and the ASTs were **not** identical.
+
+`analysis.diagnostics._annualized_sharpe` and
+`backtesting.overfitting._sharpe` matched statement for statement, but
+differed in the two things that were not in the AST comparison: `_sharpe`
+carried a default (`periods=TRADING_DAYS`) and the docstring explaining why
+the dispersion test is relative rather than `std <= 0`. The third,
+`backtesting.trade_analysis`, was nested inside a function and had **no**
+`sqrt(periods)` at all — a per-trade ratio, deliberately un-annualized.
+
+So a blind merge had two ways to go wrong. Aliasing the shared function
+straight onto `_sharpe` would have silently un-annualized the CSCV split,
+which calls `_sharpe(column)` with no period argument; folding the nested
+one in as an equal would have annualized a per-trade ratio by 252.
+
+`metrics.risk_metrics.annualized_sharpe` is the primitive now, next to the
+`has_no_dispersion` it depends on, defaulting to `periods=1` so the
+per-trade caller is a plain call. `overfitting` keeps a two-line wrapper
+whose only job is the default, and says so. Verified: all three paths return
+bit-identical results to the pre-change arithmetic across normal,
+degenerate, single-element and empty inputs.
+
+### `indicator_panel` is consumable, and the claim missed how
+
+Recorded as "minted and unconsumable — nothing anywhere resolves that kind,
+so an agent gets references no tool will accept". `resolve(ref, expect=None)`
+accepts **any** kind when `expect` is omitted, and that is exactly what
+`read_reference` and `describe_reference` do. An agent holding an
+`indicator_panel` reference can read its rows and describe its contents. No
+code change.
+
+The real shape is broader and milder than the claim. Of 16 reference kinds,
+7 are named by some consumer's `expect=`; the rest travel through the
+generic readers. That is a design, not a defect.
+
+### `feature_panel` was a promise with nothing behind it
+
+This one held, and it was the smaller half of the item. The kind was
+declared in `KINDS` and appeared **nowhere else in the package** — no
+producer, no consumer, and neither side of any pair in `convert.py`'s
+`CONVERSIONS`. `list_reference_kinds` advertised it to agents regardless, so
+the interconnect told a caller it could obtain something no tool can mint.
+
+A modelling feature panel is persisted as a dataset artifact and addressed
+by `dataset_id`, not as a handoff reference, so there was never a producer
+to write. Removed, with the reason recorded where the kind used to be.
+
+### `coverage_report` had a door; the caller had built its own
+
+Recorded as "has no door... its docstring names the caller who currently
+gets nothing". The caller was not getting nothing. `join_point_in_time` had
+grown its own coverage-warning loop inline — the same pattern as
+`fit_preprocessing` inlining the quantile-and-clip that `winsorize` existed
+for, which is how `winsorize` came to be deleted earlier in this sweep.
+
+**The two were not equivalent, and that decided which one to keep.** The
+inline copy went quiet above 50% coverage, and it never said the thing that
+matters most: a gap in ONE field costs rows for EVERY field once the panel
+is aligned. A caller reading "80% coverage" cannot otherwise guess that the
+other 20% takes the whole row with it. So `coverage_report` is the one
+implementation now and `join_point_in_time` calls it, with the inline
+version's better guidance on the never-resolved case folded in rather than
+discarded.
+
+## Three helpers that were duplicated, and what each duplicate cost
+
+Working the "found and not yet fixed" list. Two of the three claims
+recorded there did not survive re-measurement, which is the useful part.
+
+### A window that was not a window
+
+`amihud_illiquidity` had `window = max(2, int(window))`, so `window=-5`
+became a 2-bar average and nothing said otherwise. The caller asked for
+something impossible and got something plausible instead, which is the
+failure mode worth more than an exception.
+
+Its two neighbours already had this right: the tool boundary declares
+`window: int = Field(21, ge=2)`, and the sibling in `backtest.liquidity`
+refuses a non-positive window outright. A direct library caller was the only
+one who could reach the silent rewrite. It raises now, and the message says
+why two is the floor — the percentile and the trend are both computed by
+comparing halves of the rolling series.
+
+### `_finite_or_none`, written fifteen times
+
+**The recorded claim was "15 copies in three spellings". It was five
+distinct bodies, and that changed the fix.** Every copy was live and used
+exactly once in its own module, so none of this was dead code.
+
+Four of the five were one function. One tested `isinstance(value, float)`;
+another added an `int`/`bool` branch that cannot change the answer, because
+an integer is always finite; two more were the first with a docstring, and
+those two differed from each other only in how the docstring was wrapped.
+Fourteen modules, one behaviour, and the explanation of WHY any of it is
+needed — a bare `NaN` is not valid JSON and several MCP clients reject it at
+the transport layer rather than at the tool — present in two of them. That
+is the whole cost: twelve readers met an unexplained `isinstance` check.
+
+**The fifth is a different function and it stays.**
+`modeling.agent.feature_models` coerces with `float()` and swallows
+`TypeError`/`ValueError`, so a string reaches it and leaves as `None`, where
+the others pass it through untouched. Deleting it as the fifteenth copy
+would have changed what every feature tool returns for a non-numeric value,
+silently. There is now a test asserting the two differ, so the next person
+to "finish" the consolidation fails a test instead of shipping it.
+
+### Two copies of a path-traversal guard
+
+`backtest/artifacts.py` and `modeling/artifacts.py` each defined
+`_IDENTIFIER_RE`, `_runs_dir` and `_validate_identifier` — same regex, same
+message — and `modeling.artifacts.run_dir` open-coded the containment check
+that `backtest.artifacts` had factored out as `_resolved_within_runs_dir`.
+
+These build filesystem paths out of identifiers an LLM chooses. The problem
+is not the duplication, it is that the copies are equal only until one is
+hardened: a half-applied security fix reads as fixed everywhere and removes
+the reason to look again. The asymmetry was already visible — one copy
+carried the docstring explaining what it defends against and a
+defence-in-depth layer on top, the other had neither.
+
+Both now come from `standard_quant_tools._runspath`, which is neither
+package's internals — the arrangement `_jsonsafe` already uses, for the
+reason its own docstring gives: both need it and neither should import the
+other. `modeling/artifacts.py`'s docstring said it mirrored the pattern
+rather than "reaching into that module's underscore-prefixed internals
+across a package boundary", which was the right instinct and the wrong
+remedy; it now says what actually happens.
+
+**The recorded note said the import path between them was "already open and
+unused".** It was open and used: `modeling/artifacts.py` imports
+`load_artifact` and `save_artifact` from `backtest/artifacts.py` at line 31.
+
+The new tests assert the two stores share the same function OBJECT rather
+than an equivalent one. An equivalence test passes for two copies that have
+not drifted yet, which is the state this started in.
+
 ## One estimator in two shapes, and a gap adjustment that was never applied
 
 `corwin_schultz_spread` existed twice — a per-bar `pd.Series` in
@@ -174,26 +319,24 @@ reasoning lives.
   the price, and on a second fixture the same corruption moved the estimate
   by 1.04x rather than 4.4x. The defect was real and the magnitude was
   fixture-specific, which is the correction worth keeping.
-- **`amihud_illiquidity`**, the same pair, sloppiness reversed:
-  `max(2, int(window))` silently accepts `window=-5`.
-- **`_annualized_sharpe` and `_sharpe`** have identical ASTs, both live,
-  agreeing on every input including degenerates — no drift yet, which is
-  what a duplicate looks like right up until it is not.
-- **`indicator_panel` is minted and unconsumable.**
-  `compute_indicator_panel` publishes one reference per indicator and
-  nothing anywhere resolves that kind, so an agent gets references no tool
-  will accept. **`feature_panel`** has neither producer nor consumer.
-- **`_finite_or_none` has 15 copies** in three spellings; `_runs_dir` /
-  `_validate_identifier` / `_IDENTIFIER_RE` are duplicated between
-  `backtest/artifacts.py` and `modeling/artifacts.py`, which are
-  path-security guards and the worst place to keep two copies — the import
-  path between them is already open and unused.
-- **`coverage_report`** (`modeling/dataset/point_in_time.py`) has no door,
-  while its two siblings in the same module are reachable through
-  `join_point_in_time`. Its docstring names the caller who currently gets
-  nothing: a point-in-time join legitimately produces NaN at the start of a
-  sample, and the alternative to saying so is a caller discovering it as an
-  unexplained drop in row count.
+- ~~**`amihud_illiquidity`**~~ — fixed, see the entry above.
+- ~~**`_annualized_sharpe` and `_sharpe`**~~, ~~**`indicator_panel`**~~ and
+  ~~**`feature_panel`**~~ — closed, see the entry above. Two of those three
+  claims were wrong: the sharpes were three functions rather than two and
+  did NOT have identical ASTs, and `indicator_panel` is consumable — the
+  claim missed that `resolve(ref)` takes any kind when `expect` is omitted,
+  which is exactly what `read_reference` does.
+- ~~**`_finite_or_none` has 15 copies**~~ and ~~the duplicated artifact
+  path guards~~ — both fixed, see the entry above. Two details recorded
+  here were wrong. The 15 copies were not one function in three spellings:
+  they were **five distinct bodies**, and one of them is a different
+  function that had to be kept. And the import path between the two
+  artifact modules was not "open and unused" — `modeling/artifacts.py`
+  already imported `load_artifact`/`save_artifact` from
+  `backtest/artifacts.py`.
+- ~~**`coverage_report`**~~ — fixed, see the entry above. The premise was
+  wrong in an interesting way: the caller was not getting nothing, it had
+  grown its own copy.
 
 ### A note on method
 

@@ -34,7 +34,10 @@ import numpy as np
 
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
+from standard_quant_tools.metrics.risk_metrics import (
+    annualized_sharpe,
+    has_no_dispersion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -306,15 +309,7 @@ def compare_against_random(
     magnitudes = np.abs(array)
     win_rate = float((array > 0).mean())
 
-    def _sharpe(values: np.ndarray) -> float:
-        # Relative guard: `std <= 0` passes on a constant series, because
-        # numpy returns 2.2e-19 rather than 0 there.
-        std = float(values.std(ddof=1))
-        if has_no_dispersion(values, std):
-            return float("nan")
-        return float(values.mean() / std)
-
-    observed = _sharpe(array)
+    observed = annualized_sharpe(array)
     if not math.isfinite(observed):
         raise ValidationError(
             "compare_against_random: the trade returns have no dispersion, "
@@ -324,7 +319,7 @@ def compare_against_random(
     simulated = np.empty(n_simulations)
     for i in range(n_simulations):
         signs = np.where(rng.random(array.size) < win_rate, 1.0, -1.0)
-        simulated[i] = _sharpe(rng.permutation(magnitudes) * signs)
+        simulated[i] = annualized_sharpe(rng.permutation(magnitudes) * signs)
     usable = simulated[np.isfinite(simulated)]
     p_value = float((usable >= observed).mean())
 

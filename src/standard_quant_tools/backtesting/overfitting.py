@@ -61,7 +61,7 @@ from standard_quant_tools.constants import (
     TRADING_DAYS_PER_YEAR,
 )
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
+from standard_quant_tools.metrics.risk_metrics import annualized_sharpe
 
 logger = logging.getLogger(__name__)
 
@@ -98,31 +98,21 @@ def _clean_returns(returns: pd.Series, who: str, minimum: int = 20) -> pd.Series
 
 def _sharpe(values: np.ndarray, periods: int = TRADING_DAYS) -> float:
     """
-    Annualized Sharpe, returning NaN for a series with no dispersion.
+    `metrics.risk_metrics.annualized_sharpe`, with this module's period
+    count as the default.
 
-    THE ZERO CHECK IS RELATIVE, not `std <= 0`, and it has to be. On a
-    constant series numpy's `std` returns 2.2e-19 rather than 0 -- the
-    deviations are computed against an accumulated mean, and the rounding
-    does not cancel. A strict `<= 0` test therefore passes, and the Sharpe
-    of a flat 0.001 series comes back as 7.3e16: a finite number, no NaN
-    anywhere, and complete nonsense that then propagates into every
-    threshold computed from it.
+    The arithmetic used to live here, and the docstring explaining WHY the
+    dispersion test is relative rather than `std <= 0` lived here with it --
+    while `analysis.diagnostics` and `backtesting.trade_analysis` carried
+    their own copies of the same three statements without it. All three
+    call one function now.
 
-    Comparing the range against the magnitude of the values catches the
-    degenerate case at any scale, which an absolute epsilon would not --
-    a series of returns around 1e-8 is not constant just because its
-    spread is small.
+    This wrapper stays because the DEFAULT is load-bearing: the CSCV split
+    below calls `_sharpe(column)` with no period argument, and the shared
+    primitive deliberately defaults to un-annualized so the per-trade caller
+    can use it too.
     """
-    if values.size < 2:
-        return float("nan")
-    std = float(values.std(ddof=1))
-    # The relative test that used to live here inline. It is now
-    # `metrics.risk_metrics.has_no_dispersion`, because five other
-    # implementations were carrying the broken absolute version while this
-    # docstring explained why it was broken.
-    if has_no_dispersion(values, std):
-        return float("nan")
-    return float(values.mean() / std * math.sqrt(periods))
+    return annualized_sharpe(values, periods)
 
 
 # ── the multiple-testing correction ─────────────────────────────────────

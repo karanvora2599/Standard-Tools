@@ -21,13 +21,15 @@ what it meant.
 from __future__ import annotations
 
 import logging
-import math
 from typing import Annotated, Any, Dict, List, Optional
 
 import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from standard_quant_tools import metrics as M
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 from standard_quant_tools.agent.runtimes.data.models import DataSource, resolve_source
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.panel import technical_indicators_panel
@@ -36,14 +38,6 @@ from standard_quant_tools.portfolio.portfolio import fetch_ohlcv_panel_sync
 from ..handoff import publish
 
 logger = logging.getLogger(__name__)
-
-
-def _finite_or_none(value: Any) -> Any:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value if math.isfinite(float(value)) else None
-    return value
-
-
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 #: name -> (callable, needs_equity_curve). Closed on purpose: this surface

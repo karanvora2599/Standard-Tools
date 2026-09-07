@@ -210,9 +210,7 @@ def asof_join(
     return out
 
 
-def coverage_report(
-    panel: pd.DataFrame, joined: pd.DataFrame, fields: Iterable[str]
-) -> List[str]:
+def coverage_report(joined: pd.DataFrame, fields: Iterable[str]) -> List[str]:
     """
     Warnings about what the join could not supply.
 
@@ -220,6 +218,17 @@ def coverage_report(
     nobody had the data yet — and that is not an error. It IS worth saying
     out loud, because the alternative is a caller discovering it as an
     unexplained drop in row count after alignment.
+
+    THIS HAD NO CALLER for a while, and `join_point_in_time` — the tool whose
+    output these warnings are for — had grown its own version inline. The two
+    were not equal, which is the reason this one survived the merge: the
+    inline copy went quiet above 50% coverage, and it never said the thing
+    that matters most, which is that a gap in ONE field costs rows for every
+    other field once the panel is aligned. A caller reading "80% coverage"
+    has no way to guess that the other 20% takes the whole row with it.
+
+    The inline version's guidance is folded in rather than discarded: when
+    nothing resolved at all, the likely causes are named.
     """
     warnings: List[str] = []
     total = len(joined)
@@ -232,14 +241,18 @@ def coverage_report(
         if missing == total:
             warnings.append(
                 f"WARNING: {field!r} was never available for any panel row. "
-                "Check that the record set covers this date range and these "
-                "entities, and that available_time is populated."
+                "Either every record became available after the panel ends, "
+                "or the entities do not match. Check that the record set "
+                "covers this date range and these entities, and that "
+                "available_time is populated."
             )
         elif missing:
             warnings.append(
                 f"NOTE: {field!r} was not yet available for {missing} of {total} "
-                f"panel rows ({missing / total:.1%}). Alignment drops any row "
-                "where a requested feature is missing, so this costs rows for "
-                "every other feature too."
+                f"panel rows ({missing / total:.1%}). Usually the panel starts "
+                "before the first release, which is expected — but check the "
+                "entity names match. Alignment drops any row where a requested "
+                "feature is missing, so this costs rows for every other "
+                "feature too."
             )
     return warnings

@@ -25,25 +25,13 @@ ignore it.
 
 from __future__ import annotations
 
-import math
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Dict, List, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
-
-def _finite_or_none(value: Any) -> Any:
-    """
-    Non-finite in, null out.
-
-    Applied before validation so a NaN never reaches the serializer. The
-    alternative -- letting it through and relying on the JSON encoder --
-    produces `NaN` in the payload, which is not valid JSON and which several
-    MCP clients reject at the transport layer rather than at the tool.
-    """
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
-
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 

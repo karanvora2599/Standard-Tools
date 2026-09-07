@@ -234,16 +234,43 @@ class TestCoverageReport:
     def test_reports_partial_availability(self):
         panel = _panel(["2026-07-01", "2026-08-14"])
         joined = asof_join(panel, EARNINGS, fields=["eps"])
-        warnings = coverage_report(panel, joined, ["eps"])
+        warnings = coverage_report(joined, ["eps"])
         assert any("not yet available" in w for w in warnings)
 
     def test_reports_a_field_that_was_never_available(self):
         panel = _panel(["2020-01-01"])
         joined = asof_join(panel, EARNINGS, fields=["eps"])
-        warnings = coverage_report(panel, joined, ["eps"])
+        warnings = coverage_report(joined, ["eps"])
         assert any(w.startswith("WARNING") for w in warnings)
 
     def test_says_nothing_when_everything_resolved(self):
         panel = _panel(["2026-11-01"], entities=("AAA",))
         joined = asof_join(panel, EARNINGS, fields=["eps"])
-        assert coverage_report(panel, joined, ["eps"]) == []
+        assert coverage_report(joined, ["eps"]) == []
+
+    def test_it_warns_above_half_coverage_where_the_inline_copy_went_quiet(self):
+        """
+        The reason this helper survived instead of being deleted as dead.
+
+        `join_point_in_time` had grown its own coverage warnings inline and
+        only spoke below 50% coverage. A join resolving most of the panel
+        reported a coverage number and no warning at all -- while every
+        unresolved row was still about to be dropped, taking every other
+        field on that row with it.
+        """
+        panel = _panel(["2026-07-01"] + ["2026-11-01"] * 9, entities=("AAA",))
+        joined = asof_join(panel, EARNINGS, fields=["eps"])
+        missing = int(joined["eps"].isna().sum())
+        assert 0 < missing < len(joined) / 2, "fixture must be above half covered"
+
+        warnings = coverage_report(joined, ["eps"])
+        assert any("not yet available" in w for w in warnings)
+
+    def test_it_says_a_gap_in_one_field_costs_rows_for_the_others(self):
+        """The sentence the inline copy never carried. A caller reading
+        '80% coverage' cannot otherwise guess that the other 20% takes the
+        whole row with it."""
+        panel = _panel(["2026-07-01", "2026-08-14"])
+        joined = asof_join(panel, EARNINGS, fields=["eps"])
+        warnings = coverage_report(joined, ["eps"])
+        assert any("every other" in w for w in warnings)

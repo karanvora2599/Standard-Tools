@@ -138,10 +138,13 @@ KINDS: Dict[str, Dict[str, str]] = {
             "run_model_experiment persists out of sample."
         ),
     },
-    "feature_panel": {
-        "storage": "frame",
-        "description": "Computed features, entity by date.",
-    },
+    # `feature_panel` was declared here and existed nowhere else: nothing
+    # published one, nothing resolved one, and no conversion produced or
+    # consumed one. `list_reference_kinds` still advertised it, so an agent
+    # was told it could obtain a kind that no tool in the package can mint.
+    # A modelling feature panel is persisted as a dataset artifact and
+    # addressed by `dataset_id`, not as a handoff reference, so there was
+    # never a producer to write. Removed rather than left as a promise.
     "indicator_panel": {
         "storage": "frame",
         "description": "Technical indicator values across a universe.",

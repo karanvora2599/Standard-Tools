@@ -11,16 +11,21 @@ backtest runs already use, rather than requiring a nested subdirectory
 separators allowed — can't express).
 
 Model registry artifacts (manifest.json, model.joblib) aren't
-DataFrames, so they get their own small atomic-write helpers here,
-mirroring backtest.artifacts' exact identifier-validation and
-resolved-within-root pattern rather than reaching into that module's
-underscore-prefixed internals across a package boundary.
+DataFrames, so they get their own small atomic-write helpers here.
+
+They used to MIRROR backtest.artifacts' identifier-validation and
+resolved-within-root pattern rather than reach into that module's
+underscore-prefixed internals across a package boundary. That was the
+right instinct and the wrong remedy: it left two independent copies of a
+path-traversal guard, equal only until one of them was hardened. Both now
+come from `standard_quant_tools._runspath`, which is neither package's
+internals — the same arrangement `_jsonsafe` already uses for the same
+reason.
 """
 
 import hashlib
 import json
 import os
-import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -28,6 +33,11 @@ from typing import Any, Dict, Optional
 import joblib
 
 from standard_quant_tools._jsonsafe import sanitize_for_json
+from standard_quant_tools._runspath import (
+    resolve_within_runs_dir as _resolved_within_runs_dir,
+)
+from standard_quant_tools._runspath import runs_dir as _runs_dir
+from standard_quant_tools._runspath import validate_identifier as _validate_identifier
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.error import ValidationError
 
@@ -43,25 +53,6 @@ __all__ = [
     "verify_file",
 ]
 
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-def _runs_dir() -> Path:
-    return Path(
-        os.environ.get(
-            "SQT_RUNS_DIR",
-            str(Path.home() / ".cache" / "standard_quant_tools" / "runs"),
-        )
-    )
-
-
-def _validate_identifier(value: str, field_name: str) -> None:
-    if not value or not _IDENTIFIER_RE.match(value):
-        raise ValidationError(
-            f"{field_name}={value!r} is not a valid identifier — only letters, digits, "
-            "'_', and '-' are allowed (no path separators, '..', or empty string)."
-        )
-
 
 def run_dir(artifact_id: str) -> Path:
     """
@@ -71,13 +62,14 @@ def run_dir(artifact_id: str) -> Path:
     collide), matching backtest.artifacts' own run_id convention:
     multiple named files (manifest.json, model.joblib, panel.parquet,
     dataset_spec.json, ...) live side by side under the same directory.
+
+    The validator and the containment check both come from `_runspath` now.
+    This module had its own copy of the first and open-coded the second, so
+    the two artifact stores guarded the same attack with the same code
+    written twice -- equal only until one of them was improved.
     """
     _validate_identifier(artifact_id, "artifact_id")
-    root = _runs_dir().resolve()
-    path = (root / artifact_id).resolve()
-    if not path.is_relative_to(root):
-        raise ValidationError(f"resolved path {path} escapes SQT_RUNS_DIR ({root})")
-    return path
+    return _resolved_within_runs_dir(_runs_dir() / artifact_id)
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:

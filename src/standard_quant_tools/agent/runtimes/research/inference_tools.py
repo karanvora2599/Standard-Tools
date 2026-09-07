@@ -14,22 +14,16 @@ curve, which no provider has, as on an asset's returns.
 from __future__ import annotations
 
 import logging
-import math
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 from standard_quant_tools.analysis import inference as lib
 
 logger = logging.getLogger(__name__)
-
-
-def _finite_or_none(value: Any) -> Any:
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
-
-
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 

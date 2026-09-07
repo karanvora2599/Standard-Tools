@@ -20,23 +20,17 @@ here is new maths; it is an existing kernel that no tool could reach.
 from __future__ import annotations
 
 import logging
-import math
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, List, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 from standard_quant_tools.agent.runtimes.data.models import DataSource, resolve_source
 from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths_terminal
 
 logger = logging.getLogger(__name__)
-
-
-def _finite_or_none(value: Any) -> Any:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value if math.isfinite(float(value)) else None
-    return value
-
-
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 

@@ -1808,6 +1808,7 @@ def join_point_in_time(input_data: JoinPointInTimeInput) -> JoinPointInTimeResul
         ENTITY,
         EVENT_TIME,
         asof_join,
+        coverage_report,
     )
 
     logger.debug(
@@ -1839,20 +1840,12 @@ def join_point_in_time(input_data: JoinPointInTimeInput) -> JoinPointInTimeResul
     added = [f"{input_data.prefix}{f}" for f in fields]
     coverage = {column: float(joined[column].notna().mean()) for column in added}
 
-    warnings = []
-    for column, fraction in sorted(coverage.items()):
-        if fraction == 0.0:
-            warnings.append(
-                f"{column}: no panel row received a value. Every record "
-                "became available after the panel ends, or the entities do "
-                "not match."
-            )
-        elif fraction < 0.5:
-            warnings.append(
-                f"{column}: only {fraction:.0%} of rows received a value. "
-                "Usually the panel starts before the first release, which is "
-                "expected -- but check the entity names match."
-            )
+    # `coverage_report` is the one implementation of this. A copy used to
+    # live here, and it went quiet above 50% coverage -- so a join that
+    # dropped a fifth of the panel reported a coverage number and no
+    # warning, and the caller had no way to know that a gap in one field
+    # takes the whole row with it.
+    warnings = coverage_report(joined, sorted(added))
 
     uri = _artifacts.save_artifact(
         joined, run_id=input_data.dataset_id, name="pit_joined"

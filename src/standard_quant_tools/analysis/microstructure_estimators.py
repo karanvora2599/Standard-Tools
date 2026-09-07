@@ -468,7 +468,19 @@ def amihud_illiquidity(
     # than silently applied, because published values use several conventions.
     scaled = ratio * 1e6
 
-    window = max(2, int(window))
+    # `max(2, int(window))` stood here, which turned window=-5 into a 2-bar
+    # average and said nothing. The tool boundary declares `ge=2` and the
+    # sibling in backtest.liquidity refuses a non-positive window outright,
+    # so a direct library caller was the only one who could ask for
+    # something impossible and be quietly given something else instead.
+    window = int(window)
+    if window < 2:
+        raise ValidationError(
+            f"amihud_illiquidity: window={window} is not a window. Two bars "
+            "is the floor -- the percentile and the trend below are both "
+            "computed by comparing halves of the rolling series, and a "
+            "one-bar 'average' leaves nothing to compare."
+        )
     rolling = scaled.rolling(window).mean().dropna()
     current = float(rolling.iloc[-1]) if len(rolling) else float(scaled.mean())
     percentile = float((rolling < current).mean() * 100.0) if len(rolling) > 1 else None

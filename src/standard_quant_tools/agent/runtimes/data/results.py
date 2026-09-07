@@ -20,17 +20,13 @@ rejects the whole document over one.
 
 from __future__ import annotations
 
-import math
 from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
-
-def _finite_or_none(value: Any) -> Any:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value if math.isfinite(float(value)) else None
-    return value
-
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 

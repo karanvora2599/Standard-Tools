@@ -288,6 +288,44 @@ class TestAmihud:
         assert math.isfinite(result["mean_illiquidity"])
 
 
+class TestTheAmihudWindowIsAWindow:
+    """
+    `max(2, int(window))` stood in this function, so window=-5 became a
+    2-bar average and nothing said otherwise. The caller asked for something
+    impossible and was quietly given something else -- the failure mode that
+    is worse than an exception, because the number that comes back is
+    plausible.
+
+    The tool boundary already declared `ge=2`, and the sibling in
+    `backtest.liquidity` refuses a non-positive window outright. A direct
+    library caller was the only one who could reach the silent rewrite.
+    """
+
+    @staticmethod
+    def _frame(n=400, seed=5):
+        rng = np.random.default_rng(seed)
+        return pd.DataFrame(
+            {
+                "close": 100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, n))),
+                "volume": rng.lognormal(12.0, 0.4, n),
+            }
+        )
+
+    @pytest.mark.parametrize("bad_window", [-5, -1, 0, 1])
+    def test_a_window_below_two_is_refused_not_rewritten(self, bad_window):
+        with pytest.raises(ValidationError, match="is not a window"):
+            amihud_illiquidity(self._frame(), window=bad_window)
+
+    def test_the_message_says_why_two_is_the_floor(self):
+        with pytest.raises(ValidationError, match="halves of the rolling"):
+            amihud_illiquidity(self._frame(), window=0)
+
+    def test_a_legal_window_still_works(self):
+        result = amihud_illiquidity(self._frame(), window=21)
+        assert result["window"] == 21
+        assert result["current_illiquidity"] is not None
+
+
 class TestKyleLambda:
     @staticmethod
     def _planted(lam=2e-6, n=800, noise=0.05, seed=6):

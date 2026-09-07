@@ -17,22 +17,16 @@ if this were a different strategy".
 from __future__ import annotations
 
 import logging
-import math
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, List, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 from standard_quant_tools.backtesting import trade_analysis as lib
 
 logger = logging.getLogger(__name__)
-
-
-def _finite_or_none(value: Any) -> Any:
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
-
-
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 
