@@ -176,10 +176,26 @@ class TestTheFallbackActuallyComputes:
 
 class TestTheSwitchIsReadableFromCode:
     def test_the_helper_reports_it(self):
-        import standard_quant_tools as sqt
+        """
+        Asked in BOTH directions from a fresh interpreter, which is the rule
+        this module's docstring states and which this test was the one place
+        to break.
 
-        assert sqt.native_disabled() is False
-        assert sqt.DISABLE_NATIVE_ENV == "SQT_DISABLE_NATIVE"
+        It read the ambient environment and asserted `native_disabled() is
+        False` whatever configuration was actually being exercised. So a
+        whole-suite run under `SQT_DISABLE_NATIVE=1` -- the one
+        configuration this file exists to make runnable -- failed here and
+        nowhere else, reporting a defect in the switch when the switch was
+        working exactly as designed. A test that cannot survive its own
+        subject matter is worse than no test: it costs a real failure the
+        attention it needs.
+        """
+        script = """
+            import standard_quant_tools as sqt
+            print(sqt.native_disabled(), sqt.DISABLE_NATIVE_ENV)
+        """
+        assert _run(script, disable=False) == "False SQT_DISABLE_NATIVE"
+        assert _run(script, disable=True) == "True SQT_DISABLE_NATIVE"
 
     def test_only_explicit_truthy_values_count(self):
         """An empty or unset variable must not disable anything, or a stray
