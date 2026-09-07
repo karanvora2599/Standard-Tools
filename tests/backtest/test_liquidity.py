@@ -120,3 +120,103 @@ class TestCorwinSchultzSpread:
         empty = pd.Series([], dtype=float)
         with pytest.raises(ValidationError):
             corwin_schultz_spread(empty, empty)
+
+
+class TestTheTwoShapesAreOneEstimator:
+    """
+    `corwin_schultz_spread` exists twice on purpose -- as this per-bar
+    Series, which `check_spread_proxy` rolls a window over, and as an
+    aggregate dict in `analysis.microstructure_estimators` that reports
+    `negative_fraction`. They are not interchangeable and neither can be
+    deleted.
+
+    They WERE two independent copies of the same algebra, and that is the
+    part that had to go. They agreed to the last digit on clean data, so
+    nothing flagged them, and disagreed completely on invalid data: only the
+    dict form refused a bar whose low was non-positive or whose high sat
+    below its low. The series form took the logarithm anyway and returned a
+    number -- to `check_spread_proxy`, whose entire job is to say whether a
+    backtest charged too little.
+
+    These tests pin the two properties that make one kernel worth having:
+    identical answers on good data, identical refusals on bad.
+    """
+
+    @staticmethod
+    def _bars(n=250, seed=7):
+        rng = np.random.default_rng(seed)
+        idx = pd.bdate_range("2023-01-02", periods=n)
+        mid = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
+        half = mid * 0.0016
+        high = pd.Series(mid + half + rng.uniform(0, 0.05, n), index=idx)
+        low = pd.Series(mid - half - rng.uniform(0, 0.05, n), index=idx)
+        return high, low
+
+    def test_the_two_forms_agree_to_the_last_digit(self):
+        """Measured at 3.8968222761 bps from both, before and after the two
+        copies became one kernel. This is the number that made the duplicate
+        invisible, so it is the one to pin."""
+        from standard_quant_tools.analysis.microstructure_estimators import (
+            corwin_schultz_spread as aggregate_form,
+        )
+
+        high, low = self._bars()
+        series_bps = float(corwin_schultz_spread(high, low).mean()) * 1e4
+        dict_bps = aggregate_form(pd.DataFrame({"high": high, "low": low}))[
+            "spread_bps"
+        ]
+
+        assert series_bps == pytest.approx(dict_bps, abs=1e-9)
+        assert series_bps == pytest.approx(3.8968222761, abs=1e-6)
+
+    @pytest.mark.parametrize(
+        "corrupt",
+        [
+            pytest.param(
+                lambda h, lo: (h, lo.mask(lo.index == lo.index[50], 0.0)),
+                id="low_is_zero",
+            ),
+            pytest.param(
+                lambda h, lo: (h, lo.mask(lo.index == lo.index[20], -3.0)),
+                id="low_is_negative",
+            ),
+            pytest.param(
+                lambda h, lo: (lo.copy(), h.copy()), id="high_and_low_transposed"
+            ),
+        ],
+    )
+    def test_both_forms_refuse_the_same_bad_bars(self, corrupt):
+        from standard_quant_tools.analysis.microstructure_estimators import (
+            corwin_schultz_spread as aggregate_form,
+        )
+
+        high, low = corrupt(*self._bars())
+
+        with pytest.raises(ValidationError, match="non-positive low or a high"):
+            corwin_schultz_spread(high, low)
+        with pytest.raises(ValidationError, match="non-positive low or a high"):
+            aggregate_form(pd.DataFrame({"high": high, "low": low}))
+
+    def test_a_transposed_row_no_longer_passes_for_a_spread(self):
+        """
+        The failure this consolidation exists to close. One bar with its
+        high and low swapped used to come back as a slightly wider spread --
+        1.04x the true figure on this fixture, which is well inside the
+        range a real name could move and would never be questioned.
+        """
+        high, low = self._bars()
+        high.iloc[100], low.iloc[100] = low.iloc[100], high.iloc[100]
+
+        with pytest.raises(ValidationError, match="not recoverable data noise"):
+            corwin_schultz_spread(high, low)
+
+    def test_a_partial_nan_is_still_allowed_through(self):
+        """A ticker that lists mid-sample, or a holiday on one calendar and
+        not another, is a normal gap and not a corrupt bar. The refusal is
+        for impossible values, not for missing ones."""
+        high, low = self._bars()
+        high.iloc[10] = np.nan
+        low.iloc[10] = np.nan
+
+        result = corwin_schultz_spread(high, low)
+        assert result.notna().any()

@@ -1,5 +1,59 @@
 # Changelog
 
+## One estimator in two shapes, and a gap adjustment that was never applied
+
+`corwin_schultz_spread` existed twice — a per-bar `pd.Series` in
+`backtest/liquidity.py` and an aggregate dict in
+`analysis/microstructure_estimators.py`. Neither could be deleted:
+`check_spread_proxy` rolls a window over the Series, and the dict form
+reports `negative_fraction`, which is the number that says whether the
+average means anything. The duplication was in the algebra between them.
+
+**They agreed to the last digit, which is why nothing caught it.** Both
+returned 3.8968222761 bps on the same clean fixture. They disagreed
+completely on invalid data, because only one of them checked:
+
+    one bar with high < low   Series -> 4.04 bps      dict -> ValidationError
+    one bar with low == 0     Series -> 3.93 bps      dict -> ValidationError
+
+The Series form took the logarithm of a negative ratio and returned a
+number, to `check_spread_proxy` — the tool whose entire job is to say
+whether a backtest charged too little. One shared kernel now, and both
+refuse the same three shapes with the same message. A partial `NaN` still
+passes: a ticker listing mid-sample is a gap, not a corrupt bar.
+
+### The adjustment the docstring had been promising
+
+Consolidating the two turned up something neither copy did. The estimator's
+docstring said overnight gaps "bias the estimate UP" and that "the
+adjustment for that is applied here"; the comment above the arithmetic said
+the gap "is removed". The code took a plain `np.maximum` / `np.minimum` over
+the two-bar range, which removes nothing.
+
+Both claims were wrong, and the sign was the more interesting one. The
+inflated range enters `gamma`, and `gamma` is SUBTRACTED from `alpha`, so an
+unremoved gap biases the estimate DOWN. Measured on a name gapping 3% every
+twentieth bar, 31 of 399 pairs gap and the correction moves the raw mean
+from -39.80 bps to -21.85 bps.
+
+**It hides in the floor**, which is why it survived. A gap large enough to
+matter drives that pair's estimate deeply negative — -984 bps on the worst
+pair here — and Corwin-Schultz's own zero-floor swallows the whole
+correction. `spread_bps` was 37.540011 before the fix and 37.540011 after,
+to six decimal places. No headline number could have revealed the
+adjustment was missing; only `raw_mean_bps` moves.
+
+So the adjustment is applied, and `n_gap_adjusted` is returned alongside it
+with a warning above 5% of pairs, because an estimator resting on its own
+correction rather than on the data should say so. The field is declared on
+`CorwinSchultzResult` rather than left to `extra="allow"`, which would have
+accepted it into the model and hidden it from the tool schema — a new
+instance of exactly the shape the last sweep was looking for.
+
+Every previously measured figure is unchanged: a planted 100 bps spread
+still comes back at 103, a planted 20 bps at 56 with 44% negative. The
+fixtures behind those are continuous, so they gap zero times.
+
 ## Dead code, and the two live defects it was hiding
 
 A sweep of the whole repository for code nothing can reach — 246 source
@@ -114,12 +168,12 @@ and `CONTRIBUTING.md`, not a plan.
 Recorded here rather than in a plan document, so it is where the rest of the
 reasoning lives.
 
-- **`corwin_schultz_spread` exists twice**, `backtest/liquidity.py:42` and
-  `analysis/microstructure_estimators.py:250`. Identical arithmetic
-  (31.95786159285826 bps from both), and the first takes logs of `high/low`
-  with no positivity check: one bar with `high < low` returns 139.7 bps
-  against a true 32.0. Its consumer is `check_spread_proxy`, the tool whose
-  job is to say a backtest under-charged.
+- ~~**`corwin_schultz_spread` exists twice**~~ — fixed, see the entry above.
+  The "139.7 bps against a true 32.0" recorded here did not survive
+  re-measurement: the distortion scales with the spread's size relative to
+  the price, and on a second fixture the same corruption moved the estimate
+  by 1.04x rather than 4.4x. The defect was real and the magnitude was
+  fixture-specific, which is the correction worth keeping.
 - **`amihud_illiquidity`**, the same pair, sloppiness reversed:
   `max(2, int(window))` silently accepts `window=-5`.
 - **`_annualized_sharpe` and `_sharpe`** have identical ASTs, both live,

@@ -182,6 +182,66 @@ class TestCorwinSchultz:
         with pytest.raises(ValidationError, match="low"):
             corwin_schultz_spread(pd.DataFrame({"high": np.arange(50.0)}))
 
+    @staticmethod
+    def _gapping_frame(jump=0.03, every=20, n=400, seed=11):
+        """A name that gaps UP hard every twentieth bar and drifts between."""
+        rng = np.random.default_rng(seed)
+        price, rows = 100.0, []
+        for i in range(n):
+            if i % every == 0 and i:
+                price *= 1 + jump
+            path = price * np.exp(np.cumsum(rng.normal(0, 0.012 / math.sqrt(20), 20)))
+            rows.append((path.max() * 1.0005, path.min() * 0.9995))
+            price = path[-1]
+        return pd.DataFrame(rows, columns=["high", "low"])
+
+    def test_the_overnight_gap_adjustment_is_applied_and_counted(self):
+        """
+        The docstring claimed this adjustment for a long time before the
+        code did it -- the two-day range was a plain max/min, which does not
+        remove a gap. Measured on a name gapping 3% every twentieth bar: 31
+        of 399 pairs gap, and removing the gap moves the raw mean from
+        -39.795562 to -21.852966 bps.
+        """
+        result = corwin_schultz_spread(self._gapping_frame())
+
+        assert result["n_gap_adjusted"] == 31
+        assert result["raw_mean_bps"] == pytest.approx(-21.852966, abs=1e-4)
+        assert any("GAPPED" in w for w in result["warnings"])
+
+    def test_a_continuous_name_is_not_gap_adjusted_at_all(self):
+        result = corwin_schultz_spread(ohlc_frame(spread=0.010))
+
+        assert result["n_gap_adjusted"] == 0
+        assert not any("GAPPED" in w for w in result["warnings"])
+
+    def test_the_gap_correction_hides_in_the_floor_not_in_the_headline(self):
+        """
+        WHY THE BUG SURVIVED. A gap large enough to matter drives that
+        pair's estimate deeply negative (-984 bps on the worst pair here),
+        and Corwin-Schultz's own zero-floor then swallows the whole
+        correction. spread_bps is unchanged to six decimal places while
+        raw_mean_bps moves by 18 bps, so the headline number could not have
+        revealed that the adjustment was missing.
+        """
+        result = corwin_schultz_spread(self._gapping_frame())
+
+        assert result["spread_bps"] == pytest.approx(37.540011, abs=1e-4)
+        assert result["raw_mean_bps"] < result["spread_bps"] - 50.0
+
+    def test_the_direction_of_the_gap_bias_is_downward(self):
+        """
+        The docstring also had the SIGN backwards: it said gaps bias the
+        estimate up. The inflated two-day range enters gamma, and gamma is
+        SUBTRACTED from alpha, so an unadjusted gap biases it down. Gapping
+        the same underlying harder has to push the raw estimate lower.
+        """
+        mild = corwin_schultz_spread(self._gapping_frame(jump=0.005))
+        harsh = corwin_schultz_spread(self._gapping_frame(jump=0.06))
+
+        assert harsh["n_gap_adjusted"] > mild["n_gap_adjusted"]
+        assert harsh["raw_mean_bps"] < mild["raw_mean_bps"]
+
 
 class TestAmihud:
     @staticmethod

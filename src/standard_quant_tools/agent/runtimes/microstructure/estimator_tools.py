@@ -219,6 +219,15 @@ class CorwinSchultzResult(_Result):
         "at zero. 10-30% is normal; above a third the average is noise, "
         "because flooring turns a symmetric error into a one-sided bias.",
     )
+    n_gap_adjusted: int = Field(
+        0,
+        description="Bar pairs that did not overlap at all, and so had the "
+        "overnight gap removed before the two-bar range was measured. The "
+        "estimator assumes a continuous price, so a large count means the "
+        "answer rests on that adjustment rather than on the data. It moves "
+        "raw_mean_bps and usually not spread_bps, because a gapping pair "
+        "lands negative and is floored either way.",
+    )
     raw_mean_bps: Stat = None
 
 

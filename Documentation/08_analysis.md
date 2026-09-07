@@ -1074,6 +1074,10 @@ corwin_schultz_spread(high, low, window=1)               # fractional spread; cl
 
 `corwin_schultz_spread` is indexed at the second bar of each consecutive-day pair (the first bar of the series is always `NaN` — no prior bar to pair with); `window > 1` additionally smooths the per-pair estimate with a rolling mean.
 
+**This is the Series shape of the same estimator** that `analysis.microstructure_estimators.corwin_schultz_spread` returns as an aggregate dict, and both run one shared kernel. The two are not interchangeable — `check_spread_proxy` needs a per-bar series to roll a window over, and the dict form reports `negative_fraction`, which is the number that says whether the average means anything at all. **Prefer the dict form when a single figure is what you want**: this one floors negatives silently, so a series of zeros and a genuinely tight spread look identical.
+
+Both refuse a bar whose low is non-positive or whose high sits below its low, with a `ValidationError`. The algebra takes `ln(high / low)`, so that is a transposed or corrupt row rather than recoverable noise. A partial `NaN` is still allowed through — a ticker listing mid-sample is a normal gap, not a bad bar.
+
 ---
 
 ## GARCH(1,1) Conditional Volatility

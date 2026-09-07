@@ -92,6 +92,23 @@ a one-sided bias. Measured:
 one, which is why it is returned rather than swallowed. Above about a third,
 read the average as noise.
 
+**Overnight gaps bias it DOWN**, and `n_gap_adjusted` counts them. The
+derivation assumes the price is continuous between the two days; a bar
+that sits entirely above or below the one before it has a two-bar range
+inflated by the gap rather than by the spread. That range enters `gamma`,
+and `gamma` is *subtracted*, so an unadjusted gap makes the spread look
+smaller. The standard adjustment shifts the bar to touch its predecessor
+before the range is measured.
+
+The correction is mostly invisible in the headline, which is why it went
+missing for so long. Measured on a name gapping 3% every twentieth bar,
+31 of 399 pairs gapped and removing the gaps moved `raw_mean_bps` from
+-39.80 to -21.85 while `spread_bps` stayed at 37.540011 — a gap large
+enough to matter drives that pair's estimate deeply negative, and the
+zero-floor then swallows the whole difference. Read `n_gap_adjusted`
+against `n_estimates`: above about 5% the answer rests on the adjustment
+rather than on the data, and a warning says so.
+
 ### `get_amihud_illiquidity`
 
 `|return| / dollar volume` — how far the price moves to absorb a dollar. The

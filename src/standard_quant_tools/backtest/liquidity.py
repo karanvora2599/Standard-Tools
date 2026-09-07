@@ -1,15 +1,15 @@
 import logging
 
-import numpy as np
 import pandas as pd
 
+from standard_quant_tools.analysis.microstructure_estimators import (
+    corwin_schultz_pairs,
+    require_tradeable_bars,
+)
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import validate_series
 
 logger = logging.getLogger(__name__)
-
-# Corwin-Schultz (2012) constant: k = 3 - 2*sqrt(2)
-_CS_K = 3.0 - 2.0 * np.sqrt(2.0)
 
 
 def _check_window(window: int) -> None:
@@ -63,21 +63,23 @@ def corwin_schultz_spread(
     (no prior bar to pair with). When window > 1, the per-pair spread is
     additionally smoothed with a rolling mean of that length.
 
+    THIS IS THE SERIES SHAPE of the same estimator that
+    `analysis.microstructure_estimators.corwin_schultz_spread` returns as an
+    aggregate dict, and both now run the one kernel. The two shapes are not
+    interchangeable -- `check_spread_proxy` needs a per-bar series to roll a
+    window over, and the dict form reports `negative_fraction`, which is the
+    number that says whether the average means anything. Prefer the dict
+    form when a single figure is what is wanted: this one floors negatives
+    silently, so a series of zeros and a genuinely tight spread look alike.
+
     Returns:
         Fractional spread (e.g. 0.01 = 1%, not basis points) as a
         pd.Series aligned to high/low's index.
     """
     _check_window(window)
+    require_tradeable_bars(high, low, "corwin_schultz_spread")
 
-    log_hl2 = np.log(high / low) ** 2
-    beta = log_hl2 + log_hl2.shift(1)
-
-    high_max = pd.concat([high, high.shift(1)], axis=1).max(axis=1)
-    low_min = pd.concat([low, low.shift(1)], axis=1).min(axis=1)
-    gamma = np.log(high_max / low_min) ** 2
-
-    alpha = (np.sqrt(2.0 * beta) - np.sqrt(beta)) / _CS_K - np.sqrt(gamma / _CS_K)
-    spread = 2.0 * (np.exp(alpha) - 1.0) / (1.0 + np.exp(alpha))
+    spread = corwin_schultz_pairs(high.shift(1), low.shift(1), high, low)
     spread = spread.clip(lower=0.0)
 
     if window > 1:
