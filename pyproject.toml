@@ -141,7 +141,18 @@ cmake.build-type = "Release"
 # The compiled artifact is the only thing CMake needs to contribute to the
 # wheel; everything else is the pure-Python tree copied by wheel.packages.
 build.verbose = false
-sdist.exclude = ["build/", "build_*/", "*.pyd", "*.so"]
+# `build*/`, not `build_*/`. The per-ABI trees are named build311, build312,
+# ... and the PGO tree build-pgo -- none with an underscore, so the old
+# pattern matched not one of the directories it was written to exclude.
+#
+# Nothing leaked because of it: scikit-build-core's sdist is git-driven by
+# default (sdist.cmake/"default" processes .gitignore), and `build*/` there
+# already covered them. That is exactly why it went unnoticed. This list is
+# the backstop for when the git path doesn't apply -- an export with no .git,
+# or a checkout whose .gitignore has drifted -- so it should state the rule
+# rather than silently duplicate a typo. Kept deliberately in sync with the
+# `build*/` line in .gitignore.
+sdist.exclude = ["build*/", "*.pyd", "*.so"]
 
 [tool.black]
 line-length = 88

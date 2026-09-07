@@ -30,6 +30,10 @@ pip-wheel-metadata/
 .env.local
 .env.*.local
 .venv/
+# Per-interpreter venvs, named for the version they hold (.venv311, ...),
+# same convention as the build*/ trees above. uv writes a self-ignoring
+# .gitignore inside each venv it creates; this does not depend on that.
+.venv*/
 venv/
 env/
 ENV/

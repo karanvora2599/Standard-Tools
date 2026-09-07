@@ -1,9 +1,9 @@
 # C++ Extension Build Guide
 
-## `pip install.` builds the extension
+## `pip install .` builds the extension
 
 The build backend is **scikit-build-core**, which drives this project's CMake
-build as part of a normal install. `pip install.` produces a platform wheel
+build as part of a normal install. `pip install .` produces a platform wheel
 containing `_sqt_core` when a C++ toolchain is present.
 
 It used to be `flit_core`, a pure-Python backend, so an install produced a
@@ -17,16 +17,19 @@ fallback). That is deliberate: the extension is an optional accelerator, so
 requiring a compiler would turn it into a hard dependency.
 
 ```bash
-pip install.                                      # builds it if it can
-pip install. -C cmake.define.SQT_REQUIRE_NATIVE=ON # fail if it cannot
+pip install .                                      # builds it if it can
+pip install . -C cmake.define.SQT_REQUIRE_NATIVE=ON # fail if it cannot
 ```
 
 Use `SQT_REQUIRE_NATIVE=ON` in CI — a silent skip there means a green build
 that quietly tested only the fallback path.
 
 > The in-place developer build below is unchanged: `cmake -B build` still
-> writes the compiled module directly into `src/standard_quant_tools/` so
-> pytest picks it up without an install step. The wheel path adds a CMake
+> writes the compiled module directly into `src/standard_quant_tools/`.
+> Whether that is the copy you actually *import* depends on how the package
+> was installed into the interpreter you are running — see
+> [Which copy are you importing?](#which-copy-are-you-importing) before
+> concluding a rebuild had no effect. The wheel path adds a CMake
 > `install` rule, because a wheel is staged in an isolated directory and
 > carries only what CMake *installs* — without that rule the build succeeded
 > and produced a wheel with no extension in it.
@@ -35,9 +38,16 @@ that quietly tested only the fallback path.
 ## How it works
 
 The C++ extension (`_sqt_core`) is compiled with **CMake + pybind11**.  
-The compiled binary is dropped directly into the Python package directory so
-`from standard_quant_tools import _sqt_core` works from an editable install
-without any extra install step.
+The compiled binary is dropped directly into the Python package directory
+(`src/standard_quant_tools/`), which is where `pytest` imports it from —
+`pyproject.toml` sets `pythonpath = ["src"]`, so a run from the repo root
+sees the freshly built file with no install step. That is *not* universally
+true of every interpreter that has this package installed; see
+[Which copy are you importing?](#which-copy-are-you-importing).
+
+The binary is **built per Python ABI**: one `cmake -B <dir>` tree is bound to
+one interpreter, and a second Python version needs a second tree. See
+[Building for more than one Python version](#building-for-more-than-one-python-version).
 
 The Python modules automatically fall back to pure Python when the extension
 is not built — all existing tests continue to pass either way.
@@ -196,6 +206,13 @@ in `PATH` (see platform notes above).
 >   `build/` produced. If you need a second configuration (a warnings audit,
 >   a sanitizer build), redirect its output or expect to rebuild `build/`
 >   afterwards to restore a good `.pyd`.
+>
+>   The one exception is a tree configured against a **different Python
+>   version**: the filename carries the ABI tag
+>   (`_sqt_core.cp311-win_amd64.pyd` vs `_sqt_core.cp312-win_amd64.pyd`), so
+>   those two coexist in the package directory rather than clobbering each
+>   other. That is what makes the per-ABI trees below workable — and also why
+>   a stale one can sit there unnoticed for days.
 > - **If you suspect a stale or bad extension**, delete
 >   `src/standard_quant_tools/_sqt_core*.pyd` and run `cmake --build build`
 >   again. Ninja tracks its own outputs, so a file replaced by a *different*
@@ -232,15 +249,111 @@ cmake --build build
 
 ---
 
-The compiled extension is written directly to the package directory:
+The compiled extension is written directly to the package directory. **Every
+platform's filename carries the Python ABI tag** — this is not cosmetic, it is
+what lets two interpreters' builds coexist, and what tells you which one you
+are looking at:
 
-| Platform | File |
+| Platform | File (`3XX` = the Python version the tree was configured against) |
 |----------|------|
-| Windows  | `src/standard_quant_tools/_sqt_core.pyd` |
+| Windows  | `src/standard_quant_tools/_sqt_core.cp3XX-win_amd64.pyd` |
 | Linux    | `src/standard_quant_tools/_sqt_core.cpython-3XX-x86_64-linux-gnu.so` |
 | macOS    | `src/standard_quant_tools/_sqt_core.cpython-3XX-darwin.so` |
 
-No install step is needed.
+`pytest` run from the repo root picks these up with no install step
+(`pythonpath = ["src"]`). Other interpreters may not — see
+[Which copy are you importing?](#which-copy-are-you-importing).
+
+---
+
+### Building for more than one Python version
+
+A CMake tree **bakes in the interpreter it was configured against** —
+`Python3_EXECUTABLE`, the include directory, the import library and the
+resulting ABI tag all land in `CMakeCache.txt` at configure time. There is no
+way to retarget an existing tree at another Python; you configure a second one:
+
+The target interpreter needs `pybind11` importable — root `CMakeLists.txt`
+locates pybind11 by running `import pybind11` *under `Python3_EXECUTABLE`*, so
+having it in your everyday environment does not help. Give each extra version
+its own venv in the repo:
+
+```
+# one-time, per Python version
+uv venv --python 3.11 .venv311
+uv pip install --python ./.venv311/Scripts/python.exe pybind11
+```
+
+Then configure one tree per interpreter:
+
+```
+# 3.12 (whatever `python` resolves to)
+cmake -B build   -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+
+# 3.11, from the same source tree
+cmake -B build311 -G "Visual Studio 17 2022" -A x64 ^
+      -DPython3_EXECUTABLE="<repo>/.venv311/Scripts/python.exe"
+cmake --build build311 --config Release
+```
+
+The directory names are arbitrary — `-B` creates them. `build311`/`.venv311`
+is this repo's convention for the 3.11 pair. `.gitignore` covers `build*/` and
+`.venv*/` for the same reason: they are generated, machine-specific (the CMake
+caches hold absolute paths), and there is no fixed number of them.
+
+> **Point these at a venv you own, inside this repo.** `build311` previously
+> pointed at an unrelated downstream project's `.venv` — the only 3.11
+> environment on the machine that happened to have `pybind11` — which quietly
+> made this project's 3.11 build depend on that project's environment
+> surviving unchanged. A configure-time `Python3_EXECUTABLE` is baked into
+> `CMakeCache.txt`, so a moved or rebuilt venv elsewhere breaks the build here
+> with a path error that points at someone else's directory.
+
+**Rebuild every ABI you actually ship to.** The two artifacts have different
+filenames, so a stale one does not announce itself — it simply keeps being
+imported. This has bitten once already: `build/` was rebuilt against 3.12
+while the cp311 artifact stayed five days behind, and since 3.11 is what
+downstream consumers load, the Python layer called `run_portfolio_simulation`
+with 22 arguments against a binding that knew 14. 129 tests failed looking
+like broken numerics. Nothing in the build output pointed at a stale binary.
+
+To check what you have, compare the ABI tags against their timestamps:
+
+```
+ls -la src/standard_quant_tools/_sqt_core*
+```
+
+---
+
+### Which copy are you importing?
+
+`cmake --build` writes to `src/standard_quant_tools/`. Whether that is the
+file a given interpreter imports depends on how the package was installed
+into it, and the two shapes behave differently:
+
+| Install shape | What's in `site-packages` | Does a `cmake --build` take effect? |
+|---|---|---|
+| `pip install -e .` where the backend emits a plain path `.pth` | a `.pth` line pointing at `…/Standard Tools/src` | **Yes** — `src/` *is* the import location |
+| `pip install -e .` via scikit-build-core's redirect shim | `_editable_skbc_*.pth` + `_editable_skbc_*.py`, **and a real copy of the `.pyd`** | **No** — the site-packages copy shadows `src/` |
+| `pip install .` (non-editable) | a full copy of the package | **No** — reinstall to update |
+| not installed; `pytest` from the repo root | n/a | **Yes** — `pythonpath = ["src"]` |
+
+Row 2 is the trap, and it is the default for this project's own backend:
+scikit-build-core's editable install redirects *Python modules* back to the
+source tree but keeps the **compiled** extension in `site-packages`. So
+dropping a freshly built `.pyd` into `src/` changes nothing for that
+interpreter until you reinstall. This cost a first attempt at the stale-cp311
+fix above — the rebuild was correct and had no observable effect.
+
+Ask the interpreter directly rather than assuming:
+
+```
+python -c "from standard_quant_tools import _sqt_core; print(_sqt_core.__file__)"
+```
+
+If that prints a `site-packages` path, re-run `pip install -e .` in that
+environment after building; if it prints your `src/` path, the build is live.
 
 ---
 
@@ -373,6 +486,13 @@ cmake --build build --config Release
 
 CMake tracks source timestamps; only changed `.cpp` files are recompiled.
 
+**Rebuild each ABI tree you maintain**, not just `build/` — `cmake --build
+build311 --config Release` too, if you have one. A C++ signature change that
+is only rebuilt for one interpreter leaves the other's callers talking to an
+old binding, and the resulting failures look like broken numerics rather than
+a stale artifact. See
+[Building for more than one Python version](#building-for-more-than-one-python-version).
+
 ### Full clean rebuild
 
 ```
@@ -390,7 +510,7 @@ Standard Tools/
 ├── CMakeLists.txt                           ← Root CMake entry point
 ├── src/
 │   └── standard_quant_tools/
-│       ├── _sqt_core.[pyd|so]               ← Compiled output (generated, gitignored)
+│       ├── _sqt_core.cp3XX-*.[pyd|so]       ← Compiled output, one per Python ABI (generated, gitignored)
 │       └── _cpp/                            ← All C++ sources
 │           ├── CMakeLists.txt               ← Extension build rules (LTO/IPO, PGO options, OpenMP, AVX2 file override)
 │           ├── include/sqt/
@@ -633,15 +753,19 @@ it off (the default) rather than substituting a manual baseline flag.
 **Extension suffix**  
 Python automatically picks up the correct suffix
 (`.pyd`, `.so`, `.cpython-*.so`) via the import system. No code changes are
-needed across platforms.
+needed across platforms. The suffix encodes the **ABI tag**, which is why one
+package directory can hold a cp311 and a cp312 build at once — see
+[Building for more than one Python version](#building-for-more-than-one-python-version).
 
 **Editable installs**  
-`pip install -e.` builds the extension through scikit-build-core (it used to
+`pip install -e .` builds the extension through scikit-build-core (it used to
 go through flit_core, which is why an editable install used to produce no
-`.pyd` at all). The C++
-extension is built separately with cmake and lands in the same directory, so
-both are always importable together after a single `pip install -e.` +
-`cmake --build build --config Release`.
+`.pyd` at all). Note that scikit-build-core's editable install is a
+*redirect shim*, not a path `.pth`: Python modules resolve back to the source
+tree, but the compiled extension is copied into `site-packages` and imported
+from there. A subsequent `cmake --build build --config Release` writes to
+`src/` and that environment will not see it until you reinstall. Full
+breakdown in [Which copy are you importing?](#which-copy-are-you-importing).
 
 **OpenMP (optional)**  
 `_cpp/CMakeLists.txt` calls `find_package(OpenMP)` (not `REQUIRED`) to
@@ -671,7 +795,9 @@ same absolute package path** (`src/standard_quant_tools/`), regardless of
 which build directory produced it — there's no per-build-dir isolation of
 the *output*, only of intermediate object files. Building an instrumented
 or PGO-optimized extension **overwrites your normal working extension** in
-place. Use a separate build directory for PGO experiments
+place. (A tree configured against a *different Python version* is the
+exception — the ABI tag differs, so it writes a differently named file. A
+PGO tree normally uses the same interpreter, so it does collide.) Use a separate build directory for PGO experiments
 (`build-pgo` below) and rebuild your normal `build/` directory afterward
 to restore it — don't assume the two build dirs are independent just
 because their *names* differ.

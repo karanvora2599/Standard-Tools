@@ -16,6 +16,21 @@ every code path falls back to Numba/pure-Python automatically when it isn't
 built. See [Development/build_guide.md](Development/build_guide.md) if you're
 working on the C++ side specifically.
 
+Two things about it are worth knowing before you touch a `.cpp` file, because
+neither is visible from the build output:
+
+- **It is built per Python ABI.** A `cmake -B <dir>` tree is bound to the
+  interpreter it was configured against, and the artifact is ABI-tagged
+  (`_sqt_core.cp311-*` / `_sqt_core.cp312-*`), so two builds coexist in the
+  package directory instead of overwriting each other. Changing a binding
+  signature means rebuilding *every* tree you use — a stale one keeps getting
+  imported silently.
+- **A rebuild does not always reach your interpreter.** scikit-build-core's
+  editable install keeps the compiled extension in `site-packages`, so a
+  `.pyd` written into `src/` has no effect there until you reinstall.
+  `python -c "from standard_quant_tools import _sqt_core; print(_sqt_core.__file__)"`
+  answers which copy you are actually running.
+
 If you're working on the Bloomberg provider (`pip install -e
 ".[test,dev,bloomberg]"`), copy [`.env.example`](.env.example) to `.env`
 (already `.gitignore`d) and fill in `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT`
