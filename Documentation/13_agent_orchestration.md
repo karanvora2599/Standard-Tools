@@ -1,8 +1,8 @@
 # Agent Orchestration
 
-`get_agent_tools()` returns 178 LLM-callable tools (see
+`get_agent_tools()` returns 180 LLM-callable tools (see
 [07_agent_tools.md](07_agent_tools.md) /
-[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 178 to
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 180 to
 one model on every call — the default behavior of every single-agent script
 in `Implementation/{Anthropic,OpenAI,Gemini}/` — is the largest untreated
 source of tool-selection error: similarly-named or similarly-scoped tools
@@ -39,7 +39,7 @@ categorization only ever needs to be correct in one place.
 Everything above concerns the 180-tool analysis and backtest surface. There
 are two more: `standard_quant_tools.modeling.agent`, 20 tools, and the
 9-tool `feature_lab` runtime — neither of which the library merges into the
-first, see [15_modeling.md](15_modeling.md) for why. 178 + 20 + 9 is the
+first, see [15_modeling.md](15_modeling.md) for why. 180 + 20 + 9 is the
 209-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 

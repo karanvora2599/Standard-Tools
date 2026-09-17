@@ -1,5 +1,63 @@
 # Changelog
 
+## The documentation described a library two releases behind
+
+None of this changes a line of source. Every figure below was a claim about
+this repository that stopped being true and kept being published, which on a
+project whose pitch is that its numbers are computed rather than asserted is
+the one class of defect that costs more than a bug.
+
+### 178 + 20 + 9 was never 209
+
+`13_agent_orchestration.md` said `get_agent_tools()` returns 178 tools, then
+added the 20-tool modeling runtime and the 9-tool `feature_lab` and called the
+sum the 209-tool whole surface. That sum is 207. The analysis registry is
+**180** -- `len(get_agent_tools())` says so -- and 180 + 20 + 9 is 209. The
+error was in the first term, so the arithmetic had been visibly wrong on the
+page for as long as the figure had been stale. `00_module_reference.md`
+carried the same 178 one paragraph above a sentence that already said 180.
+
+### The MCP budgets mixed two instruments and quoted neither correctly
+
+`18_mcp.md` listed served costs -- research 35 KB, backtest 80 KB,
+microstructure 22 KB -- that were neither the bare schema bytes
+`--print-budget` reports nor the served bytes the server sends at its own
+default. `--tool-detail auto` is the default, and measured through
+`context_bytes()` at that default: research **43 KB**, backtest **42 KB**,
+derivatives **21 KB**, microstructure **28 KB**, the whole surface **~28k
+tokens served** rather than the ~63k claimed.
+
+The bare-schema table in the README had drifted too: `data` 21 -> **23 KB**,
+`meta` 14 -> **17 KB**, `backtest` 80 -> **81 KB**, whole surface 350 ->
+**358 KB** (~89k -> **~92k tokens**). The served pair in the same paragraph
+moved with it: backtest 88 -> **89 KB**, research 56 -> **57 KB**.
+
+### The test counts, including the one nobody could have checked
+
+6,959 total -> **7,204**; 6,876 passing, 65 skipped -> **7,097 passing, 89
+skipped** in about 8 minutes, the 18 deselected still being the integration
+tests. 7,097 + 89 + 18 reconciles to 7,204, which the old triple did not.
+
+The C++ figure was the interesting one: **67,731** assertion-level checks ->
+**68,675**, from re-running the ten executables against a current build rather
+than trusting the recorded number. 50,234 from the fuzz harness was correct.
+A downstream consumer had already copied 67,731 onto a public page, which is
+how a stale figure in a README becomes a stale figure somewhere it cannot be
+corrected from here.
+
+### Two counts that contradicted themselves in the same file
+
+The module map called modeling a 17-tool runtime; it is **20**, and the
+per-runtime table three sections earlier already said so. It called the
+testing regime seven layers while the bullet above it said nine and
+`25_testing.md` carries nine layer headings (1, 1b, 1c, 2, 3, 3b, 4, 5, 6) --
+the seven-item list had dropped the second-oracle layer and the
+extension-switched-off run, which are two of the layers with the best record
+of catching things.
+
+`21 of 21 mutations killed` is left as it stands: not verified in this pass,
+and not known to be wrong.
+
 ## The last of the open list, and three claims that did not survive it
 
 Closing the rest of "found and not yet fixed". Three of the six items were

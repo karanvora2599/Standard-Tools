@@ -145,7 +145,7 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 209 tools cost about **350 KB of schema, ~90,000 tokens**, held for the
+The 209 tools cost about **358 KB of schema, ~92,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
@@ -240,13 +240,13 @@ error round trip, which costs more than the category does.
 Serve a runtime, or narrow inside one:
 
 ```bash
-sqt-mcp --runtime research                    # 42 tools, 35 KB served
-sqt-mcp --runtime backtest                    # 35 tools, 80 KB served
-sqt-mcp --runtime derivatives                 # 12 tools, 17 KB served
-sqt-mcp --runtime microstructure              # 17 tools, 22 KB served
+sqt-mcp --runtime research                    # 42 tools, 43 KB served
+sqt-mcp --runtime backtest                    # 35 tools, 42 KB served
+sqt-mcp --runtime derivatives                 # 12 tools, 21 KB served
+sqt-mcp --runtime microstructure              # 17 tools, 28 KB served
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
 sqt-mcp --runtime research --categories screener
-sqt-mcp --runtime all                         # ~63k tokens, and it says so
+sqt-mcp --runtime all                         # ~28k tokens served, and it says so
 ```
 
 `+` joins runtimes because that is how `combine()` names a joined runtime in

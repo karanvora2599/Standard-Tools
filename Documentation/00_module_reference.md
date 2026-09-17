@@ -370,7 +370,7 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ## AI Agent Tools (`standard_quant_tools.agent`)
 
-178 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
+180 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
 `Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 180 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 20-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since twenty tools in one ordered pipeline have no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 16 specialist sub-agents, thirteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
 
@@ -450,7 +450,7 @@ print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 
 ## Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent 17-tool runtime — `list_modeling_capabilities`,
+A second, independent 20-tool runtime — `list_modeling_capabilities`,
 `list_features`, `check_leakage`, `build_model_dataset`, `list_datasets`,
 `analyze_features`, `validate_pit_records`, `join_point_in_time`,
 `validate_model_spec`, `run_model_experiment`, `list_models`,

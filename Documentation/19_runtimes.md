@@ -322,7 +322,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-178 schemas — which is exactly what the MCP category budget exists to avoid,
+209 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.
