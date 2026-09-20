@@ -35,6 +35,7 @@ from .preprocessing import FoldContext, apply_pipeline
 from .registry.feature_provenance import feature_provenance_from_spec
 from .registry.model_registry import (
     load_dataset_spec,
+    load_distribution,
     load_manifest,
     load_model,
     load_model_spec,
@@ -72,6 +73,8 @@ def _deployed_preprocessing(manifest, model_id: str) -> Dict[str, Any]:
             "predictions remain valid."
         )
     return spec.preprocessing.model_dump()
+
+
 from .specs import DatasetSpec, _parse_date
 
 
@@ -392,11 +395,26 @@ def score_model(
     # is how the two drift.
     predictions = get_adapter(manifest.task).score(estimator, X)
 
+    # The distribution the model was registered with, emitted under the
+    # same columns the validation reported on: one per quantile level, and
+    # `lower`/`upper` from the deployed conformal radius. Empty for a
+    # point-only model, so its frame is exactly what it was.
+    distribution, quantile_models = load_distribution(model_id)
+    extra_columns: Dict[str, Any] = {}
+    for column, quantile_model in quantile_models.items():
+        extra_columns[column] = np.asarray(quantile_model.predict(X.to_numpy()))
+    conformal = distribution.get("conformal") or None
+    if conformal:
+        radius = float(conformal["radius"])
+        extra_columns["lower"] = np.asarray(predictions, dtype=float) - radius
+        extra_columns["upper"] = np.asarray(predictions, dtype=float) + radius
+
     predictions_df = pd.DataFrame(
         {
             "entity": latest["entity"].to_numpy(),
             "date": latest["date"].to_numpy(),
             "prediction": predictions,
+            **extra_columns,
         }
     )
     # The artifact name includes a digest of the scored universe, not just

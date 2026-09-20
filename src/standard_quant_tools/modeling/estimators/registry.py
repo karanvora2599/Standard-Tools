@@ -6,7 +6,7 @@ rejects any ModelSpec.estimator.params key outside the allowlist for that
 estimator, so a caller can't smuggle in an unvetted constructor kwarg.
 """
 
-from typing import Any, Dict, Tuple, Type
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Type
 
 from standard_quant_tools.error import ValidationError
 
@@ -16,6 +16,26 @@ ESTIMATOR_REGISTRY: Dict[Tuple[str, str], Type] = {}
 _PARAM_SCHEMAS: Dict[Tuple[str, str], EstimatorParamSchema] = {}
 
 
+class QuantileSupport(NamedTuple):
+    """
+    How an estimator is told which quantile to fit.
+
+    `param` is the constructor argument that names the quantile, and
+    `fixed` the arguments that switch the estimator into quantile loss at
+    all -- LightGBM needs `objective='quantile'` beside `alpha`, XGBoost
+    `objective='reg:quantileerror'` beside `quantile_alpha`, and sklearn's
+    two quantile regressors need nothing but the quantile. The engine sets
+    these itself, one fit per requested quantile, so they are declared
+    here rather than opened up to a caller's `params`.
+    """
+
+    param: str
+    fixed: Dict[str, Any]
+
+
+_QUANTILE_SUPPORT: Dict[Tuple[str, str], QuantileSupport] = {}
+
+
 def register_estimator(
     task: str,
     name: str,
@@ -23,6 +43,7 @@ def register_estimator(
     schema: EstimatorParamSchema,
     *,
     overwrite: bool = False,
+    quantile: Optional[QuantileSupport] = None,
 ) -> None:
     """
     Add an estimator to the allowlist.
@@ -45,6 +66,20 @@ def register_estimator(
         )
     ESTIMATOR_REGISTRY[key] = cls
     _PARAM_SCHEMAS[key] = schema
+    if quantile is not None:
+        _QUANTILE_SUPPORT[key] = quantile
+    else:
+        _QUANTILE_SUPPORT.pop(key, None)
+
+
+def quantile_support(task: str, name: str) -> Optional[QuantileSupport]:
+    """How this estimator fits a quantile, or None when it cannot."""
+    return _QUANTILE_SUPPORT.get((task, name))
+
+
+def quantile_estimators(task: str) -> List[str]:
+    """The estimators of `task` that can fit a requested quantile."""
+    return sorted(n for t, n in _QUANTILE_SUPPORT if t == task)
 
 
 def get_estimator_class(task: str, name: str) -> Type:

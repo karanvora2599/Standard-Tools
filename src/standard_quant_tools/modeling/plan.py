@@ -59,13 +59,20 @@ def fits_per_estimator(model_spec: ModelSpec) -> int:
 
     One, unless the classifier is calibrated: `CalibratedClassifierCV`
     fits the estimator once per calibration fold, and those are real fits
-    of the real estimator on most of the window each. The inner search
-    does not calibrate its candidates, so this multiplies the outer fit
-    and the refit only.
+    of the real estimator on most of the window each. A regression spec
+    that asks for quantiles fits the estimator once more per level, and
+    one that asks for a conformal interval refits it once per calibration
+    block. The inner search does neither for its candidates, so this
+    applies to the outer fit and the refit only.
     """
-    if getattr(model_spec.estimator, "calibration", "none") == "none":
-        return 1
-    return int(getattr(model_spec.estimator, "calibration_folds", 3))
+    fits = 1
+    if getattr(model_spec.estimator, "calibration", "none") != "none":
+        fits = int(getattr(model_spec.estimator, "calibration_folds", 3))
+    fits += len(getattr(model_spec, "quantiles", None) or [])
+    intervals = getattr(model_spec, "intervals", None)
+    if intervals is not None:
+        fits += int(intervals.calibration_folds)
+    return int(fits)
 
 
 def fit_count(

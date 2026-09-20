@@ -17,13 +17,13 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 | `research` | 42 | 47 KB | what is this asset, and what is its statistical structure |
 | `data` | 18 | 23 KB | get the bytes, and say what they can and cannot support |
 | `backtest` | 35 | 81 KB | does this strategy work, and how much of it is real |
-| `modeling` | 20 | 74 KB | build, fit and score a model — one ordered pipeline |
+| `modeling` | 20 | 78 KB | build, fit and score a model — one ordered pipeline |
 | `portfolio` | 18 | 31 KB | turn a view into a position and price what it costs |
 | `derivatives` | 12 | 17 KB | what an option is worth and what holding it does to you |
 | `delta_one` | 18 | 38 KB | which instrument is the cheapest way to hold this exposure |
 | `microstructure` | 17 | 23 KB | what the market will charge you to trade |
 | `meta` | 20 | 17 KB | what does this library hold, and what did this session do |
-| `feature_lab` | 9 | 26 KB | what each feature measures and predicts, before fitting |
+| `feature_lab` | 9 | 28 KB | what each feature measures and predicts, before fitting |
 
 - **Tested in nine layers, and the layers earn their place** — correctness against PLANTED answers rather than recorded outputs (second-order greeks against central finite differences, put-call parity against the model's own prices, risk parity against its closed form); whole-surface invariants that catch a tool registered halfway; schema-synthesized adversarial fuzzing that found six real bugs on its first run; metamorphic relations that catch a function which is *consistently* wrong; determinism checks that catch a `seed` being silently ignored; a second oracle for every C++ kernel, because a parity test cannot catch two backends agreeing on the wrong answer and one of them did not; generated documentation that cannot go stale; a whole-suite run with the compiled extension switched off, because a fallback that only exists behind a monkeypatch is not covered and is easily mistaken for dead code; and mutation testing, because a passing suite proves the tests RUN and not that they would notice. 7,204 tests; 21 of 21 mutations killed. See [Documentation/25_testing.md](Documentation/25_testing.md).
 - **Point-in-time by declaration, not by hope** — a source says what it can tell you about *when* its facts became knowable, and `describe_temporal_contract` answers that before anything is fetched. A quarterly filing describes 30 September and is published on 25 October; joining it on the quarter end is three weeks of hindsight per row, and the contract refuses rather than degrading silently.

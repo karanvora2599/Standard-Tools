@@ -39,7 +39,7 @@ from .bounds import (
     EstimatorParamSchema,
     ParamBound,
 )
-from .registry import register_estimator
+from .registry import QuantileSupport, register_estimator
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,15 @@ def _register_lightgbm() -> bool:
     except Exception:  # noqa: BLE001 - older versions lack register_logger
         logger.debug("[modeling] lightgbm.register_logger unavailable")
 
-    register_estimator("regression", "lightgbm", LGBMRegressor, _LIGHTGBM)
+    register_estimator(
+        "regression",
+        "lightgbm",
+        LGBMRegressor,
+        _LIGHTGBM,
+        # The quantile objective beside the quantile itself; the engine
+        # sets both, one fit per requested quantile.
+        quantile=QuantileSupport("alpha", {"objective": "quantile"}),
+    )
     register_estimator("classification", "lightgbm", LGBMClassifier, _LIGHTGBM)
     return True
 
@@ -138,7 +146,13 @@ def _register_xgboost() -> bool:
         from xgboost import XGBClassifier, XGBRegressor
     except ImportError:
         return False
-    register_estimator("regression", "xgboost", XGBRegressor, _XGBOOST)
+    register_estimator(
+        "regression",
+        "xgboost",
+        XGBRegressor,
+        _XGBOOST,
+        quantile=QuantileSupport("quantile_alpha", {"objective": "reg:quantileerror"}),
+    )
     register_estimator("classification", "xgboost", XGBClassifier, _XGBOOST)
     return True
 
@@ -274,12 +288,19 @@ def _register_quantile() -> None:
     """
     from sklearn.linear_model import QuantileRegressor
 
-    register_estimator("regression", "quantile", QuantileRegressor, _QUANTILE_LINEAR)
+    register_estimator(
+        "regression",
+        "quantile",
+        QuantileRegressor,
+        _QUANTILE_LINEAR,
+        quantile=QuantileSupport("quantile", {}),
+    )
     register_estimator(
         "regression",
         "quantile_gradient_boosting",
         QuantileGradientBoostingRegressor,
         _QUANTILE_GB,
+        quantile=QuantileSupport("alpha", {}),
     )
 
 

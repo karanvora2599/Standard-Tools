@@ -62,8 +62,8 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | regression | `lasso` | `sklearn.linear_model._coordinate_descent.Lasso` | `alpha`, `fit_intercept`, `max_iter` | sample weights, coefficients |
 | regression | `linear` | `sklearn.linear_model._base.LinearRegression` | `fit_intercept` | sample weights, coefficients |
 | regression | `mlp` | `standard_quant_tools.modeling.estimators.neural.PanelMLPRegressor` | `alpha`, `early_stopping`, `learning_rate_init`, `max_iter`, `n_hidden_layers`, `n_hidden_units`, `random_state` |  |
-| regression | `quantile` | `sklearn.linear_model._quantile.QuantileRegressor` | `alpha`, `fit_intercept`, `quantile`, `solver` | sample weights, coefficients |
-| regression | `quantile_gradient_boosting` | `standard_quant_tools.modeling.estimators.boosting.QuantileGradientBoostingRegressor` | `alpha`, `learning_rate`, `max_depth`, `n_estimators` | sample weights, importances |
+| regression | `quantile` | `sklearn.linear_model._quantile.QuantileRegressor` | `alpha`, `fit_intercept`, `quantile`, `solver` | sample weights, coefficients, quantiles (`quantile`) |
+| regression | `quantile_gradient_boosting` | `standard_quant_tools.modeling.estimators.boosting.QuantileGradientBoostingRegressor` | `alpha`, `learning_rate`, `max_depth`, `n_estimators` | sample weights, importances, quantiles (`alpha`) |
 | regression | `random_forest` | `sklearn.ensemble._forest.RandomForestRegressor` | `max_depth`, `n_estimators` | sample weights, importances |
 | regression | `ridge` | `sklearn.linear_model._ridge.Ridge` | `alpha`, `fit_intercept`, `max_iter` | sample weights, coefficients |
 | regression | `sgd` | `sklearn.linear_model._stochastic_gradient.SGDRegressor` | `alpha`, `eta0`, `fit_intercept`, `l1_ratio`, `learning_rate`, `loss`, `max_iter`, `penalty`, `random_state`, `tol` | sample weights |
@@ -129,7 +129,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `SearchSpec.method` | `grid`, `random`, `tpe` |
 | `SearchSpec.scoring` | `cs_rank_ic`, `cs_ic`, `r2`, `neg_mae`, `accuracy`, `auc` |
 | `EstimatorSpec.calibration` | `none`, `isotonic`, `sigmoid` |
-| `PredictionTransformSpec.method` | `sign`, `cross_sectional_rank`, `cross_sectional_zscore`, `top_bottom_quantile` |
+| `PredictionTransformSpec.method` | `sign`, `cross_sectional_rank`, `cross_sectional_zscore`, `top_bottom_quantile`, `uncertainty_scaled` |
 | `PredictionTransformSpec.rebalance_frequency` | `daily`, `weekly`, `monthly` |
 
 ## Limits

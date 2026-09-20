@@ -19,7 +19,11 @@ from typing import Any, Dict, List
 
 from . import calendar as _calendar
 from .adapters import available_tasks, get_adapter
-from .estimators.registry import ESTIMATOR_REGISTRY, allowed_params
+from .estimators.registry import (
+    ESTIMATOR_REGISTRY,
+    allowed_params,
+    quantile_support,
+)
 from .features.registry import list_features as _list_features
 from .preprocessing import list_preprocessors
 from .specs import (
@@ -47,10 +51,15 @@ def estimator_capabilities() -> List[Dict[str, Any]]:
     """One entry per (task, estimator) actually available in this install."""
     out: List[Dict[str, Any]] = []
     for (task, name), cls in sorted(ESTIMATOR_REGISTRY.items()):
+        support = quantile_support(task, name)
         entry: Dict[str, Any] = {
             "name": name,
             "class": f"{cls.__module__}.{cls.__qualname__}",
             "allowed_params": allowed_params(task, name),
+            # The constructor argument that names a quantile, when the
+            # estimator can fit one; None otherwise. What decides whether
+            # `ModelSpec.quantiles` can be asked of it.
+            "quantile_param": support.param if support is not None else None,
         }
         try:
             entry.update(get_adapter(task).capabilities(cls))

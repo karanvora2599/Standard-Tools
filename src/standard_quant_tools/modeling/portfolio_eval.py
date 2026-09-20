@@ -350,7 +350,44 @@ def _raw_weights_for_group(
             lookback=spec.volatility_lookback,
             gross_leverage=1.0,
         )
+    if spec.method == "uncertainty_scaled":
+        # The scores reaching here are already prediction / interval width
+        # (see `scale_by_uncertainty`); what remains is to size them like
+        # any magnitude-carrying score, standardized within the date.
+        return zscore_normalized(scores, gross_leverage=1.0)
     return _SIZERS[spec.method](scores, gross_leverage=1.0)
+
+
+def scale_by_uncertainty(predictions_df: pd.DataFrame, source: str) -> pd.DataFrame:
+    """
+    The prediction divided by the width of its conformal interval.
+
+    A forecast of +2% with a +/-1% band and one of +2% with a +/-10% band
+    are not the same view, and every other transform here sizes them the
+    same. Dividing by the width -- the model's own statement of how sure
+    it is, read off the interval it was validated with -- is where the
+    portfolio layer starts consuming the distribution. A model without
+    intervals is refused by name rather than sized as though every band
+    were equal, which is what silently falling back would mean.
+    """
+    missing = [c for c in ("lower", "upper") if c not in predictions_df.columns]
+    if missing:
+        raise ValidationError(
+            f"transform.method='uncertainty_scaled' needs an interval per "
+            f"prediction, and {source} carries no {missing} column(s). Train "
+            "the model with ModelSpec.intervals (a split-conformal band) and "
+            "evaluate that one, or use a transform that sizes on the point "
+            "prediction alone."
+        )
+    width = (predictions_df["upper"] - predictions_df["lower"]).to_numpy(dtype=float)
+    if not np.all(np.isfinite(width)) or (width <= 0).any():
+        raise ValidationError(
+            f"transform.method='uncertainty_scaled': {source} carries an interval "
+            "of zero or negative width, which is not a statement of uncertainty."
+        )
+    out = predictions_df.copy()
+    out["prediction"] = out["prediction"].to_numpy(dtype=float) / width
+    return out
 
 
 def transform_predictions_to_weights(
@@ -648,6 +685,10 @@ def evaluate_model_portfolio(
         "oos_predictions",
     )
     predictions_df = _artifacts.load_artifact(predictions_uri)
+    if transform.method == "uncertainty_scaled":
+        # Before the pivot, where the interval columns still stand beside
+        # the prediction: the score the sizer sees is prediction / width.
+        predictions_df = scale_by_uncertainty(predictions_df, predictions_uri)
     score_panel = predictions_to_score_panel(
         predictions_df, manifest.task, predictions_uri
     )

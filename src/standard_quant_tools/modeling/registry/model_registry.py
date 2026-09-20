@@ -58,6 +58,8 @@ def save_model(
     environment: Optional[Dict[str, Any]] = None,
     preprocessing_state: Optional[Dict[str, Any]] = None,
     model_input_columns: Optional[List[str]] = None,
+    distribution: Optional[Dict[str, Any]] = None,
+    quantile_models: Optional[Dict[str, Any]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -121,6 +123,21 @@ def save_model(
             directory, "preprocessing_state", preprocessing_state
         )
 
+    # The deployed distribution: the quantile levels, their columns and
+    # the conformal radius as JSON, and the fitted quantile estimators as
+    # a joblib beside the point estimator. Both are hashed into the
+    # manifest like every other artifact, because an edited radius shifts
+    # every interval while the model_id stays the same.
+    distribution_path = None
+    quantile_models_path = None
+    if distribution is not None:
+        distribution_path = _artifacts.save_json(
+            directory, "distribution", distribution
+        )
+    if quantile_models:
+        quantile_models_path = _artifacts.save_joblib(
+            directory, "quantile_models", quantile_models
+        )
     content_hashes: Dict[str, str] = {
         "model.joblib": _artifacts.hash_file(Path(model_path)),
         "model_spec.json": _artifacts.hash_file(Path(model_spec_path)),
@@ -129,6 +146,14 @@ def save_model(
     if state_path is not None:
         content_hashes["preprocessing_state.json"] = _artifacts.hash_file(
             Path(state_path)
+        )
+    if distribution_path is not None:
+        content_hashes["distribution.json"] = _artifacts.hash_file(
+            Path(distribution_path)
+        )
+    if quantile_models_path is not None:
+        content_hashes["quantile_models.joblib"] = _artifacts.hash_file(
+            Path(quantile_models_path)
         )
     if dataset_spec_path is not None:
         content_hashes["dataset_spec.json"] = _artifacts.hash_file(
@@ -179,6 +204,7 @@ def save_model(
         training_information_cutoff=training_information_cutoff,
         dataset_warnings=list(dataset_warnings or []),
         preprocessing=dict(preprocessing or {}),
+        distribution=dict(distribution or {}),
         # Read from the process at registration, never declared by the
         # caller -- a caller-supplied value is only for tests that need a
         # known one.
@@ -267,6 +293,38 @@ def load_preprocessing_state(model_id: str) -> Optional[Dict[str, Any]]:
         "preprocessing_state.json",
     )
     return _artifacts.load_json(str(path))
+
+
+def load_distribution(model_id: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
+    """
+    The deployed distribution: (state, quantile models by column), both
+    empty for a model registered without quantiles or intervals -- which
+    every model before they existed was, and which a point-only model
+    still is. Verified against the manifest before either is read, the
+    joblib before it is deserialized.
+    """
+    directory = _artifacts.run_dir(model_id)
+    if not (directory / "manifest.json").exists():
+        raise ValidationError(f"no registered model with model_id={model_id!r}")
+    state: Dict[str, Any] = {}
+    models: Dict[str, Any] = {}
+    state_path = directory / "distribution.json"
+    if state_path.exists():
+        _artifacts.verify_file(
+            state_path,
+            _expected_hash(model_id, "distribution.json"),
+            "distribution.json",
+        )
+        state = _artifacts.load_json(str(state_path))
+    models_path = directory / "quantile_models.joblib"
+    if models_path.exists():
+        _artifacts.verify_file(
+            models_path,
+            _expected_hash(model_id, "quantile_models.joblib"),
+            "quantile_models.joblib",
+        )
+        models = _artifacts.load_joblib(str(models_path))
+    return state, models
 
 
 def load_dataset_spec(model_id: str) -> Dict[str, Any]:

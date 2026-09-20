@@ -1183,6 +1183,41 @@ class ComputeBudgetSpec(BaseModel):
     )
 
 
+class ConformalSpec(BaseModel):
+    """
+    A prediction interval from split conformal calibration.
+
+    Inside each training window the estimator is refit without each of
+    `calibration_folds` contiguous date blocks -- embargoed and purged like
+    every other split here -- and the absolute residuals on the held-out
+    blocks are collected. The (1 - alpha) quantile of those is the radius:
+    prediction +/- radius covers a new outcome with probability at least
+    1 - alpha for exchangeable rows. A return panel is not exchangeable
+    across regimes, so the OOS coverage is reported as the check.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    alpha: float = Field(
+        0.1,
+        gt=0.0,
+        lt=1.0,
+        description="Miscoverage: 0.1 asks for a 90% interval.",
+    )
+    method: Literal["split"] = Field(
+        "split",
+        description="'split' -- residual quantiles on held-out date blocks. The "
+        "only method; named so a second one is a choice rather than a change.",
+    )
+    calibration_folds: int = Field(
+        3,
+        ge=2,
+        le=10,
+        description="Contiguous date blocks the training window is cut into "
+        "for the residuals. Each is one more fit per fold.",
+    )
+
+
 class ModelSpec(BaseModel):
     # extra="forbid" like every top-level input model. Without it a
     # nested typo was silently dropped: `validate_model_spec` -- the
@@ -1193,6 +1228,26 @@ class ModelSpec(BaseModel):
     task: Task
     estimator: EstimatorSpec
     validation: ValidationSpec
+    quantiles: List[float] = Field(
+        default_factory=list,
+        max_length=9,
+        description=(
+            "task='regression' only: quantile levels in (0, 1) to fit beside "
+            "the point prediction, one fit per level per fold, on an "
+            "estimator that can fit a quantile (list_modeling_capabilities "
+            "reports `quantile_param`). The OOS frame gains a column per "
+            "level (`q05`, `q50`, `q95`), `prediction` stays the base fit's "
+            "point score, and the metrics gain the pinball loss per level, "
+            "the crossing rate, and coverage and width for each symmetric "
+            "pair such as 0.05 and 0.95."
+        ),
+    )
+    intervals: Optional[ConformalSpec] = Field(
+        None,
+        description="task='regression' only: a split-conformal prediction "
+        "interval, `lower`/`upper` on the OOS frame and at scoring, with "
+        "coverage and width reported. See ConformalSpec.",
+    )
     budget: ComputeBudgetSpec = Field(
         default_factory=ComputeBudgetSpec,
         description="How much compute the experiment may spend; refused, not "
@@ -1220,6 +1275,36 @@ class ModelSpec(BaseModel):
         "deep inside sklearn rather than at this boundary, where the message "
         "can say which field was wrong.",
     )
+
+    @field_validator("quantiles")
+    @classmethod
+    def _quantiles_are_levels(cls, v: List[float]) -> List[float]:
+        levels = sorted({float(q) for q in v})
+        for q in levels:
+            if not 0.0 < q < 1.0:
+                raise ValueError(
+                    f"quantiles must lie strictly inside (0, 1); got {q}. The "
+                    "0th and 100th percentiles are the sample's own extremes, "
+                    "not something a model fits."
+                )
+        return levels
+
+    @model_validator(mode="after")
+    def _distribution_is_a_regression_question(self) -> "ModelSpec":
+        if self.task == "regression":
+            return self
+        if self.quantiles:
+            raise ValueError(
+                f"quantiles are fitted for task='regression' only; task="
+                f"{self.task!r} predicts a probability or an ordering, which "
+                "has no quantiles of a continuous outcome to fit."
+            )
+        if self.intervals is not None:
+            raise ValueError(
+                f"intervals are calibrated for task='regression' only; task="
+                f"{self.task!r} has no residual to place an interval around."
+            )
+        return self
 
 
 class PredictionTransformSpec(BaseModel):
@@ -1256,6 +1341,7 @@ class PredictionTransformSpec(BaseModel):
         "cross_sectional_rank",
         "cross_sectional_zscore",
         "top_bottom_quantile",
+        "uncertainty_scaled",
     ] = Field(
         "cross_sectional_rank",
         description=(
@@ -1270,7 +1356,12 @@ class PredictionTransformSpec(BaseModel):
             "flat in between; the classic quantile-portfolio construction. "
             "'sign' — equal weight on the sign of the (centered) prediction. "
             "Reproduces the bridge's information content, but sized as a "
-            "portfolio rather than as per-ticker direction signals."
+            "portfolio rather than as per-ticker direction signals. "
+            "'uncertainty_scaled' — the prediction divided by the width of its "
+            "conformal interval, then standardized within the cross-section: "
+            "a confident forecast gets a bigger position than an equal but "
+            "uncertain one. Needs a model trained with ModelSpec.intervals; "
+            "refused by name otherwise."
         ),
     )
     long_quantile: float = Field(

@@ -108,6 +108,7 @@ def _estimators() -> str:
     from standard_quant_tools.modeling.estimators.registry import (
         ESTIMATOR_REGISTRY,
         allowed_params,
+        quantile_support,
     )
 
     optional = boosting.OPTIONAL_ESTIMATORS
@@ -127,6 +128,9 @@ def _estimators() -> str:
             )
             if capabilities.get(key)
         ]
+        quantile = quantile_support(task, name)
+        if quantile is not None:
+            flags.append(f"quantiles (`{quantile.param}`)")
         rows.append(
             [
                 task,

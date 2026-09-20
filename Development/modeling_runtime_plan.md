@@ -4,8 +4,14 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phases 0-5 are implemented and merged; phases 6-10 are
-proposals.** Phase 5 landed as two commits on 2026-09-20: `f305ea9`
+**Status: phases 0-6 are implemented and merged; phases 7-10 are
+proposals.** Phase 6 landed as the commit that carries this paragraph on
+2026-09-20 (`ModelSpec.quantiles` through a registry-declared
+`QuantileSupport`, `ModelSpec.intervals` as split conformal on purged
+date blocks, the distributional metrics, `distribution.json` and
+`quantile_models.joblib` on the model, scoring's columns, and
+`transform.method="uncertainty_scaled"`); `prediction` is deliberately
+left as the base fit rather than swapped for the median. Phase 5 landed as two commits on 2026-09-20: `f305ea9`
 (`get_point_in_time_records`, Polygon's fundamentals with
 `revisions="unknown"` until `observed_revisions` measures a restatement
 on a pulled history -- the live pull the plan called for has not been

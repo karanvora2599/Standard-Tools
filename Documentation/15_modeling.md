@@ -2493,6 +2493,81 @@ zero and `indistinguishable`.
 ---
 
 
+## Distributional predictions
+
+A point prediction says where the outcome is expected; it says nothing
+about how wide the model's own uncertainty is, and a portfolio that sizes
+a confident +2% and a wild +2% the same is throwing that away. Two fields
+on `ModelSpec`, regression only, put the distribution beside the point:
+
+```python
+ModelSpec(
+    task="regression",
+    estimator=EstimatorSpec(type="quantile_gradient_boosting", params={"n_estimators": 200}),
+    validation=ValidationSpec(train_window=250, test_window=125, embargo=5),
+    quantiles=[0.05, 0.5, 0.95],
+    intervals=ConformalSpec(alpha=0.1, calibration_folds=3),
+)
+```
+
+**`quantiles`** fits the estimator once more per level, on the same rows
+and weights as the point fit, with the registry's quantile parameter set:
+`quantile` and `quantile_gradient_boosting` name it directly, `lightgbm`
+takes `alpha` under `objective="quantile"`, `xgboost` `quantile_alpha`
+under `reg:quantileerror`. An estimator without one — ridge, a random
+forest — is refused by name with the ones that have it;
+`list_modeling_capabilities` reports `quantile_param` per estimator. The
+OOS frame gains one column per level (`q05`, `q50`, `q95`), and
+**`prediction` is left exactly as the base fit produced it**: for the two
+sklearn quantile regressors that is already the median, for a booster it
+is the mean, and the test pins that a point-only run and a quantile run
+agree on it bitwise.
+
+**`intervals`** is a split-conformal band around any regressor's point
+prediction. Inside each training window the estimator is refit without
+each of `calibration_folds` contiguous date blocks — embargoed and purged
+by the same `label_overlap_mask` every other split here uses, because a
+residual read on a row whose label the refit had already seen is too
+small in the direction that flatters — and the absolute residuals on the
+held-out blocks are collected. Their `(1 − alpha)` quantile, with the
+finite-sample correction, is the radius; `lower`/`upper` are the
+prediction ∓ radius. For exchangeable rows that covers a new outcome with
+probability at least `1 − alpha`. A return panel is not exchangeable
+across regimes, so the OOS coverage is reported as the check rather than
+taken from the theory.
+
+**What is reported**, beside the point metrics, per fold and averaged:
+
+| Metric | Meaning |
+|---|---|
+| `pinball_q05`, `pinball_q50`, … | the proper score for a quantile; at 0.5 it is half the MAE |
+| `quantile_crossing_rate` | rows where a higher level was predicted below a lower one |
+| `quantile_coverage_90`, `quantile_width_90` | for each symmetric pair such as 0.05/0.95 |
+| `interval_coverage`, `interval_width`, `interval_nominal_coverage` | the conformal band against what it claimed |
+
+Planted on a Gaussian panel, both the 0.05/0.95 pair and the `alpha=0.1`
+band cover between 87% and 93% of out-of-sample outcomes at a width
+within 15% of the true `2 × 1.645σ`.
+
+**The deployed distribution travels with the model.** The refit fits the
+quantile models on the full panel and reads the conformal radius off
+held-out blocks of it; `distribution.json` and `quantile_models.joblib`
+are hashed into the manifest like every other artifact, the manifest's
+`distribution` field records the levels, their columns and the radius,
+and `score_model` emits the same columns the validation reported on. A
+point-only model has none of this and scores exactly as before; every
+consumer of the three canonical OOS columns reads them unchanged.
+
+**`transform.method="uncertainty_scaled"`** is where the portfolio layer
+starts consuming it: `evaluate_model_portfolio` divides each prediction
+by the width of its interval, then sizes the result like
+`cross_sectional_zscore`. A model without intervals is refused by name
+rather than sized as though every band were equal. Each extra fit is
+counted by the plan and checked against the budget: three quantiles and a
+three-block calibration make one "fit" of the spec cost seven.
+
+---
+
 ## Backtesting a trained model
 
 `run_model_experiment` answers "how did this model do out-of-sample."

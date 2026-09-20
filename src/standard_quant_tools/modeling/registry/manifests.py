@@ -156,6 +156,13 @@ class ModelManifest(BaseModel):
     # spec says cross_sectional, score_model refuses rather than guess
     # which of the two transforms its estimator was actually fitted on.
     preprocessing: Dict[str, Any] = Field(default_factory=dict)
+    # The deployed DISTRIBUTION beside the point estimator: the quantile
+    # levels fitted and the OOS/scoring column each maps to, and the
+    # split-conformal radius with the alpha and calibration it was read
+    # under. Empty for a point-only model, which is every model before
+    # this existed and most since; `distribution.json` and
+    # `quantile_models.joblib` exist exactly when it is not.
+    distribution: Dict[str, Any] = Field(default_factory=dict)
     # What COMPUTED this model: Python, numpy, pandas, scikit-learn, scipy,
     # the optional boosters, the BLAS numpy was built against, whether the
     # native extension was loaded and current, and the thread caps in

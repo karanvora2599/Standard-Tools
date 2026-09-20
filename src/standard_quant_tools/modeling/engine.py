@@ -24,7 +24,12 @@ from . import artifacts as _artifacts
 from .adapters import accepts_missing, get_adapter
 from .cache import FoldCache, column_wise_pipeline
 from .dataset.alignment import LABEL_END_COL
-from .estimators.registry import get_estimator_class, validate_params
+from .estimators.registry import (
+    get_estimator_class,
+    quantile_estimators,
+    quantile_support,
+    validate_params,
+)
 from .plan import plan_experiment
 from .preprocessing import (
     FoldContext,
@@ -35,7 +40,9 @@ from .preprocessing import (
 )
 from .registry.model_registry import new_model_id, save_model
 from .specs import TASKS, ModelSpec, targets_for_task
+from .validation.conformal import conformal_radius, held_out_residuals
 from .validation.diagnostics import fold_feature_importance, summarize_importance
+from .validation.distributional import distributional_metrics, quantile_column
 from .validation.metrics import (
     aggregate_cross_sectional_ic,
     average_fold_metrics,
@@ -349,6 +356,66 @@ def _fit(
         ) from exc
 
 
+def _fit_quantile_models(
+    estimator_cls: Any,
+    support: Any,
+    params: Dict[str, Any],
+    model_spec: ModelSpec,
+    arrays: Any,
+) -> Dict[float, Any]:
+    """
+    One estimator per requested quantile, fitted on the same rows and
+    weights as the point estimator, with the registry's quantile parameter
+    set and its fixed objective switched on. The point estimator is left
+    exactly as it was: `prediction` is the base fit, and the quantiles
+    stand beside it.
+    """
+    models: Dict[float, Any] = {}
+    for q in model_spec.quantiles:
+        quantile_params = {**params, **support.fixed, support.param: float(q)}
+        model = _instantiate(estimator_cls, quantile_params, model_spec.random_seed)
+        _fit(model, arrays.X, arrays.y, arrays.sample_weight)
+        models[float(q)] = model
+    return models
+
+
+def _conformal_radius(
+    estimator_cls: Any,
+    params: Dict[str, Any],
+    model_spec: ModelSpec,
+    arrays: Any,
+    frame: pd.DataFrame,
+) -> "tuple[float, int]":
+    """
+    The split-conformal radius for one training window: absolute
+    residuals on held-out date blocks, the estimator refit without each
+    under the embargo and the label purge, and their (1 - alpha) quantile.
+    Returns (radius, number of residuals it was read from).
+    """
+    intervals = model_spec.intervals
+    assert intervals is not None
+    weights = arrays.sample_weight
+
+    def fit_predict(train_mask, test_mask):
+        model = _instantiate(estimator_cls, params, model_spec.random_seed)
+        _fit(
+            model,
+            arrays.X[train_mask],
+            arrays.y[train_mask],
+            weights[train_mask] if weights is not None else None,
+        )
+        return arrays.y[test_mask], np.asarray(model.predict(arrays.X[test_mask]))
+
+    residuals = held_out_residuals(
+        fit_predict,
+        frame["date"].to_numpy(),
+        frame[LABEL_END_COL].to_numpy() if LABEL_END_COL in frame.columns else None,
+        n_folds=int(intervals.calibration_folds),
+        embargo=int(model_spec.validation.embargo),
+    )
+    return conformal_radius(residuals, float(intervals.alpha)), int(residuals.size)
+
+
 def _predict_fold(
     adapter: Any,
     model_spec: ModelSpec,
@@ -424,6 +491,23 @@ def run_experiment(
     validate_params(
         model_spec.task, model_spec.estimator.type, model_spec.estimator.params
     )
+
+    # Whether the estimator can fit a quantile at all, before any data is
+    # touched: the registry declares the parameter, and an estimator
+    # without one cannot be asked, whatever the spec says.
+    quantile = None
+    if model_spec.quantiles:
+        quantile = quantile_support(model_spec.task, model_spec.estimator.type)
+        if quantile is None:
+            raise ValidationError(
+                f"run_model_experiment: estimator {model_spec.estimator.type!r} "
+                "has no quantile parameter, so it cannot fit the requested "
+                f"quantiles {list(model_spec.quantiles)}. Estimators that can: "
+                f"{quantile_estimators(model_spec.task)}; "
+                "list_modeling_capabilities reports `quantile_param` per "
+                "estimator. Drop `quantiles`, or use `intervals` for a "
+                "conformal band around any regressor's point prediction."
+            )
 
     panel = dataset["panel"]
     _check_task_target_compatibility(model_spec.task, dataset.get("target_id"))
@@ -720,6 +804,43 @@ def run_experiment(
             test_df["date"].to_numpy(),
             train_y=train_y,
         )
+        # ── The distribution beside the point ────────────────────────────
+        # One more fit per requested quantile, on the same rows, and a
+        # conformal radius read off held-out date blocks inside this
+        # training window; both become OOS columns beside `prediction`,
+        # which is left exactly as the base fit produced it, and metrics
+        # beside the point metrics.
+        distribution_columns: Dict[str, np.ndarray] = {}
+        quantile_values: Dict[float, np.ndarray] = {}
+        if quantile is not None:
+            for q, model in _fit_quantile_models(
+                estimator_cls, quantile, fold_params, model_spec, arrays
+            ).items():
+                quantile_values[q] = np.asarray(model.predict(test_X.to_numpy()))
+                distribution_columns[quantile_column(q)] = quantile_values[q]
+        lower = upper = None
+        if model_spec.intervals is not None:
+            radius, _n_calibration = _conformal_radius(
+                estimator_cls, fold_params, model_spec, arrays, train_df
+            )
+            lower = np.asarray(prediction_values, dtype=float) - radius
+            upper = np.asarray(prediction_values, dtype=float) + radius
+            distribution_columns["lower"] = lower
+            distribution_columns["upper"] = upper
+        if distribution_columns:
+            metrics.update(
+                distributional_metrics(
+                    test_y,
+                    quantile_values,
+                    lower=lower,
+                    upper=upper,
+                    alpha=(
+                        float(model_spec.intervals.alpha)
+                        if model_spec.intervals is not None
+                        else None
+                    ),
+                )
+            )
         # Every fold's per-date IC dates are kept so the OOS dispersion
         # statistics can be computed once over the pooled series -- see
         # aggregate_cross_sectional_ic for why averaging per-fold std/ICIR
@@ -766,6 +887,7 @@ def run_experiment(
                 "date": test_df["date"].to_numpy(),
                 "entity": test_df["entity"].to_numpy(),
                 "prediction": prediction_values,
+                **distribution_columns,
             }
         )
         if is_cpcv:
@@ -1012,6 +1134,42 @@ def run_experiment(
         full_arrays.sample_weight,
         group=full_arrays.group,
     )
+    # The deployed distribution, fitted the way the folds' were: one
+    # quantile model per level on the full panel, and a conformal radius
+    # read off held-out blocks of it. Persisted with the model so scoring
+    # emits the same columns the validation reported on.
+    distribution_state: "Dict[str, Any] | None" = None
+    quantile_models: "Dict[str, Any] | None" = None
+    if quantile is not None or model_spec.intervals is not None:
+        distribution_state = {
+            "quantiles": [float(q) for q in model_spec.quantiles],
+            "columns": {quantile_column(q): float(q) for q in model_spec.quantiles},
+            "conformal": None,
+        }
+        if quantile is not None:
+            fitted = _fit_quantile_models(
+                estimator_cls,
+                quantile,
+                model_spec.estimator.params,
+                model_spec,
+                full_arrays,
+            )
+            quantile_models = {quantile_column(q): m for q, m in fitted.items()}
+        if model_spec.intervals is not None:
+            radius, n_calibration = _conformal_radius(
+                estimator_cls,
+                model_spec.estimator.params,
+                model_spec,
+                full_arrays,
+                panel,
+            )
+            distribution_state["conformal"] = {
+                "method": model_spec.intervals.method,
+                "alpha": float(model_spec.intervals.alpha),
+                "calibration_folds": int(model_spec.intervals.calibration_folds),
+                "radius": float(radius),
+                "n_calibration": int(n_calibration),
+            }
 
     # model_id generated here (not left to save_model's own default)
     # so the OOS predictions artifact lands in the same
@@ -1062,6 +1220,8 @@ def run_experiment(
         model_input_columns=model_columns,
         oos_predictions_uri=oos_predictions_uri,
         model_id=model_id,
+        distribution=distribution_state,
+        quantile_models=quantile_models,
         # The last FEATURE date in the training panel. Kept for lineage, but
         # deliberately NOT the cutoff score_model gates on -- see below.
         train_end_date=pd.Timestamp(panel["date"].max()).strftime("%Y-%m-%d"),

@@ -1145,6 +1145,27 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
                         )
                     )
                     break
+    # Quantiles need an estimator that can fit one; the registry declares
+    # which, and asking one that cannot is refused here rather than by
+    # run_model_experiment after it planned the fits.
+    if spec.quantiles and (task, estimator) in ESTIMATOR_REGISTRY:
+        from ..estimators.registry import quantile_estimators, quantile_support
+
+        if quantile_support(task, estimator) is None:
+            problems.append(
+                SpecProblem(
+                    where="quantiles",
+                    problem=(
+                        f"estimator {estimator!r} has no quantile parameter, so "
+                        f"it cannot fit quantiles {list(spec.quantiles)}."
+                    ),
+                    suggestion=(
+                        f"Estimators that can: {quantile_estimators(task)}. Or "
+                        "drop `quantiles` and use `intervals` for a conformal "
+                        "band around any regressor."
+                    ),
+                )
+            )
     if spec.search is not None and spec.search.method == "tpe":
         from ..validation import search as _search
 

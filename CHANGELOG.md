@@ -1,5 +1,50 @@
 # Changelog
 
+## A confident +2% and a wild +2% were sized the same
+
+Phase 6 of `Development/modeling_runtime_plan.md`.
+
+The runtime predicted a point. Two quantile regressors were registered
+and could be fitted one level at a time by hand, but nothing fitted a set
+of them, reported them beside the point, persisted them, or let a
+portfolio read how sure the model was. Every transform sized a confident
+forecast and an uncertain one the same.
+
+**`ModelSpec.quantiles`** fits the estimator once more per level on the
+same rows and weights, with the parameter the registry now declares per
+estimator (`QuantileSupport`: `quantile` and `quantile_gradient_boosting`
+name it directly, lightgbm takes `alpha` under `objective='quantile'`,
+xgboost `quantile_alpha` under `reg:quantileerror`); an estimator without
+one is refused by name with the ones that have it, in the engine and in
+`validate_model_spec`, and `list_modeling_capabilities` reports
+`quantile_param`. The OOS frame gains `q05`, `q50`, `q95`, and
+`prediction` is left exactly as the base fit produced it -- the plan said
+"the median when 0.5 is requested", and switching the point column to a
+different estimator's output on the strength of a list entry is the
+quiet substitution this runtime exists to avoid, so it is not done.
+
+**`ModelSpec.intervals`** is a split-conformal band around any regressor:
+inside each training window the estimator is refit without each of
+`calibration_folds` contiguous date blocks, embargoed and purged by the
+same `label_overlap_mask` every other split uses, and the corrected
+`(1 - alpha)` quantile of the held-out absolute residuals is the radius.
+`lower`/`upper` join the OOS frame. Pinball loss per level, the crossing
+rate, coverage and width per symmetric pair, and the band's coverage,
+width and nominal level are reported beside the point metrics; on a
+planted Gaussian panel both the 0.05/0.95 pair and the alpha=0.1 band
+cover 87-93% at a width within 15% of 2 x 1.645 sigma.
+
+**The deployed distribution travels with the model**: `distribution.json`
+and `quantile_models.joblib` hashed into the manifest, `distribution` on
+the manifest, and `score_model` emitting the same columns; a point-only
+model scores exactly as before, and every consumer of the three canonical
+OOS columns reads them unchanged. **`transform.method=
+'uncertainty_scaled'`** divides each prediction by its interval's width
+before sizing it like `cross_sectional_zscore`, and refuses a model
+without intervals by name. The plan counts every extra fit against the
+budget: three quantiles and a three-block calibration make one fit of the
+spec cost seven.
+
 ## Bars per hour is not bars per year until somebody names the venue
 
 Phase 5 of `Development/modeling_runtime_plan.md`, second and last commit.
