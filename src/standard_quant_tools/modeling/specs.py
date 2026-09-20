@@ -490,6 +490,31 @@ class DatasetSpec(BaseModel):
             "those defaults."
         ),
     )
+    calendar: Optional[str] = Field(
+        None,
+        description=(
+            "The venue's exchange calendar, as an `exchange_calendars` name "
+            "such as 'XNYS', 'XLON' or '24/7'. What makes an INTRADAY "
+            "interval annualizable: bars per session and sessions per year "
+            "are read off it, so a volatility at '1h' is scaled by the bars "
+            "this venue actually has rather than by a constant chosen for "
+            "another. Optional; a daily-or-coarser interval needs none, and "
+            "an intraday feature that annualizes refuses without one. Needs "
+            "the optional exchange_calendars package."
+        ),
+    )
+
+    @field_validator("calendar")
+    @classmethod
+    def _calendar_is_a_known_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        # Lazy: the calendar module imports nothing from specs, but the
+        # library it wraps is optional and is only needed once a spec
+        # names a calendar.
+        from .calendar import validate_calendar_name
+
+        return validate_calendar_name(v, "DatasetSpec.calendar")
 
     missing: MissingDataSpec = Field(
         default_factory=MissingDataSpec,

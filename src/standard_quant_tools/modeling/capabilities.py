@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from . import calendar as _calendar
 from .adapters import available_tasks, get_adapter
 from .estimators.registry import ESTIMATOR_REGISTRY, allowed_params
 from .features.registry import list_features as _list_features
@@ -169,6 +170,9 @@ def modeling_capabilities() -> Dict[str, Any]:
             # The search module's own probe, so the capability report and
             # the refusal in run_model_experiment cannot disagree.
             "optuna": _search.optuna_available(),
+            # What makes DatasetSpec.calendar resolvable, and with it an
+            # intraday interval annualizable.
+            "exchange_calendars": _calendar.calendar_available(),
             "native_extension": _native_available(),
             "scipy": _importable("scipy"),
             "numba": _importable("numba"),

@@ -473,6 +473,25 @@ misleading the moment anyone reads the value.
 `FeatureContext` now carries the interval and each feature scales by its
 own constant: 252 for `1d`, 52 for `5d`/`1wk`, 12 for `1mo`, 4 for `3mo`.
 
+**Intraday needs a calendar.** Bars per year at `1h` is bars per *session*
+times sessions per year, and the session is 6.5 hours on NYSE, 8.5 on the
+LSE and 24 on a crypto venue; a constant chosen for one is wrong by a fixed
+factor on the others while still looking precise, so an intraday feature
+that annualizes refuses rather than guess. `DatasetSpec.calendar` names the
+venue as an `exchange_calendars` code (`"XNYS"`, `"XLON"`, `"24/7"`), and
+`modeling.calendar` reads both numbers off it: sessions per year counted
+over the calendar's whole years, session length as the median over recent
+sessions so an early close does not shorten every day, and bars per session
+rounded *up* because a provider emits the partial last bar (seven hourly
+bars for a 6.5-hour NYSE session). The calendar is part of the dataset's
+identity — hashed into `spec_hash` like `provider` and `interval`, bundled
+into the model — and `evaluate_model_portfolio` annualizes an intraday
+model's Sharpe by it. The library is optional, guarded like optuna: a spec
+that names a calendar on a machine without it is refused by name, and
+`list_modeling_capabilities` reports `exchange_calendars` under
+`optional_dependencies`. `AssetKey` (venue, asset class, contract) is
+still not built; `universe` stays a list of symbols.
+
 **Intraday intervals raise rather than guess.** There is no correct constant
 without knowing the session length, which is venue-specific — 6.5 hours on
 US equities, 23 on CME futures, 24 on crypto — and not derivable from the

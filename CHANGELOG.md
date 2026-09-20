@@ -1,5 +1,39 @@
 # Changelog
 
+## Bars per hour is not bars per year until somebody names the venue
+
+Phase 5 of `Development/modeling_runtime_plan.md`, second and last commit.
+
+An intraday volatility could not be annualized. Bars per year at "1h" is
+bars per session times sessions per year, and the session is 6.5 hours on
+NYSE, 8.5 on the LSE and 24 on a crypto venue; the package had nothing to
+resolve that from, so `risk.py` refused every intraday interval rather
+than guess a constant that would be wrong by a fixed factor on every
+other market while looking precise.
+
+**`DatasetSpec.calendar`** names the venue as an `exchange_calendars` code
+("XNYS", "XLON", "24/7"), and **`modeling.calendar`** reads both numbers
+off it: sessions per year counted over the calendar's whole years, session
+length as the median over recent sessions so an early close does not
+shorten every day, and bars per session rounded UP because a provider
+emits the partial last bar -- seven hourly bars for a 6.5-hour NYSE
+session. `periods_per_year_for_interval(interval, calendar)` keeps its
+constants for daily-or-coarser intervals, resolves an intraday one when a
+calendar is named, and returns None otherwise, so the refusal in
+`risk.py` stands without one and now says what to set. The builder hands
+the calendar to `FeatureContext`, the portfolio evaluator annualizes an
+intraday model's Sharpe by the calendar its dataset was built under, and
+the calendar is part of the dataset's identity -- hashed into `spec_hash`
+under hash v2, so every existing dataset's hash is unchanged.
+
+The library is optional, guarded like optuna: a spec that names a calendar
+on a machine without it is refused by name, an unknown name is refused
+with the known ones, and `list_modeling_capabilities` reports
+`exchange_calendars`. Planted: an hourly Yang-Zhang, Parkinson and
+Garman-Klass volatility on XNYS is the daily one scaled by
+sqrt(bars per year at 1h / 252) to the last digit. `AssetKey` is not
+built; `universe` stays a list of symbols.
+
 ## The join that could not leak had nothing to join
 
 Phase 5 of `Development/modeling_runtime_plan.md`, first commit.

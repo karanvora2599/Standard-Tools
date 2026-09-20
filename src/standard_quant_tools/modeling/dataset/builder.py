@@ -341,7 +341,9 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # by the right constant instead of assuming daily bars -- see
     # features/risk.py::_annualization.
     context = FeatureContext(
-        benchmark_close=benchmark_df["Close"], interval=spec.interval
+        benchmark_close=benchmark_df["Close"],
+        interval=spec.interval,
+        calendar=spec.calendar,
     )
 
     close_by_entity = {symbol: df["Close"] for symbol, df in ohlcv_by_entity.items()}

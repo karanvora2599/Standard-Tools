@@ -49,15 +49,18 @@ def _annualization(context: FeatureContext, feature_id: str) -> int:
     """
     if context is None or context.interval is None:
         return 252
-    resolved = periods_per_year_for_interval(context.interval)
+    resolved = periods_per_year_for_interval(
+        context.interval, getattr(context, "calendar", None)
+    )
     if resolved is None:
         raise ValidationError(
-            f"{feature_id}: cannot annualize at interval={context.interval!r}. "
-            "Bars per year for an intraday interval depends on the venue's "
-            "session length, which this package has no exchange calendar to "
-            "resolve -- assuming one would make this 'annualized' volatility "
-            "wrong by a fixed factor for every other market while still "
-            "looking precise. Use a daily-or-coarser interval for this "
+            f"{feature_id}: cannot annualize at interval={context.interval!r} "
+            "without an exchange calendar. Bars per year for an intraday "
+            "interval depends on the venue's session length -- assuming one "
+            "would make this 'annualized' volatility wrong by a fixed factor "
+            "for every other market while still looking precise. Name the "
+            "venue on the dataset (DatasetSpec.calendar, an exchange_calendars "
+            "code such as 'XNYS'), use a daily-or-coarser interval for this "
             "feature, or compute an explicitly per-bar volatility instead."
         )
     return resolved

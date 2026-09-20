@@ -621,14 +621,20 @@ def evaluate_model_portfolio(
     interval = str(dataset_spec.get("interval", "1d"))
     provider_name = str(dataset_spec.get("provider", "yfinance"))
 
-    periods_per_year = periods_per_year_for_interval(interval)
+    # The calendar the dataset was built under, so an intraday model's
+    # Sharpe is annualized by the bars its venue actually has.
+    calendar = dataset_spec.get("calendar")
+    periods_per_year = periods_per_year_for_interval(
+        interval, str(calendar) if calendar else None
+    )
     if periods_per_year is None:
         periods_per_year = 252
         warnings.append(
             f"interval={interval!r} has no defined bars-per-year without an "
-            "exchange calendar; annualized metrics (Sharpe, CAGR, volatility, "
-            "Calmar, annualized turnover) were computed with 252 and are "
-            "wrong by a fixed factor for this interval."
+            "exchange calendar (the dataset names none); annualized metrics "
+            "(Sharpe, CAGR, volatility, Calmar, annualized turnover) were "
+            "computed with 252 and are wrong by a fixed factor for this "
+            "interval. Build the dataset with DatasetSpec.calendar set."
         )
 
     # Verified before loading, for the same reason bridge.py verifies:

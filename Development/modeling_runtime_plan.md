@@ -4,8 +4,15 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phases 0-4 are implemented and merged; phases 5-10 are
-proposals.** Phase 4 landed as three commits on 2026-09-20: `56727b8`
+**Status: phases 0-5 are implemented and merged; phases 6-10 are
+proposals.** Phase 5 landed as two commits on 2026-09-20: `f305ea9`
+(`get_point_in_time_records`, Polygon's fundamentals with
+`revisions="unknown"` until `observed_revisions` measures a restatement
+on a pulled history -- the live pull the plan called for has not been
+run, so the claim is not made -- `FeatureScope.POINT_IN_TIME`, three
+`fundamental.*` features, the builder's gate and join) and the commit
+that carries this paragraph (`DatasetSpec.calendar`, `modeling.calendar`,
+intraday annualization). Phase 4 landed as three commits on 2026-09-20: `56727b8`
 (`plan_experiment`, `ModelSpec.budget`, the fit count in
 `validate_model_spec`), `85128dd` (the fold cache, with the measurement
 in the guide: a 20-feature ablation on 40k rows from 4.4 s to 3.3 s under

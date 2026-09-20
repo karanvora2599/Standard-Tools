@@ -72,11 +72,12 @@ RESERVED_PANEL_COLUMNS = frozenset({"date", "entity", "target", "label_end_date"
 # Only intervals whose constant is unambiguous are listed. Daily, weekly and
 # monthly are calendar-derived and need no assumption about session length.
 # INTRADAY IS DELIBERATELY ABSENT: bars-per-year at "1h" depends on how many
-# trading hours the venue is open (6.5 for US equities, 8 for many European
-# venues, ~24 for crypto), and this package has no exchange calendar to
-# resolve that from. Picking one silently would make an "annualized"
-# volatility wrong by a fixed multiplicative factor for every other market —
-# a number that looks precise and is not.
+# trading hours the venue is open (6.5 for US equities, 8.5 for the LSE,
+# ~24 for crypto), and only an exchange calendar can say which. Picking one
+# silently would make an "annualized" volatility wrong by a fixed
+# multiplicative factor for every other market -- a number that looks
+# precise and is not. With a calendar named on the dataset, `modeling.calendar`
+# reads the session length and the sessions per year off it.
 _PERIODS_PER_YEAR = {
     "1d": 252,
     "5d": 52,
@@ -86,10 +87,27 @@ _PERIODS_PER_YEAR = {
 }
 
 
-def periods_per_year_for_interval(interval: str) -> Optional[int]:
-    """Bars per year for `interval`, or None when it cannot be determined
-    without an exchange calendar (every intraday interval)."""
-    return _PERIODS_PER_YEAR.get(str(interval).strip())
+def periods_per_year_for_interval(
+    interval: str, calendar: Optional[str] = None
+) -> Optional[int]:
+    """
+    Bars per year for `interval`.
+
+    A daily-or-coarser interval is a constant. An intraday interval is
+    bars per session times sessions per year, both read off the named
+    exchange calendar, and None without one -- the caller then refuses or
+    warns rather than assuming a venue.
+    """
+    known = _PERIODS_PER_YEAR.get(str(interval).strip())
+    if known is not None:
+        return known
+    if calendar is None:
+        return None
+    from ..calendar import interval_minutes, periods_per_year
+
+    if interval_minutes(interval) is None:
+        return None
+    return periods_per_year(interval, calendar)
 
 
 class FeatureContext(BaseModel):
@@ -103,6 +121,11 @@ class FeatureContext(BaseModel):
     # the right constant instead of assuming daily bars. None means "not
     # supplied", which callers treat as daily for backward compatibility.
     interval: Optional[str] = None
+    # The dataset's exchange calendar (an `exchange_calendars` name), which
+    # is what makes an INTRADAY interval annualizable: bars per session
+    # and sessions per year are read off it. None means an intraday
+    # feature that annualizes still refuses, as before.
+    calendar: Optional[str] = None
 
 
 class FeatureDefinition(BaseModel):
