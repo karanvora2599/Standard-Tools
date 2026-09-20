@@ -55,6 +55,7 @@ from .validation.ranking import (
     ranking_metrics,
     relevance_grades,
 )
+from .validation.survival import survival_metrics
 
 
 @dataclass(frozen=True)
@@ -325,10 +326,43 @@ class RankingAdapter(ModelAdapter):
         return fold_ic_series(y_true, score, dates) if dates is not None else {}
 
 
+class SurvivalAdapter(ModelAdapter):
+    """
+    A duration that may be censored, fitted as a risk.
+
+    The label the engine hands in is already (n, 2) -- [duration, event],
+    built by `validation.survival.survival_labels` from the panel's
+    `target` and `event` columns -- so `prepare` passes it through, and
+    `score` is the estimator's risk, higher meaning sooner. Like a ranker's
+    score it has no units, so R2 and MAE are not reported; the concordance
+    index is, pooled and per date.
+    """
+
+    task = "survival"
+    score_has_scale = False
+
+    def prepare(self, model_spec, frame, X, y, weights) -> FitArrays:
+        return FitArrays(
+            X=X.to_numpy(), y=np.asarray(y, dtype=float), sample_weight=weights
+        )
+
+    def score(self, estimator: Any, X: pd.DataFrame) -> np.ndarray:
+        return np.asarray(estimator.predict(X.to_numpy()), dtype=float)
+
+    def metrics(self, model_spec, estimator, X, y_true, score, dates, train_y):
+        return survival_metrics(y_true, score, dates)
+
+    def fold_ic(self, y_true, score, dates):
+        # An IC of a risk score against a censored duration is not a
+        # measure of skill; the per-date concordance in `metrics` is.
+        return {}
+
+
 _ADAPTERS: Dict[str, ModelAdapter] = {
     RegressionAdapter.task: RegressionAdapter(),
     ClassificationAdapter.task: ClassificationAdapter(),
     RankingAdapter.task: RankingAdapter(),
+    SurvivalAdapter.task: SurvivalAdapter(),
 }
 
 

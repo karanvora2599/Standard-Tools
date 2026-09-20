@@ -293,6 +293,7 @@ def register_external_panel(
                 "horizon": target.horizon,
                 "target_type": target.target_type,
                 "label_end_column": target.label_end_column,
+                "event_column": target.event_column,
             }
             for target in input_data.targets
         ]
@@ -304,6 +305,7 @@ def register_external_panel(
                 "horizon": input_data.horizon,
                 "target_type": input_data.target_type,
                 "label_end_column": input_data.label_end_column,
+                "event_column": input_data.event_column,
             }
         ]
 
@@ -435,7 +437,11 @@ def _select_target(panel, meta, requested, dataset_id: str):
     on the union would make every short-horizon model pay for the longest
     one's warm-down.
     """
-    from ..dataset.external_panel import label_end_column_for, target_column_for
+    from ..dataset.external_panel import (
+        event_column_for,
+        label_end_column_for,
+        target_column_for,
+    )
 
     declared = meta.get("targets") or []
     names = [str(d["name"]) for d in declared]
@@ -480,6 +486,13 @@ def _select_target(panel, meta, requested, dataset_id: str):
         # The primary's label-end would otherwise be applied to a different
         # horizon's rows, which is a purge computed against the wrong window.
         out = out.drop(columns=["label_end_date"])
+    # The event indicator follows the label the same way: the chosen
+    # target's, or none -- never the primary's against another's rows.
+    events = event_column_for(requested)
+    if events in out.columns:
+        out["event"] = out[events]
+    elif "event" in out.columns:
+        out = out.drop(columns=["event"])
 
     before = len(out)
     out = out[out["target"].notna()]
@@ -821,6 +834,9 @@ _HEADLINE_METRIC = {
     "regression": ("cs_rank_ic_mean", "rank_ic", "ic", "r2"),
     "classification": ("auc", "roc_auc", "accuracy"),
     "ranking": ("cs_rank_ic_mean", "ndcg_at_10", "ndcg_at_5"),
+    # A risk score is judged on whether it ordered the durations right,
+    # per date first, pooled second.
+    "survival": ("cs_concordance_mean", "concordance"),
 }
 
 

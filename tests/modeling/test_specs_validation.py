@@ -238,6 +238,12 @@ class TestReservedPanelColumnNames:
         path in the first place."""
         from standard_quant_tools.modeling.features.base import RESERVED_PANEL_COLUMNS
 
-        assert RESERVED_PANEL_COLUMNS == {"date", "entity", "target", "label_end_date"}
+        assert RESERVED_PANEL_COLUMNS == {
+            "date",
+            "entity",
+            "target",
+            "label_end_date",
+            "event",
+        }
         with pytest.raises(PydanticValidationError, match="reserved"):
             FeatureSpec(id="technical.rsi", alias="target")

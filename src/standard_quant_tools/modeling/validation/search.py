@@ -134,6 +134,12 @@ def _score(
         roc_auc_score,
     )
 
+    if scoring == "concordance":
+        from .survival import concordance_index
+
+        labels = np.asarray(y_true, dtype=float)
+        value, _pairs = concordance_index(labels[:, 0], labels[:, 1], predictions)
+        return value
     if scoring in ("cs_rank_ic", "cs_ic"):
         method = "spearman" if scoring == "cs_rank_ic" else "pearson"
         series = cross_sectional_ic(y_true, predictions, dates, method)
@@ -182,6 +188,16 @@ def _inner_splitter(
     return WalkForwardSplit(
         train_window=train_window, test_window=test_window, embargo=int(embargo)
     )
+
+
+def _labels_for(task: str, frame: pd.DataFrame) -> np.ndarray:
+    """The label a candidate is scored against: `target`, or for survival
+    the (duration, event) pair the concordance needs."""
+    if task == "survival":
+        from .survival import survival_labels
+
+        return survival_labels(frame)
+    return frame["target"].to_numpy()
 
 
 def inner_fold_count(n_dates: int, inner_splits: int, embargo: int = 0) -> int:
@@ -293,6 +309,8 @@ def search_best_params(
             return None
         if task == "classification" and len(np.unique(inner_train["target"])) < 2:
             return None
+        if task == "survival" and not (inner_train["event"].to_numpy() == 1).any():
+            return None
         try:
             predictions, probabilities = fit_predict(
                 params, inner_train, inner_test, fold_index
@@ -305,7 +323,7 @@ def search_best_params(
         return _score(
             task,
             search_spec.scoring,
-            inner_test["target"].to_numpy(),
+            _labels_for(task, inner_test),
             predictions,
             probabilities,
             inner_test["date"].to_numpy(),

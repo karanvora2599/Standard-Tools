@@ -72,6 +72,12 @@ class TargetDefinition(BaseModel):
     tasks: Tuple[str, ...]
     buildable: bool
     continuous: bool
+    #: A duration that may be right-censored. The panel must then carry an
+    #: `event` indicator beside the label -- 1 where the event was observed,
+    #: 0 where the window ended first -- and only the survival task may fit
+    #: it, because a regression on the duration alone reads every censored
+    #: row as an event at the horizon.
+    censored: bool = False
     #: OHLCV columns the builder reads. Checked against the fetched frame
     #: before anything is built, the way a feature's `requires` is.
     requires: List[str] = Field(default_factory=lambda: ["Close"])

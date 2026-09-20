@@ -60,6 +60,7 @@ from .validation.ranking import (
     relevance_grades,
 )
 from .validation.search import require_optuna, search_best_params
+from .validation.survival import EVENT_COL, survival_labels
 from .validation.walk_forward import build_splitter
 from .validation.weights import build_sample_weights
 
@@ -170,6 +171,51 @@ def _validate_classification_target(panel: pd.DataFrame) -> None:
             f"target with at least two classes, but every row is "
             f"{sorted(unique_values)[0]!r}. A threshold that no bar exceeds "
             "produces exactly this."
+        )
+
+
+def _labels(model_spec: ModelSpec, frame: pd.DataFrame) -> np.ndarray:
+    """
+    The label an estimator of this task fits, read off a panel slice.
+
+    `target` for every task but survival, whose label is two columns --
+    the duration and whether the event was observed -- and whose
+    estimators refuse the duration alone. One reader, used by the fold
+    loop, the inner search closure and the full-panel refit, so the three
+    cannot disagree about what a survival row is.
+    """
+    if model_spec.task == "survival":
+        return survival_labels(frame)
+    return frame["target"].to_numpy()
+
+
+def _validate_survival_target(panel: pd.DataFrame) -> None:
+    """
+    A survival panel carries a positive duration and a 0/1 event
+    indicator, with at least one event observed; anything else cannot be
+    ordered, and is refused here rather than inside an estimator.
+    """
+    if EVENT_COL not in panel.columns:
+        raise ValidationError(
+            "run_model_experiment: task='survival' needs an `event` column "
+            "beside `target` -- 1 where the event was observed, 0 where the "
+            "window ended first. A panel registered with "
+            "register_external_panel declares it as `event_column` on the "
+            "target; a duration without it would be fitted as though every "
+            "row's event had been seen."
+        )
+    labels = survival_labels(panel)
+    duration, event = labels[:, 0], labels[:, 1]
+    if not np.isfinite(duration).all() or (duration <= 0).any():
+        raise ValidationError(
+            "run_model_experiment: task='survival' needs a finite, positive "
+            "duration on every row; a zero or negative duration has no place "
+            "in the ordering."
+        )
+    if event.sum() == 0:
+        raise ValidationError(
+            "run_model_experiment: every row of the survival label is censored, "
+            "so there is no observed event and nothing to order."
         )
 
 
@@ -513,6 +559,8 @@ def run_experiment(
     _check_task_target_compatibility(model_spec.task, dataset.get("target_id"))
     if model_spec.task == "classification":
         _validate_classification_target(panel)
+    if model_spec.task == "survival":
+        _validate_survival_target(panel)
     feature_ids = dataset["feature_ids"]
     dates = pd.Index(sorted(panel["date"].unique()))
 
@@ -654,8 +702,8 @@ def run_experiment(
             )
             continue
 
-        train_y = train_df["target"].to_numpy()
-        test_y = test_df["target"].to_numpy()
+        train_y = _labels(model_spec, train_df)
+        test_y = _labels(model_spec, test_df)
         # A fold whose training window happens to land entirely on one
         # side of a binary target can't fit a classifier at all (sklearn
         # raises deep inside .fit()) -- skip it, same as an empty
@@ -666,6 +714,16 @@ def run_experiment(
                 {
                     "test_start": str(pd.Timestamp(test_dates[0]).date()),
                     "reason": "training window contained only one class",
+                }
+            )
+            continue
+        # The survival analogue: a window in which every row was censored
+        # has no observed event and therefore no ordering to learn.
+        if model_spec.task == "survival" and train_y[:, 1].sum() == 0:
+            skipped.append(
+                {
+                    "test_start": str(pd.Timestamp(test_dates[0]).date()),
+                    "reason": "training window contained no observed event",
                 }
             )
             continue
@@ -747,7 +805,7 @@ def run_experiment(
                     model_spec,
                     inner_train,
                     inner_train_X,
-                    inner_train["target"].to_numpy(),
+                    _labels(model_spec, inner_train),
                     _fold_sample_weights(model_spec, inner_train),
                 )
                 _fit(
@@ -988,6 +1046,7 @@ def run_experiment(
             "accuracy",
             "ndcg_at_5",
             "ndcg_at_10",
+            "concordance",
         ):
             values = np.array([m.get(key, np.nan) for m in fold_metrics], dtype=float)
             values = values[np.isfinite(values)]
@@ -1102,7 +1161,7 @@ def run_experiment(
             f"{model_columns[:6]} on the folds. The deployed estimator would "
             "be fitted on different columns than the ones that were validated."
         )
-    full_y = panel["target"].to_numpy()
+    full_y = _labels(model_spec, panel)
     final_estimator = _instantiate(
         estimator_cls, model_spec.estimator.params, model_spec.random_seed
     )

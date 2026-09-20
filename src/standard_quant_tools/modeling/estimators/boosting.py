@@ -31,6 +31,7 @@ import logging
 
 from sklearn.ensemble import GradientBoostingRegressor as _GradientBoostingRegressor
 
+from . import survival as _survival
 from .bounds import (
     ALPHA,
     LEARNING_RATE,
@@ -236,6 +237,10 @@ OPTIONAL_ESTIMATORS = {
     ("classification", "xgboost"): ("xgboost", _XGBOOST),
     ("ranking", "lightgbm_ranker"): ("lightgbm", _RANKER_LGBM),
     ("ranking", "xgboost_ranker"): ("xgboost", _RANKER_XGB),
+    # The two survival objectives, registered by estimators/survival.py
+    # under the same guard.
+    ("survival", "xgboost_cox"): ("xgboost", _survival._XGB_COX),
+    ("survival", "xgboost_aft"): ("xgboost", _survival._XGB_AFT),
 }
 
 

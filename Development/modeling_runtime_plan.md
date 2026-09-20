@@ -4,9 +4,14 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phases 0-6 are implemented and merged; phases 7-10 are
-proposals.** Phase 6 landed as the commit that carries this paragraph on
-2026-09-20 (`ModelSpec.quantiles` through a registry-declared
+**Status: phases 0-7 are implemented and merged; phases 8-10 are
+proposals.** Phase 7 landed as the commit that carries this paragraph on
+2026-09-20 (`task="survival"`, `cox_ph` in numpy plus `xgboost_cox` and
+`xgboost_aft` under the xgboost guard, Harrell's concordance,
+`TargetDefinition.censored`, `event_column` on external panels;
+`time_to_fill` now fits as survival only; the integrated Brier score is
+not reported because `scikit-survival` is neither installed nor
+declared). Phase 6 landed as `d8f8f66` on 2026-09-20 (`ModelSpec.quantiles` through a registry-declared
 `QuantileSupport`, `ModelSpec.intervals` as split conformal on purged
 date blocks, the distributional metrics, `distribution.json` and
 `quantile_models.joblib` on the model, scoring's columns, and

@@ -266,7 +266,7 @@ class TestTheCompatibilityMapCannotSkipItself:
         )
 
         with pytest.raises(ValidationError, match="no entry in the task/target"):
-            _check_task_target_compatibility("survival", "forward_return:5")
+            _check_task_target_compatibility("forecasting", "forward_return:5")
 
     def test_the_message_names_where_to_add_it(self) -> None:
         from standard_quant_tools.error import ValidationError
@@ -275,7 +275,7 @@ class TestTheCompatibilityMapCannotSkipItself:
         )
 
         with pytest.raises(ValidationError) as caught:
-            _check_task_target_compatibility("survival", "forward_return:5")
+            _check_task_target_compatibility("forecasting", "forward_return:5")
         assert "_check_task_target_compatibility" in str(caught.value)
         assert "modeling/engine.py" in str(caught.value)
 
@@ -295,6 +295,7 @@ class TestTheCompatibilityMapCannotSkipItself:
             "regression": "forward_return:5",
             "classification": "forward_direction:5",
             "ranking": "forward_return:5",
+            "survival": "time_to_fill:50",
         }
         missing = [task for task in TASKS if task not in compatible]
         assert not missing, (

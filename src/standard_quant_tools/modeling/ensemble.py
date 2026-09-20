@@ -112,6 +112,15 @@ def _check_tasks(tasks: Dict[str, str]) -> None:
     distinct = set(tasks.values())
     if len(distinct) == 1:
         return
+    if "survival" in distinct:
+        listing = ", ".join(f"{m}={t}" for m, t in sorted(tasks.items()))
+        raise ValidationError(
+            f"these models answer different questions: {listing}. A survival "
+            "model's score is a hazard ordering -- higher means the event "
+            "sooner -- not a return forecast, and averaging the two ranks "
+            "names by a quantity nobody asked for. Combine survival models "
+            "with survival models."
+        )
     if distinct <= set(SCORE_TASKS):
         return
     listing = ", ".join(f"{m}={t}" for m, t in sorted(tasks.items()))

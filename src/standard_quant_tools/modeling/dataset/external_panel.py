@@ -66,6 +66,16 @@ def target_column_for(name: str) -> str:
     return f"{TARGET_PREFIX}{name}"
 
 
+#: The event indicator beside a censored label, per declared target and on
+#: the plain name for the primary, as the label and its end date are.
+PANEL_EVENT = "event"
+EVENT_PREFIX = "event__"
+
+
+def event_column_for(name: str) -> str:
+    return f"{EVENT_PREFIX}{name}"
+
+
 def label_end_column_for(name: str) -> str:
     return f"{LABEL_END_PREFIX}{name}"
 
@@ -114,6 +124,13 @@ def _resolve_columns(
                 "fixed horizon; supply it only for one that can end early, "
                 "such as a triple barrier."
             )
+        events = target.get("event_column")
+        if events is not None and str(events) not in columns:
+            raise ValidationError(
+                f"target {target['name']!r} names event_column={events!r}, "
+                "which is not in the panel. It is the 0/1 column saying "
+                "whether the event the duration counts to was observed."
+            )
 
     rename = {date_column: PANEL_DATE, entity_column: PANEL_ENTITY}
     # The PRIMARY target is the first one, and it also lands on plain
@@ -124,6 +141,9 @@ def _resolve_columns(
         ends = target.get("label_end_column")
         if ends is not None:
             rename[str(ends)] = label_end_column_for(target["name"])
+        events = target.get("event_column")
+        if events is not None:
+            rename[str(events)] = event_column_for(target["name"])
 
     if feature_columns is None:
         features = [c for c in columns if c not in rename]
@@ -195,6 +215,25 @@ def load_external_panel(
             "column names, and two of one name would overwrite rather than "
             "add."
         )
+    # A censored label needs its event indicator declared with it. Without
+    # one, a row whose event was never seen would be read as an event at
+    # the horizon -- the bias the survival task exists to remove -- so the
+    # registration is refused rather than the label quietly fitted wrong.
+    from ..targets.registry import TARGET_REGISTRY
+
+    for target in targets:
+        definition = TARGET_REGISTRY.get(str(target.get("target_type") or ""))
+        if (
+            definition is not None
+            and definition.censored
+            and not target.get("event_column")
+        ):
+            raise ValidationError(
+                f"target {target['name']!r} is {definition.id!r}, which is "
+                "censored by construction: declare event_column, the 0/1 column "
+                "saying whether the event was observed. Without it every "
+                "unfilled row would be read as filling at the horizon."
+            )
 
     handle = _external.inspect(path, kind="model_panel", fmt=fmt)
     rename, features = _resolve_columns(
@@ -227,6 +266,19 @@ def load_external_panel(
         ends = label_end_column_for(target["name"])
         if ends in panel.columns:
             panel[ends] = pd.to_datetime(panel[ends], errors="coerce")
+        events = event_column_for(target["name"])
+        if events in panel.columns:
+            values = pd.to_numeric(panel[events], errors="coerce")
+            present = values.dropna()
+            if not present.isin([0, 1]).all():
+                sample = sorted(present[~present.isin([0, 1])].unique().tolist())[:5]
+                raise ValidationError(
+                    f"target {target['name']!r}: event_column="
+                    f"{target.get('event_column')!r} must hold 0 or 1 on every "
+                    f"row (observed or not); it holds {sample}. A time or a "
+                    "count is not an indicator."
+                )
+            panel[events] = values.astype(float)
 
     # The primary is duplicated onto the plain names, so a multi-horizon
     # panel still reads as an ordinary one to every consumer that has
@@ -236,6 +288,9 @@ def load_external_panel(
     primary_ends = label_end_column_for(primary)
     if primary_ends in panel.columns:
         panel[PANEL_LABEL_END] = panel[primary_ends]
+    primary_events = event_column_for(primary)
+    if primary_events in panel.columns:
+        panel[PANEL_EVENT] = panel[primary_events]
 
     panel[PANEL_ENTITY] = panel[PANEL_ENTITY].astype(str)
     entities = sorted(panel[PANEL_ENTITY].unique())

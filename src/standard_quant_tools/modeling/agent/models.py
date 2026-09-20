@@ -101,6 +101,16 @@ class ExternalTarget(BaseModel):
             "that can end early."
         ),
     )
+    event_column: Optional[str] = Field(
+        None,
+        description=(
+            "For a censored label such as time_to_fill: the 0/1 column saying "
+            "whether the event was observed (1) or the window ended first "
+            "(0). Required by a censored target_type and fitted by "
+            "task='survival'; without it an unfilled order would be read as "
+            "filling at the horizon."
+        ),
+    )
 
 
 class BuildEnsembleInput(BaseModel):
@@ -229,6 +239,13 @@ class RegisterExternalPanelInput(BaseModel):
     target_type: TargetType = Field(
         "forward_return",
         description="What the target column already holds. Recorded, not recomputed.",
+    )
+    event_column: Optional[str] = Field(
+        None,
+        description=(
+            "For a panel with ONE censored label: the 0/1 column saying whether "
+            "its event was observed. See ExternalTarget.event_column."
+        ),
     )
     interval: str = Field(
         "1d",

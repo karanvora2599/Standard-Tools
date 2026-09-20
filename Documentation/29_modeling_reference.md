@@ -43,7 +43,7 @@ them the running install actually has.
 | `volume.obv_roc` | entity | pit_safe | 20 | Close, Volume | `lookback=20` | Rate of change of On-Balance Volume over `lookback` bars. |
 | `volume.vwap_deviation` | entity | pit_safe | 20 | High, Low, Close, Volume | `period=20` | (Close - VWAP) / VWAP over a trailing `period`-bar window. |
 
-## Estimators (18 always available, 6 optional)
+## Estimators (19 always available, 8 optional)
 
 Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.md#parameter-values-are-bounded-not-just-named).
 
@@ -67,6 +67,7 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | regression | `random_forest` | `sklearn.ensemble._forest.RandomForestRegressor` | `max_depth`, `n_estimators` | sample weights, importances |
 | regression | `ridge` | `sklearn.linear_model._ridge.Ridge` | `alpha`, `fit_intercept`, `max_iter` | sample weights, coefficients |
 | regression | `sgd` | `sklearn.linear_model._stochastic_gradient.SGDRegressor` | `alpha`, `eta0`, `fit_intercept`, `l1_ratio`, `learning_rate`, `loss`, `max_iter`, `penalty`, `random_state`, `tol` | sample weights |
+| survival | `cox_ph` | `standard_quant_tools.modeling.estimators.survival.CoxPHRegressor` | `alpha`, `max_iter`, `tol` | sample weights, coefficients |
 
 ### Optional
 
@@ -78,6 +79,8 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | ranking | `xgboost_ranker` | *optional: `xgboost`* | `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_weight`, `n_estimators`, `reg_alpha`, `reg_lambda`, `subsample` |
 | regression | `lightgbm` | *optional: `lightgbm`* | `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_samples`, `n_estimators`, `num_leaves`, `reg_alpha`, `reg_lambda`, `subsample` |
 | regression | `xgboost` | *optional: `xgboost`* | `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_weight`, `n_estimators`, `reg_alpha`, `reg_lambda`, `subsample` |
+| survival | `xgboost_aft` | *optional: `xgboost`* | `aft_loss_distribution`, `aft_loss_distribution_scale`, `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_weight`, `n_estimators`, `reg_alpha`, `reg_lambda`, `subsample` |
+| survival | `xgboost_cox` | *optional: `xgboost`* | `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_weight`, `n_estimators`, `reg_alpha`, `reg_lambda`, `subsample` |
 
 ## Preprocessing steps (8)
 
@@ -114,7 +117,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `future_trade_intensity` | regression, ranking | external only | continuous | Trades per unit time over the horizon. Distinct from volume: one block and two hundred odd lots are the same volume and completely different information. |
 | `future_volume` | regression, ranking | external only | continuous | Traded volume over the horizon. Bar volume can approximate this at daily frequency, but not at the horizons this exists for, where the question is how much prints in the next thirty seconds. |
 | `next_mid_direction` | classification | external only | discrete | Whether the midpoint's next move is up or down. |
-| `time_to_fill` | regression | external only | continuous | How long that order waits before filling. CENSORED by construction -- an order that never fills has no time, and recording it as the horizon rather than as unfilled biases every estimate toward patience. |
+| `time_to_fill` | survival | external only | continuous | How long that order waits before filling, fitted as a SURVIVAL task: the panel carries an `event` column beside it saying whether the fill was observed, and an order that never filled is censored at the horizon rather than recorded as filling then. A regression on the duration alone is refused, because it reads every censored row as a fill at the horizon and biases every estimate toward patience. |
 | `triple_barrier` | classification | yes | discrete | Which barrier is touched first: up, down, or neither. |
 
 ## Spec options
@@ -127,7 +130,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `PreprocessingSpec.normalization` | `pooled`, `cross_sectional` |
 | `WeightingSpec.method` | `none`, `label_uniqueness`, `time_decay`, `uniqueness_and_time_decay` |
 | `SearchSpec.method` | `grid`, `random`, `tpe` |
-| `SearchSpec.scoring` | `cs_rank_ic`, `cs_ic`, `r2`, `neg_mae`, `accuracy`, `auc` |
+| `SearchSpec.scoring` | `cs_rank_ic`, `cs_ic`, `r2`, `neg_mae`, `accuracy`, `auc`, `concordance` |
 | `EstimatorSpec.calibration` | `none`, `isotonic`, `sigmoid` |
 | `PredictionTransformSpec.method` | `sign`, `cross_sectional_rank`, `cross_sectional_zscore`, `top_bottom_quantile`, `uncertainty_scaled` |
 | `PredictionTransformSpec.rebalance_frequency` | `daily`, `weekly`, `monthly` |

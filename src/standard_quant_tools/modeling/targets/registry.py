@@ -42,6 +42,19 @@ def register_target(definition: TargetDefinition, *, overwrite: bool = False) ->
             f"target {definition.id!r} names no task, so it could be declared "
             "and never fitted."
         )
+    if definition.censored and "survival" not in definition.tasks:
+        raise ValidationError(
+            f"target {definition.id!r} is declared censored but names tasks "
+            f"{list(definition.tasks)}. A censored duration is fitted by the "
+            "survival task, which reads the event indicator; any other task "
+            "would read a censored row as an event at the horizon."
+        )
+    if definition.censored and set(definition.tasks) - {"survival"}:
+        raise ValidationError(
+            f"target {definition.id!r} is censored and names "
+            f"{sorted(set(definition.tasks) - {'survival'})} beside survival. A "
+            "task that cannot read the event indicator cannot fit it honestly."
+        )
     unknown = [t for t in definition.tasks if t not in TASKS]
     if unknown:
         raise ValidationError(

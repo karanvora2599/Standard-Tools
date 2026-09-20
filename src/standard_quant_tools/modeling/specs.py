@@ -1049,12 +1049,16 @@ class SearchSpec(BaseModel):
     inner_splits: int = Field(
         3, ge=2, description="Inner walk-forward folds used to score a candidate."
     )
-    scoring: Literal["cs_rank_ic", "cs_ic", "r2", "neg_mae", "accuracy", "auc"] = Field(
+    scoring: Literal[
+        "cs_rank_ic", "cs_ic", "r2", "neg_mae", "accuracy", "auc", "concordance"
+    ] = Field(
         "cs_rank_ic",
         description="What the search maximizes. Defaults to cross-sectional "
         "rank IC because that is what the outer report leads with — selecting "
         "on r2 and then quoting rank IC optimizes one thing and reports "
-        "another.",
+        "another. 'concordance' is the survival task's score and the only one "
+        "it accepts: an IC of a risk against a censored duration measures "
+        "nothing.",
     )
 
     @model_validator(mode="after")
@@ -1288,6 +1292,24 @@ class ModelSpec(BaseModel):
                     "not something a model fits."
                 )
         return levels
+
+    @model_validator(mode="after")
+    def _search_scoring_fits_the_task(self) -> "ModelSpec":
+        if self.search is None:
+            return self
+        if self.task == "survival" and self.search.scoring != "concordance":
+            raise ValueError(
+                f"task='survival' selects on search.scoring='concordance'; "
+                f"{self.search.scoring!r} correlates a risk score with a "
+                "censored duration, which measures nothing about the ordering "
+                "the task is judged on."
+            )
+        if self.task != "survival" and self.search.scoring == "concordance":
+            raise ValueError(
+                "search.scoring='concordance' is the survival task's score; "
+                f"task={self.task!r} has no event indicator to compute it from."
+            )
+        return self
 
     @model_validator(mode="after")
     def _distribution_is_a_regression_question(self) -> "ModelSpec":

@@ -7,6 +7,7 @@ from . import (  # noqa: F401  (registration side effect)
     neural,
     online,
     regression,
+    survival,
     trees,
 )
 from .registry import (

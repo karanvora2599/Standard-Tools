@@ -92,7 +92,9 @@ def _planted_labels():
             buildable=True,
             continuous=True,
             builder=_residual_return,
-            param_schema=EstimatorParamSchema(bounds={"beta": ParamBound("float", 0.0, 3.0)}),
+            param_schema=EstimatorParamSchema(
+                bounds={"beta": ParamBound("float", 0.0, 3.0)}
+            ),
             default_params={"beta": 1.0},
         ),
         overwrite=True,
@@ -162,7 +164,9 @@ class TestRegistration:
             )
 
     def test_an_external_label_must_not_have_one(self):
-        with pytest.raises(ValidationError, match="external-only and carries a builder"):
+        with pytest.raises(
+            ValidationError, match="external-only and carries a builder"
+        ):
             register_target(
                 TargetDefinition(
                     id="test.fake_fill",
@@ -180,7 +184,7 @@ class TestRegistration:
                 TargetDefinition(
                     id="test.bad_task",
                     description="Names a task that the library does not fit.",
-                    tasks=("survival",),
+                    tasks=("forecasting",),
                     buildable=True,
                     continuous=True,
                     builder=_next_bar_sign,
@@ -230,7 +234,11 @@ class TestBuilding:
         self, patched_multi_factory
     ):
         built = build_dataset(
-            _spec(TargetSpec(type="test.residual_return", horizon=20, params={"beta": 0.5}))
+            _spec(
+                TargetSpec(
+                    type="test.residual_return", horizon=20, params={"beta": 0.5}
+                )
+            )
         )
         panel = built["panel"]
         rows = panel[panel["entity"] == "AAA"].set_index("date")
@@ -240,21 +248,29 @@ class TestBuilding:
         common = rows.index.intersection(expected.index)
         assert len(common) > 100
         np.testing.assert_allclose(
-            rows.loc[common, "target"].to_numpy(), expected.loc[common].to_numpy(), atol=1e-12
+            rows.loc[common, "target"].to_numpy(),
+            expected.loc[common].to_numpy(),
+            atol=1e-12,
         )
         assert built["target_id"] == "test.residual_return:20"
 
     def test_a_label_that_needs_high_and_low_is_refused_a_bare_close(self):
         close = make_ohlcv("AAA")["Close"]
-        with pytest.raises(ValidationError, match=r"reads column\(s\) \['High', 'Low'\]"):
+        with pytest.raises(
+            ValidationError, match=r"reads column\(s\) \['High', 'Low'\]"
+        ):
             build_target(close, TargetSpec(type="test.range", horizon=1))
         # And builds from the frame.
-        series = build_target(make_ohlcv("AAA"), TargetSpec(type="test.range", horizon=1))
+        series = build_target(
+            make_ohlcv("AAA"), TargetSpec(type="test.range", horizon=1)
+        )
         assert series.notna().all()
 
     def test_the_default_label_end_is_the_horizon(self):
         ohlcv = make_ohlcv("AAA")
-        ends = build_label_end_dates(ohlcv, TargetSpec(type="test.residual_return", horizon=20))
+        ends = build_label_end_dates(
+            ohlcv, TargetSpec(type="test.residual_return", horizon=20)
+        )
         assert ends.iloc[0] == ohlcv.index[20]
         assert ends.iloc[-20:].isna().all()
 
@@ -304,7 +320,9 @@ class TestTheEngine:
 
     def test_a_task_the_label_did_not_name_is_refused(self, patched_multi_factory):
         with pytest.raises(ValidationError, match="expects one of"):
-            _check_task_target_compatibility("classification", "test.residual_return:20")
+            _check_task_target_compatibility(
+                "classification", "test.residual_return:20"
+            )
         _check_task_target_compatibility("ranking", "test.residual_return:20")
 
     def test_validate_model_spec_reads_the_registry(self, patched_multi_factory):
@@ -342,7 +360,11 @@ class TestTheEngine:
     def test_a_custom_label_trains_end_to_end(self, patched_multi_factory):
         result = run_experiment(
             build_dataset(
-                _spec(TargetSpec(type="test.residual_return", horizon=20, params={"beta": 0.5}))
+                _spec(
+                    TargetSpec(
+                        type="test.residual_return", horizon=20, params={"beta": 0.5}
+                    )
+                )
             ),
             ModelSpec(
                 task="regression",

@@ -64,7 +64,9 @@ class FeatureScope(str, Enum):
 # the feature-id path cannot drift apart: the alias path was validated and
 # the id path was not, which let a custom feature registered as id="target"
 # produce a column that shadowed the panel's supervised target.
-RESERVED_PANEL_COLUMNS = frozenset({"date", "entity", "target", "label_end_date"})
+RESERVED_PANEL_COLUMNS = frozenset(
+    {"date", "entity", "target", "label_end_date", "event"}
+)
 
 
 # Bars per year, by interval, for annualizing a per-bar volatility.

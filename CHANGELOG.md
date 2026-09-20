@@ -1,5 +1,46 @@
 # Changelog
 
+## The label said it was censored, and it was fitted as though it were not
+
+Phase 7 of `Development/modeling_runtime_plan.md`.
+
+`time_to_fill` was declared censored in its own description -- an order
+that never fills has no time, and recording it as the horizon biases every
+estimate toward patience -- and was registered as a regression label,
+which is exactly that recording. Nothing in the runtime could read an
+event indicator, so nothing could fit the label as what it was.
+
+**`task="survival"`** fits a duration and whether its event was seen.
+`SurvivalAdapter` passes the `(n, 2)` label through and returns a RISK,
+higher meaning sooner, so the bridge and the portfolio path consume it as
+a score; the engine reads `(target, event)` through one `_labels` reader
+shared by the fold loop, the inner search closure and the refit, refuses
+a panel without the indicator or without an observed event, and skips a
+window with no event as it skips a single-class window. `cox_ph` is Cox's
+proportional hazards on the Breslow partial likelihood by Newton's method
+in numpy, so the task exists on every install and carries coefficients;
+it recovers a planted beta to 0.12 and the truth's own out-of-sample
+concordance to 0.02. `xgboost_cox` (the objective that reads a negative
+label as censored) and `xgboost_aft` (wrapped over the native API,
+because the censoring is passed as label bounds) register under the
+xgboost guard and are declared in the reference either way.
+
+**Harrell's concordance**, own implementation, is the metric: of the pairs
+whose earlier row's event was seen, the fraction the model ordered right,
+pooled over the fold and per date; R2 and MAE are not reported for a
+score with no units. A search selects on `scoring="concordance"` and the
+spec refuses any other pairing.
+
+**The registry now says what a censored label needs.** `TargetDefinition`
+gains `censored`, `time_to_fill`'s tasks become `("survival",)` -- a
+deliberate break, since the regression is the thing being removed --
+and the registry refuses a censored label naming any other task. An
+external panel declares `event_column` per target, checked to be 0/1 and
+carried as `event` (`event__<name>` per target, the chosen one on the
+plain name, as the label and its end date travel); registering a censored
+target without one is refused by name. `event` joins the reserved panel
+columns. An ensemble refuses to average a hazard with a return.
+
 ## A confident +2% and a wild +2% were sized the same
 
 Phase 6 of `Development/modeling_runtime_plan.md`.

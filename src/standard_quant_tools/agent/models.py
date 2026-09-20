@@ -5038,14 +5038,18 @@ class ConvertReferenceInput(BaseModel):
     # the two equal instead, so a task added on one side fails on the
     # other rather than silently making a model untradeable -- which is
     # what the missing 'ranking' did here.
-    task: Optional[Literal["regression", "classification", "ranking"]] = Field(
-        None,
-        description=(
-            "predictions -> signal_panel: how to read the prediction "
-            "column. 'regression' and 'ranking' are read as continuous "
-            "scores by sign; 'classification' against proba_threshold. "
-            "Required unless the reference carries a model_id."
-        ),
+    task: Optional[Literal["regression", "classification", "ranking", "survival"]] = (
+        Field(
+            None,
+            description=(
+                "predictions -> signal_panel: how to read the prediction "
+                "column. 'regression', 'ranking' and 'survival' are read as "
+                "continuous scores by sign (a survival score is a risk: higher "
+                "means the event sooner); 'classification' against "
+                "proba_threshold. Required unless the reference carries a "
+                "model_id."
+            ),
+        )
     )
     construction_method: str = Field(
         "rank_weighted",

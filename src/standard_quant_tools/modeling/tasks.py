@@ -15,14 +15,22 @@ targets register at import, `specs` reads the registry to validate a
 
 from typing import Literal
 
-TASKS = ("regression", "classification", "ranking")
-Task = Literal["regression", "classification", "ranking"]
+#: `survival` fits a DURATION that may be right-censored: the label is
+#: how long until an event -- a fill, a default, a barrier touch -- with
+#: an indicator saying whether the event was observed or the window ended
+#: first. A regression on that label reads every censored row as an event
+#: at the horizon, which is the bias the task exists to remove.
+TASKS = ("regression", "classification", "ranking", "survival")
+Task = Literal["regression", "classification", "ranking", "survival"]
 
 #: Tasks whose prediction is a CONTINUOUS SCORE rather than a probability.
 #: A ranker emits a relative score exactly as a regressor emits a
 #: magnitude, so everything downstream that asks "which side is this" reads
-#: the sign of both the same way. Classification is the odd one out, being
-#: bounded in [0, 1] with a decision boundary in the middle.
-SCORE_TASKS = ("regression", "ranking")
+#: the sign of both the same way. A survival model emits a RISK score --
+#: higher means the event sooner -- which is a continuous ordering too,
+#: though of a different question, which is why an ensemble refuses to
+#: average it with a return forecast. Classification is the odd one out,
+#: being bounded in [0, 1] with a decision boundary in the middle.
+SCORE_TASKS = ("regression", "ranking", "survival")
 
 __all__ = ["SCORE_TASKS", "TASKS", "Task"]

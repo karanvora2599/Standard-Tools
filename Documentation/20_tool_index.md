@@ -36,13 +36,13 @@ advertises 155 of the 209 below.
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `modeling` | 20 | 78 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 20 | 79 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 9 | 28 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `feature_lab` | 9 | 29 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **209** | | | |
 
 ---
@@ -856,7 +856,7 @@ Every registered model, newest first, with its task, estimator, headline out-of-
 Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have.
 
 **Required:** `path`  
-**Optional:** `horizon`, `targets`, `target_type`, `interval`, `date_column`, `entity_column`, `target_column`, `label_end_column`, `feature_columns`, `source`, `file_format`
+**Optional:** `horizon`, `targets`, `target_type`, `event_column`, `interval`, `date_column`, `entity_column`, `target_column`, `label_end_column`, `feature_columns`, `source`, `file_format`
 
 #### `run_model_experiment`
 

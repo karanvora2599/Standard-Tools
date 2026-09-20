@@ -186,7 +186,9 @@ def _stage_rank(panel: pd.DataFrame, spec: Any, target_col: str) -> pd.DataFrame
     return out
 
 
-def _stage_market_neutral(panel: pd.DataFrame, spec: Any, target_col: str) -> pd.DataFrame:
+def _stage_market_neutral(
+    panel: pd.DataFrame, spec: Any, target_col: str
+) -> pd.DataFrame:
     """The return minus that date's equal-weighted mean across entities:
     the market factor taken out of the LABEL rather than left in and
     hoped away. A one-name cross-section has a market-relative return of
@@ -358,12 +360,15 @@ for _id, _tasks, _continuous, _description in (
     ),
     (
         "time_to_fill",
-        ("regression",),
+        ("survival",),
         True,
-        "How long that order waits before filling. CENSORED by "
-        "construction -- an order that never fills has no time, and "
-        "recording it as the horizon rather than as unfilled biases "
-        "every estimate toward patience.",
+        "How long that order waits before filling, fitted as a SURVIVAL "
+        "task: the panel carries an `event` column beside it saying whether "
+        "the fill was observed, and an order that never filled is censored "
+        "at the horizon rather than recorded as filling then. A regression "
+        "on the duration alone is refused, because it reads every censored "
+        "row as a fill at the horizon and biases every estimate toward "
+        "patience.",
     ),
     (
         "adverse_selection",
@@ -380,6 +385,10 @@ for _id, _tasks, _continuous, _description in (
             tasks=_tasks,
             buildable=False,
             continuous=_continuous,
+            # A duration is censored exactly when its task is survival:
+            # the two are one declaration, and the registry refuses them
+            # apart.
+            censored="survival" in _tasks,
         )
     )
 

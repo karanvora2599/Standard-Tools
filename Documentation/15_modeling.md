@@ -1454,7 +1454,7 @@ needs the book. No column of closing prices contains any of them.
 | `next_mid_direction` | classification | Whether the midpoint's next move is up or down |
 | `future_spread` | regression, ranking | The quoted spread at t+horizon — what it will COST to cross, not where the price goes |
 | `fill_probability` | classification | Whether a passive order at a stated level fills within the horizon |
-| `time_to_fill` | regression | How long it waits. **Censored by construction** — an order that never fills has no time, and recording it as the horizon biases every estimate toward patience |
+| `time_to_fill` | survival | How long it waits. **Censored by construction** — an order that never fills has no time, so the panel declares an `event_column` beside it and the [survival task](#survival-models) fits the pair; a regression on the duration alone is refused |
 | `adverse_selection` | regression, ranking | How far the mid moves against a fill after it happens |
 
 `build_target` **refuses** every one of them by name, and says to compute it
@@ -2073,6 +2073,73 @@ ridge beat everything — that panel's ordering is linear in the features and
 rank IC is invariant to the monotone cubing, so ridge recovers it exactly.
 Reported rather than tuned away: this is a model family worth having
 available, not a free improvement.
+
+---
+
+## Survival models
+
+`time_to_fill` was declared censored in its own description and fitted as
+a regression, which the description said biases every estimate: an order
+that never filled has no time, and recording it as the horizon teaches
+the model that patience is rewarded. `task="survival"` fits the label the
+label actually is — a duration and an indicator of whether the event was
+seen — and every estimator here emits a **risk score, higher meaning
+sooner**, so the bridge and the portfolio path read it like any other
+score.
+
+```python
+register_external_panel(RegisterExternalPanelInput(
+    path="fills.parquet", interval="1s",
+    targets=[{"name": "ttf", "column": "seconds_to_fill", "horizon": 50,
+              "target_type": "time_to_fill", "event_column": "filled"}],
+))
+ModelSpec(task="survival", estimator=EstimatorSpec(type="cox_ph"),
+          validation=ValidationSpec(train_window=2000, test_window=500, embargo=50))
+```
+
+**The label.** An external panel declares `event_column` per target, a
+0/1 column the registration checks and carries onto the panel as `event`
+(per target as `event__<name>`, the chosen one on the plain name, exactly
+as `target` and `label_end_date` travel). A target whose registry entry is
+`censored` — `time_to_fill` — cannot be registered without one, and the
+target registry refuses a censored label that names any task but
+survival. The engine reads `(target, event)` into one `(n, 2)` label
+through a single reader shared by the fold loop, the inner search and the
+refit, refuses a panel without the indicator or without a single observed
+event, and skips a fold whose training window saw no event the way it
+skips a single-class window for a classifier.
+
+**Estimators.** `cox_ph` is Cox's proportional-hazards model on the
+Breslow partial likelihood by Newton's method, written here in numpy so
+the task exists on every install and has a linear, coefficient-bearing
+baseline; it recovers a planted `beta = (1, −0.5, 0)` to within 0.12 on
+6,000 rows and reaches the truth's own out-of-sample concordance within
+0.02. `xgboost_cox` (the `survival:cox` objective, which reads a negative
+label as censored) and `xgboost_aft` (accelerated failure time, wrapped
+over the native API because the censoring is passed as label bounds)
+register when xgboost imports and are declared in the reference either
+way. Every constructor names its parameters, for the reason
+`QuantileGradientBoostingRegressor` documents.
+
+**The metric.** Harrell's concordance index, own implementation: of the
+pairs where the earlier row's event was seen, the fraction the model gave
+the higher risk, ties in risk counting half. A censored row can only be
+the *later* member of a pair, which is where the censoring enters the
+metric and why R² on the same label means nothing — it is not reported.
+`concordance` is pooled over the fold; `cs_concordance_mean` is the same
+question asked of each date's rows alone, and is the headline. A search
+selects on `scoring="concordance"` and on nothing else: an IC of a risk
+against a censored duration measures nothing. The integrated Brier score
+is not reported; it needs a survival function, which only a baseline
+hazard supplies, and `scikit-survival` is neither installed nor
+declared.
+
+**What a risk is not.** An ensemble refuses to average a survival model
+with a regressor or a ranker: a hazard ordering says which name's event
+comes first, not which name's return is larger, and `rank_mean` of the
+two ranks names by a quantity nobody asked for. `fill_probability` stays
+a classification label; deriving it from a survival curve at a horizon is
+a later convenience, not a change to what the label is.
 
 ---
 
