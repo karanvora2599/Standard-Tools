@@ -715,13 +715,19 @@ value on the last 20 bars of each entity, and those rows survive as NaN
 rather than costing the 1-bar model its data; the experiment drops its own
 when it selects.
 
-> **One upgrade note.** `dataset_spec_hash` covers every field of the spec,
-> so adding `horizons` changes the hash of every spec — including ones
-> already persisted. A dataset built before this release will fail
-> `run_model_experiment`'s spec-hash check even though nothing was edited.
-> The remedy is the one the message already gives, rebuild the dataset, and
-> the message now names an upgrade as a cause so it does not read as an
-> accusation.
+> **One upgrade note, and the versioning it led to.** The spec hash used
+> to cover every field of the spec, so adding `horizons` changed the hash
+> of every spec — including ones already persisted — and a dataset built
+> before that release failed `run_model_experiment`'s spec-hash check
+> although nothing had been edited. The hash is versioned now:
+> `dataset_meta.json` records `spec_hash_version`, and the verifier
+> recomputes with the version recorded. Version 2, which every dataset
+> built today records, excludes default-valued fields, so a field nobody
+> set does not enter a dataset's identity and the next additive field
+> costs no rebuild. A dataset recorded under version 1 keeps verifying
+> under version 1 until the next field is added, at which point the
+> message names the upgrade as the cause and rebuilding records a
+> version-2 hash.
 
 
 **What this is not.** One estimator emitting several horizons at once —

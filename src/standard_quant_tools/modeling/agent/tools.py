@@ -45,6 +45,7 @@ from standard_quant_tools.error import ValidationError
 from .. import artifacts as _artifacts
 from ..analysis import build_feature_report
 from ..capabilities import modeling_capabilities
+from ..dataset.builder import SPEC_HASH_VERSION
 from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
 from ..engine import run_experiment as _run_experiment
@@ -194,8 +195,10 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             "data_hash": built["data_hash"],
             # spec_hash was computed by build_dataset and then discarded.
             # Persisted so a model can be tied to the exact feature/target
-            # DEFINITION, not just to the resulting data.
+            # DEFINITION, not just to the resulting data. The version says
+            # which hash form it is, so the verifier recomputes the same one.
             "spec_hash": built["spec_hash"],
+            "spec_hash_version": SPEC_HASH_VERSION,
             "entities": built["entities"],
             # Persisted so run_model_experiment can carry them into the
             # manifest without re-reading dataset_spec.json, and so the
@@ -367,6 +370,7 @@ def register_external_panel(
             "targets": declared,
             "data_hash": hash_dataframe(panel),
             "spec_hash": dataset_spec_hash(spec),
+            "spec_hash_version": SPEC_HASH_VERSION,
             "entities": loaded["entities"],
             "provider": "external",
             "interval": input_data.interval,
@@ -637,21 +641,33 @@ def run_model_experiment(
     # spec left exactly the mismatch the self-contained-model work existed to
     # prevent.
     stored_spec_hash = meta.get("spec_hash")
+    # The version the stored hash was written under. A dataset persisted
+    # before versions existed is version 1, which hashed every field; the
+    # verifier recomputes with THAT version, so an old dataset is not
+    # refused for having been built under an older form of the check.
+    spec_hash_version = int(meta.get("spec_hash_version", 1))
     spec_dict = _artifacts.load_json(str(directory / "dataset_spec.json"))
     if stored_spec_hash is not None:
-        actual_spec_hash = dataset_spec_hash(DatasetSpec(**spec_dict))
+        actual_spec_hash = dataset_spec_hash(
+            DatasetSpec(**spec_dict), version=spec_hash_version
+        )
         if actual_spec_hash != stored_spec_hash:
             raise ValidationError(
                 f"dataset {input_data.dataset_id!r}: dataset_spec.json no longer matches "
                 f"the hash recorded when it was built (expected {stored_spec_hash}, found "
-                f"{actual_spec_hash}). The panel was built from the original spec, so "
-                "training would register a model whose bundled feature definitions differ "
-                "from the data it learned on — rebuild the dataset instead. "
-                "An UPGRADE can also cause this without anything being edited: "
-                "the hash covers every field of the spec, so a release that "
-                "adds one (TargetSpec.horizons did) changes it for every "
-                "dataset persisted before that release. Rebuilding is the "
-                "same remedy either way."
+                f"{actual_spec_hash}, hash version {spec_hash_version}). The panel was "
+                "built from the original spec, so training would register a model whose "
+                "bundled feature definitions differ from the data it learned on — rebuild "
+                "the dataset instead. "
+                + (
+                    "An UPGRADE can also cause this for a version-1 hash without "
+                    "anything being edited: that form covered every field of the "
+                    "spec, so a release that added one changed it for every dataset "
+                    "persisted earlier. Rebuilding records a version-2 hash, which "
+                    "excludes fields nobody set and survives the next such release."
+                    if spec_hash_version == 1
+                    else ""
+                )
             )
 
     dataset = {
@@ -660,6 +676,7 @@ def run_model_experiment(
         "target_id": selected_target_id,
         "data_hash": meta["data_hash"],
         "spec_hash": stored_spec_hash,
+        "spec_hash_version": spec_hash_version if stored_spec_hash is not None else None,
         # Bundled into the model so it becomes self-contained -- see
         # registry.model_registry.save_model.
         "dataset_spec": spec_dict,

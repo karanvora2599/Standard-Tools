@@ -237,7 +237,14 @@ def _check_universe_output(
     return result
 
 
-def dataset_spec_hash(spec: DatasetSpec) -> str:
+#: The hash form a dataset built today records. `dataset_meta.json` carries
+#: it as `spec_hash_version`, and the verifier recomputes with the version
+#: recorded rather than the current one, so a dataset keeps verifying
+#: under the form it was written in.
+SPEC_HASH_VERSION = 2
+
+
+def dataset_spec_hash(spec: DatasetSpec, version: int = SPEC_HASH_VERSION) -> str:
     """
     Canonical content hash of a DatasetSpec.
 
@@ -250,8 +257,27 @@ def dataset_spec_hash(spec: DatasetSpec) -> str:
     model_dump_json() is canonical enough here because pydantic serializes
     a model's fields in declaration order, so the same spec always produces
     the same JSON regardless of the order kwargs were passed in.
+
+    TWO VERSIONS, and why the second exists. Version 1 hashed every field.
+    That made the hash change for every persisted dataset whenever a field
+    with a default was ADDED to the spec -- `horizons` did exactly that, and
+    every dataset built before it failed the verify step although nothing
+    had been edited. Version 2 excludes default-valued fields, so a field
+    nobody set does not enter the identity of a dataset built before it
+    existed; a value typed out equal to its default is the same spec as one
+    omitted, and hashes the same. A field that WAS set still changes it.
+    Version 1 remains callable so a dataset recorded under it verifies.
     """
-    return hashlib.sha256(spec.model_dump_json().encode()).hexdigest()
+    if version == 1:
+        payload = spec.model_dump_json()
+    elif version == 2:
+        payload = spec.model_dump_json(exclude_defaults=True)
+    else:
+        raise ValidationError(
+            f"dataset_spec_hash: unknown spec hash version {version!r}; this "
+            f"library writes version {SPEC_HASH_VERSION} and reads 1 and 2."
+        )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, Any]:

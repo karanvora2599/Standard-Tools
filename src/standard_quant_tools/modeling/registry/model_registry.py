@@ -50,6 +50,7 @@ def save_model(
     training_information_cutoff: Optional[str] = None,
     dataset_spec: Optional[Dict[str, Any]] = None,
     dataset_spec_hash: Optional[str] = None,
+    dataset_spec_hash_version: Optional[int] = None,
     validation_report: Optional[Dict[str, Any]] = None,
     dataset_warnings: Optional[List[str]] = None,
     preprocessing: Optional[Dict[str, Any]] = None,
@@ -139,6 +140,7 @@ def save_model(
         oos_predictions_uri=oos_predictions_uri,
         random_seed=model_spec.random_seed,
         dataset_spec_hash=dataset_spec_hash,
+        dataset_spec_hash_version=dataset_spec_hash_version,
         content_hashes=content_hashes,
         # Derived from the DatasetSpec's own feature entries, so an aliased
         # column resolves through its real registry id instead of having

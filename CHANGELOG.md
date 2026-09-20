@@ -1,5 +1,33 @@
 # Changelog
 
+## Adding a field to the spec invalidated every persisted dataset, so the hash is versioned
+
+Phase 0 of `Development/modeling_runtime_plan.md`, fourth commit.
+
+`dataset_spec_hash` hashed every field of `DatasetSpec`. A field added with
+a default therefore changed the hash of every spec already on disk, and
+`run_model_experiment` refused every dataset built before the release --
+`15_modeling.md`'s upgrade note records it happening for `horizons`. The
+plan adds a missing-data policy, a calendar and point-in-time features at
+the dataset level; each would have been another mass invalidation.
+
+**Version 2 excludes default-valued fields.** A field nobody set does not
+enter a dataset's identity, so the next additive field costs no rebuild; a
+value typed out equal to its default is the same spec as one omitted and
+hashes the same; a field that was set still changes it. The test plants the
+next release: a subclass of `DatasetSpec` with one more defaulted field
+hashes identically under version 2 and differently under version 1.
+
+**The version travels with the dataset.** `dataset_meta.json` records
+`spec_hash_version` from both build paths, `run_model_experiment` recomputes
+with the version recorded rather than the current one, and the manifest
+carries `dataset_spec_hash_version` beside the hash. A dataset persisted
+before versions existed is read as version 1 and keeps verifying under
+version 1; the refusal for a version-1 mismatch names an upgrade as a
+possible cause and says that rebuilding records a version-2 hash. An edited
+spec is refused under either version, which the tests check in both
+directions.
+
 ## A model validated cross-sectionally was deployed on the pooled statistics, and the manifest could not say so
 
 Phase 0 of `Development/modeling_runtime_plan.md`, third commit. The

@@ -865,6 +865,7 @@ def run_experiment(
         # or on its spec file not having been edited since training.
         dataset_spec=dataset.get("dataset_spec"),
         dataset_spec_hash=dataset.get("spec_hash"),
+        dataset_spec_hash_version=dataset.get("spec_hash_version"),
         # Carried from the dataset build onto the model: survivorship,
         # revised history, partial coverage and interval caveats belong
         # next to the OOS metrics they qualify, not only in the

@@ -75,6 +75,10 @@ class ModelManifest(BaseModel):
     # so a model can be tied to the exact feature/target definition it was
     # trained under, independently of the mutable dataset_spec.json file.
     dataset_spec_hash: Optional[str] = None
+    # Which form of the spec hash `dataset_spec_hash` is -- see
+    # dataset.builder.dataset_spec_hash. None for a model whose dataset
+    # never recorded one, which the verifier treats as version 1.
+    dataset_spec_hash_version: Optional[int] = None
     # {filename: content hash} for every artifact in this model's own
     # directory, plus its OOS predictions. Verified on load so an edited
     # spec, tampered preprocessing stats or swapped estimator binary is
