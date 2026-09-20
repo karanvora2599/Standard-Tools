@@ -30,7 +30,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 from .metrics import cross_sectional_ic
-from .walk_forward import WalkForwardSplit
+from .walk_forward import WalkForwardSplit, label_overlap_mask
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,9 @@ def _score(
     raise ValidationError(f"unknown scoring metric {scoring!r}")
 
 
-def _inner_splitter(n_dates: int, inner_splits: int) -> Optional[WalkForwardSplit]:
+def _inner_splitter(
+    n_dates: int, inner_splits: int, embargo: int = 0
+) -> Optional[WalkForwardSplit]:
     """
     Size an inner walk-forward so it yields exactly `inner_splits` folds.
 
@@ -102,15 +104,23 @@ def _inner_splitter(n_dates: int, inner_splits: int) -> Optional[WalkForwardSpli
     many times — the caller then skips the search for that fold rather
     than silently searching on one or two dates, which would select on
     noise and be worse than not searching at all.
+
+    `embargo` is the outer spec's, applied between every inner train and
+    test window. It was hardwired to zero, so a spec that asked for a
+    five-bar gap on its outer folds got none on the folds that CHOSE its
+    parameters. The embargo is taken off the axis before it is divided, so
+    the fold count is still exactly `inner_splits`: the last fold ends on
+    the last date and every earlier one steps back by one test window.
     """
-    test_window = n_dates // (inner_splits + 1)
+    usable = n_dates - int(embargo)
+    test_window = usable // (inner_splits + 1)
     if test_window < 1:
         return None
-    train_window = n_dates - inner_splits * test_window
+    train_window = usable - inner_splits * test_window
     if train_window < 1:
         return None
     return WalkForwardSplit(
-        train_window=train_window, test_window=test_window, embargo=0
+        train_window=train_window, test_window=test_window, embargo=int(embargo)
     )
 
 
@@ -126,6 +136,8 @@ def search_best_params(
         [Dict[str, Any], pd.DataFrame, pd.DataFrame],
         Tuple[np.ndarray, Optional[np.ndarray]],
     ],
+    embargo: int = 0,
+    label_end: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Choose estimator parameters using only `train_frame`.
@@ -136,37 +148,67 @@ def search_best_params(
     its data differently from the final fit would select for the wrong
     thing.
 
+    `embargo` and `label_end` are the outer loop's leakage discipline,
+    applied to the inner folds. `label_end` is one entry per row of
+    `train_frame`, the date its label finishes observing; a training row
+    whose label reaches into an inner test window is purged from that
+    fold, by the same `label_overlap_mask` the engine applies. Without it
+    the inner folds were cut on dates alone, and the candidate that won was
+    the one that scored best on rows whose labels had already seen the
+    window they were scored against.
+
     Returns (best_params, report). The report carries every candidate's
     score, because "which alpha won" is much less informative than "the
     top four alphas were within 0.001 of each other", and only the second
-    tells a reader the search did not actually find anything.
+    tells a reader the search did not actually find anything. It also
+    records the embargo and how many rows each inner fold purged, so a
+    reader can see the selection ran under the discipline it claims.
     """
+    if label_end is not None and len(label_end) != len(train_frame):
+        raise ValidationError(
+            f"search_best_params: label_end has {len(label_end)} entries for "
+            f"{len(train_frame)} training rows; it must be one per row."
+        )
     dates = pd.Index(sorted(train_frame["date"].unique()))
-    splitter = _inner_splitter(len(dates), search_spec.inner_splits)
+    splitter = _inner_splitter(len(dates), search_spec.inner_splits, embargo)
     if splitter is None:
         return dict(base_params), {
             "searched": False,
             "reason": (
                 f"training window has {len(dates)} dates, too few for "
-                f"{search_spec.inner_splits} inner folds"
+                f"{search_spec.inner_splits} inner folds with embargo={embargo}"
             ),
         }
 
-    date_code = np.searchsorted(dates.to_numpy(), train_frame["date"].to_numpy())
-    folds = list(splitter.split(dates))
+    row_dates = train_frame["date"].to_numpy()
+    date_code = np.searchsorted(dates.to_numpy(), row_dates)
     candidates = _candidates(search_spec, random_seed)
+
+    # The inner folds' row masks, cut ONCE: they do not depend on the
+    # candidate, and the purge is the same for every one of them.
+    fold_masks: List[Tuple[np.ndarray, np.ndarray]] = []
+    purged_per_fold: List[int] = []
+    for train_pos, test_pos in splitter.split(dates):
+        in_train = np.zeros(len(dates), dtype=bool)
+        in_train[train_pos] = True
+        in_test = np.zeros(len(dates), dtype=bool)
+        in_test[test_pos] = True
+        train_mask = in_train[date_code]
+        test_mask = in_test[date_code]
+        test_axis = dates[test_pos]
+        overlaps = label_overlap_mask(
+            train_mask, row_dates, label_end, test_axis[0], test_axis[-1]
+        )
+        purged_per_fold.append(int(overlaps.sum()))
+        fold_masks.append((train_mask & ~overlaps, test_mask))
 
     results: List[Dict[str, Any]] = []
     for params in candidates:
         merged = {**base_params, **params}
         fold_scores: List[float] = []
-        for train_pos, test_pos in folds:
-            in_train = np.zeros(len(dates), dtype=bool)
-            in_train[train_pos] = True
-            in_test = np.zeros(len(dates), dtype=bool)
-            in_test[test_pos] = True
-            inner_train = train_frame[in_train[date_code]]
-            inner_test = train_frame[in_test[date_code]]
+        for train_mask, test_mask in fold_masks:
+            inner_train = train_frame[train_mask]
+            inner_test = train_frame[test_mask]
             if inner_train.empty or inner_test.empty:
                 continue
             if task == "classification" and len(np.unique(inner_train["target"])) < 2:
@@ -212,7 +254,12 @@ def search_best_params(
         "searched": True,
         "scoring": search_spec.scoring,
         "n_candidates": len(results),
-        "n_inner_folds": len(folds),
+        "n_inner_folds": len(fold_masks),
+        "embargo": int(embargo),
+        # Per inner fold. Zero everywhere means the training window
+        # carried no label ends, not that nothing overlapped.
+        "n_train_rows_purged_overlap": purged_per_fold,
+        "purged_on_label_end": label_end is not None,
         "best_params": best["params"],
         "best_score": best["score"],
         # Sorted best-first and kept whole: a caller can see how flat the

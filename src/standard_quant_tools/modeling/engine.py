@@ -49,7 +49,7 @@ from .validation.ranking import (
     relevance_grades,
 )
 from .validation.search import search_best_params
-from .validation.walk_forward import build_splitter
+from .validation.walk_forward import build_splitter, label_overlap_mask
 from .validation.weights import build_sample_weights
 
 
@@ -473,10 +473,11 @@ def run_experiment(
             # mask, so the fold is taken ONCE. Selecting and then dropping
             # made a second full copy of the training block -- 11.5 ms on
             # 100,000 rows, the largest single piece of per-fold overhead.
-            overlaps = (
-                train_mask
-                & (panel_label_end >= first_test_date)
-                & (panel_dates <= last_test_date)
+            # The rule itself lives in walk_forward.label_overlap_mask,
+            # shared with the inner hyperparameter search so the two
+            # cannot disagree about what a leaked row is.
+            overlaps = label_overlap_mask(
+                train_mask, panel_dates, panel_label_end, first_test_date, last_test_date
             )
             n_purged_total += int(overlaps.sum())
             train_mask = train_mask & ~overlaps
@@ -573,6 +574,16 @@ def run_experiment(
                 feature_ids=feature_ids,
                 random_seed=model_spec.random_seed,
                 fit_predict=_fit_predict,
+                # The inner folds are cut under the SAME discipline as the
+                # outer ones: the spec's embargo, and a purge on each row's
+                # own label end. They were cut with neither, so the
+                # candidate that won was the one that scored best on
+                # training rows whose labels had already seen the inner
+                # test window.
+                embargo=model_spec.validation.embargo,
+                label_end=(
+                    train_df[LABEL_END_COL].to_numpy() if has_label_end else None
+                ),
             )
             search_reports.append(search_report)
 

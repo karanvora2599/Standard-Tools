@@ -1,5 +1,37 @@
 # Changelog
 
+## The inner search chose parameters on rows whose labels had already seen the window they were scored against
+
+Phase 0 of `Development/modeling_runtime_plan.md`, second commit.
+
+The outer walk-forward loop has purged every training row whose label
+reaches into the test block since the P0 leakage fixes, on the row's own
+`label_end_date`. The inner hyperparameter search had neither that purge
+nor the spec's embargo: `_inner_splitter` hardwired `embargo=0`, and the
+inner train/test selection never looked at a label end. So with a five-bar
+label, the last five training rows before every inner test window were
+scored on a label built from that window's prices, and the candidate that
+won was the one that fit them best. The outer OOS metric was never touched.
+What was leak-biased was which parameters the outer fold was then fit with.
+
+The overlap rule now lives once, in `walk_forward.label_overlap_mask`, and
+both loops call it; the engine's inline copy is gone. `search_best_params`
+takes the outer spec's `embargo` and a per-row `label_end`, cuts its inner
+folds with the embargo taken off the axis so the fold count is still exactly
+`inner_splits`, and purges each fold before any candidate sees it. The
+search report records `embargo`, `purged_on_label_end` and a per-fold
+`n_train_rows_purged_overlap`, so a reader can see the selection ran under
+the discipline it claims -- zero everywhere means the window carried no
+label ends, not that nothing overlapped.
+
+The tests plant the leak rather than hope to observe it: a window whose
+label ends are exactly five bars ahead lets every inner fold be checked for
+a training row that reaches its test block, and the purge count is asserted
+to be the planted number, two entities times five rows, not merely
+positive. The null case is kept beside it -- with no label ends the leak is
+present and the report says zero -- because a purge that cannot fail to
+find something is not a test of the purge.
+
 ## Five modeling tools answered wrongly or not at all, and every one was registered, dispatchable and documented
 
 Phase 0 of `Development/modeling_runtime_plan.md`, first commit. None of

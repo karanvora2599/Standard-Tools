@@ -155,6 +155,44 @@ class PurgedKFoldSplit:
         return sum(1 for _ in self.split(dates))
 
 
+def label_overlap_mask(
+    train_mask: np.ndarray,
+    row_dates: np.ndarray,
+    row_label_end: "np.ndarray | None",
+    first_test_date: Any,
+    last_test_date: Any,
+) -> np.ndarray:
+    """
+    Which training rows share label bars with a test block.
+
+    A training row is purged when the bars its label spans OVERLAP the
+    block: the label ends on or after the block starts, and the row itself
+    begins on or before the block ends. Under walk-forward the second
+    condition is always true, since training precedes testing; it is
+    written in full because purged k-fold puts training rows on BOTH sides
+    of the block, and there the rows after it must not be purged for the
+    wrong reason.
+
+    ONE IMPLEMENTATION, for the outer fold loop and the inner
+    hyperparameter search alike. The engine had this rule inline and the
+    search had nothing -- its inner folds were cut on dates with an embargo
+    of zero and no purge, so the candidate selection was scored on training
+    rows whose labels reached into the inner test window. The outer OOS
+    number stayed clean; what was leak-biased was WHICH parameters won.
+
+    A row with no label end (NaT) compares False and is never purged: it
+    has no resolved label to leak. `row_label_end=None` purges nothing,
+    which is the honest behaviour for a panel that never recorded one.
+    """
+    if row_label_end is None:
+        return np.zeros(np.asarray(train_mask).shape, dtype=bool)
+    return (
+        np.asarray(train_mask, dtype=bool)
+        & (row_label_end >= first_test_date)
+        & (row_dates <= last_test_date)
+    )
+
+
 def build_splitter(validation_spec: Any) -> Any:
     """Construct the splitter a ValidationSpec asks for."""
     if validation_spec.method == "purged_kfold":
