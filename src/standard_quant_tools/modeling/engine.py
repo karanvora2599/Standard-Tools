@@ -42,6 +42,7 @@ from .validation.metrics import (
     effective_sample_size,
     positive_class_proba,
     regression_metrics,
+    summarize_cross_sectional_ic,
 )
 from .validation.ranking import (
     fold_ic_series,
@@ -50,7 +51,11 @@ from .validation.ranking import (
     relevance_grades,
 )
 from .validation.search import search_best_params
-from .validation.walk_forward import build_splitter, label_overlap_mask
+from .validation.walk_forward import (
+    build_splitter,
+    contiguous_runs,
+    label_overlap_mask,
+)
 from .validation.weights import build_sample_weights
 
 
@@ -435,6 +440,7 @@ def run_experiment(
         )
 
     has_label_end = LABEL_END_COL in panel.columns
+    is_cpcv = model_spec.validation.method == "cpcv"
     fold_metrics = []
     fold_importance = []
     # The columns the ESTIMATOR sees: the pipeline's output, which is the
@@ -506,8 +512,6 @@ def run_experiment(
         # an integer offset also handles entities on different calendars,
         # where t+horizon entity bars != t+horizon global panel dates.
         if has_label_end and train_mask.any() and len(test_dates) > 0:
-            first_test_date = test_dates[0]
-            last_test_date = test_dates[-1]
             # A training row is purged when the bars its label spans
             # OVERLAP the test block: the label ends on or after the block
             # starts, and the row itself begins on or before the block
@@ -523,9 +527,22 @@ def run_experiment(
             # The rule itself lives in walk_forward.label_overlap_mask,
             # shared with the inner hyperparameter search so the two
             # cannot disagree about what a leaked row is.
-            overlaps = label_overlap_mask(
-                train_mask, panel_dates, panel_label_end, first_test_date, last_test_date
-            )
+            # PER CONTIGUOUS BLOCK of the test set, ORed. Walk-forward and
+            # purged k-fold have one block, and this is exactly the rule
+            # above. Combinatorial CV has several, and a training row
+            # BETWEEN two of them must be purged only when its own label
+            # reaches the later block -- not for lying between the two,
+            # which a purge on [first test date, last test date] would have
+            # done to every row in the gap.
+            overlaps = np.zeros(train_mask.shape, dtype=bool)
+            for first_pos, last_pos in contiguous_runs(test_pos):
+                overlaps |= label_overlap_mask(
+                    train_mask,
+                    panel_dates,
+                    panel_label_end,
+                    dates[first_pos],
+                    dates[last_pos],
+                )
             n_purged_total += int(overlaps.sum())
             train_mask = train_mask & ~overlaps
 
@@ -704,15 +721,21 @@ def run_experiment(
         fold_weights.append(float(len(test_df)))
         fold_metrics.append(metrics)
         fold_importance.append(fold_feature_importance(estimator, fold_columns))
-        oos_prediction_frames.append(
-            pd.DataFrame(
-                {
-                    "date": test_df["date"].to_numpy(),
-                    "entity": test_df["entity"].to_numpy(),
-                    "prediction": prediction_values,
-                }
-            )
+        oos_frame = pd.DataFrame(
+            {
+                "date": test_df["date"].to_numpy(),
+                "entity": test_df["entity"].to_numpy(),
+                "prediction": prediction_values,
+            }
         )
+        if is_cpcv:
+            # Under combinatorial CV a (date, entity) is predicted once per
+            # path it was tested in, so the row is not unique without the
+            # path that produced it. Additive: every consumer that reads the
+            # three canonical columns still can, and the ones that need one
+            # prediction per row refuse a cpcv model by name.
+            oos_frame["path"] = len(fold_records) - 1
+        oos_prediction_frames.append(oos_frame)
 
     if not fold_metrics:
         raise ValidationError(
@@ -753,7 +776,17 @@ def run_experiment(
     # dependable. The per-fold numbers remain in validation_report, where
     # they answer the different question of how each fold did.
     for prefix, series_list in pooled_ic.items():
-        oos_metrics.update(aggregate_cross_sectional_ic(series_list, prefix))
+        if is_cpcv:
+            # Paths are NOT disjoint in time: a date is tested in several,
+            # so a plain concat would count it once per path and the
+            # dispersion would mix across-path spread into the across-date
+            # spread ICIR exists to measure. Each date's IC is averaged
+            # across the paths that tested it first, then summarized once.
+            merged = pd.concat(series_list)
+            per_date = merged.groupby(level=0).mean().sort_index()
+            oos_metrics.update(summarize_cross_sectional_ic(per_date, prefix))
+        else:
+            oos_metrics.update(aggregate_cross_sectional_ic(series_list, prefix))
     importance_summary = summarize_importance(fold_importance, model_columns or [])
 
     # Sample size discounted for target overlap. A `horizon`-bar forward
@@ -761,6 +794,14 @@ def run_experiment(
     # bars, so the raw OOS row count overstates the independent evidence
     # behind every metric above -- often by an order of magnitude.
     n_oos_rows = int(sum(fold_weights))
+    if is_cpcv:
+        # Once per row, not once per path: a row tested in five paths is
+        # one observation of the world, however many fits looked at it.
+        n_oos_rows = int(
+            pd.concat(oos_prediction_frames)[["date", "entity"]]
+            .drop_duplicates()
+            .shape[0]
+        )
     horizon = _target_horizon(dataset.get("target_id"))
     n_entities = int(panel["entity"].nunique())
     oos_metrics["n_oos_rows"] = float(n_oos_rows)
@@ -770,8 +811,50 @@ def run_experiment(
         else float(n_oos_rows)
     )
 
+    paths_report = None
+    if is_cpcv:
+        # The distribution across paths IS the result combinatorial CV
+        # exists to produce: a fifth percentile and a median of the OOS
+        # metric rather than one draw of it.
+        distribution: Dict[str, Dict[str, float]] = {}
+        for key in (
+            "cs_rank_ic_mean",
+            "cs_ic_mean",
+            "r2",
+            "mae",
+            "auc",
+            "accuracy",
+            "ndcg_at_5",
+            "ndcg_at_10",
+        ):
+            values = np.array([m.get(key, np.nan) for m in fold_metrics], dtype=float)
+            values = values[np.isfinite(values)]
+            if values.size:
+                distribution[key] = {
+                    "n": int(values.size),
+                    "mean": float(values.mean()),
+                    "std": (
+                        float(values.std(ddof=1)) if values.size > 1 else float("nan")
+                    ),
+                    "min": float(values.min()),
+                    "p05": float(np.percentile(values, 5)),
+                    "p50": float(np.percentile(values, 50)),
+                    "p95": float(np.percentile(values, 95)),
+                    "max": float(values.max()),
+                }
+        paths_report = {
+            "n_paths": len(fold_metrics),
+            "n_groups": int(model_spec.validation.n_splits),
+            "n_test_groups": int(model_spec.validation.n_test_splits),
+            "ic_pooling": "mean per date across paths",
+            "metric_distribution": distribution,
+        }
+
     validation_report = {
         "method": model_spec.validation.method,
+        # cpcv only: the metric distribution across paths, which is the
+        # number to select a model on; None for the other methods.
+        "paths": paths_report,
         "scheme": (
             model_spec.validation.scheme
             if model_spec.validation.method == "walk_forward"

@@ -119,7 +119,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | field | choices |
 |---|---|
 | `DatasetSpec.missing.policy` | `drop`, `forward_fill_bounded`, `keep` |
-| `ValidationSpec.method` | `walk_forward`, `purged_kfold` |
+| `ValidationSpec.method` | `walk_forward`, `purged_kfold`, `cpcv` |
 | `ValidationSpec.scheme` | `rolling`, `expanding` |
 | `PreprocessingSpec.normalization` | `pooled`, `cross_sectional` |
 | `WeightingSpec.method` | `none`, `label_uniqueness`, `time_decay`, `uniqueness_and_time_decay` |

@@ -73,7 +73,11 @@ from standard_quant_tools.metrics.risk_metrics import (
 from standard_quant_tools.modeling.specs import TASKS
 
 from . import artifacts as _artifacts
-from .bridge import _assert_continuous_calendar, _validate_predictions_frame
+from .bridge import (
+    _assert_continuous_calendar,
+    _refuse_cpcv,
+    _validate_predictions_frame,
+)
 from .dataset.fetch import fetch_universe_ohlcv
 from .features.base import periods_per_year_for_interval
 from .registry.model_registry import load_dataset_spec, load_manifest
@@ -612,6 +616,7 @@ def evaluate_model_portfolio(
         )
 
     manifest = load_manifest(model_id)
+    _refuse_cpcv(manifest, "evaluate_model_portfolio")
     dataset_spec = load_dataset_spec(model_id)
     interval = str(dataset_spec.get("interval", "1d"))
     provider_name = str(dataset_spec.get("provider", "yfinance"))

@@ -677,7 +677,9 @@ def run_model_experiment(
         "target_id": selected_target_id,
         "data_hash": meta["data_hash"],
         "spec_hash": stored_spec_hash,
-        "spec_hash_version": spec_hash_version if stored_spec_hash is not None else None,
+        "spec_hash_version": (
+            spec_hash_version if stored_spec_hash is not None else None
+        ),
         # Bundled into the model so it becomes self-contained -- see
         # registry.model_registry.save_model.
         "dataset_spec": spec_dict,
@@ -1220,7 +1222,19 @@ def _estimated_folds(validation, n_dates: Optional[int]):
     from ..validation.walk_forward import build_splitter
 
     if n_dates is not None:
-        return int(build_splitter(validation).n_splits(pd.RangeIndex(int(n_dates)))), None
+        return (
+            int(build_splitter(validation).n_splits(pd.RangeIndex(int(n_dates)))),
+            None,
+        )
+    if validation.method == "cpcv":
+        from math import comb
+
+        paths = comb(validation.n_splits, validation.n_test_splits)
+        return paths, (
+            f"cpcv yields C({validation.n_splits}, {validation.n_test_splits}) = "
+            f"{paths} paths on any dataset with at least {validation.n_splits} "
+            "dates, each a full fit."
+        )
     if validation.method == "purged_kfold":
         return int(validation.n_splits), (
             f"purged k-fold yields n_splits={validation.n_splits} folds on any "

@@ -155,6 +155,99 @@ class PurgedKFoldSplit:
         return sum(1 for _ in self.split(dates))
 
 
+class CombinatorialPurgedSplit:
+    """
+    Every choice of `n_test_groups` blocks out of `n_groups` is a test set.
+
+    WHAT THIS BUYS. Walk-forward yields one out-of-sample number per fold
+    and one path through time; purged k-fold tests each date once. Neither
+    gives the OOS metric a distribution. Here the date axis is cut into
+    `n_groups` contiguous blocks and every combination of `n_test_groups`
+    of them is a test set, so C(n, k) paths are scored -- 15 from six choose
+    two -- and "how good is this model out of sample" has a spread, a fifth
+    percentile and a median rather than a single draw. That is the number
+    model SELECTION should be made on; a single walk-forward figure has no
+    error bar at all.
+
+    WHAT IT COSTS, STATED PLAINLY. Every path trains on blocks that come
+    AFTER some of its test blocks, so like purged k-fold it is not a
+    simulation of live trading: it answers "is there a signal here, and how
+    sure are we", never "what would this have earned". A model validated
+    this way is refused by the portfolio evaluation and the bridge by name.
+    Use walk-forward for the number to quote a return from.
+
+    THE PURGE IS PER BLOCK. A test set here is two or more disjoint blocks,
+    and a training row between them must be purged only when its OWN label
+    reaches the later block -- not for lying between the two, which is what
+    a purge on [first test date, last test date] would have done to every
+    row in the gap. The engine applies `label_overlap_mask` to each
+    contiguous run of the test set and ORs the results. The `embargo` band
+    is removed on both sides of every block, as purged k-fold does.
+
+    `dates` is the SORTED, UNIQUE date axis; positions index into it.
+    """
+
+    def __init__(self, n_groups: int = 6, n_test_groups: int = 2, embargo: int = 0):
+        if n_groups < 2:
+            raise ValidationError(f"cpcv needs n_groups >= 2, got {n_groups}")
+        if not 1 <= n_test_groups < n_groups:
+            raise ValidationError(
+                f"cpcv needs 1 <= n_test_groups < n_groups, got "
+                f"n_test_groups={n_test_groups} for n_groups={n_groups}"
+            )
+        if embargo < 0:
+            raise ValidationError(f"embargo must be >= 0, got {embargo}")
+        self.n_groups = int(n_groups)
+        self.n_test_groups = int(n_test_groups)
+        self.embargo = int(embargo)
+
+    @property
+    def n_paths(self) -> int:
+        from math import comb
+
+        return comb(self.n_groups, self.n_test_groups)
+
+    def split(self, dates: pd.Index) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        from itertools import combinations
+
+        n = len(dates)
+        if n < self.n_groups:
+            return
+        groups = np.array_split(np.arange(n), self.n_groups)
+        for combination in combinations(range(self.n_groups), self.n_test_groups):
+            keep = np.ones(n, dtype=bool)
+            test_parts = []
+            for g in combination:
+                block = groups[g]
+                if block.size == 0:
+                    continue
+                start, end = int(block[0]), int(block[-1]) + 1
+                test_parts.append(block)
+                keep[max(0, start - self.embargo) : min(n, end + self.embargo)] = False
+            if not test_parts:
+                continue
+            test_positions = np.concatenate(test_parts)
+            train_positions = np.flatnonzero(keep)
+            if train_positions.size == 0:
+                continue
+            yield train_positions, test_positions
+
+    def n_splits(self, dates: pd.Index) -> int:
+        return sum(1 for _ in self.split(dates))
+
+
+def contiguous_runs(positions: np.ndarray) -> "list[tuple[int, int]]":
+    """(first, last) position of each contiguous run in a sorted position
+    array -- the blocks a combinatorial test set is made of."""
+    positions = np.asarray(positions)
+    if positions.size == 0:
+        return []
+    breaks = np.flatnonzero(np.diff(positions) != 1)
+    starts = np.r_[0, breaks + 1]
+    ends = np.r_[breaks, positions.size - 1]
+    return [(int(positions[s]), int(positions[e])) for s, e in zip(starts, ends)]
+
+
 def label_overlap_mask(
     train_mask: np.ndarray,
     row_dates: np.ndarray,
@@ -195,6 +288,12 @@ def label_overlap_mask(
 
 def build_splitter(validation_spec: Any) -> Any:
     """Construct the splitter a ValidationSpec asks for."""
+    if validation_spec.method == "cpcv":
+        return CombinatorialPurgedSplit(
+            n_groups=validation_spec.n_splits,
+            n_test_groups=validation_spec.n_test_splits,
+            embargo=validation_spec.embargo,
+        )
     if validation_spec.method == "purged_kfold":
         return PurgedKFoldSplit(
             n_splits=validation_spec.n_splits, embargo=validation_spec.embargo

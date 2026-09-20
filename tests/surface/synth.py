@@ -29,11 +29,13 @@ import re
 import shutil
 import tempfile
 import typing
+from itertools import combinations
 from pathlib import Path
 from typing import (
     Annotated,
     Any,
     Dict,
+    Iterator,
     List,
     Optional,
     Tuple,
@@ -483,15 +485,42 @@ def build(model: type[BaseModel], *, length: int = 300, salt: int = 0) -> Any:
     Filling only the required fields satisfies none of those, so the model
     refused its own synthesized input and the tool dropped out of the fuzz
     set -- silently, which is the part that mattered. So: try the required
-    set, then the required set plus each optional in turn, then plus all of
-    them. The first that constructs wins, and the ORIGINAL refusal is
-    re-raised if none does, because that message names the real rule.
+    set, then the required set plus each optional in turn, then plus each
+    PAIR, then plus all of them, then all of them minus each one in turn.
+    The first that constructs wins, and the ORIGINAL refusal is re-raised
+    if none does, because that message names the real rule.
+
+    The pair stage exists because walk-forward needs `train_window` AND
+    `test_window` together and no single optional satisfies that; the
+    all-minus-one stage because a spec that refuses a field its chosen
+    mode does not read (`n_test_splits` under walk-forward) refuses the
+    all-optionals set for exactly one member.
+
+    A field with a default FACTORY is synthesized like a required one, so a
+    nested spec is exercised rather than defaulted -- but it is not
+    required, and when its synthesized value is what the model refuses
+    (`MissingDataSpec.features` under `policy='drop'`) the model's own
+    factory stands in: the stages run a second time from the truly required
+    set, with the factory fields among the extras.
     """
     required: Dict[str, Any] = {}
+    truly_required: Dict[str, Any] = {}
     for name, info in model.model_fields.items():
         if not info.is_required() and info.default is not PydanticUndefined:
             continue
-        required[name] = _value(info.annotation, info, name.lower(), length, salt)
+        try:
+            value = _value(info.annotation, info, name.lower(), length, salt)
+        except ValidationError:
+            # `_value` raises a NESTED model's own refusal rather than
+            # Unsynthesizable. A factory field falls back to its factory; a
+            # truly required one has nothing to fall back to, so its
+            # refusal is the reason this model cannot be built.
+            if info.is_required():
+                raise
+            continue
+        required[name] = value
+        if info.is_required():
+            truly_required[name] = value
     # Bound to its OWN name inside the block: Python deletes an
     # `except ... as` target when the block exits, so re-raising it later
     # needs a separate binding.
@@ -501,24 +530,37 @@ def build(model: type[BaseModel], *, length: int = 300, salt: int = 0) -> Any:
     except ValidationError as exc:
         first_refusal = exc
 
-    optional = _optional_fields(model)
     extras: Dict[str, Any] = {}
-    for name, info in optional:
+    for name, info in _optional_fields(model):
         try:
             extras[name] = _value(info.annotation, info, name.lower(), length, salt)
-        except Unsynthesizable:
+        except (Unsynthesizable, ValidationError):
             continue
 
-    for name, value in extras.items():
-        try:
-            return model(**required, **{name: value})
-        except ValidationError:
-            continue
+    passes = [(required, extras)]
+    if len(truly_required) < len(required):
+        factory_defaulted = {
+            k: v for k, v in required.items() if k not in truly_required
+        }
+        passes.append((truly_required, {**factory_defaulted, **extras}))
+    for base, pool in passes:
+        for chosen in _subsets_to_try(list(pool)):
+            try:
+                return model(**base, **{name: pool[name] for name in chosen})
+            except ValidationError:
+                continue
+    raise first_refusal
 
-    try:
-        return model(**required, **extras)
-    except ValidationError:
-        raise first_refusal
+
+def _subsets_to_try(names: List[str]) -> Iterator[Tuple[str, ...]]:
+    """None, each one, each pair, all, and all minus each one -- in that order."""
+    yield ()
+    for name in names:
+        yield (name,)
+    yield from combinations(names, 2)
+    yield tuple(names)
+    for dropped in names:
+        yield tuple(name for name in names if name != dropped)
 
 
 def build_arguments(model: type[BaseModel], *, length: int = 300) -> Dict[str, Any]:

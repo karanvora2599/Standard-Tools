@@ -8,7 +8,7 @@ tool surface.
 """
 
 import math
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, ClassVar, Dict, List, Literal, Optional
 
 import pandas as pd
 from pydantic import (
@@ -622,7 +622,7 @@ class ValidationSpec(BaseModel):
     # `valid: True` while the embargo the caller asked for was 0.
     model_config = ConfigDict(extra="forbid")
 
-    method: Literal["walk_forward", "purged_kfold"] = Field(
+    method: Literal["walk_forward", "purged_kfold", "cpcv"] = Field(
         "walk_forward",
         description=(
             "'walk_forward' (default) — train on the past, test on the "
@@ -633,7 +633,21 @@ class ValidationSpec(BaseModel):
             "short history far better and is not dominated by the end of the "
             "sample, but later folds train partly on data that postdates their "
             "test block, so it answers 'is there a signal here', not 'what "
-            "would this have earned'."
+            "would this have earned'. 'cpcv' — combinatorial purged CV: every "
+            "choice of n_test_splits blocks out of n_splits is a test set, so "
+            "the OOS metric has a DISTRIBUTION across C(n_splits, n_test_splits) "
+            "paths rather than one draw; that is the number to select a model "
+            "on. Like purged_kfold it is not a trading simulation, and a cpcv "
+            "model is refused by evaluate_model_portfolio and the bridge."
+        ),
+    )
+    n_test_splits: int = Field(
+        2,
+        ge=1,
+        description=(
+            "cpcv only: how many of the n_splits blocks form each test set. "
+            "The path count is C(n_splits, n_test_splits), bounded at 60 -- "
+            "six choose two is 15 paths; eight choose two is 28."
         ),
     )
     scheme: Literal["rolling", "expanding"] = Field(
@@ -647,7 +661,10 @@ class ValidationSpec(BaseModel):
         ),
     )
     n_splits: int = Field(
-        5, ge=2, description="purged_kfold only: how many contiguous test blocks."
+        5,
+        ge=2,
+        description="purged_kfold and cpcv: how many contiguous blocks the date "
+        "axis is cut into.",
     )
     train_window: Optional[int] = Field(
         None, gt=0, description="Bars per training fold (walk_forward)."
@@ -689,6 +706,40 @@ class ValidationSpec(BaseModel):
                     "(method='purged_kfold' does not, since its fold sizes come "
                     "from n_splits)."
                 )
+        return self
+
+    #: The most paths a cpcv spec may imply. Each path is a full fit, so
+    #: this is a compute budget of the same kind the estimator bounds are:
+    #: 60 keeps eight choose two (28) and ten choose two (45) reachable and
+    #: refuses fourteen choose seven (3,432) before it starts.
+    MAX_CPCV_PATHS: ClassVar[int] = 60
+
+    @model_validator(mode="after")
+    def _cpcv_paths_are_bounded(self) -> "ValidationSpec":
+        from math import comb
+
+        if self.method == "cpcv":
+            if self.n_test_splits >= self.n_splits:
+                raise ValueError(
+                    f"method='cpcv' needs n_test_splits ({self.n_test_splits}) "
+                    f"fewer than n_splits ({self.n_splits}); a test set of every "
+                    "block leaves nothing to train on."
+                )
+            paths = comb(self.n_splits, self.n_test_splits)
+            if paths > self.MAX_CPCV_PATHS:
+                raise ValueError(
+                    f"method='cpcv' with n_splits={self.n_splits} and "
+                    f"n_test_splits={self.n_test_splits} implies {paths} paths, "
+                    f"each a full fit, past the ceiling of {self.MAX_CPCV_PATHS}. "
+                    "Six choose two is 15 paths and is the usual choice."
+                )
+        # Checked against the default rather than against which fields were
+        # set, so a spec survives its own model_dump() round trip.
+        elif self.n_test_splits != 2:
+            raise ValueError(
+                f"n_test_splits={self.n_test_splits} is read by method='cpcv' "
+                f"only; method={self.method!r} does not use it."
+            )
         return self
 
 

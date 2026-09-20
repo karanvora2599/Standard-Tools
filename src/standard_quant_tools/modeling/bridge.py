@@ -65,7 +65,7 @@ SCORE.
 """
 
 from pathlib import Path
-from typing import Dict, Literal
+from typing import Any, Dict, Literal
 
 import numpy as np
 import pandas as pd
@@ -75,6 +75,28 @@ from standard_quant_tools.modeling.specs import SCORE_TASKS, TASKS, Task
 
 from . import artifacts as _artifacts
 from .registry.model_registry import load_manifest
+
+
+def _refuse_cpcv(manifest: Any, where: str) -> None:
+    """
+    A combinatorial-CV model has no single trading path to backtest.
+
+    Each date was tested in several paths, so its OOS frame carries one
+    prediction per path per row; an equity curve needs exactly one. The
+    guide draws the same line for purged k-fold: use it to decide whether a
+    signal exists, use walk-forward for what it would have earned. Refused
+    by name rather than by averaging across paths, which would produce a
+    curve nobody validated.
+    """
+    if getattr(manifest, "validation_method", None) == "cpcv":
+        raise ValidationError(
+            f"{where}: model {manifest.model_id!r} was validated with "
+            "method='cpcv', which tests each date in several paths and so "
+            "has no single out-of-sample trading path. Its result is the "
+            "distribution across paths in inspect_model(view='validation'). "
+            "For an equity curve, train the same spec with "
+            "validation.method='walk_forward'."
+        )
 
 
 def _validate_predictions_frame(df: "pd.DataFrame", source: str) -> None:
@@ -254,6 +276,7 @@ def oos_predictions_to_signal_panel(
                 "manifest."
             )
         task = manifest.task
+        _refuse_cpcv(manifest, "oos_predictions_to_signal_panel")
         oos_predictions_uri = manifest.oos_predictions_uri
         # Authoritative, unlike inferring a hole from date spacing: the
         # engine records exactly which folds were skipped and why. Only

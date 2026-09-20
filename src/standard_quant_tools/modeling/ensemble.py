@@ -52,8 +52,16 @@ METHODS = ("mean", "median", "rank_mean", "weighted")
 PREDICTION_COLUMNS = ("date", "entity", "prediction")
 
 
-def load_oos_predictions(model_id: str) -> pd.DataFrame:
-    """One model's out-of-sample predictions, verified against its manifest."""
+def load_oos_predictions(model_id: str, *, keep_path: bool = False) -> pd.DataFrame:
+    """
+    One model's out-of-sample predictions, verified against its manifest.
+
+    `keep_path` keeps the `path` column a combinatorial-CV model's frame
+    carries -- under cpcv a (date, entity) is predicted once per path it
+    was tested in, so the row is unique only with it. Dropped by default,
+    because every consumer that wants ONE prediction per row refuses a cpcv
+    model by name rather than silently averaging or picking.
+    """
     manifest = load_manifest(model_id)
     uri = manifest.oos_predictions_uri
     if not uri:
@@ -78,7 +86,10 @@ def load_oos_predictions(model_id: str) -> pd.DataFrame:
             f"model {model_id!r}: its predictions artifact is missing "
             f"{missing}; expected {list(PREDICTION_COLUMNS)}."
         )
-    out = frame[list(PREDICTION_COLUMNS)].copy()
+    columns = list(PREDICTION_COLUMNS)
+    if keep_path and "path" in frame.columns:
+        columns.append("path")
+    out = frame[columns].copy()
     out["date"] = pd.to_datetime(out["date"])
     out["entity"] = out["entity"].astype(str)
     return out
@@ -215,7 +226,9 @@ def combine_predictions(
         if series.index.has_duplicates:
             raise ValidationError(
                 f"model {model_id!r} has more than one prediction for some "
-                "(date, entity). A combination cannot say which to use."
+                "(date, entity). A combination cannot say which to use. A "
+                "model validated with method='cpcv' predicts each row once per "
+                "path; combine walk-forward models, whose rows are unique."
             )
         wide = series.to_frame() if wide is None else wide.join(series, how="inner")
 

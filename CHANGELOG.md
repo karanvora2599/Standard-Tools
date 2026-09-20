@@ -1,5 +1,55 @@
 # Changelog
 
+## Purged K-fold gave one number, and the purge that made it honest was wrong for two test blocks
+
+Phase 3 of `Development/modeling_runtime_plan.md`, second commit.
+
+`purged_kfold` tests each date once, so its OOS metric is one draw with no
+error bar. **`ValidationSpec.method="cpcv"`** runs the same construction
+combinatorially: `n_splits` groups, every choice of `n_test_splits` of
+them a test set, C(n, k) full fits -- 15 paths at the 6-choose-2 default,
+each date tested in five. The validation report gains `paths`: the count,
+`ic_pooling`, and for each headline metric its `mean`, `std`, `p05`,
+`p50`, `p95` across paths, which is the number combinatorial CV exists to
+produce and the one to select on. The spec refuses past 60 paths by name,
+because each is a fit.
+
+**The purge is per contiguous test block.** The label-overlap purge took
+the span from the first test date to the last; with two test blocks that
+span covers the training rows between them, and every one was purged for
+lying in the gap rather than for its label reaching the later block. The
+engine now walks `contiguous_runs(test_positions)` and ORs one
+`label_overlap_mask` per run. Under walk-forward and purged K-fold there
+is one run and the rule is unchanged; the test asserts the count against a
+row-wise oracle and that it is strictly below what the span rule counted.
+
+**A date tested five times is still one date.** The pooled IC averages
+each date across the paths that tested it before summarizing, so ICIR
+measures across-date dispersion and not across-path spread; `n_oos_rows`
+counts unique (date, entity) rows, not fits; and the OOS frame carries a
+`path` column, additive, which `load_oos_predictions(keep_path=True)`
+keeps. Because a cpcv model has no single trading path,
+`evaluate_model_portfolio` and `oos_predictions_to_signal_panel` refuse
+it by name with the guide's own line -- decide whether the signal exists
+here, use walk-forward for what it would have earned -- and
+`combine_predictions` names the same cause where it already refused
+duplicate rows. `validate_model_spec` reports the path count as the
+estimated fold count without a dataset.
+
+**The surface fuzzer had lost the four modeling tools since phase 1**, and
+this is the commit that ran it. `tests/surface/synth.py` builds every
+tool's baseline input from its schema, and two of phase 1's refusals were
+refusals of the synthesizer's own habits: a field with a default factory
+was synthesized like a required one, so `MissingDataSpec` was handed a
+`features` list its default `drop` policy refuses, and a preprocessing
+step was named `'a1'`. `n_test_splits` under walk-forward added a third.
+The synthesizer now lets a factory field fall back to its own default when
+the synthesized value is what the model refuses, and tries each pair of
+optionals and each all-but-one set between the single and the
+all-optionals stages, so a spec that needs two fields together or refuses
+one it does not read still builds. 209 of 209 tools synthesize again; the
+test that names the gap was the one that said so.
+
 ## Which number is larger was the only question compare_models could answer
 
 Phase 3 of `Development/modeling_runtime_plan.md`, first commit.

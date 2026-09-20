@@ -1126,7 +1126,7 @@ yields `(train_positions, test_positions)` pairs over the dataset's
 unique dates, walking forward one `test_window` at a time, with an
 `embargo` gap between each fold's train and test window.
 
-### Three schemes
+### Four schemes
 
 `ValidationSpec.method` and `.scheme` choose between them:
 
@@ -1135,6 +1135,7 @@ unique dates, walking forward one `test_window` at a time, with an
 | `walk_forward` + `rolling` (default) | fixed length, slides forward | what would this have earned |
 | `walk_forward` + `expanding` | anchored at the start, grows | same, on a short history |
 | `purged_kfold` | everything outside the test block | is there a signal here at all |
+| `cpcv` | everything outside the test blocks, per path | how sure am I of that, as a distribution |
 
 **`expanding`** keeps the same fold *boundaries* as rolling — the test
 windows are identical — and only anchors the training start at the
@@ -1157,11 +1158,50 @@ trading either, because a live model cannot be fitted on next year's data.
 Use `purged_kfold` to decide whether a signal exists; use `walk_forward` to
 estimate what it would have earned.
 
+**`cpcv`** is purged K-fold run combinatorially. The date axis is split
+into `n_splits` groups and every choice of `n_test_splits` of them becomes
+a test set, so C(n, k) paths instead of n folds — `n_splits=6,
+n_test_splits=2` is 15 paths, and each date is tested in five of them.
+Every path is a full fit with the same per-block purge and two-sided
+embargo, and the point is what comes out: the OOS metric as a
+**distribution across paths** rather than one draw of it.
+`inspect_model(view="validation")` reports it under `paths` — `n_paths`,
+and for each headline metric its `mean`, `std`, `p05`, `p50` and `p95` —
+which is the number to select a model on; a fifth percentile that is still
+positive is a different claim from a mean that is. The spec refuses more
+than 60 paths, because each is a fit and the count grows as a binomial.
+
+Three consequences follow from a date being tested more than once, and
+each is handled rather than averaged over:
+
+- **The pooled IC is computed per date first.** A plain concatenation of
+  the paths' per-date IC series would count a date once per path that
+  tested it and mix across-path spread into the across-date spread the ICIR
+  measures. Each date's IC is averaged across its paths, then the series is
+  summarized once, and `paths.ic_pooling` says so.
+- **The OOS frame carries a `path` column** and `n_oos_rows` counts unique
+  (date, entity) rows, not fits. `ensemble.load_oos_predictions(...,
+  keep_path=True)` keeps the column; without it the frame has duplicate
+  rows, which is why `combine_predictions` refuses a cpcv model.
+- **There is no single trading path to backtest.** `evaluate_model_portfolio`
+  and `oos_predictions_to_signal_panel` refuse a cpcv model by name: the
+  guide's own line applies, decide whether the signal exists here and use
+  `walk_forward` for what it would have earned.
+
+The strategy layer has the same construction in
+`backtesting/overfitting.py::combinatorial_purged_cv`, index-based with an
+integer horizon; the modeling splitter is written on dates and defers the
+purge to the engine's label-span rule.
+
 The target-overlap purge below is generalized to match: a training row is
 purged when its label's span *overlaps* the test block, rather than merely
 ending after the test starts. Under walk-forward the two rules are
 identical, since training always precedes testing; the general form exists
-because purged K-fold puts training rows on both sides.
+because purged K-fold puts training rows on both sides. Under `cpcv` it is
+applied **per contiguous test block**, not to the span from first to last
+test date: a training row between two test blocks is purged only when its
+own label reaches the later block, and the span rule would have purged
+every row in the gap.
 
 There are **two distinct leakage channels**, and the split only closes one:
 

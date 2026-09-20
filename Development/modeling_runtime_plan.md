@@ -4,8 +4,14 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phases 0 and 1 are implemented and merged; phases 2-10 are
-proposals.** Phase 1 landed as three commits on 2026-09-20 -- `ee5ad55`
+**Status: phases 0-3 are implemented and merged; phases 4-10 are
+proposals.** Phase 2 landed as `9e574ee` (the target registry) and phase
+3 as `77dfffd` (paired comparison, `validation/comparison.py`) plus the
+commit that carries this paragraph (`CombinatorialPurgedSplit`,
+`method="cpcv"`, per-block purge, the path distribution in the validation
+report, and the by-name refusals in the bridge, the portfolio evaluator
+and the ensemble), all on 2026-09-20. Phase 1 landed as three commits on
+2026-09-20 -- `ee5ad55`
 (the preprocessing registry, pipeline and persisted state, replacing the
 phase 0 stop-gap), `dcee66b` (the five remaining built-in steps, and
 importance labelled by the pipeline's output) and the commit that carries
