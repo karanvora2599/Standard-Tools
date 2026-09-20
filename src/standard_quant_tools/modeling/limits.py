@@ -31,4 +31,22 @@ MAX_LAGS_PER_FEATURE = 20
 #: cost as a memory error rather than as a refusal.
 MAX_EXPANDED_COLUMNS = 400
 
-__all__ = ["MAX_EXPANDED_COLUMNS", "MAX_LAG", "MAX_LAGS_PER_FEATURE"]
+#: Estimator fits one experiment may cost unless the spec says otherwise:
+#: every fold's fit, every search candidate on every inner fold, each
+#: calibration fold, and the full-panel refit. Over it the plan is REFUSED
+#: before the first fit, with the count, and never truncated. The same
+#: order of magnitude as the feature ablation's own ceiling.
+DEFAULT_MAX_FITS = 500
+
+#: The most a spec may raise that ceiling to. A budget past it is not a
+#: budget, and a caller who wants more than this from one call wants a
+#: workflow rather than an experiment.
+MAX_FITS_CEILING = 100_000
+
+__all__ = [
+    "DEFAULT_MAX_FITS",
+    "MAX_EXPANDED_COLUMNS",
+    "MAX_FITS_CEILING",
+    "MAX_LAG",
+    "MAX_LAGS_PER_FEATURE",
+]

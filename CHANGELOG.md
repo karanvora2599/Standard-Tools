@@ -1,5 +1,46 @@
 # Changelog
 
+## What a spec cost was discovered by paying it
+
+Phase 4 of `Development/modeling_runtime_plan.md`, first commit.
+
+The engine cut its folds, purged them and counted its fits AS it ran, so
+the only way to learn what a spec cost was to run it. `validate_model_spec`
+estimated the count from the spec alone -- folds times grid times inner
+splits -- and the estimate could not see that a fold's training window was
+too short for its inner search, that the purge had removed the dates the
+search needed, that a calibrated classifier fits once per calibration
+fold, or that a full-panel refit follows the folds.
+
+**`modeling.plan.plan_experiment` is a pure function of the spec and the
+date axis**, plus the panel when there is one, and `run_experiment`
+executes the plan rather than re-deriving it. A plan carries the folds
+with their date ranges, the rows the label-overlap purge removes from each
+(computed once, per contiguous test block, and applied to the fold's row
+mask as given), the inner fold count each training window supports on the
+dates that survive the purge, the candidate list the search will walk,
+the fit count all of that implies, and two content hashes per fold: one
+over everything that determines the fitted estimator, one over what
+determines its preprocessed matrices alone, which is what a fold cache
+keys on. The validation report records `fits` -- planned, folds, refit,
+candidates per fold, ceiling -- and each fold's `node_hash`.
+
+**`ModelSpec.budget.max_fits` (default 500) is refused, never truncated.**
+A plan over the ceiling is refused before the first fit, by name, with the
+count and the `max_fits` that would accept it; a test with a spy on the fit
+proves nothing was fitted. `validate_model_spec` reports the plan's count
+when given a dataset -- planned over the dataset's recorded date count, so
+the panel is never loaded -- and an over-budget spec as a problem at
+`where="budget"`, with `max_fits` and `within_budget` on the result.
+Without a dataset the estimate assumes every fold searches, which is the
+most the spec can cost. The refit is now counted everywhere, so every
+estimate is one higher than before; the planted tests check the estimate
+against what an experiment then reports it ran.
+
+`max_parallelism` from the plan is not built: nothing in the engine runs
+in parallel and no registered estimator exposes `n_jobs`, so a knob would
+control nothing, and a budget field that does nothing is worse than none.
+
 ## Purged K-fold gave one number, and the purge that made it honest was wrong for two test blocks
 
 Phase 3 of `Development/modeling_runtime_plan.md`, second commit.

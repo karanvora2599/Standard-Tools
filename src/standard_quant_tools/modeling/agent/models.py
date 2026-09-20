@@ -884,7 +884,10 @@ class CompareModelsInput(BaseModel):
 
     @model_validator(mode="after")
     def _reference_is_a_candidate(self) -> "CompareModelsInput":
-        if self.reference_model_id is not None and self.reference_model_id not in self.model_ids:
+        if (
+            self.reference_model_id is not None
+            and self.reference_model_id not in self.model_ids
+        ):
             raise ValueError(
                 f"reference_model_id={self.reference_model_id!r} is not in "
                 "model_ids; the reference is compared against the others and "
@@ -913,7 +916,9 @@ class PairedComparison(BaseModel):
     p_value_holm: float = Field(
         ..., description="The same, Holm-adjusted across every candidate in this call."
     )
-    hit_rate: float = Field(..., description="Share of dates the candidate's IC exceeded the reference's.")
+    hit_rate: float = Field(
+        ..., description="Share of dates the candidate's IC exceeded the reference's."
+    )
     block_size: int
     verdict: Literal["candidate_better", "reference_better", "indistinguishable"]
     diebold_mariano: Optional[Dict[str, Any]] = Field(
@@ -1062,12 +1067,25 @@ class ValidateModelSpecResult(BaseModel):
     estimated_fits: Optional[int] = Field(
         None,
         description=(
-            "Fits this spec implies: folds, times the search grid if one is "
-            "set. The number that decides whether the experiment takes "
-            "seconds or an afternoon. None when it cannot be known: a "
-            "walk-forward fold count depends on the dataset's date axis, so "
-            "without a `dataset_id` it is not estimated rather than guessed."
+            "Estimator fits this spec implies: every fold's fit, every search "
+            "candidate on every inner fold, each calibration fold, and the "
+            "full-panel refit -- the same plan run_model_experiment executes. "
+            "The number that decides whether the experiment takes seconds or "
+            "an afternoon. None when it cannot be known: a walk-forward fold "
+            "count depends on the dataset's date axis, so without a "
+            "`dataset_id` it is not estimated rather than guessed."
         ),
+    )
+    max_fits: Optional[int] = Field(
+        None,
+        description="The spec's budget.max_fits, the ceiling the experiment "
+        "is checked against before its first fit.",
+    )
+    within_budget: Optional[bool] = Field(
+        None,
+        description="Whether estimated_fits fits under max_fits. False is "
+        "reported as a problem at where='budget'; None when the fit count "
+        "is unknown.",
     )
     estimated_folds: Optional[int] = Field(
         None,

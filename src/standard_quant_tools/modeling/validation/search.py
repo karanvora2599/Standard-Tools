@@ -35,8 +35,14 @@ from .walk_forward import WalkForwardSplit, label_overlap_mask
 logger = logging.getLogger(__name__)
 
 
-def _candidates(search_spec: Any, random_seed: int) -> List[Dict[str, Any]]:
-    """The parameter combinations to try, in a deterministic order."""
+def search_candidates(search_spec: Any, random_seed: int) -> List[Dict[str, Any]]:
+    """
+    The parameter combinations to try, in a deterministic order.
+
+    Public because the experiment plan counts them before anything is
+    fitted, and the count the plan reports has to be the list the search
+    walks -- same enumeration, same sampling, same seed.
+    """
     names = sorted(search_spec.param_grid)
     grid = [
         dict(zip(names, combo))
@@ -124,6 +130,17 @@ def _inner_splitter(
     )
 
 
+def inner_fold_count(n_dates: int, inner_splits: int, embargo: int = 0) -> int:
+    """
+    Inner folds a training window of `n_dates` supports: `inner_splits`,
+    or zero when the window is too short and the search will not run.
+
+    The plan's question, answered by the splitter's own sizing rule rather
+    than a restatement of it.
+    """
+    return int(inner_splits) if _inner_splitter(n_dates, inner_splits, embargo) else 0
+
+
 def search_best_params(
     *,
     task: str,
@@ -182,7 +199,7 @@ def search_best_params(
 
     row_dates = train_frame["date"].to_numpy()
     date_code = np.searchsorted(dates.to_numpy(), row_dates)
-    candidates = _candidates(search_spec, random_seed)
+    candidates = search_candidates(search_spec, random_seed)
 
     # The inner folds' row masks, cut ONCE: they do not depend on the
     # candidate, and the purge is the same for every one of them.

@@ -21,7 +21,7 @@ from pydantic import (
 )
 
 from .features.base import RESERVED_PANEL_COLUMNS
-from .limits import MAX_LAG, MAX_LAGS_PER_FEATURE
+from .limits import DEFAULT_MAX_FITS, MAX_FITS_CEILING, MAX_LAG, MAX_LAGS_PER_FEATURE
 
 
 def _parse_date(value: str, field_name: str) -> pd.Timestamp:
@@ -1029,6 +1029,35 @@ class RankingSpec(BaseModel):
         return self
 
 
+class ComputeBudgetSpec(BaseModel):
+    """
+    The most an experiment may cost, checked before it costs anything.
+
+    A spec that looks modest can imply thousands of estimator fits once a
+    search grid multiplies through every fold's inner splits, and nothing
+    in the spec shows it. The plan counts the fits before the first one and
+    REFUSES a spec over the ceiling, by name, with the count and what would
+    bring it under. Never truncates: a search that ran half its grid is not
+    the search the spec described.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_fits: int = Field(
+        DEFAULT_MAX_FITS,
+        ge=1,
+        le=MAX_FITS_CEILING,
+        description=(
+            "Ceiling on estimator fits for one run_model_experiment call: "
+            "every fold's fit, every search candidate on every inner fold, "
+            "each calibration fold, and the full-panel refit. Over it the "
+            "run is refused before anything is fitted and the message says "
+            "the count. Raise it on purpose to accept a long run; "
+            "validate_model_spec reports the count without running."
+        ),
+    )
+
+
 class ModelSpec(BaseModel):
     # extra="forbid" like every top-level input model. Without it a
     # nested typo was silently dropped: `validate_model_spec` -- the
@@ -1039,6 +1068,11 @@ class ModelSpec(BaseModel):
     task: Task
     estimator: EstimatorSpec
     validation: ValidationSpec
+    budget: ComputeBudgetSpec = Field(
+        default_factory=ComputeBudgetSpec,
+        description="How much compute the experiment may spend; refused, not "
+        "truncated, when the plan exceeds it.",
+    )
     preprocessing: PreprocessingSpec = Field(default_factory=PreprocessingSpec)
     ranking: RankingSpec = Field(
         default_factory=RankingSpec,

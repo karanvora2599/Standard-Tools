@@ -1176,21 +1176,55 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
                 ),
             )
         )
+    # The plan's count, not a formula beside it. With a date axis the same
+    # planner run_model_experiment executes is asked, so the folds whose
+    # training window is too short for the inner search cost what they
+    # will cost: one fit, not one plus the grid. Without one, every fold
+    # is assumed to search, which is the most the spec can cost.
     estimated_fits: Optional[int] = None
-    if folds:
-        estimated_fits = int(folds)
-        search = spec.search
-        if search is not None:
-            combinations = 1
-            for values in search.param_grid.values():
-                combinations *= max(1, len(values))
-            inner = int(search.inner_splits)
-            estimated_fits = int(folds * (1 + combinations * inner))
-            notes.append(
-                f"A search grid of {combinations} combination(s) over "
-                f"{inner} inner split(s) multiplies through {folds} fold(s). "
-                "That is the difference between a quick experiment and a "
-                "long one, and nothing in the spec shows it."
+    if folds and n_dates is not None:
+        import pandas as pd
+
+        from ..plan import plan_experiment
+
+        estimated_fits = plan_experiment(spec, pd.RangeIndex(int(n_dates))).n_fits
+    elif folds:
+        from ..plan import fit_count
+
+        estimated_fits = fit_count(spec, folds)
+    if folds and spec.search is not None:
+        from ..validation.search import search_candidates
+
+        combinations = len(search_candidates(spec.search, spec.random_seed))
+        notes.append(
+            f"A search over {combinations} candidate(s) and "
+            f"{spec.search.inner_splits} inner split(s) multiplies through "
+            f"{folds} fold(s), plus one refit on the full panel. That is the "
+            "difference between a quick experiment and a long one, and "
+            "nothing in the spec shows it."
+        )
+
+    # The ceiling the experiment would be checked against before its first
+    # fit. Reported as a problem here so the refusal is read now, from a
+    # tool that fitted nothing, rather than later from the one that would.
+    within_budget: Optional[bool] = None
+    if estimated_fits is not None:
+        within_budget = estimated_fits <= spec.budget.max_fits
+        if not within_budget:
+            problems.append(
+                SpecProblem(
+                    where="budget",
+                    problem=(
+                        f"the spec implies {estimated_fits:,} estimator fits, "
+                        f"over budget.max_fits={spec.budget.max_fits:,}; "
+                        "run_model_experiment refuses it before the first fit."
+                    ),
+                    suggestion=(
+                        "Shrink the search grid or its inner_splits, use fewer "
+                        f"folds, or pass budget.max_fits={estimated_fits} to "
+                        "accept the cost on purpose."
+                    ),
+                )
             )
 
     if not problems:
@@ -1204,6 +1238,8 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
         allowed_estimator_params=allowed,
         estimated_fits=estimated_fits,
         estimated_folds=folds,
+        max_fits=int(spec.budget.max_fits),
+        within_budget=within_budget,
         notes=notes,
     )
 

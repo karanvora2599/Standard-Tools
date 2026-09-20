@@ -81,12 +81,17 @@ def _features() -> str:
                 definition.description,
             ]
         )
-    return (
-        f"## Features ({len(rows)})\n\n"
-        + _table(
-            ["id", "scope", "temporal", "lookback", "requires", "default params", "description"],
-            rows,
-        )
+    return f"## Features ({len(rows)})\n\n" + _table(
+        [
+            "id",
+            "scope",
+            "temporal",
+            "lookback",
+            "requires",
+            "default params",
+            "description",
+        ],
+        rows,
     )
 
 
@@ -209,12 +214,18 @@ def _spec_options() -> str:
         ["`DatasetSpec.missing.policy`", _literal_options(MissingDataSpec, "policy")],
         ["`ValidationSpec.method`", _literal_options(ValidationSpec, "method")],
         ["`ValidationSpec.scheme`", _literal_options(ValidationSpec, "scheme")],
-        ["`PreprocessingSpec.normalization`", _literal_options(PreprocessingSpec, "normalization")],
+        [
+            "`PreprocessingSpec.normalization`",
+            _literal_options(PreprocessingSpec, "normalization"),
+        ],
         ["`WeightingSpec.method`", _literal_options(WeightingSpec, "method")],
         ["`SearchSpec.method`", _literal_options(SearchSpec, "method")],
         ["`SearchSpec.scoring`", _literal_options(SearchSpec, "scoring")],
         ["`EstimatorSpec.calibration`", _literal_options(EstimatorSpec, "calibration")],
-        ["`PredictionTransformSpec.method`", _literal_options(PredictionTransformSpec, "method")],
+        [
+            "`PredictionTransformSpec.method`",
+            _literal_options(PredictionTransformSpec, "method"),
+        ],
         [
             "`PredictionTransformSpec.rebalance_frequency`",
             _literal_options(PredictionTransformSpec, "rebalance_frequency"),
@@ -231,8 +242,26 @@ def _limits() -> str:
 
     rows = [
         ["`MAX_LAG`", limits.MAX_LAG, "deepest single lag, in bars"],
-        ["`MAX_LAGS_PER_FEATURE`", limits.MAX_LAGS_PER_FEATURE, "lags one feature may request"],
-        ["`MAX_EXPANDED_COLUMNS`", limits.MAX_EXPANDED_COLUMNS, "ceiling on the expanded panel"],
+        [
+            "`MAX_LAGS_PER_FEATURE`",
+            limits.MAX_LAGS_PER_FEATURE,
+            "lags one feature may request",
+        ],
+        [
+            "`MAX_EXPANDED_COLUMNS`",
+            limits.MAX_EXPANDED_COLUMNS,
+            "ceiling on the expanded panel",
+        ],
+        [
+            "`DEFAULT_MAX_FITS`",
+            limits.DEFAULT_MAX_FITS,
+            "estimator fits one experiment may cost unless `budget.max_fits` says otherwise; refused, never truncated",
+        ],
+        [
+            "`MAX_FITS_CEILING`",
+            limits.MAX_FITS_CEILING,
+            "the most `budget.max_fits` may be raised to",
+        ],
     ]
     return "## Limits\n\n" + _table(["name", "value", "meaning"], rows)
 

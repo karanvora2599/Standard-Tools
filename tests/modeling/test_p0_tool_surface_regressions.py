@@ -78,7 +78,9 @@ def _ridge(**overrides) -> ModelSpec:
 
 @pytest.fixture
 def built_dataset_id(patched_multi_factory) -> str:
-    return build_model_dataset(BuildModelDatasetInput(spec=_tool_dataset_spec())).dataset_id
+    return build_model_dataset(
+        BuildModelDatasetInput(spec=_tool_dataset_spec())
+    ).dataset_id
 
 
 # ── F2: scoring goes through the task's adapter ─────────────────────────
@@ -189,7 +191,9 @@ class TestDatasetListingReportsWhatWasBuilt:
             )
         )
         assert result.dataset_coverage["rows"] > 0
-        assert result.dataset_coverage["start_date"] < result.dataset_coverage["end_date"]
+        assert (
+            result.dataset_coverage["start_date"] < result.dataset_coverage["end_date"]
+        )
 
 
 # ── F4: validate_model_spec estimates the work that will actually run ────
@@ -216,7 +220,10 @@ class TestValidateModelSpecEstimatesRealWork:
         )
         expected = actual.validation_report["n_folds_expected"]
         assert estimate.estimated_folds == expected
-        assert estimate.estimated_fits == expected
+        # One fit per fold, plus the refit on the full panel that follows
+        # them -- the plan the experiment executed, which it reports back.
+        assert estimate.estimated_fits == expected + 1
+        assert actual.validation_report["fits"]["planned"] == expected + 1
         # The old answer, which no walk-forward spec over this dataset
         # produces: the windows yield far more than five folds here.
         assert expected != 5
@@ -236,7 +243,20 @@ class TestValidateModelSpecEstimatesRealWork:
         )
         folds = result.estimated_folds
         assert folds and folds > 0
-        assert result.estimated_fits == folds * (1 + 3 * 2)
+        # Against what RAN, not a formula: every fold that searched fitted
+        # three candidates on two inner folds, every fold fitted once, and
+        # the full panel was refit once.
+        actual = run_model_experiment(
+            RunModelExperimentInput(dataset_id=built_dataset_id, spec=spec)
+        )
+        searched = [
+            r
+            for r in actual.validation_report["hyperparameter_search"]
+            if r["searched"]
+        ]
+        assert searched
+        assert result.estimated_fits == folds + 1 + 3 * 2 * len(searched)
+        assert result.estimated_fits == actual.validation_report["fits"]["planned"]
 
     def test_without_a_dataset_a_walk_forward_count_is_unknown_not_guessed(self):
         result = validate_model_spec(ValidateModelSpecInput(spec=_ridge()))
@@ -249,7 +269,7 @@ class TestValidateModelSpecEstimatesRealWork:
         spec = _ridge(validation=ValidationSpec(method="purged_kfold", n_splits=7))
         result = validate_model_spec(ValidateModelSpecInput(spec=spec))
         assert result.estimated_folds == 7
-        assert result.estimated_fits == 7
+        assert result.estimated_fits == 7 + 1  # plus the full-panel refit
 
     def test_a_dataset_recorded_without_n_dates_is_reported_as_unknown(self):
         directory = _artifacts.run_dir("ds_legacy_validate")
@@ -356,7 +376,9 @@ class TestTheEnsembleToolRuns:
 
         ids = [
             run_model_experiment(
-                RunModelExperimentInput(dataset_id=built_dataset_id, spec=_ridge(random_seed=s))
+                RunModelExperimentInput(
+                    dataset_id=built_dataset_id, spec=_ridge(random_seed=s)
+                )
             ).model_id
             for s in (1, 2)
         ]

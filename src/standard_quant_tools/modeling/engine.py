@@ -24,6 +24,7 @@ from . import artifacts as _artifacts
 from .adapters import accepts_missing, get_adapter
 from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import get_estimator_class, validate_params
+from .plan import plan_experiment
 from .preprocessing import (
     FoldContext,
     fit_and_apply_pipeline,
@@ -51,11 +52,7 @@ from .validation.ranking import (
     relevance_grades,
 )
 from .validation.search import search_best_params
-from .validation.walk_forward import (
-    build_splitter,
-    contiguous_runs,
-    label_overlap_mask,
-)
+from .validation.walk_forward import build_splitter
 from .validation.weights import build_sample_weights
 
 
@@ -465,7 +462,21 @@ def run_experiment(
     # each fold picked something different -- the latter means the search
     # was fitting noise, and the report is the only place that shows it.
     search_reports: List[Dict[str, Any]] = []
-    n_expected_folds = splitter.n_splits(dates)
+    # The schedule, decided before anything is fitted: the folds, the rows
+    # the label-overlap purge removes from each, the inner folds each
+    # training window supports, and the fit count all of that implies.
+    # Refused here by name when it costs more than the spec's budget
+    # allows, and executed as planned below, so the count the plan reports
+    # is the count that runs.
+    plan = plan_experiment(
+        model_spec,
+        dates,
+        panel=panel,
+        dataset_hash=dataset.get("data_hash"),
+        feature_ids=feature_ids,
+    )
+    plan.refuse_over_budget("run_model_experiment")
+    n_expected_folds = len(plan.folds)
     # Row -> position in `dates`, computed once instead of hashing the whole
     # date column against a fresh set on every fold. `dates` is sorted and
     # every row's date is in it by construction, so searchsorted is exact.
@@ -485,17 +496,13 @@ def run_experiment(
     # question needs asking at all.
     panel_has_missing = bool(np.isnan(feature_matrix).any())
     estimator_accepts_missing = accepts_missing(estimator_cls)
-    # The purge is decided on these rather than on a copied sub-frame; see
-    # the fold loop for why that removes a whole frame copy per fold.
-    panel_dates = panel["date"].to_numpy()
-    panel_label_end = panel[LABEL_END_COL].to_numpy() if has_label_end else None
-    for train_pos, test_pos in splitter.split(dates):
-        train_dates = dates[train_pos]
-        test_dates = dates[test_pos]
+    for fold in plan.folds:
+        train_dates = dates[fold.train_positions]
+        test_dates = dates[fold.test_positions]
         in_train = np.zeros(len(dates), dtype=bool)
-        in_train[train_pos] = True
+        in_train[fold.train_positions] = True
         in_test = np.zeros(len(dates), dtype=bool)
-        in_test[test_pos] = True
+        in_test[fold.test_positions] = True
         train_mask = in_train[date_code]
         test_mask = in_test[date_code]
 
@@ -508,43 +515,17 @@ def run_experiment(
         # the horizon at all), so horizon=20/embargo=0 trained on 20 labels
         # that had already seen the test period.
         #
-        # Purging on the row's own recorded label_end_date rather than on
-        # an integer offset also handles entities on different calendars,
-        # where t+horizon entity bars != t+horizon global panel dates.
-        if has_label_end and train_mask.any() and len(test_dates) > 0:
-            # A training row is purged when the bars its label spans
-            # OVERLAP the test block: the label ends on or after the block
-            # starts, and the row itself begins on or before the block
-            # ends. Under walk-forward the second condition is always true
-            # (training precedes testing), so this reduces exactly to the
-            # previous rule; it is written in full because purged k-fold
-            # puts training rows on BOTH sides of the test block, and there
-            # the rows after it must not be purged for the wrong reason.
-            # Computed on the panel-wide arrays and folded into the row
-            # mask, so the fold is taken ONCE. Selecting and then dropping
-            # made a second full copy of the training block -- 11.5 ms on
-            # 100,000 rows, the largest single piece of per-fold overhead.
-            # The rule itself lives in walk_forward.label_overlap_mask,
-            # shared with the inner hyperparameter search so the two
-            # cannot disagree about what a leaked row is.
-            # PER CONTIGUOUS BLOCK of the test set, ORed. Walk-forward and
-            # purged k-fold have one block, and this is exactly the rule
-            # above. Combinatorial CV has several, and a training row
-            # BETWEEN two of them must be purged only when its own label
-            # reaches the later block -- not for lying between the two,
-            # which a purge on [first test date, last test date] would have
-            # done to every row in the gap.
-            overlaps = np.zeros(train_mask.shape, dtype=bool)
-            for first_pos, last_pos in contiguous_runs(test_pos):
-                overlaps |= label_overlap_mask(
-                    train_mask,
-                    panel_dates,
-                    panel_label_end,
-                    dates[first_pos],
-                    dates[last_pos],
-                )
-            n_purged_total += int(overlaps.sum())
-            train_mask = train_mask & ~overlaps
+        # The rows are the PLAN's: a training row is purged when the bars
+        # its label spans overlap a test block, decided per contiguous
+        # block by walk_forward.label_overlap_mask -- the rule the inner
+        # hyperparameter search shares -- on each row's own recorded
+        # label_end_date, which also handles entities on different
+        # calendars. Applied to the row mask in place so the fold is taken
+        # ONCE; selecting and then dropping made a second full copy of the
+        # training block, 11.5 ms on 100,000 rows.
+        if fold.purged_rows is not None and fold.purged_rows.size:
+            train_mask[fold.purged_rows] = False
+            n_purged_total += int(fold.purged_rows.size)
 
         train_df = panel[train_mask]
         test_df = panel[test_mask]
@@ -713,6 +694,10 @@ def run_experiment(
                 "n_train_rows": int(len(train_df)),
                 "n_test_rows": int(len(test_df)),
                 "metrics": metrics,
+                # What determined this fold's estimator: dataset, rows,
+                # pipeline, estimator, parameters, seed. Two runs that
+                # agree here fitted the same thing.
+                "node_hash": fold.node_hash,
             }
         )
         # Weight by out-of-sample prediction count -- see
@@ -879,6 +864,16 @@ def run_experiment(
         "skipped_folds": skipped,
         "n_train_rows_purged_overlap": n_purged_total,
         "target_horizon": horizon,
+        # What the plan said this would cost, against the ceiling it was
+        # checked against. A fold skipped at run time cost less than
+        # planned; nothing costs more.
+        "fits": {
+            "planned": plan.n_fits,
+            "folds": plan.n_fits_folds,
+            "refit": plan.n_fits_refit,
+            "candidates_per_fold": plan.n_candidates,
+            "max_fits": plan.max_fits,
+        },
         "folds": fold_records,
     }
 

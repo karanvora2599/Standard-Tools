@@ -136,3 +136,5 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `MAX_LAG` | 60 | deepest single lag, in bars |
 | `MAX_LAGS_PER_FEATURE` | 20 | lags one feature may request |
 | `MAX_EXPANDED_COLUMNS` | 400 | ceiling on the expanded panel |
+| `DEFAULT_MAX_FITS` | 500 | estimator fits one experiment may cost unless `budget.max_fits` says otherwise; refused, never truncated |
+| `MAX_FITS_CEILING` | 100000 | the most `budget.max_fits` may be raised to |

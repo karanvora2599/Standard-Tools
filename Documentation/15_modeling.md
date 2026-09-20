@@ -64,7 +64,7 @@ because the order is the point.
 | `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing |
 | `validate_pit_records` | point-in-time records → whether they are joinable, checked before anything is joined |
 | `join_point_in_time` | `dataset_id` + records → each panel row gets the most recent record **available by then**, never the one describing that date |
-| `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold |
+| `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, how many fits the spec implies once a search grid multiplies through every fold, and whether that is under the spec's `budget.max_fits` |
 | `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
 | `list_models` | → every registered model, newest first, with task, estimator, headline OOS metric and source dataset |
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
@@ -1752,6 +1752,71 @@ fold. A 12-point grid with 3 inner splits over 20 outer folds is 720 fits
 where there was 20. That is why it is opt-in. If the training window is too
 short to be split `inner_splits` times, the search declines for that fold
 and says so in `reason`, rather than selecting on two dates.
+
+---
+
+## Planning before running: the experiment plan and the compute budget
+
+`run_model_experiment` does not discover what a spec costs by paying it.
+`modeling.plan.plan_experiment(model_spec, dates, panel=..., dataset_hash=...,
+feature_ids=...)` is a pure function of the spec and the date axis — plus
+the panel when there is one — and `run_experiment` executes the plan it
+returns rather than re-deriving any of it. A plan carries:
+
+- **the folds**, each with its date ranges and, with a panel, the exact rows
+  the label-overlap purge removes from it (`purged_rows`, applied to the
+  fold's row mask as given, so the purge count the plan reports is the
+  purge count that ran);
+- **the inner fold count** each training window supports, judged by the
+  search's own sizing rule on the dates that *survive* the purge — a fold
+  whose window is too short to search costs one fit, not one plus the grid;
+- **the candidate list** the search will score, from the same enumeration
+  and the same seeded sample the search walks;
+- **the fit count**: per fold, one fit (times `calibration_folds` for a
+  calibrated classifier) plus candidates × inner folds, and one refit on
+  the full panel after the folds;
+- **a content hash per fold**: `node_hash` over everything that determines
+  the fitted estimator (dataset hash, the fold's rows, the resolved
+  preprocessing pipeline, the feature set, the estimator and its parameters,
+  the seed), recorded in `validation_report.folds[i].node_hash`, and a
+  narrower `preprocessing_hash` over what determines the fold's
+  *preprocessed matrices* alone.
+
+`validation_report["fits"]` records what the plan said the run would cost
+(`planned`, split into `folds` and `refit`, with `candidates_per_fold`)
+beside the ceiling it was checked against. A fold skipped at run time cost
+less than planned; nothing costs more.
+
+**The budget is refused, never truncated.** `ModelSpec.budget.max_fits`
+(default 500) is a ceiling on estimator fits for one experiment. A plan
+over it is refused before the first fit, by name, with the count and what
+would bring it under:
+
+```
+run_model_experiment: this spec implies 1,281 estimator fits (16 fold(s) x
+(1 + 20 candidate(s) x inner folds) + 1 for the refit), over
+budget.max_fits=500. Nothing was fitted. Shrink the search grid or its
+inner_splits, use fewer folds, or pass budget.max_fits=1281 to accept the
+cost on purpose.
+```
+
+Nothing is quietly shortened: a search that ran half its grid is not the
+search the spec described, and a number produced by it would carry the
+spec's name without its meaning.
+
+`validate_model_spec` reports the same count without running anything.
+Given a `dataset_id` it plans over the dataset's recorded date count — the
+panel is never loaded — so `estimated_fits` is the plan's number and
+`within_budget` says whether the experiment would be refused; over budget
+is reported as a problem at `where="budget"` with the `max_fits` that
+would accept it. Without a dataset, purged K-fold and CPCV have a known
+fold count and the estimate assumes every fold searches, which is the most
+the spec can cost; walk-forward's fold count depends on the date axis and
+is reported as unknown rather than guessed.
+
+`feature_ablation`'s own `max_fits` is a separate ceiling on the whole
+ablation, which runs one experiment per feature; each of those experiments
+is still planned and checked against the spec's budget on its own.
 
 ---
 

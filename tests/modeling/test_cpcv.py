@@ -233,7 +233,7 @@ class TestTheFitEstimate:
     def test_the_path_count_is_known_without_a_dataset(self):
         result = validate_model_spec(ValidateModelSpecInput(spec=_cpcv()))
         assert result.estimated_folds == math.comb(6, 2) == 15
-        assert result.estimated_fits == 15
+        assert result.estimated_fits == 15 + 1  # each path a fit, plus the refit
 
     def test_and_exact_with_one(self, patched_multi_factory):
         dataset_id = build_model_dataset(
