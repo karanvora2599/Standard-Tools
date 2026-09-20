@@ -1382,55 +1382,131 @@ and forgotten there came back silently **binarized** — a continuous label
 arriving as 1.0/0.0 with nothing raising.
 
 
-## Preprocessing: pooled vs cross-sectional
+## Preprocessing: a registry of steps, a pipeline of fitted state
 
-`ModelSpec.preprocessing.normalization` chooses how feature columns are
-standardized before the estimator sees them.
+`ModelSpec.preprocessing` is either an explicit `steps` pipeline composed
+from `PREPROCESSOR_REGISTRY`, or the original `normalization` scheme, which
+resolves to one:
 
-**`pooled`** (default) fits one mean and standard deviation over the whole
-training panel, and applies them unchanged to the test rows.
+| `normalization` | resolves to |
+|---|---|
+| `pooled` (default) | `winsorize(lower=0.01, upper=0.99)` → `zscore` |
+| `cross_sectional` | `cross_sectional_standardize(clip_sigma)` |
 
-**`cross_sectional`** standardizes within each date, so what reaches the
-model is each entity's position relative to its peers that day.
+```python
+PreprocessingSpec(steps=[
+    StepSpec(type="winsorize", params={"lower": 0.05, "upper": 0.95}),
+    StepSpec(type="cross_sectional_standardize", params={"clip_sigma": 2.0}),
+])
+```
 
-The difference is not cosmetic. Pooled z-scoring leaves the market factor
-inside every feature: on a day the whole market rallies, every entity's
-momentum reads high together, and a model fed those features can score well
-by learning *"today was an up day"* rather than *"this name is strong
-relative to its peers"*. For a model judged on cross-sectional IC, that is
-the wrong thing to have learned.
+Every registered step, with its bounded parameters, is in the generated
+[29_modeling_reference.md](29_modeling_reference.md);
+`list_modeling_capabilities` reports the same list. A step named in a spec
+is looked up there and nowhere else, so an agent composes from a bounded
+catalog and cannot smuggle in a transform the library has not vetted. A
+scheme given beside `steps` is refused as a second claim about one
+transform — checked against the default values rather than against which
+fields were set, because a spec round-trips through `model_dump()` on every
+persist and a dump writes every field.
 
-It is not the default only because switching it changes what every existing
+### Fit on train, apply to test, persist the state
+
+A step is `fit(X, ctx) -> state` and `transform(X, state, ctx)`, with the
+state plain JSON. The engine fits the pipeline on each fold's **training
+rows** and applies the fitted state to that fold's test rows; the
+full-panel refit fits it once and the registry persists the result as
+`preprocessing_state.json`, content-hashed beside the estimator;
+`score_model` applies it. There is one implementation of "fit on train,
+apply to test", and the deployed transform is the validated one because
+there is no second place for it to be written.
+
+That is not a tidiness argument. `normalization` used to be two code paths
+consulted in three places — the fold loop, the search closure and the
+refit — and the refit consulted neither: it fitted the pooled statistics
+whatever the spec said, so a model validated cross-sectionally was deployed
+pooled, with nothing in the package to show it. Measured on a six-entity
+panel, the deployed estimator's predictions under the two transforms agreed
+at Spearman 0.84. A model registered before the state file existed scores
+through its statistics file when that describes a validated pipeline, and
+is refused by name when it does not; its walk-forward OOS predictions
+remain valid either way.
+
+`ctx` carries the rows' dates and entities, because a cross-sectional step
+has to know which rows share a date. It never carries the target: a step
+that could read the label would be a step that could leak it.
+
+### Two flags a consumer reads
+
+**`stateless`** — the step fits nothing. `cross_sectional_standardize`
+uses only each date's own cross-section, contemporaneous information a live
+model also has, so nothing crosses the fold boundary and there is nothing
+to persist. **`column_wise`** — one column's transform depends only on that
+column, which is what lets a consumer drop a column from a fitted matrix
+rather than refit the pipeline without it.
+
+### Why the default is still pooled
+
+Pooled z-scoring leaves the market factor inside every feature: on a day
+the whole market rallies, every entity's momentum reads high together, and
+a model fed those features can score well by learning *"today was an up
+day"* rather than *"this name is strong relative to its peers"*. For a
+model judged on cross-sectional IC, that is the wrong thing to have
+learned, and `cross_sectional_standardize` removes it by construction. It
+is not the default only because switching it changes what every existing
 model predicts.
 
-Two properties worth knowing:
+Within a date, clipping replaces quantile winsorizing. The 1st percentile
+of a 20-name cross-section *is* its minimum, so clipping to it would do
+nothing at all; `clip_sigma` (default 3.0) bounds outliers at the sample
+size that actually exists. It is also cheaper — measured at 469 ms against
+898 ms for pooled on a 50-entity walk-forward, because it skips the
+quantile fitting entirely.
 
-- **No fold-boundary question.** Unlike the pooled statistics, these are not
-  fitted on train and carried to test — each date uses only its own
-  cross-section, which is contemporaneous information a live model would
-  also have. Nothing crosses the split.
-- **Clipping, not quantile winsorizing.** The pooled path clips to the
-  1st/99th percentile. That is meaningless inside a single date: the 1st
-  percentile of a 20-name cross-section *is* its minimum, so clipping to it
-  does nothing at all. `clip_sigma` (default 3.0) bounds outliers at the
-  sample size that actually exists.
+### The native kernel is still the fast path
 
-It is also cheaper — measured at 469 ms against 898 ms for pooled on a
-50-entity walk-forward, because it skips the quantile fitting entirely.
+The default pair is exactly `fit_preprocessing`/`apply_preprocessing`, the
+functions with the fused native kernel that took preprocessing from half a
+walk-forward run to a fraction of it. When the resolved steps are that
+pair the pipeline calls those functions and reads the state off their
+statistics; the generic step classes are the reference, and a test pins the
+two paths equal to 1e-12 on both the native and the Python path. The
+legacy `preprocessing_stats.json` is still written, byte for byte, from the
+state for one release, so an older reader keeps loading; the state file is
+the record.
 
-**The deployed estimator is refit under the same transform the folds
-used**, and the manifest says which. A cross-sectional model fits nothing
-per column, so its `preprocessing_stats.json` is empty and
-`ModelManifest.preprocessing` records the `PreprocessingSpec`; `score_model`
-reads it and standardizes within the scoring date's own cross-section. The
-refit did not branch before this was recorded: a model validated
-cross-sectionally was refit and scored on the pooled statistics, with
-nothing in the package to show it — measured on a six-entity panel, the
-deployed estimator's predictions under the two transforms agreed at
-Spearman 0.84. A model registered before the field existed whose spec says
-`cross_sectional` is refused at scoring rather than guessed at, because no
-transform applied now reproduces the pipeline its OOS metrics describe; its
-walk-forward OOS predictions remain valid.
+### Adding your own step
+
+```python
+from standard_quant_tools.modeling.estimators.bounds import EstimatorParamSchema, ParamBound
+from standard_quant_tools.modeling.preprocessing import (
+    Preprocessor, PreprocessorDefinition, register_preprocessor,
+)
+
+class RankGauss(Preprocessor):
+    id = "firm.rank_gauss"
+    stateless = False
+    column_wise = True
+
+    def fit(self, X, ctx):
+        return {"n": int(len(X))}          # JSON-serializable, from training rows
+
+    def transform(self, X, state, ctx):
+        ...
+
+register_preprocessor(PreprocessorDefinition(
+    id="firm.rank_gauss",
+    description="Rank each column, then map the ranks onto a normal.",
+    cls=RankGauss,
+    schema=EstimatorParamSchema(bounds={"eps": ParamBound("float", 0.0, 0.5)}),
+    default_params={"eps": 1e-6},
+))
+```
+
+The registry refuses a duplicate id without `overwrite=True`, and refuses
+a definition whose class declares a different id — a fitted state names
+its steps by id, and a state naming a step the pipeline cannot rebuild is
+a model that cannot be scored.
 
 ---
 

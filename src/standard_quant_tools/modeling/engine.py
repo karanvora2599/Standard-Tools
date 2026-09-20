@@ -24,11 +24,12 @@ from . import artifacts as _artifacts
 from .adapters import get_adapter
 from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import get_estimator_class, validate_params
-from .features.transforms import (
-    apply_preprocessing,
-    fit_and_apply_preprocessing,
-    fit_preprocessing,
-    standardize_cross_sectional,
+from .preprocessing import (
+    FoldContext,
+    fit_and_apply_pipeline,
+    fit_pipeline,
+    legacy_stats,
+    step_types,
 )
 from .registry.model_registry import new_model_id, save_model
 from .specs import TASKS, ModelSpec, targets_for_task
@@ -212,15 +213,17 @@ def _preprocess(
     test_features: "pd.DataFrame | None" = None,
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
-    Normalize the feature columns for one fold.
+    Transform the feature columns for one fold.
 
-    The two modes differ in more than their arithmetic. Pooled statistics
-    are FITTED on the training rows and applied unchanged to the test rows,
-    which is the fold-boundary discipline that keeps the test window
-    genuinely out of sample. Cross-sectional standardization has nothing to
-    fit: each date is normalized against its own cross-section, which is
-    contemporaneous information a live model would also have, so train and
-    test are transformed independently and no statistic crosses the split.
+    The pipeline is fitted on the training rows and its state applied
+    unchanged to the test rows, which is the fold-boundary discipline that
+    keeps the test window genuinely out of sample. A stateless step --
+    cross-sectional standardization, which uses only each date's own
+    cross-section, contemporaneous information a live model also has --
+    fits nothing, so for it the two sides are transformed independently
+    and no statistic crosses the split. Which steps run is
+    `PreprocessingSpec.resolved_steps`, read here and in the refit and
+    nowhere else.
     """
     # Selected ONCE each. `train_frame[feature_ids]` was evaluated twice on
     # the pooled path -- once to fit and once to apply -- and the take is
@@ -237,20 +240,22 @@ def _preprocess(
     if test_features is None:
         test_features = test_frame[feature_ids]
 
-    if model_spec.preprocessing.normalization == "cross_sectional":
-        clip = model_spec.preprocessing.clip_sigma
-        return (
-            standardize_cross_sectional(
-                train_features, train_frame["date"].to_numpy(), clip
-            ),
-            standardize_cross_sectional(
-                test_features, test_frame["date"].to_numpy(), clip
-            ),
-        )
-    # Fused so the training block becomes a C-contiguous matrix once rather
-    # than once per kernel call; identical arithmetic, and it falls back to
-    # the fit/apply pair whenever the fast path does not apply.
-    return fit_and_apply_preprocessing(train_features, test_features)
+    # ONE call, whatever the spec asked for. This branched on
+    # `normalization` -- pooled statistics fitted on train and applied to
+    # test, or per-date standardization of each side -- and so did the
+    # full-panel refit, except the refit did not, which is how a model
+    # validated cross-sectionally was deployed pooled. The pipeline is the
+    # one place that knows how a step is fitted and applied; the fold loop,
+    # the search closure and the refit all hand it the same resolved steps.
+    # The default pair still goes through the fused native kernel inside.
+    _state, train_X, test_X = fit_and_apply_pipeline(
+        model_spec.preprocessing.resolved_steps,
+        train_features,
+        test_features,
+        FoldContext.from_frame(train_frame),
+        FoldContext.from_frame(test_frame),
+    )
+    return train_X, test_X
 
 
 def _fold_sample_weights(
@@ -715,6 +720,9 @@ def run_experiment(
             else None
         ),
         "normalization": model_spec.preprocessing.normalization,
+        # The resolved pipeline, by step id. `normalization` alone cannot
+        # describe an explicit `steps` spec, for which it reads 'pooled'.
+        "preprocessing_steps": step_types(model_spec.preprocessing.resolved_steps),
         "weighting": model_spec.weighting.method,
         # Per fold, so a reader can see whether the search settled on the
         # same parameters every time or picked something different each
@@ -754,16 +762,16 @@ def run_experiment(
     # fits nothing per column, so its persisted statistics are empty and
     # the manifest's `preprocessing` field says which transform to apply.
     full_features = panel[feature_ids]
-    if model_spec.preprocessing.normalization == "cross_sectional":
-        full_stats = {}
-        full_X = standardize_cross_sectional(
-            full_features,
-            panel["date"].to_numpy(),
-            model_spec.preprocessing.clip_sigma,
-        )
-    else:
-        full_stats = fit_preprocessing(full_features)
-        full_X = apply_preprocessing(full_features, full_stats)
+    # The same pipeline the folds ran, fitted once on the whole panel. Its
+    # state is what gets persisted and what scoring applies; the legacy
+    # per-column statistics file is projected from it for one release so an
+    # older reader of `preprocessing_stats.json` keeps loading.
+    full_state, full_X = fit_pipeline(
+        model_spec.preprocessing.resolved_steps,
+        full_features,
+        FoldContext.from_frame(panel),
+    )
+    full_stats = legacy_stats(full_state)
     full_y = panel["target"].to_numpy()
     final_estimator = _instantiate(
         estimator_cls, model_spec.estimator.params, model_spec.random_seed
@@ -837,9 +845,11 @@ def run_experiment(
         n_folds=len(fold_metrics),
         validation_report=validation_report,
         preprocessing_stats=full_stats,
-        # Which transform the deployed estimator expects -- see the refit
-        # above and ModelManifest.preprocessing.
-        preprocessing=model_spec.preprocessing.model_dump(),
+        # The fitted pipeline state the deployed estimator expects, and the
+        # RESOLVED step list in the manifest so a reader sees what ran
+        # rather than the scheme that implied it.
+        preprocessing_state=full_state,
+        preprocessing=model_spec.preprocessing.resolved_dump(),
         oos_predictions_uri=oos_predictions_uri,
         model_id=model_id,
         # The last FEATURE date in the training panel. Kept for lineage, but

@@ -156,10 +156,16 @@ class TestTheRefitHonoursTheValidatedTransform:
         self, cross_sectional_model, pooled_model
     ):
         cs = load_manifest(cross_sectional_model[0])
-        assert cs.preprocessing == {"normalization": "cross_sectional", "clip_sigma": 3.0}
+        assert cs.preprocessing["normalization"] == "cross_sectional"
+        # The RESOLVED pipeline, so a reader sees what ran.
+        assert [s["type"] for s in cs.preprocessing["steps"]] == [
+            "cross_sectional_standardize"
+        ]
+        assert cs.preprocessing["steps"][0]["params"] == {"clip_sigma": 3.0}
         assert load_preprocessing_stats(cross_sectional_model[0]) == {}
         pooled = load_manifest(pooled_model[0])
         assert pooled.preprocessing["normalization"] == "pooled"
+        assert [s["type"] for s in pooled.preprocessing["steps"]] == ["winsorize", "zscore"]
         view = inspect_model(
             InspectModelInput(model_id=cross_sectional_model[0], view="validation")
         )
@@ -194,6 +200,24 @@ class TestScoringAppliesTheValidatedTransform:
         deployed = load_model(model_id)
         assert abs(float(predictions.mean()) - float(deployed.intercept_)) > 1e-6
 
+    @staticmethod
+    def _make_legacy(model_id: str) -> None:
+        """
+        The shape a model registered before the stop-gap had: a statistics
+        file, no `preprocessing` field in the manifest, and -- since the
+        pipeline registry -- no `preprocessing_state.json` either. The
+        manifest is not self-hashed, so the field can be removed; the
+        state file's hash is removed with it so the manifest stays
+        consistent with the directory.
+        """
+        directory = _artifacts.run_dir(model_id)
+        (directory / "preprocessing_state.json").unlink()
+        path = directory / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        del manifest["preprocessing"]
+        del manifest["content_hashes"]["preprocessing_state.json"]
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
     def test_a_legacy_cross_sectional_model_is_refused_not_guessed(
         self, cross_sectional_model
     ):
@@ -201,22 +225,15 @@ class TestScoringAppliesTheValidatedTransform:
         A manifest from before the field existed, whose bundled spec says
         cross_sectional, describes an estimator that was refit on the
         pooled statistics: no transform applied now reproduces a validated
-        pipeline. The manifest is not self-hashed, so the legacy shape is
-        produced by removing the field.
+        pipeline.
         """
         model_id, _dataset = cross_sectional_model
-        path = _artifacts.run_dir(model_id) / "manifest.json"
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        del manifest["preprocessing"]
-        path.write_text(json.dumps(manifest), encoding="utf-8")
+        self._make_legacy(model_id)
         with pytest.raises(ValidationError, match="predates the refit"):
             score_model(model_id, as_of="2023-12-29", universe=UNIVERSE)
 
     def test_a_legacy_pooled_model_still_scores(self, pooled_model):
         model_id, _dataset = pooled_model
-        path = _artifacts.run_dir(model_id) / "manifest.json"
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        del manifest["preprocessing"]
-        path.write_text(json.dumps(manifest), encoding="utf-8")
+        self._make_legacy(model_id)
         result = score_model(model_id, as_of="2023-12-29", universe=UNIVERSE)
         assert result["n_entities"] == len(UNIVERSE)

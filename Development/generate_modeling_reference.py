@@ -144,6 +144,34 @@ def _estimators() -> str:
     )
 
 
+def _preprocessing() -> str:
+    from standard_quant_tools.modeling.preprocessing import list_preprocessors
+
+    rows = []
+    for definition in list_preprocessors():
+        rows.append(
+            [
+                f"`{definition.id}`",
+                ", ".join(f"`{p}`" for p in definition.schema_.allowed_names) or "",
+                _params(definition.default_params),
+                "stateless" if definition.stateless else "fitted on train",
+                "yes" if definition.column_wise else "no",
+                definition.description,
+            ]
+        )
+    return (
+        f"## Preprocessing steps ({len(rows)})\n\n"
+        "Composed in order by `PreprocessingSpec.steps`; each is fitted on the "
+        "fold's training rows and its state applied to the test rows, then "
+        "persisted with the model as `preprocessing_state.json`. "
+        "`normalization='pooled'` resolves to `winsorize` then `zscore`; "
+        "`'cross_sectional'` to `cross_sectional_standardize`.\n\n"
+        + _table(
+            ["id", "params", "defaults", "state", "column-wise", "description"], rows
+        )
+    )
+
+
 def _targets() -> str:
     from standard_quant_tools.modeling.specs import TARGET_KINDS
 
@@ -208,7 +236,15 @@ def _limits() -> str:
 
 
 def render() -> str:
-    sections = [HEADER, _features(), _estimators(), _targets(), _spec_options(), _limits()]
+    sections = [
+        HEADER,
+        _features(),
+        _estimators(),
+        _preprocessing(),
+        _targets(),
+        _spec_options(),
+        _limits(),
+    ]
     return "\n\n".join(section.rstrip() for section in sections) + "\n"
 
 

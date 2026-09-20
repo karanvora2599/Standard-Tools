@@ -1,5 +1,56 @@
 # Changelog
 
+## Preprocessing is a registry of steps and a pipeline of fitted state
+
+Phase 1 of `Development/modeling_runtime_plan.md`, first commit.
+
+`PreprocessingSpec.normalization` was a Literal with two values, and the
+two values were two code paths -- `fit_preprocessing`/`apply_preprocessing`
+and `standardize_cross_sectional` -- consulted in the fold loop, the search
+closure and the full-panel refit. The refit consulted neither, which is how
+a model validated cross-sectionally was deployed pooled (the entry three
+below). A branch that has to be repeated in every consumer is a branch that
+will be forgotten in one of them.
+
+**A step is an object; a pipeline is a list of them; the state is the
+artifact.** `modeling/preprocessing/` holds the contract (`fit(X, ctx) ->
+state`, `transform(X, state, ctx)`, the state plain JSON, `ctx` carrying
+dates and entities and never the target), `PREPROCESSOR_REGISTRY` with a
+bounded parameter schema per step and a `register_preprocessor` that refuses
+what `register_feature` refuses, and the pipeline that fits every step on
+the training rows in order and applies the fitted state anywhere. The fold
+loop, the search closure and the refit hand the same
+`PreprocessingSpec.resolved_steps` to one function; the refit's state is
+persisted as `preprocessing_state.json`, content-hashed beside the
+estimator; `score_model` applies it. The deployed transform is the validated
+one because there is no second place for it to be written.
+
+**The default is today's transform, byte for byte.** `normalization=
+'pooled'` resolves to `winsorize(0.01, 0.99)` then `zscore`, and the generic
+steps are pinned equal to the old functions to 1e-12 on both the native and
+the Python path. The pair still goes through the fused native kernel: the
+pipeline recognises it and reads the state off the kernel's statistics. The
+legacy `preprocessing_stats.json` is written from the state, byte for byte,
+for one release. `'cross_sectional'` resolves to one stateless step that is
+the old function.
+
+**`steps` composes from the catalog.** `StepSpec(type, params)` is checked
+against the registry at the spec boundary, names and values alike. A scheme
+given beside `steps` is refused as a second claim about one transform,
+checked against default values rather than against which fields were set,
+because a spec round-trips through `model_dump()` on every persist and a
+dump writes every field. `ModelManifest.preprocessing` records the
+RESOLVED pipeline so a reader sees what ran; `validation_report` lists the
+step ids; `list_modeling_capabilities` and the generated reference read the
+registry, closing the last hand-written option list in `capabilities.py`.
+
+The tests plant their oracles: a test-only outlier a hundred thousand times
+the training range cannot move a fitted bound; the state reproduces the
+transform after a JSON round trip; the deployed ridge's coefficients equal a
+hand refit on the persisted state applied to the panel; an edited state is
+refused by hash; a model with no state file scores through its statistics
+as before.
+
 ## The modeling catalog is generated, and no count lives in a docstring
 
 Phase 0 of `Development/modeling_runtime_plan.md`, sixth and last commit.

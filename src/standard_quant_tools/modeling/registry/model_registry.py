@@ -56,6 +56,7 @@ def save_model(
     dataset_warnings: Optional[List[str]] = None,
     preprocessing: Optional[Dict[str, Any]] = None,
     environment: Optional[Dict[str, Any]] = None,
+    preprocessing_state: Optional[Dict[str, Any]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -109,12 +110,25 @@ def save_model(
     preprocessing_path = _artifacts.save_json(
         directory, "preprocessing_stats", preprocessing_stats
     )
+    # The fitted pipeline state -- every step's type, parameters and fitted
+    # values, in order. This is what scoring applies; the statistics file
+    # above is its legacy projection. Written whenever the engine supplies
+    # one, which is every registration through run_experiment.
+    state_path = None
+    if preprocessing_state is not None:
+        state_path = _artifacts.save_json(
+            directory, "preprocessing_state", preprocessing_state
+        )
 
     content_hashes: Dict[str, str] = {
         "model.joblib": _artifacts.hash_file(Path(model_path)),
         "model_spec.json": _artifacts.hash_file(Path(model_spec_path)),
         "preprocessing_stats.json": _artifacts.hash_file(Path(preprocessing_path)),
     }
+    if state_path is not None:
+        content_hashes["preprocessing_state.json"] = _artifacts.hash_file(
+            Path(state_path)
+        )
     if dataset_spec_path is not None:
         content_hashes["dataset_spec.json"] = _artifacts.hash_file(
             Path(dataset_spec_path)
@@ -224,6 +238,31 @@ def load_preprocessing_stats(model_id: str) -> Dict[str, Dict[str, float]]:
         path,
         _expected_hash(model_id, "preprocessing_stats.json"),
         "preprocessing_stats.json",
+    )
+    return _artifacts.load_json(str(path))
+
+
+def load_preprocessing_state(model_id: str) -> Optional[Dict[str, Any]]:
+    """
+    The fitted preprocessing pipeline the deployed estimator expects, or
+    None for a model registered before the state file existed.
+
+    None is a real answer rather than an error: the scoring path falls back
+    to the legacy statistics file for such a model, and refuses by name
+    when that file cannot describe the transform that was validated.
+    """
+    directory = _artifacts.run_dir(model_id)
+    path = directory / "preprocessing_state.json"
+    if not path.exists():
+        if not (directory / "manifest.json").exists():
+            raise ValidationError(f"no registered model with model_id={model_id!r}")
+        return None
+    # Same immutability contract as the statistics: an edited state shifts
+    # every prediction while the model_id stays the same.
+    _artifacts.verify_file(
+        path,
+        _expected_hash(model_id, "preprocessing_state.json"),
+        "preprocessing_state.json",
     )
     return _artifacts.load_json(str(path))
 

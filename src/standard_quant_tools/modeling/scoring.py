@@ -29,12 +29,14 @@ from .dataset.builder import build_dataset
 from .features.base import FeatureScope
 from .features.registry import get_feature
 from .features.transforms import apply_preprocessing, standardize_cross_sectional
+from .preprocessing import FoldContext, apply_pipeline
 from .registry.feature_provenance import feature_provenance_from_spec
 from .registry.model_registry import (
     load_dataset_spec,
     load_manifest,
     load_model,
     load_model_spec,
+    load_preprocessing_state,
     load_preprocessing_stats,
 )
 
@@ -150,8 +152,16 @@ def score_model(
                 f"out-of-sample; use score_model only for dates after training.{weaker}"
             )
 
-    stats = load_preprocessing_stats(model_id)
-    preprocessing = _deployed_preprocessing(manifest, model_id)
+    # The fitted pipeline state is the record of the deployed transform. A
+    # model registered before it existed falls back to the statistics file
+    # and the manifest's scheme, which is the Phase 0 stop-gap, and is
+    # refused by name when neither describes a validated pipeline.
+    state = load_preprocessing_state(model_id)
+    stats: Dict[str, Any] = {}
+    preprocessing: Dict[str, Any] = {}
+    if state is None:
+        stats = load_preprocessing_stats(model_id)
+        preprocessing = _deployed_preprocessing(manifest, model_id)
     estimator = load_model(model_id)
 
     # The model's OWN bundled, content-verified copy -- not
@@ -341,7 +351,11 @@ def score_model(
     # a live model also has. A pooled model applies the persisted
     # statistics. Applying the pooled statistics to both was the
     # deployment mismatch the engine's refit comment records.
-    if preprocessing.get("normalization") == "cross_sectional":
+    if state is not None:
+        X = apply_pipeline(
+            state, latest[manifest.feature_ids], FoldContext.from_frame(latest)
+        )
+    elif preprocessing.get("normalization") == "cross_sectional":
         X = standardize_cross_sectional(
             latest[manifest.feature_ids],
             latest["date"].to_numpy(),

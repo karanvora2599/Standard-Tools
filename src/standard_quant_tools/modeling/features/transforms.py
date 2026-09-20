@@ -207,18 +207,42 @@ def fit_and_apply_preprocessing(
     Falls back to the public pair whenever the fast path does not apply, so
     there is exactly one implementation of the arithmetic.
     """
+    train_out, test_out, _stats = _fit_and_apply_with_stats(train, test)
+    return train_out, test_out
+
+
+def _fit_and_apply_with_stats(
+    train: pd.DataFrame, test: pd.DataFrame
+) -> "tuple[pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, float]]]":
+    """
+    The fused fit-and-apply, returning the fitted statistics as well.
+
+    The preprocessing pipeline needs the statistics to persist as the fold
+    state and the fused path to keep the single-copy saving above; this is
+    the one function that provides both, and `fit_and_apply_preprocessing`
+    is the public view of it.
+    """
     train_matrix = _native_matrix(train) if HAS_CPP else None
     test_matrix = _native_matrix(test) if HAS_CPP else None
     same_columns = list(train.columns) == list(test.columns)
     if train_matrix is None or test_matrix is None or not same_columns:
         stats = fit_preprocessing(train)
-        return apply_preprocessing(train, stats), apply_preprocessing(test, stats)
+        return apply_preprocessing(train, stats), apply_preprocessing(test, stats), stats
 
     native = _cpp_core.fit_preprocess_stats(train_matrix, _WINSOR_LOW, _WINSOR_HIGH)
     lo = np.asarray(native["lo"], dtype=np.float64)
     hi = np.asarray(native["hi"], dtype=np.float64)
     mean = np.asarray(native["mean"], dtype=np.float64)
     std = np.asarray(native["std"], dtype=np.float64)
+    stats = {
+        col: {
+            "lo": float(lo[i]),
+            "hi": float(hi[i]),
+            "mean": float(mean[i]),
+            "std": float(std[i]),
+        }
+        for i, col in enumerate(train.columns)
+    }
     return (
         pd.DataFrame(
             _cpp_core.apply_preprocess_stats(train_matrix, lo, hi, mean, std),
@@ -230,6 +254,7 @@ def fit_and_apply_preprocessing(
             index=test.index,
             columns=test.columns,
         ),
+        stats,
     )
 
 

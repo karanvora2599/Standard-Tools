@@ -742,14 +742,68 @@ class ValidationSpec(BaseModel):
         return self
 
 
+class StepSpec(BaseModel):
+    """One preprocessing step: a `PREPROCESSOR_REGISTRY` id plus overrides
+    for that step's bounded parameters -- the same shape as a FeatureSpec
+    against the feature registry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(
+        ...,
+        description=(
+            "Step id, e.g. 'winsorize', 'zscore', 'cross_sectional_standardize'. "
+            "list_modeling_capabilities lists every registered step with its "
+            "parameters."
+        ),
+    )
+    params: Dict[str, object] = Field(
+        default_factory=dict,
+        description="Overrides merged onto the step's default parameters; "
+        "names and values are checked against the step's bounds.",
+    )
+
+    @model_validator(mode="after")
+    def _known_step_with_valid_params(self) -> "StepSpec":
+        # Lazy import: the preprocessing package imports the transforms,
+        # which do not import specs, but keeping the registry out of this
+        # module's import graph is what keeps `specs` a leaf.
+        from .preprocessing.registry import validate_step_params
+
+        validate_step_params(self.type, dict(self.params))
+        return self
+
+
 class PreprocessingSpec(BaseModel):
-    """How feature columns are normalized before the estimator sees them."""
+    """
+    How feature columns are transformed before the estimator sees them.
+
+    Either a `steps` pipeline composed from the preprocessor registry, or --
+    the original form -- a `normalization` scheme that resolves to one.
+    `resolved_steps` is what the engine runs in both cases.
+    """
 
     # extra="forbid" like every top-level input model. Without it a
     # nested typo was silently dropped: `validate_model_spec` -- the
     # tool whose job is catching exactly this -- certified a spec
     # `valid: True` while the embargo the caller asked for was 0.
     model_config = ConfigDict(extra="forbid")
+
+    steps: List[StepSpec] = Field(
+        default_factory=list,
+        max_length=16,
+        description=(
+            "An explicit pipeline, applied in order: each step is fitted on "
+            "the fold's TRAINING rows and its state applied unchanged to the "
+            "test rows, then persisted with the model so scoring applies the "
+            "same state. Empty (default) means `normalization` decides: "
+            "'pooled' is [winsorize(0.01, 0.99), zscore] and 'cross_sectional' "
+            "is [cross_sectional_standardize(clip_sigma)]. When `steps` is "
+            "given, `normalization` and `clip_sigma` must be left at their "
+            "defaults -- a pipeline and a scheme that disagree would be two "
+            "claims about one transform."
+        ),
+    )
 
     normalization: Literal["pooled", "cross_sectional"] = Field(
         "pooled",
@@ -775,6 +829,61 @@ class PreprocessingSpec(BaseModel):
         "date — the 1st percentile of a 20-name cross-section is its minimum, "
         "so clipping to it would do nothing at all.",
     )
+
+    @model_validator(mode="after")
+    def _steps_and_scheme_do_not_disagree(self) -> "PreprocessingSpec":
+        """
+        With `steps` given, the scheme fields must be at their defaults.
+
+        Checked against the DEFAULT VALUES rather than against which fields
+        were set, because a spec round-trips through `model_dump()` on
+        every persist and reload, and a dump writes every field -- so
+        "was normalization passed" is not a question a reloaded spec can
+        answer, while "does it say something other than the default" is.
+        """
+        if self.steps and self.normalization != "pooled":
+            raise ValueError(
+                f"preprocessing.steps was given together with normalization="
+                f"{self.normalization!r}. The steps ARE the pipeline; a scheme "
+                "beside them would be a second claim about the same transform. "
+                "Drop `normalization`, or express it as a step "
+                "(cross_sectional_standardize)."
+            )
+        if self.steps and self.clip_sigma != 3.0:
+            raise ValueError(
+                f"preprocessing.steps was given together with clip_sigma="
+                f"{self.clip_sigma}. clip_sigma is read only by "
+                "normalization='cross_sectional'; with steps, pass it as the "
+                "cross_sectional_standardize step's own parameter."
+            )
+        return self
+
+    @property
+    def resolved_steps(self) -> List[StepSpec]:
+        """The pipeline the engine runs: `steps` when given, else the
+        scheme's translation. Read here and nowhere else, so the two forms
+        cannot be interpreted differently by two consumers."""
+        if self.steps:
+            return list(self.steps)
+        if self.normalization == "cross_sectional":
+            return [
+                StepSpec(
+                    type="cross_sectional_standardize",
+                    params={"clip_sigma": self.clip_sigma},
+                )
+            ]
+        return [
+            StepSpec(type="winsorize", params={"lower": 0.01, "upper": 0.99}),
+            StepSpec(type="zscore"),
+        ]
+
+    def resolved_dump(self) -> Dict[str, object]:
+        """`model_dump()` with `steps` replaced by the RESOLVED pipeline --
+        what the manifest records, so a reader sees what ran rather than
+        the scheme that implied it."""
+        dumped = self.model_dump()
+        dumped["steps"] = [s.model_dump() for s in self.resolved_steps]
+        return dumped
 
 
 class WeightingSpec(BaseModel):

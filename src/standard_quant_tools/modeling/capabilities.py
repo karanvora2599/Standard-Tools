@@ -20,7 +20,8 @@ from typing import Any, Dict, List
 from .adapters import available_tasks, get_adapter
 from .estimators.registry import ESTIMATOR_REGISTRY, allowed_params
 from .features.registry import list_features as _list_features
-from .specs import TARGET_KINDS, TargetSpec, ValidationSpec
+from .preprocessing import list_preprocessors
+from .specs import TARGET_KINDS, PreprocessingSpec, TargetSpec, ValidationSpec
 
 
 def _literal_options(model: Any, field: str) -> List[str]:
@@ -121,7 +122,24 @@ def modeling_capabilities() -> Dict[str, Any]:
             "methods": _literal_options(ValidationSpec, "method"),
             "walk_forward_schemes": _literal_options(ValidationSpec, "scheme"),
         },
-        "preprocessing": ["pooled", "cross_sectional"],
+        # FROM THE REGISTRY. This was a hand-written two-item list, which
+        # is the failure mode this module's docstring says it exists to
+        # avoid; the steps are what a `PreprocessingSpec.steps` pipeline may
+        # name, and the schemes are what `normalization` still accepts.
+        "preprocessing": {
+            "normalization": _literal_options(PreprocessingSpec, "normalization"),
+            "steps": [
+                {
+                    "id": definition.id,
+                    "description": definition.description,
+                    "params": definition.schema_.allowed_names,
+                    "default_params": dict(definition.default_params),
+                    "stateless": definition.stateless,
+                    "column_wise": definition.column_wise,
+                }
+                for definition in list_preprocessors()
+            ],
+        },
         "weighting": [
             "none",
             "label_uniqueness",
