@@ -38,7 +38,7 @@ def build_target(close: pd.Series, spec: TargetSpec) -> pd.Series:
 
     `forward_direction` — that same forward return binarized to 1.0/0.0
     against `spec.threshold`. This exists so task='classification' is
-    reachable through the ordinary five-tool pipeline: ModelSpec.task has
+    reachable through the ordinary modeling pipeline: ModelSpec.task has
     always ACCEPTED 'classification', but TargetSpec could only build a
     continuous return, so a binary target could only be obtained by
     mutating the panel by hand outside the agent workflow — a documented

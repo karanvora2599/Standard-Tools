@@ -1,7 +1,7 @@
 """
-The 6-tool modeling agent surface — kept structurally separate from
+The modeling agent surface — kept structurally separate from
 standard_quant_tools.agent.get_agent_tools()/TOOL_CATEGORY (the existing
-46-tool analysis/backtest registry) per Documentation/15_modeling.md's
+analysis/backtest registry) per Documentation/15_modeling.md's
 architecture rationale: fitting/validating/registering a statistical
 model doesn't fit that surface's shape (a point-in-time snapshot or a
 single backtest run), and adding it there would make the tool-selection
@@ -30,7 +30,7 @@ is no decision in it, so exposing it would have been a sixth name for an
 argument-shaping step. This one runs a simulation, produces new persisted
 artifacts, and answers the question an agent actually asks after training
 ("is this model worth trading"), which is the same shape of operation
-score_model already occupies. The 5-tool count was never the invariant;
+score_model already occupies. The tool count was never the invariant;
 "every tool is a decision the agent makes, not plumbing" was.
 """
 
@@ -2102,9 +2102,12 @@ MODELING_TOOL_DISPATCH = {
 def get_modeling_tools() -> List[Dict[str, Any]]:
     """Tool definitions for the modeling runtime, in the exact same
     OpenAI-style {"type": "function", "function": {...}} envelope
-    agent.tools.get_agent_tools() returns — a separate 6-entry list,
-    never merged into that 46-entry one, but shaped identically so the
-    same LLM client code can consume either registry."""
+    agent.tools.get_agent_tools() returns — a separate list, never merged
+    into the analysis surface's, but shaped identically so the same LLM
+    client code can consume either registry. The count lives in the
+    generated Documentation/20_tool_index.md, not here: it was quoted in
+    this docstring and rotted from six to twenty without anything
+    noticing."""
     return [
         {
             "type": "function",

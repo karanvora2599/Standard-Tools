@@ -203,6 +203,28 @@ _RANKER_XGB = EstimatorParamSchema(
 )
 
 
+#: The estimators whose registration depends on an optional library: the
+#: library each needs and the parameter schema it registers under.
+#:
+#: STATIC, and that is the point. `ESTIMATOR_REGISTRY` only holds what this
+#: machine could import, so anything that documents the registry -- the
+#: generated modeling reference in particular -- would describe a different
+#: library on a machine without lightgbm than on one with it, and a
+#: generated document that depends on the machine generating it fails its
+#: own currency test everywhere else. The schemas are module-level
+#: constants that exist whether or not the library does, so a reader can
+#: name every optional estimator and its bounded parameters without the
+#: class being importable.
+OPTIONAL_ESTIMATORS = {
+    ("regression", "lightgbm"): ("lightgbm", _LIGHTGBM),
+    ("classification", "lightgbm"): ("lightgbm", _LIGHTGBM),
+    ("regression", "xgboost"): ("xgboost", _XGBOOST),
+    ("classification", "xgboost"): ("xgboost", _XGBOOST),
+    ("ranking", "lightgbm_ranker"): ("lightgbm", _RANKER_LGBM),
+    ("ranking", "xgboost_ranker"): ("xgboost", _RANKER_XGB),
+}
+
+
 def _register_rankers() -> None:
     """
     Learning-to-rank estimators, under task='ranking'.

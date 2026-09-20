@@ -4,12 +4,19 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: proposal. Nothing below is implemented.** Every claim in sections
-1-3 was checked against `main` at `f9c7008` on 2026-09-20 by reading the
-code, and the two defects marked *reproduced* were reproduced by script.
-The baseline is 1,182 modeling tests passing in 66 s on a clean tree. Where
-a phase depends on something not yet measured, the measurement is named as
-the first task of that phase rather than assumed.
+**Status: phase 0 is implemented and merged; phases 1-10 are proposals.**
+Every claim in sections 1-3 was checked against `main` at `f9c7008` on
+2026-09-20 by reading the code, and the two defects marked *reproduced*
+were reproduced by script. The baseline was 1,182 modeling tests passing
+in 66 s on a clean tree. Phase 0 landed as six commits on 2026-09-20 --
+`56e55c8` (F2, F4, F5, F6, F8), `230a7fe` (F3), `92c1ed6` (F1 stop-gap),
+`4c49e2a` (hash v2), `3496b31` (environment fingerprint) and the commit
+that carries this status line (generated reference, F7) -- and added 69
+tests: the modeling suite went from 1,182 to 1,247 and `tests/docs` gained
+four. One finding, F8 below, was not in the original read and was found
+while fixing the others. Where a later phase depends on something not yet
+measured, the measurement is named as the first task of that phase rather
+than assumed.
 
 The external review this responds to is largely right about what is built
 and what is missing. Where this plan departs from it, section 5 says so and
@@ -164,6 +171,16 @@ feature, estimator or target tables, and the docs test's count guards match
 specific phrasings that none of the above use. **Fix** in phase 0: generate
 the modeling reference from the registries and stop writing counts into
 docstrings.
+
+### F8. `build_model_ensemble` raised `NameError` on every call — *found during phase 0*
+
+`agent/tools.py`'s ensemble tool called a bare `publish` that nothing in
+the module defined. Nothing ever reached it: the one test naming the tool
+checked that it was registered, and the surface fuzzer's synthesized model
+ids fail at `load_manifest` first. A tool that is advertised, dispatchable
+and cannot run is the gap the advertised-equals-dispatchable invariant
+cannot see; the fix routes through `handoff.publish` and an end-to-end
+test combines two registered models into a reference that resolves.
 
 ---
 

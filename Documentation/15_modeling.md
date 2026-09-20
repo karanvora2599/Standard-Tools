@@ -94,9 +94,10 @@ typed fields for **one** question:
 | `select_features` | `dataset_id` → a chosen set, with a recorded reason for every exclusion |
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta |
 
-`feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table:
-17 + 9 is 26, and the whole library is 200. `Multi_Agent_Implementation/`
-gives it its own worker for the same reason.
+`feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table;
+the per-runtime counts are in the generated
+[tool index](20_tool_index.md). `Multi_Agent_Implementation/` gives it its
+own worker for the same reason.
 
 ### Driving these from an agent
 
@@ -107,12 +108,13 @@ example script that does not use the 180-tool surface: it passes
 and `modeling_dispatch` together.
 
 It also skips the category router, deliberately. Routing exists to narrow
-174 similarly-shaped tools down to the relevant few; seventeen tools in one
-ordered pipeline have nothing to narrow, since they are used in sequence. Passing `categories=` alongside `registry="modeling"` raises
-rather than being quietly ignored.
+a large surface of similarly-shaped tools down to the relevant few; the
+modeling tools form one ordered pipeline and have nothing to narrow, since
+they are used in sequence. Passing `categories=` alongside
+`registry="modeling"` raises rather than being quietly ignored.
 
 For the split-agent version, `Multi_Agent_Implementation/` gives these
-sixteen tools two workers rather than one — `model_research` (capabilities,
+tools two workers rather than one — `model_research` (capabilities,
 catalog, build, point-in-time joins, leakage and spec checks, analyze) and
 `model_builder` (fit, inspect, compare, score, evaluate). The cut is at the dataset, which is the only handoff in the
 pipeline that carries a single value (`dataset_id`) rather than a whole
@@ -291,33 +293,34 @@ audit implementation).
 
 ## The feature catalog
 
-`modeling.features.registry.FEATURE_REGISTRY` — 21 built-in features,
-each a thin wrapper over a primitive that already exists elsewhere in
-this codebase, not new indicator math:
+`modeling.features.registry.FEATURE_REGISTRY` holds every built-in feature,
+each a thin wrapper over a primitive that already exists elsewhere in this
+codebase rather than new indicator math. The catalog itself — every id,
+its scope, lookback, required columns, default parameters and description
+— is **generated** into [29_modeling_reference.md](29_modeling_reference.md)
+from the live registry, and a test fails when that file drifts. It used
+to be a table here, and the table said 21 entries when the registry held
+23. A few entries worth knowing the reasoning behind:
 
-| id | wraps | scope |
-|---|---|---|
-| `technical.rsi` | `indicators.momentum.rsi` | entity |
-| `technical.adx` | `indicators.trend.adx` | entity |
-| `technical.macd_histogram` | `indicators.trend.macd` — `Histogram` column | entity |
-| `technical.stochastic_k` | `indicators.momentum.stochastic_oscillator` — `Stoch_K` column | entity |
-| `technical.williams_r` | `indicators.trend.williams_r` | entity |
-| `market.momentum` | trailing `pct_change` | entity |
-| `market.new_high_breakout` | look-ahead-safe Donchian breakout (same `.shift(1)` convention as `backtest.strategies`/`analysis.rally`). Warm-up bars are NaN, not 0.0 — `NaN > x` is False, so `.astype(float)` alone asserted "no breakout" for every bar before the window existed | entity |
-| `market.psar_trend` | `indicators.trend.parabolic_sar` — `Trend` column (±1; the raw `SAR` price level isn't cross-sectionally comparable) | entity |
-| `risk.realized_volatility` | `metrics.volatility_estimators.yang_zhang_volatility` | entity |
-| `risk.rolling_beta` | `analysis.regression.rolling_beta` against `DatasetSpec.benchmark` | entity |
-| `risk.atr_pct` | `indicators.volatility.wilder_atr` ÷ Close (normalized — raw ATR is a price level). A non-positive Close yields NaN rather than ±inf | entity |
-| `risk.bollinger_pct_b` | `indicators.volatility.bollinger_bands` — %B, Close's position within the bands. A flat window collapses both bands onto the mean, where %B is 0.5 (the middle band) rather than 0/0 | entity |
-| `risk.parkinson_volatility` | `metrics.volatility_estimators.parkinson_volatility` | entity |
-| `risk.garman_klass_volatility` | `metrics.volatility_estimators.garman_klass_volatility` | entity |
-| `risk.rolling_drawdown` | trailing `.rolling(window).max()` peak, **not** `metrics.risk_metrics.drawdown_series` (that function's whole-series `cummax()` gives a stale peak inside a multi-year training window) | entity |
-| `volume.mfi` | `indicators.volume.mfi` | entity |
-| `volume.obv_roc` | `indicators.volume.obv` change over `lookback`, normalized by the volume traded in that window (raw OBV is unbounded/cumulative). **Not** `obv.pct_change()` — OBV is seeded at exactly 0 and crosses zero freely, so a ratio against it blows up | entity |
-| `volume.vwap_deviation` | `indicators.volume.vwap` — `(Close - VWAP) / VWAP` | entity |
-| `statistical.hurst` | `analysis.hurst.rolling_hurst` | entity |
-| `factors.pca_loading` | `analysis.pca.pca_returns` — entity's loading on PC1, refit every `refit_every` bars | universe |
-| `factors.pca_factor_return` | same PCA fit, projected onto each date's realized return — a shared macro factor | universe |
+- `market.new_high_breakout` is a look-ahead-safe Donchian breakout (same
+  `.shift(1)` convention as `backtest.strategies`/`analysis.rally`). Warm-up
+  bars are NaN, not 0.0 — `NaN > x` is False, so `.astype(float)` alone
+  asserted "no breakout" for every bar before the window existed.
+- `market.psar_trend` is the Parabolic SAR `Trend` column (±1); the raw
+  `SAR` price level isn't cross-sectionally comparable.
+- `risk.atr_pct` is Wilder's ATR ÷ Close, since raw ATR is a price level.
+  A non-positive Close yields NaN rather than ±inf.
+- `risk.bollinger_pct_b` is %B, Close's position within the bands. A flat
+  window collapses both bands onto the mean, where %B is 0.5 (the middle
+  band) rather than 0/0.
+- `risk.rolling_drawdown` uses a trailing `.rolling(window).max()` peak,
+  **not** `metrics.risk_metrics.drawdown_series` — that function's
+  whole-series `cummax()` gives a stale peak inside a multi-year training
+  window.
+- `volume.obv_roc` is the OBV change over `lookback`, normalized by the
+  volume traded in that window (raw OBV is unbounded/cumulative). **Not**
+  `obv.pct_change()` — OBV is seeded at exactly 0 and crosses zero freely,
+  so a ratio against it blows up.
 
 The three `volume.*` features are the only ones that need the OHLCV
 panel's `Volume` column — every other feature only needs Open/High/Low/Close.
@@ -870,13 +873,13 @@ correlation spans nothing in particular.
 `modeling.estimators.registry.ESTIMATOR_REGISTRY` — an explicit allowlist,
 keyed by `(task, name)`:
 
-- **regression** (scikit-learn): `linear`, `ridge`, `lasso`, `elastic_net`,
-  `huber`, `hist_gradient_boosting`, `random_forest`, `gradient_boosting`,
-  `quantile`, `quantile_gradient_boosting`, `mlp`, `sgd`
-- **classification** (scikit-learn): `logistic`, `hist_gradient_boosting`,
-  `random_forest`, `gradient_boosting`, `mlp`, `sgd`
-- **ranking, when installed**: `lightgbm_ranker`, `xgboost_ranker`
-- **both, when installed**: `lightgbm`, `xgboost`
+Every `(task, name)` pair, with the bounded parameters each accepts and
+what each supports (sample weights, probabilities, query groups,
+coefficients, importances), is **generated** into
+[29_modeling_reference.md](29_modeling_reference.md). The optional
+LightGBM and XGBoost entries are listed there from a static declaration,
+so the document is the same on every machine; `list_modeling_capabilities`
+reports which of them the running install actually has.
 
 `mlp` is the non-linear-over-a-window estimator — see **Sequence models**
 below for why that is what a sequence model reduces to here. Its

@@ -1,10 +1,10 @@
 """
-Pydantic Input/Result models for the 6-tool modeling agent surface.
+Pydantic Input/Result models for the modeling agent surface.
 DatasetSpec/ModelSpec (modeling.specs) are embedded directly as nested
 fields rather than flattened — an LLM constructs one declarative spec
 object per call, the same ModelSpec-not-exec() contract described in
 Documentation/15_modeling.md, matching how agent/models.py's own Input
-models nest structured params for the existing 46-tool surface.
+models nest structured params for the existing analysis surface.
 """
 
 from typing import Any, Dict, List, Literal, Optional

@@ -6,10 +6,11 @@ tools and a system prompt scoped to exactly that workflow. Together the
 fourteen workers cover every registered tool exactly once — see
 tests/agent/test_multi_agent_tool_coverage.py for the coverage check.
 
-THREE REGISTRIES, NOT ONE. Eleven workers draw from the 132-tool analysis
-and backtest surface (standard_quant_tools.agent); two draw from the
-separate 16-tool modeling runtime and one from the 9-tool feature_lab
-runtime (both in standard_quant_tools.modeling.agent). The library
+THREE REGISTRIES, NOT ONE. Eleven workers draw from the analysis and
+backtest surface (standard_quant_tools.agent); two draw from the separate
+modeling runtime and one from the feature_lab runtime (both in
+standard_quant_tools.modeling.agent). The per-runtime counts live in the
+generated Documentation/20_tool_index.md, not here. The library
 keeps those apart deliberately — see Documentation/15_modeling.md — and so
 does this file: each worker declares which registry it belongs to, and
 run_agent() loads that registry's schemas and calls that registry's
@@ -47,8 +48,8 @@ from standard_quant_tools.agent.tools import TOOL_CATEGORY
 #: Registry names understood by run_agent(). See the module docstring.
 ANALYSIS_REGISTRY = "analysis"
 MODELING_REGISTRY = "modeling"
-# Split out of modeling once its feature cluster reached the nine-tool floor
-# a runtime needs. Its tools were built inside modeling and moved.
+# Split out of modeling once its feature cluster cleared the size floor a
+# runtime needs. Its tools were built inside modeling and moved.
 FEATURE_LAB_REGISTRY = "feature_lab"
 
 
@@ -80,8 +81,8 @@ def _runtime_for(category: str) -> str:
 
 
 # The modeling runtime has no category taxonomy to derive a split from --
-# it is eight tools in ONE ordered pipeline, so the split below is by
-# pipeline STAGE instead. Named here rather than written inline so the
+# it is ONE ordered pipeline, so the split below is by pipeline STAGE
+# instead. Named here rather than written inline so the
 # coverage test can assert the two stages partition the modeling registry
 # exactly, which is the same guarantee _tools_for() gives the analysis
 # workers.

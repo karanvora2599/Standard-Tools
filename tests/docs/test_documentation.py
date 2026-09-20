@@ -518,3 +518,82 @@ class TestNoStaleWholeSurfaceCountSurvivesInAnyPhrasing:
             if not re.search(rf"{value}[ -]tools?\b", text):
                 unused.append(f"{name}:{value} ({reason})")
         assert not unused, f"no longer present, so delete: {unused}"
+
+
+MODELING_GENERATOR = ROOT / "Development" / "generate_modeling_reference.py"
+MODELING_REFERENCE = DOCS / "29_modeling_reference.md"
+
+
+class TestTheModelingReferenceIsGenerated:
+    """
+    The modeling guide carried a hand-written feature table that said 21
+    entries when the registry held 23. The catalog is generated now, on
+    the same terms as the tool index: regenerate and compare, so a feature,
+    estimator or target added without regenerating fails in its own commit.
+    """
+
+    def test_the_reference_matches_the_live_registries(self):
+        before = MODELING_REFERENCE.read_text(encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(MODELING_GENERATOR)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert result.returncode == 0, result.stderr
+        after = MODELING_REFERENCE.read_text(encoding="utf-8")
+        assert before == after, (
+            "Documentation/29_modeling_reference.md is out of date with the "
+            "modeling registries. Run "
+            "`python Development/generate_modeling_reference.py` and commit "
+            "the result -- the reference is generated, not written."
+        )
+
+    def test_every_feature_and_target_is_in_it(self):
+        from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY
+        from standard_quant_tools.modeling.specs import TARGET_KINDS
+
+        text = MODELING_REFERENCE.read_text(encoding="utf-8")
+        missing = [f"`{name}`" for name in [*FEATURE_REGISTRY, *TARGET_KINDS] if f"`{name}`" not in text]
+        assert not missing, f"absent from the generated reference: {missing}"
+
+    def test_every_optional_estimator_is_in_it_whether_or_not_installed(self):
+        """The document is the same on every machine, so it must name the
+        estimators this machine may not have."""
+        from standard_quant_tools.modeling.estimators.boosting import OPTIONAL_ESTIMATORS
+
+        text = MODELING_REFERENCE.read_text(encoding="utf-8")
+        missing = [name for _task, name in OPTIONAL_ESTIMATORS if f"`{name}`" not in text]
+        assert not missing, missing
+
+
+class TestNoCountIsHardcodedInTheModelingSource:
+    """
+    Seven docstrings under `modeling/` quoted a 6-tool, 46-tool or 16-tool
+    surface after the counts had moved, and nothing checked them because
+    the count guards above read the documentation, not the source. A count
+    in a docstring is a claim that rots on exactly the same schedule; the
+    fix is to say "the modeling surface" and let the generated index carry
+    the number.
+    """
+
+    SOURCES = (
+        ROOT / "src" / "standard_quant_tools" / "modeling",
+        ROOT / "Multi_Agent_Implementation" / "worker_agents.py",
+    )
+    PATTERN = re.compile(
+        r"\b(?:\d+|five|six|eight|sixteen|seventeen|twenty)-(?:tool|entry)\b",
+        re.IGNORECASE,
+    )
+
+    def test_no_n_tool_or_n_entry_phrase_survives(self):
+        stale = []
+        for source in self.SOURCES:
+            files = [source] if source.is_file() else sorted(source.rglob("*.py"))
+            for path in files:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                for match in self.PATTERN.finditer(text):
+                    line = text[: match.start()].count("\n") + 1
+                    stale.append(f"{path.relative_to(ROOT)}:{line} {match.group(0)!r}")
+        assert not stale, f"counts hardcoded in source: {stale}"

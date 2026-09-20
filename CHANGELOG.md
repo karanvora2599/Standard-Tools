@@ -1,5 +1,67 @@
 # Changelog
 
+## The modeling catalog is generated, and no count lives in a docstring
+
+Phase 0 of `Development/modeling_runtime_plan.md`, sixth and last commit.
+
+The modeling guide's feature table said 21 entries when the registry held
+23. Seven docstrings under `modeling/` and the worker registry still
+described a 6-tool, 46-tool or 16-tool surface long after the counts had
+moved, and the guide's own arithmetic -- "17 + 9 is 26, and the whole
+library is 200" -- had been wrong on the page for as long as its first
+term had been stale. None of it failed a test, because the count guards
+read the documentation for specific phrasings and none read the source.
+
+**`Documentation/29_modeling_reference.md` is generated** by
+`Development/generate_modeling_reference.py` from the live registries --
+every feature with its scope, lookback, required columns and default
+parameters; every estimator with its bounded parameters and what it
+supports; every target with its tasks and whether prices can build it; the
+spec's Literal options; the lag limits -- and `tests/docs` regenerates and
+compares it exactly as it does the tool index. The guide's hand-written
+feature table and estimator list are replaced by pointers, keeping only the
+entries whose reasoning is worth prose.
+
+**Machine-independent by construction.** `ESTIMATOR_REGISTRY` only holds
+what the running machine could import, so a generated document that read it
+alone would say one thing on a machine with LightGBM and another without,
+and fail its own currency test everywhere but where it was written. The
+six optional estimators are declared statically in
+`boosting.OPTIONAL_ESTIMATORS` with the schemas they register under, which
+exist whether or not the library does; the reference lists them from that,
+and a test asserts every one is named.
+
+**No count survives in the source.** The docstrings say "the modeling
+surface" and "the analysis surface" now, and a docs test scans `modeling/`
+and the worker registry for any `N-tool` or `N-entry` phrase, spelled or
+numeric, so the next one fails in its own commit. The guide's stale
+arithmetic and its "seventeen"/"sixteen" tools are reworded to point at the
+generated index rather than re-hardcoded.
+
+## The manifest said what source created a model and not what computed it
+
+Phase 0 of `Development/modeling_runtime_plan.md`, fifth commit.
+
+`git_commit_sha` and `package_version` answer "what source created me".
+Two machines at that commit can still differ on numpy, pandas,
+scikit-learn, scipy, the BLAS numpy was built against, whether the native
+extension was loaded and whether it was the current build, and how many
+threads the kernels were allowed -- and those are the differences that
+show up as coefficients agreeing to four digits rather than twelve, or as
+a run eighteen times slower with nothing saying why.
+
+`ModelManifest.environment` now records all of that, read from the process
+at registration by `registry/environment.py` and never declared. The
+native block reuses the same check `list_modeling_capabilities` reports,
+so the manifest and the capability report cannot disagree about whether
+the fast path was present or stale. An optional package that is absent is
+recorded as `None` rather than dropped, because "not installed" is a fact
+about the environment; a thread cap that is unset is recorded the same
+way, because "no cap" is a different environment from "capped at one".
+The block carries nothing that identifies the host -- no hostname, no
+user, no path -- since a fingerprint of the numerics is not a fingerprint
+of the machine. `inspect_model(view="lineage")` reports it.
+
 ## Adding a field to the spec invalidated every persisted dataset, so the hash is versioned
 
 Phase 0 of `Development/modeling_runtime_plan.md`, fourth commit.

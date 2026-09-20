@@ -1,7 +1,7 @@
 """
 modeling_dispatch: routes an LLM tool call to the correct modeling tool
 function, mirroring agent.tools.dispatch() exactly — but over
-MODELING_TOOL_DISPATCH, never the 46-entry _TOOL_DISPATCH. Reuses
+MODELING_TOOL_DISPATCH, never the analysis surface's _TOOL_DISPATCH. Reuses
 audit._run_and_record as-is, so every modeling tool call is still
 audit-logged (ModelSpec/DatasetSpec hashes ride in the existing
 DecisionRecord.input payload) without a parallel audit implementation.
