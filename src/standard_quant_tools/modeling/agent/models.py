@@ -790,6 +790,14 @@ class DatasetSummary(BaseModel):
     features: Optional[int] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+    # Distinct dates in the panel. This is what decides how many
+    # walk-forward folds a spec yields, which is why validate_model_spec
+    # reads it and why it is recorded rather than re-derived from a panel
+    # that would have to be loaded and hashed to answer.
+    n_dates: Optional[int] = None
+    provider: Optional[str] = None
+    interval: Optional[str] = None
+    target_id: Optional[str] = None
 
 
 class ListDatasetsResult(BaseModel):
@@ -924,9 +932,19 @@ class ValidateModelSpecInput(BaseModel):
     dataset_id: Optional[str] = Field(
         None,
         description=(
-            "Also check the spec against a built dataset: that its features "
-            "exist in the panel and that the target is present. Omit to "
-            "check the spec alone."
+            "Also check the spec against a built dataset: that the dataset's "
+            "label is one the task can consume, and how many folds the "
+            "validation spec yields over the dataset's own date axis -- which "
+            "is what turns `estimated_fits` from a guess into a count. Omit "
+            "to check the spec alone."
+        ),
+    )
+    target: Optional[str] = Field(
+        None,
+        description=(
+            "For a dataset registered with several labels: the label name the "
+            "experiment would select, exactly as run_model_experiment's "
+            "`target`. Omitted, the primary label is checked."
         ),
     )
 
@@ -956,7 +974,17 @@ class ValidateModelSpecResult(BaseModel):
         description=(
             "Fits this spec implies: folds, times the search grid if one is "
             "set. The number that decides whether the experiment takes "
-            "seconds or an afternoon."
+            "seconds or an afternoon. None when it cannot be known: a "
+            "walk-forward fold count depends on the dataset's date axis, so "
+            "without a `dataset_id` it is not estimated rather than guessed."
+        ),
+    )
+    estimated_folds: Optional[int] = Field(
+        None,
+        description=(
+            "Folds the validation spec yields. Exact when a `dataset_id` "
+            "supplies the date axis; for purged k-fold without one, the "
+            "requested `n_splits`; for walk-forward without one, None."
         ),
     )
     notes: List[str] = Field(default_factory=list)

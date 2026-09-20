@@ -87,3 +87,37 @@ def allowed_params(task: str, name: str) -> "list[str]":
     if key not in _PARAM_SCHEMAS:
         return []
     return _PARAM_SCHEMAS[key].allowed_names
+
+
+def validate_param_value(task: str, name: str, param: str, value: Any) -> None:
+    """
+    Check ONE parameter's value against its bound, without the
+    cross-parameter compatibility checks.
+
+    `validate_params` is the whole-dict check and is right for a spec's
+    `estimator.params`. A search grid is different: each axis is a list of
+    candidates, and a candidate on one axis may only be compatible with a
+    candidate on another (logistic's penalty='l1' needs solver='saga' or
+    'liblinear'). Validating each axis against the base params would
+    therefore refuse grids the engine runs fine, so a grid is checked one
+    value at a time against the bound alone, and the combination is left
+    to the fit -- which is where the engine already scores an impossible
+    candidate as NaN rather than aborting the search.
+
+    Raises:
+        ValidationError: unknown estimator, unknown parameter name, or a
+        value outside the bound.
+    """
+    key = (task, name)
+    if key not in _PARAM_SCHEMAS:
+        allowed = sorted(n for t, n in ESTIMATOR_REGISTRY if t == task)
+        raise ValidationError(
+            f"unknown estimator name={name!r} for task={task!r} — allowed: {allowed}"
+        )
+    schema = _PARAM_SCHEMAS[key]
+    if param not in schema.bounds:
+        raise ValidationError(
+            f"estimator {name!r} does not accept param {param!r} — "
+            f"allowed: {schema.allowed_names}"
+        )
+    schema.bounds[param].validate(name, param, value)

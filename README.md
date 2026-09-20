@@ -17,7 +17,7 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 | `research` | 42 | 47 KB | what is this asset, and what is its statistical structure |
 | `data` | 18 | 23 KB | get the bytes, and say what they can and cannot support |
 | `backtest` | 35 | 81 KB | does this strategy work, and how much of it is real |
-| `modeling` | 20 | 59 KB | build, fit and score a model — one ordered pipeline |
+| `modeling` | 20 | 60 KB | build, fit and score a model — one ordered pipeline |
 | `portfolio` | 18 | 31 KB | turn a view into a position and price what it costs |
 | `derivatives` | 12 | 17 KB | what an option is worth and what holding it does to you |
 | `delta_one` | 18 | 38 KB | which instrument is the cheapest way to hold this exposure |

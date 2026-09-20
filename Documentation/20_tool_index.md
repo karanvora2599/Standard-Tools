@@ -36,7 +36,7 @@ advertises 155 of the 209 below.
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `modeling` | 20 | 59 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 20 | 60 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
@@ -884,7 +884,7 @@ Score a predictions reference against its realized outcome — accuracy metrics,
 Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Fetches nothing and fits nothing.
 
 **Required:** `spec`  
-**Optional:** `dataset_id`
+**Optional:** `dataset_id`, `target`
 
 #### `validate_pit_records`
 

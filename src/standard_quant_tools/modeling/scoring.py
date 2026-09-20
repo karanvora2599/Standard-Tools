@@ -24,6 +24,7 @@ from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
+from .adapters import get_adapter
 from .dataset.builder import build_dataset
 from .features.base import FeatureScope
 from .features.registry import get_feature
@@ -36,7 +37,6 @@ from .registry.model_registry import (
     load_preprocessing_stats,
 )
 from .specs import DatasetSpec, _parse_date
-from .validation.metrics import positive_class_proba
 
 
 def score_model(
@@ -302,10 +302,16 @@ def score_model(
     )
 
     X = apply_preprocessing(latest[manifest.feature_ids], stats)
-    if manifest.task == "regression":
-        predictions = estimator.predict(X.to_numpy())
-    else:
-        predictions = positive_class_proba(estimator, X.to_numpy())
+    # Through the SAME adapter the folds and the deployed refit used. This
+    # was a two-way branch -- regression got `predict`, everything else got
+    # `positive_class_proba` -- written when those were the only two tasks.
+    # A ranker is neither: LGBMRanker and XGBRanker have no predict_proba
+    # at all, so a registered ranking model trained, validated, and then
+    # failed here with an AttributeError from inside the library. The
+    # adapter already answers "how do I get a score out of this task's
+    # estimator" for the engine; scoring asking the question its own way
+    # is how the two drift.
+    predictions = get_adapter(manifest.task).score(estimator, X)
 
     predictions_df = pd.DataFrame(
         {

@@ -37,7 +37,7 @@ score_model already occupies. The 5-tool count was never the invariant;
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
@@ -52,7 +52,7 @@ from ..features.registry import list_features as _list_features
 from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
 from ..registry.model_registry import load_manifest
 from ..scoring import score_model as _score_model
-from ..specs import DatasetSpec, FeatureSpec, TargetSpec
+from ..specs import TASKS, DatasetSpec, FeatureSpec, TargetSpec, targets_for_task
 from .dataset_tools import (  # noqa: F401
     ExplainRowLossInput,
     explain_dataset_row_loss,
@@ -126,6 +126,33 @@ def list_features(input_data: ListFeaturesInput) -> ListFeaturesResult:
     )
 
 
+def _dataset_extent(panel) -> Dict[str, Any]:
+    """
+    The four facts about a panel that `list_datasets`, `check_leakage` and
+    `validate_model_spec` read from `dataset_meta.json`.
+
+    Recorded at build time rather than re-derived, because answering them
+    later means loading and hashing the panel -- 0.5 s per million rows --
+    to fetch four numbers. `list_datasets` read `rows`, `start_date` and
+    `end_date` from the metadata from the day it was written, and nothing
+    wrote them, so every dataset listed with no row count and no span and
+    the list was sorted on a key that was always None.
+
+    `n_dates` is the one that matters most: it is the length of the date
+    axis every splitter walks, so it is what turns a fit estimate for a
+    walk-forward spec from a guess into a count.
+    """
+    import pandas as pd
+
+    dates = pd.to_datetime(panel["date"])
+    return {
+        "rows": int(len(panel)),
+        "n_dates": int(dates.nunique()),
+        "start_date": str(dates.min().date()),
+        "end_date": str(dates.max().date()),
+    }
+
+
 def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDatasetResult:
     """Fetch OHLCV for DatasetSpec.universe, compute the requested
     features/target, and persist the resulting panel — never returned
@@ -183,6 +210,8 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             # this panel so small" is answerable later without a rebuild.
             "drop_attribution": built["drop_attribution"],
             "entities_fetched": built["entities_fetched"],
+            # rows / n_dates / start_date / end_date.
+            **_dataset_extent(built["panel"]),
         },
     )
 
@@ -199,6 +228,8 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
 
 def build_model_ensemble(input_data: BuildEnsembleInput) -> BuildEnsembleResult:
     """Combine registered models' out-of-sample predictions into one series."""
+    from standard_quant_tools.agent.runtimes import handoff
+
     from ..ensemble import combine_predictions
 
     combined = combine_predictions(
@@ -206,11 +237,18 @@ def build_model_ensemble(input_data: BuildEnsembleInput) -> BuildEnsembleResult:
         method=input_data.method,
         weights=input_data.weights,
     )
-    ref = publish(
+    # `handoff.publish`, imported. This called a bare `publish` that nothing
+    # in the module defined, so the tool raised NameError on every call
+    # that got past loading its models -- and nothing got that far: the
+    # only test naming it checked that it was registered, and the surface
+    # fuzzer's synthesized model ids fail at load_manifest first. A tool
+    # that is advertised, dispatchable and cannot run is the exact gap the
+    # advertised-equals-dispatchable invariant cannot see.
+    ref = handoff.publish(
         combined["predictions"],
-        kind="predictions",
-        run_id=input_data.run_id,
-        name=input_data.name,
+        "predictions",
+        input_data.run_id,
+        input_data.name,
         producer="build_model_ensemble",
     )
     warnings = list(combined["warnings"])
@@ -339,6 +377,10 @@ def register_external_panel(
             # such rather than implying no rows were ever lost upstream.
             "drop_attribution": {},
             "entities_fetched": loaded["entities"],
+            # rows / n_dates / start_date / end_date, the same four keys a
+            # built dataset records, so the listing and the fit estimate
+            # need no branch for where the panel came from.
+            **_dataset_extent(panel),
             # How to read the panel again. Stored as the ORIGINAL column
             # names rather than the rename map, so reloading takes the same
             # code path as registering did and cannot drift from it.
@@ -734,10 +776,20 @@ def evaluate_model_portfolio(
 #: Metric each task is ranked by when the caller names none. Ranking a
 #: regression R2 against a classification AUC would produce an ordering
 #: that looks meaningful and is not, so tasks are ranked separately.
+#:
+#: The per-date cross-sectional rank IC leads for the two score tasks. It
+#: used to be the POOLED `ic`, which 15_modeling.md's own "What the metrics
+#: mean" section says conflates ranking names against each other with
+#: tracking the market's level across days -- a model with no
+#: cross-sectional skill can post a pooled IC above 0.9 by following the
+#: market factor. Ranking regression models by that number ordered them on
+#: the thing the engine leads its report with telling you to ignore. The
+#: later entries are fallbacks for manifests written before the
+#: cross-sectional family existed.
 _HEADLINE_METRIC = {
-    "regression": ("ic", "spearman_ic", "r2"),
+    "regression": ("cs_rank_ic_mean", "rank_ic", "ic", "r2"),
     "classification": ("auc", "roc_auc", "accuracy"),
-    "ranking": ("ndcg_at_10", "ndcg", "ic"),
+    "ranking": ("cs_rank_ic_mean", "ndcg_at_10", "ndcg_at_5"),
 }
 
 
@@ -810,11 +862,17 @@ def list_datasets(input_data: ListDatasetsInput) -> ListDatasetsResult:
         summaries.append(
             DatasetSummary(
                 dataset_id=path.parent.name,
+                # None for a dataset built before these were recorded, which
+                # is the honest answer -- see _dataset_extent.
                 rows=meta.get("rows"),
                 entities=len(meta.get("entities", []) or []) or None,
                 features=len(meta.get("feature_ids", []) or []) or None,
                 start_date=meta.get("start_date"),
                 end_date=meta.get("end_date"),
+                n_dates=meta.get("n_dates"),
+                provider=meta.get("provider"),
+                interval=meta.get("interval"),
+                target_id=meta.get("target_id"),
             )
         )
     summaries.sort(key=lambda s: s.end_date or "", reverse=True)
@@ -968,6 +1026,7 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
     from standard_quant_tools.modeling.estimators.registry import (
         ESTIMATOR_REGISTRY,
         allowed_params,
+        validate_param_value,
         validate_params,
     )
 
@@ -1000,50 +1059,90 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
                 )
             )
 
-    # How much work this implies.
+    # ── The search grid, one value at a time ──────────────────────────
+    # A grid axis is checked value by value against its bound and never as
+    # a combination: an axis may only be compatible with a candidate on
+    # another axis, and the engine already scores an impossible pair as
+    # NaN rather than aborting. What IS caught here is the mistake that
+    # used to cost a whole experiment -- a misspelled axis name, which the
+    # search silently scored as "every candidate failed to fit".
+    if spec.search is not None and (task, estimator) in ESTIMATOR_REGISTRY:
+        for param, values in spec.search.param_grid.items():
+            for value in values:
+                try:
+                    validate_param_value(task, estimator, param, value)
+                except ValidationError as exc:
+                    problems.append(
+                        SpecProblem(
+                            where="search.param_grid",
+                            problem=str(exc),
+                            suggestion=f"Accepted parameters: {allowed}",
+                        )
+                    )
+                    break  # one report per axis is enough
+
+    # ── The dataset, when one is named ────────────────────────────────
+    # Metadata only -- `rows`, `n_dates` and `target_id` -- so the panel is
+    # neither loaded nor hashed to answer a question four JSON keys answer.
+    meta = None
+    n_dates: Optional[int] = None
+    if input_data.dataset_id is not None:
+        try:
+            meta, _directory = _load_dataset_meta(input_data.dataset_id)
+        except ValidationError as exc:
+            problems.append(SpecProblem(where="dataset_id", problem=str(exc)))
+        else:
+            n_dates = meta.get("n_dates")
+            target_problem = _target_compatibility_problem(
+                meta, task, input_data.target, input_data.dataset_id
+            )
+            if target_problem is not None:
+                problems.append(target_problem)
+            notes.append(
+                f"Checked against dataset {input_data.dataset_id!r} "
+                f"({meta.get('rows', 'unknown')} rows, "
+                f"{n_dates if n_dates is not None else 'unknown'} dates)."
+            )
+
+    # ── How much work this implies ────────────────────────────────────
+    # The fold count used to be read off `validation.n_splits`, which every
+    # spec carries at its default of 5 whether or not the method is purged
+    # k-fold -- so a walk-forward spec, the default, was always "5 folds"
+    # regardless of its windows or the dataset. A walk-forward count is a
+    # function of the date axis, which only a dataset can supply; without
+    # one it is reported as unknown rather than guessed.
+    folds, fold_note = _estimated_folds(spec.validation, n_dates)
+    if fold_note:
+        notes.append(fold_note)
+    if folds == 0:
+        problems.append(
+            SpecProblem(
+                where="validation",
+                problem=(
+                    f"the validation spec yields no folds over this dataset's "
+                    f"{n_dates} dates."
+                ),
+                suggestion=(
+                    "Shorten train_window/test_window, lower n_splits, or "
+                    "build the dataset over a longer window."
+                ),
+            )
+        )
     estimated_fits: Optional[int] = None
-    folds = getattr(spec.validation, "n_splits", None)
     if folds:
         estimated_fits = int(folds)
         search = spec.search
         if search is not None:
-            grid = getattr(search, "param_grid", None) or {}
             combinations = 1
-            for values in grid.values():
+            for values in search.param_grid.values():
                 combinations *= max(1, len(values))
-            inner = getattr(search, "inner_splits", 1) or 1
+            inner = int(search.inner_splits)
             estimated_fits = int(folds * (1 + combinations * inner))
             notes.append(
                 f"A search grid of {combinations} combination(s) over "
                 f"{inner} inner split(s) multiplies through {folds} fold(s). "
                 "That is the difference between a quick experiment and a "
                 "long one, and nothing in the spec shows it."
-            )
-
-    if input_data.dataset_id is not None:
-        try:
-            # Metadata only: this branch reads `feature_ids` and nothing
-            # else, so it does not need the panel loaded or verified.
-            meta, _directory = _load_dataset_meta(input_data.dataset_id)
-        except ValidationError as exc:
-            problems.append(SpecProblem(where="dataset_id", problem=str(exc)))
-        else:
-            available = set(meta.get("feature_ids", []) or [])
-            wanted = {
-                f.output_name() if hasattr(f, "output_name") else str(f)
-                for f in (meta.get("feature_ids", []) or [])
-            }
-            missing = sorted(w for w in wanted if w not in available)
-            if missing:
-                problems.append(
-                    SpecProblem(
-                        where="features",
-                        problem=f"not present in dataset {input_data.dataset_id!r}: {missing}",
-                    )
-                )
-            notes.append(
-                f"Checked against dataset {input_data.dataset_id!r} "
-                f"({meta.get('rows')} rows)."
             )
 
     if not problems:
@@ -1056,7 +1155,86 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
         problems=problems,
         allowed_estimator_params=allowed,
         estimated_fits=estimated_fits,
+        estimated_folds=folds,
         notes=notes,
+    )
+
+
+def _estimated_folds(validation, n_dates: Optional[int]):
+    """
+    (fold count, note) for a validation spec.
+
+    Exact when `n_dates` is known: the real splitter is walked over a date
+    axis of that length, which is all either splitter reads of it. Without
+    it, purged k-fold's count is its own `n_splits` (true whenever the
+    dataset has at least that many dates) and walk-forward's is unknown.
+    """
+    import pandas as pd
+
+    from ..validation.walk_forward import build_splitter
+
+    if n_dates is not None:
+        return int(build_splitter(validation).n_splits(pd.RangeIndex(int(n_dates)))), None
+    if validation.method == "purged_kfold":
+        return int(validation.n_splits), (
+            f"purged k-fold yields n_splits={validation.n_splits} folds on any "
+            "dataset with at least that many dates."
+        )
+    return None, (
+        "The walk-forward fold count depends on the dataset's date axis "
+        "(train_window + embargo + test_window per fold, stepping by "
+        "test_window), so it is not estimated without one. Pass `dataset_id` "
+        "to get the exact count."
+    )
+
+
+def _target_compatibility_problem(meta, task: str, requested, dataset_id: str):
+    """
+    The check run_model_experiment performs AFTER loading and hashing the
+    panel, done here from the metadata alone.
+
+    A classification spec against a forward_return dataset, or a regressor
+    against a 0/1 label, used to surface only once the experiment had paid
+    for the panel load. The metadata records the label; nothing else is
+    needed to say whether the task can consume it.
+    """
+    declared = meta.get("targets") or []
+    names = [str(d["name"]) for d in declared]
+    if requested is not None:
+        if not declared:
+            return SpecProblem(
+                where="target",
+                problem=(
+                    f"target={requested!r} was named, but dataset {dataset_id!r} "
+                    "carries a single unnamed label."
+                ),
+            )
+        if requested not in names:
+            return SpecProblem(
+                where="target",
+                problem=f"dataset {dataset_id!r} has no label named {requested!r}.",
+                suggestion=f"It carries {names}.",
+            )
+        chosen = declared[names.index(requested)]
+        target_id = f"{chosen.get('target_type', 'forward_return')}:{chosen['horizon']}"
+    else:
+        target_id = meta.get("target_id")
+    if not target_id or ":" not in str(target_id) or task not in TASKS:
+        return None
+    target_type = str(target_id).split(":", 1)[0]
+    compatible = targets_for_task(task)
+    if target_type in compatible:
+        return None
+    return SpecProblem(
+        where="target",
+        problem=(
+            f"task={task!r} cannot be fitted against this dataset's label "
+            f"{target_type!r}."
+        ),
+        suggestion=(
+            f"task={task!r} consumes {sorted(compatible)}. Rebuild the dataset "
+            "with a compatible TargetSpec(type=...), or change the task."
+        ),
     )
 
 

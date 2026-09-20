@@ -41,7 +41,9 @@ def _dataset_spec(**overrides) -> DatasetSpec:
 
 
 def _train_a_model_with_spec(
-    spec: DatasetSpec, dataset_id: str = "ds_scoring_test"
+    spec: DatasetSpec,
+    dataset_id: str = "ds_scoring_test",
+    model_spec: "ModelSpec | None" = None,
 ) -> str:
     """Builds+trains a model exactly the way build_model_dataset +
     run_model_experiment would, but persists dataset_spec.json by hand
@@ -58,7 +60,7 @@ def _train_a_model_with_spec(
     directory = Path(panel_uri).parent
     _artifacts.save_json(directory, "dataset_spec", spec.model_dump())
 
-    model_spec = ModelSpec(
+    model_spec = model_spec or ModelSpec(
         task="regression",
         estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
         validation=ValidationSpec(train_window=150, test_window=30, embargo=5),

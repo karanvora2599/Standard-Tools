@@ -1,5 +1,72 @@
 # Changelog
 
+## Five modeling tools answered wrongly or not at all, and every one was registered, dispatchable and documented
+
+Phase 0 of `Development/modeling_runtime_plan.md`, first commit. None of
+these could be seen from the tool surface's own invariants -- advertised
+equals dispatchable, every input strict, every result typed -- because each
+tool cleared all of them and then gave a wrong answer, or no answer, to a
+call that got past its input model.
+
+### `score_model` could not score a ranking model
+
+It branched `task == "regression"` to `predict` and everything else to
+`positive_class_proba`, written when those were the only two tasks.
+`LGBMRanker` and `XGBRanker` have no `predict_proba`, so a ranker trained,
+validated, registered, and then raised `AttributeError` from inside the
+library at the first score. Scoring now asks `get_adapter(task).score`, the
+same question the engine asks on every fold and on the deployed refit.
+
+### `build_model_ensemble` raised `NameError` on every call
+
+It called a bare `publish` that nothing in its module defined. Nothing ever
+got that far: the one test naming the tool checked that it was registered,
+and the surface fuzzer's synthesized model ids fail at `load_manifest`
+first. It now publishes through `handoff.publish`, and an end-to-end test
+combines two registered models into a reference that resolves.
+
+### `validate_model_spec` estimated five folds for every walk-forward spec
+
+The fold count was read off `validation.n_splits`, which every spec carries
+at its default of 5 whether or not the method is purged k-fold. The default
+method is walk-forward, whose fold count is a function of the date axis, so
+the estimate was 5 regardless of the windows or the dataset. Its dataset
+branch also compared the dataset's own feature list to itself, so `missing`
+was empty by construction.
+
+Now: with a `dataset_id`, the real splitter is walked over the recorded
+date axis and the count is exact -- pinned against `n_folds_expected` from
+an actual run. Without one, purged k-fold reports its `n_splits` and
+walk-forward reports `None` with a note, rather than a number. The vacuous
+check is replaced by two that can fail: the dataset's label against the
+task (the check `run_model_experiment` performed only after loading and
+hashing the panel), and every search-grid value against its bound, one
+axis at a time -- a misspelled axis used to score as "every candidate
+failed to fit" inside the search. `estimated_folds` is reported beside
+`estimated_fits`.
+
+### `list_datasets` listed every dataset with no rows and no span
+
+It read `rows`, `start_date` and `end_date` from `dataset_meta.json`, and
+neither `build_model_dataset` nor `register_external_panel` wrote any of
+them, so the list was sorted on a key that was always `None`. Both now
+record `rows`, `n_dates`, `start_date` and `end_date`; the summary also
+carries `provider`, `interval` and `target_id`, which the metadata already
+had. A dataset built before the keys existed lists with `None`, which is
+the honest answer. `check_leakage`'s coverage block read the same missing
+keys and is populated by the same fix.
+
+### `compare_models` ranked regression by the metric the guide says to ignore
+
+Its headline for regression was the pooled Pearson `ic`, which
+`15_modeling.md`'s "What the metrics mean" explains conflates ranking names
+against each other with tracking the market's level -- a model with no
+cross-sectional skill can post a pooled IC above 0.9 by following the
+market factor. Regression and ranking now headline on `cs_rank_ic_mean`,
+the number the engine leads its own report with; the pooled metrics remain
+as fallbacks for manifests written before the cross-sectional family
+existed. `list_models` uses the same headline.
+
 ## The documentation described a library two releases behind
 
 None of this changes a line of source. Every figure below was a claim about
