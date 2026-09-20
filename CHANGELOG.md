@@ -1,5 +1,37 @@
 # Changelog
 
+## A grid over a regularization strength is either coarse or enormous
+
+Phase 4 of `Development/modeling_runtime_plan.md`, third and last commit.
+
+The hyperparameter search enumerated: every combination of a grid, or a
+seeded sample of them. A continuous axis had to be discretized by hand,
+and the choice of grid was a choice about the answer -- 0.1, 1, 10 finds
+nothing between them.
+
+**`SearchSpec.method="tpe"`** asks optuna's Tree-structured Parzen
+Estimator for each next candidate from what the previous ones scored,
+over `param_ranges` (continuous axes, linear or log, optionally integer)
+and `param_grid` (categorical axes), for `max_trials` trials per fold. It
+cuts the SAME purged, embargoed inner folds the other two methods do and
+scores them with the same closure; the planted test hands the sampler the
+frames the grid was handed, fold for fold, and finds the planted optimum
+within half a unit where the grid found it exactly. The sampler is seeded
+from the spec's `random_seed`. `early_pruning` stops a trial whose running
+mean falls below the median of the completed trials at the same inner
+fold; a pruned trial keeps its score and is reported as such.
+
+The spec refuses the tpe fields under the other methods and a name on
+both kinds of axis; `validate_model_spec` checks a range at both ends
+against the estimator's bounds. optuna is guarded like lightgbm --
+installed here, not declared: a tpe spec is refused by name before the
+first fit without it, the validation tool reports it as a problem, and
+`list_modeling_capabilities` lists `optuna` beside the boosters and reads
+the backend list off the spec rather than restating it. The plan counts a
+tpe search as `max_trials` candidates per fold, by arithmetic rather than
+enumeration -- the grid count is now a product of axis lengths too, so a
+large grid no longer has to be materialized to be counted.
+
 ## The same pipeline was fitted once per candidate and once per feature
 
 Phase 4 of `Development/modeling_runtime_plan.md`, second commit.

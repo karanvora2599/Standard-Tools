@@ -1706,7 +1706,8 @@ corrected for label overlap and did not.
 ## Hyperparameter search
 
 `ModelSpec.search` is optional and off by default. When set, each fold runs
-a grid or random search **on its own training window** before the real fit.
+a grid, random or TPE search **on its own training window** before the
+real fit.
 
 ```python
 ModelSpec(
@@ -1752,6 +1753,39 @@ fold. A 12-point grid with 3 inner splits over 20 outer folds is 720 fits
 where there was 20. That is why it is opt-in. If the training window is too
 short to be split `inner_splits` times, the search declines for that fold
 and says so in `reason`, rather than selecting on two dates.
+
+**`method="tpe"`: sampled, not enumerated.** A grid over a regularization
+strength is either coarse or enormous, and the question is a continuous
+one. With `tpe`, optuna's Tree-structured Parzen Estimator chooses each
+next candidate from what the previous ones scored, over `param_ranges`
+(continuous axes, linear or `log`, optionally `integer`) and `param_grid`
+(categorical axes), for `max_trials` trials per fold:
+
+```python
+SearchSpec(
+    method="tpe",
+    param_ranges={"alpha": ParamRange(low=0.01, high=1000.0, log=True)},
+    param_grid={"fit_intercept": [True, False]},
+    max_trials=30,
+    inner_splits=3,
+    early_pruning=True,
+)
+```
+
+It cuts the *same* purged, embargoed inner folds the other two do and
+scores them with the same closure — the sampler decides which parameters
+to try and nothing else, and the test that pins this hands the sampler the
+frames the grid was handed, fold for fold. The sampler is seeded from the
+spec's `random_seed`, so a fold's search is reproducible. `early_pruning`
+stops a trial after an inner fold when its running mean is below the
+median of the completed trials at the same point (optuna's median pruner,
+after three complete trials); a pruned trial keeps the score it had and is
+reported as `pruned`, and `n_trials_pruned` says how many were. The plan
+counts `max_trials × inner_splits` fits per fold, which pruning can only
+reduce. optuna is an optional dependency, guarded like lightgbm: a `tpe`
+spec is refused by name before the first fit on a machine without it,
+`validate_model_spec` reports the same as a problem, and
+`list_modeling_capabilities` lists `optuna` under `optional_dependencies`.
 
 ---
 

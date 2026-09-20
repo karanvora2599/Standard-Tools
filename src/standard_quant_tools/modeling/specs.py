@@ -919,6 +919,48 @@ class WeightingSpec(BaseModel):
     )
 
 
+class ParamRange(BaseModel):
+    """
+    A continuous axis for `SearchSpec.method='tpe'`: sampled between `low`
+    and `high` by the sampler rather than enumerated by hand. A grid over a
+    regularization strength is either coarse or enormous; a log-spaced
+    range is what the question actually is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    low: float
+    high: float
+    log: bool = Field(
+        False,
+        description="Sample uniformly in log space -- for a strength or a "
+        "learning rate whose sensible values span decades. Needs low > 0.",
+    )
+    integer: bool = Field(
+        False,
+        description="Round to an integer: a tree count, a depth, a window. "
+        "Both endpoints must be integers.",
+    )
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> "ParamRange":
+        if not self.low < self.high:
+            raise ValueError(
+                f"a range needs low < high; got low={self.low}, high={self.high}"
+            )
+        if self.log and self.low <= 0:
+            raise ValueError(
+                f"a log-spaced range needs low > 0; got low={self.low}. Sample "
+                "linearly, or start the range above zero."
+            )
+        if self.integer and (self.low != int(self.low) or self.high != int(self.high)):
+            raise ValueError(
+                f"an integer range needs integer endpoints; got low={self.low}, "
+                f"high={self.high}"
+            )
+        return self
+
+
 class SearchSpec(BaseModel):
     """
     Hyperparameter search on the TRAINING window of each fold.
@@ -937,20 +979,47 @@ class SearchSpec(BaseModel):
     # `valid: True` while the embargo the caller asked for was 0.
     model_config = ConfigDict(extra="forbid")
 
-    method: Literal["grid", "random"] = Field(
+    method: Literal["grid", "random", "tpe"] = Field(
         "grid",
         description="'grid' — every combination. 'random' — `n_iter` samples "
         "from the grid, the better use of a fixed budget once the grid has "
-        "more than a couple of axes.",
+        "more than a couple of axes. 'tpe' — optuna's Tree-structured Parzen "
+        "Estimator chooses each next candidate from what the previous ones "
+        "scored, over `param_ranges` (continuous) and `param_grid` "
+        "(categorical), for `max_trials` trials; needs optuna installed. All "
+        "three score candidates on the same purged, embargoed inner folds.",
     )
     param_grid: Dict[str, List[object]] = Field(
-        ...,
+        default_factory=dict,
         description="Estimator parameter name -> candidate values. Every name "
         "must be allowed for the chosen estimator, checked at the same boundary "
-        "as EstimatorSpec.params.",
+        "as EstimatorSpec.params. grid and random: every axis; tpe: the "
+        "categorical axes, beside `param_ranges`.",
+    )
+    param_ranges: Dict[str, ParamRange] = Field(
+        default_factory=dict,
+        description="tpe only: estimator parameter name -> a continuous range "
+        "the sampler draws from. A name may not appear in both this and "
+        "`param_grid`.",
     )
     n_iter: int = Field(
         20, gt=0, description="random only: how many combinations to sample."
+    )
+    max_trials: int = Field(
+        30,
+        ge=1,
+        le=1000,
+        description="tpe only: trials the sampler runs per fold. Each is "
+        "fitted on every inner fold, so the cost is max_trials x inner_splits "
+        "fits per outer fold, which the plan counts against the budget.",
+    )
+    early_pruning: bool = Field(
+        False,
+        description="tpe only: stop a trial after an inner fold when its "
+        "running mean is below the median of the completed trials at the "
+        "same fold (optuna's MedianPruner, after three complete trials). "
+        "Fewer fits; a pruned trial keeps the score it had and is reported "
+        "as pruned.",
     )
     inner_splits: int = Field(
         3, ge=2, description="Inner walk-forward folds used to score a candidate."
@@ -964,12 +1033,43 @@ class SearchSpec(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _grid_not_empty(self) -> "SearchSpec":
-        if not self.param_grid:
-            raise ValueError("param_grid must name at least one parameter")
+    def _axes_agree_with_method(self) -> "SearchSpec":
         for name, values in self.param_grid.items():
             if not values:
                 raise ValueError(f"param_grid[{name!r}] has no candidate values")
+        both = sorted(set(self.param_grid) & set(self.param_ranges))
+        if both:
+            raise ValueError(
+                f"{both} appear in both param_grid and param_ranges; an axis is "
+                "either enumerated or sampled, not both."
+            )
+        if self.method == "tpe":
+            if not self.param_grid and not self.param_ranges:
+                raise ValueError(
+                    "method='tpe' needs at least one axis: a continuous range in "
+                    "param_ranges or candidate values in param_grid."
+                )
+            return self
+        # The fields the other methods do not read must be at their
+        # defaults, so a reloaded spec cannot carry a setting nothing used.
+        if not self.param_grid:
+            raise ValueError("param_grid must name at least one parameter")
+        if self.param_ranges:
+            raise ValueError(
+                f"param_ranges is read by method='tpe' only; method="
+                f"{self.method!r} enumerates param_grid. Drop the ranges, or "
+                "set method='tpe'."
+            )
+        if self.max_trials != 30:
+            raise ValueError(
+                f"max_trials={self.max_trials} is read by method='tpe' only; "
+                f"method={self.method!r} does not use it."
+            )
+        if self.early_pruning:
+            raise ValueError(
+                f"early_pruning is read by method='tpe' only; method="
+                f"{self.method!r} does not use it."
+            )
         return self
 
 

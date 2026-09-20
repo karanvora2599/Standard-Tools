@@ -123,7 +123,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `ValidationSpec.scheme` | `rolling`, `expanding` |
 | `PreprocessingSpec.normalization` | `pooled`, `cross_sectional` |
 | `WeightingSpec.method` | `none`, `label_uniqueness`, `time_decay`, `uniqueness_and_time_decay` |
-| `SearchSpec.method` | `grid`, `random` |
+| `SearchSpec.method` | `grid`, `random`, `tpe` |
 | `SearchSpec.scoring` | `cs_rank_ic`, `cs_ic`, `r2`, `neg_mae`, `accuracy`, `auc` |
 | `EstimatorSpec.calibration` | `none`, `isotonic`, `sigmoid` |
 | `PredictionTransformSpec.method` | `sign`, `cross_sectional_rank`, `cross_sectional_zscore`, `top_bottom_quantile` |

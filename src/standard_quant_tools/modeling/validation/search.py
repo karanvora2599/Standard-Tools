@@ -16,12 +16,22 @@ fold, on top of the one fit that fold already did. A 12-point grid with 3
 inner splits over 20 outer folds is 720 fits where there was 20. That is
 the honest price of not hand-picking `alpha`, and it is why the search is
 opt-in.
+
+THREE BACKENDS, ONE DISCIPLINE. `grid` scores every combination, `random`
+a seeded sample of them, and `tpe` asks optuna's Tree-structured Parzen
+Estimator for each next candidate from what the previous ones scored --
+which is the one that makes a CONTINUOUS axis (`param_ranges`) worth
+declaring, since a grid over a log-spaced regularization strength is
+either coarse or enormous. All three cut the same purged, embargoed inner
+folds and score them with the same closure; the sampler decides which
+parameters to try and nothing else.
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
+from math import prod
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -35,14 +45,44 @@ from .walk_forward import WalkForwardSplit, label_overlap_mask
 logger = logging.getLogger(__name__)
 
 
+def optuna_available() -> bool:
+    """Whether optuna can be imported, without importing it."""
+    from importlib.util import find_spec
+
+    try:
+        return find_spec("optuna") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def require_optuna(where: str) -> None:
+    """Refuse, by name, a tpe search on a machine without optuna."""
+    if optuna_available():
+        return
+    raise ValidationError(
+        f"{where}: search.method='tpe' needs optuna, which is not installed "
+        "in this environment (pip install optuna). 'grid' and 'random' need "
+        "nothing; list_modeling_capabilities reports which backends are "
+        "available."
+    )
+
+
 def search_candidates(search_spec: Any, random_seed: int) -> List[Dict[str, Any]]:
     """
     The parameter combinations to try, in a deterministic order.
 
     Public because the experiment plan counts them before anything is
     fitted, and the count the plan reports has to be the list the search
-    walks -- same enumeration, same sampling, same seed.
+    walks -- same enumeration, same sampling, same seed. A tpe search has
+    no list: its candidates are chosen one at a time from the scores of
+    the previous ones, so it is counted by `n_search_candidates` and not
+    enumerated here.
     """
+    if search_spec.method == "tpe":
+        raise ValidationError(
+            "a tpe search samples its candidates rather than enumerating "
+            "them; ask n_search_candidates for how many it will run."
+        )
     names = sorted(search_spec.param_grid)
     grid = [
         dict(zip(names, combo))
@@ -56,6 +96,20 @@ def search_candidates(search_spec: Any, random_seed: int) -> List[Dict[str, Any]
     rng = np.random.default_rng(random_seed)
     picks = rng.choice(len(grid), size=search_spec.n_iter, replace=False)
     return [grid[int(i)] for i in sorted(picks)]
+
+
+def n_search_candidates(search_spec: Any) -> int:
+    """
+    How many candidates the search will score per outer fold, without
+    enumerating them: the grid's size, the random sample's size, or the
+    tpe trial budget. What the plan multiplies through the inner folds.
+    """
+    if search_spec.method == "tpe":
+        return int(search_spec.max_trials)
+    size = prod(max(1, len(values)) for values in search_spec.param_grid.values())
+    if search_spec.method == "random":
+        return int(min(size, search_spec.n_iter))
+    return int(size)
 
 
 def _score(
@@ -141,6 +195,12 @@ def inner_fold_count(n_dates: int, inner_splits: int, embargo: int = 0) -> int:
     return int(inner_splits) if _inner_splitter(n_dates, inner_splits, embargo) else 0
 
 
+FitPredict = Callable[
+    [Dict[str, Any], pd.DataFrame, pd.DataFrame, int],
+    Tuple[np.ndarray, Optional[np.ndarray]],
+]
+
+
 def search_best_params(
     *,
     task: str,
@@ -149,10 +209,7 @@ def search_best_params(
     train_frame: pd.DataFrame,
     feature_ids: List[str],
     random_seed: int,
-    fit_predict: Callable[
-        [Dict[str, Any], pd.DataFrame, pd.DataFrame, int],
-        Tuple[np.ndarray, Optional[np.ndarray]],
-    ],
+    fit_predict: FitPredict,
     embargo: int = 0,
     label_end: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -192,6 +249,7 @@ def search_best_params(
     if splitter is None:
         return dict(base_params), {
             "searched": False,
+            "method": search_spec.method,
             "reason": (
                 f"training window has {len(dates)} dates, too few for "
                 f"{search_spec.inner_splits} inner folds with embargo={embargo}"
@@ -200,7 +258,6 @@ def search_best_params(
 
     row_dates = train_frame["date"].to_numpy()
     date_code = np.searchsorted(dates.to_numpy(), row_dates)
-    candidates = search_candidates(search_spec, random_seed)
 
     # The inner folds' row masks, cut ONCE: they do not depend on the
     # candidate, and the purge is the same for every one of them.
@@ -228,54 +285,62 @@ def search_best_params(
         for train_mask, test_mask in fold_masks
     ]
 
-    results: List[Dict[str, Any]] = []
-    for params in candidates:
-        merged = {**base_params, **params}
-        fold_scores: List[float] = []
-        for fold_index, (inner_train, inner_test) in enumerate(inner_frames):
-            if inner_train.empty or inner_test.empty:
-                continue
-            if task == "classification" and len(np.unique(inner_train["target"])) < 2:
-                continue
-            try:
-                predictions, probabilities = fit_predict(
-                    merged, inner_train, inner_test, fold_index
-                )
-            except Exception as exc:  # noqa: BLE001
-                # One candidate failing to fit (an invalid combination, a
-                # degenerate window) must not abort the whole search.
-                logger.debug("[modeling] search candidate %s failed: %s", params, exc)
-                fold_scores.append(float("nan"))
-                continue
-            fold_scores.append(
-                _score(
-                    task,
-                    search_spec.scoring,
-                    inner_test["target"].to_numpy(),
-                    predictions,
-                    probabilities,
-                    inner_test["date"].to_numpy(),
-                )
+    def score_fold(params: Dict[str, Any], fold_index: int) -> Optional[float]:
+        """One candidate on one inner fold: its score, NaN when it could
+        not be scored, None when the fold itself cannot score anything."""
+        inner_train, inner_test = inner_frames[fold_index]
+        if inner_train.empty or inner_test.empty:
+            return None
+        if task == "classification" and len(np.unique(inner_train["target"])) < 2:
+            return None
+        try:
+            predictions, probabilities = fit_predict(
+                params, inner_train, inner_test, fold_index
             )
-        finite = [s for s in fold_scores if np.isfinite(s)]
-        results.append(
-            {
-                "params": params,
-                "score": float(np.mean(finite)) if finite else float("nan"),
-                "n_folds_scored": len(finite),
-            }
+        except Exception as exc:  # noqa: BLE001
+            # One candidate failing to fit (an invalid combination, a
+            # degenerate window) must not abort the whole search.
+            logger.debug("[modeling] search candidate %s failed: %s", params, exc)
+            return float("nan")
+        return _score(
+            task,
+            search_spec.scoring,
+            inner_test["target"].to_numpy(),
+            predictions,
+            probabilities,
+            inner_test["date"].to_numpy(),
         )
+
+    if search_spec.method == "tpe":
+        results = _tpe_trials(
+            search_spec, base_params, random_seed, score_fold, len(inner_frames)
+        )
+    else:
+        results = []
+        for params in search_candidates(search_spec, random_seed):
+            merged = {**base_params, **params}
+            fold_scores = [score_fold(merged, i) for i in range(len(inner_frames))]
+            finite = [s for s in fold_scores if s is not None and np.isfinite(s)]
+            results.append(
+                {
+                    "params": params,
+                    "score": float(np.mean(finite)) if finite else float("nan"),
+                    "n_folds_scored": len(finite),
+                }
+            )
 
     scored = [r for r in results if np.isfinite(r["score"])]
     if not scored:
         return dict(base_params), {
             "searched": False,
+            "method": search_spec.method,
             "reason": "no candidate could be scored on any inner fold",
             "candidates": results,
         }
     best = max(scored, key=lambda r: r["score"])
-    return {**base_params, **best["params"]}, {
+    report = {
         "searched": True,
+        "method": search_spec.method,
         "scoring": search_spec.scoring,
         "n_candidates": len(results),
         "n_inner_folds": len(fold_masks),
@@ -294,3 +359,107 @@ def search_best_params(
             key=lambda r: (-r["score"] if np.isfinite(r["score"]) else float("inf")),
         ),
     }
+    if search_spec.method == "tpe":
+        report["n_trials_pruned"] = sum(1 for r in results if r.get("pruned"))
+    return {**base_params, **best["params"]}, report
+
+
+def _tpe_trials(
+    search_spec: Any,
+    base_params: Dict[str, Any],
+    random_seed: int,
+    score_fold: Callable[[Dict[str, Any], int], Optional[float]],
+    n_folds: int,
+) -> List[Dict[str, Any]]:
+    """
+    `max_trials` candidates chosen by optuna's TPE sampler, each scored on
+    the same inner folds a grid candidate is.
+
+    The sampler is seeded from the spec's `random_seed`, so a fold's search
+    is reproducible; the study is in memory and single-threaded, because
+    an inner search that ran in parallel would fit the same fold's
+    pipeline in several processes at once for no gain. With
+    `early_pruning`, a trial reports its running mean after each inner
+    fold and is stopped when that falls below the median of the completed
+    trials at the same point; its score is what it had when stopped, and
+    the report says it was pruned rather than letting a half-scored trial
+    pass as a whole one.
+    """
+    require_optuna("search_best_params")
+    import optuna
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def suggest(trial: Any) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        for name in sorted(search_spec.param_grid):
+            params[name] = trial.suggest_categorical(
+                name, list(search_spec.param_grid[name])
+            )
+        for name in sorted(search_spec.param_ranges):
+            axis = search_spec.param_ranges[name]
+            if axis.integer:
+                params[name] = trial.suggest_int(
+                    name, int(axis.low), int(axis.high), log=bool(axis.log)
+                )
+            else:
+                params[name] = trial.suggest_float(
+                    name, float(axis.low), float(axis.high), log=bool(axis.log)
+                )
+        return params
+
+    results: List[Dict[str, Any]] = []
+
+    def objective(trial: Any) -> float:
+        params = suggest(trial)
+        merged = {**base_params, **params}
+        finite: List[float] = []
+        pruned = False
+        for fold_index in range(n_folds):
+            score = score_fold(merged, fold_index)
+            if score is not None and np.isfinite(score):
+                finite.append(float(score))
+            if search_spec.early_pruning and finite:
+                trial.report(float(np.mean(finite)), step=fold_index)
+                if trial.should_prune():
+                    pruned = True
+                    break
+        value = float(np.mean(finite)) if finite else float("nan")
+        results.append(
+            {
+                "params": params,
+                "score": value,
+                "n_folds_scored": len(finite),
+                "pruned": pruned,
+            }
+        )
+        if pruned:
+            raise optuna.TrialPruned()
+        if not np.isfinite(value):
+            # optuna treats a NaN objective as a failed trial and moves on,
+            # which is the right reading of "could not be scored".
+            return float("nan")
+        return value
+
+    pruner = (
+        optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=0)
+        if search_spec.early_pruning
+        else optuna.pruners.NopPruner()
+    )
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=int(random_seed)),
+        pruner=pruner,
+    )
+    study.optimize(objective, n_trials=int(search_spec.max_trials), n_jobs=1)
+    return results
+
+
+__all__ = [
+    "inner_fold_count",
+    "n_search_candidates",
+    "optuna_available",
+    "require_optuna",
+    "search_best_params",
+    "search_candidates",
+]

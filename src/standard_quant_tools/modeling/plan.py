@@ -45,7 +45,7 @@ from standard_quant_tools.error import ValidationError
 
 from .dataset.alignment import LABEL_END_COL
 from .specs import ModelSpec
-from .validation.search import inner_fold_count, search_candidates
+from .validation.search import inner_fold_count, n_search_candidates
 from .validation.walk_forward import (
     build_splitter,
     contiguous_runs,
@@ -87,7 +87,7 @@ def fit_count(
     total = per_fit  # the full-panel refit
     candidates = 0
     if model_spec.search is not None:
-        candidates = len(search_candidates(model_spec.search, model_spec.random_seed))
+        candidates = n_search_candidates(model_spec.search)
     for i in range(int(n_folds)):
         inner = (
             int(n_inner_folds[i])
@@ -248,8 +248,7 @@ def plan_experiment(
 
     per_fit = fits_per_estimator(model_spec)
     search = model_spec.search
-    candidates = search_candidates(search, model_spec.random_seed) if search else []
-    n_candidates = len(candidates)
+    n_candidates = n_search_candidates(search) if search is not None else 0
     embargo = int(model_spec.validation.embargo)
     steps = [s.model_dump() for s in model_spec.preprocessing.resolved_steps]
     estimator = {

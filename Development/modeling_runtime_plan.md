@@ -4,8 +4,17 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phases 0-3 are implemented and merged; phases 4-10 are
-proposals.** Phase 2 landed as `9e574ee` (the target registry) and phase
+**Status: phases 0-4 are implemented and merged; phases 5-10 are
+proposals.** Phase 4 landed as three commits on 2026-09-20: `56727b8`
+(`plan_experiment`, `ModelSpec.budget`, the fit count in
+`validate_model_spec`), `85128dd` (the fold cache, with the measurement
+in the guide: a 20-feature ablation on 40k rows from 4.4 s to 3.3 s under
+the fused default pipeline and from 43.8 s to 8.4 s with a quantile
+transform in it, identical numbers) and the commit that carries this
+paragraph (`SearchSpec.method="tpe"` over `param_ranges`, seeded, with
+median pruning). `max_parallelism` was not built: nothing in the engine
+runs in parallel and no registered estimator exposes `n_jobs`, so the
+knob would control nothing. Phase 2 landed as `9e574ee` (the target registry) and phase
 3 as `77dfffd` (paired comparison, `validation/comparison.py`) plus the
 commit that carries this paragraph (`CombinatorialPurgedSplit`,
 `method="cpcv"`, per-block purge, the path distribution in the validation

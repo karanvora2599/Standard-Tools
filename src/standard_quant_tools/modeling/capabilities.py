@@ -21,7 +21,14 @@ from .adapters import available_tasks, get_adapter
 from .estimators.registry import ESTIMATOR_REGISTRY, allowed_params
 from .features.registry import list_features as _list_features
 from .preprocessing import list_preprocessors
-from .specs import TARGET_KINDS, PreprocessingSpec, TargetSpec, ValidationSpec
+from .specs import (
+    TARGET_KINDS,
+    PreprocessingSpec,
+    SearchSpec,
+    TargetSpec,
+    ValidationSpec,
+)
+from .validation import search as _search
 
 
 def _literal_options(model: Any, field: str) -> List[str]:
@@ -148,7 +155,10 @@ def modeling_capabilities() -> Dict[str, Any]:
             "time_decay",
             "uniqueness_and_time_decay",
         ],
-        "hyperparameter_search": ["grid", "random"],
+        # From the spec, so a backend added there is reported here. 'tpe'
+        # is listed whether or not optuna is installed; the entry under
+        # optional_dependencies says whether it can run.
+        "hyperparameter_search": _literal_options(SearchSpec, "method"),
         # Widened. It reported three, so an agent could not learn from it
         # that the bloomberg provider or the audit signing path are
         # unavailable in this environment -- and would discover that by
@@ -156,6 +166,9 @@ def modeling_capabilities() -> Dict[str, Any]:
         "optional_dependencies": {
             "lightgbm": boosting.HAS_LIGHTGBM,
             "xgboost": boosting.HAS_XGBOOST,
+            # The search module's own probe, so the capability report and
+            # the refusal in run_model_experiment cannot disagree.
+            "optuna": _search.optuna_available(),
             "native_extension": _native_available(),
             "scipy": _importable("scipy"),
             "numba": _importable("numba"),

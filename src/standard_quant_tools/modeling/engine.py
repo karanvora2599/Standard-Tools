@@ -52,7 +52,7 @@ from .validation.ranking import (
     ranking_metrics,
     relevance_grades,
 )
-from .validation.search import search_best_params
+from .validation.search import require_optuna, search_best_params
 from .validation.walk_forward import build_splitter
 from .validation.weights import build_sample_weights
 
@@ -486,6 +486,11 @@ def run_experiment(
         feature_ids=feature_ids,
     )
     plan.refuse_over_budget("run_model_experiment")
+    if model_spec.search is not None and model_spec.search.method == "tpe":
+        # Before the first fold, not inside it: a missing library is a
+        # fact about the environment, and the first fold's preprocessing
+        # is work spent learning it.
+        require_optuna("run_model_experiment")
     n_expected_folds = len(plan.folds)
     if fold_cache is not None and not dataset.get("data_hash"):
         raise ValidationError(

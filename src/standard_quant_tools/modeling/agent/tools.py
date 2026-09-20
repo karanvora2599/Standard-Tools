@@ -1128,6 +1128,38 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
                         )
                     )
                     break  # one report per axis is enough
+        # A continuous axis is checked at its two ends: a bound the
+        # estimator enforces is a bound on the whole interval.
+        for param, axis in spec.search.param_ranges.items():
+            for end in (axis.low, axis.high):
+                try:
+                    validate_param_value(
+                        task, estimator, param, int(end) if axis.integer else end
+                    )
+                except ValidationError as exc:
+                    problems.append(
+                        SpecProblem(
+                            where="search.param_ranges",
+                            problem=str(exc),
+                            suggestion=f"Accepted parameters: {allowed}",
+                        )
+                    )
+                    break
+    if spec.search is not None and spec.search.method == "tpe":
+        from ..validation import search as _search
+
+        if not _search.optuna_available():
+            problems.append(
+                SpecProblem(
+                    where="search.method",
+                    problem=(
+                        "method='tpe' needs optuna, which is not installed in "
+                        "this environment; run_model_experiment would refuse "
+                        "the spec before its first fit."
+                    ),
+                    suggestion="pip install optuna, or use method='grid' or 'random'.",
+                )
+            )
 
     # ── The dataset, when one is named ────────────────────────────────
     # Metadata only -- `rows`, `n_dates` and `target_id` -- so the panel is
@@ -1193,9 +1225,9 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
 
         estimated_fits = fit_count(spec, folds)
     if folds and spec.search is not None:
-        from ..validation.search import search_candidates
+        from ..validation.search import n_search_candidates
 
-        combinations = len(search_candidates(spec.search, spec.random_seed))
+        combinations = n_search_candidates(spec.search)
         notes.append(
             f"A search over {combinations} candidate(s) and "
             f"{spec.search.inner_splits} inner split(s) multiplies through "
