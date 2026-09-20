@@ -485,12 +485,16 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                     fill_counts[name] = fill_counts.get(name, 0) + count
             per_entity_features[symbol] = expand_lags(entity_frame, lags_requested)
             if include_target:
-                target_by_entity[symbol] = build_target(ohlcv["Close"], spec.target)
+                # The FULL frame and the feature context, not Close alone:
+                # a registered label may read High and Low, or the
+                # benchmark's own return. `build_target` checks the label's
+                # declared `requires` against the frame first.
+                target_by_entity[symbol] = build_target(ohlcv, spec.target, context)
                 # Recorded per row, per entity, from that entity's OWN bar
                 # index -- see build_label_end_dates for why an integer
                 # offset against the global date axis is not equivalent.
                 label_end_by_entity[symbol] = build_label_end_dates(
-                    ohlcv["Close"], spec.target
+                    ohlcv, spec.target, context
                 )
                 # One label per requested horizon, off the SAME features
                 # -- but ONLY when more than one was asked for. A
@@ -509,10 +513,10 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                         update={"horizon": horizon, "horizons": [horizon]}
                     )
                     extra_targets.setdefault(name, {})[symbol] = build_target(
-                        ohlcv["Close"], at_horizon
+                        ohlcv, at_horizon, context
                     )
                     extra_label_ends.setdefault(name, {})[symbol] = (
-                        build_label_end_dates(ohlcv["Close"], at_horizon)
+                        build_label_end_dates(ohlcv, at_horizon, context)
                     )
 
     keep_missing = spec.missing.policy == "keep"

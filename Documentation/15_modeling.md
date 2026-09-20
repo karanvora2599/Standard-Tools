@@ -1419,26 +1419,86 @@ trains under a classifier and is **refused** for a regressor — which is the
 refusal that matters, because a regressor fitted on a 0/1 label does not
 error. It fits happily and reports a meaningless R².
 
-### One registry, not five literals
+### One registry, and `register_target` as the way in
 
-`TARGET_KINDS` in `modeling/specs.py` is the only place that says what a
-label is: which tasks consume it, whether this library can build it, and
-whether it is continuous. Every consumer reads it — the engine's
-compatibility check is *derived* from it rather than restating it, the
-threshold rule reads `continuous` off it, and `build_target` reads
-`buildable`.
+`modeling.targets.TARGET_REGISTRY` is the only place that says what a
+label is — which tasks consume it, whether prices can build it, whether it
+is continuous — **and how it is built**. Every consumer reads it: the
+engine's compatibility check is derived from it rather than restating it,
+the threshold rule reads `continuous` off it, `build_target` dispatches to
+its `builder`, the capability report and the generated
+[reference](29_modeling_reference.md) list it. `TARGET_KINDS`,
+`EXTERNAL_TARGETS` and `CROSS_SECTIONAL_TARGETS` are live views of it under
+the names they always had.
 
 That is not tidiness. The task set had been written five times in two
 different widths, and the narrow copies were where `ranking` had been
 forgotten — a model that could be trained and never traded. The target set
-was on the same path with four copies, two of them added the same week.
-A hand-written `Literal` still exists, because one cannot be built from a
-dict at type-check time, and a test pins the two equal.
+followed: a dict saying what each label was, a chain of `if spec.type ==`
+branches saying how, a frozenset naming the two cross-sectional labels, and
+a hand-written `Literal` pinned equal to the dict by test. Adding a label
+meant editing all four, and a label from outside the library could not be
+added at all.
 
-`build_target`'s final branch is now explicit. It used to end in a bare
-`else` that produced a direction target, so any type added to the Literal
-and forgotten there came back silently **binarized** — a continuous label
-arriving as 1.0/0.0 with nothing raising.
+The `Literal` is gone and the schema still lists the choices:
+`TargetSpec.type` is a validated string whose registered ids are written
+into the JSON schema as an enum when a tool definition is built, so an LLM
+sees the same list the validator enforces — including a label registered
+at runtime.
+
+#### Adding your own label
+
+```python
+from standard_quant_tools.modeling.estimators.bounds import EstimatorParamSchema, ParamBound
+from standard_quant_tools.modeling.targets import TargetDefinition, register_target
+
+def residual_return(ohlcv, spec, context):
+    """Forward return minus beta times the benchmark's, over the same bars."""
+    fwd = lambda s: s.pct_change(spec.horizon, fill_method=None).shift(-spec.horizon)
+    bench = context.benchmark_close.reindex(ohlcv.index)
+    return fwd(ohlcv["Close"]) - spec.resolved_params["beta"] * fwd(bench)
+
+register_target(TargetDefinition(
+    id="firm.residual_return",
+    description="Forward return minus beta times the benchmark's forward return.",
+    tasks=("regression", "ranking"),
+    buildable=True,
+    continuous=True,
+    builder=residual_return,                      # (ohlcv, spec, context) -> Series
+    param_schema=EstimatorParamSchema(bounds={"beta": ParamBound("float", 0.0, 3.0)}),
+    default_params={"beta": 1.0},
+))
+
+TargetSpec(type="firm.residual_return", horizon=20, params={"beta": 0.5})
+```
+
+A builder sees the entity's **full OHLCV** and the same `FeatureContext` a
+feature sees (the benchmark close, the interval), and declares the columns
+it reads in `requires`, which is checked against the fetched frame before
+anything is built. `TargetSpec.params` are checked against the label's
+bounds at the spec boundary, the way an estimator's are; the built-ins
+declare none, so a parameter on one is refused by name rather than
+ignored.
+
+Two more hooks, for labels the default rules do not describe:
+
+- **`label_end_builder`** — when each row's label closes, for a label that
+  resolves before `horizon` bars (a barrier, a fill). The engine's purge
+  reads it, so training rows are removed exactly where their labels reach
+  the test block and not where a nominal horizon would. Measured: a
+  next-bar label whose end is one bar ahead is purged as one row per
+  entity per fold at embargo zero, against five for a five-bar horizon.
+- **`cross_sectional_stage`** — for a label defined against the date's
+  other entities, applied once after every entity is stacked; the rank and
+  market-neutral built-ins use it.
+
+The registry refuses a duplicate id without `overwrite=True`, a task that
+does not exist, a description too short to be one, a buildable label with
+no builder, and — the refusal only a label can earn — an external label
+**with** one: a markout, a fill probability or a time to fill is recorded
+through `register_external_panel`, never computed from bars, because a
+bar-derived approximation is a number with nothing behind it and would
+look exactly like a number with something behind it.
 
 
 ## Preprocessing: a registry of steps, a pipeline of fitted state

@@ -1,5 +1,47 @@
 # Changelog
 
+## A label is registered now, and a firm's own label needs no edit to the library
+
+Phase 2 of `Development/modeling_runtime_plan.md`, in one commit.
+
+`TARGET_KINDS` said what each label was and said it once; how to build it
+lived in a chain of `if spec.type ==` branches, a frozenset naming the two
+cross-sectional labels, and a hand-written `TargetType` Literal pinned
+equal to the dict by test. Adding a label meant editing all four, and a
+label from outside the library -- a residual return, an earnings drift, an
+execution shortfall -- could not be added at all.
+
+**`modeling.targets` holds every label as a `TargetDefinition`**: the what
+(tasks, buildable, continuous, description) beside the how -- a `builder`
+that sees the entity's full OHLCV and the same feature context a feature
+sees, so a label can read High and Low or the benchmark's own return; a
+`label_end_builder` for a label that closes early, which the engine's
+purge honours; a `cross_sectional_stage` for one defined against the
+date's other entities; and a bounded `param_schema` for the label's own
+parameters, carried by the new `TargetSpec.params`. `register_target` is
+the extension point and refuses what the other registries refuse, plus
+two things only a label can get wrong: a buildable label with no builder,
+and an external label WITH one, because a bar-derived approximation of a
+fill probability is a number with nothing behind it.
+
+**The Literal is gone and the schema still lists the choices.** `TargetType`
+is a validated string now, with the registered ids written into the JSON
+schema as an enum when a tool definition is built, so an LLM sees the same
+list the validator enforces and a label registered at runtime is on it.
+`TARGET_KINDS`, `EXTERNAL_TARGETS` and `CROSS_SECTIONAL_TARGETS` are live
+views of the registry under their old names; every consumer keeps its
+import. `dataset/target.py` is the dispatcher, with the six built-ins'
+arithmetic moved to `targets/builtin.py` unchanged -- the tests that pin
+each label's numbers run against it as they did.
+
+The extension is tested from outside: a residual-return label reading the
+benchmark through the context builds to 1e-12 of the hand computation; a
+next-bar-sign label whose own label end is one bar ahead is purged by the
+engine as exactly one row per entity per fold at embargo zero, against
+five for a five-bar horizon; a `beta` outside its bound, a parameter the
+label did not declare, and a task it did not name are each refused by
+name.
+
 ## A missing feature cost the whole row, and the only policy was to drop it
 
 Phase 1 of `Development/modeling_runtime_plan.md`, third commit.

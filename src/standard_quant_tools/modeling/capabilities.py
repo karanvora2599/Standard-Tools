@@ -99,7 +99,9 @@ def modeling_capabilities() -> Dict[str, Any]:
             "external_only": sorted(
                 name for name, kind in TARGET_KINDS.items() if not kind.buildable
             ),
-            "all": _literal_options(TargetSpec, "type"),
+            # From the registry view, which a label registered at runtime
+            # joins; the field is no longer a Literal to read options off.
+            "all": sorted(TARGET_KINDS),
             "note": (
                 "`buildable` is what build_model_dataset can derive from a "
                 "Close series. `external_only` labels are functions of the "

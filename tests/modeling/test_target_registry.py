@@ -17,8 +17,6 @@ something behind it.
 
 from __future__ import annotations
 
-import typing
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -30,7 +28,6 @@ from standard_quant_tools.modeling.specs import (
     TARGET_KINDS,
     TASKS,
     TargetSpec,
-    TargetType,
     targets_for_task,
 )
 
@@ -41,18 +38,27 @@ CLOSE = pd.Series(
 
 
 class TestTheRegistryIsTheSourceOfTruth:
-    def test_the_literal_matches_the_registry(self) -> None:
+    def test_the_schema_lists_exactly_the_registry(self) -> None:
         """
-        A Literal cannot be built from a dict at type-check time, so it is
-        written out — and this is what stops the two versions of the same
-        list from drifting, which is exactly how `ranking` went missing
-        from two task literals.
+        The Literal that used to be pinned equal to the dict is gone: the
+        field is a registry lookup, and the schema an LLM reads gets the
+        registered ids written in as an enum when it is built. So the
+        thing to pin is that the schema and the registry agree.
         """
-        assert set(typing.get_args(TargetType)) == set(TARGET_KINDS)
+        schema = TargetSpec.model_json_schema()["properties"]["type"]
+        assert schema["enum"] == sorted(TARGET_KINDS)
 
-    def test_the_spec_field_uses_it(self) -> None:
-        members = typing.get_args(TargetSpec.model_fields["type"].annotation)
-        assert set(members) == set(TARGET_KINDS)
+    def test_an_unregistered_type_is_refused_at_the_boundary(self) -> None:
+        with pytest.raises(Exception, match="unknown target type"):
+            TargetSpec(type="not_a_label", horizon=5)
+
+    def test_the_external_panel_inputs_use_the_same_lookup(self) -> None:
+        from standard_quant_tools.modeling.agent.models import ExternalTarget
+
+        schema = ExternalTarget.model_json_schema()["properties"]["target_type"]
+        assert schema["enum"] == sorted(TARGET_KINDS)
+        with pytest.raises(Exception, match="unknown target type"):
+            ExternalTarget(name="h1", column="c", horizon=1, target_type="nope")
 
     def test_every_target_names_at_least_one_task(self) -> None:
         orphans = [name for name, k in TARGET_KINDS.items() if not k.tasks]

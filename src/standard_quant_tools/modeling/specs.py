@@ -8,11 +8,17 @@ tool surface.
 """
 
 import math
-from dataclasses import dataclass
-from typing import Annotated, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Dict, List, Literal, Optional
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from .features.base import RESERVED_PANEL_COLUMNS
 from .limits import MAX_LAG, MAX_LAGS_PER_FEATURE
@@ -29,249 +35,54 @@ def _parse_date(value: str, field_name: str) -> pd.Timestamp:
         raise ValueError(f"{field_name}={value!r} is not a valid date: {exc}") from None
 
 
-@dataclass(frozen=True)
-class TargetKind:
-    """One supervised label: what consumes it, and who can build it."""
-
-    #: The tasks that can be fitted against it. A continuous label suits a
-    #: regressor and a ranker; a discrete one suits a classifier. This is
-    #: read by the engine's compatibility check rather than restated there.
-    tasks: Tuple[str, ...]
-    #: Whether `build_target` can produce it from a Close series. FALSE for
-    #: every microstructure and execution label: none is a function of
-    #: closing prices, and pretending otherwise would silently hand back a
-    #: forward return under another name.
-    buildable: bool
-    #: Continuous labels reject a `threshold`, which only means something
-    #: for a binarized one.
-    continuous: bool
-    description: str
-
-
-#: Every label this library understands, and the ONE place that says so.
-#:
-#: WHY A REGISTRY AND NOT FIVE LITERALS. The task set was written five times
-#: in two widths, and the narrow copies were where `ranking` had been
-#: forgotten -- a model that could be fitted and never traded. The target
-#: set was on the same path: four copies, two of them added in the same
-#: week this was written. A type declared here is a type every consumer
-#: sees, and the Literal below is pinned equal to it by test.
-#:
-#: EXTERNAL-ONLY IS NOT A GAP. A markout, a fill probability or a time to
-#: fill is a function of the order book and of orders, not of closing
-#: prices. `build_target` refuses them by name and says to compute them
-#: where the book is and register the panel -- which is a real answer,
-#: whereas a bar-derived approximation of a fill probability would be a
-#: number with nothing behind it.
-TARGET_KINDS: Dict[str, TargetKind] = {
-    "forward_return": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=True,
-        continuous=True,
-        description="The return from t to t+horizon.",
-    ),
-    "forward_direction": TargetKind(
-        tasks=("classification",),
-        buildable=True,
-        continuous=False,
-        description="That forward return binarized against `threshold`.",
-    ),
-    "forward_return_vol_scaled": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=True,
-        continuous=True,
-        description="Forward return over the entity's own trailing volatility.",
-    ),
-    "forward_return_rank": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=True,
-        continuous=True,
-        description="Its rank within the date's cross-section, in [-0.5, 0.5].",
-    ),
-    "forward_return_market_neutral": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=True,
-        continuous=True,
-        description="Forward return minus that date's equal-weighted mean.",
-    ),
-    "triple_barrier": TargetKind(
-        tasks=("classification",),
-        buildable=True,
-        continuous=False,
-        description="Which barrier is touched first: up, down, or neither.",
-    ),
-    # ── microstructure labels, computed where the book is ─────────────
-    "future_mid_return": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "Return of the MIDPOINT over the horizon. Not the same as a "
-            "trade-price return: the mid moves without a trade and is where "
-            "a passive order is measured from."
-        ),
-    ),
-    "future_microprice_return": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "Return of the size-weighted touch price. Leads the mid when the "
-            "book is lopsided, which is exactly when the mid is least "
-            "informative."
-        ),
-    ),
-    "future_markout": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "Mid move measured FROM a fill, signed by the side taken. The "
-            "standard read on whether a trade was well-placed."
-        ),
-    ),
-    "next_mid_direction": TargetKind(
-        tasks=("classification",),
-        buildable=False,
-        continuous=False,
-        description="Whether the midpoint's next move is up or down.",
-    ),
-    "future_spread": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "The quoted spread at t+horizon. A liquidity forecast rather "
-            "than a price one -- what it will COST to cross, not where the "
-            "price goes."
-        ),
-    ),
-    "future_depth": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "Resting size at t+horizon. What will be THERE to trade against, "
-            "which a spread forecast does not answer -- a tight quote for a "
-            "hundred shares and a tight quote for fifty thousand cost the "
-            "same to cross and are not the same liquidity."
-        ),
-    ),
-    "future_ofi": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "Signed order-flow imbalance over the horizon, from book "
-            "updates. Predicting FLOW rather than price: the quantity that "
-            "moves the price, one step earlier."
-        ),
-    ),
-    "future_volume": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "Traded volume over the horizon. Bar volume can approximate this "
-            "at daily frequency, but not at the horizons this exists for, "
-            "where the question is how much prints in the next thirty "
-            "seconds."
-        ),
-    ),
-    "future_trade_intensity": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "Trades per unit time over the horizon. Distinct from volume: "
-            "one block and two hundred odd lots are the same volume and "
-            "completely different information."
-        ),
-    ),
-    "fill_probability": TargetKind(
-        tasks=("classification",),
-        buildable=False,
-        continuous=False,
-        description=(
-            "Whether a passive order resting at a stated level fills within "
-            "the horizon. Needs queue position and cancellations, so no "
-            "bar-derived series can produce it."
-        ),
-    ),
-    "time_to_fill": TargetKind(
-        tasks=("regression",),
-        buildable=False,
-        continuous=True,
-        description=(
-            "How long that order waits before filling. CENSORED by "
-            "construction -- an order that never fills has no time, and "
-            "recording it as the horizon rather than as unfilled biases "
-            "every estimate toward patience."
-        ),
-    ),
-    "adverse_selection": TargetKind(
-        tasks=("regression", "ranking"),
-        buildable=False,
-        continuous=True,
-        description=(
-            "How much the mid moves against a fill after it happens. The "
-            "cost of being the one who was willing to trade."
-        ),
-    ),
-}
-
-#: The same set as a Literal, so a bad value is refused at the schema
-#: boundary. Written out because a Literal cannot be built from a dict at
-#: type-check time; `test_the_target_literal_matches_the_registry` fails the
-#: moment the two disagree.
-TargetType = Literal[
-    "forward_return",
-    "forward_direction",
-    "forward_return_vol_scaled",
-    "forward_return_rank",
-    "forward_return_market_neutral",
-    "triple_barrier",
-    "future_mid_return",
-    "future_microprice_return",
-    "future_markout",
-    "next_mid_direction",
-    "future_spread",
-    "future_depth",
-    "future_ofi",
-    "future_volume",
-    "future_trade_intensity",
-    "fill_probability",
-    "time_to_fill",
-    "adverse_selection",
-]
-
-#: Labels no Close series can produce.
-EXTERNAL_TARGETS = tuple(
-    name for name, kind in TARGET_KINDS.items() if not kind.buildable
+# ── The labels and the tasks live in registries, not here ──────────────
+#
+# `TARGET_KINDS`, `EXTERNAL_TARGETS`, `targets_for_task` and `TargetKind`
+# used to be defined in this module, and the `TargetType` Literal beside
+# them was pinned equal to the dict by test. They are re-exported from
+# `modeling.targets` so every consumer keeps its import, and they are LIVE:
+# a label registered through `register_target` is seen by the validator
+# below, by the capability report and by the generated reference without
+# anyone editing this file. `TASKS`/`Task`/`SCORE_TASKS` come from the
+# `tasks` leaf for the reason its docstring gives.
+from .targets import (  # noqa: F401  (re-exports; importing registers the built-ins)
+    EXTERNAL_TARGETS,
+    TARGET_KINDS,
+    TargetKind,
+    get_target,
+    targets_for_task,
+    validate_target_params,
 )
+from .tasks import SCORE_TASKS, TASKS, Task  # noqa: F401  (re-exports)
 
 
-def targets_for_task(task: str) -> Tuple[str, ...]:
-    """Every label a given task can be fitted against."""
-    return tuple(name for name, kind in TARGET_KINDS.items() if task in kind.tasks)
+def _known_target_type(value: str) -> str:
+    """A target id is a registry lookup, not a Literal member."""
+    get_target(value)
+    return value
 
 
-#: The supervised tasks this library fits, declared ONCE.
-#:
-#: It was written five times, in two widths: three copies said
-#: regression/classification/ranking and two said
-#: regression/classification. The narrow pair was not a different opinion,
-#: it was a place ranking had been forgotten -- which is exactly the drift
-#: a repeated literal produces and the reason this name exists.
-TASKS = ("regression", "classification", "ranking")
-Task = Literal["regression", "classification", "ranking"]
+def _target_choices(schema: Dict[str, object]) -> None:
+    """
+    Write the registered ids into the JSON schema as an enum.
 
-#: Tasks whose prediction is a CONTINUOUS SCORE rather than a probability.
-#: A ranker emits a relative score exactly as a regressor emits a
-#: magnitude, so everything downstream that asks "which side is this" reads
-#: the sign of both the same way. Classification is the odd one out, being
-#: bounded in [0, 1] with a decision boundary in the middle.
-SCORE_TASKS = ("regression", "ranking")
+    A Literal put the choices in the schema for free and could not be
+    extended; a plain string can be extended and puts nothing in the
+    schema. This is the third option: the schema is generated when a tool
+    definition is built, which is after every registration, so an LLM
+    reading it sees the same list the validator enforces.
+    """
+    schema["enum"] = sorted(TARGET_KINDS)
+
+
+#: A registered target id. Validated against the registry and advertised
+#: in the schema as an enum of whatever is registered when the schema is
+#: built. Keeps the name every input model used for the Literal.
+TargetType = Annotated[
+    str,
+    AfterValidator(_known_target_type),
+    Field(json_schema_extra=_target_choices),
+]
 
 
 class FeatureSpec(BaseModel):
@@ -500,7 +311,28 @@ class TargetSpec(BaseModel):
             )
         if not math.isfinite(self.threshold):
             raise ValueError(f"threshold must be finite, got {self.threshold}")
+        # A custom label's parameters, against the bounds it registered.
+        # The built-ins register none, so any `params` on one is refused
+        # by name rather than silently ignored.
+        validate_target_params(self.type, dict(self.params))
         return self
+
+    params: Dict[str, object] = Field(
+        default_factory=dict,
+        description=(
+            "Parameters of a label registered with its own bounds -- a "
+            "firm's residual return, an earnings drift -- merged onto that "
+            "label's defaults. The built-in labels take none: their "
+            "parameters are the fields above (horizon, threshold, "
+            "vol_window, barrier)."
+        ),
+    )
+
+    @property
+    def resolved_params(self) -> Dict[str, object]:
+        """The label's defaults with this spec's overrides on top -- what a
+        registered builder reads."""
+        return {**get_target(self.type).default_params, **dict(self.params)}
 
 
 class MissingDataSpec(BaseModel):
