@@ -42,7 +42,6 @@ from ..features.params import resolve_params
 from ..features.registry import get_feature
 from ..specs import DatasetSpec
 from .alignment import build_returns_panel, stack_features_only, stack_long
-from .lags import expand_lags, expanded_feature_ids, lags_by_output_name
 from .coverage import (
     alignment_warnings,
     entity_coverage_warnings,
@@ -52,9 +51,15 @@ from .coverage import (
     provider_guarantee_warnings,
 )
 from .fetch import fetch_universe_ohlcv
+from .lags import expand_lags, expanded_feature_ids, lags_by_output_name
 from .leakage import check_point_in_time_safety
 from .missing import forward_fill_bounded
 from .panel_features import compute_panel_features
+from .pit_features import (
+    gate_point_in_time,
+    join_point_in_time_features,
+    point_in_time_requests,
+)
 from .target import (
     CROSS_SECTIONAL_TARGETS,
     apply_cross_sectional_target,
@@ -313,6 +318,18 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # Both are part of DatasetSpec, so both are hashed into spec_hash,
     # bundled into the model, and reused verbatim by scoring.
     provider = DataFactory.get_provider(spec.provider)
+    # Point-in-time features are gated BEFORE the first bar is fetched:
+    # whether the provider stamps its records with availability times is a
+    # fact it states in one method call, and a spec that could never have
+    # been built is refused for that price rather than after a universe
+    # has been downloaded.
+    pit_requests = point_in_time_requests(spec.features, feature_defs, resolved_params)
+    pit_contracts = gate_point_in_time(
+        provider,
+        pit_requests,
+        contract_getter=_provider_contract,
+        purpose="build_model_dataset",
+    )
     ohlcv_by_entity = fetch_universe_ohlcv(
         provider, list(spec.universe), spec.start, spec.end, spec.interval
     )
@@ -465,6 +482,11 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                         ohlcv,
                         symbol,
                     )
+                elif definition.scope == FeatureScope.POINT_IN_TIME:
+                    # Joined onto the stacked panel below, by availability
+                    # time. There is nothing per entity to compute from
+                    # bars, because the feature does not read bars.
+                    continue
                 else:
                     columns[fs.output_name] = universe_outputs[fs.output_name][symbol]
             # Lags are added HERE -- on one entity's own frame, on its
@@ -553,6 +575,44 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
             per_entity_features, keep_missing_features=keep_missing
         )
 
+    if pit_requests:
+        # Records fetched once per frame kind, transformed per feature and
+        # joined by availability time -- the version current at each date,
+        # never the final one -- with each feature's staleness bound. The
+        # rows the join could not supply are missing in the ordinary sense
+        # and the missing-data policy decides them; the attribution says
+        # which feature cost which rows, as it does for a lookback.
+        long_panel, pit_attribution, pit_warnings, pit_frames = (
+            join_point_in_time_features(
+                long_panel,
+                provider,
+                spec,
+                pit_requests,
+                pit_contracts,
+                context,
+                keep_missing=keep_missing,
+            )
+        )
+        warnings.extend(pit_warnings)
+        rows_before = int(drop_attribution.get("rows_after_alignment", len(long_panel)))
+        drop_attribution["per_feature"].update(pit_attribution)
+        drop_attribution["rows_after_alignment"] = int(len(long_panel))
+        drop_attribution["rows_dropped"] = int(
+            drop_attribution.get("rows_dropped", 0) + rows_before - len(long_panel)
+        )
+        # The record set and the contract it arrived under travel with the
+        # dataset, beside the bars, so the verdict says what the
+        # fundamentals could and could not support.
+        for frame_kind, entry in pit_frames.items():
+            bundle.add(
+                frame_kind,
+                entry["records"],
+                entry["contract"],
+                source=spec.provider,
+                entity_scoped=True,
+            )
+        bundle_verdict = validate_bundle(bundle, require_pit=False)
+
     if long_panel.empty:
         # The attribution turns a dead end into a diagnosis: "no rows
         # survive" previously left the caller to guess which of their
@@ -581,7 +641,9 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     warnings.extend(
         alignment_warnings(drop_attribution, entities_fetched, entities_surviving)
     )
-    warnings.extend(missing_policy_warnings(spec.missing, drop_attribution, fill_counts))
+    warnings.extend(
+        missing_policy_warnings(spec.missing, drop_attribution, fill_counts)
+    )
 
     # dropna() (inside stack_long/stack_features_only) removes NaN but
     # not +/-inf -- a degenerate feature computation (e.g. division by a

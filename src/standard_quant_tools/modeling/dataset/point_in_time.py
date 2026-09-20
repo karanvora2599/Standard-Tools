@@ -210,6 +210,28 @@ def asof_join(
     return out
 
 
+def observed_revisions(records: pd.DataFrame, *, by_entity: bool = True) -> dict:
+    """
+    Evidence about restatements IN THIS record set.
+
+    How many (entity, event_time) facts carry more than one version -- more
+    than one `available_time`. Evidence and not a contract: a set in which
+    nothing was restated says nothing about whether the source would have
+    kept the earlier value if something had been, which is why a provider
+    declares `revisions` itself and this only reports what was pulled. It
+    is the measurement the Polygon contract is waiting on.
+    """
+    keys = [EVENT_TIME] + ([ENTITY] if by_entity and ENTITY in records.columns else [])
+    if records.empty:
+        return {"n_facts": 0, "n_restated": 0, "max_versions": 0}
+    versions = records.groupby(keys)[AVAILABLE_TIME].nunique()
+    return {
+        "n_facts": int(len(versions)),
+        "n_restated": int((versions > 1).sum()),
+        "max_versions": int(versions.max()),
+    }
+
+
 def coverage_report(joined: pd.DataFrame, fields: Iterable[str]) -> List[str]:
     """
     Warnings about what the join could not supply.

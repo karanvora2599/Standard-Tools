@@ -70,13 +70,20 @@ def _features() -> str:
 
     rows = []
     for definition in list_features():
+        # What the feature READS: bar columns for an entity or universe
+        # feature, and the record set plus its fields for a point-in-time
+        # one, which never touches a bar.
+        if definition.scope.value == "point_in_time":
+            reads = f"{definition.frame_kind}: " + ", ".join(definition.fields)
+        else:
+            reads = ", ".join(definition.requires) or "Close"
         rows.append(
             [
                 f"`{definition.id}`",
                 definition.scope.value,
                 definition.temporal_support.value,
                 definition.lookback,
-                ", ".join(definition.requires) or "Close",
+                reads,
                 _params(definition.default_params),
                 definition.description,
             ]

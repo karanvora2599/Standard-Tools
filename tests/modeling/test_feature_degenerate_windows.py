@@ -370,13 +370,21 @@ def test_no_feature_produces_inf_on_ordinary_data(patched_multi_factory):
     """A catalog-wide guard rather than one test per feature: inf does not
     corrupt a row, it fails the finite-value check and rejects the whole
     panel, so any feature acquiring one breaks every dataset containing it."""
+    from standard_quant_tools.modeling.features.base import FeatureScope
     from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY
 
+    # Every feature that reads BARS. A point-in-time feature reads filings
+    # the mocked provider does not serve, and the builder refuses it by
+    # name before fetching; tests/modeling/test_pit_features.py covers it.
     spec = DatasetSpec(
         universe=["AAA", "BBB", "CCC"],
         start="2022-01-01",
         end="2023-12-31",
-        features=[FeatureSpec(id=fid) for fid in sorted(FEATURE_REGISTRY)],
+        features=[
+            FeatureSpec(id=fid)
+            for fid, definition in sorted(FEATURE_REGISTRY.items())
+            if definition.scope != FeatureScope.POINT_IN_TIME
+        ],
         target=TargetSpec(horizon=5),
     )
     try:

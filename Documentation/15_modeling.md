@@ -804,19 +804,23 @@ the horizon curve; a joint fit does not.
 
 ## Point-in-time safety
 
-Every built-in feature is `TemporalSupport.PIT_SAFE` — price/volume-derived
-only, so the formula is causal. `TemporalSupport.CURRENT_ONLY` exists
-for features like today's fundamentals, where no point-in-time-safe
-historical provider is wired up yet: using one in a multi-year training
+Every built-in feature is `TemporalSupport.PIT_SAFE`: the price/volume
+features because their formula is causal over bars, the `fundamental.*`
+features because they read a record set stamped with when each filing
+became knowable and are joined by that stamp (see [Point-in-time
+joins](#point-in-time-joins)). `TemporalSupport.CURRENT_ONLY` exists for
+a feature that has neither — a value only known as it stands today, with
+no source that dates its history: using one in a multi-year training
 dataset would silently leak future-only information into the past.
 
 `dataset.leakage.check_point_in_time_safety` runs on every
 `build_model_dataset` call and raises `PointInTimeViolation` (a
 `ValidationError` subclass) if any requested feature is `CURRENT_ONLY`.
-Nothing here registers a `CURRENT_ONLY` feature — the mechanism
-is built now, not deferred, because retrofitting it after models already
-exist that were (silently) trained on leaked data is much more expensive
-than building the guardrail before the first fundamentals feature ships.
+Nothing here registers one — the mechanism was built before the first
+fundamentals feature shipped, because retrofitting it after models exist
+that were (silently) trained on leaked data is much more expensive, and
+when fundamentals did ship they came through a dated source rather than
+through this label.
 
 ### PIT safety is a property of the resolved feature, not just its label
 
@@ -2149,17 +2153,87 @@ Three details that are load-bearing:
 release reaching every entity, from its release time rather than from the
 month it describes.
 
-### What is deliberately not built
+### A point-in-time fundamentals source
 
-The join primitive and its rules, **not a fundamentals feed**. No shipped
-provider exposes point-in-time fundamentals: `get_financial_ratios(symbol)`
-takes no `as_of` at all, and yfinance, Polygon and Bloomberg all report
-`point_in_time=False`. A data bundle carrying fundamentals today would be an
-empty box with a correct label on it.
+The join primitive shipped before any source could feed it. The source is
+`DataProvider.get_point_in_time_records(symbols, frame_kind, fields, start,
+end)`: a frame in the schema above, one row per *version* of a fact. The
+base class refuses by name, as `get_trades` does, and
+`get_temporal_contract(frame_kind)` says the same thing first, without a
+fetch. `PolygonProvider` implements it for `frame_kind="fundamentals"` from
+the financials endpoint it already reads its latest filing from — walked in
+full, paginated, one row per filing with `event_time` = the period's
+`end_date` and `available_time` = its `filing_date`, `fields` as
+`<statement>.<key>` paths such as `income_statement.revenues`, plus
+`fiscal_year` and `fiscal_period` for the transforms that compare filings.
+A filing without a filing date is left out and counted on the frame's
+`attrs`, never dated to its period end.
 
-What is buildable and testable now is the leakage-critical part, so that
-when a PIT source arrives it is already written and covered rather than
-being invented under deadline.
+**The contract says `revisions="unknown"`, on purpose.** Polygon documents
+amended filings as separate results, which would make the frame
+`versioned` — but a contract is a claim about the source, not a reading of
+its documentation, and the claim has not been measured on a pulled history.
+`unknown` is treated as `snapshot` everywhere: the join is leak-free either
+way, `reproduces_history` reports false, and
+`point_in_time.observed_revisions(records)` is the measurement that
+upgrades it. The dataset builder runs that measurement on every pull and
+reports what it saw:
+
+```text
+NOTE: 3 of 34 fundamentals fact(s) in the pulled records carry more than one
+version, so restatements arrived as rows and the join reads the version
+current at each date. The provider declares revisions='unknown'; this is
+the observation that encoding is waiting on.
+```
+
+**`FeatureScope.POINT_IN_TIME`.** A feature of this scope never sees OHLCV.
+Its definition names the `frame_kind` it reads and the `fields` it needs,
+its `default_params` carry `max_staleness_days`, and its `fn(records,
+context, **params)` returns a value series in the record schema with a
+`value` column. Three ship:
+
+| Feature | Reads | Transform |
+|---|---|---|
+| `fundamental.diluted_eps` | diluted EPS | as filed, every version |
+| `fundamental.net_margin` | net income, revenues | a ratio within one filing; NaN without positive revenue |
+| `fundamental.revenue_growth_yoy` | revenues, fiscal keys | against the same fiscal period a year earlier |
+
+The third is the one that is easy to get wrong. Its value at *t* depends
+on the version of this quarter's filing known at *t* **and** the version of
+last year's known at *t*, and either can be restated. So the derived series
+has a version at every time at which either input changed: a prior year
+restated in September is read from September, not from whenever the
+current quarter next files. The planted test is exactly that case.
+
+**What the builder does with one.**
+
+1. **Gate first.** Before a single bar is fetched, the provider's contract
+   for each requested frame kind is checked with `data.temporal.require_pit`;
+   a provider that does not stamp availability — every shipped provider
+   but Polygon — is refused by name, naming the features, for the price of
+   one method call. A provider with no contract at all is refused too.
+2. **Fetch once per frame kind**, for the union of fields, from
+   `max_staleness_days + 400` days before the panel starts so the first
+   rows have a prior filing to read.
+3. **Transform and join** each feature onto the *stacked* panel with
+   `asof_join`, bounded by its `max_staleness_days` (120 by default: a
+   quarterly figure older than that has been superseded, and a feed that
+   stopped would otherwise supply its last value forever).
+4. **Missing rows follow `missing.policy`**: dropped by default, kept as
+   NaN under `keep`, attributed per feature in `drop_attribution` like a
+   lookback would be, with `coverage_report`'s warnings in `warnings`.
+5. **The record set travels with the dataset** in the `DataBundle` beside
+   the bars, under the contract it arrived under, so `temporal_bundle`
+   lists `fundamentals` and says what it can and cannot support.
+
+A `lags` request on a point-in-time feature is refused: its rows are
+filings, not sessions, and a lag of *k* bars would mean a different number
+of filings for every entity. Request the prior period as its own feature.
+
+A custom point-in-time feature registers like any other, with
+`scope=FeatureScope.POINT_IN_TIME`, `frame_kind`, `fields` and
+`default_params={"max_staleness_days": ...}`; the definition refuses one
+that omits any of them, and `requires`/`lookback` do not apply.
 
 
 

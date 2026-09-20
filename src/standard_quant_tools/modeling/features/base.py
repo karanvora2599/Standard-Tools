@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TemporalSupport(str, Enum):
@@ -48,6 +48,14 @@ class TemporalSupport(str, Enum):
 class FeatureScope(str, Enum):
     ENTITY = "entity"
     UNIVERSE = "universe"
+    # Computed from a point-in-time RECORD SET rather than from bars: the
+    # provider's `get_point_in_time_records` supplies one row per version
+    # of a fact stamped with when it became knowable, the feature's `fn`
+    # transforms those records into a value series in the same schema, and
+    # the builder joins it onto the stacked panel by availability time. A
+    # feature of this scope never touches OHLCV and cannot be lagged in
+    # bars, because its rows are filings, not sessions.
+    POINT_IN_TIME = "point_in_time"
 
 
 # Column names the long panel builds itself. A feature's output column --
@@ -110,3 +118,36 @@ class FeatureDefinition(BaseModel):
     lookback: int = Field(
         ..., ge=0, description="Bars of history consumed before the first valid output."
     )
+    #: POINT_IN_TIME scope only: which record set the provider is asked
+    #: for (a `data.temporal.FRAME_KINDS` entry) and which of its fields
+    #: the transform reads. `default_params` must carry
+    #: `max_staleness_days`, the oldest record a panel row may still read.
+    frame_kind: Optional[str] = None
+    fields: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _point_in_time_fields_agree_with_scope(self) -> "FeatureDefinition":
+        if self.scope == FeatureScope.POINT_IN_TIME:
+            if not self.frame_kind or not self.fields:
+                raise ValueError(
+                    f"feature {self.id!r}: a POINT_IN_TIME feature names the "
+                    "record set it reads (frame_kind) and the fields it needs."
+                )
+            if "max_staleness_days" not in self.default_params:
+                raise ValueError(
+                    f"feature {self.id!r}: a POINT_IN_TIME feature declares "
+                    "default_params['max_staleness_days'], the oldest record a "
+                    "panel row may still read -- without a bound a feed that "
+                    "stops updating supplies its last value forever."
+                )
+            if self.requires or self.lookback:
+                raise ValueError(
+                    f"feature {self.id!r}: a POINT_IN_TIME feature reads "
+                    "records, not bars; `requires` and `lookback` do not apply."
+                )
+        elif self.frame_kind or self.fields:
+            raise ValueError(
+                f"feature {self.id!r}: frame_kind and fields are read for "
+                "scope=POINT_IN_TIME only."
+            )
+        return self

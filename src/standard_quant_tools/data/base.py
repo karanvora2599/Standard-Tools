@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, FrozenSet, Optional, Union
+from typing import Dict, FrozenSet, Optional, Sequence, Union
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -239,6 +239,44 @@ class DataProvider(ABC):
                 "about the frame kind -- the point-in-time join is built and "
                 "tested, and works as soon as a source supplies the column.",
             ],
+        )
+
+    def get_point_in_time_records(
+        self,
+        symbols: Sequence[str],
+        frame_kind: str,
+        fields: Sequence[str],
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """
+        Records of `frame_kind` for `symbols`, each stamped with when it
+        became knowable.
+
+        Returns a frame in the `modeling.dataset.point_in_time` schema: one
+        row per VERSION of a fact, with `entity`, `event_time` (what period
+        the record describes), `available_time` (when anyone could act on
+        it) and one column per requested field. A restatement is a second
+        row with a later `available_time`, never an overwrite -- that is
+        what lets a past decision be reproduced from the frame.
+
+        `start_date`/`end_date` bound the records' EVENT times; a caller
+        joining onto a panel widens `start_date` by the staleness it will
+        accept, so the panel's first rows have a record to read.
+
+        Raises:
+            NotImplementedError: this provider does not serve point-in-time
+                records. Its `get_temporal_contract(frame_kind)` says the
+                same thing first, without a fetch, and the dataset builder
+                asks that before calling this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not serve point-in-time "
+            f"{frame_kind!r} records. PolygonProvider serves 'fundamentals' "
+            "from its financials endpoint, stamped with each filing's date; "
+            "a frame joined on the period it describes rather than on when "
+            "it was filed would put weeks of hindsight in every row, which "
+            "is why nothing here substitutes get_financial_ratios."
         )
 
     @abstractmethod

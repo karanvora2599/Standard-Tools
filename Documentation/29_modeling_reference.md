@@ -12,12 +12,15 @@ installed. They are listed from a static declaration so this document is
 the same on every machine; `list_modeling_capabilities` reports which of
 them the running install actually has.
 
-## Features (23)
+## Features (26)
 
 | id | scope | temporal | lookback | requires | default params | description |
 |---|---|---|---|---|---|---|
 | `factors.pca_factor_return` | universe | pit_safe | 252 | Close | `refit_every=21`, `window=252` | That date's realized universe return projected onto the currently-held PC1 loadings — a shared macro factor (same value for every entity that date). |
 | `factors.pca_loading` | universe | pit_safe | 252 | Close | `refit_every=21`, `window=252` | Entity's loading on PC1 of the universe return panel, refit every `refit_every` bars and forward-filled between refits. |
+| `fundamental.diluted_eps` | point_in_time | pit_safe | 0 | fundamentals: income_statement.diluted_earnings_per_share | `max_staleness_days=120` | Diluted earnings per share as filed, joined by filing date; a restatement is a new version from the date it was filed. |
+| `fundamental.net_margin` | point_in_time | pit_safe | 0 | fundamentals: income_statement.net_income_loss, income_statement.revenues | `max_staleness_days=120` | Net income over revenues within one filing, joined by filing date; NaN where revenues are not positive. |
+| `fundamental.revenue_growth_yoy` | point_in_time | pit_safe | 0 | fundamentals: income_statement.revenues | `max_staleness_days=120` | Revenue growth against the same fiscal period a year earlier, with a version at every time either filing changed, so a restated prior year is read from the day it was restated. |
 | `market.momentum` | entity | pit_safe | 20 | Close | `lookback=20` | Trailing close-to-close return over `lookback` bars. |
 | `market.new_high_breakout` | entity | pit_safe | 20 | High, Close | `period=20` | 1.0 if Close breaks above the prior `period`-bar High (today's own bar excluded), else 0.0. NaN until `period` bars of history exist — the warm-up is unknown, not a confirmed non-breakout. |
 | `market.psar_trend` | entity | pit_safe | 1 | High, Low | `af_max=0.2`, `af_start=0.02`, `af_step=0.02` | Parabolic SAR trend direction: 1.0 (uptrend) or -1.0 (downtrend). |

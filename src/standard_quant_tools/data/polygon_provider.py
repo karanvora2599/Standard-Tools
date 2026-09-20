@@ -55,7 +55,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 from urllib.parse import quote as _urlquote
 from urllib.parse import urlencode
 
@@ -435,6 +435,99 @@ def _parse_financial_ratios(
     return ratios
 
 
+# ── Point-in-time financials ─────────────────────────────────────────────
+#
+# The same endpoint `get_financial_ratios` reads its latest filing from,
+# walked in full and kept as ONE ROW PER FILING, each stamped with its
+# `filing_date`. That stamp is what makes the frame joinable point in time:
+# a panel row on 15 July reads nothing from a filing dated 29 July, and a
+# restatement filed later is a later row rather than an overwrite. The
+# column names are `modeling.dataset.point_in_time`'s schema, written out
+# here so this module does not import the modeling package.
+
+_FINANCIALS_PATH = "/vX/reference/financials"
+_FINANCIALS_PAGE = 100  # the endpoint's documented per-page maximum
+_PIT_ENTITY = "entity"
+_PIT_EVENT_TIME = "event_time"
+_PIT_AVAILABLE_TIME = "available_time"
+_PIT_PERIOD_COLUMNS = ("fiscal_year", "fiscal_period", "timeframe")
+
+
+def _polygon_pages(
+    path: str, params: Dict[str, Any], api_key: str
+) -> Iterator[Dict[str, Any]]:
+    """Every page of a paginated endpoint, following `next_url`."""
+    from urllib.parse import parse_qsl, urlparse
+
+    payload = _polygon_get(path, params, api_key)
+    yield payload
+    while payload.get("next_url"):
+        parsed = urlparse(str(payload["next_url"]))
+        query = {k: v for k, v in parse_qsl(parsed.query) if k != "apiKey"}
+        payload = _polygon_get(parsed.path, query, api_key)
+        yield payload
+
+
+def _parse_financials_records(
+    results: List[Dict[str, Any]], entity: str, fields: List[str]
+) -> pd.DataFrame:
+    """
+    Filings as point-in-time records: `event_time` is the period's
+    `end_date`, `available_time` its `filing_date`, and each requested
+    `<statement>.<key>` field its numeric value.
+
+    A filing without a `filing_date` cannot be placed in time and is
+    dropped rather than dated to its period end, which would put weeks of
+    hindsight in every row that read it; the count is kept on the frame's
+    `attrs` so a caller can see what was left out.
+    """
+    for field in fields:
+        statement, _, key = str(field).partition(".")
+        if not statement or not key:
+            raise ValidationError(
+                f"point-in-time field {field!r} must be '<statement>.<key>', "
+                "e.g. 'income_statement.revenues' or 'balance_sheet.assets'."
+            )
+    rows: List[Dict[str, Any]] = []
+    dropped = 0
+    for filing in results:
+        filed = filing.get("filing_date")
+        period_end = filing.get("end_date")
+        if not filed or not period_end:
+            dropped += 1
+            continue
+        statements = filing.get("financials") or {}
+        row: Dict[str, Any] = {
+            _PIT_ENTITY: entity,
+            _PIT_EVENT_TIME: period_end,
+            _PIT_AVAILABLE_TIME: filed,
+            "fiscal_year": _maybe_int(filing.get("fiscal_year")),
+            "fiscal_period": filing.get("fiscal_period"),
+            "timeframe": filing.get("timeframe"),
+        }
+        for field in fields:
+            statement, _, key = str(field).partition(".")
+            row[field] = _financial_value(statements.get(statement) or {}, key)
+        rows.append(row)
+    columns = [
+        _PIT_ENTITY,
+        _PIT_EVENT_TIME,
+        _PIT_AVAILABLE_TIME,
+        *_PIT_PERIOD_COLUMNS,
+        *fields,
+    ]
+    frame = pd.DataFrame(rows, columns=columns)
+    frame.attrs["n_dropped_without_available_time"] = dropped
+    return frame
+
+
+def _maybe_int(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class PolygonProvider(DataProvider):
     """
     DataProvider backed by the Polygon.io REST API.
@@ -633,6 +726,103 @@ class PolygonProvider(DataProvider):
             financials_results[0].get("financials", {}) if financials_results else {}
         )
         return _parse_financial_ratios(details, financials)
+
+    def get_point_in_time_records(
+        self,
+        symbols: Sequence[str],
+        frame_kind: str,
+        fields: Sequence[str],
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """
+        Quarterly filings for `symbols` whose period ends fall in
+        [start_date, end_date], one row per filing, stamped with the
+        filing date. See `DataProvider.get_point_in_time_records`.
+
+        Only `frame_kind='fundamentals'` is served: Polygon's financials
+        endpoint is the one source here that dates each record's
+        publication. `fields` are `<statement>.<key>` paths into a filing's
+        `financials` object.
+        """
+        if frame_kind != "fundamentals":
+            raise NotImplementedError(
+                "PolygonProvider serves point-in-time records for "
+                f"'fundamentals' only, not {frame_kind!r}: its financials "
+                "endpoint dates each filing, and no other Polygon endpoint "
+                "this provider reads stamps availability."
+            )
+        if not fields:
+            raise ValidationError(
+                "get_point_in_time_records needs at least one field, e.g. "
+                "'income_statement.revenues'."
+            )
+        start = _norm_date(start_date)
+        end = _norm_date(end_date)
+        frames: List[pd.DataFrame] = []
+        for symbol in symbols:
+            entity = str(symbol).strip()
+            if not entity:
+                raise InvalidSymbolError("Symbol cannot be empty.")
+            params = {
+                "ticker": entity.upper(),
+                "timeframe": "quarterly",
+                "period_of_report_date.gte": start,
+                "period_of_report_date.lte": end,
+                "limit": _FINANCIALS_PAGE,
+                "sort": "period_of_report_date",
+                "order": "asc",
+            }
+            results: List[Dict[str, Any]] = []
+            for page in _polygon_pages(_FINANCIALS_PATH, params, self._api_key):
+                results.extend(page.get("results") or [])
+            frames.append(_parse_financials_records(results, entity, list(fields)))
+        dropped = sum(
+            f.attrs.get("n_dropped_without_available_time", 0) for f in frames
+        )
+        out = pd.concat(frames, ignore_index=True)
+        out[_PIT_EVENT_TIME] = pd.to_datetime(out[_PIT_EVENT_TIME])
+        out[_PIT_AVAILABLE_TIME] = pd.to_datetime(out[_PIT_AVAILABLE_TIME])
+        out = out.sort_values([_PIT_AVAILABLE_TIME, _PIT_ENTITY], kind="stable")
+        out = out.reset_index(drop=True)
+        out.attrs["n_dropped_without_available_time"] = int(dropped)
+        return out
+
+    def get_temporal_contract(self, frame_kind: str = "bars"):
+        """
+        Bars as every provider declares them; fundamentals with both
+        timestamps and `revisions='unknown'`.
+
+        `unknown` is deliberate. Polygon's documentation lists amended
+        filings as separate results, which would make the frame
+        `versioned` -- but this library has not measured a restatement
+        arriving as a second row, and a contract is a claim about the
+        source, not a reading of its documentation. `unknown` is treated as
+        `snapshot` everywhere, the join stays leak-free either way, and
+        `observed_revisions` on a pulled history is what upgrades it.
+        """
+        if frame_kind != "fundamentals":
+            return super().get_temporal_contract(frame_kind)
+        from standard_quant_tools.data.temporal import TemporalContract
+
+        return TemporalContract(
+            source=type(self).__name__,
+            frame_kind="fundamentals",
+            has_event_time=True,
+            has_available_time=True,
+            entity_scoped=True,
+            revisions="unknown",
+            notes=[
+                "Each record is stamped with its filing's `filing_date` "
+                "(available_time) and the period's `end_date` (event_time). "
+                "Polygon documents amended filings as separate results, "
+                "which would make restatements `versioned`; that has not been "
+                "measured on a pulled history, so `revisions` stays 'unknown' "
+                "and is treated as 'snapshot' until "
+                "modeling.dataset.point_in_time.observed_revisions shows a "
+                "second version of a fact.",
+            ],
+        )
 
     def _fetch_ticker_details(self, symbol: str) -> Dict[str, Any]:
         ticker = _urlquote(symbol.strip().upper(), safe=":")

@@ -5,6 +5,7 @@ factors.py/network.py modules rely on."""
 
 from . import (  # noqa: F401  (registration side effect)
     factors,
+    fundamental,
     market,
     network,
     risk,

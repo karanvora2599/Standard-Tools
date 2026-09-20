@@ -403,6 +403,11 @@ class TestFeatureRegistry:
             # factors.pca_loading already is.
             "network.avg_correlation",
             "network.mst_degree",
+            # Point-in-time: read from filing records joined by the date
+            # they were filed, never from bars.
+            "fundamental.diluted_eps",
+            "fundamental.net_margin",
+            "fundamental.revenue_growth_yoy",
         }
         assert expected_ids <= set(FEATURE_REGISTRY.keys())
         assert expected_ids == set(FEATURE_REGISTRY.keys())

@@ -1,5 +1,52 @@
 # Changelog
 
+## The join that could not leak had nothing to join
+
+Phase 5 of `Development/modeling_runtime_plan.md`, first commit.
+
+`asof_join` and the temporal contract shipped with no source that could
+feed them: every provider reported `point_in_time=False`,
+`get_financial_ratios` took no `as_of`, and `TemporalSupport.CURRENT_ONLY`
+was a label nothing used. The guide said so. This is the source, and the
+first features that read it.
+
+**`DataProvider.get_point_in_time_records(symbols, frame_kind, fields,
+start, end)`** returns one row per VERSION of a fact in the point-in-time
+schema; the base refuses by name as `get_trades` does, and
+`get_temporal_contract(frame_kind)` says so first without a fetch.
+`PolygonProvider` serves `fundamentals` from the financials endpoint it
+already read its latest filing from, paginated, `event_time` the period's
+end and `available_time` the filing date, fields as `<statement>.<key>`
+paths, `fiscal_year`/`fiscal_period` beside them. A filing without a
+filing date is left out and counted, never dated to its period end.
+
+**The contract declares `revisions="unknown"`, on purpose.** Polygon
+documents amended filings as separate results, which would make the frame
+`versioned`, but a contract is a claim about the source and the claim has
+not been measured on a pulled history. `unknown` is treated as `snapshot`;
+`point_in_time.observed_revisions(records)` is the measurement, and the
+dataset builder runs it on every pull and reports how many facts arrived
+in more than one version. The Polygon test plants an amended filing across
+two pages and asserts both rows survive.
+
+**`FeatureScope.POINT_IN_TIME`** and three `fundamental.*` features:
+diluted EPS as filed, net margin within a filing, and revenue growth
+year-over-year -- the last with a version at every time EITHER filing
+changed, so a prior year restated in September is read from September
+rather than from whenever the current quarter next files. The builder
+gates on the provider's contract before fetching a single bar, fetches
+once per frame kind for the union of fields from 400 days plus the deepest
+staleness before the panel starts, joins each feature onto the stacked
+panel with its `max_staleness_days`, hands the rows nobody had a filing for
+to the missing-data policy with per-feature attribution and coverage
+warnings, and carries the record set and its contract in the dataset's
+bundle. A lag on a point-in-time feature is refused: its rows are filings,
+not sessions.
+
+Planted: a 14 July row reads the previous quarter, 1 August reads the
+filing, 21 August reads its amendment; a provider without availability
+times is refused before any fetch, with a spy on the fetch to prove it.
+
 ## A grid over a regularization strength is either coarse or enormous
 
 Phase 4 of `Development/modeling_runtime_plan.md`, third and last commit.

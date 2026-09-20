@@ -557,6 +557,51 @@ wearing a measurement's clothes.
 
 ---
 
+## Point-in-time records (`get_point_in_time_records`)
+
+`get_financial_ratios` returns the latest filing with no `as_of`: a fact
+about the present. A model trained on history needs the fact **as it was
+known on each date**, and the difference is the leak that makes a backtest
+look prescient — a quarterly figure describes 30 June, is filed on 29 July
+and may be restated in August, and a join on the quarter end reads it a
+month early.
+
+```python
+records = provider.get_point_in_time_records(
+    ["AAPL", "MSFT"],
+    "fundamentals",
+    ["income_statement.revenues", "income_statement.diluted_earnings_per_share"],
+    "2021-01-01",
+    "2024-12-31",
+)
+```
+
+The frame is `modeling.dataset.point_in_time`'s schema: one row per
+**version** of a fact with `entity`, `event_time` (the period's end),
+`available_time` (the filing date) and one column per field, plus
+`fiscal_year`, `fiscal_period` and `timeframe`. A restatement is a second
+row with a later `available_time`, never an overwrite. A filing with no
+filing date is left out and counted in `records.attrs`, rather than dated
+to its period end.
+
+- **`PolygonProvider`** serves `frame_kind="fundamentals"` only, from the
+  same `/vX/reference/financials` endpoint, quarterly, walked through every
+  page; fields are `<statement>.<key>` paths into a filing's `financials`.
+  Its `get_temporal_contract("fundamentals")` declares both timestamps and
+  `revisions="unknown"`: Polygon documents amended filings as separate
+  results, which would make it `versioned`, but that has not been measured
+  on a pulled history and a contract is a claim about the source.
+  `modeling.dataset.point_in_time.observed_revisions(records)` is the
+  measurement; the dataset builder reports what it observed on every pull.
+- **Every other provider refuses by name**, and its contract for
+  `fundamentals` says `has_available_time=False` first, so the modeling
+  builder never calls this on a provider that cannot serve it.
+
+The consumer is `FeatureScope.POINT_IN_TIME` in the modeling runtime — see
+[15_modeling.md](15_modeling.md#a-point-in-time-fundamentals-source).
+
+---
+
 ## Dataset Provenance and Data Quality
 
 Every `DataProvider` also implements `get_metadata(symbol, interval)`,
