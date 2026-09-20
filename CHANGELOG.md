@@ -1,5 +1,51 @@
 # Changelog
 
+## Which number is larger was the only question compare_models could answer
+
+Phase 3 of `Development/modeling_runtime_plan.md`, first commit.
+
+`compare_models` ranked registered models by a headline OOS metric. That
+says which number is larger and nothing about whether the gap is larger
+than the noise in one out-of-sample sample -- and on a few hundred dates
+of daily IC a gap of 0.006 is routinely inside that noise. Sorting on it
+selects the model that drew the kinder sample, which is the quiet way to
+turn an OOS sample into a tuning set.
+
+**`method='paired'`** tests every candidate against a reference on the rows
+both predicted. Both models' OOS predictions are joined on (date, entity)
+and the same realized outcome, so each date contributes one IC for each
+measured on identical rows, and the object of interest is the per-date
+DIFFERENCE series: its mean is the improvement and its dispersion, far
+smaller than either model's own because the two share every good and bad
+day, is what the interval is built on. The interval is a moving-block
+bootstrap of n^(1/3)-date blocks, reusing `analysis.inference`'s block
+indexer, because an IID resample destroys the serial correlation an
+overlapping label produces and narrows the interval by a factor the
+repository has already measured. Where the task has a loss with units --
+squared error for a regressor, Brier for a classifier -- a Diebold-Mariano
+test on the per-date loss differential is reported beside it, with a
+Newey-West variance at the label horizon and the Harvey-Leybourne-Newbold
+correction; a ranker has no such loss and the IC difference carries the
+comparison alone. Across several candidates the p-values are
+Holm-adjusted, and the note says what Holm does not do: control for the
+candidates having been chosen on this same sample, which is what SPA-style
+tests exist for.
+
+**The realized outcome must agree on every shared row.** A candidate on a
+different label, or a different task, is refused by name: two labels are
+two questions. The label a multi-horizon model was fit on is resolved by
+the same helper `analyze_model_errors` uses, extracted so the two tools
+cannot disagree about it.
+
+The oracles are planted. Two IC series differing by a known constant plus
+AR(1) noise recover the constant inside the interval; the null is checked
+as a RATE -- twenty and forty independent nulls rejecting about one time
+in twenty -- rather than as one draw that happens to pass; the block
+interval is wider than the IID one on autocorrelated differences and about
+the same on white noise; Holm on a hand-worked triple gives the hand-worked
+answer; and end to end, a model compared against its own twin reports a
+difference of exactly zero, a hit rate of zero and 'indistinguishable'.
+
 ## A label is registered now, and a firm's own label needs no edit to the library
 
 Phase 2 of `Development/modeling_runtime_plan.md`, in one commit.

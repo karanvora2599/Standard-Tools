@@ -36,7 +36,7 @@ advertises 155 of the 209 below.
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `modeling` | 20 | 64 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 20 | 67 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
@@ -791,10 +791,10 @@ Ask whether a set of features is temporally safe to fit on — before building a
 
 #### `compare_models`
 
-Rank registered models side by side on their out-of-sample metrics. Models are ranked within their own task, never across tasks, because those metrics are not on a common scale.
+Rank registered models side by side on their out-of-sample metrics, or -- with method='paired' -- test whether one is actually better than a reference. The headline ranking says which number is larger and nothing about whether the gap exceeds the noise in one OOS sample, which on a few hundred dates it routinely does not; the paired method measures the per-date IC difference on the rows both models predicted, puts a block-bootstrap interval on it, runs a Diebold-Mariano loss test where the task has a loss, and Holm-adjusts across candidates. Models are ranked within their own task, never across tasks, because those metrics are not on a common scale.
 
 **Required:** `model_ids`  
-**Optional:** `metric`
+**Optional:** `metric`, `method`, `reference_model_id`, `comparison_metric`, `n_bootstrap`, `block_size`
 
 #### `evaluate_model_portfolio`
 

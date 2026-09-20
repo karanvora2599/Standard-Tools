@@ -829,6 +829,47 @@ class CompareModelsInput(BaseModel):
             "against each other — the metrics are not comparable."
         ),
     )
+    method: Literal["headline", "paired"] = Field(
+        "headline",
+        description=(
+            "'headline' (default): rank by each model's recorded OOS metric, "
+            "which says which number is larger and nothing about whether the "
+            "gap is larger than the noise in one OOS sample. 'paired': test "
+            "every other model against `reference_model_id` on the rows both "
+            "predicted -- a block-bootstrap interval on the per-date IC "
+            "difference, a Diebold-Mariano test on the loss where the task has "
+            "one, and Holm-adjusted p-values across the candidates. Paired "
+            "comparison needs models trained on the SAME label; the realized "
+            "outcomes must agree on every shared row."
+        ),
+    )
+    reference_model_id: Optional[str] = Field(
+        None,
+        description=(
+            "method='paired' only: the model every other one is compared "
+            "against. Must be one of `model_ids`. Omitted, the first is used."
+        ),
+    )
+    comparison_metric: Literal["cs_rank_ic", "cs_ic"] = Field(
+        "cs_rank_ic",
+        description="method='paired' only: the per-date correlation the "
+        "difference is measured on.",
+    )
+    n_bootstrap: int = Field(
+        2000,
+        ge=100,
+        le=20_000,
+        description="method='paired' only: block-bootstrap resamples of the "
+        "per-date difference.",
+    )
+    block_size: Optional[int] = Field(
+        None,
+        ge=1,
+        description="method='paired' only: dates per bootstrap block. None "
+        "uses n_dates^(1/3), the same rule get_bootstrap_interval uses; 1 is "
+        "an IID resample, which understates the interval on an overlapping "
+        "label.",
+    )
 
     @field_validator("model_ids")
     @classmethod
@@ -840,6 +881,48 @@ class CompareModelsInput(BaseModel):
                 "compared against itself contributes nothing to a ranking."
             )
         return ids
+
+    @model_validator(mode="after")
+    def _reference_is_a_candidate(self) -> "CompareModelsInput":
+        if self.reference_model_id is not None and self.reference_model_id not in self.model_ids:
+            raise ValueError(
+                f"reference_model_id={self.reference_model_id!r} is not in "
+                "model_ids; the reference is compared against the others and "
+                "must be one of them."
+            )
+        return self
+
+
+class PairedComparison(BaseModel):
+    """One candidate against the reference, on the rows both predicted."""
+
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    reference_model_id: str
+    metric: str
+    n_dates: int
+    n_rows: int
+    mean_reference: float = Field(..., description="Mean per-date IC of the reference.")
+    mean_candidate: float = Field(..., description="Mean per-date IC of the candidate.")
+    mean_difference: float = Field(..., description="candidate minus reference.")
+    ci_lower: float
+    ci_upper: float
+    confidence: float
+    p_value: float = Field(..., description="Two-sided bootstrap p-value, unadjusted.")
+    p_value_holm: float = Field(
+        ..., description="The same, Holm-adjusted across every candidate in this call."
+    )
+    hit_rate: float = Field(..., description="Share of dates the candidate's IC exceeded the reference's.")
+    block_size: int
+    verdict: Literal["candidate_better", "reference_better", "indistinguishable"]
+    diebold_mariano: Optional[Dict[str, Any]] = Field(
+        None,
+        description="The loss test where the task has a loss with units; "
+        "None for a ranker. A positive statistic means the candidate's loss "
+        "is smaller.",
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 class ModelComparison(BaseModel):
@@ -857,9 +940,16 @@ class ModelComparison(BaseModel):
 
 
 class CompareModelsResult(BaseModel):
+    method: Literal["headline", "paired"] = "headline"
     comparisons: List[ModelComparison]
     best_by_task: Dict[str, str] = Field(
         default_factory=dict, description="task -> winning model_id."
+    )
+    reference_model_id: Optional[str] = None
+    pairs: List[PairedComparison] = Field(
+        default_factory=list,
+        description="method='paired' only: one entry per candidate against "
+        "the reference.",
     )
     notes: List[str] = Field(default_factory=list)
 

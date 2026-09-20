@@ -2149,6 +2149,68 @@ resolves.
 
 ---
 
+## Comparing models: which number is larger, and whether it matters
+
+`compare_models` ranks registered models by a headline out-of-sample
+metric — the per-date cross-sectional rank IC for a regressor or ranker,
+AUC for a classifier — within their own task, never across tasks. That
+answers which number is larger. It says nothing about whether the gap is
+larger than the noise in one OOS sample, and on a few hundred dates of
+daily IC a gap of 0.006 routinely is not. Sorting on the headline selects
+the model that drew the kinder sample, which is the quiet way to turn an
+out-of-sample sample into a tuning set.
+
+```python
+compare_models(model_ids=[ref, a, b], method="paired", reference_model_id=ref)
+```
+
+**The comparison is paired, on the intersection.** Both models' OOS
+predictions are joined on (date, entity) and the same realized outcome, so
+each date contributes one IC for the reference and one for the candidate,
+measured on identical rows. The object of interest is the per-date
+*difference*: its mean is the improvement, and its dispersion — far smaller
+than either model's own, because the two share every good and bad day — is
+what the interval has to be built on. Two unpaired intervals would find
+nothing significant about two models that differ on every single day.
+
+**The interval is block-bootstrapped.** Daily ICs under an overlapping
+label are serially correlated, and an IID resample destroys exactly that;
+blocks of n^(1/3) consecutive dates are resampled, the rule
+`get_bootstrap_interval` uses, and its block indexer is reused. A two-sided
+bootstrap p-value comes back beside the interval, and across several
+candidates the p-values are **Holm-adjusted**. What Holm does not do is
+control for the candidates having been *chosen* on this same sample —
+that is what SPA-style tests exist for — and the result's note says so
+rather than letting the adjustment imply it.
+
+**Where the task has a loss with units, a Diebold-Mariano test** on the
+per-date loss differential is reported too: squared error for a regressor,
+Brier for a classifier, with a Newey-West variance at the label horizon
+and the Harvey-Leybourne-Newbold small-sample correction. A ranker's score
+has no scale, so it has no loss and the IC difference carries the
+comparison alone.
+
+```
+model_id         mean_reference  mean_candidate  difference   95% interval          verdict
+mdl_a  vs  ref   0.041           0.047           +0.006       [-0.004, +0.016]      indistinguishable
+```
+
+**The realized outcome must agree on every shared row.** A candidate fit
+on a different label, or a different task, is refused by name: two labels
+are two questions, and a comparison on rows whose "truth" differs would be
+arithmetic on both. The label a multi-horizon model was fit on is resolved
+by the same helper `analyze_model_errors` uses.
+
+The nulls are tested as *rates*: a single seed rejects at the 5% level one
+time in twenty by design, so the tests check that twenty and forty
+independent nulls reject about that often rather than that one particular
+draw happens not to. A model compared against its own twin — the same spec
+registered twice — reports a difference of exactly zero, a hit rate of
+zero and `indistinguishable`.
+
+---
+
+
 ## Backtesting a trained model
 
 `run_model_experiment` answers "how did this model do out-of-sample."

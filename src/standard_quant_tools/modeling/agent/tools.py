@@ -90,6 +90,7 @@ from .models import (
     ListModelsResult,
     ModelComparison,
     ModelSummary,
+    PairedComparison,
     PitRecordsInput,
     PitValidationResult,
     RegisterExternalPanelInput,
@@ -962,7 +963,24 @@ def compare_models(input_data: CompareModelsInput) -> CompareModelsResult:
             "across tasks here would be arithmetic on incomparable numbers."
         )
 
-    return CompareModelsResult(comparisons=comparisons, best_by_task=best, notes=notes)
+    # The headline ordering says which number is larger. The paired
+    # comparison says whether the gap is larger than the noise in one OOS
+    # sample, which is the question sorting on the headline quietly skips.
+    pairs: List[PairedComparison] = []
+    reference = None
+    if input_data.method == "paired":
+        reference = input_data.reference_model_id or input_data.model_ids[0]
+        pairs, paired_notes = _paired_against_reference(input_data, reference)
+        notes.extend(paired_notes)
+
+    return CompareModelsResult(
+        method=input_data.method,
+        comparisons=comparisons,
+        best_by_task=best,
+        reference_model_id=reference,
+        pairs=pairs,
+        notes=notes,
+    )
 
 
 def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
@@ -1416,6 +1434,152 @@ def _label_name_for_target_id(meta, target_id: str):
     return matches[0] if len(matches) == 1 else None
 
 
+def _panel_with_selected_target(manifest, purpose: str):
+    """
+    The model's training panel with `target` pointed at the label it was
+    actually fit on, plus the selection notes.
+
+    Shared by every tool that joins a model's OOS predictions back to
+    realized outcomes -- the error analysis and the paired comparison --
+    so the two cannot disagree about which label a multi-horizon model
+    means. Refuses, rather than guessing, when the dataset declares
+    several labels and none matches the manifest's target id.
+    """
+    panel, meta, _directory = _load_dataset_panel(manifest.dataset_id)
+    notes: List[str] = []
+    label = _label_name_for_target_id(meta, manifest.target_id)
+    if label is not None:
+        panel, _target_id, notes = _select_target(
+            panel, meta, label, manifest.dataset_id
+        )
+    elif (meta.get("targets") or []) and "target" not in panel.columns:
+        raise ValidationError(
+            f"model {manifest.model_id!r} was fit on target_id="
+            f"{manifest.target_id!r}, and dataset {manifest.dataset_id!r} "
+            f"declares no single label matching it. {purpose} cannot be "
+            "computed against a label that cannot be identified -- the wrong "
+            "one would produce numbers that look fine and describe a "
+            "different outcome."
+        )
+    if "target" not in panel.columns:
+        raise ValidationError(
+            f"dataset {manifest.dataset_id!r} has no 'target' column, so "
+            "there are no outcomes to compare this model's predictions "
+            "against."
+        )
+    return panel, meta, notes
+
+
+def _oos_with_actuals(model_id: str):
+    """A model's OOS predictions joined to the realized outcome of each
+    row, as (frame, manifest) -- the input a paired comparison takes."""
+    import pandas as pd
+
+    from ..ensemble import load_oos_predictions
+
+    manifest = load_manifest(model_id)
+    predictions = load_oos_predictions(model_id)
+    panel, _meta, _notes = _panel_with_selected_target(manifest, "A paired comparison")
+    actuals = panel[["date", "entity", "target"]].copy()
+    actuals["date"] = pd.to_datetime(actuals["date"])
+    actuals["entity"] = actuals["entity"].astype(str)
+    frame = predictions.merge(actuals, on=["date", "entity"], how="inner")
+    if frame.empty:
+        raise ValidationError(
+            f"none of model {model_id!r}'s out-of-sample rows match a row in "
+            f"dataset {manifest.dataset_id!r}, so there are no outcomes to "
+            "compare it on."
+        )
+    return frame, manifest
+
+
+def _paired_against_reference(input_data, reference: str):
+    """Every other candidate against the reference, Holm-adjusted."""
+    from ..validation.comparison import holm_adjust, paired_comparison
+
+    reference_frame, reference_manifest = _oos_with_actuals(reference)
+    results = []
+    for model_id in input_data.model_ids:
+        if model_id == reference:
+            continue
+        frame, manifest = _oos_with_actuals(model_id)
+        if manifest.task != reference_manifest.task:
+            raise ValidationError(
+                f"compare_models: {model_id!r} is a {manifest.task!r} model and "
+                f"the reference {reference!r} is {reference_manifest.task!r}. A "
+                "paired comparison measures the same per-date correlation on "
+                "the same rows; across tasks the scores are not the same "
+                "quantity."
+            )
+        if manifest.target_id != reference_manifest.target_id:
+            raise ValidationError(
+                f"compare_models: {model_id!r} was fit on "
+                f"{manifest.target_id!r} and the reference on "
+                f"{reference_manifest.target_id!r}. A paired comparison needs "
+                "the same realized outcome on every shared row; two labels "
+                "are two questions."
+            )
+        try:
+            horizon = int(str(manifest.target_id).rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            horizon = None
+        results.append(
+            (
+                model_id,
+                paired_comparison(
+                    reference_frame,
+                    frame,
+                    task=manifest.task,
+                    metric=input_data.comparison_metric,
+                    horizon=horizon,
+                    n_bootstrap=input_data.n_bootstrap,
+                    block_size=input_data.block_size,
+                    seed=0,
+                ),
+            )
+        )
+    adjusted = holm_adjust([r["p_value"] for _, r in results])
+    verdicts = {
+        "b_better": "candidate_better",
+        "a_better": "reference_better",
+        "indistinguishable": "indistinguishable",
+    }
+    pairs = [
+        PairedComparison(
+            model_id=model_id,
+            reference_model_id=reference,
+            metric=r["metric"],
+            n_dates=r["n_dates"],
+            n_rows=r["n_rows"],
+            mean_reference=r["mean_a"],
+            mean_candidate=r["mean_b"],
+            mean_difference=r["mean_difference"],
+            ci_lower=r["ci_lower"],
+            ci_upper=r["ci_upper"],
+            confidence=r["confidence"],
+            p_value=r["p_value"],
+            p_value_holm=p_holm,
+            hit_rate=r["hit_rate"],
+            block_size=r["block_size"],
+            verdict=verdicts[r["verdict"]],
+            diebold_mariano=r["diebold_mariano"],
+            warnings=r["warnings"],
+        )
+        for (model_id, r), p_holm in zip(results, adjusted)
+    ]
+    notes = [
+        f"Paired against {reference!r} on the rows both models predicted, "
+        f"with the same realized outcome; p-values are Holm-adjusted across "
+        f"{len(pairs)} candidate(s). Holm controls the family-wise error of "
+        "THESE tests. It does not control for the candidates having been "
+        "chosen on this same out-of-sample sample -- that is what SPA-style "
+        "tests exist for -- and selecting among them on "
+        "evaluate_model_portfolio's Sharpe would make the OOS folds tuning "
+        "data either way."
+    ]
+    return pairs, notes
+
+
 def _trim(rows, top_n: int):
     """Worst and best buckets by RMSE, with the middle counted not listed."""
     if len(rows) <= 2 * top_n:
@@ -1441,31 +1605,8 @@ def analyze_model_errors(
 
     manifest = load_manifest(input_data.model_id)
     predictions = load_oos_predictions(input_data.model_id)
-    panel, meta, _directory = _load_dataset_panel(manifest.dataset_id)
-
-    warnings: List[str] = []
-    label = _label_name_for_target_id(meta, manifest.target_id)
-    if label is not None:
-        panel, _target_id, notes = _select_target(
-            panel, meta, label, manifest.dataset_id
-        )
-        warnings.extend(notes)
-    elif (meta.get("targets") or []) and "target" not in panel.columns:
-        raise ValidationError(
-            f"model {input_data.model_id!r} was fit on target_id="
-            f"{manifest.target_id!r}, and dataset {manifest.dataset_id!r} "
-            "declares no single label matching it. Residuals cannot be "
-            "computed against a label that cannot be identified -- the wrong "
-            "one would produce numbers that look fine and describe a "
-            "different outcome."
-        )
-
-    if "target" not in panel.columns:
-        raise ValidationError(
-            f"dataset {manifest.dataset_id!r} has no 'target' column, so "
-            "there are no outcomes to compare this model's predictions "
-            "against."
-        )
+    panel, meta, notes = _panel_with_selected_target(manifest, "Residuals")
+    warnings: List[str] = list(notes)
 
     actuals = panel[["date", "entity", "target"]].copy()
     actuals["date"] = pd.to_datetime(actuals["date"])
@@ -1774,8 +1915,16 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     (
         "compare_models",
         "Rank registered models side by side on their out-of-sample "
-        "metrics. Models are ranked within their own task, never across "
-        "tasks, because those metrics are not on a common scale.",
+        "metrics, or -- with method='paired' -- test whether one is actually "
+        "better than a reference. The headline ranking says which number is "
+        "larger and nothing about whether the gap exceeds the noise in one "
+        "OOS sample, which on a few hundred dates it routinely does not; the "
+        "paired method measures the per-date IC difference on the rows both "
+        "models predicted, puts a block-bootstrap interval on it, runs a "
+        "Diebold-Mariano loss test where the task has a loss, and "
+        "Holm-adjusts across candidates. Models are ranked within their own "
+        "task, never across tasks, because those metrics are not on a common "
+        "scale.",
         CompareModelsInput,
     ),
     (
