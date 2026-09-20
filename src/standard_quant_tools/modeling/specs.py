@@ -21,7 +21,13 @@ from pydantic import (
 )
 
 from .features.base import RESERVED_PANEL_COLUMNS
-from .limits import DEFAULT_MAX_FITS, MAX_FITS_CEILING, MAX_LAG, MAX_LAGS_PER_FEATURE
+from .limits import (
+    DEFAULT_MAX_FITS,
+    MAX_FITS_CEILING,
+    MAX_LAG,
+    MAX_LAGS_PER_FEATURE,
+    MAX_PARALLELISM_CEILING,
+)
 
 
 def _parse_date(value: str, field_name: str) -> pd.Timestamp:
@@ -531,10 +537,24 @@ class DatasetSpec(BaseModel):
     @field_validator("universe")
     @classmethod
     def _no_duplicate_symbols(cls, v: List[str]) -> List[str]:
-        dupes = sorted({s for s in v if v.count(s) > 1})
+        """
+        Every entry is an asset key -- `SYMBOL[@VENUE][~CLASS]` -- kept in
+        its canonical spelling, so `AAPL` and `AAPL~equity` are one entity
+        and `BHP.AX@XASX` and `BHP@XNYS` are two. Duplicates are judged on
+        the canonical form.
+        """
+        from standard_quant_tools.error import ValidationError
+
+        from .assets import canonical_universe
+
+        try:
+            canonical = canonical_universe(v)
+        except ValidationError as exc:
+            raise ValueError(str(exc)) from exc
+        dupes = sorted({s for s in canonical if canonical.count(s) > 1})
         if dupes:
             raise ValueError(f"universe contains duplicate symbols: {dupes}")
-        return v
+        return canonical
 
     @field_validator("features")
     @classmethod
@@ -578,6 +598,31 @@ class DatasetSpec(BaseModel):
             raise ValueError(
                 f"start ({self.start!r}) must be before end ({self.end!r})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _calendar_from_the_universe_s_venue(self) -> "DatasetSpec":
+        """
+        A venue every key names is the dataset's calendar unless one was
+        given: the same code, so there is no second field to keep in
+        step. Only when the calendar library is present -- without it
+        nothing could read the code, and the annualization refusal that
+        names the library still applies.
+        """
+        if self.calendar is not None:
+            return self
+        from standard_quant_tools.error import ValidationError
+
+        from .assets import common_venue
+        from .calendar import calendar_available, validate_calendar_name
+
+        venue = common_venue(self.universe)
+        if venue is None or not calendar_available():
+            return self
+        try:
+            self.calendar = validate_calendar_name(venue, "DatasetSpec.universe venue")
+        except ValidationError as exc:
+            raise ValueError(str(exc)) from exc
         return self
 
     @model_validator(mode="after")
@@ -1050,7 +1095,14 @@ class SearchSpec(BaseModel):
         3, ge=2, description="Inner walk-forward folds used to score a candidate."
     )
     scoring: Literal[
-        "cs_rank_ic", "cs_ic", "r2", "neg_mae", "accuracy", "auc", "concordance"
+        "cs_rank_ic",
+        "cs_rank_ic_net_of_turnover",
+        "cs_ic",
+        "r2",
+        "neg_mae",
+        "accuracy",
+        "auc",
+        "concordance",
     ] = Field(
         "cs_rank_ic",
         description="What the search maximizes. Defaults to cross-sectional "
@@ -1058,8 +1110,38 @@ class SearchSpec(BaseModel):
         "on r2 and then quoting rank IC optimizes one thing and reports "
         "another. 'concordance' is the survival task's score and the only one "
         "it accepts: an IC of a risk against a censored duration measures "
-        "nothing.",
+        "nothing. 'cs_rank_ic_net_of_turnover' is rank IC minus "
+        "turnover_penalty times the candidate's rank turnover, so the search "
+        "cannot select a signal whose edge would be traded away.",
     )
+    turnover_penalty: float = Field(
+        0.0,
+        ge=0.0,
+        le=10.0,
+        description=(
+            "scoring='cs_rank_ic_net_of_turnover' only: what one unit of rank "
+            "turnover costs in IC. Rank turnover is the mean absolute change "
+            "in each entity's percentile rank between consecutive dates, in "
+            "[0, 1]. A preference weight in IC units, not a cost model; "
+            "evaluate_model_portfolio is where costs are money."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _turnover_penalty_matches_scoring(self) -> "SearchSpec":
+        if self.scoring == "cs_rank_ic_net_of_turnover":
+            if self.turnover_penalty <= 0.0:
+                raise ValueError(
+                    "scoring='cs_rank_ic_net_of_turnover' needs turnover_penalty "
+                    "> 0; at 0 it is plain cs_rank_ic, so say that instead."
+                )
+        elif self.turnover_penalty != 0.0:
+            raise ValueError(
+                f"turnover_penalty={self.turnover_penalty} is read by scoring="
+                f"'cs_rank_ic_net_of_turnover' only; scoring={self.scoring!r} "
+                "does not use it."
+            )
+        return self
 
     @model_validator(mode="after")
     def _axes_agree_with_method(self) -> "SearchSpec":
@@ -1183,6 +1265,20 @@ class ComputeBudgetSpec(BaseModel):
             "run is refused before anything is fitted and the message says "
             "the count. Raise it on purpose to accept a long run; "
             "validate_model_spec reports the count without running."
+        ),
+    )
+    max_parallelism: int = Field(
+        1,
+        ge=1,
+        le=MAX_PARALLELISM_CEILING,
+        description=(
+            "Threads that score grid and random search candidates side by "
+            "side, and the n_jobs handed to any estimator whose constructor "
+            "accepts it and whose params do not set it. 1 keeps every fit "
+            "sequential. The result does not depend on it: candidates keep "
+            "their spec order whatever order they finish in, and the TPE "
+            "search stays sequential because a parallel study changes which "
+            "trials the sampler has seen."
         ),
     )
 

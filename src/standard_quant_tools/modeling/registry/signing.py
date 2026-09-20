@@ -190,10 +190,6 @@ def verify_manifest_signature(
     that does not verify, a signature under the wrong key and an
     unreadable record are four different findings and each is named.
     """
-    _require()
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
     directory, payload = _manifest_bytes(model_id)
     sig_path = directory / SIGNATURE_FILE
     if not sig_path.exists():
@@ -202,12 +198,34 @@ def verify_manifest_signature(
             f"manifest. Sign it with sign_manifest, or register with "
             f"{SIGNING_KEY_ENV} set."
         )
+    return verify_signature_bytes(
+        payload, sig_path.read_bytes(), public_key=public_key, model_id=model_id
+    )
+
+
+def verify_signature_bytes(
+    payload: bytes,
+    record_bytes: bytes,
+    *,
+    public_key: Union[bytes, str, Path, None] = None,
+    model_id: str = "?",
+) -> Dict[str, Any]:
+    """
+    The check itself, on bytes: the manifest as read and the signature
+    record beside it. `verify_manifest_signature` reads a registered
+    package and calls this; `pull_model_package` calls it on what a
+    store returned BEFORE writing any of it locally.
+    """
+    _require()
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
     try:
-        record = json.loads(sig_path.read_text(encoding="utf-8"))
+        record = json.loads(record_bytes.decode("utf-8"))
         algorithm = record["algorithm"]
         embedded = bytes.fromhex(record["public_key"])
         signature = bytes.fromhex(record["signature"])
-    except (ValueError, KeyError, TypeError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise ValidationError(
             f"{SIGNATURE_FILE} for model {model_id!r} is not a signature "
             f"record: {exc}"
@@ -251,4 +269,5 @@ __all__ = [
     "signing_available",
     "signing_configured",
     "verify_manifest_signature",
+    "verify_signature_bytes",
 ]

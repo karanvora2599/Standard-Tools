@@ -19,16 +19,26 @@ copied last, so the commit-point property holds on the target too.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
 from standard_quant_tools._runspath import validate_identifier
-from standard_quant_tools.artifact_store import ArtifactStore, LocalArtifactStore
+from standard_quant_tools.artifact_store import (
+    ArtifactStore,
+    LocalArtifactStore,
+    hash_bytes,
+)
 from standard_quant_tools.error import ValidationError
 
 from .lifecycle import PROMOTIONS_FILE
+from .manifests import ModelManifest
 from .model_registry import load_manifest
-from .signing import SIGNATURE_FILE, verify_manifest_signature
+from .signing import (
+    SIGNATURE_FILE,
+    verify_manifest_signature,
+    verify_signature_bytes,
+)
 
 MANIFEST_FILE = "manifest.json"
 
@@ -153,10 +163,108 @@ def mirror_model_package(
     return uris
 
 
+def list_remote_models(store: ArtifactStore) -> List[str]:
+    """Every model id with a manifest in `store`, sorted."""
+    suffix = f"/{MANIFEST_FILE}"
+    return sorted(
+        {
+            key.split("/", 1)[0]
+            for key in store.list()
+            if key.endswith(suffix) and key.startswith("mdl_")
+        }
+    )
+
+
+def pull_model_package(
+    model_id: str,
+    store: ArtifactStore,
+    *,
+    require_signature: bool = False,
+    public_key: Union[bytes, str, None] = None,
+    overwrite: bool = False,
+) -> PackageVerification:
+    """
+    Register a package from `store` locally, verified on the way in.
+
+    The manifest is read first and every hashed file is checked
+    against it as it arrives; the signature, when present or required,
+    is verified over the store's bytes before anything is written. The
+    manifest is written LAST, so a pull that fails at any point leaves a
+    directory that is not a registered model rather than a registered
+    model that is wrong.
+    """
+    validate_identifier(model_id, "model_id")
+    filenames = sorted(key.split("/", 1)[1] for key in store.list(model_id))
+    if MANIFEST_FILE not in filenames:
+        raise ValidationError(
+            f"{store.uri(f'{model_id}/{MANIFEST_FILE}')} does not exist: no "
+            f"registered model {model_id!r} in that store."
+        )
+    local = LocalArtifactStore()
+    if local.exists(f"{model_id}/{MANIFEST_FILE}") and not overwrite:
+        raise ValidationError(
+            f"model {model_id!r} is already registered locally; pass "
+            "overwrite=True to replace it with the store's copy."
+        )
+    manifest_bytes = store.get(f"{model_id}/{MANIFEST_FILE}")
+    try:
+        manifest = ModelManifest(**json.loads(manifest_bytes.decode("utf-8")))
+    except Exception as exc:  # noqa: BLE001 - whatever it is, not a manifest
+        raise ValidationError(
+            f"{store.uri(f'{model_id}/{MANIFEST_FILE}')} is not a model manifest: {exc}"
+        ) from exc
+    if manifest.model_id != model_id:
+        raise ValidationError(
+            f"the manifest under {model_id!r} in the store says model_id="
+            f"{manifest.model_id!r}; refusing to register one as the other."
+        )
+    if require_signature or SIGNATURE_FILE in filenames:
+        if SIGNATURE_FILE not in filenames:
+            raise ValidationError(
+                f"model {model_id!r} in {store.uri(model_id)} is not signed and a "
+                "signature was required; nothing was registered locally."
+            )
+        verify_signature_bytes(
+            manifest_bytes,
+            store.get(f"{model_id}/{SIGNATURE_FILE}"),
+            public_key=public_key,
+            model_id=model_id,
+        )
+    expected = {
+        _filename_for(entry): digest
+        for entry, digest in manifest.content_hashes.items()
+    }
+    missing = sorted(f for f in expected if f not in filenames)
+    if missing:
+        raise ValidationError(
+            f"the store's package for {model_id!r} lacks {missing}, which its "
+            "manifest hashes; nothing was registered locally."
+        )
+    for filename in filenames:
+        if filename == MANIFEST_FILE:
+            continue
+        key = f"{model_id}/{filename}"
+        data = store.get(key)
+        digest = expected.get(filename)
+        if digest is not None and hash_bytes(data) != digest:
+            raise ValidationError(
+                f"{filename} in {store.uri(key)} does not match the manifest it "
+                f"travels with (registered {digest}, found {hash_bytes(data)}); "
+                "nothing was registered locally."
+            )
+        local.put(key, data)
+    local.put(f"{model_id}/{MANIFEST_FILE}", manifest_bytes)
+    return verify_model_package(
+        model_id, require_signature=require_signature, public_key=public_key
+    )
+
+
 __all__ = [
     "MANIFEST_FILE",
     "PROMOTIONS_FILE",
     "PackageVerification",
+    "list_remote_models",
     "mirror_model_package",
+    "pull_model_package",
     "verify_model_package",
 ]

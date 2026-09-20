@@ -73,6 +73,7 @@ from standard_quant_tools.metrics.risk_metrics import (
 from standard_quant_tools.modeling.specs import TASKS
 
 from . import artifacts as _artifacts
+from .assets import fetch_plan
 from .bridge import (
     _assert_continuous_calendar,
     _refuse_cpcv,
@@ -722,13 +723,19 @@ def evaluate_model_portfolio(
     # fills. Re-fetching the training window costs nothing beyond the
     # provider cache and guarantees both.
     provider = DataFactory.get_provider(provider_name)
-    price_data = fetch_universe_ohlcv(
+    # Prices are fetched by each entity's symbol and keyed back by the
+    # entity, so a venue-qualified universe simulates under its own names.
+    plan = fetch_plan(entities)
+    fetched = fetch_universe_ohlcv(
         provider,
-        entities,
+        list(plan.values()),
         str(dataset_spec["start"]),
         str(dataset_spec["end"]),
         interval,
     )
+    price_data = {
+        entity: fetched[symbol] for entity, symbol in plan.items() if symbol in fetched
+    }
     missing_prices = [e for e in entities if e not in price_data]
     if missing_prices:
         raise ValidationError(

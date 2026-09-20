@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Literal, Sequence
 from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
+from . import mirror as _mirror
 
 STAGES = ("candidate", "validated", "staging", "production", "archived")
 LifecycleStage = Literal["candidate", "validated", "staging", "production", "archived"]
@@ -156,6 +157,9 @@ def promote(
     path = _log_path(model_id)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
+    # The log is the stage; a mirror holding a stale log holds a stale
+    # stage, so the whole file follows every decision.
+    _mirror.mirror_file(model_id, PROMOTIONS_FILE)
     return record
 
 

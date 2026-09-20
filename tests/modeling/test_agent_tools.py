@@ -65,6 +65,8 @@ class TestListFeatures:
             "risk.parkinson_volatility",
             "risk.garman_klass_volatility",
             "risk.rolling_drawdown",
+            "risk.realized_semivariance",
+            "risk.bipower_variation",
         }
 
 

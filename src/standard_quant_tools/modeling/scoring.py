@@ -26,6 +26,7 @@ from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
 from .adapters import accepts_missing, get_adapter
+from .assets import canonical_universe
 from .dataset.builder import build_dataset
 from .estimators.registry import get_estimator_class
 from .features.base import FeatureScope
@@ -96,6 +97,9 @@ def score_model(
         ValidationError: no registered model with `model_id`, or no
         entity in `universe` has a scoreable row as of `as_of`.
     """
+    # Entities are asset keys in canonical form, whatever spelling arrived,
+    # so `missing_entities` and the panel agree on names.
+    universe = canonical_universe(universe)
     try:
         as_of_ts = _parse_date(as_of, "as_of")
     except ValueError as exc:

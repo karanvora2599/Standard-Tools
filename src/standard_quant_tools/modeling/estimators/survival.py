@@ -106,6 +106,82 @@ def _split_labels(y: Any) -> "tuple[np.ndarray, np.ndarray]":
     return duration, event
 
 
+def breslow_baseline(
+    duration: Any,
+    event: Any,
+    log_risk: Any,
+    weights: Optional[np.ndarray] = None,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """
+    Breslow's estimate of the baseline cumulative hazard, from fitted
+    risks: at each distinct event time, the (weighted) events there over
+    the (weighted) hazard mass of everyone still at risk. Returned as the
+    ascending event times and the cumulative hazard at each, a step
+    function that is zero before the first event. With every risk zero
+    it is the Nelson-Aalen estimator.
+    """
+    t = np.asarray(duration, dtype=float)
+    e = np.asarray(event, dtype=float)
+    eta = np.clip(np.asarray(log_risk, dtype=float), -30.0, 30.0)
+    w = np.ones_like(t) if weights is None else np.asarray(weights, dtype=float)
+    order = np.argsort(t, kind="stable")
+    ts, es, ws, rs = t[order], e[order], w[order], np.exp(eta[order])
+    # Everyone with a duration >= u is at risk at u: a suffix sum in
+    # ascending time, read at each tie group's first row.
+    suffix = np.cumsum((ws * rs)[::-1])[::-1]
+    unique_t, first = np.unique(ts, return_index=True)
+    at_risk = suffix[first]
+    group = np.searchsorted(unique_t, ts)
+    d = np.bincount(group, weights=ws * es, minlength=unique_t.size)
+    keep = d > 0
+    return unique_t[keep], np.cumsum(d[keep] / at_risk[keep])
+
+
+def cumulative_hazard_at(
+    times: Any, baseline_times: np.ndarray, baseline_cumhaz: np.ndarray
+) -> np.ndarray:
+    """The baseline step function read at `times`: zero before the first
+    event time, the last value after the last."""
+    grid = np.asarray(times, dtype=float)
+    index = np.searchsorted(baseline_times, grid, side="right") - 1
+    return np.where(index >= 0, baseline_cumhaz[np.clip(index, 0, None)], 0.0)
+
+
+def cox_survival_function(
+    log_risk: Any,
+    times: Any,
+    baseline_times: np.ndarray,
+    baseline_cumhaz: np.ndarray,
+) -> np.ndarray:
+    """S(t | x) = exp(-H0(t) exp(x beta)), an (n, len(times)) matrix."""
+    hazard = cumulative_hazard_at(times, baseline_times, baseline_cumhaz)
+    risk = np.exp(np.clip(np.asarray(log_risk, dtype=float), -30.0, 30.0))
+    return np.exp(-np.outer(risk, hazard))
+
+
+def aft_survival_function(
+    log_time: Any, times: Any, distribution: str, scale: float
+) -> np.ndarray:
+    """
+    The accelerated-failure-time survival function: with ln T = mu + sigma Z,
+    S(t | x) = 1 - F((ln t - mu) / sigma) for Z's distribution -- normal,
+    logistic, or the minimum extreme value XGBoost calls "extreme".
+    """
+    from scipy.special import ndtr
+
+    mu = np.asarray(log_time, dtype=float)[:, None]
+    z = (
+        np.log(np.maximum(np.asarray(times, dtype=float), 1e-12))[None, :] - mu
+    ) / float(scale)
+    if distribution == "normal":
+        return 1.0 - ndtr(z)
+    if distribution == "logistic":
+        return 1.0 / (1.0 + np.exp(np.clip(z, -500, 500)))
+    if distribution == "extreme":
+        return np.exp(-np.exp(np.clip(z, -500, 500)))
+    raise ValidationError(f"unknown AFT distribution {distribution!r}")
+
+
 class CoxPHRegressor:
     """
     Cox proportional hazards on the partial likelihood, by Newton's method.
@@ -179,6 +255,12 @@ class CoxPHRegressor:
         self.coef_ = beta / self.scale_
         self.n_iter_ = _iteration + 1
         self.n_features_in_ = p
+        # The baseline hazard the fitted risks imply, so the model can
+        # say not only who goes first but how likely each is to have
+        # gone by a given time -- what a Brier score is read from.
+        self.baseline_times_, self.baseline_cumhaz_ = breslow_baseline(
+            duration, event, Z @ beta, weights
+        )
         return self
 
     def predict(self, X: Any) -> np.ndarray:
@@ -186,6 +268,12 @@ class CoxPHRegressor:
             raise ValidationError("CoxPHRegressor.predict called before fit.")
         X = np.asarray(X, dtype=float)
         return (X - self.mean_) @ self.coef_
+
+    def predict_survival_function(self, X: Any, times: Any) -> np.ndarray:
+        """S(t | x) at each of `times`, one row per row of X."""
+        return cox_survival_function(
+            self.predict(X), times, self.baseline_times_, self.baseline_cumhaz_
+        )
 
     def get_params(self, deep: bool = True) -> Dict[str, Any]:
         return {"alpha": self.alpha, "max_iter": self.max_iter, "tol": self.tol}
@@ -263,10 +351,22 @@ class XGBCoxSurvival(_XGBSurvivalBase):
         self.feature_importances_ = np.asarray(
             self._model.feature_importances_, dtype=float
         )
+        self.baseline_times_, self.baseline_cumhaz_ = breslow_baseline(
+            duration, event, np.log(np.maximum(self.predict(X), 1e-300)), sample_weight
+        )
         return self
 
     def predict(self, X: Any) -> np.ndarray:
         return np.asarray(self._model.predict(np.asarray(X, dtype=float)), dtype=float)
+
+    def predict_survival_function(self, X: Any, times: Any) -> np.ndarray:
+        """S(t | x) from the booster's hazard ratio and the Breslow baseline."""
+        return cox_survival_function(
+            np.log(np.maximum(self.predict(X), 1e-300)),
+            times,
+            self.baseline_times_,
+            self.baseline_cumhaz_,
+        )
 
 
 class XGBAFTSurvival(_XGBSurvivalBase):
@@ -356,6 +456,16 @@ class XGBAFTSurvival(_XGBSurvivalBase):
         )
         return -np.log(np.maximum(time, 1e-12))
 
+    def predict_survival_function(self, X: Any, times: Any) -> np.ndarray:
+        """S(t | x) under the fitted distribution: the booster predicts
+        the location of ln T and the spec fixes its scale."""
+        return aft_survival_function(
+            -self.predict(X),
+            times,
+            self.aft_loss_distribution,
+            self.aft_loss_distribution_scale,
+        )
+
 
 register_estimator("survival", "cox_ph", CoxPHRegressor, _COX_PH)
 
@@ -377,4 +487,8 @@ __all__ = [
     "CoxPHRegressor",
     "XGBAFTSurvival",
     "XGBCoxSurvival",
+    "aft_survival_function",
+    "breslow_baseline",
+    "cox_survival_function",
+    "cumulative_hazard_at",
 ]

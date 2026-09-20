@@ -37,6 +37,7 @@ from standard_quant_tools.validation import (
     require_finite_array,
 )
 
+from ..assets import fetch_plan, fetch_symbol
 from ..features.base import FeatureContext, FeatureScope
 from ..features.params import resolve_params
 from ..features.registry import get_feature
@@ -330,12 +331,18 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         contract_getter=_provider_contract,
         purpose="build_model_dataset",
     )
-    ohlcv_by_entity = fetch_universe_ohlcv(
-        provider, list(spec.universe), spec.start, spec.end, spec.interval
+    # Each entity's fetch symbol: the string itself for a bare symbol, the
+    # symbol alone for a venue- or class-qualified key. Two keys that
+    # fetch as one symbol are refused here rather than blended into one
+    # entity; the panel's `entity` column carries the canonical key.
+    plan = fetch_plan(list(spec.universe))
+    fetched = fetch_universe_ohlcv(
+        provider, list(plan.values()), spec.start, spec.end, spec.interval
     )
+    ohlcv_by_entity = {entity: fetched[symbol] for entity, symbol in plan.items()}
 
     benchmark_df = _fetch_ohlcv(
-        provider, spec.benchmark, spec.start, spec.end, spec.interval
+        provider, fetch_symbol(spec.benchmark), spec.start, spec.end, spec.interval
     )
     # interval carried into the context so a feature that ANNUALIZES scales
     # by the right constant instead of assuming daily bars -- see
@@ -361,7 +368,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     warnings.extend(interval_warnings(spec.interval))
     warnings.extend(
         provider_guarantee_warnings(
-            _provider_metadata(provider, spec.universe[0], spec.interval)
+            _provider_metadata(provider, plan[spec.universe[0]], spec.interval)
         )
     )
     warnings.extend(entity_coverage_warnings(ohlcv_by_entity, spec.start, spec.end))

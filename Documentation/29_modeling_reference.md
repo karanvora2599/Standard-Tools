@@ -12,7 +12,7 @@ installed. They are listed from a static declaration so this document is
 the same on every machine; `list_modeling_capabilities` reports which of
 them the running install actually has.
 
-## Features (26)
+## Features (30)
 
 | id | scope | temporal | lookback | requires | default params | description |
 |---|---|---|---|---|---|---|
@@ -27,9 +27,11 @@ them the running install actually has.
 | `network.avg_correlation` | universe | pit_safe | 126 | Close | `refit_every=21`, `window=126` | Entity's mean correlation to the rest of the universe over a trailing window, refit every `refit_every` bars. Scale-free, unlike a PC1 loading: it says how much company a name keeps rather than how much variance it contributes. |
 | `network.mst_degree` | universe | pit_safe | 126 | Close | `refit_every=21`, `window=126` | Entity's degree in the minimum spanning tree of the universe's correlation-distance matrix (Mantegna). Local topology, not a global factor: a hub is a name others route through, which a PC1 loading cannot express. |
 | `risk.atr_pct` | entity | pit_safe | 14 | High, Low, Close | `period=14` | Wilder's Average True Range as a fraction of Close (normalized, comparable across differently-priced stocks). |
+| `risk.bipower_variation` | entity | pit_safe | 22 | Close | `period=20` | Jump-robust annualized volatility from consecutive absolute log returns over `period` bars; realized_volatility above it is jump variance. |
 | `risk.bollinger_pct_b` | entity | pit_safe | 20 | Close | `num_std=2.0`, `period=20` | Position of Close within its Bollinger Bands: 0=lower band, 1=upper band, 0.5 when a flat window collapses the bands onto the mean. |
 | `risk.garman_klass_volatility` | entity | pit_safe | 20 | Open, High, Low, Close | `period=20` | Garman-Klass OHLC realized volatility (annualized). |
 | `risk.parkinson_volatility` | entity | pit_safe | 20 | High, Low | `period=20` | Parkinson high-low range realized volatility (annualized). |
+| `risk.realized_semivariance` | entity | pit_safe | 21 | Close | `period=20` | Annualized downside volatility: root mean squared negative log return over `period` bars. |
 | `risk.realized_volatility` | entity | pit_safe | 20 | Open, High, Low, Close | `period=20` | Yang-Zhang realized volatility (annualized). |
 | `risk.rolling_beta` | entity | pit_safe | 60 | Close | `window=60` | Rolling OLS beta of the entity's returns against DatasetSpec.benchmark. |
 | `risk.rolling_drawdown` | entity | pit_safe | 252 | Close | `window=252` | Drawdown of Close from its trailing `window`-bar peak (0 at a new high, negative otherwise). |
@@ -39,8 +41,10 @@ them the running install actually has.
 | `technical.rsi` | entity | pit_safe | 14 | Close | `period=14` | Relative Strength Index — momentum oscillator, 0-100. |
 | `technical.stochastic_k` | entity | pit_safe | 14 | High, Low, Close | `d_period=3`, `k_period=14` | Stochastic oscillator %K — momentum vs. recent high-low range, 0-100. |
 | `technical.williams_r` | entity | pit_safe | 14 | High, Low, Close | `period=14` | Williams %R momentum oscillator, -100 (oversold) to 0 (overbought). |
+| `volume.amihud_illiquidity` | entity | pit_safe | 21 | Close, Volume | `period=20` | Amihud illiquidity: mean \|return\| per dollar traded over `period` bars, per million. |
 | `volume.mfi` | entity | pit_safe | 14 | High, Low, Close, Volume | `period=14` | Money Flow Index — volume-weighted RSI, 0-100. |
 | `volume.obv_roc` | entity | pit_safe | 20 | Close, Volume | `lookback=20` | Rate of change of On-Balance Volume over `lookback` bars. |
+| `volume.volume_surprise` | entity | pit_safe | 21 | Volume | `period=20` | log of this bar's volume over the trailing `period`-bar mean volume before it. |
 | `volume.vwap_deviation` | entity | pit_safe | 20 | High, Low, Close, Volume | `period=20` | (Close - VWAP) / VWAP over a trailing `period`-bar window. |
 
 ## Estimators (19 always available, 8 optional)
@@ -130,7 +134,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `PreprocessingSpec.normalization` | `pooled`, `cross_sectional` |
 | `WeightingSpec.method` | `none`, `label_uniqueness`, `time_decay`, `uniqueness_and_time_decay` |
 | `SearchSpec.method` | `grid`, `random`, `tpe` |
-| `SearchSpec.scoring` | `cs_rank_ic`, `cs_ic`, `r2`, `neg_mae`, `accuracy`, `auc`, `concordance` |
+| `SearchSpec.scoring` | `cs_rank_ic`, `cs_rank_ic_net_of_turnover`, `cs_ic`, `r2`, `neg_mae`, `accuracy`, `auc`, `concordance` |
 | `EstimatorSpec.calibration` | `none`, `isotonic`, `sigmoid` |
 | `PredictionTransformSpec.method` | `sign`, `cross_sectional_rank`, `cross_sectional_zscore`, `top_bottom_quantile`, `uncertainty_scaled` |
 | `PredictionTransformSpec.rebalance_frequency` | `daily`, `weekly`, `monthly` |

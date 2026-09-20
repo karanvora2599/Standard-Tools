@@ -5,7 +5,14 @@ validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
 **Status: phases 0-10 (the "now" half of 8) are implemented and merged;
-the sequence half of 8 is a proposal.** Phase 10 landed as the commit
+the sequence half of 8 is a proposal. The items the phases set aside were
+built on 2026-09-20 in the commit that carries this sentence: the
+integrated Brier score from native survival functions (cross-checked
+against scikit-survival), the skops bundle, mirror-on-register and
+`pull_model_package`, `budget.max_parallelism`,
+`scoring="cs_rank_ic_net_of_turnover"`, four price/volume features and
+`AssetKey`. Still set aside: the sequence kind, Polygon's revisions
+measurement (no live key here), and a remote registry root.** Phase 10 landed as the commit
 that carries this paragraph on 2026-09-20 (`ArtifactStore` with the
 local and fsspec implementations, `verify_model_package` and
 `mirror_model_package` over it, `manifest.sig` through
@@ -44,9 +51,10 @@ in the guide: a 20-feature ablation on 40k rows from 4.4 s to 3.3 s under
 the fused default pipeline and from 43.8 s to 8.4 s with a quantile
 transform in it, identical numbers) and the commit that carries this
 paragraph (`SearchSpec.method="tpe"` over `param_ranges`, seeded, with
-median pruning). `max_parallelism` was not built: nothing in the engine
-runs in parallel and no registered estimator exposes `n_jobs`, so the
-knob would control nothing. Phase 2 landed as `9e574ee` (the target registry) and phase
+median pruning). `max_parallelism` was not built then -- nothing in the engine
+ran in parallel and no registered estimator exposed `n_jobs`, so the
+knob would have controlled nothing -- and was built once it could
+control the grid search's threads and an estimator's `n_jobs`. Phase 2 landed as `9e574ee` (the target registry) and phase
 3 as `77dfffd` (paired comparison, `validation/comparison.py`) plus the
 commit that carries this paragraph (`CombinatorialPurgedSplit`,
 `method="cpcv"`, per-block purge, the path distribution in the validation
@@ -570,9 +578,9 @@ revisions, profitability, balance-sheet momentum; macro surprise through
 name; optional dependency), and `periods_per_year_for_interval(interval,
 calendar)` derives bars per session × sessions per year for intraday
 intervals. The refusal in `risk.py:_annualization` stays for a missing
-calendar. `AssetKey` (venue, asset class, contract) is not built here:
-`universe` stays a list of symbols, and the collision cases the review
-lists are recorded as the reason to revisit.
+calendar. `AssetKey` was not built here and was built afterwards
+(`modeling/assets.py`): `SYMBOL[@VENUE][~CLASS]`, the venue as the
+calendar, and the collision cases the review lists refused by name.
 
 Both fields depend on phase 0's hash v2.
 

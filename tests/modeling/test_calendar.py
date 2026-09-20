@@ -129,6 +129,8 @@ class TestTheCalendar:
             "risk.realized_volatility",
             "risk.parkinson_volatility",
             "risk.garman_klass_volatility",
+            "risk.realized_semivariance",
+            "risk.bipower_variation",
         ],
     )
     def test_an_intraday_feature_annualizes_with_a_calendar_and_refuses_without(

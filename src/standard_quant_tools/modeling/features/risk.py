@@ -3,6 +3,7 @@ feature in this phase that actually uses FeatureContext.benchmark_close
 — dataset.builder is responsible for populating it from DatasetSpec.benchmark
 before calling any entity-scope feature."""
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.analysis.regression import rolling_beta as _rolling_beta
@@ -76,6 +77,33 @@ def _risk_realized_volatility(
         ohlcv["Close"],
         period=period,
         periods_per_year=_annualization(context, "risk.realized_volatility"),
+    )
+
+
+def _risk_realized_semivariance(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
+) -> pd.Series:
+    """Annualized DOWNSIDE volatility: the root of the mean squared
+    negative log return over `period` bars, scaled by bars per year. The
+    half of realized variance that a long holder pays for."""
+    log_returns = np.log(ohlcv["Close"].astype(float)).diff()
+    downside = log_returns.clip(upper=0.0) ** 2
+    mean_square = downside.rolling(period, min_periods=period).mean()
+    return np.sqrt(mean_square * _annualization(context, "risk.realized_semivariance"))
+
+
+def _risk_bipower_variation(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
+) -> pd.Series:
+    """Jump-robust annualized volatility (Barndorff-Nielsen and Shephard):
+    the root of pi/2 times the mean product of consecutive absolute log
+    returns over `period` bars, scaled by bars per year. Realized
+    volatility above this is variance that arrived in jumps."""
+    absolute = np.log(ohlcv["Close"].astype(float)).diff().abs()
+    products = absolute * absolute.shift(1)
+    mean_product = products.rolling(period, min_periods=period).mean()
+    return np.sqrt(
+        (np.pi / 2.0) * mean_product * _annualization(context, "risk.bipower_variation")
     )
 
 
@@ -206,6 +234,33 @@ register_feature(
         scope=FeatureScope.ENTITY,
         requires=["Open", "High", "Low", "Close"],
         lookback=20,
+    )
+)
+register_feature(
+    FeatureDefinition(
+        id="risk.realized_semivariance",
+        description="Annualized downside volatility: root mean squared negative "
+        "log return over `period` bars.",
+        fn=_risk_realized_semivariance,
+        default_params={"period": 20},
+        temporal_support=TemporalSupport.PIT_SAFE,
+        scope=FeatureScope.ENTITY,
+        requires=["Close"],
+        lookback=21,
+    )
+)
+register_feature(
+    FeatureDefinition(
+        id="risk.bipower_variation",
+        description="Jump-robust annualized volatility from consecutive absolute "
+        "log returns over `period` bars; realized_volatility above it is jump "
+        "variance.",
+        fn=_risk_bipower_variation,
+        default_params={"period": 20},
+        temporal_support=TemporalSupport.PIT_SAFE,
+        scope=FeatureScope.ENTITY,
+        requires=["Close"],
+        lookback=22,
     )
 )
 register_feature(

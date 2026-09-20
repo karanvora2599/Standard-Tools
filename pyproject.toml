@@ -117,6 +117,16 @@ signing = [
 remote = [
     "fsspec>=2023.1.0"
 ]
+# The skops bundle beside model.joblib: the estimator loadable without
+# executing pickle. Registration writes it when the package is present.
+skops = [
+    "skops>=0.10"
+]
+# Not used by the runtime: the oracle the survival Brier-score tests
+# compare the native implementation against.
+survival-oracle = [
+    "scikit-survival>=0.23"
+]
 polars = [
     "polars>=0.20.0"
 ]

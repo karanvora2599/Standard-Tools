@@ -310,6 +310,23 @@ to be a table here, and the table said 21 entries when the registry held
   asserted "no breakout" for every bar before the window existed.
 - `market.psar_trend` is the Parabolic SAR `Trend` column (±1); the raw
   `SAR` price level isn't cross-sectionally comparable.
+- `risk.realized_semivariance` is the annualized **downside** half of
+  realized variance: the root of the mean squared negative log return
+  over the window. Zero on a series that only rises; `σ/√2` of a
+  symmetric one.
+- `risk.bipower_variation` is the jump-robust volatility of
+  Barndorff-Nielsen and Shephard: `√(π/2 · mean |r_t||r_{t−1}|)`,
+  annualized. Realized volatility above it is variance that arrived in
+  jumps; a single jump moves the squared-return estimator by an order of
+  magnitude and this one barely, since the jump enters only through two
+  cross products.
+- `volume.amihud_illiquidity` is Amihud's price impact: mean `|return|`
+  per dollar traded over the window, per million. Twice the volume is
+  half the value; a bar with no volume is left out of the mean rather
+  than made infinite.
+- `volume.volume_surprise` is `log(Volume / trailing mean Volume)`, the
+  trailing mean taken *before* the bar so the bar is compared with what
+  came before it. Zero volume is NaN, not `−inf`.
 - `risk.atr_pct` is Wilder's ATR ÷ Close, since raw ATR is a price level.
   A non-positive Close yields NaN rather than ±inf.
 - `risk.bollinger_pct_b` is %B, Close's position within the bands. A flat
@@ -466,7 +483,8 @@ Non-daily intervals are fetched correctly and warned about, not rescaled.
 #### Interval-aware annualization
 
 Annualization is the exception: it *is* rescaled. `risk.realized_volatility`
-(Yang-Zhang), `risk.parkinson_volatility` and `risk.garman_klass_volatility`
+(Yang-Zhang), `risk.parkinson_volatility`, `risk.garman_klass_volatility`
+(and now `risk.realized_semivariance` and `risk.bipower_variation`)
 all used to multiply by `sqrt(252)` regardless of interval, so weekly bars
 were reported at roughly 2.2× their true annualized volatility. Harmless for
 a standardized model whose ranking is unaffected by a constant factor,
@@ -655,6 +673,48 @@ removed, because that is the number a caller deciding between the two
 policies wants, with the rows that actually survived and how many carry a
 hole recorded beside it. `explain_dataset_row_loss` says so at the top of
 its report, so a reader does not go looking for rows that are there.
+
+## Asset keys: a universe entry is more than a symbol
+
+A universe was a list of symbols, and an entity was the symbol: one string
+doing two jobs, the name a provider fetches by and the identity a panel
+row belongs to. The jobs come apart the moment one symbol names two
+things — `BHP` on the ASX and on the NYSE, `ES` the future and `ES` a
+ticker somewhere else — and when they come apart silently, two
+instruments become one entity and every feature, label and weight on it
+is computed on a blend.
+
+Every universe entry is an **asset key**, `SYMBOL[@VENUE][~CLASS]`: the
+symbol a provider resolves, the venue as an `exchange_calendars` code
+(`XNYS`, `XASX`, `XCME`), and the asset class (`equity`, `etf`, `index`,
+`future`, `fx`, `crypto`). `AAPL` and `AAPL~equity` are one key;
+`BHP.AX@XASX` and `BHP@XNYS` are two. The **canonical** spelling is what
+the panel's `entity` column carries, what a scoring universe names and
+what `missing_entities` reports; the **symbol** is what reaches the
+provider, in `build_model_dataset`, `score_model`,
+`evaluate_model_portfolio` and the point-in-time join alike.
+
+Three consequences, each pinned:
+
+- **A venue every key shares is the dataset's calendar** unless the spec
+  names one — the same code, so there is no second field to keep in step
+  — which is what makes an intraday interval annualizable from the
+  universe alone. A venue that is not a known calendar is refused by
+  name when the calendar library is present.
+- **The collision is refused where it would have been made.** No shipped
+  provider resolves a venue; it fetches by symbol. Two keys that fetch as
+  one symbol (`BHP@XASX` beside `BHP@XNYS`, or `AAA` beside `AAA~etf`)
+  would return one series under two identities, so the builder refuses
+  them before anything is fetched and says which symbol they share.
+  Spell the venue-specific symbol the provider knows (`BHP.AX@XASX`) and
+  they are two series.
+- **The bridge refuses a qualified universe by name.** The backtest
+  runtime addresses prices by bare symbol, so a signal panel keyed by
+  `AAA@XNYS` would fetch nothing or the wrong series;
+  `evaluate_model_portfolio`, which resolves each entity's fetch symbol,
+  is the path for a keyed model.
+
+---
 
 ---
 
@@ -1812,6 +1872,27 @@ spec is refused by name before the first fit on a machine without it,
 `validate_model_spec` reports the same as a problem, and
 `list_modeling_capabilities` lists `optuna` under `optional_dependencies`.
 
+### Rank IC net of turnover
+
+Selecting on IC alone can pick the candidate whose edge is traded away
+between rebalances. `SearchSpec.scoring="cs_rank_ic_net_of_turnover"`
+scores each inner fold as the mean per-date rank IC **minus**
+`turnover_penalty` times the candidate's rank turnover — the mean
+absolute change in each entity's percentile rank between consecutive
+dates, in `[0, 1]`: zero for an ordering that never changes, near a third
+for one reshuffled at random. The penalty is a preference weight in IC
+units, not a cost model; `evaluate_model_portfolio` is where costs are
+money, on the outer path, without touching the OOS sample.
+
+The two go together and the spec says so: the net scoring needs a penalty
+above zero (at zero it is plain `cs_rank_ic`, so say that), and a penalty
+under any other scoring is refused as a field nothing would read. The
+planted test is two candidates, one with the higher IC and an ordering
+reshuffled every date, one a little lower and perfectly stable: at
+penalty zero the first wins, at a penalty that prices the reshuffling
+the second does, and the search report carries `turnover_penalty` beside
+every candidate's score.
+
 ---
 
 ## Planning before running: the experiment plan and the compute budget
@@ -1926,6 +2007,30 @@ either way.
 A persistent, cross-process cache is deliberately not built. The plan's
 hashes make one possible, and orchestration is the layer above this
 library.
+
+### `max_parallelism`: what the knob controls
+
+`budget.max_parallelism` was not built with the rest of the budget in
+phase 4, because nothing in the engine ran in parallel and no registered
+estimator read `n_jobs`: the knob would have controlled nothing. It
+controls two things now:
+
+- **Grid and random search candidates are scored on threads.** The first
+  candidate runs alone, so each inner fold's preprocessing is fitted once
+  and cached before anything reads it; every remaining (candidate, fold)
+  pair is then scored side by side, and the scores are gathered in spec
+  order whatever order the threads finish in.
+- **Estimators that accept `n_jobs` receive it** — a random forest, a
+  booster — unless the spec's params set it themselves. An estimator
+  whose constructor has no `n_jobs` is built as before.
+
+The result does not depend on it: the same spec at 1 and at 4 threads
+selects the same parameters with the same candidate scores, which is the
+property the test pins. The TPE search stays sequential on purpose — a
+parallel optuna study changes which trials the sampler has seen when it
+proposes the next one, and a search whose winner depends on thread timing
+is not a search anyone can reproduce. The search report and the
+`fits` block of the validation report carry the value that ran.
 
 ---
 
@@ -2142,6 +2247,44 @@ comes first, not which name's return is larger, and `rank_mean` of the
 two ranks names by a quantity nobody asked for. `fill_probability` stays
 a classification label; deriving it from a survival curve at a horizon is
 a later convenience, not a change to what the label is.
+
+### The survival function, and the Brier score
+
+Concordance says whether a model orders the durations; it cannot say
+whether "this row has a 30% chance of having gone by day 10" is right.
+That takes a survival function per row, and every survival estimator
+here has one:
+
+- `cox_ph` keeps Breslow's baseline cumulative hazard from the fitted
+  risks — at each event time, the events there over the hazard mass of
+  everyone still at risk — so `S(t | x) = exp(-H0(t) · exp(xβ))`. With
+  every risk zero it is the Nelson–Aalen estimator, which the test checks
+  by hand.
+- `xgboost_cox` does the same from the booster's hazard ratios on the
+  training rows.
+- `xgboost_aft` is parametric: `ln T = μ + σZ`, so `S(t | x) = 1 − F((ln t
+  − μ)/σ)` under the fitted distribution — normal, logistic, or the
+  minimum extreme value XGBoost calls `extreme`.
+
+`predict_survival_function(X, times)` returns the `(n, len(times))`
+matrix, and the survival adapter hands it to the metrics. The
+**integrated Brier score** (Graf et al., 1999) is then read from it: the
+squared error of `S(t | x)` against "still going at t", each row weighted
+by the inverse probability of not having been censored by the time its
+contribution is decided, integrated over the event times inside both
+follow-ups and divided by their span. The censoring distribution is a
+Kaplan–Meier with events and censorings swapped and a tie resolved with
+the event first, estimated on the **training** labels. Every convention
+is pinned: the score agrees with scikit-survival's to `1e-12` when that
+library is installed (`pip install standard_quant_tools[survival-oracle]`
+gets the oracle; the runtime does not need it).
+
+`integrated_brier` is reported beside `concordance` per fold, in the OOS
+aggregate and in the cpcv distribution — `NaN`, with the key kept, on a
+fold too short to carry two event times inside both follow-ups. Lower is
+better; 0.25 is a coin flip at every horizon; an informative Cox model
+scores below the constant-risk baseline on the same data, which is the
+planted direction check.
 
 ---
 
@@ -2532,6 +2675,53 @@ uris = mirror_model_package(model_id, store_from_url("s3://models/registry"))
 > still address the local runs directory by path, so the fsspec store is a
 > **target** for a verified package rather than a root the registry runs
 > from. Saying otherwise would be a claim the code does not make good on.
+
+### The skops bundle
+
+`model.joblib` is verified before it is deserialized and the manifest can
+be signed, which is a guard *around* pickle, not a replacement for it:
+joblib is pickle, and pickle executes code from the file by design. When
+the `skops` package is installed (`pip install standard_quant_tools[skops]`),
+registration also writes **`model.skops`** beside the joblib — the same
+estimator as declared state — hashed into the manifest like every other
+artifact, and `formats` on the manifest says which of the two the model
+carries. `load_model(model_id, format="skops")`, or
+`SQT_MODEL_FORMAT=skops` for every load, constructs only the types the
+loader trusts: skops' defaults and this package's own estimators, by
+module prefix. A bundle naming any other type is refused **by that
+type's name** before anything is built.
+
+The planted cases: a corrupted joblib is refused while the bundle still
+answers; a corrupted bundle is refused before it is read; a bundle
+carrying a type from outside the package is refused by name. skops
+cannot serialize everything (a booster holding a native handle, say) —
+registration then keeps joblib alone, `formats` says `["joblib"]`, and
+asking for the bundle is refused rather than answered with the joblib.
+
+### A registry that reaches another machine
+
+Two operations make the store protocol a registry across machines rather
+than a copy target:
+
+- **Mirror on register.** With `SQT_MODEL_MIRROR_URL` set — a directory,
+  or a bucket through fsspec — every package this process registers is
+  mirrored immediately after the local write and the signature, and
+  every promotion pushes the whole `promotions.jsonl` after it, because
+  the log *is* the stage and a stale log is a stale stage. A mirror that
+  cannot be written is an error, not a warning.
+- **Pull on demand.** `pull_model_package(model_id, store)` registers a
+  package from a store locally, verified on the way in: the manifest is
+  read first, the signature (when present or required) is checked over
+  the store's own bytes before anything is written, every hashed file is
+  checked against the manifest as it arrives, and the manifest is written
+  **last** — so a pull that fails at any point leaves a directory that is
+  not a registered model rather than a registered model that is wrong.
+  `list_remote_models(store)` says what a store holds.
+
+The runtime still lists, checks and appends by path in its own runs
+directory. That is the design: local is the root the runtime reads, the
+mirror is how another machine finds the package, and a pull is a
+verified registration rather than a remote read.
 
 ### `score_model` is for dates after training only
 
@@ -3327,22 +3517,19 @@ Not built here, and not accidentally half-built either:
 - **Semantic feature search** — `list_features` is a plain catalog
   lookup. A catalog of two dozen entries doesn't need ranking; revisited
   only if the catalog grows large enough that it does.
-- **A point-in-time fundamentals SOURCE** — the join is built (see
-  [Point-in-time joins](#point-in-time-joins)); the data is not. No shipped
-  provider exposes point-in-time fundamentals: `get_financial_ratios(symbol)`
-  takes no `as_of` at all, and yfinance, Polygon and Bloomberg all report
-  `point_in_time=False`. That is the honest blocker on the "analyze
-  fundamentals → turn them into model features → train" workflow, and it
-  needs a provider rather than a feature wrapper over today's reported
-  ratios. What changed is that the leakage-critical half — `available_time`
-  vs `event_time`, revisions, staleness bounds — is now written and tested,
-  so connecting a source is a data problem rather than a correctness one.
-- **Sequence and graph models** — the model adapters cover three task shapes
-  that all take a flat `(n_rows, n_features)` matrix. A sequence model
-  wanting `(entity, time, feature)` tensors, or a graph model wanting an
-  adjacency structure, needs `build_dataset` to emit a different shape;
-  that is a dataset change, not an adapter one, and inventing the interface
-  before there is a real case would shape it by speculation.
+- **Point-in-time fundamentals beyond Polygon** — Polygon's quarterly
+  financials are the shipped point-in-time source (see [A point-in-time
+  fundamentals source](#a-point-in-time-fundamentals-source)); yfinance and
+  Bloomberg still report `point_in_time=False`, and `get_financial_ratios`
+  takes no `as_of`. Polygon's contract stays `revisions="unknown"` until a
+  live pull is measured with `observed_revisions`, which needs an API key
+  this repository does not carry.
+- **Sequence and graph models** — every adapter takes a flat `(n_rows,
+  n_features)` matrix through `SampleIndex`. A sequence model wanting
+  `(entity, time, feature)` tensors needs a sequence estimator to measure
+  against, and none is in this environment; the repository's own spike
+  put a shared representation at +0.0014 R², so the kind waits for a
+  measured case rather than a speculative interface.
 - **Time-varying universe membership** — universes are static ticker
   lists, with no as-of membership, so historical models over a
   present-day universe carry survivorship bias (which the default
@@ -3355,31 +3542,18 @@ Not built here, and not accidentally half-built either:
   trading year at `1d`, about six weeks at `1h`) and nothing rescales them
   for a non-daily interval; you get a warning and are expected to set them
   yourself.
-- **`skops` export** — serialization stays joblib. `skops` would make a
-  sklearn-only estimator loadable without executing pickle, which is a
-  real property; the library is neither installed nor declared here, so
-  an export path whose success case cannot run in-tree would be a claim
-  without a test. The trust concern it addresses is covered from the
-  other side: `model.joblib` is verified against a manifest that can be
-  [signed](#signing-the-manifest) **before** it is deserialized.
-- **A remote registry root** — `FsspecArtifactStore` is a target for
-  mirroring a verified package to object storage, not a root the runtime
-  can be pointed at; see [The artifact store](#the-artifact-store-and-mirroring-a-package).
+- **A remote registry root** — the runtime lists, checks and appends by
+  path in its own runs directory. What exists is mirror-on-register and a
+  verified pull (see [A registry that reaches another
+  machine](#a-registry-that-reaches-another-machine)); pointing the
+  runtime itself at a bucket would need every directory operation behind
+  the store protocol, and nothing measured yet asks for it.
 - **Beta- and sector-neutral prediction transforms** — need per-ticker
   beta/sector metadata this repo does not carry, the same blocker
   `backtest.sizing` documents for its own deferred list. The **bridge**
   stays sign-only by design either way: `DIRECTION` is the only
   units-invariant signal for an engine that treats a `SCORE` as a raw
   leverage multiplier.
-- **Statistical model comparison.** `compare_models` ranks registered
-  models by a headline out-of-sample metric; it does not say whether the
-  difference between two of them is larger than the noise in one OOS
-  sample. The reason that needs care rather than a loop is worth stating:
-  selecting among candidates on `evaluate_model_portfolio`'s reported
-  Sharpe would turn those OOS folds into tuning data. The estimator
-  allowlist stays closed on the same principle — no arbitrary `sklearn`
-  import, no `exec()` — so adding an estimator means registering it, not
-  naming a class path.
 - **Per-estimator and per-feature preprocessing** — trees do not need
   standardization at all and pay for it anyway, and every feature gets the
   same transform. Neither changes a result today, so neither is urgent.

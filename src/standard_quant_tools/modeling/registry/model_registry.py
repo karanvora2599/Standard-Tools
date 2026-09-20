@@ -22,6 +22,8 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..specs import ModelSpec
+from . import mirror as _mirror
+from . import serialization as _serialization
 from . import signing as _signing
 from .environment import environment_fingerprint
 from .feature_provenance import (
@@ -113,6 +115,10 @@ def save_model(
     )
 
     model_path = _artifacts.save_joblib(directory, "model", estimator)
+    # The same estimator as a skops bundle when the package can write
+    # one: loadable without pickle. None -- and joblib alone -- when
+    # it cannot, which the manifest's `formats` records.
+    skops_path = _serialization.dump_estimator(directory, "model", estimator)
     model_spec_path = _artifacts.save_json(
         directory, "model_spec", model_spec.model_dump()
     )
@@ -149,6 +155,8 @@ def save_model(
         "model_spec.json": _artifacts.hash_file(Path(model_spec_path)),
         "preprocessing_stats.json": _artifacts.hash_file(Path(preprocessing_path)),
     }
+    if skops_path is not None:
+        content_hashes["model.skops"] = _artifacts.hash_file(Path(skops_path))
     if state_path is not None:
         content_hashes["preprocessing_state.json"] = _artifacts.hash_file(
             Path(state_path)
@@ -218,6 +226,7 @@ def save_model(
         dataset_spec_hash=dataset_spec_hash,
         dataset_spec_hash_version=dataset_spec_hash_version,
         content_hashes=content_hashes,
+        formats=["joblib", "skops"] if skops_path is not None else ["joblib"],
         # Derived from the DatasetSpec's own feature entries, so an aliased
         # column resolves through its real registry id instead of having
         # its alias looked up as one (which recorded "unavailable", or --
@@ -263,6 +272,13 @@ def save_model(
     # says unsigned is not enough.
     if _signing.signing_configured():
         _signing.sign_manifest(model_id)
+    # Pushed to the configured mirror as the last step, after the
+    # signature, so what lands there is the whole package. The import
+    # is local because `package` reads this module.
+    if _mirror.mirror_configured():
+        from .package import mirror_model_package
+
+        mirror_model_package(model_id, _mirror.configured_mirror())
     return manifest
 
 
@@ -470,8 +486,33 @@ def load_manifest(model_id: str, *, require_signature: bool = False) -> ModelMan
     return ModelManifest(**_artifacts.load_json(str(path)))
 
 
-def load_model(model_id: str) -> Any:
+def load_model(model_id: str, *, format: Optional[str] = None) -> Any:
+    """
+    The registered estimator, from `model.joblib` or -- `format='skops'`,
+    or `SQT_MODEL_FORMAT=skops` -- from the skops bundle, which is loaded
+    without executing pickle. Either file is verified against the
+    manifest before it is read. A model registered without a bundle
+    refuses the skops format by name rather than falling back.
+    """
     directory = _artifacts.run_dir(model_id)
+    chosen = format or _serialization.default_format()
+    if chosen not in _serialization.FORMATS:
+        raise ValidationError(
+            f"load_model: format={chosen!r} is not one of {list(_serialization.FORMATS)}."
+        )
+    if chosen == "skops":
+        bundle = directory / "model.skops"
+        if not bundle.exists():
+            manifest = load_manifest(model_id)  # names a missing model itself
+            raise ValidationError(
+                f"model {model_id!r} has no skops bundle: it was registered with "
+                f"formats {manifest.formats}. Load it with format='joblib', or "
+                "retrain with skops installed to get a bundle."
+            )
+        _artifacts.verify_file(
+            bundle, _expected_hash(model_id, "model.skops"), "model.skops"
+        )
+        return _serialization.load_estimator(str(bundle))
     path = directory / "model.joblib"
     if not path.exists():
         raise ValidationError(f"no registered model with model_id={model_id!r}")

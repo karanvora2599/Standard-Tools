@@ -112,6 +112,32 @@ def n_search_candidates(search_spec: Any) -> int:
     return int(size)
 
 
+def rank_turnover(
+    predictions: np.ndarray, dates: np.ndarray, entities: np.ndarray
+) -> float:
+    """
+    How much a signal's ordering moves from one date to the next: the
+    mean absolute change in each entity's percentile rank between
+    consecutive dates, averaged over dates, in [0, 1]. An entity absent
+    on either date of a pair contributes nothing to that pair. Zero for
+    a signal whose ordering never changes; a signal reshuffled at random
+    every date sits near one third.
+    """
+    frame = pd.DataFrame(
+        {
+            "date": np.asarray(dates),
+            "entity": np.asarray(entities),
+            "p": np.asarray(predictions, dtype=float),
+        }
+    )
+    frame["rank"] = frame.groupby("date")["p"].rank(pct=True)
+    wide = frame.pivot_table(index="date", columns="entity", values="rank")
+    if len(wide) < 2:
+        return 0.0
+    per_date = wide.sort_index().diff().abs().mean(axis=1).iloc[1:]
+    return float(per_date.mean()) if per_date.notna().any() else 0.0
+
+
 def _score(
     task: str,
     scoring: str,
@@ -119,6 +145,9 @@ def _score(
     predictions: np.ndarray,
     probabilities: Optional[np.ndarray],
     dates: np.ndarray,
+    *,
+    entities: Optional[np.ndarray] = None,
+    turnover_penalty: float = 0.0,
 ) -> float:
     """
     One inner fold's score, always oriented so that HIGHER IS BETTER.
@@ -140,6 +169,17 @@ def _score(
         labels = np.asarray(y_true, dtype=float)
         value, _pairs = concordance_index(labels[:, 0], labels[:, 1], predictions)
         return value
+    if scoring == "cs_rank_ic_net_of_turnover":
+        if entities is None:
+            raise ValidationError(
+                "cs_rank_ic_net_of_turnover needs the rows' entities to measure "
+                "turnover on."
+            )
+        series = cross_sectional_ic(y_true, predictions, dates, "spearman")
+        ic = float(series.mean()) if len(series) else float("nan")
+        return ic - float(turnover_penalty) * rank_turnover(
+            predictions, dates, entities
+        )
     if scoring in ("cs_rank_ic", "cs_ic"):
         method = "spearman" if scoring == "cs_rank_ic" else "pearson"
         series = cross_sectional_ic(y_true, predictions, dates, method)
@@ -228,6 +268,7 @@ def search_best_params(
     fit_predict: FitPredict,
     embargo: int = 0,
     label_end: Optional[np.ndarray] = None,
+    max_parallelism: int = 1,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Choose estimator parameters using only `train_frame`.
@@ -327,6 +368,8 @@ def search_best_params(
             predictions,
             probabilities,
             inner_test["date"].to_numpy(),
+            entities=inner_test["entity"].to_numpy(),
+            turnover_penalty=float(getattr(search_spec, "turnover_penalty", 0.0)),
         )
 
     if search_spec.method == "tpe":
@@ -334,10 +377,39 @@ def search_best_params(
             search_spec, base_params, random_seed, score_fold, len(inner_frames)
         )
     else:
+        candidates = list(search_candidates(search_spec, random_seed))
+        merged_candidates = [{**base_params, **params} for params in candidates]
+        n_folds = len(inner_frames)
+        if int(max_parallelism) > 1 and len(merged_candidates) > 1:
+            # The first candidate runs alone, so each inner fold's
+            # preprocessing is fitted once and cached before anything
+            # reads it; every remaining (candidate, fold) pair is then
+            # scored side by side. Scores are gathered in spec order
+            # whatever order the threads finish in, so the result is the
+            # sequential one.
+            from concurrent.futures import ThreadPoolExecutor
+
+            first = [score_fold(merged_candidates[0], i) for i in range(n_folds)]
+            jobs = [
+                (c, i) for c in range(1, len(merged_candidates)) for i in range(n_folds)
+            ]
+            with ThreadPoolExecutor(max_workers=int(max_parallelism)) as pool:
+                rest = list(
+                    pool.map(
+                        lambda job: score_fold(merged_candidates[job[0]], job[1]), jobs
+                    )
+                )
+            per_candidate = [first] + [
+                rest[k * n_folds : (k + 1) * n_folds]
+                for k in range(len(merged_candidates) - 1)
+            ]
+        else:
+            per_candidate = [
+                [score_fold(merged, i) for i in range(n_folds)]
+                for merged in merged_candidates
+            ]
         results = []
-        for params in search_candidates(search_spec, random_seed):
-            merged = {**base_params, **params}
-            fold_scores = [score_fold(merged, i) for i in range(len(inner_frames))]
+        for params, fold_scores in zip(candidates, per_candidate):
             finite = [s for s in fold_scores if s is not None and np.isfinite(s)]
             results.append(
                 {
@@ -362,6 +434,8 @@ def search_best_params(
         "scoring": search_spec.scoring,
         "n_candidates": len(results),
         "n_inner_folds": len(fold_masks),
+        "max_parallelism": int(max_parallelism),
+        "turnover_penalty": float(getattr(search_spec, "turnover_penalty", 0.0)),
         "embargo": int(embargo),
         # Per inner fold. Zero everywhere means the training window
         # carried no label ends, not that nothing overlapped.

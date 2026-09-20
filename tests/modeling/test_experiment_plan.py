@@ -349,6 +349,7 @@ class TestTheBudget:
             "refit": 1,
             "candidates_per_fold": 3,
             "max_fits": planned,
+            "max_parallelism": 1,
         }
 
     def test_validate_model_spec_reports_the_plan_and_the_ceiling(

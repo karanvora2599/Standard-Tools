@@ -20,7 +20,7 @@ runtime leads with.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -93,14 +93,135 @@ def concordance_index(
     return float(concordant / comparable), int(comparable)
 
 
+def censoring_distribution(
+    durations: np.ndarray, events: np.ndarray
+) -> "tuple[np.ndarray, np.ndarray]":
+    """
+    The Kaplan-Meier estimate of the CENSORING survival G(t) = P(C > t),
+    with events and censorings swapped and a tie between the two resolved
+    with the event first -- the convention the inverse-probability weights
+    below need, and the one scikit-survival uses, so the two agree to the
+    last digit. Returned as the distinct times and G at each.
+    """
+    t = np.asarray(durations, dtype=float)
+    e = np.asarray(events, dtype=float)
+    order = np.argsort(t, kind="stable")
+    ts, es = t[order], e[order]
+    unique_t, first = np.unique(ts, return_index=True)
+    n_at_risk = ts.size - first
+    group = np.searchsorted(unique_t, ts)
+    n_events = np.bincount(group, weights=es, minlength=unique_t.size)
+    n_censored = np.bincount(group, weights=1.0 - es, minlength=unique_t.size)
+    denominator = n_at_risk - n_events
+    ratio = np.divide(
+        n_censored,
+        denominator,
+        out=np.zeros_like(n_censored),
+        where=(n_censored != 0) & (denominator > 0),
+    )
+    return unique_t, np.cumprod(1.0 - ratio)
+
+
+def _step_at(times: np.ndarray, knots: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """A right-continuous step function, 1 before its first knot."""
+    index = np.searchsorted(knots, np.asarray(times, dtype=float), side="right") - 1
+    return np.where(index >= 0, values[np.clip(index, 0, None)], 1.0)
+
+
+def brier_time_grid(
+    train_y: np.ndarray, test_y: np.ndarray, *, max_points: int = 64
+) -> np.ndarray:
+    """
+    Where the Brier score is read: the distinct test event times inside
+    BOTH follow-ups -- at or after the later start, strictly before the
+    earlier end -- thinned evenly to `max_points`. Empty when fewer than
+    two remain, which is the honest answer for a fold too short to score.
+    """
+    train = np.asarray(train_y, dtype=float)
+    test = np.asarray(test_y, dtype=float)
+    low = max(train[:, 0].min(), test[:, 0].min())
+    high = min(train[:, 0].max(), test[:, 0].max())
+    candidates = np.unique(test[test[:, 1] == 1.0, 0])
+    candidates = candidates[(candidates >= low) & (candidates < high)]
+    if candidates.size < 2:
+        return np.empty(0, dtype=float)
+    if candidates.size > max_points:
+        picks = np.linspace(0, candidates.size - 1, max_points).round().astype(int)
+        candidates = candidates[np.unique(picks)]
+    return candidates
+
+
+def brier_scores(
+    train_y: np.ndarray,
+    test_y: np.ndarray,
+    survival_probs: np.ndarray,
+    times: np.ndarray,
+) -> np.ndarray:
+    """
+    The time-dependent Brier score of Graf et al. (1999) at each of
+    `times`: the squared error of S(t | x) against "still going at t",
+    with each row weighted by the inverse probability of NOT having been
+    censored by the time its contribution is decided -- so a censored row
+    counts fully while it is still observed and not at all after, and the
+    rows that are observed stand in for those that are not. G is estimated
+    on the TRAINING labels, the same reference the model was fitted on.
+    """
+    train = np.asarray(train_y, dtype=float)
+    test = np.asarray(test_y, dtype=float)
+    grid = np.asarray(times, dtype=float)
+    S = np.asarray(survival_probs, dtype=float)
+    if S.shape != (test.shape[0], grid.size):
+        raise ValidationError(
+            f"survival probabilities must be (n_test, n_times) = "
+            f"({test.shape[0]}, {grid.size}); got {S.shape}."
+        )
+    knots, G = censoring_distribution(train[:, 0], train[:, 1])
+    g_at_times = _step_at(grid, knots, G)
+    g_at_rows = _step_at(test[:, 0], knots, G)
+    g_at_times = np.where(g_at_times == 0, np.inf, g_at_times)
+    g_at_rows = np.where(g_at_rows == 0, np.inf, g_at_rows)
+    scores = np.empty(grid.size, dtype=float)
+    for i, t in enumerate(grid):
+        est = S[:, i]
+        is_case = ((test[:, 0] <= t) & (test[:, 1] == 1.0)).astype(float)
+        is_control = (test[:, 0] > t).astype(float)
+        scores[i] = np.mean(
+            np.square(est) * is_case / g_at_rows
+            + np.square(1.0 - est) * is_control / g_at_times[i]
+        )
+    return scores
+
+
+def integrated_brier_score(scores: np.ndarray, times: np.ndarray) -> float:
+    """The trapezoid integral of the Brier curve over its grid, divided by
+    the grid's span: one number in [0, 1], lower is better, 0.25 is a
+    coin flip at every horizon."""
+    bs = np.asarray(scores, dtype=float)
+    grid = np.asarray(times, dtype=float)
+    if grid.size < 2:
+        return float("nan")
+    area = np.sum((bs[1:] + bs[:-1]) / 2.0 * np.diff(grid))
+    return float(area / (grid[-1] - grid[0]))
+
+
 def survival_metrics(
     y_true: np.ndarray,
     risk: np.ndarray,
     dates: Optional[np.ndarray] = None,
+    *,
+    train_y: Optional[np.ndarray] = None,
+    survival_function: Optional[Callable[[np.ndarray], np.ndarray]] = None,
 ) -> Dict[str, float]:
     """
     Concordance pooled over the fold, the per-date concordance summarized
-    across dates, and how much of the label was actually observed.
+    across dates, how much of the label was actually observed, and --
+    when the estimator can say how likely each row is to have gone by a
+    given time -- the integrated Brier score of those probabilities.
+
+    `survival_function(times)` returns S(t | x) for the fold's test rows
+    at `times`; `train_y` is the training label the censoring weights
+    are estimated on. Without both, the Brier score is not reported
+    rather than reported as something else.
     """
     y = np.asarray(y_true, dtype=float)
     if y.ndim != 2 or y.shape[1] != 2:
@@ -137,7 +258,29 @@ def survival_metrics(
             float(series.std(ddof=1)) if series.size > 1 else float("nan")
         )
         out["cs_concordance_n_dates"] = float(series.size)
+    if train_y is not None and survival_function is not None:
+        times = brier_time_grid(train_y, y)
+        if times.size >= 2:
+            probabilities = np.asarray(survival_function(times), dtype=float)
+            curve = brier_scores(train_y, y, probabilities, times)
+            out["integrated_brier"] = integrated_brier_score(curve, times)
+            out["brier_n_times"] = float(times.size)
+            out["brier_horizon_min"] = float(times[0])
+            out["brier_horizon_max"] = float(times[-1])
+        else:
+            # Too few event times inside both follow-ups to integrate
+            # over; NaN keeps the key and says so.
+            out["integrated_brier"] = float("nan")
     return out
 
 
-__all__ = ["EVENT_COL", "concordance_index", "survival_labels", "survival_metrics"]
+__all__ = [
+    "EVENT_COL",
+    "brier_scores",
+    "brier_time_grid",
+    "censoring_distribution",
+    "concordance_index",
+    "integrated_brier_score",
+    "survival_labels",
+    "survival_metrics",
+]

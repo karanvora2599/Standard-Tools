@@ -130,11 +130,26 @@ def _calibrated(estimator, model_spec, n_rows: int):
     return CalibratedClassifierCV(estimator, method=method, cv=folds)
 
 
-def _instantiate(cls: Any, params: Dict[str, Any], random_seed: int) -> Any:
+def _instantiate(
+    cls: Any, params: Dict[str, Any], random_seed: int, n_jobs: Optional[int] = None
+) -> Any:
+    """
+    Build an estimator from its params, plus what the run supplies: the
+    seed, and -- for a constructor that accepts `n_jobs` and params that
+    do not set it -- the budget's parallelism. An estimator whose
+    signature has neither is built from its params alone.
+    """
     sig = inspect.signature(cls.__init__)
     kwargs = dict(params)
     if "random_state" in sig.parameters:
         kwargs["random_state"] = random_seed
+    if (
+        n_jobs
+        and int(n_jobs) > 1
+        and "n_jobs" in sig.parameters
+        and "n_jobs" not in kwargs
+    ):
+        kwargs["n_jobs"] = int(n_jobs)
     return cls(**kwargs)
 
 
@@ -417,7 +432,12 @@ def _fit_quantile_models(
     models: Dict[float, Any] = {}
     for q in model_spec.quantiles:
         quantile_params = {**params, **support.fixed, support.param: float(q)}
-        model = _instantiate(estimator_cls, quantile_params, model_spec.random_seed)
+        model = _instantiate(
+            estimator_cls,
+            quantile_params,
+            model_spec.random_seed,
+            n_jobs=model_spec.budget.max_parallelism,
+        )
         _fit(model, arrays.X, arrays.y, arrays.sample_weight)
         models[float(q)] = model
     return models
@@ -447,7 +467,12 @@ def _conformal_radius(
     weights = arrays.sample_weight
 
     def fit_predict(train_mask, test_mask):
-        model = _instantiate(estimator_cls, params, model_spec.random_seed)
+        model = _instantiate(
+            estimator_cls,
+            params,
+            model_spec.random_seed,
+            n_jobs=model_spec.budget.max_parallelism,
+        )
         _fit(
             model,
             arrays.X[train_mask],
@@ -808,7 +833,12 @@ def run_experiment(
                         inner_key, feature_ids, *matrices, projectable=projectable
                     )
                 inner_train_X, inner_test_X = matrices
-                candidate = _instantiate(estimator_cls, params, model_spec.random_seed)
+                candidate = _instantiate(
+                    estimator_cls,
+                    params,
+                    model_spec.random_seed,
+                    n_jobs=model_spec.budget.max_parallelism,
+                )
                 inner_index = SampleIndex.from_frame(inner_train)
                 inner_arrays = adapter.prepare(
                     model_spec,
@@ -851,10 +881,16 @@ def run_experiment(
                 label_end=(
                     train_df[LABEL_END_COL].to_numpy() if has_label_end else None
                 ),
+                max_parallelism=model_spec.budget.max_parallelism,
             )
             search_reports.append(search_report)
 
-        estimator = _instantiate(estimator_cls, fold_params, model_spec.random_seed)
+        estimator = _instantiate(
+            estimator_cls,
+            fold_params,
+            model_spec.random_seed,
+            n_jobs=model_spec.budget.max_parallelism,
+        )
         arrays = adapter.prepare(
             model_spec, train_index, train_X, train_y, sample_weight
         )
@@ -1058,6 +1094,7 @@ def run_experiment(
             "ndcg_at_5",
             "ndcg_at_10",
             "concordance",
+            "integrated_brier",
         ):
             values = np.array([m.get(key, np.nan) for m in fold_metrics], dtype=float)
             values = values[np.isfinite(values)]
@@ -1120,6 +1157,7 @@ def run_experiment(
             "refit": plan.n_fits_refit,
             "candidates_per_fold": plan.n_candidates,
             "max_fits": plan.max_fits,
+            "max_parallelism": int(model_spec.budget.max_parallelism),
         },
         # Pipeline fits this run did and did not have to do: `misses` were
         # fitted here, `hits` and `projections` were read off an earlier
@@ -1174,7 +1212,10 @@ def run_experiment(
         )
     full_y = _labels(model_spec, panel)
     final_estimator = _instantiate(
-        estimator_cls, model_spec.estimator.params, model_spec.random_seed
+        estimator_cls,
+        model_spec.estimator.params,
+        model_spec.random_seed,
+        n_jobs=model_spec.budget.max_parallelism,
     )
     # The deployed estimator is calibrated the same way the folds were. A
     # model validated with calibrated probabilities and deployed without

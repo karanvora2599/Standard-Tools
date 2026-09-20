@@ -373,7 +373,23 @@ class SurvivalAdapter(ModelAdapter):
         return np.asarray(estimator.predict(X.to_numpy()), dtype=float)
 
     def metrics(self, model_spec, estimator, X, y_true, score, dates, train_y):
-        return survival_metrics(y_true, score, dates)
+        # An estimator that can say how likely each row is to have gone
+        # by a given time gets its probabilities scored too; one that
+        # only orders is scored on the ordering alone.
+        survival_function = None
+        if hasattr(estimator, "predict_survival_function"):
+            matrix = X.to_numpy()
+
+            def survival_function(times):
+                return estimator.predict_survival_function(matrix, times)
+
+        return survival_metrics(
+            y_true,
+            score,
+            dates,
+            train_y=train_y,
+            survival_function=survival_function,
+        )
 
     def fold_ic(self, y_true, score, dates):
         # An IC of a risk score against a censored duration is not a

@@ -74,6 +74,7 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.specs import SCORE_TASKS, TASKS, Task
 
 from . import artifacts as _artifacts
+from .assets import is_qualified
 from .registry.model_registry import load_manifest
 
 
@@ -339,6 +340,17 @@ def oos_predictions_to_signal_panel(
 
     predictions_df = _artifacts.load_artifact(str(oos_predictions_uri))
     _validate_predictions_frame(predictions_df, str(oos_predictions_uri))
+    qualified = sorted(
+        {str(e) for e in predictions_df["entity"].unique() if is_qualified(str(e))}
+    )
+    if qualified:
+        raise ValidationError(
+            f"oos_predictions_to_signal_panel: entities {qualified[:5]} carry a "
+            "venue or asset class, and the backtest runtime addresses prices by "
+            "bare symbol, so a signal panel keyed by them would fetch nothing or "
+            "the wrong series. Use evaluate_model_portfolio, which resolves each "
+            "entity's fetch symbol, or train on bare symbols."
+        )
     dates = predictions_df["date"].dt.strftime("%Y-%m-%d")
     raw = predictions_df["prediction"].to_numpy(dtype=float)
 

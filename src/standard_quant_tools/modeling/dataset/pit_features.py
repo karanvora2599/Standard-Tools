@@ -35,6 +35,7 @@ import pandas as pd
 from standard_quant_tools.data.temporal import TemporalContract, require_pit
 from standard_quant_tools.error import ValidationError
 
+from ..assets import fetch_plan
 from ..features.base import FeatureContext, FeatureDefinition, FeatureScope
 from .point_in_time import (
     AVAILABLE_TIME,
@@ -201,9 +202,20 @@ def join_point_in_time_features(
         start = (
             pd.Timestamp(spec.start) - pd.Timedelta(days=deepest + RECORD_HISTORY_DAYS)
         ).strftime("%Y-%m-%d")
+        # Fetched by symbol, then re-keyed to the canonical entity the
+        # panel carries, so a venue-qualified universe joins its records.
+        plan = fetch_plan(list(spec.universe))
         records = _fetch_records(
-            provider, frame_kind, fields, spec.universe, start, spec.end, purpose
+            provider, frame_kind, fields, list(plan.values()), start, spec.end, purpose
         )
+        by_symbol = {symbol: entity for entity, symbol in plan.items()}
+        if "entity" in records.columns and any(
+            entity != symbol for entity, symbol in plan.items()
+        ):
+            records = records.copy()
+            records["entity"] = records["entity"].map(
+                lambda value: by_symbol.get(str(value), value)
+            )
         frames[frame_kind] = {"records": records, "contract": contracts[frame_kind]}
         dropped = int(records.attrs.get("n_dropped_without_available_time", 0) or 0)
         if dropped:

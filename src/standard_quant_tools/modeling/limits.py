@@ -43,10 +43,16 @@ DEFAULT_MAX_FITS = 500
 #: workflow rather than an experiment.
 MAX_FITS_CEILING = 100_000
 
+#: The most threads a budget may score grid-search candidates on side
+#: by side, and hand to an estimator as `n_jobs`. Above this the
+#: machine, not the spec, is the constraint.
+MAX_PARALLELISM_CEILING = 64
+
 __all__ = [
     "DEFAULT_MAX_FITS",
     "MAX_EXPANDED_COLUMNS",
     "MAX_FITS_CEILING",
     "MAX_LAG",
+    "MAX_PARALLELISM_CEILING",
     "MAX_LAGS_PER_FEATURE",
 ]

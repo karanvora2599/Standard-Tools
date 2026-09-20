@@ -2,6 +2,7 @@
 needs the OHLCV panel's Volume column (every other feature file in this
 package only needs Open/High/Low/Close)."""
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.indicators.volume import mfi as _mfi
@@ -51,6 +52,31 @@ def _volume_obv_roc(
     return obv_change / volume_traded.where(volume_traded > 0)
 
 
+def _volume_amihud_illiquidity(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
+) -> pd.Series:
+    """Amihud (2002): the mean of |return| per dollar traded over `period`
+    bars, times 1e6 -- the price move per million traded. A bar with no
+    volume is left out of the mean; a window with fewer than half its
+    bars traded is NaN."""
+    returns = ohlcv["Close"].astype(float).pct_change(fill_method=None).abs()
+    dollar = ohlcv["Close"].astype(float) * ohlcv["Volume"].astype(float)
+    ratio = (returns / dollar.where(dollar > 0)) * 1e6
+    return ratio.rolling(period, min_periods=max(1, period // 2)).mean()
+
+
+def _volume_surprise(
+    ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
+) -> pd.Series:
+    """log(Volume / trailing `period`-bar mean Volume), the trailing mean
+    taken BEFORE the current bar so the bar is compared with what came
+    before it. Zero volume on either side is NaN, not -inf."""
+    volume = ohlcv["Volume"].astype(float)
+    trailing = volume.shift(1).rolling(period, min_periods=period).mean()
+    ratio = volume / trailing.where(trailing > 0)
+    return np.log(ratio.where(ratio > 0))
+
+
 def _volume_vwap_deviation(
     ohlcv: pd.DataFrame, context: FeatureContext, period: int = 20
 ) -> pd.Series:
@@ -93,6 +119,32 @@ register_feature(
         scope=FeatureScope.ENTITY,
         requires=["Close", "Volume"],
         lookback=20,
+    )
+)
+register_feature(
+    FeatureDefinition(
+        id="volume.amihud_illiquidity",
+        description="Amihud illiquidity: mean |return| per dollar traded over "
+        "`period` bars, per million.",
+        fn=_volume_amihud_illiquidity,
+        default_params={"period": 20},
+        temporal_support=TemporalSupport.PIT_SAFE,
+        scope=FeatureScope.ENTITY,
+        requires=["Close", "Volume"],
+        lookback=21,
+    )
+)
+register_feature(
+    FeatureDefinition(
+        id="volume.volume_surprise",
+        description="log of this bar's volume over the trailing `period`-bar "
+        "mean volume before it.",
+        fn=_volume_surprise,
+        default_params={"period": 20},
+        temporal_support=TemporalSupport.PIT_SAFE,
+        scope=FeatureScope.ENTITY,
+        requires=["Volume"],
+        lookback=21,
     )
 )
 register_feature(

@@ -1,5 +1,61 @@
 # Changelog
 
+## Set aside is not the same as decided against
+
+Seven things the plan's phases set aside, built.
+
+**Survival functions and the integrated Brier score.** Every survival
+estimator now answers "how likely is this row to have gone by t": Cox
+through Breslow's baseline (the Nelson-Aalen estimator with every risk
+zero), the XGBoost Cox objective the same way from its hazard ratios, the
+AFT objective parametrically. The integrated Brier score under censoring
+is implemented natively, weighted by a reverse Kaplan-Meier on the
+training labels with the tie convention scikit-survival uses, and agrees
+with that library to 1e-12 when it is installed as the test oracle. It is
+reported beside concordance per fold, in the OOS aggregate and in the
+cpcv distribution.
+
+**The skops bundle.** With skops installed, registration writes
+`model.skops` beside the joblib, hashed into the manifest;
+`load_model(format="skops")` or `SQT_MODEL_FORMAT=skops` loads it without
+executing pickle, trusting skops' defaults and this package's own types
+and refusing any other by name. A model whose estimator skops cannot
+serialize says so in `formats` and refuses the format rather than
+answering with the joblib.
+
+**A registry that reaches another machine.** `SQT_MODEL_MIRROR_URL`
+mirrors every registration and every promotion as they happen;
+`pull_model_package` registers a package from a store locally, the
+signature checked over the store's bytes before anything is written,
+every hashed file checked as it arrives, the manifest written last.
+
+**`budget.max_parallelism`.** It controls two things now: grid and random
+search candidates are scored on threads, gathered in spec order whatever
+order they finish in, and estimators that accept `n_jobs` receive it. The
+result does not depend on it, which the test pins; TPE stays sequential
+because a parallel study changes what the sampler has seen.
+
+**Rank IC net of turnover.** `scoring="cs_rank_ic_net_of_turnover"` with
+`turnover_penalty` scores inner folds as rank IC minus the penalty times
+the candidate's rank turnover, so the search cannot select the signal
+whose edge would be traded away. A preference weight in IC units, not a
+cost model, and the spec refuses the two apart.
+
+**Four price/volume features.** `risk.realized_semivariance`,
+`risk.bipower_variation`, `volume.amihud_illiquidity` and
+`volume.volume_surprise`, each with a planted answer.
+
+**Asset keys.** A universe entry is `SYMBOL[@VENUE][~CLASS]`: the symbol
+reaches the provider, the canonical key is the entity, a venue every key
+shares is the calendar, and two keys that fetch as one symbol are refused
+where they would have been blended into one entity. The bridge refuses a
+qualified universe by name because the backtest runtime speaks bare
+symbols.
+
+Still set aside, and said so in the guide: the sequence representation
+kind (no sequence estimator to measure), Polygon's revisions measurement
+(needs a live key), a remote registry root (nothing measured asks for it).
+
 ## The hashes said the package was intact, and could not say whose it was
 
 Phase 10 of `Development/modeling_runtime_plan.md`, the last phase.

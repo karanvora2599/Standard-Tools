@@ -191,6 +191,9 @@ def modeling_capabilities() -> Dict[str, Any]:
             # What `FsspecArtifactStore` needs to mirror a verified model
             # package to object storage.
             "fsspec": _importable("fsspec"),
+            # What writes `model.skops` beside `model.joblib`: the estimator
+            # loadable without executing pickle.
+            "skops": _importable("skops"),
             "cvxpy": _importable("cvxpy"),
         },
         # A SIBLING, not an entry in the map above. `optional_dependencies`
