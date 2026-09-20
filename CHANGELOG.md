@@ -1,5 +1,41 @@
 # Changelog
 
+## Registration was the last thing anyone recorded about a model
+
+Phase 9 of `Development/modeling_runtime_plan.md`.
+
+A model was fitted, validated and registered, and from then on the
+registry knew exactly as much about it as it had on the day: not whether
+anyone had read the folds and accepted them, not whether it was being
+paper traded or was live, and not whether the universe it scored this
+morning still looked like the panel it was trained on. A model reached
+production the way models do, by being the one somebody was using.
+
+**`promote_model`** records a lifecycle decision -- `candidate ->
+validated -> staging -> production`, or `archived` from anywhere -- as one
+line appended to `promotions.jsonl` beside the manifest: from, to, reason,
+actor, timestamp, evidence. The manifest is never rewritten, because it is
+content-hashed and every integrity check rests on that; the stage is
+whatever the last line says, and a model with no log is a candidate. One
+stage at a time on the way up, so the step that says "the evidence was
+read" cannot be skipped; a demotion is allowed and recorded like any other
+decision; `archived` is terminal. `list_models` filters by `stage` and
+`inspect_model`'s summary carries the history.
+
+**`monitor_model`** compares a scoring run with references the registration
+kept: a seeded sample of raw training rows, a sample of the out-of-sample
+predictions and a per-feature profile, all hashed into the manifest.
+`score_model` now writes the raw feature rows it predicted from beside the
+predictions and returns them as `features_uri`. The report is PSI and KS
+per feature, prediction drift, and -- when outcomes are supplied -- the
+realized cross-sectional IC as a z-score against the validation's mean and
+dispersion. Every status is reported with the threshold it was read
+against, `overall_status` is the worst of the known ones, and a model
+registered before the references existed is refused rather than measured
+against its own scoring window, which would find no drift by construction.
+
+Two tools take the runtime to 22 and the surface to 211.
+
 ## A row's date was read off whichever frame was in hand
 
 Phase 8 of `Development/modeling_runtime_plan.md`, the part that is built

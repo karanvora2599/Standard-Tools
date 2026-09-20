@@ -254,7 +254,15 @@ def _scalar(annotation: Any, info: Any, name: str, salt: int = 0) -> Any:
         # of feature specs is built by calling `build` N times, and several
         # tools refuse duplicate labels or duplicate feature ids -- which is
         # correct of them, and made those tools unsynthesizable.
-        return "a" if not salt else f"a{salt}"
+        value = "a" if not salt else f"a{salt}"
+        # A `min_length` on a string, not only on a list: `promote_model`
+        # asks for a reason of at least eight characters -- a promotion is
+        # read months later -- and "a" made it the one tool the fuzzer
+        # could not build.
+        floor = _minimum_length(info)
+        if len(value) < floor:
+            value = (value * (floor // len(value) + 1))[:floor]
+        return value
     if annotation is dict:
         # A bare `dict` annotation, which carries no value type to read.
         return _mapping_for(name)

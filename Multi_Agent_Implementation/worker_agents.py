@@ -133,6 +133,10 @@ _MODEL_BUILDER_TOOLS = [
     "list_models",
     "compare_models",
     "score_predictions",
+    # Lifecycle and monitoring: a promotion is a decision this agent records
+    # with its evidence, and drift is what it checks before recommending one.
+    "promote_model",
+    "monitor_model",
 ]
 
 
@@ -875,6 +879,16 @@ evaluate_model_portfolio: turn a model's out-of-sample predictions into a
 shared-cash portfolio backtest with real costs. This is the only honest
 answer to "would this have made money". Out-of-sample IC is not that
 answer and must never be reported as if it were.
+
+promote_model: record a lifecycle decision (candidate -> validated ->
+staging -> production -> archived) with a reason and the evidence it
+rested on. One stage at a time; the log is append-only and the manifest
+never changes.
+
+monitor_model: compare a scoring run's features and predictions with the
+references kept at registration (PSI and KS per feature, prediction
+drift, realized IC when outcomes are supplied) and report drift by name.
+Run it before trusting a production model's next batch of scores.
 
 Report metrics exactly as the tools return them, and never describe an
 in-sample number as out-of-sample.""",

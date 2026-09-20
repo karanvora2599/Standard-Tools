@@ -50,8 +50,10 @@ from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
 from ..engine import run_experiment as _run_experiment
 from ..features.registry import list_features as _list_features
+from ..monitoring import THRESHOLDS, drift_report, prediction_drift, realized_ic
 from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
-from ..registry.model_registry import load_manifest
+from ..registry.lifecycle import current_stage, promote, promotions
+from ..registry.model_registry import load_manifest, load_monitoring_reference
 from ..scoring import score_model as _score_model
 from ..specs import TASKS, DatasetSpec, FeatureSpec, TargetSpec, targets_for_task
 from .dataset_tools import (  # noqa: F401
@@ -75,6 +77,7 @@ from .models import (
     EvaluateModelPortfolioInput,
     EvaluateModelPortfolioResult,
     FeatureCatalogEntry,
+    FeatureDriftRow,
     InspectModelInput,
     InspectModelResult,
     JoinPointInTimeInput,
@@ -90,9 +93,13 @@ from .models import (
     ListModelsResult,
     ModelComparison,
     ModelSummary,
+    MonitorModelInput,
+    MonitorModelResult,
     PairedComparison,
     PitRecordsInput,
     PitValidationResult,
+    PromoteModelInput,
+    PromoteModelResult,
     RegisterExternalPanelInput,
     RegisterExternalPanelResult,
     RunModelExperimentInput,
@@ -749,6 +756,10 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             "model_input_columns": manifest.model_input_columns,
             "target_id": manifest.target_id,
             "created_at_utc": manifest.created_at_utc,
+            # Where the model is in its lifecycle and every decision that
+            # moved it, read off the append-only log beside the manifest.
+            "stage": current_stage(input_data.model_id),
+            "promotions": [p.to_dict() for p in promotions(input_data.model_id)],
         }
     elif input_data.view == "feature_importance":
         data = {"feature_importance_summary": manifest.feature_importance_summary}
@@ -870,6 +881,11 @@ def list_models(input_data: ListModelsInput) -> ListModelsResult:
             continue
         if input_data.task and manifest.task != input_data.task:
             continue
+        # Derived from the promotion log beside the manifest, never stored
+        # on the manifest itself, which stays content-hashed and immutable.
+        stage = current_stage(manifest.model_id)
+        if input_data.stage and stage != input_data.stage:
+            continue
         metric, value = _headline(manifest.task, manifest.oos_metrics)
         summaries.append(
             ModelSummary(
@@ -882,6 +898,7 @@ def list_models(input_data: ListModelsInput) -> ListModelsResult:
                 headline_metric=metric,
                 headline_value=value,
                 dataset_id=manifest.dataset_id,
+                stage=stage,
             )
         )
     summaries.sort(key=lambda s: s.created_at or "", reverse=True)
@@ -889,6 +906,147 @@ def list_models(input_data: ListModelsInput) -> ListModelsResult:
         models=summaries[: input_data.limit],
         n_total=len(summaries),
         registry_dir=str(directory),
+    )
+
+
+def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
+    """
+    Record a lifecycle decision for a registered model.
+
+    A promotion is a decision, which is why it is a tool and not a field:
+    it has a reason, an actor, evidence and a time, and it can be
+    reversed. The manifest is never touched -- it stays content-hashed
+    and immutable -- and the stage is whatever the last line of the
+    append-only log says. One stage at a time on the way up, so nothing
+    reaches production without somebody having recorded that the evidence
+    was read.
+    """
+    record = promote(
+        input_data.model_id,
+        input_data.to_stage,
+        input_data.reason,
+        actor=input_data.actor,
+        evidence=input_data.evidence,
+    )
+    return PromoteModelResult(
+        model_id=input_data.model_id,
+        from_stage=record.from_stage,
+        to_stage=record.to_stage,
+        timestamp_utc=record.timestamp_utc,
+        actor=record.actor,
+        history=[p.to_dict() for p in promotions(input_data.model_id)],
+    )
+
+
+def _sibling_features_uri(predictions_uri: str) -> Optional[str]:
+    """The features file score_model writes beside a predictions file."""
+    from pathlib import Path
+
+    path = Path(str(predictions_uri))
+    if not path.name.startswith("predictions_"):
+        return None
+    candidate = path.with_name(path.name.replace("predictions_", "features_", 1))
+    return str(candidate) if candidate.exists() else None
+
+
+def monitor_model(input_data: MonitorModelInput) -> MonitorModelResult:
+    """
+    Has the universe a model was scored on drifted from the panel it was
+    trained on, and -- where outcomes exist -- is it still right.
+
+    Feature drift is PSI and KS per feature against the seeded sample of
+    raw training rows the registration kept; prediction drift is the same
+    against the out-of-sample prediction sample; realized IC is the scored
+    date's cross-sectional rank IC beside the validation's mean and
+    dispersion. Every status is reported with the threshold it was read
+    against, because the thresholds are conventions and the numbers are
+    the finding.
+    """
+    manifest = load_manifest(input_data.model_id)
+    profile, feature_reference, prediction_reference = load_monitoring_reference(
+        input_data.model_id
+    )
+    if feature_reference is None or prediction_reference is None:
+        raise ValidationError(
+            f"monitor_model: model {input_data.model_id!r} was registered before "
+            "monitoring references were kept, so there is nothing honest to "
+            "compare a scored universe against -- a reference read from the "
+            "scoring window itself would find no drift by construction. "
+            "Retrain to register a model with references."
+        )
+    predictions_df = _artifacts.load_artifact(str(input_data.predictions_uri))
+    for column in ("entity", "prediction"):
+        if column not in predictions_df.columns:
+            raise ValidationError(
+                f"monitor_model: {input_data.predictions_uri} has no {column!r} "
+                "column; pass a score_model predictions_uri."
+            )
+    warnings: List[str] = []
+
+    features_uri = input_data.features_uri or _sibling_features_uri(
+        str(input_data.predictions_uri)
+    )
+    rows: List[FeatureDriftRow] = []
+    if features_uri is None:
+        warnings.append(
+            "feature drift is unavailable: no feature matrix was found beside "
+            "these predictions. score_model keeps one since monitoring was "
+            "added; re-score to get it, or pass features_uri."
+        )
+    else:
+        current = _artifacts.load_artifact(str(features_uri))
+        missing = [f for f in manifest.feature_ids if f not in current.columns]
+        if missing:
+            raise ValidationError(
+                f"monitor_model: {features_uri} lacks feature column(s) "
+                f"{missing[:5]} the model was trained on."
+            )
+        rows = [
+            FeatureDriftRow(**row)
+            for row in drift_report(feature_reference, current, manifest.feature_ids)
+        ]
+
+    drift = prediction_drift(
+        prediction_reference["prediction"].to_numpy(),
+        predictions_df["prediction"].to_numpy(),
+    )
+
+    realized = None
+    if input_data.outcomes_ref:
+        outcomes = _artifacts.load_artifact(str(input_data.outcomes_ref))
+        realized = realized_ic(
+            predictions_df,
+            outcomes,
+            validation_ic_mean=manifest.oos_metrics.get("cs_rank_ic_mean"),
+            validation_ic_std=manifest.oos_metrics.get("cs_rank_ic_std"),
+        )
+        if realized["z_versus_validation"] is None:
+            warnings.append(
+                "the validation recorded no cross-sectional IC dispersion, so "
+                "the realized IC is reported without a z-score."
+            )
+
+    statuses = [r.status for r in rows] + [drift["status"]]
+    if realized is not None:
+        statuses.append(realized["status"])
+    order = {"unknown": 0, "stable": 1, "moderate": 2, "severe": 3}
+    known = [s for s in statuses if s != "unknown"]
+    overall = max(known, key=order.__getitem__) if known else "unknown"
+
+    return MonitorModelResult(
+        model_id=input_data.model_id,
+        stage=current_stage(input_data.model_id),
+        predictions_uri=str(input_data.predictions_uri),
+        features_uri=features_uri,
+        n_scored=int(len(predictions_df)),
+        feature_drift=rows,
+        n_features_moderate=sum(1 for r in rows if r.status == "moderate"),
+        n_features_severe=sum(1 for r in rows if r.status == "severe"),
+        prediction_drift=drift,
+        realized_ic=realized,
+        thresholds=dict(THRESHOLDS),
+        overall_status=overall,
+        warnings=warnings,
     )
 
 
@@ -2026,6 +2184,22 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         ListModelsInput,
     ),
     (
+        "promote_model",
+        "Record a lifecycle decision for a registered model: candidate -> "
+        "validated -> staging -> production one stage at a time, or archived "
+        "from anywhere, with a reason and the evidence it rests on. The "
+        "manifest is untouched; the stage is read off an append-only log.",
+        PromoteModelInput,
+    ),
+    (
+        "monitor_model",
+        "Feature and prediction drift of a scored universe against the "
+        "model's training reference (PSI and KS per feature), and, given "
+        "outcomes, the realized cross-sectional IC beside the validation's. "
+        "Statuses come with the thresholds they were read against.",
+        MonitorModelInput,
+    ),
+    (
         "list_datasets",
         "Every built dataset panel, newest first, with row/entity/feature "
         "counts and date span.",
@@ -2359,6 +2533,8 @@ MODELING_TOOL_DISPATCH = {
         EvaluateModelPortfolioInput,
     ),
     "list_models": (list_models, ListModelsInput),
+    "promote_model": (promote_model, PromoteModelInput),
+    "monitor_model": (monitor_model, MonitorModelInput),
     "list_datasets": (list_datasets, ListDatasetsInput),
     "compare_models": (compare_models, CompareModelsInput),
     "check_leakage": (check_leakage, CheckLeakageInput),

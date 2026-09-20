@@ -60,6 +60,9 @@ def save_model(
     model_input_columns: Optional[List[str]] = None,
     distribution: Optional[Dict[str, Any]] = None,
     quantile_models: Optional[Dict[str, Any]] = None,
+    feature_profile: Optional[Dict[str, Any]] = None,
+    feature_reference: Optional[Any] = None,
+    prediction_reference: Optional[Any] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -151,6 +154,33 @@ def save_model(
         content_hashes["distribution.json"] = _artifacts.hash_file(
             Path(distribution_path)
         )
+    # The monitoring reference: a profile a reader can inspect, and the
+    # seeded samples PSI and KS are computed against. Hashed like every
+    # other artifact, because a reference that could be edited is a
+    # drift report that could be made to say anything.
+    monitoring: Dict[str, Any] = {}
+    if feature_profile is not None:
+        profile_path = _artifacts.save_json(
+            directory, "feature_profile", feature_profile
+        )
+        content_hashes["feature_profile.json"] = _artifacts.hash_file(
+            Path(profile_path)
+        )
+        monitoring["profile_bins"] = feature_profile.get("bins")
+    if feature_reference is not None:
+        uri = _artifacts.save_artifact(
+            feature_reference, run_id=model_id, name="feature_reference"
+        )
+        content_hashes["feature_reference"] = _artifacts.hash_file(Path(uri))
+        monitoring["feature_reference_uri"] = uri
+        monitoring["feature_reference_rows"] = int(len(feature_reference))
+    if prediction_reference is not None:
+        uri = _artifacts.save_artifact(
+            prediction_reference, run_id=model_id, name="prediction_reference"
+        )
+        content_hashes["prediction_reference"] = _artifacts.hash_file(Path(uri))
+        monitoring["prediction_reference_uri"] = uri
+        monitoring["prediction_reference_rows"] = int(len(prediction_reference))
     if quantile_models_path is not None:
         content_hashes["quantile_models.joblib"] = _artifacts.hash_file(
             Path(quantile_models_path)
@@ -205,6 +235,7 @@ def save_model(
         dataset_warnings=list(dataset_warnings or []),
         preprocessing=dict(preprocessing or {}),
         distribution=dict(distribution or {}),
+        monitoring=monitoring,
         # Read from the process at registration, never declared by the
         # caller -- a caller-supplied value is only for tests that need a
         # known one.
@@ -325,6 +356,45 @@ def load_distribution(model_id: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
         )
         models = _artifacts.load_joblib(str(models_path))
     return state, models
+
+
+def load_monitoring_reference(
+    model_id: str,
+) -> "tuple[Dict[str, Any], Optional[Any], Optional[Any]]":
+    """
+    (feature profile, feature reference frame, prediction reference frame)
+    for `monitor_model`, each verified against the manifest first; the
+    frames are None for a model registered before they were kept.
+    """
+    manifest = load_manifest(model_id)
+    directory = _artifacts.run_dir(model_id)
+    profile: Dict[str, Any] = {}
+    profile_path = directory / "feature_profile.json"
+    if profile_path.exists():
+        _artifacts.verify_file(
+            profile_path,
+            manifest.content_hashes.get("feature_profile.json"),
+            "feature_profile.json",
+        )
+        profile = _artifacts.load_json(str(profile_path))
+    features = predictions = None
+    feature_uri = manifest.monitoring.get("feature_reference_uri")
+    if feature_uri and Path(str(feature_uri)).exists():
+        _artifacts.verify_file(
+            Path(str(feature_uri)),
+            manifest.content_hashes.get("feature_reference"),
+            "feature_reference",
+        )
+        features = _artifacts.load_artifact(str(feature_uri))
+    prediction_uri = manifest.monitoring.get("prediction_reference_uri")
+    if prediction_uri and Path(str(prediction_uri)).exists():
+        _artifacts.verify_file(
+            Path(str(prediction_uri)),
+            manifest.content_hashes.get("prediction_reference"),
+            "prediction_reference",
+        )
+        predictions = _artifacts.load_artifact(str(prediction_uri))
+    return profile, features, predictions
 
 
 def load_dataset_spec(model_id: str) -> Dict[str, Any]:

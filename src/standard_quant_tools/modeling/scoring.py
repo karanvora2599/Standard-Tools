@@ -452,10 +452,23 @@ def score_model(
     predictions_uri = _artifacts.save_artifact(
         predictions_df, run_id=model_id, name=run_name, overwrite=True
     )
+    # The RAW feature rows these predictions were made from, beside them
+    # under the same suffix, so `monitor_model` can ask whether the inputs
+    # the model was handed today look like the inputs it was trained on.
+    features_df = latest[["entity", "date", *manifest.feature_ids]].reset_index(
+        drop=True
+    )
+    features_uri = _artifacts.save_artifact(
+        features_df,
+        run_id=model_id,
+        name=run_name.replace("predictions_", "features_", 1),
+        overwrite=True,
+    )
 
     return {
         "model_id": model_id,
         "as_of": as_of,
+        "features_uri": features_uri,
         # The date the predictions were actually computed from, which is not
         # necessarily the date that was asked for.
         "effective_score_date": effective_ts.strftime("%Y-%m-%d"),

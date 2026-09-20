@@ -30,6 +30,7 @@ from .estimators.registry import (
     quantile_support,
     validate_params,
 )
+from .monitoring import feature_profile, reference_sample
 from .plan import plan_experiment
 from .preprocessing import (
     FoldContext,
@@ -1268,6 +1269,20 @@ def run_experiment(
     oos_predictions_uri = _artifacts.save_artifact(
         oos_predictions_df, run_id=model_id, name="oos_predictions"
     )
+    # What `monitor_model` will compare a scored universe against: a
+    # seeded sample of the RAW feature rows the model was trained on and a
+    # sample of its out-of-sample predictions, plus a profile per feature.
+    # The reference window's own values, so a later window cannot move the
+    # edges it is measured by.
+    monitoring_profile = feature_profile(panel, feature_ids)
+    feature_reference_frame = reference_sample(
+        panel, ["date", "entity", *feature_ids], seed=model_spec.random_seed
+    )
+    prediction_reference_frame = reference_sample(
+        oos_predictions_df,
+        ["date", "entity", "prediction"],
+        seed=model_spec.random_seed,
+    )
 
     manifest = save_model(
         estimator=final_estimator,
@@ -1291,6 +1306,9 @@ def run_experiment(
         model_id=model_id,
         distribution=distribution_state,
         quantile_models=quantile_models,
+        feature_profile=monitoring_profile,
+        feature_reference=feature_reference_frame,
+        prediction_reference=prediction_reference_frame,
         # The last FEATURE date in the training panel. Kept for lineage, but
         # deliberately NOT the cutoff score_model gates on -- see below.
         train_end_date=pd.Timestamp(panel["date"].max()).strftime("%Y-%m-%d"),

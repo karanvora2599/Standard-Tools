@@ -4,10 +4,14 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phases 0-8 (the "now" half of 8) are implemented and merged;
-phases 9-10 and the sequence half of 8 are proposals.** Phase 8's
-`SampleIndex` landed as the commit that carries this paragraph on
-2026-09-20; the sequence kind stays gated on a measured case. Phase 7
+**Status: phases 0-9 (the "now" half of 8) are implemented and merged;
+phase 10 and the sequence half of 8 are proposals.** Phase 9 landed as
+the commit that carries this paragraph on 2026-09-20 (`promote_model`
+over an append-only `promotions.jsonl`, `monitor_model` over
+references kept at registration, `score_model` keeping its feature
+rows; 22 tools, 211 on the surface). Phase 8's `SampleIndex` landed as
+`9c29680` on 2026-09-20; the sequence kind stays gated on a measured
+case. Phase 7
 landed as `6cf4525` on 2026-09-20 (`task="survival"`, `cox_ph` in numpy plus `xgboost_cox` and
 `xgboost_aft` under the xgboost guard, Harrell's concordance,
 `TargetDefinition.censored`, `event_column` on external panels;

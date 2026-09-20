@@ -172,6 +172,16 @@ class TestModelingDispatch:
             # calendar or a set of FOMC dates can be joined today.
             "validate_pit_records",
             "join_point_in_time",
+            # A decision, not plumbing: a promotion is somebody saying
+            # the evidence was read and accepted, with a reason and
+            # what it rested on, in an append-only log the manifest
+            # never sees. Nothing else in the runtime can say it.
+            "promote_model",
+            # Whether the world the model scores today still looks
+            # like the world it was fitted on, feature by feature,
+            # against a reference kept at registration -- a question
+            # score_model cannot answer about its own output.
+            "monitor_model",
             # The nine feature tools that used to sit here moved to the
             # feature_lab runtime -- see tests/modeling/test_feature_tools.py.
             # modeling is one ordered pipeline; feature work is a

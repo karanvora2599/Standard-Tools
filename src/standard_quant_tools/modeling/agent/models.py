@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..registry.lifecycle import LifecycleStage
 from ..specs import (
     DatasetSpec,
     ModelSpec,
@@ -534,6 +535,12 @@ class ScoreModelResult(BaseModel):
         "audit record still points at.",
     )
     n_entities: int
+    features_uri: Optional[str] = Field(
+        None,
+        description="The raw feature rows these predictions were made from, "
+        "written beside them so monitor_model can measure how far the scored "
+        "universe has drifted from the training panel.",
+    )
     summary_stats: Dict[str, float]
     missing_entities: List[str] = Field(
         default_factory=list,
@@ -551,6 +558,122 @@ class ScoreModelResult(BaseModel):
         "cross-sectional model means the ranking no longer compares "
         "contemporaneous information.",
     )
+
+
+# ── promote_model / monitor_model ────────────────────────────────────────
+
+
+class PromoteModelInput(BaseModel):
+    """A lifecycle decision, recorded with its reason and evidence."""
+
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    model_id: str
+    to_stage: LifecycleStage = Field(
+        ...,
+        description=(
+            "Where to move the model: candidate -> validated -> staging -> "
+            "production, one stage at a time, or 'archived' from anywhere "
+            "(terminal). A demotion to an earlier live stage is allowed and "
+            "recorded like any other decision."
+        ),
+    )
+    reason: str = Field(
+        ...,
+        min_length=8,
+        description="Why, in a sentence somebody can read months later.",
+    )
+    actor: str = Field("agent", min_length=1, description="Who decided.")
+    evidence: List[str] = Field(
+        default_factory=list,
+        description="References the decision rests on: an evaluate_model_portfolio "
+        "weights_uri, a monitor_model predictions_uri, a compare_models run.",
+    )
+
+
+class PromoteModelResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    from_stage: str
+    to_stage: str
+    timestamp_utc: str
+    actor: str
+    history: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Every promotion recorded for this model, oldest first, "
+        "from the append-only promotions.jsonl beside the manifest.",
+    )
+
+
+class MonitorModelInput(BaseModel):
+    """Has the scored universe drifted from the training panel, and is the
+    model still right where outcomes exist."""
+
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    model_id: str
+    predictions_uri: str = Field(
+        ..., description="A score_model predictions_uri for this model."
+    )
+    features_uri: Optional[str] = Field(
+        None,
+        description="The score_model features_uri that goes with it. Found "
+        "beside the predictions by name when omitted.",
+    )
+    outcomes_ref: Optional[str] = Field(
+        None,
+        description=(
+            "Optional: an artifact or sqt:// reference holding `entity` and "
+            "`realized` (and `date` when the predictions span several dates) "
+            "for the scored rows. With it the realized cross-sectional rank IC "
+            "is reported beside the validation's."
+        ),
+    )
+
+
+class FeatureDriftRow(BaseModel):
+    feature: str
+    psi: float = Field(
+        ...,
+        description="Population stability index against the "
+        "training reference sample; NaN when undefined.",
+    )
+    ks: float = Field(..., description="Two-sample Kolmogorov-Smirnov statistic.")
+    missing_rate_reference: float
+    missing_rate_current: float
+    status: Literal["stable", "moderate", "severe", "unknown"]
+
+
+class MonitorModelResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    stage: str
+    predictions_uri: str
+    features_uri: Optional[str] = None
+    n_scored: int
+    feature_drift: List[FeatureDriftRow] = Field(default_factory=list)
+    n_features_moderate: int = 0
+    n_features_severe: int = 0
+    prediction_drift: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="PSI, KS and moments of the scored predictions against the "
+        "model's out-of-sample prediction sample.",
+    )
+    realized_ic: Optional[Dict[str, Any]] = Field(
+        None,
+        description="With outcomes_ref: the realized cross-sectional rank IC, the "
+        "validation's mean and dispersion, and how many validation standard "
+        "deviations the realized value sits from the mean.",
+    )
+    thresholds: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The lines the statuses were read against. Conventions, "
+        "reported with every number rather than instead of it.",
+    )
+    overall_status: Literal["stable", "moderate", "severe", "unknown"]
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ── inspect_model ───────────────────────────────────────────────────────
@@ -761,6 +884,11 @@ class ListModelsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task: Optional[Task] = Field(None, description="Only models trained for this task.")
+    stage: Optional[LifecycleStage] = Field(
+        None,
+        description="Only models at this lifecycle stage. A registered model "
+        "is a 'candidate' until promote_model moves it.",
+    )
     limit: int = Field(50, gt=0, le=500, description="Most recent first.")
 
 
@@ -778,6 +906,9 @@ class ModelSummary(BaseModel):
     )
     headline_value: Optional[float] = None
     dataset_id: Optional[str] = None
+    stage: Optional[str] = Field(
+        None, description="Where the model is in its lifecycle; see promote_model."
+    )
 
 
 class ListModelsResult(BaseModel):

@@ -163,6 +163,14 @@ class ModelManifest(BaseModel):
     # this existed and most since; `distribution.json` and
     # `quantile_models.joblib` exist exactly when it is not.
     distribution: Dict[str, Any] = Field(default_factory=dict)
+    # What `monitor_model` compares a scored universe against: where the
+    # seeded sample of the training panel's raw features and of the
+    # out-of-sample predictions were written, and how many rows each
+    # holds. Both are hashed into `content_hashes` like every artifact.
+    # Empty for a model registered before monitoring references were
+    # kept, which `monitor_model` refuses by name rather than guessing a
+    # reference from the scoring window itself.
+    monitoring: Dict[str, Any] = Field(default_factory=dict)
     # What COMPUTED this model: Python, numpy, pandas, scikit-learn, scipy,
     # the optional boosters, the BLAS numpy was built against, whether the
     # native extension was loaded and current, and the thread caps in

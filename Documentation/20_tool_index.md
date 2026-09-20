@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 209 below.
+advertises 155 of the 211 below.
 
 
 ## The runtimes
@@ -35,15 +35,15 @@ advertises 155 of the 209 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `modeling` | 22 | 82 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `modeling` | 20 | 79 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 29 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **209** | | | |
+| **Total** | **211** | | | |
 
 ---
 
@@ -608,6 +608,164 @@ Backtest a pre-computed signal panel across a ticker universe, combined into por
 
 ---
 
+## `modeling` — Modeling
+
+Build, validate and score a statistical model from this library's own features: dataset construction, leakage-purged walk-forward fitting, the model registry, and evaluation of out-of-sample predictions. One ordered pipeline rather than a set of interchangeable tools.
+
+#### `analyze_features`
+
+Score a built dataset's FEATURES before fitting anything: coverage, turnover, cross-sectional IC and ICIR, decile spread and monotonicity, which features are near-duplicates of one another, and a lead-lag causality screen for features whose information arrives too early. Use this to choose features; use inspect_model(view='feature_importance') to see what one fitted model then leaned on.
+
+**Required:** `dataset_id`  
+**Optional:** `features`, `n_quantiles`, `cluster_threshold`, `include_leakage`, `leakage_max_shift`
+
+#### `analyze_model_errors`
+
+WHERE a registered model is wrong, not merely how wrong on average. An R2 cannot separate a broadly mediocre model from one that is excellent except in the conditions you trade -- those have the same headline number and opposite consequences. Breaks the out-of-sample errors down by entity, by period, by the model's OWN prediction decile, and optionally by the decile of any feature in its panel, which is the breakdown that turns 'the model is mediocre' into 'the model fails when the spread is wide'. Also reports CALIBRATION, a separate question from accuracy: a model can rank perfectly and still be systematically too confident, which is invisible in an R2 or an IC and changes every position size computed from it. Residual autocorrelation is reported and is EXPECTED to be positive for an overlapping label rather than being a defect.
+
+**Required:** `model_id`  
+**Optional:** `feature`, `period`, `top_n`
+
+#### `build_model_dataset`
+
+Fetch OHLCV, compute requested features/target, persist the panel.
+
+**Required:** `spec`
+
+#### `build_model_ensemble`
+
+Combine several registered models into one prediction series, and publish it as an `sqt://predictions` reference that score_predictions and the backtest bridge read like any other. What gets combined is each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold that did not train on them -- so the combination cannot inherit the optimism that makes naive stacking look excellent until it meets a new day. The default is rank_mean rather than mean, because two models on different scales average into a number dominated by whichever has the wider spread, which is its units and not its skill. Reports the pairwise correlation between the base models: two agreeing at 0.98 combine into approximately either of them, and the ensemble's own score cannot show you that.
+
+**Required:** `model_ids`, `run_id`, `name`  
+**Optional:** `method`, `weights`
+
+#### `check_leakage`
+
+Ask whether a set of features is temporally safe to fit on — before building a dataset with them. Optionally reports a built dataset's recorded point-in-time coverage too.
+
+*No required arguments.*  
+**Optional:** `feature_ids`, `dataset_id`
+
+#### `compare_models`
+
+Rank registered models side by side on their out-of-sample metrics, or -- with method='paired' -- test whether one is actually better than a reference. The headline ranking says which number is larger and nothing about whether the gap exceeds the noise in one OOS sample, which on a few hundred dates it routinely does not; the paired method measures the per-date IC difference on the rows both models predicted, puts a block-bootstrap interval on it, runs a Diebold-Mariano loss test where the task has a loss, and Holm-adjusts across candidates. Models are ranked within their own task, never across tasks, because those metrics are not on a common scale.
+
+**Required:** `model_ids`  
+**Optional:** `metric`, `method`, `reference_model_id`, `comparison_metric`, `n_bootstrap`, `block_size`
+
+#### `evaluate_model_portfolio`
+
+Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transform predictions into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure.
+
+**Required:** `model_id`  
+**Optional:** `transform`, `portfolio`
+
+#### `explain_dataset_row_loss`
+
+Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.
+
+**Required:** `dataset_id`
+
+#### `inspect_model`
+
+Inspect a registered model's summary/importance/validation/lineage.
+
+**Required:** `model_id`  
+**Optional:** `view`
+
+#### `join_point_in_time`
+
+Attach point-in-time records to a built dataset, each panel row getting the most recent record AVAILABLE by then. Strictly backward and inclusive: a filing released before a bar's close is usable on it, one released after is not, and a row with nothing available yet gets NaN rather than zero or the eventual value. A restatement is a second row with the same event_time and a later available_time, and the join returns whichever version was current at each date.
+
+**Required:** `dataset_id`, `records`  
+**Optional:** `fields`, `entity_scoped`, `prefix`, `max_staleness_days`
+
+#### `list_datasets`
+
+Every built dataset panel, newest first, with row/entity/feature counts and date span.
+
+*No required arguments.*  
+**Optional:** `limit`
+
+#### `list_features`
+
+Which features this library can build, what each one measures, and what it costs to compute. Call it BEFORE build_model_dataset rather than guessing names -- a feature name that does not exist is a failed call and an error round trip, which costs more than reading the catalogue does. The feature_lab runtime then answers what each one is worth once the dataset exists.
+
+*No required arguments.*  
+**Optional:** `category`
+
+#### `list_modeling_capabilities`
+
+What this modeling runtime can do: tasks, estimators and the capabilities of each (sample weights, probabilities, query groups, coefficients, feature importance), features, target types, validation schemes, preprocessing and weighting options, and which optional libraries are installed. Call this before choosing a model rather than assuming an estimator is available.
+
+*No required arguments.*  
+**Optional:** `include_estimators`
+
+#### `list_models`
+
+Every registered model, newest first, with its task, estimator, headline out-of-sample metric and source dataset. Call this when you need a model_id you do not already hold.
+
+*No required arguments.*  
+**Optional:** `task`, `stage`, `limit`
+
+#### `monitor_model`
+
+Feature and prediction drift of a scored universe against the model's training reference (PSI and KS per feature), and, given outcomes, the realized cross-sectional IC beside the validation's. Statuses come with the thresholds they were read against.
+
+**Required:** `model_id`, `predictions_uri`  
+**Optional:** `features_uri`, `outcomes_ref`
+
+#### `promote_model`
+
+Record a lifecycle decision for a registered model: candidate -> validated -> staging -> production one stage at a time, or archived from anywhere, with a reason and the evidence it rests on. The manifest is untouched; the stage is read off an append-only log.
+
+**Required:** `model_id`, `to_stage`, `reason`  
+**Optional:** `actor`, `evidence`
+
+#### `register_external_panel`
+
+Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have.
+
+**Required:** `path`  
+**Optional:** `horizon`, `targets`, `target_type`, `event_column`, `interval`, `date_column`, `entity_column`, `target_column`, `label_end_column`, `feature_columns`, `source`, `file_format`
+
+#### `run_model_experiment`
+
+Fit + walk-forward validate + register a model from a persisted dataset.
+
+**Required:** `dataset_id`, `spec`  
+**Optional:** `target`
+
+#### `score_model`
+
+Run a registered model forward and get its predictions for a universe as of a date. The step that turns a fitted model into something a backtest can consume, and the one where point-in-time discipline matters most: the `as_of` date is what stops the model seeing features that did not exist yet. Raw probabilities from a tree ensemble are NOT calibrated, so a 0.9 threshold may select no rows at all -- check the distribution before thresholding.
+
+**Required:** `model_id`, `as_of`, `universe`  
+**Optional:** `lookback_days`, `max_staleness_days`
+
+#### `score_predictions`
+
+Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns. Works on predictions this library never produced.
+
+**Required:** `predictions_ref`, `task`  
+**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`
+
+#### `validate_model_spec`
+
+Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Fetches nothing and fits nothing.
+
+**Required:** `spec`  
+**Optional:** `dataset_id`, `target`
+
+#### `validate_pit_records`
+
+Check point-in-time records BEFORE joining them onto anything. The error worth catching is the two timestamps the wrong way round: event_time is when a fact is ABOUT, available_time is when it could first be ACTED ON, and swapped they make every model look prescient. Also reports median_publication_lag_days -- exactly how much hindsight a naive join on event_time would have handed you. Fetches nothing.
+
+**Required:** `records`  
+**Optional:** `entity_scoped`
+
+---
+
 ## `meta` — Discovery & Provenance
 
 Questions about the library and the session rather than about a market: what this library accepts and what the data provider can serve, and what a past tool call did and whether it still reproduces.
@@ -748,150 +906,6 @@ Check the audit log's tamper-evident hash chain, for one day or the whole trail,
 
 *No required arguments.*  
 **Optional:** `date`, `public_key_path`
-
----
-
-## `modeling` — Modeling
-
-Build, validate and score a statistical model from this library's own features: dataset construction, leakage-purged walk-forward fitting, the model registry, and evaluation of out-of-sample predictions. One ordered pipeline rather than a set of interchangeable tools.
-
-#### `analyze_features`
-
-Score a built dataset's FEATURES before fitting anything: coverage, turnover, cross-sectional IC and ICIR, decile spread and monotonicity, which features are near-duplicates of one another, and a lead-lag causality screen for features whose information arrives too early. Use this to choose features; use inspect_model(view='feature_importance') to see what one fitted model then leaned on.
-
-**Required:** `dataset_id`  
-**Optional:** `features`, `n_quantiles`, `cluster_threshold`, `include_leakage`, `leakage_max_shift`
-
-#### `analyze_model_errors`
-
-WHERE a registered model is wrong, not merely how wrong on average. An R2 cannot separate a broadly mediocre model from one that is excellent except in the conditions you trade -- those have the same headline number and opposite consequences. Breaks the out-of-sample errors down by entity, by period, by the model's OWN prediction decile, and optionally by the decile of any feature in its panel, which is the breakdown that turns 'the model is mediocre' into 'the model fails when the spread is wide'. Also reports CALIBRATION, a separate question from accuracy: a model can rank perfectly and still be systematically too confident, which is invisible in an R2 or an IC and changes every position size computed from it. Residual autocorrelation is reported and is EXPECTED to be positive for an overlapping label rather than being a defect.
-
-**Required:** `model_id`  
-**Optional:** `feature`, `period`, `top_n`
-
-#### `build_model_dataset`
-
-Fetch OHLCV, compute requested features/target, persist the panel.
-
-**Required:** `spec`
-
-#### `build_model_ensemble`
-
-Combine several registered models into one prediction series, and publish it as an `sqt://predictions` reference that score_predictions and the backtest bridge read like any other. What gets combined is each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold that did not train on them -- so the combination cannot inherit the optimism that makes naive stacking look excellent until it meets a new day. The default is rank_mean rather than mean, because two models on different scales average into a number dominated by whichever has the wider spread, which is its units and not its skill. Reports the pairwise correlation between the base models: two agreeing at 0.98 combine into approximately either of them, and the ensemble's own score cannot show you that.
-
-**Required:** `model_ids`, `run_id`, `name`  
-**Optional:** `method`, `weights`
-
-#### `check_leakage`
-
-Ask whether a set of features is temporally safe to fit on — before building a dataset with them. Optionally reports a built dataset's recorded point-in-time coverage too.
-
-*No required arguments.*  
-**Optional:** `feature_ids`, `dataset_id`
-
-#### `compare_models`
-
-Rank registered models side by side on their out-of-sample metrics, or -- with method='paired' -- test whether one is actually better than a reference. The headline ranking says which number is larger and nothing about whether the gap exceeds the noise in one OOS sample, which on a few hundred dates it routinely does not; the paired method measures the per-date IC difference on the rows both models predicted, puts a block-bootstrap interval on it, runs a Diebold-Mariano loss test where the task has a loss, and Holm-adjusts across candidates. Models are ranked within their own task, never across tasks, because those metrics are not on a common scale.
-
-**Required:** `model_ids`  
-**Optional:** `metric`, `method`, `reference_model_id`, `comparison_metric`, `n_bootstrap`, `block_size`
-
-#### `evaluate_model_portfolio`
-
-Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transform predictions into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure.
-
-**Required:** `model_id`  
-**Optional:** `transform`, `portfolio`
-
-#### `explain_dataset_row_loss`
-
-Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.
-
-**Required:** `dataset_id`
-
-#### `inspect_model`
-
-Inspect a registered model's summary/importance/validation/lineage.
-
-**Required:** `model_id`  
-**Optional:** `view`
-
-#### `join_point_in_time`
-
-Attach point-in-time records to a built dataset, each panel row getting the most recent record AVAILABLE by then. Strictly backward and inclusive: a filing released before a bar's close is usable on it, one released after is not, and a row with nothing available yet gets NaN rather than zero or the eventual value. A restatement is a second row with the same event_time and a later available_time, and the join returns whichever version was current at each date.
-
-**Required:** `dataset_id`, `records`  
-**Optional:** `fields`, `entity_scoped`, `prefix`, `max_staleness_days`
-
-#### `list_datasets`
-
-Every built dataset panel, newest first, with row/entity/feature counts and date span.
-
-*No required arguments.*  
-**Optional:** `limit`
-
-#### `list_features`
-
-Which features this library can build, what each one measures, and what it costs to compute. Call it BEFORE build_model_dataset rather than guessing names -- a feature name that does not exist is a failed call and an error round trip, which costs more than reading the catalogue does. The feature_lab runtime then answers what each one is worth once the dataset exists.
-
-*No required arguments.*  
-**Optional:** `category`
-
-#### `list_modeling_capabilities`
-
-What this modeling runtime can do: tasks, estimators and the capabilities of each (sample weights, probabilities, query groups, coefficients, feature importance), features, target types, validation schemes, preprocessing and weighting options, and which optional libraries are installed. Call this before choosing a model rather than assuming an estimator is available.
-
-*No required arguments.*  
-**Optional:** `include_estimators`
-
-#### `list_models`
-
-Every registered model, newest first, with its task, estimator, headline out-of-sample metric and source dataset. Call this when you need a model_id you do not already hold.
-
-*No required arguments.*  
-**Optional:** `task`, `limit`
-
-#### `register_external_panel`
-
-Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have.
-
-**Required:** `path`  
-**Optional:** `horizon`, `targets`, `target_type`, `event_column`, `interval`, `date_column`, `entity_column`, `target_column`, `label_end_column`, `feature_columns`, `source`, `file_format`
-
-#### `run_model_experiment`
-
-Fit + walk-forward validate + register a model from a persisted dataset.
-
-**Required:** `dataset_id`, `spec`  
-**Optional:** `target`
-
-#### `score_model`
-
-Run a registered model forward and get its predictions for a universe as of a date. The step that turns a fitted model into something a backtest can consume, and the one where point-in-time discipline matters most: the `as_of` date is what stops the model seeing features that did not exist yet. Raw probabilities from a tree ensemble are NOT calibrated, so a 0.9 threshold may select no rows at all -- check the distribution before thresholding.
-
-**Required:** `model_id`, `as_of`, `universe`  
-**Optional:** `lookback_days`, `max_staleness_days`
-
-#### `score_predictions`
-
-Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns. Works on predictions this library never produced.
-
-**Required:** `predictions_ref`, `task`  
-**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`
-
-#### `validate_model_spec`
-
-Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Fetches nothing and fits nothing.
-
-**Required:** `spec`  
-**Optional:** `dataset_id`, `target`
-
-#### `validate_pit_records`
-
-Check point-in-time records BEFORE joining them onto anything. The error worth catching is the two timestamps the wrong way round: event_time is when a fact is ABOUT, available_time is when it could first be ACTED ON, and swapped they make every model look prescient. Also reports median_publication_lag_days -- exactly how much hindsight a naive join on event_time would have handed you. Fetches nothing.
-
-**Required:** `records`  
-**Optional:** `entity_scoped`
 
 ---
 

@@ -22,7 +22,7 @@ tool #133 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 20 tools, never merged into `agent.get_agent_tools()` /
+with exactly 22 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (180 tools, 8 runtimes)      (20 tools, one pipeline)
+    (180 tools, 8 runtimes)      (22 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 20 modeling tools
+## The 22 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -72,6 +72,8 @@ because the order is the point.
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
 | `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
+| `promote_model` | `model_id` + `to_stage` + `reason` (+ `actor`, `evidence`) → a lifecycle decision appended to `promotions.jsonl` beside the manifest, one stage at a time: `candidate` → `validated` → `staging` → `production`, or `archived` from anywhere. The manifest is never touched |
+| `monitor_model` | `model_id` + a `score_model` `predictions_uri` (+ `outcomes_ref`) → PSI and KS per feature against the training reference kept at registration, prediction drift against the out-of-sample sample, and — with outcomes — the realized cross-sectional IC beside the validation's, every status reported with the threshold it was read against |
 
 ### The `feature_lab` runtime — 9 more tools, one level down
 
@@ -2522,6 +2524,127 @@ the file in place — and an audit record written by the earlier call still
 pointed at that URI, which now returned different bytes. A silently wrong
 provenance trail, and the harder kind to notice, because the link still
 resolves.
+
+---
+
+## Lifecycle and monitoring
+
+A registered model is a **`candidate`**: fitted and walk-forward validated,
+which is a fact about the fit and not a judgement about the evidence. Until
+this phase that was also the last thing anyone recorded about it. Whether
+somebody had read the folds and accepted them, whether it was being paper
+traded, whether it was live, and whether the universe it was scoring had
+drifted from the panel it was trained on — none of it had anywhere to go,
+so a model reached production the way models do, by being the one somebody
+was using.
+
+### Stages are decisions, so they are a log and not a field
+
+`promote_model` moves a model through `candidate → validated → staging →
+production → archived`. Each promotion is one JSON line appended to
+`promotions.jsonl` in the model directory — from, to, reason, actor,
+timestamp and the evidence references it rested on — and the current stage
+is whatever the last line says. The manifest is **never rewritten**: it is
+content-hashed, every integrity check in the registry rests on that, and a
+stage written into it would either break the commit point or sign a value
+into the hashes it was changing. Registration writes no log at all; a model
+with no `promotions.jsonl` is a candidate.
+
+The rules are the ones the log exists to make visible:
+
+- **One stage at a time on the way up.** `candidate → production` is
+  refused by name, because the stage it skips is the one where somebody
+  records that the evidence was read. A forward move that skips is refused
+  with the stage to promote to first.
+- **A demotion is a decision too.** `production → staging` is allowed and
+  recorded like any other line, because rolling back is worth a reason.
+- **`archived` is terminal**, reachable from anywhere. A retired model is
+  not revived; retraining produces a new `model_id` with its own history.
+- **A reason is required** and must be more than a word. It is read months
+  later by someone deciding whether to trust the model, and `ok` does not
+  help them.
+
+`list_models` takes a `stage` filter and every summary carries `stage`;
+`inspect_model`'s summary view carries `stage` and the full `promotions`
+history.
+
+```python
+from standard_quant_tools.modeling.agent.tools import promote_model
+from standard_quant_tools.modeling.agent.models import PromoteModelInput
+
+promote_model(PromoteModelInput(
+    model_id=model_id,
+    to_stage="validated",
+    reason="rank IC positive on 11 of 12 folds; portfolio Sharpe 1.1 after costs",
+    actor="kv",
+    evidence=[weights_uri],       # the evaluate_model_portfolio artifact
+))
+```
+
+### Monitoring: what registration keeps so the question can be asked
+
+Drift is measured against the **training window's own values**, kept at
+registration, so the window being measured cannot move the edges it is
+measured by. A model registered here persists three more artifacts, each
+hashed into `content_hashes` like the rest of the package:
+
+| Artifact | What it holds |
+|---|---|
+| `feature_profile.json` | per feature: decile edges, missing rate, mean and std on the training panel — the summary a reader can inspect without the sample |
+| `feature_reference` | a seeded sample of up to 5,000 **raw** feature rows (`date`, `entity`, features) from the training panel |
+| `prediction_reference` | a seeded sample of the out-of-sample predictions the validation produced |
+
+`score_model` now writes the raw feature rows it predicted from beside the
+predictions — `features_<same suffix>` next to `predictions_<suffix>`, under
+the same content digest — and returns it as `features_uri`. That is what
+`monitor_model` compares:
+
+```python
+from standard_quant_tools.modeling.agent.tools import monitor_model
+from standard_quant_tools.modeling.agent.models import MonitorModelInput
+
+report = monitor_model(MonitorModelInput(
+    model_id=model_id,
+    predictions_uri=scored.predictions_uri,   # features_uri found beside it
+    outcomes_ref=outcomes_uri,                # optional: entity, realized[, date]
+))
+report.feature_drift        # one row per feature: psi, ks, missing rates, status
+report.prediction_drift     # psi, ks, moments, status
+report.realized_ic          # realized_ic, z_versus_validation, status — or None
+report.overall_status       # the worst known status across the three
+report.thresholds           # the lines every status was read against
+```
+
+Three questions, three answers:
+
+- **Feature drift** is the population stability index and the two-sample
+  Kolmogorov–Smirnov statistic per feature, current rows against the
+  reference sample — the same code `feature_lab`'s `get_feature_drift`
+  uses on a panel. PSI below 0.10 reads `stable`, 0.25 and above `severe`,
+  between them `moderate`; KS at 0.20 or above is `severe` on its own. A
+  feature the current frame lacks is refused by name, because a model
+  scored without one of its inputs is a different problem than drift.
+- **Prediction drift** is the same two statistics on the predictions
+  against the out-of-sample sample, with both sets of moments beside them.
+- **Realized IC** needs outcomes, which exist only after the horizon has
+  passed: `outcomes_ref` is an artifact with `entity` and `realized` (and
+  `date` when the predictions span several). The scored date's
+  cross-sectional rank IC is reported beside the validation's
+  `cs_rank_ic_mean` and `cs_rank_ic_std` as a z-score — one date is one
+  draw, so a negative number inside two standard deviations is noise and
+  outside it is worth a look.
+
+Every status is reported **with the thresholds it was read against**, and
+the result says in as many words that they are conventions rather than
+numbers calibrated to this model. `overall_status` is the worst of the
+known ones; `unknown` (a feature with no finite values on either side, or
+an IC with no validation dispersion to compare to) never masquerades as
+`stable`.
+
+A model registered before the references were kept is refused by
+`monitor_model`, not approximated: a reference read from the scoring window
+itself would find no drift by construction, and the honest answer is to
+retrain.
 
 ---
 
