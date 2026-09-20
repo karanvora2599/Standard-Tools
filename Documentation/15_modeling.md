@@ -2379,8 +2379,8 @@ they replaced on small panels.
 Not built here, and not accidentally half-built either:
 
 - **Semantic feature search** — `list_features` is a plain catalog
-  lookup. A 21-entry catalog doesn't need ranking; revisited only if the
-  catalog grows large enough that it does.
+  lookup. A catalog of two dozen entries doesn't need ranking; revisited
+  only if the catalog grows large enough that it does.
 - **A point-in-time fundamentals SOURCE** — the join is built (see
   [Point-in-time joins](#point-in-time-joins)); the data is not. No shipped
   provider exposes point-in-time fundamentals: `get_financial_ratios(symbol)`
@@ -2408,40 +2408,28 @@ Not built here, and not accidentally half-built either:
   default parameters are stated in trading days (`window=252` is one
   trading year at `1d`, about six weeks at `1h`) and nothing rescales them
   for a non-daily interval; you get a warning and are expected to set them
-  yourself. *Annualization* is no longer part of this gap — see
-  [Interval-aware annualization](#interval-aware-annualization).
+  yourself.
 - **Model lifecycle states** — registration means "persisted and
   validated enough to load", not "approved for production". There is no
   trained/validated/approved/production distinction.
-- **Prediction transforms beyond sign** — *closed for the portfolio
-  path.* `PredictionTransformSpec` (see [Evaluating a model as a
-  portfolio](#evaluating-a-model-as-a-portfolio)) provides sign, rank,
-  z-score, quantile and volatility-scaled transforms with gross/net
-  exposure targets and a position cap. The **bridge** remains sign-only
-  by design — `DIRECTION` is the only units-invariant signal for an
-  engine that treats a `SCORE` as a raw leverage multiplier. Still not
-  built: beta- and sector-neutralization, which need per-ticker
-  beta/sector metadata this repo does not carry (the same blocker
-  `backtest.sizing` documents for its own deferred list).
-- **Custom estimator import, multi-model comparison tooling.** The
-  estimator allowlist is deliberately closed — no arbitrary `sklearn`
+- **Beta- and sector-neutral prediction transforms** — need per-ticker
+  beta/sector metadata this repo does not carry, the same blocker
+  `backtest.sizing` documents for its own deferred list. The **bridge**
+  stays sign-only by design either way: `DIRECTION` is the only
+  units-invariant signal for an engine that treats a `SCORE` as a raw
+  leverage multiplier.
+- **Statistical model comparison.** `compare_models` ranks registered
+  models by a headline out-of-sample metric; it does not say whether the
+  difference between two of them is larger than the noise in one OOS
+  sample. The reason that needs care rather than a loop is worth stating:
+  selecting among candidates on `evaluate_model_portfolio`'s reported
+  Sharpe would turn those OOS folds into tuning data. The estimator
+  allowlist stays closed on the same principle — no arbitrary `sklearn`
   import, no `exec()` — so adding an estimator means registering it, not
-  naming a class path. Comparison tooling is still absent, and the reason
-  it needs care rather than a loop is worth stating: selecting among
-  candidates on `evaluate_model_portfolio`'s reported Sharpe would turn
-  those OOS folds into tuning data.
-  *Hyperparameter tuning is no longer part of this gap* — see
-  [Hyperparameter search](#hyperparameter-search), which does exactly the
-  nested inner-fold selection this entry used to say was missing, on each
-  fold's training window only.
-- **Preprocessing beyond two schemes** — `PreprocessingSpec` now offers
-  pooled and cross-sectional normalization (see
-  [Preprocessing](#preprocessing-pooled-vs-cross-sectional)), which closes
-  the part of this gap that mattered: a cross-sectional model no longer
-  has to accept a transform that leaves the market factor in its features.
-  What is still hardwired is *per-estimator* treatment — trees do not need
-  standardization at all and pay for it anyway — and a per-feature choice
-  of transform. Neither changes a result today, so neither is urgent.
+  naming a class path.
+- **Per-estimator and per-feature preprocessing** — trees do not need
+  standardization at all and pay for it anyway, and every feature gets the
+  same transform. Neither changes a result today, so neither is urgent.
 - **Extracting a codebase-wide generic `standard_quant_tools.artifacts`
   package** — `modeling.artifacts` reuses `backtest.artifacts` directly
   today; a shared package is only worth building once there's a second
