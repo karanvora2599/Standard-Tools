@@ -49,13 +49,13 @@ from standard_quant_tools.agent.models import (
     ExportAuditBundleResult,
     FieldDivergence,
     ListReferenceKindsInput,
-    ReadReferenceInput,
-    ReadReferenceResult,
     ListReferenceKindsResult,
     ListStrategiesInput,
     ListStrategiesResult,
     ListStressScenariosInput,
     ListStressScenariosResult,
+    ReadReferenceInput,
+    ReadReferenceResult,
     ReferenceKind,
     ReplayDecisionInput,
     ReplayDecisionResult,
@@ -853,8 +853,9 @@ def read_reference(input_data: ReadReferenceInput) -> ReadReferenceResult:
             if position is None:
                 # A date index renders as "2026-06-04 00:00:00"; accept the
                 # date alone, which is how anyone would ask for it.
-                matches = [i for i, label in enumerate(labels)
-                           if label.startswith(wanted_date)]
+                matches = [
+                    i for i, label in enumerate(labels) if label.startswith(wanted_date)
+                ]
                 position = matches[0] if matches else None
             if position is None:
                 missing.append(wanted_date)
@@ -863,7 +864,9 @@ def read_reference(input_data: ReadReferenceInput) -> ReadReferenceResult:
     else:
         positions = list(range(min(input_data.head, total)))
         if input_data.tail:
-            positions += list(range(max(total - input_data.tail, len(positions)), total))
+            positions += list(
+                range(max(total - input_data.tail, len(positions)), total)
+            )
 
     positions = sorted(set(positions))
     truncated = len(positions) > _READ_REFERENCE_MAX_ROWS
@@ -1056,8 +1059,11 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
 
     from standard_quant_tools.agent.tools import _TOOL_DISPATCH
     from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
+    from standard_quant_tools.modeling.agent.feature_tools import (
+        FEATURE_TOOL_DISPATCH,
+    )
 
-    every = {**_TOOL_DISPATCH, **MODELING_TOOL_DISPATCH}
+    every = {**_TOOL_DISPATCH, **MODELING_TOOL_DISPATCH, **FEATURE_TOOL_DISPATCH}
     entry = every.get(input_data.tool_name)
     if entry is None:
         from difflib import get_close_matches

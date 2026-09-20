@@ -75,7 +75,13 @@ def calculate_beta(
         y_mean = np.mean(y)
         ss_tot = np.sum((y - y_mean) ** 2)
         ss_res = np.sum((y - (alpha + beta * x)) ** 2)
-        r_squared = 1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0
+        # A constant y has no variance to explain: NaN, by the policy
+        # above, not the 0.0 this line used to return against it. Tested
+        # on the values, not on ss_tot: thirty copies of 0.01 sum to a
+        # mean that differs from 0.01 in the last bit, and the ratio of
+        # two rounding residues read as an R-squared of -3.2.
+        constant = bool(np.all(y == y[0]))
+        r_squared = float("nan") if constant else 1.0 - ss_res / ss_tot
         result = {"alpha": alpha, "beta": beta, "r_squared": r_squared}
 
     logger.debug(

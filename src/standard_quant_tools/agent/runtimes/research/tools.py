@@ -557,6 +557,9 @@ def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegression
             }
 
     return FactorRegressionResult(
+        warnings=[
+            "OLS standard errors: the t-statistics and p-values assume independent, homoskedastic residuals. Daily return residuals are neither, so a loading that is 'significant' here may not survive HAC (Newey-West) errors; read the p-values as a ranking of the loadings, not a test."
+        ],
         symbol=input_data.symbol,
         factors=names,
         alpha=round(float(result["alpha"]), 6),

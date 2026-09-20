@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from standard_quant_tools.analysis.derivatives import _bounded_exponent
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import finite, positive
 from .daycount import to_date
 
 __all__ = ["dividend_points"]

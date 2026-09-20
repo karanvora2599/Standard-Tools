@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import finite, non_negative, positive
 
 __all__ = ["EXPRESSION_KINDS", "compare_expressions"]
 

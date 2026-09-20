@@ -71,8 +71,6 @@ logger = logging.getLogger(__name__)
 #: Amihud needs enough days for a percentile to exist.
 MIN_OBSERVATIONS = 30
 
-#: Trading days per year, for annualizing anything that needs it.
-
 
 def _require_columns(
     frame: pd.DataFrame, needed: Sequence[str], who: str

@@ -43,7 +43,7 @@ from .context import (
     new_request_id,
     record_data_access,
 )
-from .dispatch import _run_and_record
+from .dispatch import _run_and_record, last_request_id
 from .export import export_bundle
 from .hashing import hash_dataframe, hash_payload
 from .models import DecisionRecord, ReplayResult
@@ -92,6 +92,7 @@ __all__ = [
     "hash_payload",
     "hold_day",
     "is_held",
+    "last_request_id",
     "new_request_id",
     "record_data_access",
     "release_hold",

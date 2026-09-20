@@ -253,7 +253,11 @@ class TechnicalInput(BaseModel):
         description=(
             "List of indicators to compute. Options: "
             "'sma', 'ema', 'macd', 'rsi', 'stochastic', "
-            "'bollinger', 'atr', 'obv', 'vwap', 'adx', 'williams_r'."
+            "'bollinger', 'atr', 'obv', 'vwap', 'adx', 'williams_r'. "
+            "'atr' here is the SIMPLE-mean ATR (indicators.volatility.atr); "
+            "get_advanced_indicators and the panel tools report Wilder's, "
+            "which is smoother and lower after a spike -- the two are not "
+            "the same number under the same name."
         ),
     )
 
@@ -613,6 +617,11 @@ class FactorRegressionResult(BaseModel):
     n_obs: int
     rolling_alpha_tail: Optional[List[float]] = None
     rolling_loadings_tail: Optional[Dict[str, List[float]]] = None
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the numbers do not guarantee: the residual "
+        "assumptions behind every p-value here.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -1535,6 +1544,11 @@ class RiskAttributionResult(BaseModel):
     factor_loadings: Optional[Dict[str, float]] = None
     factor_r_squared: Optional[float] = None
     factor_alpha: Optional[float] = None
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the numbers do not guarantee, when a factor "
+        "model was fitted.",
+    )
 
 
 # ──────────────────────────────────────────────

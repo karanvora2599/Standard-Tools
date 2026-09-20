@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 from standard_quant_tools.analysis.derivatives import MAX_RATE, _bounded_exponent
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import bounded, finite, positive
 from .daycount import DEFAULT_CONVENTION, year_fraction
 
 __all__ = ["QUOTE_CONVENTIONS", "price_total_return_swap", "total_return_future"]

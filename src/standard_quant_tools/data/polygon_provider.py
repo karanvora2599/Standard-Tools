@@ -786,6 +786,14 @@ class PolygonProvider(DataProvider):
         out = out.sort_values([_PIT_AVAILABLE_TIME, _PIT_ENTITY], kind="stable")
         out = out.reset_index(drop=True)
         out.attrs["n_dropped_without_available_time"] = int(dropped)
+        audit.record_data_access(
+            ",".join(str(s) for s in symbols),
+            str(start_date),
+            str(end_date),
+            f"pit:{frame_kind}",
+            source="polygon",
+            content_hash=audit.hash_dataframe(out),
+        )
         return out
 
     def get_temporal_contract(self, frame_kind: str = "bars"):
@@ -886,12 +894,23 @@ class PolygonProvider(DataProvider):
         except Exception as exc:
             _require_tick_access(exc, f"trades for {symbol!r}")
             raise
-        return _parse_ticks(
+        frame = _parse_ticks(
             payload.get("results") or [],
             {"price": "price", "size": "size", "exchange": "exchange"},
             symbol,
             "trades",
         )
+        # Ticks reach the decision record like bars do; they did not, so a
+        # microstructure call's record could never replay as data_changed.
+        audit.record_data_access(
+            symbol,
+            str(start_date),
+            str(end_date),
+            "trades",
+            source="polygon",
+            content_hash=audit.hash_dataframe(frame),
+        )
+        return frame
 
     def get_quotes(
         self,
@@ -925,7 +944,7 @@ class PolygonProvider(DataProvider):
         except Exception as exc:
             _require_tick_access(exc, f"quotes for {symbol!r}")
             raise
-        return _parse_ticks(
+        frame = _parse_ticks(
             payload.get("results") or [],
             {
                 "bid_price": "bid_price",
@@ -936,3 +955,12 @@ class PolygonProvider(DataProvider):
             symbol,
             "quotes",
         )
+        audit.record_data_access(
+            symbol,
+            str(start_date),
+            str(end_date),
+            "quotes",
+            source="polygon",
+            content_hash=audit.hash_dataframe(frame),
+        )
+        return frame

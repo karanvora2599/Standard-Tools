@@ -1608,9 +1608,17 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
                 "realized outcome, and the date each pair belongs to."
             )
 
-    frame = frame.dropna(
-        subset=[input_data.target_column, input_data.prediction_column]
-    )
+    scored_columns = [input_data.target_column, input_data.prediction_column]
+    if input_data.task == "survival":
+        if input_data.event_column not in frame.columns:
+            raise ValidationError(
+                f"task='survival' needs the event column "
+                f"{input_data.event_column!r} (1 where the event was observed, "
+                "0 where the window ended first) beside the duration; the frame "
+                f"holds {list(frame.columns)}."
+            )
+        scored_columns.append(input_data.event_column)
+    frame = frame.dropna(subset=scored_columns)
     if frame.empty:
         raise ValidationError(
             "every row is missing either the prediction or the outcome, so "
@@ -1636,6 +1644,26 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
             "a positive-class probability. If either is not what the column "
             "holds, these numbers are meaningless rather than merely wrong."
         )
+    elif input_data.task == "survival":
+        from standard_quant_tools.modeling.validation.survival import (
+            survival_metrics,
+        )
+
+        events = frame[input_data.event_column].to_numpy(dtype=float)
+        if not np.isin(events, (0.0, 1.0)).all():
+            raise ValidationError(
+                f"the event column {input_data.event_column!r} must be 0 or 1 on "
+                "every row; it says whether the event was observed, not when."
+            )
+        metrics = survival_metrics(np.column_stack([y_true, events]), y_pred, dates)
+        baseline = {}
+        notes.append(
+            "Survival predictions are a RISK, higher meaning sooner, scored on "
+            "Harrell's concordance pooled and per date against a duration that "
+            "may be censored. No R2 and no IC: a correlation of a risk with a "
+            "censored duration measures nothing. This task used to fall through "
+            "to the ranking metrics, which scored a duration with NDCG."
+        )
     else:
         metrics = ranking_metrics(
             y_true, y_pred, dates, ks=tuple(input_data.ndcg_cutoffs)
@@ -1643,7 +1671,9 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
         baseline = {}
 
     ic_summary: Dict[str, float] = {}
-    if entities > 1:
+    if input_data.task == "survival":
+        pass  # the per-date concordance in `metrics` is the cross-sectional read
+    elif entities > 1:
         ic = cross_sectional_ic(y_true, y_pred, dates, method=input_data.ic_method)
         ic_summary = summarize_cross_sectional_ic(ic, prefix="ic")
     else:
@@ -1670,12 +1700,16 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
                 "weaker evidence than it looks."
             )
 
-    ess = None
-    horizon = 1
-    if "label_end_date" in frame.columns:
+    # The adjustment this field promises needs the label's horizon, and
+    # the frame does not carry it. It used to be fixed at 1, so the
+    # 'effective sample size adjusted for overlap' was the row count.
+    horizon = int(input_data.horizon)
+    if horizon == 1:
         notes.append(
-            "Horizon inferred as 1 bar; pass a target horizon through the "
-            "dataset spec for a sharper effective sample size."
+            "effective_sample_size assumes NON-overlapping labels (horizon=1). "
+            "For a forward return over h bars pass horizon=h: the count of "
+            "independent observations is roughly n / h, and a t-statistic read "
+            "off the raw count is overstated by that factor."
         )
     ess = float(effective_sample_size(len(frame), horizon, int(entities)))
 

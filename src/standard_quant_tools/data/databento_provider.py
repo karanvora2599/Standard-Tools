@@ -56,6 +56,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
 
+from standard_quant_tools import audit
 from standard_quant_tools.data.base import DataProvider, FinancialRatios, TickerInfo
 from standard_quant_tools.data.databento import (
     CONSOLIDATED_START,
@@ -128,6 +129,27 @@ def _to_utc(value: Union[str, datetime], *, end_of_day: bool) -> datetime:
     ):
         moment = moment + timedelta(days=1)
     return moment
+
+
+def _record(
+    symbol: str,
+    start_date: Any,
+    end_date: Any,
+    what: str,
+    dataset: str,
+    frame: pd.DataFrame,
+) -> None:
+    """One line per fetch into the open decision record, if there is one:
+    which dataset answered and a digest of what it said, so a replay can
+    tell a restated feed from a changed tool."""
+    audit.record_data_access(
+        symbol,
+        str(start_date),
+        str(end_date),
+        what,
+        source=f"databento:{dataset}",
+        content_hash=audit.hash_dataframe(frame),
+    )
 
 
 class DatabentoProvider(DataProvider):
@@ -421,8 +443,13 @@ class DatabentoProvider(DataProvider):
                 "because Databento has no such schema and inventing one here "
                 "would hide that."
             )
-        frame, _dataset = self._fetch(schema, symbol, start_date, end_date, what="bars")
-        return self._to_ohlcv(frame, symbol)
+        frame, dataset = self._fetch(schema, symbol, start_date, end_date, what="bars")
+        out = self._to_ohlcv(frame, symbol)
+        # Into the open decision record, like every other provider's bars.
+        # Databento fetches used to leave `data_sources` empty, so a record
+        # of a call that read them could never replay as `data_changed`.
+        _record(symbol, start_date, end_date, interval, dataset, out)
+        return out
 
     @staticmethod
     def _to_ohlcv(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -492,7 +519,9 @@ class DatabentoProvider(DataProvider):
         out, _notes = normalize_trades(frame)
         if limit is not None and len(out) > limit:
             out = out.head(int(limit))
-        return out.set_index("timestamp") if "timestamp" in out.columns else out
+        out = out.set_index("timestamp") if "timestamp" in out.columns else out
+        _record(symbol, start_date, end_date, "trades", _dataset, out)
+        return out
 
     def get_quotes(
         self,
@@ -513,7 +542,9 @@ class DatabentoProvider(DataProvider):
         out, _notes = normalize_quotes(frame)
         if limit is not None and len(out) > limit:
             out = out.head(int(limit))
-        return out.set_index("timestamp") if "timestamp" in out.columns else out
+        out = out.set_index("timestamp") if "timestamp" in out.columns else out
+        _record(symbol, start_date, end_date, "quotes", _dataset, out)
+        return out
 
     def get_order_book(
         self,
@@ -556,6 +587,7 @@ class DatabentoProvider(DataProvider):
                 logger.warning("databento book %s: %s", symbol, note)
         if limit is not None and len(out) > limit:
             out = out.head(int(limit))
+        _record(symbol, start_date, end_date, f"mbp-10:{int(levels)}", _dataset, out)
         return out
 
     def get_order_events(
@@ -594,6 +626,7 @@ class DatabentoProvider(DataProvider):
                 logger.warning("databento mbo %s: %s", symbol, note)
         if limit is not None and len(out) > limit:
             out = out.head(int(limit))
+        _record(symbol, start_date, end_date, "mbo", _dataset, out)
         return out
 
     def get_ticker_info(self, symbol: str) -> TickerInfo:

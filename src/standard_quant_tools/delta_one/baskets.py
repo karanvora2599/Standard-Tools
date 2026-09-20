@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import finite, positive
 
 __all__ = ["index_basket"]
 
@@ -57,8 +57,25 @@ def index_basket(
     comparison fields come back None rather than zero, because zero would
     read as "the basket is exactly on top of its index".
     """
-    rows = _parse_constituents(constituents, divisor=divisor)
+    parsed = _parse_constituents(constituents, divisor=divisor)
     warnings: List[str] = []
+    # A constituent priced `null` is a MISSING print: named, left out of
+    # the value, and the omission stated. It used to be impossible to
+    # reach this list, because a missing price was refused outright.
+    missing = [row["symbol"] for row in parsed if row["price"] is None]
+    rows = [row for row in parsed if row["price"] is not None]
+    if not rows:
+        raise ValidationError(
+            f"every constituent's price is null ({missing[:5]}...); a basket "
+            "with no priced constituent has no value."
+        )
+    if missing:
+        warnings.append(
+            f"{len(missing)} constituent(s) have no price and were left out of "
+            f"the basket value: {missing[:5]}. The value understates the basket "
+            "by their share, and any spread against the index is wrong by the "
+            "same amount until they are priced."
+        )
 
     if divisor is not None:
         d = float(divisor)
@@ -113,7 +130,6 @@ def index_basket(
     )
 
     stale = [row["symbol"] for row in rows if row.get("is_stale")]
-    missing = [row["symbol"] for row in rows if row.get("price") is None]
 
     if stale:
         warnings.append(
@@ -190,6 +206,11 @@ def _parse_constituents(
         symbol = str(item.get("symbol") or f"constituent_{index}")
         if "price" not in item:
             raise ValidationError(f"constituent {symbol!r} has no `price`.")
+        if item["price"] is None:
+            # Reported by `index_basket` as missing rather than refused: the
+            # rest of the basket can still be valued, with the gap named.
+            rows.append({"symbol": symbol, "price": None, "is_stale": False})
+            continue
         price = positive(item["price"], f"{symbol}.price")
 
         if need not in item:

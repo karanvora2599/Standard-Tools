@@ -39,7 +39,7 @@ from standard_quant_tools.analysis.derivatives import (
 )
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import positive
 
 __all__ = ["SOLVE_TARGETS", "forward_price", "observed_carry_rate", "solve_carry"]
 

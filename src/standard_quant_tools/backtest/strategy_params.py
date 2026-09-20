@@ -225,9 +225,11 @@ def resolve_strategy_params(
         errors, so enforcing relations there would abort the whole sweep
         rather than let the search score those points and move on.
 
-    So relations are enforced where a single configuration is deliberately
-    requested (the agent tools), and skipped where a search is enumerating
-    a space.
+    So relations are enforced where `check_relations=True` is passed --
+    today that is `validate_tool_call`, the pre-flight -- and skipped on
+    every run path, including a single configuration handed to a tool: an
+    inverted crossover runs and scores badly rather than being refused.
+    Pre-flight a call to have the relation checked before it runs.
 
     Raises:
         ValidationError: unknown strategy, unknown parameter name, a window

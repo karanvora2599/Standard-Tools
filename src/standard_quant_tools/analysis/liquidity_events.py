@@ -120,10 +120,12 @@ class Channel:
         if self.refused_because:
             return self.refused_because
         return (
-            f"{self.name!r} needs {' and '.join(self.requires)}, and no "
-            "provider in this library serves an order book yet. The channel "
-            "is declared rather than omitted so it is clear it exists and "
-            "what it would take."
+            f"{self.name!r} needs {' and '.join(self.requires)}. The "
+            "order book arithmetic exists (analysis.order_book) and the Databento provider "
+            "serves depth; what this detector still lacks is the per-snapshot "
+            "series to run on, which is the get_order_book_series step in "
+            "Development/tool_surface_analysis.md. The channel is declared "
+            "rather than omitted so it is clear it exists and what it would take."
         )
 
 

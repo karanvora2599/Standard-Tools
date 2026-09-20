@@ -45,7 +45,7 @@ from standard_quant_tools.analysis.liquidity_events import (
 from standard_quant_tools.analysis.structure import detect_change_points
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import finite, positive
 from .carry import forward_price, observed_carry_rate, solve_carry
 
 __all__ = ["basis_history", "cash_futures_basis", "detect_basis_dislocation"]

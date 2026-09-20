@@ -35,7 +35,7 @@ from typing import Any, Dict, Optional
 
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import finite, positive
 from .daycount import DateLike, to_date, year_fraction
 
 __all__ = ["SETTLEMENT_TYPES", "ContractSpec"]

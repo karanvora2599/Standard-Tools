@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import non_negative, positive
 
 __all__ = ["etf_fair_value"]
 

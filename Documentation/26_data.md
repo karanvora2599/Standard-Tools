@@ -140,9 +140,14 @@ reports missing bars, stale prices and price jumps. A second name for those
 would be exactly the confusable duplication the runtime split exists to
 prevent.
 
-**Order book FETCHING.** `DataProvider.get_order_book` is still a declared
-contract with canonical columns and no implementation — no shipped provider
-serves depth, and a tool that always refuses is worse than no tool.
+**Order book FETCHING.** `DataProvider.get_order_book` and `get_order_events`
+are implemented by the Databento provider (mbp-10 depth to ten levels, and
+the mbo order stream), reachable programmatically and recorded in the audit
+trail; there is no fetch tool for them yet. The tool is proposed as
+`fetch_order_book` / `fetch_order_events` in
+`Development/tool_surface_analysis.md`, and this paragraph used to say no
+shipped provider served depth, which stopped being true when that provider
+landed.
 
 That was never the only way to have a book, though, and only fetching was
 ever blocked. `register_external_dataset` takes depth you already hold — a

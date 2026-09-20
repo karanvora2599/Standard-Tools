@@ -214,15 +214,19 @@ def pca_returns(
         method,
     )
 
+    # ValidationError, like every sibling in `analysis`: a tool boundary
+    # that catches it for a structured refusal saw a raw ValueError here.
     if n_obs < 2 or n_assets < 1:
-        raise ValueError(
+        raise ValidationError(
             f"Need at least 2 observations and 1 asset; got ({n_obs}, {n_assets})."
         )
     # `method` is only a type ANNOTATION -- nothing enforced it at runtime,
     # so any unrecognized string silently fell through to the SVD branch
     # and returned a result the caller never asked for.
     if method not in ("svd", "power_iteration"):
-        raise ValueError(f"method must be 'svd' or 'power_iteration', got {method!r}.")
+        raise ValidationError(
+            f"method must be 'svd' or 'power_iteration', got {method!r}."
+        )
     # (n_components' range and integrality are validated at the top of this
     # function via require_positive_int, which also covers the non-integral
     # case this check did not: 2.5 passed `< 1` and then failed inside a

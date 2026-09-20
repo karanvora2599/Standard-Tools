@@ -26,9 +26,12 @@ stopped from starting for want of a web server.
 
 THE AUDIT TRAIL COMES FOR FREE, AND MUST NOT BE BROKEN. Both dispatchers
 already route through `audit._run_and_record`, so every call made through
-this server produces a hash-chained, replayable decision record. The server
-sets a request-id context per call so a record ties back to the client
-conversation that caused it, and serves the records at `sqt://audit/{id}`.
+this server produces a hash-chained, replayable decision record. Each
+call's record id comes back to the client as `_meta.request_id` on the
+result -- the id `explain_decision`, `replay_decision` and
+`compare_decisions` take -- and the records are served at
+`sqt://audit/{id}`. The docstring used to claim a per-call request-id
+context the server never set; the id now travels with the result.
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - install-shape error
     ) from exc
 
 from standard_quant_tools import __version__ as _sqt_version
+from standard_quant_tools import audit as _audit
 from standard_quant_tools.error import QuantError
 from standard_quant_tools.mcp import progress as _progress
 from standard_quant_tools.mcp import prompts as _prompts
@@ -281,8 +285,13 @@ class StandardToolsServer:
             async with _progress.report_liveness(
                 ctx, entry.name, interval=self.config.heartbeat_seconds
             ):
-                result = await anyio.to_thread.run_sync(
-                    lambda: dispatch(entry.name, arguments)
+                # The record id is read on the SAME worker thread the
+                # dispatch ran on, which is what makes it this call's.
+                result, request_id = await anyio.to_thread.run_sync(
+                    lambda: (
+                        dispatch(entry.name, arguments),
+                        _audit.last_request_id(),
+                    )
                 )
         except QuantError as exc:
             # The library's own errors are written to be self-correcting, so
@@ -299,6 +308,7 @@ class StandardToolsServer:
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=text)],
             structuredContent=payload,
+            _meta={"request_id": request_id} if request_id else None,
         )
 
     # ── resources ────────────────────────────────────────────────────

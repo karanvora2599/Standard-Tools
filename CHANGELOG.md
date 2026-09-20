@@ -1,5 +1,48 @@
 # Changelog
 
+## What a field said and what its code did, eleven times
+
+Wave 1 of `Development/tool_surface_analysis.md`: the defects the survey
+found, each fixed with a planted test, none of them a new tool.
+
+- `score_predictions` computed its "effective sample size adjusted for
+  overlapping forward returns" with `horizon=1`, so it was the row count;
+  `horizon` is an input now, and the note says what 1 means. `task=
+  "survival"` fell through to the ranking metrics and scored a duration
+  with NDCG; it has its own branch on concordance, with an `event_column`.
+- `hedge_effectiveness.tracking_error` was the hedged series' own sigma,
+  `volatility_after` under a second name; it is the instrument's active
+  sigma, from the same function every other tracking error uses.
+  `index_basket.missing_symbols` could never be non-empty because a null
+  price was refused before the list existed; a null price is now named,
+  left out of the value, and stated in a warning. `reset_spread_monitor`
+  carried the degenerate-baseline retry accumulators through a reset.
+  `basis_scan` no longer promises a `multiplier` it never read. Twenty-four
+  unused `_numbers` imports are gone.
+- The decision record's `request_id` reaches the caller:
+  `audit.last_request_id()` after a Python dispatch, and `_meta.request_id`
+  on every MCP result. The server docstring claimed a per-call context it
+  never set.
+- Databento bars, ticks, depth and order events, and Polygon's ticks and
+  point-in-time filings, now write `data_sources` into the open decision
+  record, so a call that read them can replay as `data_changed`.
+- The feature lab is a third surface to `replay_decision` and
+  `validate_tool_call`; its records failed with "Unknown tool".
+- The liquidity-channel refusal and `26_data.md` no longer say that no
+  provider serves depth.
+- The cointegration scan's Python fallback reports the OLS intercept and
+  `optimal_lag=-1` for "not reported", not `0`. `calculate_beta` returns
+  NaN for a constant series, as its own policy says. `pca_returns` raises
+  `ValidationError` like its siblings. The factor tools carry a warning
+  that their p-values assume iid residuals.
+- `_run_signal_fn_job` passes `risk_free_rate` through, so a callable
+  strategy's grid Sharpe agrees with its single run. Two docstrings that
+  promised more than the code (`_buy_and_hold_signals`,
+  `resolve_strategy_params`) now say what it does. A redundant embargo
+  check is gone. `get_technical_analysis` says its `atr` is the simple
+  mean, not Wilder's.
+- Dead: `holdout_split`, `MIN_OBS_PER_PARAMETER`, one dangling comment.
+
 ## Set aside is not the same as decided against
 
 Seven things the plan's phases set aside, built.

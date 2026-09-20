@@ -52,11 +52,6 @@ logger = logging.getLogger(__name__)
 # imported from here by name.
 TRADING_DAYS = TRADING_DAYS_PER_YEAR
 
-#: Below this, a covariance estimate is not an estimate. With N assets you
-#: are fitting N(N+1)/2 parameters, and this is the ratio of observations to
-#: parameters below which the matrix is near-singular by construction.
-MIN_OBS_PER_PARAMETER = 2.0
-
 
 def _covariance_frame(covariance: Any, who: str) -> pd.DataFrame:
     frame = pd.DataFrame(covariance).astype(float)
@@ -1110,7 +1105,6 @@ __all__ = [
     "marginal_risk_contribution",
     "max_diversification",
     "portfolio_scenarios",
-    "MIN_OBS_PER_PARAMETER",
     "TRADING_DAYS",
     "concentration_analysis",
     "factor_exposure_budget",

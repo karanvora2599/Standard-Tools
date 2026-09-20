@@ -43,7 +43,7 @@ from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import max_drawdown
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import finite
 
 __all__ = ["HEDGE_OBJECTIVES", "futures_hedge", "hedge_effectiveness", "tracking_error"]
 
@@ -284,7 +284,12 @@ def hedge_effectiveness(
                 "sign_flips": int((np.sign(roll).diff().fillna(0) != 0).sum()),
             }
 
-    te = float((unhedged - (-ratio) * hedge).std(ddof=1) * math.sqrt(periods_per_year))
+    # Tracking error is a property of the INSTRUMENT, not of the ratio:
+    # the sigma of the portfolio's return against the hedge held one for
+    # one, which is exactly what `tracking_error` computes. It used to be
+    # the hedged series' own sigma, which is `volatility_after` under a
+    # second name.
+    te = tracking_error(unhedged, hedge, periods_per_year=periods_per_year)
     correlation = float(unhedged.corr(hedge))
     vol_reduction = (
         (1.0 - vol_after / vol_before) * 100.0 if vol_before else float("nan")

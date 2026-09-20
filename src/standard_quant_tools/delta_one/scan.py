@@ -54,7 +54,9 @@ def basis_scan(
 
     Each entry of `pairs` needs `label`, `spot` and `futures`; optionally
     `time_to_expiry` (a per-observation sequence, which is what turns a
-    basis in points into an annualized rate) and `multiplier`.
+    basis in points into an annualized rate). A contract `multiplier` is
+    NOT read: the basis is in points and the z-score is unit-free, so
+    contract size cannot change the ranking.
 
     `detect_shifts` additionally runs the CUSUM change detector per pair.
     It is on by default because the two answer different questions -- a

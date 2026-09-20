@@ -255,7 +255,9 @@ slice report names its own.)
 ## 6. Defects and drift the survey found
 
 Actionable as they stand, independent of any new tool. Report and location
-in parentheses.
+in parentheses. **Status:** all eleven were fixed on 2026-09-20 in the
+commit that carries this sentence (Wave 1), with a planted test for each;
+item 9 is corrected below, because the survey over-counted.
 
 1. `score_predictions` calls `effective_sample_size` with `horizon=1`, so
    the "effective sample size adjusted for overlapping forward returns" it
@@ -293,12 +295,15 @@ in parentheses.
    sibling raises `ValidationError`, so a tool boundary surfaces it raw;
    `multi_factor_regression` has no HAC errors and the two tools built on
    it do not say so. (analysis, §4.11–4.13)
-9. Dead code: `holdout_split`, `local_store`, `parse_lag_column`,
-   `deepest_lag`, `resolved_lookback` (modeling); `MIN_OBS_PER_PARAMETER`,
-   `inference._block_indices`, three `TRADING_DAYS` re-exports, a dangling
-   constant comment in `microstructure_estimators.py:74` (backtest, analysis).
-   Two of the dead modeling helpers are exactly what `validate_dataset_spec`
-   would revive.
+9. Dead code, corrected on inspection: `holdout_split` (no caller, no
+   test) and `MIN_OBS_PER_PARAMETER` (exported, never read) were dead and
+   are removed, as is the dangling constant comment in
+   `microstructure_estimators.py`. The survey also listed
+   `parse_lag_column`, `deepest_lag`, `resolved_lookback`,
+   `inference._block_indices` and `local_store`; the first four have
+   tests or a caller (`comparison.py` uses `_block_indices`) and
+   `local_store` is the store's documented entry point, so they stay.
+   The three `TRADING_DAYS` re-exports are kept on purpose, by name.
 10. Docstrings that promise more than the code: `_buy_and_hold_signals`,
     `resolve_strategy_params`, `engine._run_signal_fn_job` drops
     `risk_free_rate`, a redundant embargo check in

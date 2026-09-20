@@ -819,11 +819,16 @@ def _run_signal_fn_job(
     commission_pct: float,
     slippage_pct: float,
     fill_price: str = "close",
+    risk_free_rate: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Sequential-only counterpart to _run_grid_job for a user-supplied signal
     callable. Always runs in the calling process (never via
     ProcessPoolExecutor), so signal_fn need not be picklable.
+
+    `risk_free_rate` reaches `run_strategy` here as it does in
+    `_run_grid_job`; it used to be dropped on this path alone, so a
+    callable strategy's grid Sharpe disagreed with its single run.
     """
     signals = signal_fn(price_data, **params)
     result = run_strategy(
@@ -833,6 +838,7 @@ def _run_signal_fn_job(
         commission_pct=commission_pct,
         slippage_pct=slippage_pct,
         fill_price=fill_price,
+        risk_free_rate=risk_free_rate,
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -1144,6 +1150,7 @@ def backtest_grid(
                 commission_pct,
                 slippage_pct,
                 fill_price=fill_price,
+                risk_free_rate=risk_free_rate,
             )
             for combo in combos
         ]

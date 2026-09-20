@@ -748,7 +748,7 @@ Run a registered model forward and get its predictions for a universe as of a da
 Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns. Works on predictions this library never produced.
 
 **Required:** `predictions_ref`, `task`  
-**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`
+**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`, `horizon`, `event_column`
 
 #### `validate_model_spec`
 

@@ -396,6 +396,13 @@ def get_portfolio_risk_attribution(
         factor_alpha = round(float(mfr["alpha"]), 6)
 
     return RiskAttributionResult(
+        warnings=(
+            [
+                "OLS standard errors: the t-statistics and p-values assume independent, homoskedastic residuals. Daily return residuals are neither, so a loading that is 'significant' here may not survive HAC (Newey-West) errors; read the p-values as a ranking of the loadings, not a test."
+            ]
+            if factor_loadings is not None
+            else []
+        ),
         tickers=input_data.tickers,
         weights=list(input_data.weights),
         annualized_return=round(ann_ret, 4),

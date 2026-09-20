@@ -71,9 +71,14 @@ class TestToolResolution:
         _, _, surface = _resolve_tool("analyze_stock_risk")
         assert surface == "agent"
 
-    def test_unknown_tool_names_both_registries(self):
-        with pytest.raises(ValueError, match="modeling tool registry"):
+    def test_unknown_tool_names_every_registry(self):
+        with pytest.raises(ValueError, match="feature_lab"):
             _resolve_tool("no_such_tool")
+
+    def test_feature_lab_tools_resolve(self):
+        """The third surface. Its records failed here with 'Unknown tool'."""
+        _, _, surface = _resolve_tool("profile_feature")
+        assert surface == "feature_lab"
 
 
 class TestIdentifierNormalization:

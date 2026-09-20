@@ -42,9 +42,20 @@ def _resolve_tool(tool_name: str) -> Tuple[Any, Any, str]:
         fn, model_cls = MODELING_TOOL_DISPATCH[tool_name]
         return fn, model_cls, "modeling"
 
+    # The feature lab is the third surface. Its records used to fail here
+    # with 'Unknown tool', so the most expensive call in that runtime
+    # could be neither replayed nor pre-validated.
+    from standard_quant_tools.modeling.agent.feature_tools import (
+        FEATURE_TOOL_DISPATCH,
+    )
+
+    if tool_name in FEATURE_TOOL_DISPATCH:
+        fn, model_cls = FEATURE_TOOL_DISPATCH[tool_name]
+        return fn, model_cls, "feature_lab"
+
     raise ValueError(
-        f"Unknown tool {tool_name!r} in decision record — not found in the agent "
-        f"tool registry or the modeling tool registry."
+        f"Unknown tool {tool_name!r} in decision record — not found in the agent, "
+        f"modeling or feature_lab tool registries."
     )
 
 

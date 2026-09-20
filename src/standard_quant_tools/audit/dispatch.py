@@ -3,6 +3,7 @@ a tool call and -- unless disabled -- write its DecisionRecord."""
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
@@ -51,6 +52,23 @@ def _audit_fail_closed() -> bool:
     }
 
 
+_last_record = threading.local()
+
+
+def last_request_id() -> Optional[str]:
+    """
+    The request id of the most recent decision record this THREAD wrote.
+
+    `_run_and_record` minted an id for every call and returned only the
+    result, so nothing that dispatched a tool could ever learn which
+    record it produced -- and `explain_decision`, `replay_decision` and
+    `compare_decisions` all need exactly that id. It is thread-local
+    because the MCP server runs each call on a worker thread and reads
+    the id back on the same thread, right after the dispatch returns.
+    """
+    return getattr(_last_record, "request_id", None)
+
+
 def _run_and_record(
     tool_name: str, fn: Callable[[Any], Any], model_instance: Any
 ) -> Dict[str, Any]:
@@ -60,6 +78,7 @@ def _run_and_record(
     capturing inputs, data provenance, execution context, and an output hash.
     """
     request_id = new_request_id()
+    _last_record.request_id = request_id
     token_req = _request_id_var.set(request_id)
     token_data = _data_sources_var.set([])
 

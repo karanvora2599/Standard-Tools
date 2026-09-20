@@ -385,10 +385,12 @@ def _buy_and_hold_signals(df: pd.DataFrame, **params) -> pd.Series:
     """
     Long every bar. The baseline every active strategy is measured against.
 
-    It lives in the registry rather than only inside `run_buy_and_hold` so that
-    the grid, the strategy matrix, walk-forward and the optimiser can all use
-    the same baseline -- previously it was reachable through one tool, and a
-    comparison that cannot include the baseline is a comparison against nothing.
+    It lives in `RUNNABLE` beside the registry rather than only inside
+    `run_buy_and_hold`, so a single run can hold. It is deliberately NOT in
+    `STRATEGY_REGISTRY`: a search must never be able to choose to hold, and
+    the tools that gate on the registry -- the grid, walk-forward, the
+    optimiser, and today also `run_strategy_matrix` -- do not offer it. A
+    comparison tool that wants the baseline row gates on `RUNNABLE`.
 
     No parameters and no warmup: the signal is 1.0 from the first bar, which is
     what makes it a *hold*. Any indicator-based strategy is flat during its own

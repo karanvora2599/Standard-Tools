@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from standard_quant_tools.analysis.derivatives import _positive
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import bounded, finite, non_negative, positive
+from ._numbers import positive
 from .carry import observed_carry_rate
 
 __all__ = ["futures_curve", "roll_analysis"]

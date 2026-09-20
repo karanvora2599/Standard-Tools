@@ -5,7 +5,6 @@ from .metrics import (
     positive_class_proba,
     regression_metrics,
 )
-from .splits import holdout_split
 from .walk_forward import WalkForwardSplit
 
 __all__ = [
@@ -13,7 +12,6 @@ __all__ = [
     "average_fold_metrics",
     "classification_metrics",
     "fold_feature_importance",
-    "holdout_split",
     "positive_class_proba",
     "regression_metrics",
     "summarize_importance",

@@ -1292,6 +1292,24 @@ class ScorePredictionsInput(BaseModel):
     ndcg_cutoffs: List[int] = Field(
         [5, 10], description="task='ranking' only: the k values for NDCG@k."
     )
+    horizon: int = Field(
+        1,
+        ge=1,
+        description=(
+            "The label's forward horizon in bars, for the effective sample "
+            "size under overlapping labels. 1 applies no adjustment; pass the "
+            "horizon the target was built with (TargetSpec.horizon) and the "
+            "count of independent observations is deflated accordingly."
+        ),
+    )
+    event_column: str = Field(
+        "event",
+        description=(
+            "task='survival' only: the 0/1 column saying whether each "
+            "duration's event was observed. The prediction is read as a RISK, "
+            "higher meaning sooner, and scored on concordance."
+        ),
+    )
 
 
 class ScorePredictionsResult(BaseModel):

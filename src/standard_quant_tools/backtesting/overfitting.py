@@ -475,12 +475,10 @@ def combinatorial_purged_cv(
             if any(j in test_set for j in label_window):
                 purged += 1
                 continue
-            # EMBARGO: does it sit just after a test block?
-            if embargo > 0 and any(
-                (i - j) in range(1, embargo + 1) for j in (int(test_index.max()),)
-            ):
-                purged += 1
-                continue
+            # EMBARGO: does it sit just after a test block? Every block's
+            # end, which includes the last one -- a separate check on
+            # `test_index.max()` alone could never purge anything this
+            # one would not.
             if embargo > 0 and any(
                 0 < (i - t) <= embargo for t in _block_ends(test_index)
             ):

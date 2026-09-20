@@ -418,6 +418,12 @@ def reset_spread_monitor(
             "peak": 0.0,
             "triggered": False,
             "first_crossing_at": None,
+            # The retry accumulators for a baseline that came out degenerate
+            # belong to the baseline being learned; a reset that carried them
+            # over would resume a retry nobody asked for.
+            "degenerate_n": 0,
+            "degenerate_mean": 0.0,
+            "degenerate_m2": 0.0,
         }
     )
     if not keep_baseline:

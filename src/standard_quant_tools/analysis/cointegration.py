@@ -588,18 +588,24 @@ def scan_cointegrated_pairs(
         return df
 
     # Pure-Python fallback: same columns, same order, one pair at a time.
+    # The intercept is the OLS identity on the aligned rows (the hedge
+    # ratio IS the OLS slope with an intercept, so a - slope * b at the
+    # means is that intercept). statsmodels' `coint` does not report the
+    # lag it chose, so `optimal_lag` is -1 here: unknown, not zero.
     rows = []
     for a, b in pair_list:
         if degenerate[(a, b)] is not None:
             rows.append(_blank_row(len(frame)))
             continue
         r = cointegration_test(frame[a], frame[b], autolag=autolag)
+        aligned = frame[[a, b]].dropna()
+        intercept = float(aligned[a].mean() - r["hedge_ratio"] * aligned[b].mean())
         rows.append(
             [
-                float("nan"),  # intercept is not exposed by cointegration_test
+                intercept,
                 r["hedge_ratio"],
                 r["adf_statistic"],
-                0,
+                -1,
                 r["p_value"],
                 r["critical_values"]["1%"],
                 r["critical_values"]["5%"],
