@@ -2071,8 +2071,14 @@ class TestTheDeployedModelIsFitLikeTheValidatedOne:
         from standard_quant_tools.modeling import engine
 
         source = inspect.getsource(engine)
-        assert "full_weights = _fold_sample_weights(model_spec, panel)" in source
-        assert "adapter.prepare(model_spec, panel, full_X, full_y, None)" not in source
+        # The weights are read off the refit's own sample index and handed
+        # to the adapter; the line that passed None is gone.
+        assert "full_weights = _fold_sample_weights(model_spec, full_index)" in source
+        assert (
+            "adapter.prepare(model_spec, full_index, full_X, full_y, full_weights)"
+            in source
+        )
+        assert "full_X, full_y, None)" not in source
 
 
 class TestBothBackendsAgreeOnAnUndefinedSharpe:

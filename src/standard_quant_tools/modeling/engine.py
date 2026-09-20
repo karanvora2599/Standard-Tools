@@ -39,6 +39,7 @@ from .preprocessing import (
     step_types,
 )
 from .registry.model_registry import new_model_id, save_model
+from .samples import SampleIndex
 from .specs import TASKS, ModelSpec, targets_for_task
 from .validation.conformal import conformal_radius, held_out_residuals
 from .validation.diagnostics import fold_feature_importance, summarize_importance
@@ -343,21 +344,17 @@ def _refuse_missing_after_preprocessing(
 
 
 def _fold_sample_weights(
-    model_spec: ModelSpec, train_frame: pd.DataFrame
+    model_spec: ModelSpec, index: SampleIndex
 ) -> "np.ndarray | None":
-    """Training-row weights for one fold, or None for an unweighted fit."""
+    """Training-row weights for one fold, or None for an unweighted fit --
+    defined on the rows' sample index, which is what a weight is about."""
     if model_spec.weighting.method == "none":
         return None
-    label_end = (
-        train_frame[LABEL_END_COL].to_numpy()
-        if LABEL_END_COL in train_frame.columns
-        else None
-    )
     return build_sample_weights(
         model_spec.weighting.method,
-        train_frame["date"].to_numpy(),
-        label_end,
-        train_frame["entity"].to_numpy(),
+        index.dates,
+        index.label_end,
+        index.entities,
         model_spec.weighting.half_life_days,
     )
 
@@ -430,16 +427,22 @@ def _conformal_radius(
     params: Dict[str, Any],
     model_spec: ModelSpec,
     arrays: Any,
-    frame: pd.DataFrame,
 ) -> "tuple[float, int]":
     """
     The split-conformal radius for one training window: absolute
     residuals on held-out date blocks, the estimator refit without each
     under the embargo and the label purge, and their (1 - alpha) quantile.
-    Returns (radius, number of residuals it was read from).
+    Returns (radius, number of residuals it was read from). The blocks are
+    cut on the sample index the arrays carry, so they are the rows of `X`
+    whatever order the adapter put them in.
     """
     intervals = model_spec.intervals
     assert intervals is not None
+    if arrays.index is None:
+        raise ValidationError(
+            "conformal calibration needs the sample index beside the arrays; "
+            "the adapter did not carry it."
+        )
     weights = arrays.sample_weight
 
     def fit_predict(train_mask, test_mask):
@@ -454,8 +457,8 @@ def _conformal_radius(
 
     residuals = held_out_residuals(
         fit_predict,
-        frame["date"].to_numpy(),
-        frame[LABEL_END_COL].to_numpy() if LABEL_END_COL in frame.columns else None,
+        arrays.index.dates,
+        arrays.index.label_end,
         n_folds=int(intervals.calibration_folds),
         embargo=int(model_spec.validation.embargo),
     )
@@ -762,7 +765,11 @@ def run_experiment(
             _refuse_missing_after_preprocessing(
                 train_X, test_X, model_spec, "run_model_experiment"
             )
-        sample_weight = _fold_sample_weights(model_spec, train_df)
+        # What each training row IS -- its date, entity and label end --
+        # beside what it contains. The weights, the adapter and the
+        # conformal calibration are defined on this, not on the frame.
+        train_index = SampleIndex.from_frame(train_df)
+        sample_weight = _fold_sample_weights(model_spec, train_index)
         fold_columns = list(train_X.columns)
         if model_columns is None:
             model_columns = fold_columns
@@ -801,12 +808,13 @@ def run_experiment(
                     )
                 inner_train_X, inner_test_X = matrices
                 candidate = _instantiate(estimator_cls, params, model_spec.random_seed)
+                inner_index = SampleIndex.from_frame(inner_train)
                 inner_arrays = adapter.prepare(
                     model_spec,
-                    inner_train,
+                    inner_index,
                     inner_train_X,
                     _labels(model_spec, inner_train),
-                    _fold_sample_weights(model_spec, inner_train),
+                    _fold_sample_weights(model_spec, inner_index),
                 )
                 _fit(
                     candidate,
@@ -846,7 +854,9 @@ def run_experiment(
             search_reports.append(search_report)
 
         estimator = _instantiate(estimator_cls, fold_params, model_spec.random_seed)
-        arrays = adapter.prepare(model_spec, train_df, train_X, train_y, sample_weight)
+        arrays = adapter.prepare(
+            model_spec, train_index, train_X, train_y, sample_weight
+        )
         # Calibration is fitted INSIDE the training window, on folds held out
         # from it, so the map never sees a label the estimator memorized --
         # and never sees a test row at all.
@@ -879,7 +889,7 @@ def run_experiment(
         lower = upper = None
         if model_spec.intervals is not None:
             radius, _n_calibration = _conformal_radius(
-                estimator_cls, fold_params, model_spec, arrays, train_df
+                estimator_cls, fold_params, model_spec, arrays
             )
             lower = np.asarray(prediction_values, dtype=float) - radius
             upper = np.asarray(prediction_values, dtype=float) + radius
@@ -1184,8 +1194,9 @@ def run_experiment(
     # `_fold_sample_weights` needs only `date`, `entity` and optionally the
     # label-end column, all of which the full panel carries, so this is the
     # same function the folds call rather than a second weighting path.
-    full_weights = _fold_sample_weights(model_spec, panel)
-    full_arrays = adapter.prepare(model_spec, panel, full_X, full_y, full_weights)
+    full_index = SampleIndex.from_frame(panel)
+    full_weights = _fold_sample_weights(model_spec, full_index)
+    full_arrays = adapter.prepare(model_spec, full_index, full_X, full_y, full_weights)
     _fit(
         final_estimator,
         full_arrays.X,
@@ -1220,7 +1231,6 @@ def run_experiment(
                 model_spec.estimator.params,
                 model_spec,
                 full_arrays,
-                panel,
             )
             distribution_state["conformal"] = {
                 "method": model_spec.intervals.method,

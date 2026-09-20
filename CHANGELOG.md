@@ -1,5 +1,30 @@
 # Changelog
 
+## A row's date was read off whichever frame was in hand
+
+Phase 8 of `Development/modeling_runtime_plan.md`, the part that is built
+now.
+
+The purge read each row's date and label end; the weights read its date,
+label end and entity; the ranking adapter reordered by date and entity;
+the conformal calibration cut its blocks on the dates. Each read those
+columns off whichever DataFrame slice happened to be passed, which made
+the contract between the engine and an adapter "a frame with some
+columns" -- a contract on the shape of the data rather than on the
+meaning of a sample.
+
+**`SampleIndex(dates, entities, label_end)`** is that meaning, written
+once, in row order. The engine builds it per fold, for the inner search
+and for the refit; `adapter.prepare` receives it beside the matrix and
+`FitArrays` carries it through; `RankingAdapter` reorders it with the
+rows; the weights and the conformal calibration are defined on it rather
+than on a frame. Each adapter declares the `input_kind` its estimators
+consume -- `tabular`, the one kind -- and the capability report reads it
+off the adapter rather than restating it. No spec field was added: a
+one-valued `RepresentationSpec` would churn every persisted `ModelSpec`
+for no behaviour, and the repository's own spike measured a shared
+representation at +0.0014 R2. A sequence kind waits for a measured case.
+
 ## The label said it was censored, and it was fitted as though it were not
 
 Phase 7 of `Development/modeling_runtime_plan.md`.

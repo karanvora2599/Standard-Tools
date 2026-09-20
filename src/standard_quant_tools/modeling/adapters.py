@@ -43,6 +43,7 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from .samples import SampleIndex
 from .validation.metrics import (
     classification_metrics,
     cross_sectional_ic,
@@ -60,12 +61,22 @@ from .validation.survival import survival_metrics
 
 @dataclass(frozen=True)
 class FitArrays:
-    """Exactly what gets handed to `estimator.fit`, after any reshaping."""
+    """
+    Exactly what gets handed to `estimator.fit`, after any reshaping, and
+    the sample index of those rows in the same order.
+
+    `X` is in the adapter's declared `input_kind`; `index` says what each
+    row of it IS -- its date, entity and label end -- so the weights, the
+    conformal calibration and anything else defined on sample metadata
+    read it here rather than off a frame that may no longer be in the
+    same order.
+    """
 
     X: np.ndarray
     y: np.ndarray
     sample_weight: Optional[np.ndarray] = None
     group: Optional[np.ndarray] = None
+    index: Optional[SampleIndex] = None
 
 
 def _exposes_coefficients(estimator_cls: type) -> bool:
@@ -144,6 +155,10 @@ class ModelAdapter:
     estimator satisfies. Subclasses override only what differs."""
 
     task: ClassVar[str] = ""
+    #: The shape of `FitArrays.X` this adapter builds and its estimators
+    #: consume. `tabular` is (n, F) and the only kind today; a sequence
+    #: kind would build (n, T, F) per entity from the same sample index.
+    input_kind: ClassVar[str] = "tabular"
     #: Whether this task needs query groups at fit time.
     needs_groups: ClassVar[bool] = False
     #: Whether the score this adapter produces has meaningful units. False
@@ -154,12 +169,17 @@ class ModelAdapter:
     def prepare(
         self,
         model_spec: Any,
-        frame: pd.DataFrame,
+        index: SampleIndex,
         X: pd.DataFrame,
         y: np.ndarray,
         weights: Optional[np.ndarray],
     ) -> FitArrays:
-        return FitArrays(X=X.to_numpy(), y=y, sample_weight=weights)
+        """
+        The arrays `fit` receives. `index` is the sample metadata of the
+        rows of `X`, in the same order; an adapter that reorders the rows
+        reorders the index with them.
+        """
+        return FitArrays(X=X.to_numpy(), y=y, sample_weight=weights, index=index)
 
     def score(self, estimator: Any, X: pd.DataFrame) -> np.ndarray:
         """
@@ -207,7 +227,7 @@ class ModelAdapter:
             fit_params = set()
         return {
             "task": self.task,
-            "input_kind": "tabular",
+            "input_kind": self.input_kind,
             "needs_groups": self.needs_groups,
             "score_has_scale": self.score_has_scale,
             "supports_sample_weight": "sample_weight" in fit_params,
@@ -273,7 +293,7 @@ class RankingAdapter(ModelAdapter):
     needs_groups = True
     score_has_scale = False
 
-    def prepare(self, model_spec, frame, X, y, weights) -> FitArrays:
+    def prepare(self, model_spec, index, X, y, weights) -> FitArrays:
         """
         Reorder and re-label a training fold for a learning-to-rank fit.
 
@@ -303,14 +323,14 @@ class RankingAdapter(ModelAdapter):
         across dates would be asking it to rank today's names against last
         year's.
         """
-        dates_raw = frame["date"].to_numpy()
-        order = np.lexsort((frame["entity"].to_numpy(), dates_raw))
-        dates = dates_raw[order]
+        order = np.lexsort((index.entities, index.dates))
+        reordered = index.take(order)
         return FitArrays(
             X=X.to_numpy()[order],
-            y=relevance_grades(y[order], dates, model_spec.ranking.n_grades),
+            y=relevance_grades(y[order], reordered.dates, model_spec.ranking.n_grades),
             sample_weight=None if weights is None else weights[order],
-            group=group_sizes(dates),
+            group=group_sizes(reordered.dates),
+            index=reordered,
         )
 
     def metrics(self, model_spec, estimator, X, y_true, score, dates, train_y):
@@ -341,9 +361,12 @@ class SurvivalAdapter(ModelAdapter):
     task = "survival"
     score_has_scale = False
 
-    def prepare(self, model_spec, frame, X, y, weights) -> FitArrays:
+    def prepare(self, model_spec, index, X, y, weights) -> FitArrays:
         return FitArrays(
-            X=X.to_numpy(), y=np.asarray(y, dtype=float), sample_weight=weights
+            X=X.to_numpy(),
+            y=np.asarray(y, dtype=float),
+            sample_weight=weights,
+            index=index,
         )
 
     def score(self, estimator: Any, X: pd.DataFrame) -> np.ndarray:

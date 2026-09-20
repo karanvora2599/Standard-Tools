@@ -22,6 +22,7 @@ from standard_quant_tools.modeling.adapters import (
     get_adapter,
 )
 from standard_quant_tools.modeling.estimators.registry import ESTIMATOR_REGISTRY
+from standard_quant_tools.modeling.samples import SampleIndex
 from standard_quant_tools.modeling.specs import (
     EstimatorSpec,
     ModelSpec,
@@ -72,7 +73,7 @@ class TestPrepare:
         X = frame[["f1", "f2"]]
         y = np.arange(len(frame), dtype=float)
         arrays = RegressionAdapter().prepare(
-            _model_spec("regression"), frame, X, y, None
+            _model_spec("regression"), SampleIndex.from_frame(frame), X, y, None
         )
         np.testing.assert_array_equal(arrays.X, X.to_numpy())
         np.testing.assert_array_equal(arrays.y, y)
@@ -82,7 +83,9 @@ class TestPrepare:
         frame = _frame(n_dates=6, n_entities=8)
         X = frame[["f1", "f2"]]
         y = np.random.default_rng(1).normal(0, 1, len(frame))
-        arrays = RankingAdapter().prepare(_model_spec(), frame, X, y, None)
+        arrays = RankingAdapter().prepare(
+            _model_spec(), SampleIndex.from_frame(frame), X, y, None
+        )
         assert arrays.y.dtype.kind == "i", "ranker labels must be integer grades"
         assert arrays.group is not None
         assert arrays.group.sum() == len(frame)
@@ -101,11 +104,19 @@ class TestPrepare:
         adapter, spec = RankingAdapter(), _model_spec()
 
         ordered = adapter.prepare(
-            spec, frame, frame[["f1", "f2"]], frame["_y"].to_numpy(), None
+            spec,
+            SampleIndex.from_frame(frame),
+            frame[["f1", "f2"]],
+            frame["_y"].to_numpy(),
+            None,
         )
         shuffled = frame.iloc[np.random.default_rng(4).permutation(len(frame))]
         out = adapter.prepare(
-            spec, shuffled, shuffled[["f1", "f2"]], shuffled["_y"].to_numpy(), None
+            spec,
+            SampleIndex.from_frame(shuffled),
+            shuffled[["f1", "f2"]],
+            shuffled["_y"].to_numpy(),
+            None,
         )
         np.testing.assert_allclose(ordered.X, out.X)
         np.testing.assert_array_equal(ordered.y, out.y)
@@ -120,7 +131,7 @@ class TestPrepare:
         weights = np.arange(len(shuffled), dtype=float)
         arrays = RankingAdapter().prepare(
             _model_spec(),
-            shuffled,
+            SampleIndex.from_frame(shuffled),
             shuffled[["f1", "f2"]],
             np.random.default_rng(6).normal(0, 1, len(shuffled)),
             weights,

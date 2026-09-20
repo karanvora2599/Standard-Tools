@@ -2184,6 +2184,33 @@ shorter is much harder to act on than a stated absence.
 
 ---
 
+### The sample index
+
+An adapter's `prepare` receives a `SampleIndex` beside the matrix: the
+dates, entities and label ends of the rows of `X`, in the same row order,
+and `FitArrays` carries it through. That is what the engine was doing
+implicitly — the purge read each row's date and label end, the weights
+read its date, label end and entity, the ranking adapter reordered by date
+and entity, the conformal calibration cut its blocks on the dates — off
+whichever frame slice happened to be in hand, a contract on the shape of
+the data rather than on the meaning of a sample. Written once, the index
+is taken and reordered with the same masks and permutations as the
+matrix (`RankingAdapter.prepare` returns the reordered index with the
+reordered `X`), and the weights, the calibration and the adapters are
+defined on it. Each adapter declares the `input_kind` its estimators
+consume; `tabular` is the one kind today, reported by
+`list_modeling_capabilities`.
+
+No `RepresentationSpec` was added. A one-valued field would churn every
+persisted `ModelSpec` for no behaviour, and the repository's own spike
+measured a shared representation at +0.0014 R² on the most favourable
+panel it could be given. A `sequence` kind — `(n, T, F)` per entity,
+built within the fold from the same index — waits for a measured case in
+which an MLP over lag columns loses to a sequence model by more than
+bootstrap noise. Until then the lag columns are the sequence.
+
+---
+
 ## Point-in-time joins
 
 Everywhere else in this package, *was this known yet* is answered by one
