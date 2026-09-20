@@ -1,5 +1,55 @@
 # Changelog
 
+## A model validated cross-sectionally was deployed on the pooled statistics, and the manifest could not say so
+
+Phase 0 of `Development/modeling_runtime_plan.md`, third commit. The
+defect that set the plan's order.
+
+`_preprocess` standardizes each fold within its date when
+`preprocessing.normalization='cross_sectional'` is asked for. The
+full-panel refit did not branch: it fitted the pooled winsorize/zscore
+statistics whatever the spec said, persisted them as
+`preprocessing_stats.json`, and `score_model` applied them. So the
+estimator that was validated on one transform was deployed on another.
+Measured on a six-entity synthetic panel, ridge, three features: the
+deployed estimator's predictions under the two transforms agree at
+Spearman **0.84**, and the mean absolute difference between the two feature
+matrices on the same rows is 0.40 standard deviations. Nothing in the
+package recorded which transform the estimator expected, so nothing could
+show the mismatch. It is the weighting mistake the engine's own refit
+comment records, one field over.
+
+The refit now branches the way the folds do. A cross-sectional model fits
+nothing per column, so its persisted statistics are empty, and
+`ModelManifest.preprocessing` records the `PreprocessingSpec` the estimator
+was refit under; `score_model` reads that field and standardizes within the
+scoring date's own cross-section -- which is exactly one date after the
+stale filter -- or applies the persisted statistics, as the folds did.
+`inspect_model(view="validation")` reports the field.
+
+**A legacy cross-sectional model is refused at scoring, not guessed.** A
+manifest written before the field existed, whose bundled spec says
+`cross_sectional`, describes an estimator that was fitted on the pooled
+statistics: no transform applied now reproduces a pipeline that was
+validated, so the refusal says to retrain and notes that the model's
+walk-forward OOS predictions remain valid. A legacy pooled model scores as
+before.
+
+The tests plant their oracle. The refit is deterministic, so "fitted under
+the fold transform" is checked by refitting the same ridge by hand on that
+transform and comparing coefficients to 1e-12 -- and the pooled refit is
+kept beside it as the thing the coefficients must NOT equal, so the test
+cannot pass on a panel where the two transforms happen to coincide. Scoring
+is checked by an identity: a linear model on features standardized within
+the date predicts, on average over that date's names, exactly its
+intercept. With six entities the three-sigma clip cannot fire, so the
+identity is exact under the cross-sectional path and false under the pooled
+one, and both directions are asserted.
+
+This is the stop-gap. Phase 1's preprocessing registry replaces the branch
+with a serialized pipeline state that the folds, the refit and scoring all
+apply; the tests survive it.
+
 ## The inner search chose parameters on rows whose labels had already seen the window they were scored against
 
 Phase 0 of `Development/modeling_runtime_plan.md`, second commit.

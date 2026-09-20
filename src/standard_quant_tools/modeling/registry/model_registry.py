@@ -52,6 +52,7 @@ def save_model(
     dataset_spec_hash: Optional[str] = None,
     validation_report: Optional[Dict[str, Any]] = None,
     dataset_warnings: Optional[List[str]] = None,
+    preprocessing: Optional[Dict[str, Any]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -59,6 +60,11 @@ def save_model(
     refit, not any one walk-forward fold) — persisted so scoring.py can
     apply the identical winsorize/zscore transform to new data instead of
     refitting stats on whatever happens to be in the scoring universe.
+    Empty for a cross-sectional model, which fits nothing per column.
+
+    preprocessing: the PreprocessingSpec the estimator was refit under, so
+    scoring can tell whether to apply those statistics or to standardize
+    within the scoring date's own cross-section. See ModelManifest.
 
     oos_predictions_uri: where engine.py already persisted the
     walk-forward out-of-sample fold predictions (date, entity, prediction)
@@ -152,6 +158,7 @@ def save_model(
         train_end_date=train_end_date,
         training_information_cutoff=training_information_cutoff,
         dataset_warnings=list(dataset_warnings or []),
+        preprocessing=dict(preprocessing or {}),
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         git_commit_sha=_git_sha(),
         package_version=_package_version(),

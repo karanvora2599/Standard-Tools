@@ -28,14 +28,46 @@ from .adapters import get_adapter
 from .dataset.builder import build_dataset
 from .features.base import FeatureScope
 from .features.registry import get_feature
-from .features.transforms import apply_preprocessing
+from .features.transforms import apply_preprocessing, standardize_cross_sectional
 from .registry.feature_provenance import feature_provenance_from_spec
 from .registry.model_registry import (
     load_dataset_spec,
     load_manifest,
     load_model,
+    load_model_spec,
     load_preprocessing_stats,
 )
+
+
+def _deployed_preprocessing(manifest, model_id: str) -> Dict[str, Any]:
+    """
+    The transform the deployed estimator was fitted under.
+
+    From the manifest when it records one. A manifest written before the
+    field existed is resolved from the model's own bundled spec -- but only
+    when that spec says `pooled`, because that is the one transform such a
+    model was certainly refit under. For a legacy spec that says
+    `cross_sectional` the refit of the day did NOT honour it: the estimator
+    was fitted on the pooled statistics while the folds were validated
+    cross-sectionally, and no transform applied here describes a pipeline
+    that was validated. Scoring it would return a number with two
+    contradictory provenances, so it is refused with the remedy.
+    """
+    if manifest.preprocessing:
+        return dict(manifest.preprocessing)
+    spec = load_model_spec(model_id)
+    if spec.preprocessing.normalization != "pooled":
+        raise ValidationError(
+            f"score_model: model {model_id!r} was validated under "
+            f"preprocessing.normalization={spec.preprocessing.normalization!r} "
+            "but predates the refit that honours it: its deployed estimator "
+            "was fitted on the pooled statistics, so no transform applied now "
+            "reproduces the pipeline its OOS metrics describe. Retrain to "
+            "register a model whose deployed transform is the validated one. "
+            "For historical evaluation the model's walk-forward OOS "
+            "predictions remain valid."
+        )
+    return spec.preprocessing.model_dump()
 from .specs import DatasetSpec, _parse_date
 
 
@@ -119,6 +151,7 @@ def score_model(
             )
 
     stats = load_preprocessing_stats(model_id)
+    preprocessing = _deployed_preprocessing(manifest, model_id)
     estimator = load_model(model_id)
 
     # The model's OWN bundled, content-verified copy -- not
@@ -301,7 +334,21 @@ def score_model(
         set(universe) - set(latest["entity"]) - set(stale_entities)
     )
 
-    X = apply_preprocessing(latest[manifest.feature_ids], stats)
+    # The transform the deployed estimator was validated and refit under.
+    # A cross-sectional model standardizes within the scoring date's own
+    # cross-section -- `latest` is exactly one date after the stale filter
+    # above -- which is the contemporaneous information the folds used and
+    # a live model also has. A pooled model applies the persisted
+    # statistics. Applying the pooled statistics to both was the
+    # deployment mismatch the engine's refit comment records.
+    if preprocessing.get("normalization") == "cross_sectional":
+        X = standardize_cross_sectional(
+            latest[manifest.feature_ids],
+            latest["date"].to_numpy(),
+            float(preprocessing.get("clip_sigma", 3.0)),
+        )
+    else:
+        X = apply_preprocessing(latest[manifest.feature_ids], stats)
     # Through the SAME adapter the folds and the deployed refit used. This
     # was a two-way branch -- regression got `predict`, everything else got
     # `positive_class_proba` -- written when those were the only two tasks.

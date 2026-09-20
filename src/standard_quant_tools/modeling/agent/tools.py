@@ -725,6 +725,9 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # show performance decay across time, which window carried the
             # result, or how many folds were skipped and why.
             "validation_report": manifest.validation_report,
+            # The transform the DEPLOYED estimator was refit under. Empty
+            # for a model registered before it was recorded.
+            "preprocessing": manifest.preprocessing,
         }
     else:  # lineage
         data = {

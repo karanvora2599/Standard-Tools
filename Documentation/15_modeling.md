@@ -1409,6 +1409,20 @@ Two properties worth knowing:
 It is also cheaper — measured at 469 ms against 898 ms for pooled on a
 50-entity walk-forward, because it skips the quantile fitting entirely.
 
+**The deployed estimator is refit under the same transform the folds
+used**, and the manifest says which. A cross-sectional model fits nothing
+per column, so its `preprocessing_stats.json` is empty and
+`ModelManifest.preprocessing` records the `PreprocessingSpec`; `score_model`
+reads it and standardizes within the scoring date's own cross-section. The
+refit did not branch before this was recorded: a model validated
+cross-sectionally was refit and scored on the pooled statistics, with
+nothing in the package to show it — measured on a six-entity panel, the
+deployed estimator's predictions under the two transforms agreed at
+Spearman 0.84. A model registered before the field existed whose spec says
+`cross_sectional` is refused at scoring rather than guessed at, because no
+transform applied now reproduces the pipeline its OOS metrics describe; its
+walk-forward OOS predictions remain valid.
+
 ---
 
 ## Sample weighting

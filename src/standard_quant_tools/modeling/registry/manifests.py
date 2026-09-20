@@ -133,6 +133,18 @@ class ModelManifest(BaseModel):
     # is indistinguishable from "no warnings" by design: absence of a
     # recorded warning is not evidence the condition did not hold.
     dataset_warnings: List[str] = Field(default_factory=list)
+    # The transform the DEPLOYED estimator was fitted under, as
+    # PreprocessingSpec.model_dump(): {"normalization": ..., "clip_sigma":
+    # ...}. `preprocessing_stats.json` holds the fitted pooled statistics
+    # and is empty for a cross-sectional model, which fits nothing; this
+    # says which of the two the estimator expects. It was not recorded, and
+    # the refit did not branch on it: a model validated under
+    # `cross_sectional` was refit and scored under the pooled statistics,
+    # and nothing in the package could show that. Empty for a manifest
+    # written before this existed -- and for such a manifest whose bundled
+    # spec says cross_sectional, score_model refuses rather than guess
+    # which of the two transforms its estimator was actually fitted on.
+    preprocessing: Dict[str, Any] = Field(default_factory=dict)
     created_at_utc: str
     git_commit_sha: Optional[str] = None
     package_version: Optional[str] = None

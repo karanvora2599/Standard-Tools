@@ -740,9 +740,30 @@ def run_experiment(
     # One take of the whole panel, not two. The fused helper is not used
     # here because these statistics are persisted into the manifest, and it
     # returns only the transformed frames.
+    #
+    # UNDER THE SAME TRANSFORM THE FOLDS USED. This did not branch: it
+    # fitted the pooled winsorize/zscore statistics whatever
+    # `preprocessing.normalization` said, persisted them, and score_model
+    # applied them -- so a model validated under `cross_sectional` was
+    # deployed on a transform it was never validated on, with nothing in
+    # the manifest to show it. Measured on a six-entity panel, ridge, three
+    # features: the deployed estimator's predictions under the two
+    # transforms agreed at Spearman 0.84. This is the weighting mistake
+    # recorded below, one field over, and the same rule applies: the
+    # deployed pipeline is the validated pipeline. A cross-sectional model
+    # fits nothing per column, so its persisted statistics are empty and
+    # the manifest's `preprocessing` field says which transform to apply.
     full_features = panel[feature_ids]
-    full_stats = fit_preprocessing(full_features)
-    full_X = apply_preprocessing(full_features, full_stats)
+    if model_spec.preprocessing.normalization == "cross_sectional":
+        full_stats = {}
+        full_X = standardize_cross_sectional(
+            full_features,
+            panel["date"].to_numpy(),
+            model_spec.preprocessing.clip_sigma,
+        )
+    else:
+        full_stats = fit_preprocessing(full_features)
+        full_X = apply_preprocessing(full_features, full_stats)
     full_y = panel["target"].to_numpy()
     final_estimator = _instantiate(
         estimator_cls, model_spec.estimator.params, model_spec.random_seed
@@ -816,6 +837,9 @@ def run_experiment(
         n_folds=len(fold_metrics),
         validation_report=validation_report,
         preprocessing_stats=full_stats,
+        # Which transform the deployed estimator expects -- see the refit
+        # above and ModelManifest.preprocessing.
+        preprocessing=model_spec.preprocessing.model_dump(),
         oos_predictions_uri=oos_predictions_uri,
         model_id=model_id,
         # The last FEATURE date in the training panel. Kept for lineage, but
