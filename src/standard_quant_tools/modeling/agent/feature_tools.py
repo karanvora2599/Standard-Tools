@@ -597,6 +597,15 @@ def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationRes
             f"actually doubt, or pass max_fits={n_fits} to accept the cost."
         )
 
+    # One cache for every refit. The baseline fits each fold's pipeline on
+    # every feature; each leave-one-out run over a column-wise pipeline
+    # then reads its matrices off the baseline's, minus the column, which
+    # is exact -- so the pipeline is fitted once per fold for the whole
+    # ablation rather than once per fold per feature.
+    from standard_quant_tools.modeling.cache import FoldCache
+
+    cache = FoldCache()
+
     def _fit(subset):
         dataset = {
             "panel": panel,
@@ -607,7 +616,11 @@ def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationRes
             "warnings": meta.get("warnings", []),
         }
         return run_experiment(
-            dataset, spec, dataset_id=input_data.dataset_id, register=False
+            dataset,
+            spec,
+            dataset_id=input_data.dataset_id,
+            register=False,
+            fold_cache=cache,
         )["oos_metrics"]
 
     baseline_metrics = _fit(features)
@@ -621,6 +634,7 @@ def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationRes
 
     rows = ablation_contributions(baseline, without, metric)
     summary = summarize_ablation(rows, metric)
+    reuse = cache.stats()
 
     return FeatureAblationResult(
         dataset_id=input_data.dataset_id,
@@ -629,6 +643,8 @@ def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationRes
         baseline_metric=baseline,
         n_folds=n_folds,
         n_fits=n_fits,
+        preprocessing_fitted=int(reuse["misses"]),
+        preprocessing_reused=int(reuse["hits"] + reuse["projections"]),
         contributions=rows,
         **summary,
     )

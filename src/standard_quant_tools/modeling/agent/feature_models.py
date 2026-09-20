@@ -749,6 +749,19 @@ class FeatureAblationResult(BaseModel):
     )
     n_folds: int
     n_fits: int = Field(..., description="Fits actually run: (features + 1) x folds.")
+    preprocessing_fitted: int = Field(
+        0,
+        description=(
+            "Fold pipelines fitted across the whole ablation. For a "
+            "column-wise pipeline this is the baseline's folds only: each "
+            "leave-one-out run reads its matrices off the baseline's, minus "
+            "the column, which is exact."
+        ),
+    )
+    preprocessing_reused: int = Field(
+        0,
+        description="Fold pipelines read from the cache instead of refitted.",
+    )
     contributions: List[FeatureContribution] = Field(
         ..., description="Ranked, most valuable first."
     )

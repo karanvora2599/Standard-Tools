@@ -1818,6 +1818,56 @@ is reported as unknown rather than guessed.
 ablation, which runs one experiment per feature; each of those experiments
 is still planned and checked against the spec's budget on its own.
 
+### The fold cache
+
+Two things were recomputed. The inner search preprocessed each inner fold
+once per *candidate*, although the inner folds do not depend on the
+candidate and neither does the pipeline's output for them. And the feature
+ablation ran the whole walk-forward once per feature, refitting every
+fold's pipeline on the same rows with one column fewer.
+
+`modeling.cache.FoldCache` holds preprocessed `(train, test)` matrices
+keyed by the plan's `preprocessing_hash`. Every run keeps a private one,
+which is what lets the search preprocess each inner fold once; pass
+`run_experiment(..., fold_cache=cache)` across several runs over the *same*
+dataset and they share. `run_feature_ablation` does exactly that, and
+reports `preprocessing_fitted` (the baseline's folds) beside
+`preprocessing_reused` (everything after it).
+
+**What a column-wise pipeline makes exact.** Every default step transforms
+a column from that column alone — a winsorize quantile, a z-score, a
+cross-sectional rank, a median for imputation are each fitted per column —
+so the preprocessed matrix for a *subset* of the features is the full
+matrix's columns, to the last bit. The cache projects a subset off a wider
+entry only when every step in the pipeline is `column_wise` *and* the
+pipeline kept its column set; a PCA whitening is not column-wise, a
+missingness indicator adds columns, and both miss and refit, which is the
+honest answer rather than an approximate one. `validation_report["cache"]`
+records the run's `hits`, `misses` and `projections`, whether the cache
+was `shared`, and whether the pipeline was `projectable`.
+
+**What it saves depends on what the pipeline costs.** Measured on a
+synthetic 20-feature panel, ridge, leave-one-out ablation (21 experiments)
+and a 6-point grid over 3 inner splits, best of two runs; the numbers are
+identical with and without the cache in every case:
+
+| Work | Pipeline | Rows | Folds | Before | After | Pipeline fits |
+|---|---|---|---|---|---|---|
+| ablation | default (fused native winsorize + zscore) | 4k | 6 | 1.03 s | 0.95 s | 126 → 6 |
+| ablation | default | 40k | 16 | 4.37 s | 3.34 s | 336 → 16 |
+| ablation | winsorize + quantile_transform + zscore | 40k | 16 | 43.8 s | 8.4 s | 336 → 16 |
+| grid search | default | 4k | 6 | 0.19 s | 0.17 s | 114 → 24 |
+| grid search | winsorize + quantile_transform + zscore | 4k | 6 | 4.87 s | 1.63 s | 114 → 24 |
+
+The default pair goes through the fused native kernel and was never the
+cost, so removing it buys a few percent; a pipeline with a real fit in it
+is where the cache earns its place, and the fit count is what to read
+either way.
+
+A persistent, cross-process cache is deliberately not built. The plan's
+hashes make one possible, and orchestration is the layer above this
+library.
+
 ---
 
 ## Analyzing features before choosing them

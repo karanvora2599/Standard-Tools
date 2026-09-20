@@ -150,7 +150,7 @@ def search_best_params(
     feature_ids: List[str],
     random_seed: int,
     fit_predict: Callable[
-        [Dict[str, Any], pd.DataFrame, pd.DataFrame],
+        [Dict[str, Any], pd.DataFrame, pd.DataFrame, int],
         Tuple[np.ndarray, Optional[np.ndarray]],
     ],
     embargo: int = 0,
@@ -159,11 +159,12 @@ def search_best_params(
     """
     Choose estimator parameters using only `train_frame`.
 
-    `fit_predict(params, inner_train, inner_test)` is supplied by the
-    engine so the search reuses the engine's own preprocessing and
+    `fit_predict(params, inner_train, inner_test, fold_index)` is supplied
+    by the engine so the search reuses the engine's own preprocessing and
     weighting rather than reimplementing them — a search that normalized
     its data differently from the final fit would select for the wrong
-    thing.
+    thing. `fold_index` names the inner fold, which is the same frames for
+    every candidate, so the engine can preprocess it once.
 
     `embargo` and `label_end` are the outer loop's leakage discipline,
     applied to the inner folds. `label_end` is one entry per row of
@@ -219,20 +220,26 @@ def search_best_params(
         purged_per_fold.append(int(overlaps.sum()))
         fold_masks.append((train_mask & ~overlaps, test_mask))
 
+    # The inner frames, sliced ONCE: they do not depend on the candidate
+    # either, and each was re-sliced from the training frame once per
+    # candidate per fold.
+    inner_frames = [
+        (train_frame[train_mask], train_frame[test_mask])
+        for train_mask, test_mask in fold_masks
+    ]
+
     results: List[Dict[str, Any]] = []
     for params in candidates:
         merged = {**base_params, **params}
         fold_scores: List[float] = []
-        for train_mask, test_mask in fold_masks:
-            inner_train = train_frame[train_mask]
-            inner_test = train_frame[test_mask]
+        for fold_index, (inner_train, inner_test) in enumerate(inner_frames):
             if inner_train.empty or inner_test.empty:
                 continue
             if task == "classification" and len(np.unique(inner_train["target"])) < 2:
                 continue
             try:
                 predictions, probabilities = fit_predict(
-                    merged, inner_train, inner_test
+                    merged, inner_train, inner_test, fold_index
                 )
             except Exception as exc:  # noqa: BLE001
                 # One candidate failing to fit (an invalid combination, a

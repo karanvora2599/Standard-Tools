@@ -1,5 +1,42 @@
 # Changelog
 
+## The same pipeline was fitted once per candidate and once per feature
+
+Phase 4 of `Development/modeling_runtime_plan.md`, second commit.
+
+The inner hyperparameter search preprocessed each inner fold once per
+CANDIDATE, although the inner folds do not depend on the candidate and
+neither does the pipeline's output for them: a 6-point grid over 3 inner
+splits fitted the same pipeline 114 times across 6 outer folds where 24
+would do. And the feature ablation ran the whole walk-forward once per
+feature, refitting every fold's pipeline on the same rows with one column
+fewer -- 336 pipeline fits for a 20-feature panel over 16 folds, where the
+baseline's 16 held every column the others needed.
+
+**`modeling.cache.FoldCache`** holds preprocessed fold matrices keyed by
+the plan's `preprocessing_hash`. Every run keeps a private one, which is
+what lets the search preprocess each inner fold once (`fit_predict` now
+receives the inner fold's index); `run_experiment(fold_cache=...)` shares
+one across runs over the same dataset, refused by name when the dataset
+carries no `data_hash` to key on. `run_feature_ablation` shares one and
+reports `preprocessing_fitted` beside `preprocessing_reused`.
+
+**A column-wise pipeline projects exactly.** Every default step transforms
+a column from that column alone, so a feature subset's matrices are the
+wider run's columns to the last bit; the cache projects only when every
+step carries `column_wise` (phase 1) AND the pipeline kept its column set.
+A PCA whitening and a missingness indicator both miss and refit. The
+planted test runs a subset with the cache and without and asserts the
+out-of-sample numbers are equal, not close; `validation_report["cache"]`
+records hits, misses, projections and whether the pipeline was projectable.
+
+**What it saves depends on what the pipeline costs**, and the guide
+records the measurement: the default pair goes through the fused native
+kernel and was never the cost, so a 20-feature ablation on 40k rows goes
+from 4.4 s to 3.3 s; with a quantile transform in the pipeline the same
+ablation goes from 43.8 s to 8.4 s and the grid search from 4.9 s to
+1.6 s, identical numbers throughout.
+
 ## What a spec cost was discovered by paying it
 
 Phase 4 of `Development/modeling_runtime_plan.md`, first commit.

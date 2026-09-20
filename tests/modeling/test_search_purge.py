@@ -69,7 +69,7 @@ def _spy():
     """A fit_predict that records what it was handed and predicts zeros."""
     seen = []
 
-    def fit_predict(params, inner_train, inner_test):
+    def fit_predict(params, inner_train, inner_test, fold_index):
         seen.append((params, inner_train.copy(), inner_test.copy()))
         return np.zeros(len(inner_test)), None
 
@@ -211,7 +211,10 @@ class TestEngineThreadsTheDisciplineThrough:
                 universe=["AAA", "BBB", "CCC"],
                 start="2022-01-01",
                 end="2023-12-31",
-                features=[FeatureSpec(id="technical.rsi"), FeatureSpec(id="market.momentum")],
+                features=[
+                    FeatureSpec(id="technical.rsi"),
+                    FeatureSpec(id="market.momentum"),
+                ],
                 target=TargetSpec(horizon=HORIZON),
                 benchmark="SPY",
             )
@@ -221,7 +224,9 @@ class TestEngineThreadsTheDisciplineThrough:
         return ModelSpec(
             task="regression",
             estimator=EstimatorSpec(type="ridge", params={}),
-            validation=ValidationSpec(train_window=200, test_window=40, embargo=embargo),
+            validation=ValidationSpec(
+                train_window=200, test_window=40, embargo=embargo
+            ),
             search=SearchSpec(param_grid={"alpha": [0.1, 10.0]}, inner_splits=2),
             random_seed=1,
         )
@@ -230,9 +235,13 @@ class TestEngineThreadsTheDisciplineThrough:
     def test_every_searched_fold_records_the_purge_and_the_embargo(
         self, patched_multi_factory, embargo
     ):
-        result = run_experiment(self._dataset(), self._spec(embargo), "ds", register=False)
+        result = run_experiment(
+            self._dataset(), self._spec(embargo), "ds", register=False
+        )
         reports = [
-            r for r in result["validation_report"]["hyperparameter_search"] if r["searched"]
+            r
+            for r in result["validation_report"]["hyperparameter_search"]
+            if r["searched"]
         ]
         assert reports
         for report in reports:

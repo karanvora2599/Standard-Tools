@@ -13,7 +13,7 @@ leakage discipline.
 """
 
 import inspect
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,7 @@ from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
 from .adapters import accepts_missing, get_adapter
+from .cache import FoldCache, column_wise_pipeline
 from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import get_estimator_class, validate_params
 from .plan import plan_experiment
@@ -385,6 +386,7 @@ def run_experiment(
     dataset_id: str,
     *,
     register: bool = True,
+    fold_cache: Optional[FoldCache] = None,
 ) -> Dict[str, Any]:
     """
     Args:
@@ -395,6 +397,14 @@ def run_experiment(
         dataset_id: id under which the dataset panel was persisted (see
             modeling/agent/tools.py::build_model_dataset) — recorded in
             the registered model's manifest for lineage.
+        fold_cache: a cache of preprocessed fold matrices to read from and
+            add to, keyed by the plan's preprocessing hashes. Pass one
+            across several runs over the SAME dataset -- the feature
+            ablation does, once per feature -- and a column-wise pipeline
+            is fitted once per fold for all of them. Without one the run
+            keeps a private cache, which is what lets the inner search
+            preprocess each inner fold once rather than once per
+            candidate. Needs the dataset's `data_hash` to key on.
         register: persist the refit estimator and its OOS predictions, and
             return a model_id. True for anything a caller might want to
             score later. False for a comparison that fits many candidate
@@ -477,6 +487,18 @@ def run_experiment(
     )
     plan.refuse_over_budget("run_model_experiment")
     n_expected_folds = len(plan.folds)
+    if fold_cache is not None and not dataset.get("data_hash"):
+        raise ValidationError(
+            "run_model_experiment: a shared fold_cache keys its entries on the "
+            "dataset's data_hash, and this dataset carries none, so two datasets "
+            "could not be told apart in it. Build the dataset with "
+            "build_dataset, or run without the cache."
+        )
+    cache = fold_cache if fold_cache is not None else FoldCache()
+    cache_before = cache.stats()
+    # Whether a feature subset's matrices may be read off a wider run's:
+    # exact for a pipeline whose every step is column-wise, and only then.
+    projectable = column_wise_pipeline(model_spec.preprocessing.resolved_steps)
     # Row -> position in `dates`, computed once instead of hashing the whole
     # date column against a fresh set on every fold. `dates` is sorted and
     # every row's date is in it by construction, so searchsorted is exact.
@@ -559,22 +581,36 @@ def run_experiment(
             )
             continue
 
-        train_X, test_X = _preprocess(
-            model_spec,
-            train_df,
-            test_df,
-            feature_ids,
-            pd.DataFrame(
-                feature_matrix[train_mask],
-                index=train_df.index,
-                columns=feature_ids,
-            ),
-            pd.DataFrame(
-                feature_matrix[test_mask],
-                index=test_df.index,
-                columns=feature_ids,
-            ),
-        )
+        # From the cache when a run over the same dataset and fold has
+        # fitted this pipeline already -- exactly, for a column-wise
+        # pipeline, even when that run had more features than this one.
+        cached = cache.lookup(fold.preprocessing_hash, feature_ids)
+        if cached is None:
+            train_X, test_X = _preprocess(
+                model_spec,
+                train_df,
+                test_df,
+                feature_ids,
+                pd.DataFrame(
+                    feature_matrix[train_mask],
+                    index=train_df.index,
+                    columns=feature_ids,
+                ),
+                pd.DataFrame(
+                    feature_matrix[test_mask],
+                    index=test_df.index,
+                    columns=feature_ids,
+                ),
+            )
+            cache.store(
+                fold.preprocessing_hash,
+                feature_ids,
+                train_X,
+                test_X,
+                projectable=projectable,
+            )
+        else:
+            train_X, test_X = cached
         if panel_has_missing and not estimator_accepts_missing:
             _refuse_missing_after_preprocessing(
                 train_X, test_X, model_spec, "run_model_experiment"
@@ -595,14 +631,28 @@ def run_experiment(
 
         fold_params = model_spec.estimator.params
         if model_spec.search is not None:
+            # The inner folds are a function of this outer fold and the
+            # search's shape, not of the candidate, so their matrices are
+            # keyed under the outer fold's hash and fitted once per inner
+            # fold rather than once per candidate per inner fold.
+            inner_prefix = (
+                f"{fold.preprocessing_hash}/inner/{model_spec.search.inner_splits}/"
+            )
 
-            def _fit_predict(params, inner_train, inner_test):
+            def _fit_predict(params, inner_train, inner_test, fold_index):
                 """Score one candidate the way the real fit will run it —
                 same preprocessing, same weighting — so the search cannot
                 select for a pipeline that is never used."""
-                inner_train_X, inner_test_X = _preprocess(
-                    model_spec, inner_train, inner_test, feature_ids
-                )
+                inner_key = f"{inner_prefix}{fold_index}"
+                matrices = cache.lookup(inner_key, feature_ids)
+                if matrices is None:
+                    matrices = _preprocess(
+                        model_spec, inner_train, inner_test, feature_ids
+                    )
+                    cache.store(
+                        inner_key, feature_ids, *matrices, projectable=projectable
+                    )
+                inner_train_X, inner_test_X = matrices
                 candidate = _instantiate(estimator_cls, params, model_spec.random_seed)
                 inner_arrays = adapter.prepare(
                     model_spec,
@@ -874,6 +924,16 @@ def run_experiment(
             "candidates_per_fold": plan.n_candidates,
             "max_fits": plan.max_fits,
         },
+        # Pipeline fits this run did and did not have to do: `misses` were
+        # fitted here, `hits` and `projections` were read off an earlier
+        # fit -- of this run's inner search, or of a run that shared the
+        # cache. A projection is a column-wise pipeline's matrix read for
+        # a feature subset, exact by construction.
+        "cache": {
+            key: cache.stats()[key] - cache_before[key]
+            for key in ("hits", "misses", "projections")
+        }
+        | {"shared": fold_cache is not None, "projectable": projectable},
         "folds": fold_records,
     }
 
