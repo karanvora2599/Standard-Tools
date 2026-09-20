@@ -760,6 +760,11 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # trust a model, and it previously reported hashes and a commit
             # sha while staying silent about a survivors-only universe.
             "dataset_warnings": manifest.dataset_warnings,
+            # What computed the model, beside what source created it. A
+            # commit sha cannot say which numpy or which BLAS the fit went
+            # through, and that is the difference between two machines
+            # reproducing a coefficient to four digits and to twelve.
+            "environment": manifest.environment,
         }
 
     return InspectModelResult(

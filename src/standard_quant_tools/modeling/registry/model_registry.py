@@ -20,6 +20,7 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..specs import ModelSpec
+from .environment import environment_fingerprint
 from .feature_provenance import (
     feature_implementation_hashes,
     feature_provenance_from_spec,
@@ -54,6 +55,7 @@ def save_model(
     validation_report: Optional[Dict[str, Any]] = None,
     dataset_warnings: Optional[List[str]] = None,
     preprocessing: Optional[Dict[str, Any]] = None,
+    environment: Optional[Dict[str, Any]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -161,6 +163,12 @@ def save_model(
         training_information_cutoff=training_information_cutoff,
         dataset_warnings=list(dataset_warnings or []),
         preprocessing=dict(preprocessing or {}),
+        # Read from the process at registration, never declared by the
+        # caller -- a caller-supplied value is only for tests that need a
+        # known one.
+        environment=(
+            dict(environment) if environment is not None else environment_fingerprint()
+        ),
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         git_commit_sha=_git_sha(),
         package_version=_package_version(),
