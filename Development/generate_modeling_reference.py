@@ -197,6 +197,7 @@ def _spec_options() -> str:
     from standard_quant_tools.modeling.capabilities import _literal_options
     from standard_quant_tools.modeling.specs import (
         EstimatorSpec,
+        MissingDataSpec,
         PredictionTransformSpec,
         PreprocessingSpec,
         SearchSpec,
@@ -205,6 +206,7 @@ def _spec_options() -> str:
     )
 
     rows = [
+        ["`DatasetSpec.missing.policy`", _literal_options(MissingDataSpec, "policy")],
         ["`ValidationSpec.method`", _literal_options(ValidationSpec, "method")],
         ["`ValidationSpec.scheme`", _literal_options(ValidationSpec, "scheme")],
         ["`PreprocessingSpec.normalization`", _literal_options(PreprocessingSpec, "normalization")],

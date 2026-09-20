@@ -503,6 +503,98 @@ class TargetSpec(BaseModel):
         return self
 
 
+class MissingDataSpec(BaseModel):
+    """
+    What happens to a row whose feature is missing, decided at the DATASET
+    level because two of the three answers are dataset operations.
+
+    Complete-case alignment -- `drop`, the default and the only behaviour
+    there was -- is conservative and honest, and on a 50-200 feature panel
+    it is also expensive: one feature's warm-up or one halted bar costs the
+    whole row for every other feature. The two alternatives recover rows
+    without inventing observations:
+
+      forward_fill_bounded  carry a feature's last value forward, within
+                            the entity, for at most `max_staleness_bars`,
+                            and only for the features named. A carried
+                            value is a STALE one, which is defensible for a
+                            slowly-updating level and not for a bar's
+                            volume; the allowlist is what makes the caller
+                            say which. Warm-up NaN has no prior value and
+                            is never fabricated. Rows still missing after
+                            the fill are dropped as under `drop`.
+      keep                  keep the row, keep the NaN, drop on the target
+                            only. The hole then reaches the engine, where a
+                            fold-fitted `impute` step or a `missing_indicator`
+                            handles it with training-fold statistics -- the
+                            fold layer's half of the policy -- or an
+                            estimator that accepts missing values reads it
+                            directly. An estimator that does not is refused
+                            by name before any fold is fitted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy: Literal["drop", "forward_fill_bounded", "keep"] = Field(
+        "drop",
+        description=(
+            "'drop' (default): complete-case alignment, a row survives only "
+            "when every feature and the target are present. "
+            "'forward_fill_bounded': carry the named features' last value "
+            "forward within each entity for at most max_staleness_bars, then "
+            "drop what is still missing. 'keep': keep rows with missing "
+            "features and drop on the target only; pair with an `impute` or "
+            "`missing_indicator` preprocessing step, or an estimator that "
+            "accepts missing values."
+        ),
+    )
+    max_staleness_bars: int = Field(
+        0,
+        ge=0,
+        le=MAX_LAG,
+        description=(
+            "forward_fill_bounded only: how many bars a value may be carried. "
+            "Counted in the entity's own bars. Bounded like a lag, and for "
+            "the same reason: a value that old describes a different regime."
+        ),
+    )
+    features: List[str] = Field(
+        default_factory=list,
+        description=(
+            "forward_fill_bounded only: the feature output names (alias, or "
+            "id when there is none) that may be carried. Explicit rather "
+            "than 'all', because carrying a stale value is a claim about the "
+            "feature's semantics that only the caller can make."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _fields_match_the_policy(self) -> "MissingDataSpec":
+        if self.policy == "forward_fill_bounded":
+            if self.max_staleness_bars < 1:
+                raise ValueError(
+                    "missing.policy='forward_fill_bounded' needs "
+                    "max_staleness_bars >= 1: a bound of zero carries nothing."
+                )
+            if not self.features:
+                raise ValueError(
+                    "missing.policy='forward_fill_bounded' needs `features`, the "
+                    "output names allowed to be carried. Carrying every feature "
+                    "would assert that a stale value is a fair stand-in for each "
+                    "of them, which is not true of a volume."
+                )
+        else:
+            # Checked against the defaults, not against which fields were
+            # set, so a spec survives its own model_dump() round trip.
+            if self.max_staleness_bars != 0 or self.features:
+                raise ValueError(
+                    f"missing.policy={self.policy!r} does not read "
+                    "max_staleness_bars or features; they belong to "
+                    "'forward_fill_bounded'. Drop them, or change the policy."
+                )
+        return self
+
+
 class DatasetSpec(BaseModel):
     # extra="forbid" like every top-level input model. Without it a
     # nested typo was silently dropped: `validate_model_spec` -- the
@@ -567,6 +659,18 @@ class DatasetSpec(BaseModel):
         ),
     )
 
+    missing: MissingDataSpec = Field(
+        default_factory=MissingDataSpec,
+        description=(
+            "What happens to a row whose feature is missing. The default, "
+            "'drop', is complete-case alignment and the only behaviour there "
+            "was; the alternatives recover rows without inventing "
+            "observations. See MissingDataSpec. A dataset built with the "
+            "default hashes identically to one built before this field "
+            "existed."
+        ),
+    )
+
     @field_validator("universe")
     @classmethod
     def _no_duplicate_symbols(cls, v: List[str]) -> List[str]:
@@ -616,6 +720,20 @@ class DatasetSpec(BaseModel):
         if start_ts >= end_ts:
             raise ValueError(
                 f"start ({self.start!r}) must be before end ({self.end!r})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _fillable_features_exist(self) -> "DatasetSpec":
+        """A feature named for forward filling must be one this spec
+        produces, by its OUTPUT name -- the alias when there is one."""
+        names = {f.output_name for f in self.features}
+        unknown = sorted(set(self.missing.features) - names)
+        if unknown:
+            raise ValueError(
+                f"missing.features names {unknown}, which this spec does not "
+                f"produce. Its feature output names are {sorted(names)}. Name "
+                "the alias where one is set."
             )
         return self
 

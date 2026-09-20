@@ -21,7 +21,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
-from .adapters import get_adapter
+from .adapters import accepts_missing, get_adapter
 from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import get_estimator_class, validate_params
 from .preprocessing import (
@@ -258,6 +258,34 @@ def _preprocess(
     return train_X, test_X
 
 
+def _refuse_missing_after_preprocessing(
+    train_X: pd.DataFrame, test_X: pd.DataFrame, model_spec: ModelSpec, where: str
+) -> None:
+    """
+    Refuse, by name, a NaN that the pipeline left for an estimator that
+    cannot take one.
+
+    Without this the fit failed several frames down with sklearn's own
+    "Input X contains NaN", naming neither the policy that let the hole
+    through nor the step that would close it.
+    """
+    holes = int(np.isnan(train_X.to_numpy(dtype=np.float64)).sum()) + int(
+        np.isnan(test_X.to_numpy(dtype=np.float64)).sum()
+    )
+    if not holes:
+        return
+    raise ValidationError(
+        f"{where}: {holes} missing value(s) reach estimator "
+        f"{model_spec.estimator.type!r} after the preprocessing pipeline "
+        f"{step_types(model_spec.preprocessing.resolved_steps)}, and it does "
+        "not accept missing values. Either add an `impute` step (with or "
+        "without `missing_indicator` before it) to preprocessing.steps, fit "
+        "an estimator that accepts them -- list_modeling_capabilities reports "
+        "`accepts_missing` per estimator -- or build the dataset with "
+        "missing.policy='drop'."
+    )
+
+
 def _fold_sample_weights(
     model_spec: ModelSpec, train_frame: pd.DataFrame
 ) -> "np.ndarray | None":
@@ -444,6 +472,13 @@ def run_experiment(
     # take (5.5 ms on 100,000 rows) instead of a pandas column selection
     # plus the C-order copy the kernels need (7.2 + 4.2 ms).
     feature_matrix = np.ascontiguousarray(panel[feature_ids].to_numpy(dtype=np.float64))
+    # A panel built under missing.policy='keep', or an external panel with
+    # holes, carries NaN into the folds. Whether that is a problem depends
+    # on what is left after preprocessing and on the estimator, and is
+    # decided per fold below; this is the one pass that says whether the
+    # question needs asking at all.
+    panel_has_missing = bool(np.isnan(feature_matrix).any())
+    estimator_accepts_missing = accepts_missing(estimator_cls)
     # The purge is decided on these rather than on a copied sub-frame; see
     # the fold loop for why that removes a whole frame copy per fold.
     panel_dates = panel["date"].to_numpy()
@@ -542,6 +577,10 @@ def run_experiment(
                 columns=feature_ids,
             ),
         )
+        if panel_has_missing and not estimator_accepts_missing:
+            _refuse_missing_after_preprocessing(
+                train_X, test_X, model_spec, "run_model_experiment"
+            )
         sample_weight = _fold_sample_weights(model_spec, train_df)
         fold_columns = list(train_X.columns)
         if model_columns is None:

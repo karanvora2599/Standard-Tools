@@ -25,6 +25,7 @@ import hashlib
 import logging
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.audit.hashing import hash_dataframe
@@ -47,10 +48,12 @@ from .coverage import (
     entity_coverage_warnings,
     intersection_warnings,
     interval_warnings,
+    missing_policy_warnings,
     provider_guarantee_warnings,
 )
 from .fetch import fetch_universe_ohlcv
 from .leakage import check_point_in_time_safety
+from .missing import forward_fill_bounded
 from .panel_features import compute_panel_features
 from .target import (
     CROSS_SECTIONAL_TARGETS,
@@ -421,6 +424,9 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # cannot drift apart.
     lags_requested = lags_by_output_name(spec.features)
     expanded_names = expanded_feature_ids(spec.features)
+    # {feature output name: values forward-filled across every entity},
+    # reported rather than applied silently -- see dataset/missing.py.
+    fill_counts: Dict[str, int] = {}
     # Every feature function re-validates the OHLCV columns it is handed,
     # which is correct at a public boundary and pure repeat work here: this
     # loop passes the SAME ohlcv["Close"] to each of N features for each of
@@ -466,9 +472,18 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
             # earlier rows. After stack_long it would cross the entity
             # boundary and hand one symbol another's history, which
             # produces a plausible panel and no visible symptom.
-            per_entity_features[symbol] = expand_lags(
-                pd.DataFrame(columns), lags_requested
-            )
+            #
+            # The bounded forward fill runs first, for the same reason and
+            # one more: a lag of a filled value should be the filled value,
+            # which it is only if the fill precedes the shift.
+            entity_frame = pd.DataFrame(columns)
+            if spec.missing.policy == "forward_fill_bounded":
+                entity_frame, filled = forward_fill_bounded(
+                    entity_frame, spec.missing.features, spec.missing.max_staleness_bars
+                )
+                for name, count in filled.items():
+                    fill_counts[name] = fill_counts.get(name, 0) + count
+            per_entity_features[symbol] = expand_lags(entity_frame, lags_requested)
             if include_target:
                 target_by_entity[symbol] = build_target(ohlcv["Close"], spec.target)
                 # Recorded per row, per entity, from that entity's OWN bar
@@ -500,6 +515,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                         build_label_end_dates(ohlcv["Close"], at_horizon)
                     )
 
+    keep_missing = spec.missing.policy == "keep"
     if include_target:
         long_panel, drop_attribution = stack_long(
             per_entity_features,
@@ -507,6 +523,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
             label_end_by_entity,
             extra_targets,
             extra_label_ends,
+            keep_missing_features=keep_missing,
         )
         # A rank within the date, and a return measured against the
         # universe average, are defined against the OTHER entities present
@@ -528,7 +545,9 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                     "neither of which is a measurement."
                 )
     else:
-        long_panel, drop_attribution = stack_features_only(per_entity_features)
+        long_panel, drop_attribution = stack_features_only(
+            per_entity_features, keep_missing_features=keep_missing
+        )
 
     if long_panel.empty:
         # The attribution turns a dead end into a diagnosis: "no rows
@@ -558,6 +577,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     warnings.extend(
         alignment_warnings(drop_attribution, entities_fetched, entities_surviving)
     )
+    warnings.extend(missing_policy_warnings(spec.missing, drop_attribution, fill_counts))
 
     # dropna() (inside stack_long/stack_features_only) removes NaN but
     # not +/-inf -- a degenerate feature computation (e.g. division by a
@@ -573,9 +593,20 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # exactly the door this check exists to close.
     numeric_cols = list(expanded_names) + (["target"] if include_target else [])
     for col in numeric_cols:
-        require_finite_array(
-            long_panel[col].to_numpy(dtype=float), col, "build_model_dataset"
-        )
+        values = long_panel[col].to_numpy(dtype=float)
+        if keep_missing and col != "target":
+            # Under `keep` a NaN feature is the point; what is still refused
+            # is an INFINITY, which no policy makes meaningful and which
+            # would reach the estimator through the same door.
+            if np.isinf(values).any():
+                raise ValidationError(
+                    f"build_model_dataset: {col} contains "
+                    f"{int(np.isinf(values).sum())} infinite value(s). The "
+                    "'keep' missing-data policy keeps NaN, not inf -- an "
+                    "infinity is a degenerate computation, not a missing one."
+                )
+            continue
+        require_finite_array(values, col, "build_model_dataset")
 
     # audit.hash_dataframe, not a local pd.util.hash_pandas_object call.
     # hash_pandas_object is a per-ROW digest that never sees column labels,

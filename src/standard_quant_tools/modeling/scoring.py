@@ -18,14 +18,16 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
-from .adapters import get_adapter
+from .adapters import accepts_missing, get_adapter
 from .dataset.builder import build_dataset
+from .estimators.registry import get_estimator_class
 from .features.base import FeatureScope
 from .features.registry import get_feature
 from .features.transforms import apply_preprocessing, standardize_cross_sectional
@@ -363,6 +365,22 @@ def score_model(
         )
     else:
         X = apply_preprocessing(latest[manifest.feature_ids], stats)
+    # A hole the pipeline left, for an estimator that cannot take one, is
+    # refused here with the step that would close it rather than several
+    # frames down inside sklearn -- the same check the engine makes per fold.
+    if np.isnan(X.to_numpy(dtype=np.float64)).any() and not accepts_missing(
+        get_estimator_class(manifest.task, manifest.estimator_type)
+    ):
+        holed = latest.loc[X.isna().any(axis=1).to_numpy(), "entity"].tolist()
+        raise ValidationError(
+            f"score_model: {len(holed)} entity row(s) carry a missing feature "
+            f"after the model's preprocessing pipeline ({holed[:5]}"
+            f"{'...' if len(holed) > 5 else ''}), and estimator "
+            f"{manifest.estimator_type!r} does not accept missing values. "
+            "The model was registered without an `impute` step; retrain with "
+            "one, or score a universe whose features are complete as of "
+            f"{as_of!r}."
+        )
     # Through the SAME adapter the folds and the deployed refit used. This
     # was a two-way branch -- regression got `predict`, everything else got
     # `positive_class_proba` -- written when those were the only two tasks.

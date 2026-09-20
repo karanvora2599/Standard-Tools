@@ -72,6 +72,21 @@ class ExplainRowLossResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+def _recorded_policy(directory) -> str:
+    """The missing-data policy the dataset was built under, from its own
+    spec file; 'drop' for a dataset that predates the field."""
+    import json
+
+    path = directory / "dataset_spec.json"
+    if not path.exists():
+        return "drop"
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "drop"
+    return str((spec.get("missing") or {}).get("policy") or "drop")
+
+
 def explain_dataset_row_loss(
     input_data: ExplainRowLossInput,
 ) -> ExplainRowLossResult:
@@ -112,6 +127,18 @@ def explain_dataset_row_loss(
 
     free = [r.column for r in rows if r.n_missing > 0 and r.n_sole_missing == 0]
     warnings: List[str] = []
+    # Under missing.policy='keep' the panel still HOLDS the rows this report
+    # counts as lost: the attribution says what `drop` would have removed,
+    # and a reader who takes `rows_lost` at face value would look for rows
+    # that are there. Said once, at the top.
+    policy = str(report.get("policy") or _recorded_policy(_directory))
+    if policy == "keep":
+        warnings.append(
+            "This dataset was built with missing.policy='keep': the rows counted "
+            "below are PRESENT in the panel with their missing features left "
+            "as NaN. The counts say what the default 'drop' policy would have "
+            "removed, which is the number to compare the two policies on."
+        )
     if free:
         warnings.append(
             f"{len(free)} column(s) are missing rows that are ALREADY "

@@ -4,7 +4,20 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phase 0 is implemented and merged; phases 1-10 are proposals.**
+**Status: phases 0 and 1 are implemented and merged; phases 2-10 are
+proposals.** Phase 1 landed as three commits on 2026-09-20 -- `ee5ad55`
+(the preprocessing registry, pipeline and persisted state, replacing the
+phase 0 stop-gap), `dcee66b` (the five remaining built-in steps, and
+importance labelled by the pipeline's output) and the commit that carries
+this paragraph (`DatasetSpec.missing`, in two layers) -- and added 78
+modeling tests, 1,247 to 1,325. Two of the phase's open measurements were
+answered from the source rather than by experiment: the native
+preprocessing kernel already skips NaN when fitting and passes it through
+when applying, so the `keep` policy uses the fused path unchanged; and
+scikit-learn's own tags say which estimators accept NaN, so
+`accepts_missing` is read rather than listed. Sector and beta
+neutralization stay out, as section 4 says, for want of per-entity
+metadata.
 Every claim in sections 1-3 was checked against `main` at `f9c7008` on
 2026-09-20 by reading the code, and the two defects marked *reproduced*
 were reproduced by script. The baseline was 1,182 modeling tests passing

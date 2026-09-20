@@ -109,6 +109,35 @@ def _probes_true(estimator_cls: type, attribute: str) -> bool:
         return hasattr(estimator_cls, attribute)
 
 
+def accepts_missing(estimator_cls: type) -> bool:
+    """
+    Whether a DEFAULT instance accepts NaN in X, read off sklearn's tags.
+
+    Asked of the tags rather than of a hand-kept list, because the answer
+    changes with the library: RandomForest accepts missing values from
+    scikit-learn 1.4 and did not before. Measured on this install:
+    hist_gradient_boosting, random_forest, lightgbm, xgboost and both
+    rankers say yes; every linear model, the MLP and SGD say no. Both tag
+    APIs are tried -- `__sklearn_tags__` from 1.6 and `_get_tags` before it
+    -- and an estimator that cannot be constructed without arguments, or
+    answers neither, is reported as NOT accepting, which is the safe
+    direction: the engine then refuses a NaN by name rather than letting
+    sklearn fail inside a fold.
+    """
+    try:
+        instance = estimator_cls()
+    except Exception:  # noqa: BLE001 - needs constructor args; assume the safe answer
+        return False
+    try:
+        return bool(instance.__sklearn_tags__().input_tags.allow_nan)
+    except Exception:  # noqa: BLE001 - pre-1.6 sklearn, or a non-sklearn class
+        pass
+    try:
+        return bool(instance._get_tags().get("allow_nan", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class ModelAdapter:
     """Base adapter: the flat-matrix, `fit(X, y)` case every sklearn
     estimator satisfies. Subclasses override only what differs."""
@@ -190,6 +219,10 @@ class ModelAdapter:
             # default instance describes the estimator as it would actually
             # be built, which is what this dict claims to do.
             "supports_probability": _probes_true(estimator_cls, "predict_proba"),
+            # Whether a NaN feature may reach it, which decides whether a
+            # dataset built under missing.policy='keep' needs an `impute`
+            # step in front of this estimator.
+            "accepts_missing": accepts_missing(estimator_cls),
             "exposes_coefficients": _exposes_coefficients(estimator_cls),
             # A property on the class, so hasattr sees it before fitting.
             # Correctly False for HistGradientBoosting, which genuinely has

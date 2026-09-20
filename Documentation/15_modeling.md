@@ -579,6 +579,65 @@ on an older model is indistinguishable from "no warnings" by design:
 absence of a recorded warning is not evidence the condition did not hold.
 
 
+### Missing data: three policies, in two layers
+
+Complete-case alignment — every row with any missing feature dropped — is
+conservative and honest, and the only behaviour there was. On a 50–200
+feature panel it is also expensive: one feature's warm-up or one halted bar
+costs the whole row for every other feature. `DatasetSpec.missing` names
+two alternatives, and neither invents an observation:
+
+| `missing.policy` | what happens to a row with a missing feature |
+|---|---|
+| `drop` (default) | dropped — a dataset built this way hashes identically to one built before the field existed |
+| `forward_fill_bounded` | the named features carry their last value forward **within the entity** for at most `max_staleness_bars`; rows still missing are dropped |
+| `keep` | kept, with the NaN, and dropped on the target only; the hole reaches the engine |
+
+```python
+DatasetSpec(
+    ...,
+    missing=MissingDataSpec(
+        policy="forward_fill_bounded",
+        max_staleness_bars=3,
+        features=["fundamental.book_to_price"],   # output names; an allowlist, never "all"
+    ),
+)
+```
+
+**The fill is bounded and allowlisted** because a carried value is a
+*stale* one. That is a defensible stand-in for a slowly-updating level and
+not for a bar's volume, and whether it is defensible is a fact about the
+feature only the caller can assert. It runs per entity, before the lags
+are expanded, for the reason lags themselves run before stacking: after
+`stack_long` a fill would hand one entity another's last value, and the lag
+of a filled value should be the filled value. Warm-up NaN has no prior
+value and is never fabricated. The build reports every fill with its count
+— a fill that recovered nothing and one that rewrote a tenth of a column
+are different datasets under the same spec.
+
+**`keep` is the dataset half of a two-layer policy.** The other half is
+the preprocessing pipeline: an `impute` step fills the hole with a
+statistic of the *training fold* (a missing test value receives the
+training median, never the test fold's own), and `missing_indicator` turns
+missingness itself into a feature. An estimator that accepts missing
+values — `list_modeling_capabilities` reports `accepts_missing` per
+estimator, read off scikit-learn's own tags: the histogram boosters,
+random forests, LightGBM and XGBoost yes; the linear models, the MLP and
+SGD no — can read the hole directly. One that does not is refused **by
+name, before any fold is fitted**, with the step that would close it,
+rather than failing inside sklearn several frames down; `score_model`
+makes the same check. An infinity is still refused under every policy: it
+is a degenerate computation, not a missing one.
+
+`drop_attribution` under `keep` still reports what `drop` *would* have
+removed, because that is the number a caller deciding between the two
+policies wants, with the rows that actually survived and how many carry a
+hole recorded beside it. `explain_dataset_row_loss` says so at the top of
+its report, so a reader does not go looking for rows that are there.
+
+---
+
+
 ## A panel this library did not build
 
 `build_model_dataset` fetches OHLCV, computes registry features and writes a

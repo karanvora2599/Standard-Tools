@@ -1,5 +1,52 @@
 # Changelog
 
+## A missing feature cost the whole row, and the only policy was to drop it
+
+Phase 1 of `Development/modeling_runtime_plan.md`, third commit.
+
+Complete-case alignment is conservative and honest, and on a 50-200
+feature panel it is expensive: one feature's warm-up or one halted bar
+costs the whole row for every other feature. `DatasetSpec.missing` names
+two alternatives, in two layers, and neither invents an observation.
+
+**`forward_fill_bounded`** carries a named feature's last value forward
+within the entity for at most `max_staleness_bars`, then drops what is
+still missing. Bounded because a carried value is a stale one;
+allowlisted because whether a stale value is a fair stand-in is a fact
+about the feature -- true of a slowly-updating level, false of a volume --
+that only the caller can assert. It runs per entity before the lags are
+expanded, for the reason lags run before stacking: after `stack_long` a
+fill would hand one entity another's last value. Warm-up NaN has no prior
+value and is never fabricated. The build reports each fill with its count.
+
+**`keep`** keeps the row and the NaN, drops on the target only, and hands
+the hole to the fold layer, where `impute` fills it with a training-fold
+statistic and `missing_indicator` makes missingness a feature -- or to an
+estimator that accepts missing values. Which ones do is read off
+scikit-learn's own tags rather than a hand-kept list, because the answer
+moves with the library (random forests accept NaN from 1.4): on this
+install the histogram boosters, random forests, LightGBM, XGBoost and both
+rankers do; every linear model, the MLP and SGD do not. `accepts_missing`
+is in the capability report. An estimator that does not accept a hole the
+pipeline left is refused by name before any fold is fitted, naming the
+`impute` step, rather than failing inside sklearn several frames down;
+`score_model` makes the same check. An infinity is still refused under
+every policy.
+
+**The default is unchanged, and so is its hash.** A dataset built with
+`missing` at its default hashes identically to one built before the field
+existed, which is the property the versioned hash was introduced for.
+`drop_attribution` under `keep` still reports what `drop` would have
+removed, with the surviving rows and the count that carry a hole beside
+it; `explain_dataset_row_loss` says at the top of its report that those
+rows are present.
+
+The gap is planted: a registered test feature blanks bars 100 to 103 of
+every entity and the final bar, so every assertion names the exact rows a
+policy recovers, drops or fills, and the exact value a fill must carry --
+bar 99's, from the same entity, with the lag of a filled value being the
+filled value and a tight bound filling exactly that many bars.
+
 ## Five more steps, two of which change what the estimator sees
 
 Phase 1 of `Development/modeling_runtime_plan.md`, second commit.

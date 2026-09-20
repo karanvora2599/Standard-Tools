@@ -275,6 +275,52 @@ def alignment_warnings(
     return warnings
 
 
+def missing_policy_warnings(
+    missing: Any, attribution: Dict[str, Any], fill_counts: Dict[str, int]
+) -> List[str]:
+    """
+    What the missing-data policy did, said out loud.
+
+    A forward fill that rewrote a tenth of a column and one that recovered
+    nothing are different datasets under the same spec; a `keep` panel
+    carries holes the estimator will meet. Neither is an error, and both
+    change how the model built on the panel should be read.
+    """
+    policy = getattr(missing, "policy", "drop")
+    warnings: List[str] = []
+    if policy == "forward_fill_bounded":
+        bound = getattr(missing, "max_staleness_bars", 0)
+        if fill_counts:
+            listing = ", ".join(
+                f"{name} {count}" for name, count in sorted(fill_counts.items())
+            )
+            warnings.append(
+                f"forward-filled values (each carried at most {bound} bar(s) "
+                f"within its entity): {listing}. On those rows a stale value "
+                "stands in for a missing one, which is what the policy asked "
+                "for and is not a measurement."
+            )
+        else:
+            warnings.append(
+                "missing.policy='forward_fill_bounded' filled nothing: the named "
+                "features had no gap a prior value could cover. Warm-up rows "
+                "have no prior value and are never filled."
+            )
+    elif policy == "keep":
+        holes = int(attribution.get("rows_with_missing_features", 0))
+        would_drop = int(attribution.get("rows_that_drop_would_remove", 0))
+        if holes:
+            warnings.append(
+                f"missing.policy='keep': {holes} row(s) carry at least one "
+                f"missing feature and were kept; 'drop' would have removed "
+                f"{would_drop}. The holes reach the engine -- put an `impute` "
+                "or `missing_indicator` step in the preprocessing pipeline, or "
+                "fit an estimator that accepts missing values; one that does "
+                "not is refused before any fold is fitted."
+            )
+    return warnings
+
+
 def intersection_warnings(
     ohlcv_by_entity: Dict[str, pd.DataFrame],
     returns_panel: pd.DataFrame,

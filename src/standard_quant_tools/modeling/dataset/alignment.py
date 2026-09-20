@@ -145,6 +145,7 @@ def stack_long(
     label_end_by_entity: Dict[str, pd.Series] | None = None,
     extra_targets: Dict[str, Dict[str, pd.Series]] | None = None,
     extra_label_ends: Dict[str, Dict[str, pd.Series]] | None = None,
+    keep_missing_features: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     per_entity_features: {entity: DataFrame(index=date, columns=feature_ids)}.
@@ -160,6 +161,13 @@ def stack_long(
     (unavoidable at the start of each feature's lookback window and the end
     of the target's forward horizon). `attribution` says which column cost
     which rows; see attribute_drops.
+
+    `keep_missing_features` is the dataset's `missing.policy='keep'`: rows
+    are dropped on the target only and a missing feature stays NaN for the
+    fold layer to handle. The attribution is still computed as what `drop`
+    WOULD have removed -- that is the number a caller deciding between the
+    two policies wants -- with the rows that actually survived recorded
+    beside it.
     """
     long_panel = _stack(
         per_entity_features,
@@ -184,7 +192,12 @@ def stack_long(
     # rows at the end of a sample, and dropping on the union would make
     # every shorter-horizon model pay for the longest one's warm-down. The
     # experiment drops its own when it selects -- see _select_target.
-    long_panel = long_panel.dropna(subset=feature_cols + ["target"])
+    if keep_missing_features:
+        long_panel = long_panel.dropna(subset=["target"])
+        _record_kept_rows(attribution, long_panel, feature_cols)
+    else:
+        long_panel = long_panel.dropna(subset=feature_cols + ["target"])
+        attribution["policy"] = "drop"
     ordered = ["date", "entity"] + feature_cols + ["target"]
     if label_end_by_entity is not None:
         ordered.append(LABEL_END_COL)
@@ -193,8 +206,25 @@ def stack_long(
     return panel, attribution
 
 
+def _record_kept_rows(
+    attribution: Dict[str, Any], survivors: pd.DataFrame, feature_cols: List[str]
+) -> None:
+    """Under `keep`: the counts in `attribution` describe what `drop` would
+    have removed; these say what actually happened."""
+    attribution["policy"] = "keep"
+    attribution["rows_that_drop_would_remove"] = attribution["rows_dropped"]
+    attribution["rows_after_alignment"] = int(len(survivors))
+    attribution["rows_dropped"] = int(
+        attribution["rows_before_alignment"] - len(survivors)
+    )
+    attribution["rows_with_missing_features"] = (
+        int(survivors[feature_cols].isna().any(axis=1).sum()) if feature_cols else 0
+    )
+
+
 def stack_features_only(
     per_entity_features: Dict[str, pd.DataFrame],
+    keep_missing_features: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Same as stack_long, but for scoring rather than training: no target
@@ -210,7 +240,14 @@ def stack_features_only(
 
     attribution = attribute_drops(long_panel, feature_cols)
 
-    long_panel = long_panel.dropna(subset=feature_cols)
+    if keep_missing_features:
+        # Scoring under `keep`: a row whose feature is missing is still a
+        # row the model can score once its `impute` step has run, so it
+        # must survive here exactly as it did at training.
+        _record_kept_rows(attribution, long_panel, feature_cols)
+    else:
+        long_panel = long_panel.dropna(subset=feature_cols)
+        attribution["policy"] = "drop"
     ordered = ["date", "entity"] + feature_cols
     panel = long_panel[ordered].sort_values(["date", "entity"]).reset_index(drop=True)
     return panel, attribution
