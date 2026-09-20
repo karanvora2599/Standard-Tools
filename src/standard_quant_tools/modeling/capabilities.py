@@ -188,6 +188,9 @@ def modeling_capabilities() -> Dict[str, Any]:
             "polars": _importable("polars"),
             "blpapi": _importable("blpapi"),
             "cryptography": _importable("cryptography"),
+            # What `FsspecArtifactStore` needs to mirror a verified model
+            # package to object storage.
+            "fsspec": _importable("fsspec"),
             "cvxpy": _importable("cvxpy"),
         },
         # A SIBLING, not an entry in the map above. `optional_dependencies`

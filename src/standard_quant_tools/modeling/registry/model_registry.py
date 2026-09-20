@@ -7,6 +7,8 @@ modeling.artifacts' atomic-write helpers. Layout:
         model.joblib
         model_spec.json
         preprocessing_stats.json
+        manifest.sig        (when a signing key is configured; see signing.py)
+        promotions.jsonl    (once promoted; see lifecycle.py)
 """
 
 import logging
@@ -20,6 +22,7 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..specs import ModelSpec
+from . import signing as _signing
 from .environment import environment_fingerprint
 from .feature_provenance import (
     feature_implementation_hashes,
@@ -253,6 +256,13 @@ def save_model(
     # a directory without it is simply not a registered model -- the write
     # order is the transaction boundary.
     _artifacts.save_json(directory, "manifest", manifest.model_dump())
+    # An attestation on the package that now exists, written after the
+    # commit point rather than as part of it. Only when a key is
+    # configured: an unsigned registration is the default and not a
+    # failure; `load_manifest(require_signature=True)` is where a caller
+    # says unsigned is not enough.
+    if _signing.signing_configured():
+        _signing.sign_manifest(model_id)
     return manifest
 
 
@@ -442,11 +452,21 @@ def load_dataset_spec(model_id: str) -> Dict[str, Any]:
     )
 
 
-def load_manifest(model_id: str) -> ModelManifest:
+def load_manifest(model_id: str, *, require_signature: bool = False) -> ModelManifest:
+    """
+    The manifest, parsed. With `require_signature`, `manifest.sig` is
+    verified over the manifest's bytes BEFORE they are parsed -- against
+    `SQT_MODEL_VERIFY_KEY_PATH` when it is set -- so a manifest that fails
+    is never turned into an object anything can act on. Unsigned is the
+    default and is not a failure; requiring a signature is how a caller
+    at a trust boundary says it is not enough.
+    """
     directory = _artifacts.run_dir(model_id)
     path = directory / "manifest.json"
     if not path.exists():
         raise ValidationError(f"no registered model with model_id={model_id!r}")
+    if require_signature:
+        _signing.verify_manifest_signature(model_id)
     return ModelManifest(**_artifacts.load_json(str(path)))
 
 
@@ -463,10 +483,10 @@ def load_model(model_id: str) -> Any:
     #
     # This is integrity, not authenticity: it detects an artifact that no
     # longer matches its manifest, but an attacker who can rewrite BOTH
-    # model.joblib and manifest.json is still out of scope. Signing the
-    # manifest (as audit/signing.py does for decision records) is what
-    # would close that, and is the right next step before this registry is
-    # trusted across a trust boundary.
+    # model.joblib and manifest.json is still out of scope HERE. Closing
+    # it is `registry/signing.py`: `manifest.sig` over the manifest bytes,
+    # checked by `load_manifest(require_signature=True)` and by
+    # `verify_model_package` against a pinned public key.
     _artifacts.verify_file(
         path, _expected_hash(model_id, "model.joblib"), "model.joblib"
     )

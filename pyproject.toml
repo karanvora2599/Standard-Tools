@@ -111,6 +111,12 @@ bloomberg = [
 signing = [
     "cryptography>=42.0.0"
 ]
+# The object-store artifact target (`FsspecArtifactStore`): mirror a
+# verified model package to a bucket and read it back. The filesystem
+# implementation for your store (s3fs, gcsfs, adlfs) is yours to add.
+remote = [
+    "fsspec>=2023.1.0"
+]
 polars = [
     "polars>=0.20.0"
 ]

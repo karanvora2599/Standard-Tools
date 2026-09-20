@@ -1,5 +1,44 @@
 # Changelog
 
+## The hashes said the package was intact, and could not say whose it was
+
+Phase 10 of `Development/modeling_runtime_plan.md`, the last phase.
+
+Every artifact in a model package is hashed into `manifest.json` and every
+loader verifies before it reads, `model.joblib` before it is deserialized.
+The manifest is the root of that trust and cannot contain its own digest,
+so anything that could rewrite both an artifact and the manifest passed
+every check -- which the registry's own docstring named as the step before
+it crosses a trust boundary.
+
+**`manifest.sig`** is an Ed25519 signature over the manifest's exact bytes,
+written after the commit point as an attestation on the package that now
+exists: at registration when `SQT_MODEL_SIGNING_KEY_PATH` is set, or later
+by `sign_manifest`, with a key file or a signer callback routed through an
+HSM. `load_manifest(require_signature=True)` verifies over the bytes before
+parsing them; a pinned key (`public_key=` or `SQT_MODEL_VERIFY_KEY_PATH`)
+establishes who registered the package, and a verifier without one is told
+`key_pinned: False`, which is the honest description of what it learned.
+Unsigned, wrong key, changed since signed and unreadable are four refusals,
+each by name. The planted test edits the manifest by one byte: every hash
+still passes, the signature refuses.
+
+**`ArtifactStore`** is the one place bytes touch storage. The atomic write
+and the streaming hash that every integrity check rests on were written
+twice, in `backtest.artifacts` and `modeling.artifacts`, and were equal
+only by inspection; they are written once, and `LocalArtifactStore` and
+`FsspecArtifactStore` (`pip install standard_quant_tools[remote]`)
+implement the protocol. `verify_model_package` re-hashes a whole package
+and names what the hashes do not cover; `mirror_model_package` copies a
+verified package to any store, manifest last, re-hashing every covered
+file through the target. `inspect_model(view="lineage")` now reports the
+package verification.
+
+Not built, and said so: `skops` export (the library is neither installed
+nor declared, so its success path could not run in-tree), and a remote
+registry root (the runtime still lists, checks and appends by path; the
+fsspec store is a mirror target).
+
 ## Registration was the last thing anyone recorded about a model
 
 Phase 9 of `Development/modeling_runtime_plan.md`.

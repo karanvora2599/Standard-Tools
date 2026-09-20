@@ -4,9 +4,17 @@ A plan for generalizing the modeling runtime's preprocessing, target,
 validation, representation and lifecycle primitives, in the order that the
 code's own constraints impose rather than the order the ideas arrived in.
 
-**Status: phases 0-9 (the "now" half of 8) are implemented and merged;
-phase 10 and the sequence half of 8 are proposals.** Phase 9 landed as
-the commit that carries this paragraph on 2026-09-20 (`promote_model`
+**Status: phases 0-10 (the "now" half of 8) are implemented and merged;
+the sequence half of 8 is a proposal.** Phase 10 landed as the commit
+that carries this paragraph on 2026-09-20 (`ArtifactStore` with the
+local and fsspec implementations, `verify_model_package` and
+`mirror_model_package` over it, `manifest.sig` through
+`SQT_MODEL_SIGNING_KEY_PATH` and `load_manifest(require_signature=True)`;
+`skops` export not built because the library is neither installed nor
+declared and its success path could not run in-tree; the runtime still
+addresses its own directory by path, so the fsspec store is a mirror
+target rather than a root). Phase 9 landed as `bbcdf68` on 2026-09-20
+(`promote_model`
 over an append-only `promotions.jsonl`, `monitor_model` over
 references kept at registration, `score_model` keeping its feature
 rows; 22 tools, 211 on the surface). Phase 8's `SampleIndex` landed as

@@ -7,8 +7,7 @@ equity curve" gap noted for the plain BacktestResult. Same env-var-override
 convention as SQT_AUDIT_DIR/SQT_CACHE_DIR.
 """
 
-import os
-import uuid
+import io
 from pathlib import Path
 from typing import Union
 
@@ -19,6 +18,7 @@ from standard_quant_tools._runspath import (
 )
 from standard_quant_tools._runspath import runs_dir as _runs_dir
 from standard_quant_tools._runspath import validate_identifier as _validate_identifier
+from standard_quant_tools.artifact_store import write_bytes_atomically
 from standard_quant_tools.error import ValidationError
 
 # These three were defined here and again in `modeling.artifacts`, identically
@@ -74,10 +74,11 @@ def save_artifact(
         )
 
     # Write atomically: a crash or concurrent reader must never observe a
-    # partially-written Parquet file at the final path.
-    tmp_path = directory / f".{name}.{uuid.uuid4().hex}.tmp"
-    frame.to_parquet(tmp_path)
-    os.replace(tmp_path, path)
+    # partially-written Parquet file at the final path. The one atomic
+    # write, shared with the modeling artifacts, lives in `artifact_store`.
+    buffer = io.BytesIO()
+    frame.to_parquet(buffer)
+    write_bytes_atomically(path, buffer.getvalue())
     return str(path)
 
 

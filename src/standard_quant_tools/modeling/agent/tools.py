@@ -54,6 +54,7 @@ from ..monitoring import THRESHOLDS, drift_report, prediction_drift, realized_ic
 from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
 from ..registry.lifecycle import current_stage, promote, promotions
 from ..registry.model_registry import load_manifest, load_monitoring_reference
+from ..registry.package import verify_model_package
 from ..scoring import score_model as _score_model
 from ..specs import TASKS, DatasetSpec, FeatureSpec, TargetSpec, targets_for_task
 from .dataset_tools import (  # noqa: F401
@@ -795,6 +796,12 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # through, and that is the difference between two machines
             # reproducing a coefficient to four digits and to twelve.
             "environment": manifest.environment,
+            # The package as a whole: every hashed artifact re-verified,
+            # the files the hashes do NOT cover named, and the signature
+            # when there is one. This is the view someone opens before
+            # trusting a model, and it now says whether the package is
+            # still the one that was registered.
+            "package": verify_model_package(input_data.model_id).to_dict(),
         }
 
     return InspectModelResult(

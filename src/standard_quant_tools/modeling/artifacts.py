@@ -21,12 +21,16 @@ path-traversal guard, equal only until one of them was hardened. Both now
 come from `standard_quant_tools._runspath`, which is neither package's
 internals — the same arrangement `_jsonsafe` already uses for the same
 reason.
+
+Bytes reach disk through `standard_quant_tools.artifact_store`: one
+atomic write and one streaming hash, shared with `backtest.artifacts`,
+and a `LocalArtifactStore` the registry's package operations address
+by key. The path-based helpers here keep their signatures -- they are
+the local filesystem's implementation -- and delegate.
 """
 
-import hashlib
+import io
 import json
-import os
-import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -38,6 +42,11 @@ from standard_quant_tools._runspath import (
 )
 from standard_quant_tools._runspath import runs_dir as _runs_dir
 from standard_quant_tools._runspath import validate_identifier as _validate_identifier
+from standard_quant_tools.artifact_store import (
+    LocalArtifactStore,
+    hash_stream,
+    write_bytes_atomically,
+)
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.error import ValidationError
 
@@ -46,6 +55,7 @@ __all__ = [
     "load_artifact",
     "load_joblib",
     "load_json",
+    "local_store",
     "run_dir",
     "save_artifact",
     "save_joblib",
@@ -72,11 +82,13 @@ def run_dir(artifact_id: str) -> Path:
     return _resolved_within_runs_dir(_runs_dir() / artifact_id)
 
 
+def local_store() -> LocalArtifactStore:
+    """The runs directory as an `ArtifactStore`, root resolved per call."""
+    return LocalArtifactStore()
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    tmp_path.write_bytes(data)
-    os.replace(tmp_path, path)
+    write_bytes_atomically(path, data)
 
 
 def save_json(directory: Path, name: str, payload: Dict[str, Any]) -> str:
@@ -118,11 +130,10 @@ def load_json(path: str) -> Dict[str, Any]:
 
 def save_joblib(directory: Path, name: str, obj: Any) -> str:
     _validate_identifier(name, "name")
-    directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{name}.joblib"
-    tmp_path = directory / f".{name}.{uuid.uuid4().hex}.tmp"
-    joblib.dump(obj, tmp_path)
-    os.replace(tmp_path, path)
+    buffer = io.BytesIO()
+    joblib.dump(obj, buffer)
+    write_bytes_atomically(path, buffer.getvalue())
     return str(path)
 
 
@@ -160,11 +171,8 @@ def hash_file(path: Path) -> str:
     resolved = Path(path)
     if not resolved.exists():
         raise ValidationError(f"artifact not found: {resolved}")
-    digest = hashlib.sha256()
     with open(resolved, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()[:16]
+        return hash_stream(handle)
 
 
 def verify_file(path: Path, expected: Optional[str], label: str) -> None:

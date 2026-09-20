@@ -2393,12 +2393,11 @@ load-bearing ordering — joblib/pickle deserialization executes code from
 the file, so a swapped binary is an arbitrary-code-execution vector, not
 merely a wrong-answer one.
 
-> **This is integrity, not authenticity.** `manifest.json` is the root of
-> trust and cannot contain its own digest, so an attacker able to rewrite
-> *both* an artifact and the manifest is out of scope. Signing the manifest
-> — as `audit/signing.py` already does for decision records — is what would
-> close that, and is the right step before this registry is trusted across
-> a trust boundary.
+> **The hashes are integrity, not authenticity.** `manifest.json` is the
+> root of trust and cannot contain its own digest, so an attacker able to
+> rewrite *both* an artifact and the manifest passes every hash check.
+> [Signing the manifest](#signing-the-manifest) is what closes that, and
+> every check says which of the two it established.
 
 `dataset_spec.json` is verified against its recorded `spec_hash` too, not
 just `panel.parquet`. The spec is the more dangerous of the pair to tamper
@@ -2440,6 +2439,99 @@ own source. `git_commit_sha` pins the repo but says nothing about a feature
 registered at runtime from a notebook or an internal package; sources that
 can't be introspected record an explicit `"unavailable"` marker rather than
 being silently absent.
+
+### Signing the manifest
+
+`manifest.sig` is an Ed25519 signature over the **exact bytes** of
+`manifest.json`, written beside it with the public key that made it. Every
+artifact is hashed into the manifest, so a signature on the manifest is a
+signature on the package. Two ways it gets there:
+
+- **At registration**, when `SQT_MODEL_SIGNING_KEY_PATH` points at a raw
+  Ed25519 private key file (`sqt keygen` writes a development pair). The
+  signature is written *after* the manifest, as an attestation on a package
+  that now exists; the manifest stays the commit point, and an unsigned
+  registration is the default rather than a failure.
+- **Later**, with `sign_manifest(model_id, key_path=...)`, or with a
+  `signer` callback routed through an HSM/KMS together with the public key
+  it corresponds to, for a deployment that never lets a private key touch
+  disk. Key custody is not this library's problem, exactly as
+  `audit/signing.py` says of its own checkpoints.
+
+Verification is where a caller says unsigned is not enough.
+`load_manifest(model_id, require_signature=True)` verifies over the bytes
+**before** they are parsed, so a manifest that fails is never turned into an
+object anything can act on; `verify_manifest_signature` returns the
+record; `verify_model_package` carries it beside the hashes. A verifier
+that pins a key — `public_key=...` or `SQT_MODEL_VERIFY_KEY_PATH` — learns
+that the package is the one that key's holder registered. A verifier with
+no pinned key learns less, and the report says so: `key_pinned: False`
+means the manifest and the signature were written together by whoever
+holds the embedded key, which rules out an edit to the manifest alone but
+not an attacker who rewrote both under a key of their own.
+
+Four findings, each refused by name rather than folded into `False`: an
+unsigned model, a signature under a key that is not the pinned one, a
+manifest that changed since it was signed, and a signature record that
+cannot be read. The planted test is the case the signature exists for: the
+manifest is edited by one byte and the signature is not, every content
+hash still passes — the manifest is the root of those hashes and cannot
+contain its own — and the signature is what refuses.
+
+```python
+from standard_quant_tools.modeling.registry.model_registry import load_manifest
+from standard_quant_tools.modeling.registry.signing import (
+    sign_manifest, verify_manifest_signature,
+)
+
+sign_manifest(model_id, key_path="~/.sqt/model_signing.key")
+verify_manifest_signature(model_id, public_key=public_bytes)  # key_pinned: True
+load_manifest(model_id, require_signature=True)  # refuses unsigned, edited, wrong key
+```
+
+### The artifact store, and mirroring a package
+
+`standard_quant_tools.artifact_store` is the one place bytes touch storage.
+`backtest.artifacts` and `modeling.artifacts` each wrote their own files — a
+temp name, the bytes, an `os.replace` — and each hashed them with its own
+loop, so the two properties every integrity check above rests on (a write
+is atomic; a hash is of the bytes on disk) were implemented twice and equal
+only by inspection. They are implemented once, and the path-based helpers
+delegate.
+
+The `ArtifactStore` protocol is `put` / `get` / `exists` / `list` / `hash`
+/ `uri` by key, where a key is `<run_id>/<filename>` — the run segment is
+the same slug the runs directory accepts, and a filename may not start with
+a dot, so `..` and the store's own temp files are unspellable.
+`LocalArtifactStore` is the default and the only store the runtime reads
+and writes. `FsspecArtifactStore` addresses anything `fsspec` can open
+(`s3://`, `gcs://`, `memory://`; `pip install standard_quant_tools[remote]`
+plus the filesystem implementation for your store) and is tested in-tree
+against the in-memory filesystem.
+
+Two operations are written against the protocol:
+
+| Operation | What it does |
+|---|---|
+| `verify_model_package(model_id, require_signature=False, public_key=None)` | hashes every artifact the manifest covers and names the `verified`, `mismatched` and `missing` files; names the `unhashed` files too — the signature, the promotion log, scoring outputs — so a reader knows what the hashes do **not** vouch for; carries the signature record or the reason it failed. `inspect_model(view="lineage")` reports it as `package` |
+| `mirror_model_package(model_id, store, prefix=None)` | copies a verified package to another store, manifest **last** so the commit-point property holds on the target, re-hashing every covered file *through the target* after the copy; refuses a package that does not verify locally, because a mirror of a tampered package is a tampered package with a second address |
+
+```python
+from standard_quant_tools.artifact_store import store_from_url
+from standard_quant_tools.modeling.registry.package import (
+    mirror_model_package, verify_model_package,
+)
+
+report = verify_model_package(model_id, require_signature=True)
+report.ok, report.mismatched, report.unhashed
+uris = mirror_model_package(model_id, store_from_url("s3://models/registry"))
+```
+
+> Scoped honestly: the runtime is not pointed at a remote store. Listing
+> models, checking that a manifest exists and appending to a promotion log
+> still address the local runs directory by path, so the fsspec store is a
+> **target** for a verified package rather than a root the registry runs
+> from. Saying otherwise would be a claim the code does not make good on.
 
 ### `score_model` is for dates after training only
 
@@ -3263,9 +3355,16 @@ Not built here, and not accidentally half-built either:
   trading year at `1d`, about six weeks at `1h`) and nothing rescales them
   for a non-daily interval; you get a warning and are expected to set them
   yourself.
-- **Model lifecycle states** — registration means "persisted and
-  validated enough to load", not "approved for production". There is no
-  trained/validated/approved/production distinction.
+- **`skops` export** — serialization stays joblib. `skops` would make a
+  sklearn-only estimator loadable without executing pickle, which is a
+  real property; the library is neither installed nor declared here, so
+  an export path whose success case cannot run in-tree would be a claim
+  without a test. The trust concern it addresses is covered from the
+  other side: `model.joblib` is verified against a manifest that can be
+  [signed](#signing-the-manifest) **before** it is deserialized.
+- **A remote registry root** — `FsspecArtifactStore` is a target for
+  mirroring a verified package to object storage, not a root the runtime
+  can be pointed at; see [The artifact store](#the-artifact-store-and-mirroring-a-package).
 - **Beta- and sector-neutral prediction transforms** — need per-ticker
   beta/sector metadata this repo does not carry, the same blocker
   `backtest.sizing` documents for its own deferred list. The **bridge**
