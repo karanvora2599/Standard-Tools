@@ -728,6 +728,9 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             "oos_metrics": manifest.oos_metrics,
             "n_folds": manifest.n_folds,
             "feature_ids": manifest.feature_ids,
+            # What the estimator was actually fitted on, when the pipeline
+            # changed the column set; equal to feature_ids otherwise.
+            "model_input_columns": manifest.model_input_columns,
             "target_id": manifest.target_id,
             "created_at_utc": manifest.created_at_utc,
         }

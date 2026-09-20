@@ -57,6 +57,7 @@ def save_model(
     preprocessing: Optional[Dict[str, Any]] = None,
     environment: Optional[Dict[str, Any]] = None,
     preprocessing_state: Optional[Dict[str, Any]] = None,
+    model_input_columns: Optional[List[str]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -145,6 +146,7 @@ def save_model(
         estimator_type=model_spec.estimator.type,
         estimator_params=model_spec.estimator.params,
         feature_ids=feature_ids,
+        model_input_columns=list(model_input_columns or []),
         target_id=target_id,
         dataset_id=dataset_id,
         dataset_hash=dataset_hash,

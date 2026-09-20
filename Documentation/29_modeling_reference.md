@@ -76,13 +76,18 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | regression | `lightgbm` | *optional: `lightgbm`* | `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_samples`, `n_estimators`, `num_leaves`, `reg_alpha`, `reg_lambda`, `subsample` |
 | regression | `xgboost` | *optional: `xgboost`* | `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_weight`, `n_estimators`, `reg_alpha`, `reg_lambda`, `subsample` |
 
-## Preprocessing steps (3)
+## Preprocessing steps (8)
 
 Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's training rows and its state applied to the test rows, then persisted with the model as `preprocessing_state.json`. `normalization='pooled'` resolves to `winsorize` then `zscore`; `'cross_sectional'` to `cross_sectional_standardize`.
 
 | id | params | defaults | state | column-wise | description |
 |---|---|---|---|---|---|
 | `cross_sectional_standardize` | `clip_sigma` | `clip_sigma=3.0` | stateless | yes | Standardize within each date's cross-section and clip at clip_sigma, so what reaches the model is each entity's position relative to its peers that day. Stateless: nothing crosses the fold boundary. |
+| `impute` | `fill_value`, `strategy` | `fill_value=0.0`, `strategy='median'` | fitted on train | yes | Fill NaN with the training fold's median or mean, or a constant. A missing test value receives the TRAINING statistic, never the test fold's own. |
+| `missing_indicator` |  |  | stateless | yes | Add a <column>__missing indicator (1.0 where NaN) for every input column, keeping the originals. Meaningful once the dataset's missing-data policy lets NaN reach the engine; pair with impute. |
+| `pca_whiten` | `n_components`, `whiten` | `n_components=8`, `whiten=True` | fitted on train | no | Replace the columns with their leading n_components principal components, fitted on the training fold and scaled to unit variance when whiten is set. Not column-wise: every output depends on every input. Refuses NaN; put impute before it. |
+| `quantile_transform` | `n_quantiles`, `output` | `n_quantiles=1000`, `output='normal'` | fitted on train | yes | Map each column through its training-fold empirical distribution: rank-gauss for output='normal', a uniform [0, 1] for 'uniform'. Removes the shape of the distribution entirely, tails included. |
+| `robust_scale` | `scale_to_normal` | `scale_to_normal=True` | fitted on train | yes | Centre by the training median and scale by the median absolute deviation, which a single extreme print cannot move; scale_to_normal makes the MAD a consistent estimate of the standard deviation on Gaussian data. |
 | `winsorize` | `lower`, `upper` | `lower=0.01`, `upper=0.99` | fitted on train | yes | Clip each column to its training-fold quantiles, so a single extreme print cannot set the scale for everything that follows. |
 | `zscore` |  |  | fitted on train | yes | Centre and scale each column by its training-fold mean and standard deviation. Leaves the market factor inside every feature; pair with cross_sectional_standardize for a model judged on cross-sectional IC. |
 

@@ -1,5 +1,41 @@
 # Changelog
 
+## Five more steps, two of which change what the estimator sees
+
+Phase 1 of `Development/modeling_runtime_plan.md`, second commit.
+
+The registry gains `robust_scale` (median and MAD, which a single extreme
+print cannot move; `scale_to_normal` makes the MAD agree with a standard
+deviation on Gaussian data), `quantile_transform` (rank-gauss or uniform,
+through a bounded grid of training quantiles with ties collapsed so a flat
+region does not map to an arbitrary point in it), `impute` (median, mean or
+constant, fitted on the training fold so a missing test value receives the
+training statistic and never the test fold's own), `missing_indicator`
+(one `<column>__missing` per input column, for EVERY column so the column
+set cannot depend on the fold) and `pca_whiten` (the leading components,
+fitted on the training fold, signs fixed so the fit is reproducible from
+its inputs; refuses NaN and names `impute` as the remedy).
+
+**Two of them change the column set the estimator sees**, and the engine
+labelled feature importance by the dataset's feature ids. It now labels by
+the pipeline's output on every fold, refuses a pipeline whose output
+columns differ between folds or between the folds and the refit, and the
+manifest records `model_input_columns` beside `feature_ids` --
+`["pc1", "pc2"]` for a two-component PCA, the features and their
+indicators for `missing_indicator`, the features themselves for everything
+else. `feature_importance_summary` is keyed by those. `column_wise` is
+false for `pca_whiten` and true for the rest, which is what a consumer
+that drops a column from a fitted matrix reads.
+
+The oracles are planted: a median and MAD by hand on `[1, 2, 3, 4, 100]`;
+an outlier that moves the z-score scale a hundredfold and the robust scale
+by under a percent; a uniform training column whose transform is standard
+normal and whose 97.5th percentile lands at 1.96; a training median of 10
+against a test-fold median of 100, with the NaN receiving 10; a planted
+covariance the whitened output must flatten to the identity; a test fold
+ten times as dispersed as training that comes out ten times as dispersed,
+because the basis is the training one.
+
 ## Preprocessing is a registry of steps and a pipeline of fitted state
 
 Phase 1 of `Development/modeling_runtime_plan.md`, first commit.

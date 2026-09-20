@@ -56,6 +56,13 @@ class ModelManifest(BaseModel):
     estimator_type: str
     estimator_params: Dict[str, Any]
     feature_ids: List[str]
+    # The columns the ESTIMATOR was fitted on: the preprocessing pipeline's
+    # output. Equal to `feature_ids` for every step that maps columns onto
+    # themselves, and different for one that adds or replaces them -- a
+    # missingness indicator doubles the set, a PCA replaces it with
+    # `pc1..pcK`. `feature_importance_summary` is keyed by these. Empty for
+    # a manifest written before the field existed, where the two coincide.
+    model_input_columns: List[str] = Field(default_factory=list)
     target_id: str
     dataset_id: str
     dataset_hash: str

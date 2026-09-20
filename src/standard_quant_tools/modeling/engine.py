@@ -409,6 +409,13 @@ def run_experiment(
     has_label_end = LABEL_END_COL in panel.columns
     fold_metrics = []
     fold_importance = []
+    # The columns the ESTIMATOR sees: the pipeline's output, which is the
+    # dataset's feature columns for every step that maps columns onto
+    # themselves and something else for a step that adds or replaces them
+    # (a missingness indicator, a PCA). Importance is labelled by these,
+    # not by `feature_ids`, and every fold and the refit must agree on
+    # them or the per-fold vectors could not be summarized.
+    model_columns: "List[str] | None" = None
     fold_records: List[Dict[str, Any]] = []
     fold_weights: List[float] = []
     # metric prefix -> list of each fold's per-date IC series.
@@ -536,6 +543,18 @@ def run_experiment(
             ),
         )
         sample_weight = _fold_sample_weights(model_spec, train_df)
+        fold_columns = list(train_X.columns)
+        if model_columns is None:
+            model_columns = fold_columns
+        elif fold_columns != model_columns:
+            raise ValidationError(
+                "run_model_experiment: the preprocessing pipeline produced "
+                f"{len(fold_columns)} columns on this fold and "
+                f"{len(model_columns)} on an earlier one. A step whose output "
+                "columns depend on the rows it was fitted on cannot be "
+                "summarized across folds; every registered step emits a "
+                "column set that depends only on its input columns."
+            )
 
         fold_params = model_spec.estimator.params
         if model_spec.search is not None:
@@ -645,7 +664,7 @@ def run_experiment(
         # headline number when coverage varies across folds.
         fold_weights.append(float(len(test_df)))
         fold_metrics.append(metrics)
-        fold_importance.append(fold_feature_importance(estimator, feature_ids))
+        fold_importance.append(fold_feature_importance(estimator, fold_columns))
         oos_prediction_frames.append(
             pd.DataFrame(
                 {
@@ -696,7 +715,7 @@ def run_experiment(
     # they answer the different question of how each fold did.
     for prefix, series_list in pooled_ic.items():
         oos_metrics.update(aggregate_cross_sectional_ic(series_list, prefix))
-    importance_summary = summarize_importance(fold_importance, feature_ids)
+    importance_summary = summarize_importance(fold_importance, model_columns or [])
 
     # Sample size discounted for target overlap. A `horizon`-bar forward
     # return generated every bar produces labels sharing horizon-1 of their
@@ -772,6 +791,13 @@ def run_experiment(
         FoldContext.from_frame(panel),
     )
     full_stats = legacy_stats(full_state)
+    if model_columns is not None and list(full_X.columns) != model_columns:
+        raise ValidationError(
+            "run_model_experiment: the preprocessing pipeline produced "
+            f"{list(full_X.columns)[:6]} on the full-panel refit and "
+            f"{model_columns[:6]} on the folds. The deployed estimator would "
+            "be fitted on different columns than the ones that were validated."
+        )
     full_y = panel["target"].to_numpy()
     final_estimator = _instantiate(
         estimator_cls, model_spec.estimator.params, model_spec.random_seed
@@ -822,6 +848,7 @@ def run_experiment(
             "model_id": None,
             "oos_metrics": oos_metrics,
             "feature_importance_summary": importance_summary,
+            "model_input_columns": model_columns,
             "n_folds": len(fold_metrics),
             "validation_report": validation_report,
             "oos_predictions_uri": None,
@@ -850,6 +877,7 @@ def run_experiment(
         # rather than the scheme that implied it.
         preprocessing_state=full_state,
         preprocessing=model_spec.preprocessing.resolved_dump(),
+        model_input_columns=model_columns,
         oos_predictions_uri=oos_predictions_uri,
         model_id=model_id,
         # The last FEATURE date in the training panel. Kept for lineage, but
@@ -887,6 +915,7 @@ def run_experiment(
         "model_id": manifest.model_id,
         "oos_metrics": oos_metrics,
         "feature_importance_summary": importance_summary,
+        "model_input_columns": model_columns,
         "n_folds": len(fold_metrics),
         "validation_report": validation_report,
         "oos_predictions_uri": oos_predictions_uri,
