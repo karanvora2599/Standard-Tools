@@ -50,6 +50,12 @@ _DROP_WARN_FRACTION = 0.30
 _SOLE_CAUSE_WARN_FRACTION = 0.10
 
 
+def _naive(value: Any) -> pd.Timestamp:
+    """A timestamp with its zone dropped, so two clocks can be compared."""
+    ts = pd.Timestamp(value)
+    return ts.tz_localize(None) if ts.tzinfo is not None else ts
+
+
 def _fmt_date(value: Any) -> str:
     try:
         return pd.Timestamp(value).strftime("%Y-%m-%d")
@@ -184,8 +190,14 @@ def entity_coverage_warnings(
     except (ValueError, TypeError):  # pragma: no cover — validated in DatasetSpec
         return warnings
 
-    actual_start = union_dates[0]
-    actual_end = union_dates[-1]
+    # Compared as naive timestamps whatever the provider handed back: a
+    # tz-aware union against a naive request raised here on every live
+    # Databento build (D2). The provider seam now normalises; this is the
+    # defence in depth.
+    requested_start = _naive(requested_start)
+    requested_end = _naive(requested_end)
+    actual_start = _naive(union_dates[0])
+    actual_end = _naive(union_dates[-1])
     # Ten calendar days absorbs weekends, holidays and a start date that
     # simply is not a trading day, without absorbing a genuinely
     # unavailable window.

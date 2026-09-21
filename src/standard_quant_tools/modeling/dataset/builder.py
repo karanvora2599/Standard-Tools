@@ -340,6 +340,17 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         provider, list(plan.values()), spec.start, spec.end, spec.interval
     )
     ohlcv_by_entity = {entity: fetched[symbol] for entity, symbol in plan.items()}
+    # Which feed answered, per entity: a provider that chooses a dataset
+    # per window says so on the frame, and two datasets built from two
+    # feeds must not read as the same lineage (findings D16).
+    data_sources = {
+        entity: (
+            f"{spec.provider}:{frame.attrs['dataset']}"
+            if frame.attrs.get("dataset")
+            else str(spec.provider)
+        )
+        for entity, frame in ohlcv_by_entity.items()
+    }
 
     benchmark_df = _fetch_ohlcv(
         provider, fetch_symbol(spec.benchmark), spec.start, spec.end, spec.interval
@@ -709,6 +720,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         # record, not the underlying registry ids.
         "feature_ids": expanded_names,
         "data_hash": data_hash,
+        "data_sources": data_sources,
         "spec_hash": dataset_spec_hash(spec),
         # What the frames in this dataset can and cannot support, as one
         # verdict from `data.bundle`. See the bundle construction above.

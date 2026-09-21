@@ -132,7 +132,15 @@ def horizon_label_end(ohlcv: pd.DataFrame, spec: Any, context: Any = None) -> pd
     The default `label_end_builder` for every registered label.
     """
     close = ohlcv["Close"]
-    end_dates = pd.Series(pd.NaT, index=close.index, dtype="datetime64[ns]")
+    # Allocated in the index's own dtype: a tz-aware index assigned into a
+    # naive `datetime64[ns]` series raised on every live Databento build
+    # (D2), and a label end must be on the same clock as its bars.
+    dtype = (
+        close.index.dtype
+        if isinstance(close.index, pd.DatetimeIndex)
+        else "datetime64[ns]"
+    )
+    end_dates = pd.Series(pd.NaT, index=close.index, dtype=dtype)
     if spec.horizon < len(close):
         end_dates.iloc[: len(close) - spec.horizon] = close.index[spec.horizon :]
     return end_dates

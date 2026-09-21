@@ -29,6 +29,14 @@ from .test_databento_provider import (
 from .test_point_in_time_records import EPS, PAGE_ONE, PAGE_TWO, REVENUES
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cache(tmp_path, monkeypatch):
+    from standard_quant_tools.data import _cache as cache_module
+
+    monkeypatch.setattr(cache_module, "_CACHE_ROOT", tmp_path / "cache")
+    monkeypatch.setattr("standard_quant_tools.data._retry.time.sleep", lambda s: None)
+
+
 @pytest.fixture
 def open_record():
     token = _data_sources_var.set([])
@@ -40,9 +48,7 @@ def open_record():
 
 class TestDatabento:
     def test_bars_name_the_dataset_that_answered(self, open_record):
-        client = StubClient(
-            {CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE}, default=_bars()
-        )
+        client = StubClient({CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE})
         _provider(client).get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
         (entry,) = open_record()
         assert entry["symbol"] == "NVDA" and entry["interval"] == "1d"
@@ -122,11 +128,9 @@ class TestPolygon:
 
 class TestOutsideARecord:
     def test_a_direct_call_records_nothing_and_still_works(self):
-        client = StubClient(
-            {CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE}, default=_bars()
-        )
+        client = StubClient({CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE})
         frame = _provider(client).get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
-        assert len(frame) == 5
+        assert len(frame) == 7
         assert _data_sources_var.get() is None or isinstance(
             _data_sources_var.get(), list
         )

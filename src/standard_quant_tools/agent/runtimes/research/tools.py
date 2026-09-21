@@ -85,6 +85,7 @@ from standard_quant_tools.agent.models import (
     VarianceRatio,
     VolatilityEstimatorsInput,
     VolatilityEstimatorsResult,
+    VolumeAnomaly,
 )
 from standard_quant_tools.agent.runtimes._shared import (
     HAS_CPP,
@@ -115,6 +116,7 @@ from standard_quant_tools.data.quality import (
     detect_missing_bars,
     detect_price_jumps,
     detect_stale_prices,
+    detect_volume_anomalies,
 )
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
@@ -1474,6 +1476,7 @@ def get_data_quality_report(
         PriceJump(**j)
         for j in detect_price_jumps(df, threshold=input_data.jump_threshold)
     ]
+    volume_anomalies = [VolumeAnomaly(**v) for v in detect_volume_anomalies(df)]
 
     logger.debug(
         "[data_quality_report] missing_bars=%d  stale_runs=%d  price_jumps=%d",
@@ -1488,6 +1491,7 @@ def get_data_quality_report(
         missing_bars=missing,
         stale_price_runs=stale,
         price_jumps=jumps,
+        volume_anomalies=volume_anomalies,
     )
 
 

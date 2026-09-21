@@ -292,6 +292,11 @@ def _normalize_ohlcv_index(df: pd.DataFrame, interval: str = "1d") -> pd.DataFra
                 int((idx != idx.normalize()).sum()),
             )
         idx = idx.normalize()
+    # Pinned to nanoseconds: Parquet reads an index back at the resolution
+    # it stored (`[s]`, `[ms]`), and `hash_dataframe` saw a different
+    # frame for byte-identical data, so a replay reported `data_changed`.
+    if hasattr(idx, "as_unit"):
+        idx = idx.as_unit("ns")
     df = df.copy()
     df.index = idx
     return df

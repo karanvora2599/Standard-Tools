@@ -38,6 +38,22 @@ class _Store:
         return self._frame
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cache(tmp_path, monkeypatch):
+    """The provider caches to disk now, like every other provider; a test
+    must never read another test's bars, or the real cache's."""
+    from standard_quant_tools.data import _cache as cache_module
+
+    monkeypatch.setattr(cache_module, "_CACHE_ROOT", tmp_path / "cache")
+    monkeypatch.setattr("standard_quant_tools.data._retry.time.sleep", lambda s: None)
+    for name in (
+        "DATABENTO_DATASET",
+        "DATABENTO_DEPTH_DATASET",
+        "DATABENTO_OHLCV_DATASET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 class _Metadata:
     def __init__(self, ranges) -> None:
         self._ranges = ranges
@@ -47,6 +63,37 @@ class _Metadata:
             raise RuntimeError(f"403 not_entitled for {dataset}")
         first, last = self._ranges[dataset]
         return {"start": first, "end": last}
+
+
+def _bound(text: str) -> pd.Timestamp:
+    """A request bound as the vendor reads it: a bare date is a UTC midnight."""
+    return pd.Timestamp(text, tz="UTC")
+
+
+def _generated_bars(start: str, end: str) -> pd.DataFrame:
+    """
+    Daily bars for exactly the sessions in [start, end), fixed-point.
+
+    THE STUB USED TO RETURN FIVE ROWS WHATEVER WAS ASKED, so a test that
+    asserted `len(frame) == 5` asserted the stub's own length and the
+    daily off-by-one (findings D1) passed every test it had. A stub that
+    answers the window is what lets that bug fail offline.
+    """
+    first = _bound(start).normalize()
+    last = (_bound(end) - pd.Timedelta(nanoseconds=1)).normalize()
+    index = pd.bdate_range(first, last, tz="UTC")
+    day = (index - pd.Timestamp("2024-01-01", tz="UTC")).days.to_numpy()
+    close = 100.0 + day
+    return pd.DataFrame(
+        {
+            "open": np.round(close * FIXED_PRICE_SCALE).astype("int64"),
+            "high": np.round((close + 1) * FIXED_PRICE_SCALE).astype("int64"),
+            "low": np.round((close - 1) * FIXED_PRICE_SCALE).astype("int64"),
+            "close": np.round(close * FIXED_PRICE_SCALE).astype("int64"),
+            "volume": np.full(len(index), 1_000_000, dtype="uint64"),
+        },
+        index=index,
+    )
 
 
 class _Timeseries:
@@ -61,17 +108,39 @@ class _Timeseries:
                 if isinstance(outcome, Exception):
                     raise outcome
                 return _Store(outcome)
-        return _Store(self._owner.default)
+        start, end = str(kwargs["start"]), str(kwargs["end"])
+        finalized = self._owner.finalized_through
+        if (
+            kwargs.get("schema") == "ohlcv-1d"
+            and finalized is not None
+            and _bound(end) > _bound(finalized) + pd.Timedelta(days=1)
+        ):
+            # The vendor's daily feed refuses an end in its unfinalized tail.
+            raise RuntimeError("422 data_end_after_available_end")
+        default = self._owner.default
+        if default is None:
+            if str(kwargs.get("schema", "")).startswith("ohlcv"):
+                return _Store(_generated_bars(start, end))
+            return _Store(pd.DataFrame())
+        frame = default
+        if isinstance(frame.index, pd.DatetimeIndex) and frame.index.tz is not None:
+            frame = frame[(frame.index >= _bound(start)) & (frame.index < _bound(end))]
+        return _Store(frame)
 
 
 class StubClient:
     """A Databento client that answers from rules, and records every call."""
 
-    def __init__(self, ranges, rules=None, default=None) -> None:
+    def __init__(
+        self, ranges, rules=None, default=None, finalized_through=None
+    ) -> None:
         self.metadata = _Metadata(ranges)
         self.timeseries = _Timeseries(self)
         self.rules = list(rules or [])
-        self.default = default if default is not None else pd.DataFrame()
+        # None means "generate bars for the window asked"; a frame is
+        # sliced to the window, and a window it does not cover is empty.
+        self.default = default
+        self.finalized_through = finalized_through
         self.calls: list = []
 
     def datasets_called(self):
@@ -177,9 +246,7 @@ class TestTheInclusiveEndDate:
 
 class TestDatasetPreference:
     def test_the_consolidated_feed_is_tried_first(self) -> None:
-        client = StubClient(
-            {CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE}, default=_bars()
-        )
+        client = StubClient({CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE})
         _provider(client).get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
         assert client.datasets_called()[0] == CONSOLIDATED
 
@@ -188,9 +255,7 @@ class TestDatasetPreference:
         It does not exist before 2023-03-28, so asking is a guaranteed miss
         and a wasted round trip.
         """
-        client = StubClient(
-            {CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE}, default=_bars()
-        )
+        client = StubClient({CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE})
         _provider(client).get_ohlcv("NVDA", "2019-01-02", "2019-06-30")
         assert CONSOLIDATED not in client.datasets_called()
         assert client.datasets_called()[0] == BASIC
@@ -202,10 +267,11 @@ class TestDatasetPreference:
         client = StubClient(
             {CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE},
             rules=empty_for_consolidated,
-            default=_bars(),
         )
         frame = _provider(client).get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
-        assert len(frame) == 5
+        # Seven sessions from the 2nd through the 10th, and none after.
+        assert len(frame) == 7
+        assert str(frame.index[-1].date()) == "2024-01-10"
         assert client.datasets_called()[:2] == [CONSOLIDATED, BASIC]
 
     def test_exhausting_every_dataset_refuses_by_name(self) -> None:
@@ -233,7 +299,6 @@ class TestEntitlementDenialsAreRemembered:
         client = StubClient(
             {CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE},
             rules=denied,
-            default=_bars(),
         )
         provider = _provider(client)
         provider.get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
@@ -245,7 +310,7 @@ class TestEntitlementDenialsAreRemembered:
         assert CONSOLIDATED not in client.datasets_called()
 
     def test_a_dataset_with_no_range_is_skipped(self) -> None:
-        client = StubClient({BASIC: WIDE, DEPTH: WIDE}, default=_bars())
+        client = StubClient({BASIC: WIDE, DEPTH: WIDE})
         _provider(client).get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
         assert CONSOLIDATED not in client.datasets_called()
 
@@ -268,14 +333,18 @@ class TestTheDailyFinalizationLag:
                 return RuntimeError("422 data_end_after_available_end")
             return None
 
-        client = StubClient(
-            {CONSOLIDATED: SINCE_2023}, rules=[unfinalized], default=_bars()
-        )
+        client = StubClient({CONSOLIDATED: SINCE_2023}, rules=[unfinalized])
         frame = _provider(client).get_ohlcv("NVDA", "2024-03-01", "2024-03-10")
-        assert len(frame) == 5
+        # The 1st, 4th, 5th, 6th, 7th and 8th (the 10th is a Sunday, the two
+        # refusals walked the end back to the 9th, which is a Saturday).
+        assert len(frame) == 6
         ends = [c["end"] for c in client.calls]
         assert len(ends) == 3, ends
         assert ends[0] > ends[1] > ends[2], ends
+        # The first attempt is the inclusive end's own boundary, not a day
+        # past it: a bare 03-10 means through the 10th, and Databento's end
+        # is exclusive, so the honest request ends at 03-11.
+        assert ends[0] == "2024-03-11"
 
     def test_only_that_error_is_retried(self) -> None:
         """Anything else is a real failure, and re-asking would hide it."""
@@ -286,11 +355,14 @@ class TestTheDailyFinalizationLag:
         client = StubClient({CONSOLIDATED: SINCE_2023}, rules=[boom])
         with pytest.raises(APIError):
             _provider(client).get_ohlcv("NVDA", "2024-03-01", "2024-03-10")
-        # One attempt per dataset, not six walk-backs.
-        assert len(client.calls) == 1
+        # One attempt per dataset per try, not six walk-backs: the retry
+        # layer above re-asks a transient failure three times, like every
+        # other provider, so three calls and never eighteen.
+        assert len(client.calls) == 3
 
     def test_an_intraday_schema_does_not_walk_back(self) -> None:
-        client = StubClient({CONSOLIDATED: SINCE_2023}, default=_bars())
+        # Intraday asks the venue feeds only: the sample feed is not a tape.
+        client = StubClient({BASIC: WIDE}, default=_bars())
         _provider(client).get_ohlcv("NVDA", "2024-03-01", "2024-03-02", interval="1h")
         assert len(client.calls) == 1
         assert client.calls[0]["schema"] == "ohlcv-1h"
@@ -304,7 +376,7 @@ class TestTheRequestIsClampedToWhatWasPublished:
         last session, which is what the caller meant.
         """
         edge = ("2023-03-28T00:00:00+00:00", "2026-03-06T00:00:00+00:00")
-        client = StubClient({CONSOLIDATED: edge}, default=_bars())
+        client = StubClient({BASIC: edge})
         _provider(client).get_ohlcv("NVDA", "2026-03-02", "2026-03-08", interval="1h")
         requested_end = client.calls[0]["end"]
         assert requested_end <= "2026-03-06T00:00:00"

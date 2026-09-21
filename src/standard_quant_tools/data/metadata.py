@@ -6,6 +6,7 @@ provider does and doesn't promise, rather than leaving it implicit.
 """
 
 from datetime import datetime, timezone
+from typing import List
 
 from pydantic import BaseModel, Field
 
@@ -35,7 +36,19 @@ class DataSetMetadata(BaseModel):
     )
     frequency: str = Field(..., description="Bar interval, e.g. '1d'.")
     timezone: str = Field(
-        ..., description="Timezone the OHLCV timestamps are reported in."
+        ...,
+        description=(
+            "The zone the bars are STATED in. Every provider's index is "
+            "normalised before it is returned: daily bars are naive session "
+            "dates in this zone, intraday bars are naive UTC instants. "
+            "Localising the index to this zone before a join yields nothing "
+            "aligned; it is a label, not an instruction."
+        ),
+    )
+    notes: List[str] = Field(
+        default_factory=list,
+        description="What the flags cannot say: which feed answers, what the "
+        "index is, what the provider refuses.",
     )
     retrieved_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),

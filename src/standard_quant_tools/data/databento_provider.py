@@ -51,18 +51,35 @@ import logging
 import os
 import re
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import pandas as pd
 
 from standard_quant_tools import audit
+from standard_quant_tools.data._cache import (
+    _is_historical,
+    _norm_cache_bound,
+    _normalize_ohlcv_index,
+    _safe_parquet_path,
+    _session_cache_get,
+    _session_cache_set,
+    _write_parquet_atomic,
+    trim_to_inclusive_end,
+)
+from standard_quant_tools.data._retry import retry
 from standard_quant_tools.data.base import DataProvider, FinancialRatios, TickerInfo
 from standard_quant_tools.data.databento import (
     CONSOLIDATED_START,
     DATASET_CONSOLIDATED,
     DATASET_DEPTH,
+    DATASET_FUTURES,
     DATASET_NASDAQ_BASIC,
+    DATASET_OPTIONS,
+    DATASET_SUMMARY,
+    SUMMARY_SCHEMAS,
+    SUMMARY_START,
     normalize_book,
     normalize_mbo,
     normalize_quotes,
@@ -87,6 +104,82 @@ BAR_SCHEMAS: Dict[str, str] = {
 #: A plain US equity ticker, and the share-class form that needs mapping.
 _EQUITY_RE = re.compile(r"^[A-Z]{1,5}$")
 _CLASS_RE = re.compile(r"^([A-Z]{1,5})[.\-]([A-Z])$")
+#: The derivatives grammar. `ES.c.0` / `ES.n.1` / `ES.v.0` are Databento's
+#: continuous symbols (calendar, open-interest and volume rolls), `ES.FUT`
+#: and `ES.OPT` the parent symbols, `ESZ6` / `ESZ26` a contract, and an
+#: OSI string (`AAPL  240119C00190000`) an option. A bare root such as `ES`
+#: matches the equity ticker rule too, which is exactly the ambiguity
+#: this grammar exists to refuse rather than resolve.
+_CONTINUOUS_RE = re.compile(r"^([A-Z0-9]{1,4})\.([CNV])\.(\d{1,2})$")
+_PARENT_RE = re.compile(r"^([A-Z0-9]{1,4})\.(FUT|OPT)$")
+_CONTRACT_RE = re.compile(r"^([A-Z]{1,3}[0-9]?)([FGHJKMNQUVXZ])(\d{1,2})$")
+_OSI_RE = re.compile(r"^([A-Z]{1,6})\s*(\d{6})([CP])(\d{8})$")
+#: Futures roots that are also plausible equity tickers. A bare one of these
+#: is refused as ambiguous; `ES~equity` names the equity reading on purpose.
+_FUTURES_ROOTS = frozenset(
+    {
+        "ES",
+        "NQ",
+        "YM",
+        "RTY",
+        "MES",
+        "MNQ",
+        "M2K",
+        "MYM",
+        "CL",
+        "NG",
+        "HO",
+        "RB",
+        "BZ",
+        "MCL",
+        "GC",
+        "SI",
+        "HG",
+        "PL",
+        "PA",
+        "MGC",
+        "SIL",
+        "ZB",
+        "ZN",
+        "ZF",
+        "ZT",
+        "UB",
+        "TN",
+        "SR3",
+        "ZQ",
+        "ZC",
+        "ZS",
+        "ZW",
+        "ZM",
+        "ZL",
+        "KE",
+        "LE",
+        "HE",
+        "GF",
+        "6E",
+        "6J",
+        "6B",
+        "6A",
+        "6C",
+        "6S",
+        "6M",
+        "6N",
+        "VX",
+        "BTC",
+        "ETH",
+        "MBT",
+    }
+)
+
+
+class SymbolRoute(NamedTuple):
+    """What a symbol resolves to: the vendor spelling, the symbology it is
+    in, and the family that decides which datasets can answer."""
+
+    raw: str
+    stype_in: str
+    family: str
+
 
 #: Substrings that mean "your subscription does not cover this", as opposed
 #: to "this request was wrong". The distinction matters because the first
@@ -152,6 +245,13 @@ def _record(
     )
 
 
+def _with_attrs(frame: pd.DataFrame, attrs: Dict[str, Any]) -> pd.DataFrame:
+    """`DataFrame.copy()` keeps attrs in recent pandas and not in older ones;
+    the served dataset must survive either way."""
+    frame.attrs.update(dict(attrs))
+    return frame
+
+
 class DatabentoProvider(DataProvider):
     """Databento Historical, honouring this library's provider contract."""
 
@@ -170,6 +270,7 @@ class DatabentoProvider(DataProvider):
         # to exercise against a live API in a test suite.
         self._client = client
         self._client_failed = False
+        self._client_error: Optional[str] = None
         self._lock = threading.Lock()
         self._ranges: Dict[str, Tuple[datetime, datetime]] = {}
         self._denied: Set[str] = set()
@@ -183,40 +284,56 @@ class DatabentoProvider(DataProvider):
             or os.environ.get("DATABENTO_DEPTH_DATASET", "").strip()
             or DATASET_DEPTH
         )
+        self._futures_dataset = (
+            os.environ.get("DATABENTO_FUTURES_DATASET", "").strip() or DATASET_FUTURES
+        )
+        self._options_dataset = (
+            os.environ.get("DATABENTO_OPTIONS_DATASET", "").strip() or DATASET_OPTIONS
+        )
+        # The session cache is keyed per instance, like yfinance's: a fresh
+        # provider never reuses another's result, which is what lets a
+        # replay construct one to re-read from disk and detect tampering.
+        self._instance_token = uuid.uuid4()
 
     # ── client and datasets ──────────────────────────────────────────
     def _get_client(self) -> Any:
         with self._lock:
             if self._client is not None or self._client_failed:
                 if self._client is None:
+                    # The reason it failed the first time, every time: the
+                    # retry layer above re-asks, and the answer must not
+                    # decay into "it failed earlier".
                     raise APIError(
-                        "the Databento client could not be constructed earlier "
-                        "in this process and is not retried."
+                        self._client_error
+                        or "the Databento client could not be constructed."
                     )
                 return self._client
             if not self._api_key:
                 self._client_failed = True
-                raise APIError(
+                self._client_error = (
                     "DATABENTO_API_KEY is not set. This provider reads its "
                     "credential from the environment and never from a spec "
                     "or a tool argument, because a DatasetSpec is persisted "
                     "to disk, hashed into a model's lineage and written into "
                     "decision records."
                 )
+                raise APIError(self._client_error)
             try:
                 import databento as db
             except ImportError as exc:
                 self._client_failed = True
-                raise APIError(
+                self._client_error = (
                     "the `databento` package is not installed. Install it "
                     "with `pip install databento` to use provider "
                     "'databento'."
-                ) from exc
+                )
+                raise APIError(self._client_error) from exc
             try:
                 self._client = db.Historical(self._api_key)
             except Exception as exc:  # noqa: BLE001 - one refusal, not a trace
                 self._client_failed = True
-                raise APIError(f"Databento client construction failed: {exc}") from exc
+                self._client_error = f"Databento client construction failed: {exc}"
+                raise APIError(self._client_error) from exc
             return self._client
 
     @staticmethod
@@ -255,50 +372,141 @@ class DatabentoProvider(DataProvider):
             self._ranges[dataset] = (start, end)
         return (start, end)
 
-    def _bar_datasets(self) -> List[str]:
+    def _bar_datasets(
+        self, schema: str = "ohlcv-1d", start: Optional[datetime] = None
+    ) -> List[str]:
         """
-        Bar datasets in preference order.
+        Bar datasets in preference order, for a schema and a window.
 
-        The consolidated feed first, because every lit venue on one tape is
-        the best answer wherever it reaches. Then the venue feed. Then the
-        DEPTH venue, whose bars reach furthest back -- so a multi-year
-        request that the consolidated feed cannot cover still has somewhere
-        to go instead of failing.
+        DAILY: the summary feed first wherever it reaches, because it is the
+        consolidated close and volume exactly; then the consolidated-symbol
+        sample feed, then the venue feed, then the depth venue whose bars
+        reach furthest back. INTRADAY: the venue feeds only, in the same
+        order the tick methods use, so the minute bars and the trades for
+        one window come from ONE tape (D11) -- the sample feed is not a tape
+        and a minute of it reconciles with nothing.
         """
         override = os.environ.get("DATABENTO_OHLCV_DATASET", "").strip()
-        candidates = (
-            [override, self._depth_dataset]
-            if override
-            else [DATASET_CONSOLIDATED, self._dataset, self._depth_dataset]
-        )
+        if override:
+            candidates = [override, self._depth_dataset]
+        elif schema in SUMMARY_SCHEMAS:
+            candidates = [
+                DATASET_SUMMARY,
+                DATASET_CONSOLIDATED,
+                self._dataset,
+                self._depth_dataset,
+            ]
+            if start is not None and start < SUMMARY_START:
+                candidates.remove(DATASET_SUMMARY)
+        else:
+            candidates = [self._dataset, self._depth_dataset]
         seen: List[str] = []
         for name in candidates:
             if name and name not in seen and name not in self._denied:
                 seen.append(name)
         return seen
 
-    @staticmethod
-    def to_raw_symbol(symbol: str) -> str:
-        """
-        This library's ticker as Databento's `raw_symbol`.
+    def _datasets_for(
+        self, family: str, schema: str, start: Optional[datetime] = None
+    ) -> List[str]:
+        """The datasets that can answer a symbol family, in preference order."""
+        if family == "future":
+            return [self._futures_dataset]
+        if family == "option":
+            return [self._options_dataset]
+        return self._bar_datasets(schema, start)
 
-        Share classes are the whole job: `BRK.B` and `BRK-B` are `BRKB` on
-        the Nasdaq feeds. Note that the LIVE gateway uses the dotted form
-        for the same instrument, so a live path needs the inverse map and
-        not this one -- a difference worth stating because getting it
-        backwards produces an empty result rather than an error.
+    def _tick_datasets(self, symbol: str) -> List[str]:
+        """Trades and quotes: the same venue order as intraday bars."""
+        route = self.resolve_symbol(symbol)
+        if route.family != "equity":
+            return self._datasets_for(route.family, "trades")
+        return [
+            d for d in (self._dataset, self._depth_dataset) if d not in self._denied
+        ]
+
+    def _depth_datasets(self, symbol: str) -> List[str]:
+        route = self.resolve_symbol(symbol)
+        if route.family != "equity":
+            return self._datasets_for(route.family, "mbp-10")
+        return [self._depth_dataset]
+
+    @staticmethod
+    def resolve_symbol(symbol: str) -> SymbolRoute:
+        """
+        What a symbol names: its vendor spelling, symbology and family.
+
+        Share classes are the equity job: `BRK.B` and `BRK-B` are `BRKB` on
+        the Nasdaq feeds (the LIVE gateway uses the dotted form, so a live
+        path needs the inverse map). Futures and options are named by their
+        own grammar -- continuous, parent, contract, OSI -- and routed to
+        their own datasets.
+
+        A BARE FUTURES ROOT IS REFUSED. `ES` and `CL` are equity tickers as
+        well as roots, and this provider used to resolve them to the
+        equity: `get_ohlcv("CL")` returned Colgate-Palmolive at 87 where
+        crude was at 70-90 a barrel, with no warning (D5). Spell the
+        instrument -- `ES.c.0` for the front continuous contract, `ESZ6`
+        for a contract, `ES.FUT` for the parent, or `ES~equity` for the
+        ticker -- and it is one thing.
         """
         text = str(symbol).strip().upper()
+        if text.endswith("~EQUITY"):
+            text = text[: -len("~EQUITY")]
+            match = _CLASS_RE.match(text)
+            if match:
+                return SymbolRoute(
+                    f"{match.group(1)}{match.group(2)}", "raw_symbol", "equity"
+                )
+            if _EQUITY_RE.match(text):
+                return SymbolRoute(text, "raw_symbol", "equity")
+            raise ValidationError(
+                f"{symbol!r} names an equity by suffix but {text!r} is not a "
+                "1-5 letter ticker or a share class such as 'BRK.B'."
+            )
+        if _CONTINUOUS_RE.match(text):
+            return SymbolRoute(
+                text.replace(".C.", ".c.").replace(".N.", ".n.").replace(".V.", ".v."),
+                "continuous",
+                "future",
+            )
+        if _PARENT_RE.match(text):
+            return SymbolRoute(
+                text, "parent", "option" if text.endswith(".OPT") else "future"
+            )
+        if _OSI_RE.match(text.replace(" ", "")) or _OSI_RE.match(text):
+            match = _OSI_RE.match(text.replace(" ", ""))
+            assert match is not None
+            root, date, kind, strike = match.groups()
+            return SymbolRoute(f"{root:<6}{date}{kind}{strike}", "raw_symbol", "option")
+        if _CONTRACT_RE.match(text) and not _EQUITY_RE.match(text):
+            return SymbolRoute(text, "raw_symbol", "future")
+        if text in _FUTURES_ROOTS and _EQUITY_RE.match(text):
+            raise ValidationError(
+                f"{symbol!r} is ambiguous: a futures root and a US equity ticker "
+                "at once, and this provider will not pick one for you. Spell "
+                f"the instrument: '{text}.c.0' (front continuous contract), "
+                f"'{text}Z6'-style for a contract, '{text}.FUT' (parent), or "
+                f"'{text}~equity' for the ticker."
+            )
         if _EQUITY_RE.match(text):
-            return text
+            return SymbolRoute(text, "raw_symbol", "equity")
         match = _CLASS_RE.match(text)
         if match:
-            return f"{match.group(1)}{match.group(2)}"
+            return SymbolRoute(
+                f"{match.group(1)}{match.group(2)}", "raw_symbol", "equity"
+            )
         raise ValidationError(
-            f"{symbol!r} is not a US-equity symbol this provider can map to "
-            "a Databento raw_symbol. Expected a 1-5 letter ticker, or a "
-            "share class like 'BRK.B'."
+            f"{symbol!r} is not a symbol this provider can map to a Databento "
+            "raw_symbol. Expected a 1-5 letter ticker, a share class like "
+            "'BRK.B', a continuous future like 'ES.c.0', a contract like "
+            "'ESZ6', a parent like 'ES.FUT', or an OSI option string."
         )
+
+    @staticmethod
+    def to_raw_symbol(symbol: str) -> str:
+        """This library's symbol as Databento's raw spelling, any family."""
+        return DatabentoProvider.resolve_symbol(symbol).raw
 
     # ── the request itself ───────────────────────────────────────────
     def _range(
@@ -322,7 +530,13 @@ class DatabentoProvider(DataProvider):
         return start, clamped_end
 
     def _get_range(
-        self, dataset: str, schema: str, raw: str, start: datetime, end: datetime
+        self,
+        dataset: str,
+        schema: str,
+        raw: str,
+        start: datetime,
+        end: datetime,
+        stype_in: str = "raw_symbol",
     ) -> Optional[pd.DataFrame]:
         """One request, with the daily-finalization walk-back."""
         client = self._get_client()
@@ -332,7 +546,7 @@ class DatabentoProvider(DataProvider):
                 dataset=dataset,
                 schema=schema,
                 symbols=[raw],
-                stype_in="raw_symbol",
+                stype_in=stype_in,
                 start=start.strftime(fmt),
                 end=request_end.strftime(fmt),
             )
@@ -344,8 +558,15 @@ class DatabentoProvider(DataProvider):
             # honest end lands in the unfinalized tail and is refused. Walk
             # it back, but only on THAT error: anything else is a real
             # failure and re-asking would hide it.
+            # The end is already the next midnight for a bare date (see
+            # `_to_utc`), and Databento's day-granular end is EXCLUSIVE, so
+            # the honest daily request ends there: round UP to a whole day
+            # and add nothing. Adding a day here asked for one bar past the
+            # inclusive end, and that bar was tomorrow (D1) -- and cost a
+            # guaranteed 422 on every daily request before the walk-back.
             attempt = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
-            attempt += timedelta(days=1)
+            if attempt < end:
+                attempt += timedelta(days=1)
             for _ in range(_FINALIZATION_ATTEMPTS):
                 if attempt <= start:
                     return None
@@ -371,7 +592,8 @@ class DatabentoProvider(DataProvider):
         what: str = "data",
     ) -> Tuple[pd.DataFrame, str]:
         """Try each dataset in order; return the first that answers."""
-        raw = self.to_raw_symbol(symbol)
+        route = self.resolve_symbol(symbol)
+        raw = route.raw
         start = _to_utc(start_date, end_of_day=False)
         end = _to_utc(end_date, end_of_day=True)
         if end <= start:
@@ -382,19 +604,30 @@ class DatabentoProvider(DataProvider):
             )
 
         tried: List[str] = []
-        for dataset in datasets if datasets is not None else self._bar_datasets():
+        candidates = (
+            datasets
+            if datasets is not None
+            else self._datasets_for(route.family, schema, start)
+        )
+        for dataset in candidates:
             if dataset in self._denied:
                 continue
             if dataset == DATASET_CONSOLIDATED and start < CONSOLIDATED_START:
-                # The consolidated feed does not exist before this date, so
+                # The sample feed does not exist before this date, so
                 # asking is a guaranteed miss and a wasted round trip.
+                continue
+            if dataset == DATASET_SUMMARY and (
+                schema not in SUMMARY_SCHEMAS or start < SUMMARY_START
+            ):
                 continue
             window = self._range(dataset, start, end)
             if window is None:
                 continue
             tried.append(dataset)
             try:
-                frame = self._get_range(dataset, schema, raw, *window)
+                frame = self._get_range(
+                    dataset, schema, raw, *window, stype_in=route.stype_in
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "databento %s %s on %s failed: %s", symbol, schema, dataset, exc
@@ -443,13 +676,117 @@ class DatabentoProvider(DataProvider):
                 "because Databento has no such schema and inventing one here "
                 "would hide that."
             )
-        frame, dataset = self._fetch(schema, symbol, start_date, end_date, what="bars")
-        out = self._to_ohlcv(frame, symbol)
+        # The same seams every other provider passes: the session cache
+        # (keyed per instance), the retry layer, the Parquet cache keyed by
+        # the dataset that answered, and the index normaliser. Databento
+        # bypassed all four, which is why its index was the only tz-aware
+        # one in the library (D2), three identical requests were three
+        # metered fetches, and a daily request kept one bar too many (D1).
+        start_str = _norm_cache_bound(start_date, interval)
+        end_str = _norm_cache_bound(end_date, interval)
+        key = (
+            "databento",
+            self._instance_token,
+            str(symbol).strip().upper(),
+            start_str,
+            end_str,
+            interval,
+        )
+        cached = _session_cache_get(key)
+        if cached is not None:
+            _record(
+                symbol,
+                start_date,
+                end_date,
+                interval,
+                f"{cached.attrs.get('dataset', '?')}:session_cache",
+                cached,
+            )
+            return _with_attrs(cached.copy(), cached.attrs)
+        result = self._fetch_ohlcv_uncached(
+            symbol, start_date, end_date, interval, schema, start_str, end_str
+        )
+        _session_cache_set(key, result)
+        return _with_attrs(result.copy(), result.attrs)
+
+    @retry(times=3, delay=1)
+    def _fetch_ohlcv_uncached(
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        interval: str,
+        schema: str,
+        start_str: str,
+        end_str: str,
+    ) -> pd.DataFrame:
+        route = self.resolve_symbol(symbol)
+        start = _to_utc(start_date, end_of_day=False)
+        candidates = self._datasets_for(route.family, schema, start)
+        # The disk cache is keyed by the dataset that answered: the same
+        # window served by two feeds 30x apart in volume is two entries,
+        # never one file. Read in preference order, so a window a better
+        # feed has since come to cover still serves the feed it was
+        # first fetched from -- reproducibility over recency, and the
+        # served dataset says which.
+        for dataset in candidates:
+            path = _safe_parquet_path(
+                symbol, start_str, end_str, interval, provider=f"databento-{dataset}"
+            )
+            if path is None or not path.exists():
+                continue
+            try:
+                frame = _normalize_ohlcv_index(pd.read_parquet(path), interval)
+            except Exception as exc:  # noqa: BLE001 - a bad file is evicted
+                logger.warning(
+                    "[cache] databento disk read failed for %s: %s", path, exc
+                )
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            frame.attrs["dataset"] = dataset
+            frame.attrs["provider"] = "databento"
+            _record(
+                symbol, start_date, end_date, interval, f"{dataset}:disk_cache", frame
+            )
+            return frame
+        raw_frame, dataset = self._fetch(
+            schema, symbol, start_date, end_date, what="bars"
+        )
+        out = self._shape_bars(raw_frame, symbol, interval, end_date)
+        out.attrs["dataset"] = dataset
+        out.attrs["provider"] = "databento"
         # Into the open decision record, like every other provider's bars.
-        # Databento fetches used to leave `data_sources` empty, so a record
-        # of a call that read them could never replay as `data_changed`.
         _record(symbol, start_date, end_date, interval, dataset, out)
+        path = _safe_parquet_path(
+            symbol, start_str, end_str, interval, provider=f"databento-{dataset}"
+        )
+        if path is not None and _is_historical(end_date):
+            try:
+                _write_parquet_atomic(path, out)
+            except Exception as exc:  # noqa: BLE001 - caching is an optimisation
+                logger.warning(
+                    "[cache] databento disk write failed for %s: %s", path, exc
+                )
         return out
+
+    def _shape_bars(
+        self,
+        raw_frame: pd.DataFrame,
+        symbol: str,
+        interval: str,
+        end_date: Union[str, datetime],
+    ) -> pd.DataFrame:
+        """The library's column contract, a naive index, integer volume, and
+        the inclusive end enforced -- the same shaping every provider does."""
+        out = _normalize_ohlcv_index(self._to_ohlcv(raw_frame, symbol), interval)
+        if out["Volume"].notna().all():
+            # uint64 from the vendor: `Volume.diff()` on it returned
+            # 1.8e19 instead of -1,150,414. int64 like every other provider.
+            out["Volume"] = out["Volume"].astype("int64")
+        return trim_to_inclusive_end(out, end_date, interval)
 
     @staticmethod
     def _to_ohlcv(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -513,7 +850,7 @@ class DatabentoProvider(DataProvider):
             symbol,
             start_date,
             end_date,
-            datasets=[self._depth_dataset, self._dataset],
+            datasets=self._tick_datasets(symbol),
             what="trades",
         )
         out, _notes = normalize_trades(frame)
@@ -536,7 +873,7 @@ class DatabentoProvider(DataProvider):
             symbol,
             start_date,
             end_date,
-            datasets=[self._dataset, self._depth_dataset],
+            datasets=self._tick_datasets(symbol),
             what="quotes",
         )
         out, _notes = normalize_quotes(frame)
@@ -578,7 +915,7 @@ class DatabentoProvider(DataProvider):
             symbol,
             start_date,
             end_date,
-            datasets=[self._depth_dataset],
+            datasets=self._depth_datasets(symbol),
             what="depth",
         )
         out, notes = normalize_book(frame, levels=levels)
@@ -617,7 +954,7 @@ class DatabentoProvider(DataProvider):
             symbol,
             start_date,
             end_date,
-            datasets=[self._depth_dataset],
+            datasets=self._depth_datasets(symbol),
             what="order events",
         )
         out, notes = normalize_mbo(frame)
@@ -663,6 +1000,29 @@ class DatabentoProvider(DataProvider):
         better than most, but "announced" is not the guarantee this field
         asks about.
         """
+        try:
+            family = self.resolve_symbol(symbol).family
+        except ValidationError:
+            family = "unknown"
+        if family == "future":
+            feed = f"{self._futures_dataset} (CME Globex; continuous, parent and contract symbols)"
+        elif family == "option":
+            feed = f"{self._options_dataset} (OPRA; OSI option symbols)"
+        elif interval == "1d":
+            feed = (
+                f"{DATASET_SUMMARY} from {SUMMARY_START.date()} (the consolidated close "
+                f"and volume exactly); before that {DATASET_CONSOLIDATED}, a SAMPLE "
+                "feed -- 2-4% of consolidated volume and a UTC-day close that is "
+                f"often an after-hours print -- then {self._dataset} and "
+                f"{self._depth_dataset}, single-venue tapes"
+            )
+        else:
+            feed = (
+                f"{self._dataset} then {self._depth_dataset}: single-venue tapes, "
+                "the same order trades and quotes use, so bars and ticks for one "
+                "window come from one tape. No consolidated intraday feed exists "
+                "in this entitlement; volumes are the venue's share of the market."
+            )
         return DataSetMetadata(
             provider="databento",
             adjusted=False,
@@ -672,6 +1032,39 @@ class DatabentoProvider(DataProvider):
             point_in_time=False,
             frequency=interval,
             timezone="UTC",
+            notes=[
+                f"Served by: {feed}. The dataset that answered a fetch is on "
+                "the frame as attrs['dataset'].",
+                "The index is normalised like every provider's: daily bars are "
+                "naive session dates, intraday bars naive UTC instants. Do not "
+                "tz-localize before joining.",
+                "A futures root that is also an equity ticker (ES, CL, GC, ...) "
+                "is refused as ambiguous; spell ES.c.0, ESZ6, ES.FUT or ES~equity.",
+            ],
+        )
+
+    def get_temporal_contract(self, frame_kind: str = "bars"):
+        """
+        Bars, with `revisions='unknown'`: Databento reprocesses and corrects
+        data (which is why `get_metadata` says `point_in_time=False`), so
+        the base contract's claim that bars are never restated would
+        contradict the metadata on the same object.
+        """
+        if frame_kind != "bars":
+            return super().get_temporal_contract(frame_kind)
+        from standard_quant_tools.data.temporal import price_contract
+
+        contract = price_contract(type(self).__name__)
+        return contract.model_copy(
+            update={
+                "revisions": "unknown",
+                "notes": [
+                    *contract.notes,
+                    "Databento announces reprocessing and corrections; a bar can "
+                    "be restated after publication, so revisions are 'unknown' "
+                    "rather than 'none'.",
+                ],
+            }
         )
 
 

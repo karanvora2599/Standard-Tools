@@ -19,23 +19,92 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-def detect_missing_bars(df: pd.DataFrame) -> List[Dict[str, Any]]:
+def _calendar_sessions(name: str, start, end) -> "pd.DatetimeIndex | None":
+    """The exchange's sessions in [start, end], or None without the library."""
+    try:
+        import exchange_calendars as xcals
+    except ImportError:
+        return None
+    try:
+        calendar = xcals.get_calendar(name)
+        sessions = calendar.sessions_in_range(
+            pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
+        )
+    except Exception:  # noqa: BLE001 - an unknown code is a weekday fallback
+        return None
+    return pd.DatetimeIndex(sessions).tz_localize(None)
+
+
+def detect_missing_bars(
+    df: pd.DataFrame, calendar: str = "XNYS"
+) -> List[Dict[str, Any]]:
     """
-    Flag weekday gaps in df's DatetimeIndex — dates between the first and
-    last bar that fall on a weekday but have no row. Includes false
-    positives for U.S. market holidays (Thanksgiving, Christmas, etc.) —
-    this function has no holiday calendar, only a weekday heuristic.
+    Flag sessions between the first and last bar that have no row.
+
+    Against the exchange calendar when `exchange_calendars` is present
+    (`calendar` is its code; XNYS for US equities), so a holiday is not a
+    gap: measured live, the weekday heuristic this used alone flagged 21
+    'gaps' over 500 sessions, every one of them a holiday. Without the
+    library it falls back to weekdays and each entry says so.
 
     Returns:
-        List of {"date": iso date string, "weekday": name} for each gap,
-        chronological order. Empty list if df has fewer than 2 rows.
+        List of {"date": iso date string, "weekday": name, "basis": "calendar" |
+        "weekday"} for each gap, chronological order. Empty list if df has
+        fewer than 2 rows.
     """
     if len(df) < 2:
         return []
-    expected = pd.bdate_range(df.index[0], df.index[-1])
-    actual = set(df.index.normalize())
+    index = pd.DatetimeIndex(df.index)
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    expected = _calendar_sessions(calendar, index[0], index[-1])
+    basis = "calendar"
+    if expected is None:
+        expected = pd.bdate_range(index[0], index[-1])
+        basis = "weekday"
+    actual = set(index.normalize())
     gaps = [d for d in expected if d not in actual]
-    return [{"date": str(d.date()), "weekday": d.strftime("%A")} for d in gaps]
+    return [
+        {"date": str(d.date()), "weekday": d.strftime("%A"), "basis": basis}
+        for d in gaps
+    ]
+
+
+def detect_volume_anomalies(
+    df: pd.DataFrame, window: int = 20, thin_fraction: float = 0.05
+) -> List[Dict[str, Any]]:
+    """
+    Bars whose volume is zero, or below `thin_fraction` of the trailing
+    `window`-bar median.
+
+    This module never read `Volume`, so it gave identical verdicts on a
+    frame carrying 3% of the tape and on the real tape (findings §4). A
+    thin bar is not proof of a sample feed, but a run of them is the
+    signature, and it is the caller's to read.
+    """
+    if "Volume" not in df.columns or len(df) == 0:
+        return []
+    volume = pd.to_numeric(df["Volume"], errors="coerce")
+    trailing = volume.shift(1).rolling(window, min_periods=max(3, window // 2)).median()
+    out: List[Dict[str, Any]] = []
+    for stamp, value, median in zip(df.index, volume, trailing):
+        if pd.isna(value):
+            continue
+        if value == 0:
+            kind = "zero"
+        elif pd.notna(median) and median > 0 and value < thin_fraction * median:
+            kind = "thin"
+        else:
+            continue
+        out.append(
+            {
+                "date": str(pd.Timestamp(stamp).date()),
+                "volume": float(value),
+                "trailing_median": float(median) if pd.notna(median) else None,
+                "kind": kind,
+            }
+        )
+    return out
 
 
 def detect_stale_prices(df: pd.DataFrame, n: int = 3) -> List[Dict[str, Any]]:

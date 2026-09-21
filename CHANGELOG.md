@@ -1,5 +1,59 @@
 # Changelog
 
+## The provider that serves the live market bypassed every seam the others share
+
+Phase 1 of `Development/databento_live_fix_plan.md`, from the live findings
+in `databento_live_findings.md`. These change numbers the library has
+produced, and each is named here with its direction.
+
+- **A daily request no longer returns tomorrow (D1).** The daily request
+  ended one day past the inclusive end and nothing trimmed, so every as-of
+  query on this provider read the next session's close. The end is rounded
+  up to its own day boundary and `trim_to_inclusive_end` is applied, as on
+  every other provider; the guaranteed-to-fail first attempt that walked
+  back on every daily request is gone with it. Daily closes on this
+  provider move to the day asked for.
+- **The index reaches every consumer naive, and volume is int64 (D2).**
+  Databento was the only provider whose bars skipped
+  `_normalize_ohlcv_index`, which is why `build_dataset` raised on it at
+  two sites, `Volume.diff()` returned 1.8e19 from uint64, and a cached
+  frame hashed differently after a Parquet round trip. It passes the
+  normaliser now (pinned to nanoseconds), the two sites defend
+  themselves, and the modeling runtime builds on it.
+- **The daily feed is the tape where it can be (D3).** `EQUS.MINI` is a
+  sample feed -- 2-4% of consolidated volume and a UTC-day close -- and was
+  documented as the consolidated tape. `EQUS.SUMMARY`, which matches the
+  tape exactly, answers any daily window from 2024-07-01; the sample feed
+  is the fallback before that and the constants say what each is.
+  Intraday asks the venue feeds only, in the same order the tick methods
+  use, so bars and ticks for one window come from one tape (D11). Daily
+  closes and volumes from mid-2024 on move to the consolidated values.
+- **The served dataset travels with the frame (D12, D16).**
+  `frame.attrs["dataset"]`, `get_metadata(...).notes`, and
+  `build_dataset(...)["data_sources"]` per entity; the disk cache is keyed
+  by the dataset that answered, never one file for two feeds.
+- **A futures root is not an equity (D5).** `ES.c.0`, `ESZ6`, `ES.FUT` and
+  OSI option strings route to the futures and options datasets with their
+  own symbology; a bare root that is also a ticker (`ES`, `CL`, `GC`) is
+  refused as ambiguous with the spellings for each reading; `ES~equity`
+  names the ticker. `get_ohlcv("CL")` returned Colgate-Palmolive before.
+- **The session cache, the disk cache and the retry layer** now serve this
+  provider as they serve the others: three identical requests are one
+  fetch, and the audit record is written on a cache hit too.
+- **Quality checks read the calendar and the volume.** `detect_missing_bars`
+  judges against the exchange calendar when `exchange_calendars` is present
+  (21 of 21 live 'gaps' were holidays); `detect_volume_anomalies` names
+  zero and thin bars, and the data-quality report carries them.
+- The temporal contract says `revisions='unknown'` to agree with
+  `point_in_time=False`; `DataSetMetadata` gains `notes` and says what its
+  `timezone` means (a label for a normalised, naive index).
+- The stub client answers the window it is asked for and refuses an
+  unfinalized tail, so the daily off-by-one fails offline the way it did
+  live.
+
+Still to do in later phases: the modeling-side lineage (`data_sources` on
+the manifest), and Databento's per-session `degraded` flag.
+
 ## What a field said and what its code did, eleven times
 
 Wave 1 of `Development/tool_surface_analysis.md`: the defects the survey

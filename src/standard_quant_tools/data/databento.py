@@ -85,10 +85,27 @@ DATASET_CONSOLIDATED = "EQUS.MINI"
 DATASET_NASDAQ_BASIC = "XNAS.BASIC"
 DATASET_DEPTH = "XNAS.ITCH"
 
-#: EQUS.MINI is the consolidated tape and is the best answer whenever it
-#: covers the window -- but it does not exist before this date, and a
-#: request that starts earlier has to fall through to a venue dataset.
+#: EQUS.MINI carries the consolidated SYMBOL SET, not the consolidated
+#: tape. Measured live (Development/databento_live_findings.md, D3): its
+#: volume is 2-4% of consolidated, and its daily close is the last print
+#: of the UTC day, which on a busy afternoon is an after-hours trade --
+#: 74 bp RMS daily-return error on AAPL. It is the daily fallback for a
+#: window the summary feed does not reach, and the only sub-daily feed
+#: with the consolidated symbol set; it does not exist before this date.
 CONSOLIDATED_START = pd.Timestamp("2023-03-28", tz="UTC")
+
+#: The daily summary feed: the consolidated close and volume exactly (1.0000
+#: volume ratio, 0.000000 close error on every symbol tried), `ohlcv-1d`
+#: only, and it starts here. Preferred for any daily window it covers.
+DATASET_SUMMARY = "EQUS.SUMMARY"
+SUMMARY_START = pd.Timestamp("2024-07-01", tz="UTC")
+SUMMARY_SCHEMAS = ("ohlcv-1d",)
+
+#: Derivatives, reached by the symbol's own grammar rather than by a
+#: ticker: a futures root that is also an equity ticker is ambiguous and
+#: refused (D5), never resolved to the equity.
+DATASET_FUTURES = "GLBX.MDP3"
+DATASET_OPTIONS = "OPRA.PILLAR"
 
 #: schema -> the kind of thing it produces here.
 SCHEMA_KINDS: Dict[str, str] = {
@@ -312,9 +329,7 @@ def level_is_empty(frame: pd.DataFrame, level: int) -> bool:
     return bool(frame[bid].isna().all() and frame[ask].isna().all())
 
 
-def split_empty_levels(
-    empty: Sequence[int], depth: int
-) -> Tuple[List[int], List[int]]:
+def split_empty_levels(empty: Sequence[int], depth: int) -> Tuple[List[int], List[int]]:
     """
     Empty levels split into the trailing run and everything else.
 

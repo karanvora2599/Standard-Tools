@@ -3300,6 +3300,18 @@ class DataQualityReportInput(BaseModel):
 class MissingBar(BaseModel):
     date: str
     weekday: str
+    basis: Literal["calendar", "weekday"] = Field(
+        "weekday",
+        description="'calendar' when judged against the exchange calendar (a "
+        "holiday is not a gap); 'weekday' when only weekdays were known.",
+    )
+
+
+class VolumeAnomaly(BaseModel):
+    date: str
+    volume: float
+    trailing_median: Optional[float] = None
+    kind: Literal["zero", "thin"]
 
 
 class StalePriceRun(BaseModel):
@@ -3320,14 +3332,22 @@ class DataQualityReportResult(BaseModel):
     missing_bars: List[MissingBar] = Field(
         ...,
         description=(
-            "Weekday gaps in the price history. WARNING: detected with a weekday-only "
-            "heuristic, not a real market-holiday calendar — every U.S. market holiday "
-            "(Thanksgiving, Christmas, etc.) in the requested range will appear here as a "
-            "false positive. Treat entries as leads to investigate, not confirmed data gaps."
+            "Sessions with no bar. Judged against the exchange calendar (XNYS) "
+            "when exchange_calendars is installed, so a holiday is not a gap; "
+            "each entry's `basis` says which rule judged it, and under 'weekday' "
+            "every market holiday in the range appears as a false positive."
         ),
     )
     stale_price_runs: List[StalePriceRun]
     price_jumps: List[PriceJump]
+    volume_anomalies: List[VolumeAnomaly] = Field(
+        default_factory=list,
+        description=(
+            "Bars with zero volume or under 5% of the trailing 20-bar median. A "
+            "run of thin bars is the signature of a sample feed rather than the "
+            "tape; this report never read Volume before."
+        ),
+    )
 
 
 # ──────────────────────────────────────────────

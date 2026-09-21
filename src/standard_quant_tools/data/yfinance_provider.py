@@ -365,6 +365,11 @@ class YFinanceProvider(DataProvider):
             point_in_time=False,
             frequency=interval,
             timezone=timezone,
+            notes=[
+                f"The index is naive: daily bars are session dates in {timezone}, "
+                "intraday bars UTC instants with the zone stripped. Localising it "
+                "to the zone above before a join aligns nothing."
+            ],
         )
 
     @retry(times=3, delay=1)
