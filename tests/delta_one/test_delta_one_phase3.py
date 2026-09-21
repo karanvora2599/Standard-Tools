@@ -92,7 +92,11 @@ class TestTheHedgeActuallyRemovesTheExposure:
 
     @pytest.mark.parametrize(
         "rule,expected_rehedges",
-        [("daily", 252), ("weekly", 51), ("monthly", 12), ("drift", 1)],
+        # The drift band watches the hedge actually HELD (findings, phase
+        # 5): on this book it trips once during the year besides the first
+        # bar. It used to watch the rounding residual of a fresh hedge and
+        # could never trip at all.
+        [("daily", 252), ("weekly", 51), ("monthly", 12), ("drift", 2)],
     )
     def test_each_schedule_rehedges_when_it_says_it_does(self, rule, expected_rehedges):
         dates, book, future = _book_and_future()

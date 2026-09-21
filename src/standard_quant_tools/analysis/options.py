@@ -29,6 +29,15 @@ from standard_quant_tools.error import ValidationError
 logger = logging.getLogger(__name__)
 
 _OPTION_TYPES = frozenset({"call", "put"})
+
+#: Below this vega a Newton step is division by noise; bisection takes over.
+VEGA_FLOOR = 1e-8
+#: A price this close to a no-arbitrage bound, relative to the bound's
+#: scale, is AT the bound: the pricer produces such prices itself for a
+#: deep-in-the-money option (bit-for-bit equal to intrinsic, D13).
+BOUND_TOLERANCE = 1e-9
+#: The volatility bracket the bisection searches.
+SIGMA_LOW, SIGMA_HIGH = 1e-6, 5.0
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 
 
@@ -255,37 +264,58 @@ def implied_volatility(
     initial_guess: float = 0.2,
     tol: float = 1e-6,
     max_iterations: int = 100,
+    tol_sigma: float = 1e-8,
 ) -> Dict[str, Any]:
     """
     Solve for the Black-Scholes-Merton volatility that reproduces
     option_price, via Newton-Raphson (vega as the derivative) with a
     bisection fallback over [1e-6, 5.0] (500% annualized vol — a deliberately
-    generous practical cap) when Newton fails to converge or steps outside
-    that bracket. Newton alone is not robust here: vega can be tiny for deep
-    ITM/OTM options, making a raw Newton step overshoot or divide by
-    ~zero — bisection is slower but guaranteed to converge whenever a
-    solution exists in the bracket (Black-Scholes price is strictly
-    increasing in volatility for any fixed inputs).
+    generous practical cap) when vega is below a floor or a step leaves the
+    bracket. Black-Scholes price is strictly increasing in volatility for
+    any fixed inputs, so bisection always converges where a solution exists.
 
-    A no-arbitrage bound check runs first: option_price must lie strictly
-    between the option's intrinsic-value-only lower bound (volatility -> 0)
-    and its upper bound (volatility -> infinity), else no volatility can
-    reproduce that price and this raises immediately rather than searching.
+    CONVERGENCE IS DECLARED ON VOLATILITY, NOT ON PRICE. The test used to be
+    an absolute price tolerance applied BEFORE a step was taken, so where
+    vega is small a volatility wrong by hundreds of points still priced
+    inside 1e-6 and the solver returned its initial guess with
+    converged=True: four short-dated puts came back at exactly 0.2 for true
+    vols of 3.00, 1.20 and 0.45, and over a 700-case grid 28 "converged"
+    answers were off by more than 0.01 vol, the worst by 2.80 (findings
+    D9). A Newton step is now always taken, and the solver has converged
+    when the step it just took moved volatility by less than `tol_sigma`
+    -- which is the price tolerance scaled by vega, and is meaningful at
+    any vega. `tol` remains the price tolerance the result reports
+    `price_error` against; it no longer declares convergence on its own.
+
+    A no-arbitrage bound check runs first: option_price must lie between
+    the option's intrinsic-value-only lower bound (volatility -> 0) and its
+    upper bound (volatility -> infinity). Equality within BOUND_TOLERANCE
+    is admitted -- the pricer itself produces a deep-in-the-money price
+    bit-for-bit equal to intrinsic (D13) -- and a price AT the lower bound
+    is reported with `at_bound=True`: every volatility at or below the
+    returned one reproduces it, so the number is a ceiling, not an
+    estimate.
 
     Args:
-        option_price: Observed market price. Must be > 0.
+        option_price: Observed market price. Must be > 0; 0.0 is what the
+            pricer returns when an option is so far from the money that its
+            value underflows, and no volatility is identifiable from it.
         spot, strike, time_to_expiry, risk_free_rate, option_type,
             dividend_yield: same as black_scholes_price.
         initial_guess: Starting volatility for Newton-Raphson.
-        tol: Convergence tolerance on |model_price - option_price|.
+        tol: Price tolerance, reported as `price_error` and used by the
+            bisection as an early exit once the bracket is also narrow.
         max_iterations: Cap on Newton-Raphson iterations before falling
             back to bisection (bisection itself always runs up to 200
             iterations if reached).
+        tol_sigma: Convergence tolerance on the volatility step.
 
     Returns:
         Dict with implied_volatility (float), converged (bool), iterations
         (int, iterations actually used in whichever method converged/ran
-        last), method ("newton" | "bisection").
+        last), method ("newton" | "bisection"), price_error (float, the
+        absolute pricing error at the returned volatility), at_bound
+        (bool).
 
     Raises:
         ValidationError: option_price <= 0, spot/strike/time_to_expiry <= 0,
@@ -293,7 +323,12 @@ def implied_volatility(
             outside the no-arbitrage bounds achievable at any volatility.
     """
     if option_price <= 0:
-        raise ValidationError(f"option_price must be > 0, got {option_price}")
+        raise ValidationError(
+            f"option_price must be > 0, got {option_price}. A price of 0.0 is "
+            "what the pricer returns when an option is so far from the money "
+            "that its value underflows, and no volatility is identifiable "
+            "from it -- the quote carries no information about the smile."
+        )
     if spot <= 0:
         raise ValidationError(f"spot must be > 0, got {spot}")
     if strike <= 0:
@@ -315,12 +350,17 @@ def implied_volatility(
     else:
         lower = max(strike * disc_r - spot * disc_q, 0.0)
         upper = strike * disc_r
-    if not (lower < option_price < upper):
+    # Equality within a tolerance is INSIDE the bound (D13): a strict `<`
+    # refused 77 of 700 prices the pricer had itself produced, because a
+    # deep-in-the-money call prices bit-for-bit equal to intrinsic.
+    slack = BOUND_TOLERANCE * max(abs(upper), 1.0)
+    if not (lower - slack <= option_price <= upper + slack):
         raise ValidationError(
             f"option_price={option_price:.6f} is outside the no-arbitrage "
-            f"range ({lower:.6f}, {upper:.6f}) for these inputs — no "
+            f"range [{lower:.6f}, {upper:.6f}] for these inputs — no "
             "volatility can reproduce this price"
         )
+    at_bound = option_price - lower <= slack
 
     def _price_diff(sigma: float) -> float:
         return (
@@ -336,22 +376,18 @@ def implied_volatility(
             - option_price
         )
 
-    sigma = initial_guess
-    for i in range(max_iterations):
-        diff = _price_diff(sigma)
-        if abs(diff) < tol:
-            logger.debug(
-                "[options] implied_vol  newton converged  sigma=%.6f  iters=%d",
-                sigma,
-                i + 1,
-            )
-            return {
-                "implied_volatility": sigma,
-                "converged": True,
-                "iterations": i + 1,
-                "method": "newton",
-            }
-        vega = black_scholes_greeks(
+    def _result(sigma: float, converged: bool, iterations: int, method: str):
+        return {
+            "implied_volatility": float(sigma),
+            "converged": bool(converged),
+            "iterations": int(iterations),
+            "method": method,
+            "price_error": abs(_price_diff(sigma)),
+            "at_bound": bool(at_bound),
+        }
+
+    def _vega(sigma: float) -> float:
+        return black_scholes_greeks(
             spot,
             strike,
             time_to_expiry,
@@ -360,16 +396,52 @@ def implied_volatility(
             option_type,
             dividend_yield,
         )["vega"]
-        if vega < 1e-10:
+
+    # ── Newton, converged on the step it took ───────────────────────────
+    sigma = initial_guess
+    if at_bound:
+        # At intrinsic, every small volatility prices the same: the
+        # bisection finds the largest one that still does, which is the
+        # honest ceiling; Newton has nothing to divide by.
+        max_iterations = 0
+    for i in range(max_iterations):
+        diff = _price_diff(sigma)
+        vega = _vega(sigma)
+        if vega < VEGA_FLOOR:
             break
-        sigma = sigma - diff / vega
-        if sigma <= 0 or sigma > 5.0:
+        step = diff / vega
+        candidate = sigma - step
+        if candidate <= 0 or candidate > SIGMA_HIGH:
             break
+        sigma = candidate
+        if abs(step) < tol_sigma:
+            logger.debug(
+                "[options] implied_vol  newton converged  sigma=%.6f  iters=%d",
+                sigma,
+                i + 1,
+            )
+            return _result(sigma, True, i + 1, "newton")
 
     # ── Bisection fallback ──────────────────────────────────────────────
-    lo, hi = 1e-6, 5.0
+    lo, hi = SIGMA_LOW, SIGMA_HIGH
+    if at_bound:
+        # Every volatility below some level reproduces an intrinsic price to
+        # within the bound tolerance; the answer is the largest that does.
+        for i in range(200):
+            mid = 0.5 * (lo + hi)
+            if abs(_price_diff(mid)) <= slack:
+                lo = mid
+            else:
+                hi = mid
+            if (hi - lo) < tol_sigma:
+                break
+        return _result(lo, True, i + 1, "bisection")
     diff_lo = _price_diff(lo)
     diff_hi = _price_diff(hi)
+    if diff_lo == 0.0:
+        return _result(lo, True, 0, "bisection")
+    if diff_hi == 0.0:
+        return _result(hi, True, 0, "bisection")
     if diff_lo * diff_hi > 0:
         raise ValidationError(
             "option_price passed the no-arbitrage bound check but no root "
@@ -379,27 +451,20 @@ def implied_volatility(
     for i in range(200):
         mid = 0.5 * (lo + hi)
         diff_mid = _price_diff(mid)
-        if abs(diff_mid) < tol:
+        # Converged when the bracket is narrower than the volatility
+        # tolerance, or when the price is inside `tol` AND the bracket is
+        # already narrow enough that the price tolerance means something.
+        if (hi - lo) < tol_sigma or (abs(diff_mid) < tol and (hi - lo) < 1e-4):
             logger.debug(
                 "[options] implied_vol  bisection converged  sigma=%.6f  iters=%d",
                 mid,
                 i + 1,
             )
-            return {
-                "implied_volatility": mid,
-                "converged": True,
-                "iterations": i + 1,
-                "method": "bisection",
-            }
+            return _result(mid, True, i + 1, "bisection")
         if diff_lo * diff_mid < 0:
             hi = mid
         else:
             lo, diff_lo = mid, diff_mid
 
     logger.debug("[options] implied_vol  bisection did not converge  sigma=%.6f", mid)
-    return {
-        "implied_volatility": mid,
-        "converged": False,
-        "iterations": 200,
-        "method": "bisection",
-    }
+    return _result(mid, False, 200, "bisection")

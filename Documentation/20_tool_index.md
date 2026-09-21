@@ -34,7 +34,7 @@ advertises 155 of the 211 below.
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 48 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `backtest` | 35 | 82 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `modeling` | 22 | 85 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
@@ -390,7 +390,7 @@ Buy-and-hold baseline: long the full period. Use as a passive benchmark.
 Simulate a FUTURES account, whose books the shared-cash engine cannot keep. Buying ten ES at 6200 does not cost 10 x 6200 x 50 of cash, it costs margin; the position then has no market value, because its profit arrives as daily variation margin credited to cash; and a short future pays no borrow. Equity here is cash plus posted margin and the contracts contribute nothing, so the leverage reported is economic exposure over equity rather than the gross-market-value ratio, and the two are not comparable. Margin calls reduce the position rather than being financed away.
 
 **Required:** `prices`, `target_contracts`, `multiplier`  
-**Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`
+**Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`, `roll_day_prior_prices`
 
 #### `run_futures_hedge_backtest`
 

@@ -396,10 +396,15 @@ def analyze_strategy(
         parsed.append(entry)
 
     if spot_range is None:
+        # From ZERO to twice the highest strike. The scan started at half
+        # the lowest strike, so a long put's worst case (spot at zero) was
+        # outside it: max_loss came back at half the true worst case and
+        # a bounded loss was labelled unbounded because it sat at the
+        # scan's edge. Zero is a hard floor for a price, so only the
+        # RIGHT edge can be unbounded.
         strikes = [leg["strike"] for leg in parsed if leg["option_type"] != "stock"]
         anchor = max([spot] + strikes) if strikes else spot
-        low = min([spot] + strikes) * 0.5 if strikes else spot * 0.5
-        grid = np.linspace(max(0.01, low), anchor * 1.5, 401)
+        grid = np.linspace(0.0, anchor * 2.0, 801)
     else:
         grid = np.asarray(sorted(float(x) for x in spot_range), dtype=float)
         if grid.size < 3:
@@ -442,7 +447,10 @@ def analyze_strategy(
     breakevens = _find_breakevens(grid, profit)
     max_profit_i = int(np.argmax(profit))
     max_loss_i = int(np.argmin(profit))
-    at_edge = lambda i: i in (0, len(grid) - 1)  # noqa: E731
+    # Only the right edge is open: a spot of zero is a floor, not a
+    # horizon, when the default grid is used.
+    open_left = spot_range is not None
+    at_edge = lambda i: i == len(grid) - 1 or (open_left and i == 0)  # noqa: E731
 
     warnings: List[str] = []
     if at_edge(max_profit_i):
@@ -578,13 +586,17 @@ def fit_volatility_smile(
     r_squared = float(1.0 - (residual**2).sum() / total_ss) if total_ss > 0 else 1.0
 
     violations = _durrleman_violations(c0, c1, c2, x, t)
+    for violation in violations:
+        # The strike in the underlying's units, beside the moneyness.
+        violation["strike"] = float(violation["moneyness"] * forward)
 
     warnings: List[str] = []
     if violations:
         warnings.append(
             f"The fitted smile implies a NEGATIVE risk-neutral density at "
             f"{len(violations)} of the sampled log-moneyness points (nearest "
-            f"the money at k={violations[0]['strike']:.2f}). That is a "
+            f"the money at strike {violations[0]['strike']:.2f}, moneyness "
+            f"{violations[0]['moneyness']:.3f}). That is a "
             "butterfly arbitrage in the fitted surface. Usually one quote is "
             "stale rather than the market being free money -- check the "
             "inputs before trading it."
@@ -656,7 +668,10 @@ def _durrleman_violations(c0, c1, c2, x, t) -> List[Dict[str, Any]]:
     # Nearest the money first: that is the violation a trader can act on.
     out.sort(key=lambda d: abs(d["log_moneyness"]))
     for entry in out:
-        entry["strike"] = float(math.exp(entry["log_moneyness"]))
+        # K/F, and named so. This was reported under `strike`, so a
+        # trader was told the arbitrage sat at k=1.00 while strike_range
+        # in the same payload said [300, 370].
+        entry["moneyness"] = float(math.exp(entry["log_moneyness"]))
     return out[:10]
 
 
@@ -1058,11 +1073,19 @@ def implied_forward_price(
         "net_carry_rate": float(net_carry),
         "basis": float(forward - spot),
         "basis_pct": float((forward / spot - 1.0) * 100.0),
+        # A decomposition that SUMS to the basis. Each component used to
+        # be its own rate compounded alone from spot, which drops the
+        # cross terms: the three were up to 45% short of the basis they
+        # decomposed. Here each is applied to the forward the previous
+        # ones produced -- financing first, then the dividend, then the
+        # borrow -- so financing + dividend + borrow == forward - spot
+        # exactly. The order is a convention and is stated.
         "components": {
             "financing": float(spot * (math.exp(r * t) - 1.0)),
-            "dividend": float(-spot * (1.0 - math.exp(-q * t))),
-            "borrow": float(-spot * (1.0 - math.exp(-b * t))),
+            "dividend": float(spot * math.exp(r * t) * (math.exp(-q * t) - 1.0)),
+            "borrow": float(spot * math.exp((r - q) * t) * (math.exp(-b * t) - 1.0)),
         },
+        "components_order": ["financing", "dividend", "borrow"],
         "warnings": [
             "Borrow is reported separately from the dividend because they "
             "behave differently: a listed name's dividend is a known cash "

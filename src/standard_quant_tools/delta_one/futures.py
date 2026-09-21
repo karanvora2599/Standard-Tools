@@ -237,6 +237,15 @@ def roll_analysis(
             "settled."
         )
 
+    if spread_ticks and not tick_value:
+        # `spread_ticks * tick_value` with tick_value at its default of
+        # zero is zero: 83% of the spread cost went missing in silence.
+        raise ValidationError(
+            f"roll_analysis: spread_ticks={spread_ticks} needs tick_value "
+            "(the currency value of one tick) to become a cost; with "
+            "tick_value=0 the bid-ask crossed on both legs would be "
+            "charged as nothing. Pass tick_value, or spread_ticks=0."
+        )
     roll_spread = f1 - f0
     front_notional = abs(n) * f0 * m0
     # Sized to hold the same MONEY, not the same contract count. When the

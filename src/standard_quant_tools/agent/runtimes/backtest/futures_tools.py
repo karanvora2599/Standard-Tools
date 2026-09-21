@@ -91,6 +91,13 @@ class FuturesBacktestInput(BaseModel):
     allow_fractional: bool = Field(
         False, description="Contracts are integers unless this says otherwise."
     )
+    roll_day_prior_prices: Optional[Dict[str, float]] = Field(
+        None,
+        description="The OLD contract's close on each roll day, keyed like "
+        "prices. A single series cannot carry it, so without it the roll "
+        "day's variation margin is skipped (and the result says so); with "
+        "it the old contract's move is booked before the roll.",
+    )
 
 
 class FuturesBacktestResult(BaseModel):
@@ -117,6 +124,11 @@ class FuturesBacktestResult(BaseModel):
     margin_calls: List[Dict[str, Any]] = Field(default_factory=list)
     n_rolls: int = 0
     rolls: List[Dict[str, Any]] = Field(default_factory=list)
+    margin_limited_fills: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Bars on which the target exceeded what the account could "
+        "post initial margin for, with the requested and filled sizes.",
+    )
     equity_curve: Dict[str, float] = Field(
         default_factory=dict, description="Cash plus posted margin, by date."
     )
@@ -139,6 +151,7 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         collateral_rate=input_data.collateral_rate,
         contract_map=input_data.contract_map,
         allow_fractional=input_data.allow_fractional,
+        roll_day_prior_prices=input_data.roll_day_prior_prices,
     )
     return FuturesBacktestResult(
         initial_capital=out["initial_capital"],
@@ -155,6 +168,7 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         margin_calls=out["margin_calls"],
         n_rolls=out["n_rolls"],
         rolls=out["rolls"],
+        margin_limited_fills=out["margin_limited_fills"],
         equity_curve={str(k.date()): float(v) for k, v in out["equity_curve"].items()},
         warnings=out["warnings"],
     )

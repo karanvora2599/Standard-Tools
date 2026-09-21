@@ -180,6 +180,16 @@ def price_option(
             steps,
         )
     if model == "bachelier":
+        if dividend_yield:
+            # The normal model prices a forward-like underlying and has no
+            # carry term; the dividend was silently discarded with
+            # notes=None. Refused by name rather than ignored.
+            raise ValidationError(
+                f"price_option: model='bachelier' has no dividend term, so "
+                f"dividend_yield={dividend_yield} cannot be used and would have "
+                "been silently ignored. Pass dividend_yield=0 and a forward "
+                "that already carries the dividend, or use model='black_scholes'."
+            )
         return _bachelier(
             spot, strike, time_to_expiry, volatility, risk_free_rate, option_type
         )

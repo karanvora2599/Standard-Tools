@@ -1,5 +1,54 @@
 # Changelog
 
+## The solver converges on volatility, not on a step it never took
+
+Phase 5 of `Development/databento_live_fix_plan.md`: options and futures.
+Each item names the number it moves.
+
+- **The implied-volatility solver converges on volatility (D9).** The test
+  was an absolute price tolerance applied before any Newton step, so where
+  vega is small a volatility wrong by hundreds of points priced inside
+  1e-6 and the solver returned its initial guess with `converged=True`:
+  four short-dated puts came back at exactly 0.2 for true vols of 3.00,
+  1.20 and 0.45, and 28 of 549 "converged" grid answers were off by more
+  than 0.01. A step is always taken and convergence is the step's size in
+  volatility (`tol_sigma`, the price tolerance scaled by vega); vega below
+  a floor hands over to bisection, which converges on bracket width. The
+  result reports `price_error` and `at_bound`.
+- **The no-arbitrage bound admits its own prices (D13).** A deep
+  in-the-money call prices bit-for-bit equal to intrinsic and a strict `<`
+  refused 77 of 700 such prices; equality within a tolerance is inside the
+  bound, a price at intrinsic returns the largest volatility that still
+  reproduces it with `at_bound=True`, and a price of 0.0 is refused with
+  the reason (the pricer underflowed; no volatility is identifiable).
+- **`fit_volatility_smile` names `moneyness`** and gives the strike in the
+  underlying's units beside it; the arbitrage was reported at "k=1.00"
+  under a field called `strike` while `strike_range` said [300, 370].
+- **`analyze_strategy` scans from spot 0 to twice the highest strike**, so
+  a put's worst case is the true one (it was half the truth) and only the
+  open right edge can be "unbounded".
+- **The three carry components sum to the basis.** Each rate was
+  compounded alone from spot, dropping the cross terms; `implied_forward_price`
+  (and `cash_futures_basis` through it) now applies financing, then the
+  dividend, then the borrow to the running forward, states the order, and
+  the sum equals `forward - spot` exactly.
+- **`price_option(model="bachelier")` refuses a dividend** it would have
+  silently discarded; **`roll_analysis` refuses `spread_ticks` without
+  `tick_value`**, which charged 83% of the spread cost as nothing.
+- **The drift re-hedge band watches the hedge actually held.** It watched
+  the rounding residual of a fresh hedge, bounded by half a contract, so it
+  could never fire and sat through 81.8% residual beta on a 5% band. The
+  residual of the held hedge is computed bar by bar, the band fires on it,
+  and `held_residual_fraction_max`/`_mean` are reported for every rule.
+- **The futures engine books the roll day and fills what it can margin.**
+  `roll_day_prior_prices` (the old contract's close on each roll day) lets
+  the engine book the roll day's variation margin, which a single series
+  cannot carry ($7,025 per contract per year on a live ES year); without
+  it the roll record and a warning say it was skipped. A target the account
+  cannot post initial margin for is filled to what it can and recorded in
+  `margin_limited_fills`, rather than filled and liquidated in the same bar
+  with both legs charged (239 margin calls, 52.6% of capital in fees).
+
 ## A split is a real bar to this engine, and now it says so
 
 Phase 4 of `Development/databento_live_fix_plan.md`: the backtest engine

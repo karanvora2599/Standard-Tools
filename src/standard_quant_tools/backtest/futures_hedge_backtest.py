@@ -67,7 +67,11 @@ def _rehedge_dates(
     else:  # drift
         # Re-hedge when the residual has drifted outside the band. This is
         # the only rule that reacts to the book rather than to the calendar,
-        # and it is why `band` exists.
+        # and it is why `band` exists. `residual_fraction` here is the
+        # residual of the HEDGE ACTUALLY HELD, computed sequentially by the
+        # caller; it used to be the rounding residual of a fresh hedge on
+        # every bar, bounded by half a contract, so the band could never
+        # fire and the rule sat through 81.8% residual beta on a 5% band.
         flags |= np.abs(np.asarray(residual_fraction, dtype=float)) > band
     return flags
 
@@ -168,7 +172,35 @@ def run_futures_hedge_backtest(
             else 0.0
         )
 
-    flags = _rehedge_dates(index, rehedge, residual_fraction, drift_band)
+    if rehedge == "drift":
+        # The residual of the hedge HELD, bar by bar: the book's dollar
+        # beta plus what the stale contracts neutralise at today's price.
+        # A re-hedge resets it; between re-hedges it drifts with the
+        # book's value, its beta and the future's price, which is what
+        # the band is meant to watch.
+        flags = np.zeros(len(index), dtype=bool)
+        held_residual: List[float] = []
+        current = 0.0
+        for i in range(len(index)):
+            book_value = float(book.iloc[i])
+            dollar_beta = book_value * float(betas[i])
+            residual = (
+                dollar_beta
+                + current * float(futures.iloc[i]) * multiplier * future_beta
+            )
+            fraction = residual / book_value if book_value else 0.0
+            if i == 0 or abs(fraction) > drift_band:
+                flags[i] = True
+                current = exact[i] if allow_fractional else float(round(exact[i]))
+                residual = (
+                    dollar_beta
+                    + current * float(futures.iloc[i]) * multiplier * future_beta
+                )
+                fraction = residual / book_value if book_value else 0.0
+            held_residual.append(fraction)
+        residual_fraction = held_residual
+    else:
+        flags = _rehedge_dates(index, rehedge, residual_fraction, drift_band)
 
     # Held contracts step only on a re-hedge bar; between them the position
     # is stale, which is the whole reason a calendar rule leaves residual.
@@ -178,6 +210,21 @@ def run_futures_hedge_backtest(
         if flags[i]:
             current = exact[i] if allow_fractional else float(round(exact[i]))
         held.append(current)
+    # The residual of the hedge HELD on every bar, whatever the rule:
+    # the number the drift band is defined on, reported so a calendar
+    # rule's staleness is visible too.
+    held_residual_fraction = [
+        (
+            (
+                float(book.iloc[i]) * float(betas[i])
+                + held[i] * float(futures.iloc[i]) * multiplier * future_beta
+            )
+            / float(book.iloc[i])
+            if book.iloc[i]
+            else 0.0
+        )
+        for i in range(len(index))
+    ]
 
     targets = {index[i]: held[i] for i in range(len(index)) if flags[i]}
 
@@ -295,6 +342,14 @@ def run_futures_hedge_backtest(
         ),
         #  is what hedge_effectiveness calls the residual.
         "residual_beta": effectiveness.get("beta_after"),
+        # Of the hedge actually held, per bar: the largest and the mean
+        # absolute residual as a fraction of the book's dollar beta.
+        "held_residual_fraction_max": float(
+            np.max(np.abs(held_residual_fraction)) if held_residual_fraction else 0.0
+        ),
+        "held_residual_fraction_mean": float(
+            np.mean(np.abs(held_residual_fraction)) if held_residual_fraction else 0.0
+        ),
         "effective_hedge_ratio": effective_ratio,
         "hedge_effectiveness": effectiveness,
         "hedge_variation_margin": float(hedge.get("total_variation_margin", 0.0)),

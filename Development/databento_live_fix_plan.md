@@ -7,8 +7,17 @@ and what is left alone and why. Findings are cited by their number there
 (`D1`..`D20`) or by section.
 
 **Status: phases 1 (the data path), 2 (the deployed model is the
-validated model), 3 (selection and inference) and 4 (backtest and
-portfolio) are implemented, 2026-09-20; phases 5-7 are the plan.** In
+validated model), 3 (selection and inference), 4 (backtest and
+portfolio) and 5 (options and futures) are implemented, 2026-09-20;
+phases 6-7 are the plan.** Phase 5's investigation of the futures
+engine found both causes local: the roll day's variation margin is
+skipped because one price series cannot carry the old contract's close,
+so the engine now takes `roll_day_prior_prices` and books it; and a
+target the account could not margin was filled and liquidated in the
+same bar because initial margin was never checked at fill time, so the
+fill is now sized to what the account can post and recorded. The carry
+decomposition's cause was also local (each rate compounded alone, no
+cross terms) and is fixed at its shared root. In
 phase 4 the native portfolio kernel keeps refusing a trade over the ADV
 cap; the engine catches that refusal and runs the Python loop, which
 sizes the trade down, so a capped configuration is correct and merely

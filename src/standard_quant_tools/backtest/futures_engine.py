@@ -60,6 +60,7 @@ def run_futures_simulation(
     collateral_rate: float = 0.0,
     contract_map: Optional[Mapping[Any, str]] = None,
     allow_fractional: bool = False,
+    roll_day_prior_prices: Optional[Mapping[Any, float]] = None,
 ) -> Dict[str, Any]:
     """
     Simulate a futures account bar by bar.
@@ -78,6 +79,15 @@ def run_futures_simulation(
     changes, the position is rolled: closed in the old and reopened in the
     new, paying commission and slippage on both legs. Without it, no roll
     is modelled and the series is assumed to be one contract throughout.
+
+    `roll_day_prior_prices` is the OLD contract's close on each roll day,
+    keyed like `prices`. A single series cannot carry it, so without it
+    the roll day's variation margin is skipped and the roll record says
+    so -- $7,025 per contract per year on a live ES year, 5.5 points of
+    return. With it the old contract's move is booked before the roll.
+    A target the account cannot margin is filled to what it can, and
+    the shortfall is recorded, rather than filled and liquidated in the
+    same bar with both legs charged.
     """
     m = _positive(multiplier, "multiplier")
     capital = _positive(initial_capital, "initial_capital")
@@ -128,6 +138,14 @@ def run_futures_simulation(
             f"{n} price observation(s); a simulation needs at least two bars "
             "for variation margin to be defined."
         )
+
+    prior_by_date: Dict[Any, float] = {}
+    if roll_day_prior_prices:
+        prior_by_date = {
+            pd.Timestamp(key): float(value)
+            for key, value in roll_day_prior_prices.items()
+        }
+    margin_limited: List[Dict[str, Any]] = []
 
     contracts = 0.0
     cash = capital
@@ -180,10 +198,18 @@ def run_futures_simulation(
         #    was overstating by the whole width of the roll, with the wrong
         #    sign for a long in contango. Pass a back-adjusted series if you
         #    need that day, or supply the roll days as their own bars.
+        roll_day_booked = False
         if i > 0 and contracts != 0.0 and not rolled:
             variation = (price - previous_price) * contracts * m
             cash += variation
             total_variation += variation
+        elif rolled and date in prior_by_date:
+            # The old contract's own move on the roll day, when the caller
+            # supplied its close: the figure a single series cannot hold.
+            variation = (prior_by_date[date] - previous_price) * contracts * m
+            cash += variation
+            total_variation += variation
+            roll_day_booked = True
 
         # 2. Interest on collateral. Paid on cash, which for a futures
         #    account is most of the balance -- unlike a cash equity book,
@@ -208,8 +234,11 @@ def run_futures_simulation(
                     "to": current_contract,
                     "contracts": float(contracts),
                     "cost": float(cost),
-                    "spread_points": float(price - previous_price),
-                    "variation_margin_skipped": True,
+                    "spread_points": float(
+                        price
+                        - (prior_by_date[date] if roll_day_booked else previous_price)
+                    ),
+                    "variation_margin_skipped": not roll_day_booked,
                 }
             )
 
@@ -217,6 +246,38 @@ def run_futures_simulation(
         target = float(targets.iloc[i])
         if not allow_fractional:
             target = float(round(target))
+        # A target the account cannot margin is filled to what it can
+        # carry, not filled and then liquidated in the same bar with both
+        # legs charged (239 margin calls and 52.6% of starting capital in
+        # fees on a live ES year). Equity before the trade is what the
+        # initial margin is posted from.
+        if im > 0 and target != 0.0:
+            # Initial margin binds at trade time, on the contracts ADDED:
+            # what is already held on the same side stays (maintenance,
+            # step 5, is what reduces it), and new contracts are limited
+            # to the equity left after the held margin.
+            same_side = contracts * target > 0
+            base = abs(contracts) if same_side else 0.0
+            equity_before = cash + margin_posted
+            headroom = (
+                math.floor((equity_before - base * im) / im)
+                if equity_before > base * im
+                else 0
+            )
+            affordable = base + max(headroom, 0)
+            if abs(target) > affordable:
+                limited = math.copysign(max(affordable, 0.0), target)
+                if not allow_fractional:
+                    limited = float(round(limited))
+                margin_limited.append(
+                    {
+                        "date": str(date),
+                        "requested": float(target),
+                        "filled": float(limited),
+                        "equity": float(cash + margin_posted),
+                    }
+                )
+                target = limited
         delta = target - contracts
         if abs(delta) > 1e-9:
             cost = abs(delta) * commission + abs(delta) * slippage * m
@@ -303,6 +364,23 @@ def run_futures_simulation(
             "backtest that financed those calls instead would be testing a "
             "strategy nobody could have run."
         )
+    if margin_limited:
+        warnings.append(
+            f"{len(margin_limited)} fill(s) were sized down to what the account "
+            "could post initial margin for; the requested and filled sizes "
+            "are in `margin_limited_fills`. The target asked for more than "
+            "the account could carry on those bars."
+        )
+    if rolls and any(r["variation_margin_skipped"] for r in rolls):
+        skipped = sum(1 for r in rolls if r["variation_margin_skipped"])
+        warnings.append(
+            f"On {skipped} roll day(s) the variation margin was not booked: a "
+            "single price series holds the NEW contract's close on a roll "
+            "day and the old contract's move is unknown. Pass "
+            "roll_day_prior_prices (the old contract's close on each roll "
+            "day) to book it; on a live ES year the omission was $7,025 per "
+            "contract."
+        )
     if contract_map is None:
         warnings.append(
             "No contract_map, so NO ROLL was modelled and these prices are "
@@ -346,6 +424,7 @@ def run_futures_simulation(
         "margin_calls": margin_calls,
         "n_rolls": len(rolls),
         "rolls": rolls,
+        "margin_limited_fills": margin_limited,
         "warnings": warnings,
     }
 
