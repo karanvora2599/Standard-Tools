@@ -307,8 +307,13 @@ item 9 is corrected below, because the survey over-counted.
    `microstructure_estimators.py`. The survey also listed
    `parse_lag_column`, `deepest_lag`, `resolved_lookback`,
    `inference._block_indices` and `local_store`; the first four have
-   tests or a caller (`comparison.py` uses `_block_indices`) and
-   `local_store` is the store's documented entry point, so they stay.
+   tests or a caller (`comparison.py` uses `_block_indices`), so they
+   stay. `local_store` was kept here as "the store's documented entry
+   point" and was neither: it is named nowhere in `Documentation/` or the
+   README, and the two callers that want a `LocalArtifactStore`
+   (`registry/package.py`, `registry/mirror.py`) construct it from
+   `artifact_store` directly. Removed with the phase-1 deletions
+   (`modeling_capability_gaps_plan.md` 1B.8).
    The three `TRADING_DAYS` re-exports are kept on purpose, by name.
 10. Docstrings that promise more than the code: `_buy_and_hold_signals`,
     `resolve_strategy_params`, `engine._run_signal_fn_job` drops

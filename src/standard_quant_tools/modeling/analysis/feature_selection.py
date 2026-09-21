@@ -52,25 +52,33 @@ def _date_label(value: Any) -> str:
 
 
 def _selection_cutoff(
-    panel: pd.DataFrame, selection_end: Any, holdout_fraction: float
+    panel: pd.DataFrame,
+    selection_end: Any,
+    holdout_fraction: float,
+    *,
+    caller: str = "select_features",
 ) -> "tuple[pd.DatetimeIndex, Optional[pd.Timestamp]]":
     """
     The last date the selection may read. `selection_end` names it;
     otherwise the first `1 - holdout_fraction` of the panel's dates select
     and the rest are held out; a zero fraction selects on everything and
     holds out nothing, which the result then says in so many words.
+
+    `caller` prefixes the refusals. Two functions share this cutoff now,
+    and a refusal that named the wrong one would send the reader to fix an
+    argument they did not pass.
     """
     dates = pd.DatetimeIndex(sorted(pd.to_datetime(panel["date"]).unique()))
     if len(dates) < 2:
         raise ValidationError(
-            "select_features: the panel has fewer than two dates, so nothing "
+            f"{caller}: the panel has fewer than two dates, so nothing "
             "can be held out and no cross-sectional IC can be trusted."
         )
     if selection_end is not None:
         cutoff = pd.Timestamp(selection_end)
         if cutoff < dates[0] or cutoff >= dates[-1]:
             raise ValidationError(
-                f"select_features: selection_end={_date_label(cutoff)!r} must "
+                f"{caller}: selection_end={_date_label(cutoff)!r} must "
                 f"fall inside the panel's dates ({_date_label(dates[0])}.."
                 f"{_date_label(dates[-1])}) and leave at least one date after "
                 "it to hold out."
@@ -80,12 +88,63 @@ def _selection_cutoff(
         return dates, None
     if holdout_fraction >= 1:
         raise ValidationError(
-            f"select_features: holdout_fraction={holdout_fraction} would hold "
+            f"{caller}: holdout_fraction={holdout_fraction} would hold "
             "out every date; it must be below 1."
         )
     n_select = int(np.floor(len(dates) * (1.0 - holdout_fraction)))
     n_select = min(max(n_select, 1), len(dates) - 1)
     return dates, dates[n_select - 1]
+
+
+def _window(dates: pd.DatetimeIndex) -> Dict[str, Any]:
+    return {
+        "start": _date_label(dates[0]),
+        "end": _date_label(dates[-1]),
+        "n_dates": int(len(dates)),
+    }
+
+
+def _cluster_records(
+    clusters: Sequence[Sequence[str]],
+    correlation: Dict[str, Dict[str, float]],
+    predictive: Dict[str, Dict[str, float]],
+) -> List[Dict[str, Any]]:
+    """
+    The redundancy clusters in the shape `get_feature_redundancy` publishes:
+    sorted members, a representative, the strongest pairwise correlation
+    inside the group, and the size.
+
+    Built here rather than left to the caller so that the two tools cannot
+    drift apart. `select_features` and `get_feature_redundancy` resolve the
+    same clusters on the same panel, and an agent that called both and got
+    two different drop lists would have no way to tell which to believe.
+
+    The representative is the strongest |rank IC|, ties broken by the FIRST
+    name alphabetically. Written as a sort rather than a `max` because `max`
+    on a (value, name) key breaks ties toward the LAST name, and the two
+    tools would then contradict each other on any exact restatement -- which
+    is precisely the case a cluster exists to report.
+    """
+    records: List[Dict[str, Any]] = []
+    for members in clusters:
+        members = sorted(members)
+        keeper = sorted(members, key=lambda f: (-_abs_rank_ic(predictive, f), f))[0]
+        pairs = [
+            abs(correlation.get(a, {}).get(b, 0.0))
+            for a in members
+            for b in members
+            if a != b
+        ]
+        records.append(
+            {
+                "members": members,
+                "representative": keeper,
+                "max_abs_correlation": max(pairs) if pairs else 1.0,
+                "size": len(members),
+            }
+        )
+    records.sort(key=lambda record: (-record["size"], record["representative"]))
+    return records
 
 
 def select_features(
@@ -125,6 +184,13 @@ def select_features(
     a cap for a caller who has a hard budget, not a ranking to trust: the
     difference between the 20th and 21st feature by IC on one panel is
     usually noise.
+
+    The redundancy diagnostics come back with the selection rather than
+    being recomputed: `clusters` in the shape `get_feature_redundancy`
+    publishes, `vif`, `condition_number`, `correlation`, and a
+    `duplicate_of` on every redundant drop. All four were already computed
+    to make the decision, and returning them is what makes the decision
+    auditable without paying for the same correlation matrix twice.
     """
     feature_ids = list(feature_ids)
     if not feature_ids:
@@ -146,23 +212,25 @@ def select_features(
         selection_panel, feature_ids, cluster_threshold=cluster_threshold
     )
 
-    dropped: List[Dict[str, str]] = []
+    clusters = _cluster_records(
+        redundancy["clusters"], redundancy["correlation"], predictive
+    )
+
+    dropped: List[Dict[str, Any]] = []
     survivors: List[str] = []
-    for members in redundancy["clusters"]:
-        members = sorted(members)
-        # Strongest |rank IC|, ties broken by the FIRST name alphabetically.
-        # Written as a sort rather than a max because `max` on a
-        # (value, name) key breaks ties toward the LAST name, and the drop
-        # list has to agree with get_feature_redundancy's representative or
-        # the two tools contradict each other on the same panel.
-        keeper = sorted(members, key=lambda f: (-_abs_rank_ic(predictive, f), f))[0]
+    for cluster in clusters:
+        keeper = cluster["representative"]
         survivors.append(keeper)
-        for member in members:
+        for member in cluster["members"]:
             if member != keeper:
                 dropped.append(
                     {
                         "feature": member,
                         "reason": "redundant",
+                        # The prose stays, because it carries the threshold
+                        # the drop was made at; `duplicate_of` sits beside
+                        # it so that "a duplicate of what" needs no parser.
+                        "duplicate_of": keeper,
                         "detail": (
                             f"same signal as {keeper!r} at "
                             f"|rho| >= {cluster_threshold:.2f}"
@@ -178,6 +246,7 @@ def select_features(
                 {
                     "feature": feature,
                     "reason": "weak",
+                    "duplicate_of": None,
                     "detail": (
                         f"|rank IC| {strength:.4f} below the "
                         f"{min_abs_rank_ic:.4f} floor"
@@ -194,6 +263,7 @@ def select_features(
                 {
                     "feature": feature,
                     "reason": "capped",
+                    "duplicate_of": None,
                     "detail": (
                         f"ranked {kept.index(feature) + 1} by |rank IC|, past "
                         f"the max_features={max_features} cap"
@@ -206,11 +276,7 @@ def select_features(
     holdout_ic: Dict[str, Optional[float]] = {}
     holdout_window: Optional[Dict[str, Any]] = None
     if cutoff is None:
-        selection_window = {
-            "start": _date_label(dates[0]),
-            "end": _date_label(dates[-1]),
-            "n_dates": int(len(dates)),
-        }
+        selection_window = _window(dates)
         warnings.append(
             "WARNING: the selection read the WHOLE panel, holdout included. "
             "Every selection IC below is in-sample by construction, and a "
@@ -222,16 +288,15 @@ def select_features(
         )
     else:
         held = dates[dates > cutoff]
+        # `end` is the cutoff as asked for, not the last date at or before
+        # it: a caller who named `selection_end` should read their own date
+        # back rather than the nearest trading day to it.
         selection_window = {
             "start": _date_label(dates[0]),
             "end": _date_label(cutoff),
             "n_dates": int((dates <= cutoff).sum()),
         }
-        holdout_window = {
-            "start": _date_label(held[0]),
-            "end": _date_label(held[-1]),
-            "n_dates": int(len(held)),
-        }
+        holdout_window = _window(held)
         if kept:
             holdout_stats = feature_predictive_stats(holdout_panel, kept)
             holdout_ic = {f: _signed_rank_ic(holdout_stats, f) for f in kept}
@@ -254,13 +319,21 @@ def select_features(
         "dropped": sorted(dropped, key=lambda d: d["feature"]),
         "n_considered": len(feature_ids),
         "n_selected": len(kept),
-        "n_clusters": len(redundancy["clusters"]),
+        "n_clusters": len(clusters),
+        "clusters": clusters,
         "cluster_threshold": cluster_threshold,
         "min_abs_rank_ic": min_abs_rank_ic,
         "selection_window": selection_window,
         "holdout_window": holdout_window,
         "selection_ic": {f: _signed_rank_ic(predictive, f) for f in feature_ids},
         "holdout_ic": holdout_ic,
+        # Paid for by the `redundancy_report` call above and previously
+        # thrown away, which forced an agent that wanted "dropped as a
+        # duplicate of what", or the collinearity of what survived, to run
+        # get_feature_redundancy and buy the same correlation matrix twice.
+        "vif": redundancy["vif"],
+        "condition_number": redundancy["condition_number"],
+        "correlation": redundancy["correlation"],
         "warnings": warnings,
     }
 
@@ -270,6 +343,9 @@ def summarize_feature_set(
     feature_ids: Sequence[str],
     *,
     cluster_threshold: float = 0.9,
+    selection_end: Any = None,
+    holdout_fraction: float = 0.0,
+    caller: str = "summarize_feature_set",
 ) -> Dict[str, Any]:
     """
     One feature set, as the handful of numbers worth comparing.
@@ -277,15 +353,52 @@ def summarize_feature_set(
     `n_independent_signals` is the one to read rather than `n_features`. A
     set of twelve features in three clusters carries three ideas, and
     reporting twelve overstates the diversification by four times.
+
+    THE SUMMARY IS IN-SAMPLE UNLESS DATES ARE HELD OUT. `holdout_fraction`
+    (or `selection_end`) summarises the set on the earlier dates through
+    the same `_selection_cutoff` `select_features` uses, and re-measures
+    |rank IC| on the later ones as `holdout_mean_abs_rank_ic` /
+    `holdout_max_abs_rank_ic`. The default is 0.0 -- every date, no holdout
+    -- so the numbers a caller already has do not move; a zero fraction is
+    then a statement the caller's warnings have to make, not a silence.
     """
     feature_ids = list(feature_ids)
-    predictive = feature_predictive_stats(panel, feature_ids)
+    dates, cutoff = _selection_cutoff(
+        panel, selection_end, holdout_fraction, caller=caller
+    )
+    holdout_window: Optional[Dict[str, Any]] = None
+    if cutoff is None:
+        selection_panel, holdout_panel = panel, panel.iloc[0:0]
+        selection_window = _window(dates)
+    else:
+        date_values = pd.to_datetime(panel["date"])
+        selection_panel = panel[date_values <= cutoff]
+        holdout_panel = panel[date_values > cutoff]
+        selection_window = {
+            "start": _date_label(dates[0]),
+            "end": _date_label(cutoff),
+            "n_dates": int((dates <= cutoff).sum()),
+        }
+        holdout_window = _window(dates[dates > cutoff])
+
+    predictive = feature_predictive_stats(selection_panel, feature_ids)
     redundancy = redundancy_report(
-        panel, feature_ids, cluster_threshold=cluster_threshold
+        selection_panel, feature_ids, cluster_threshold=cluster_threshold
     )
     strengths = np.array(
         [_abs_rank_ic(predictive, f) for f in feature_ids], dtype=float
     )
+
+    holdout_mean: Optional[float] = None
+    holdout_max: Optional[float] = None
+    if cutoff is not None and feature_ids:
+        holdout_stats = feature_predictive_stats(holdout_panel, feature_ids)
+        held = np.array(
+            [_abs_rank_ic(holdout_stats, f) for f in feature_ids], dtype=float
+        )
+        holdout_mean = float(np.mean(held))
+        holdout_max = float(np.max(held))
+
     return {
         "features": sorted(feature_ids),
         "n_features": len(feature_ids),
@@ -293,6 +406,10 @@ def summarize_feature_set(
         "mean_abs_rank_ic": float(np.mean(strengths)) if strengths.size else 0.0,
         "max_abs_rank_ic": float(np.max(strengths)) if strengths.size else 0.0,
         "condition_number": float(redundancy["condition_number"]),
+        "selection_window": selection_window,
+        "holdout_window": holdout_window,
+        "holdout_mean_abs_rank_ic": holdout_mean,
+        "holdout_max_abs_rank_ic": holdout_max,
     }
 
 
@@ -302,6 +419,8 @@ def compare_feature_sets(
     right: Sequence[str],
     *,
     cluster_threshold: float = 0.9,
+    selection_end: Any = None,
+    holdout_fraction: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Two feature sets on the same panel, with the cost of the difference
@@ -313,9 +432,22 @@ def compare_feature_sets(
     diagnostics, the features unique to each side, and a per-feature IC
     table for everything in either.
 
-    Both sets are measured on the same panel, so the comparison is like for
+    Both sets are measured on the same window, so the comparison is like for
     like. Comparing sets scored on different date ranges would be comparing
     the ranges.
+
+    AT `holdout_fraction == 0` -- the default, kept so that existing numbers
+    do not move -- BOTH SETS ARE SUMMARISED ON EVERY DATE, and every IC here
+    is therefore in-sample. The result says so unconditionally rather than
+    only when it looks suspicious, because "in-sample" is a property of how
+    the numbers were made and not of how they came out. That is the same
+    trouble `select_features` goes to, for the same measured reason: five
+    noise columns chosen on a full panel scored +0.045 out of sample against
+    +0.002 for five chosen blind (findings D4).
+
+    Pass `holdout_fraction` (or `selection_end`) and each set is summarised
+    on the earlier dates and re-measured on the later ones, which is the
+    comparison worth acting on.
     """
     left, right = list(left), list(right)
     if not left or not right:
@@ -325,14 +457,60 @@ def compare_feature_sets(
         raise ValidationError(f"panel has no features: {unknown}")
 
     everything = sorted(set(left) | set(right))
-    predictive = feature_predictive_stats(panel, everything)
+    _dates, cutoff = _selection_cutoff(
+        panel, selection_end, holdout_fraction, caller="compare_feature_sets"
+    )
+    # The per-feature table reads the same window the summaries do. A table
+    # measured on the whole panel beside a summary that held dates out would
+    # be two answers to one question, and the wider one is the optimistic one.
+    if cutoff is None:
+        summary_panel = panel
+    else:
+        summary_panel = panel[pd.to_datetime(panel["date"]) <= cutoff]
+    predictive = feature_predictive_stats(summary_panel, everything)
 
     left_summary = summarize_feature_set(
-        panel, left, cluster_threshold=cluster_threshold
+        panel,
+        left,
+        cluster_threshold=cluster_threshold,
+        selection_end=selection_end,
+        holdout_fraction=holdout_fraction,
+        caller="compare_feature_sets",
     )
     right_summary = summarize_feature_set(
-        panel, right, cluster_threshold=cluster_threshold
+        panel,
+        right,
+        cluster_threshold=cluster_threshold,
+        selection_end=selection_end,
+        holdout_fraction=holdout_fraction,
+        caller="compare_feature_sets",
     )
+
+    warnings: List[str] = []
+    if cutoff is None:
+        warnings.append(
+            "WARNING: both sets were summarised on EVERY date, so every IC "
+            "here is in-sample by construction. This is a comparison BETWEEN "
+            "the two sets, not an estimate of either one's out-of-sample "
+            "strength: measured, the top five of sixty pure-noise columns "
+            "chosen on a full panel scored +0.045 out of sample against "
+            "+0.002 for five chosen blind (findings D4). Pass "
+            "holdout_fraction or selection_end and compare "
+            "holdout_mean_abs_rank_ic instead."
+        )
+    else:
+        n_held = int(left_summary["holdout_window"]["n_dates"])
+        warnings.append(
+            f"Summarised on dates through {left_summary['selection_window']['end']};"
+            f" `holdout_mean_abs_rank_ic` is each set's mean |rank IC| on the "
+            f"{n_held} date(s) after it, which neither summary read. Compare "
+            "the sets on that: `mean_abs_rank_ic` is in-sample."
+        )
+        if n_held < 20:
+            warnings.append(
+                f"NOTE: the holdout is {n_held} date(s), too few for a rank IC "
+                "to mean much; widen holdout_fraction or the panel."
+            )
 
     per_feature = [
         {
@@ -365,6 +543,7 @@ def compare_feature_sets(
                 right_summary["condition_number"] - left_summary["condition_number"]
             ),
         },
+        "warnings": warnings,
     }
 
 

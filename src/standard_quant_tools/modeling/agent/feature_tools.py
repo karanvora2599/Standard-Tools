@@ -352,6 +352,15 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     put the walk-forward holdout inside the selection, and the top five
     of sixty noise columns chosen that way scored +0.045 out of sample
     against +0.002 for five chosen blind (findings D4).
+
+    The redundancy work comes back with the answer. `clusters` is exactly
+    what get_feature_redundancy returns for this panel and threshold, each
+    redundant drop names its keeper in `duplicate_of`, and `vif` /
+    `condition_number` say whether what survived is collinear. All of it
+    was computed to make the decision; running the redundancy tool
+    afterwards would buy the same correlation matrix a second time.
+    `correlation` itself stays behind `include_correlation` because it is
+    the one piece that grows with the square of the candidate count.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -377,6 +386,13 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         n_considered=result["n_considered"],
         n_selected=result["n_selected"],
         n_clusters=result["n_clusters"],
+        clusters=result["clusters"],
+        vif=result["vif"],
+        condition_number=result["condition_number"],
+        # The matrix is already in hand; the gate is on the PAYLOAD, which
+        # grows with the square of the candidate count and is not what an
+        # agent reads a selection for.
+        correlation=(result["correlation"] if input_data.include_correlation else {}),
         selection_window=result["selection_window"],
         holdout_window=result["holdout_window"],
         selection_ic=result["selection_ic"],
@@ -398,6 +414,14 @@ def compare_feature_sets(
     unique to each side, and the per-feature IC for everything in either --
     including `n_independent_signals`, which is the honest count of ideas
     where `n_features` is the count of columns.
+
+    At the default `holdout_fraction=0` both sets are summarised on every
+    date, so every IC is in-sample and `warnings` says so unconditionally:
+    the comparison is still valid BETWEEN the sets, and is not an estimate
+    of either one's out-of-sample strength. Pass `holdout_fraction` (or
+    `selection_end`) and each set is summarised on the earlier dates and
+    re-measured on the later ones as `holdout_mean_abs_rank_ic`, which is
+    the number a set should be chosen on.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -411,6 +435,8 @@ def compare_feature_sets(
         input_data.left,
         input_data.right,
         cluster_threshold=input_data.cluster_threshold,
+        selection_end=input_data.selection_end,
+        holdout_fraction=input_data.holdout_fraction,
     )
     return CompareFeatureSetsResult(dataset_id=input_data.dataset_id, **result)
 
@@ -708,7 +734,10 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "selector scored on the panel it selects from manufactures overfit "
         "that looks like evidence. Redundancy is resolved before the IC "
         "floor, because a cluster is one signal and the question is whether "
-        "THAT signal clears the floor.",
+        "THAT signal clears the floor. The redundancy work comes back with "
+        "the answer -- the clusters get_feature_redundancy would return, the "
+        "keeper each duplicate was dropped for, VIF and condition number -- "
+        "so the diagnostics need no second call.",
         SelectFeaturesInput,
     ),
     (
@@ -718,7 +747,10 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "condition number, what is unique to each side, and the per-feature "
         "IC table. Not a single score, because a larger set almost always "
         "has a higher maximum IC and almost always more collinearity, and "
-        "one number hides half of that trade.",
+        "one number hides half of that trade. By default both sets are "
+        "summarised on every date, which is in-sample by construction and "
+        "warned about; holdout_fraction summarises on an earlier window and "
+        "re-measures each set on the dates neither summary read.",
         CompareFeatureSetsInput,
     ),
     (

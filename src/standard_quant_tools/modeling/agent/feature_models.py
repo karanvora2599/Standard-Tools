@@ -203,6 +203,7 @@ class FeatureICDecayResult(BaseModel):
         description="Why it was or was not flagged, in words. This is the "
         "part an agent should surface to a human before trusting the feature.",
     )
+    warnings: List[str] = Field(default_factory=list)
 
 
 class FeatureProfile(BaseModel):
@@ -227,6 +228,7 @@ class FeatureProfile(BaseModel):
         "include_ic_decay was set. Identical to get_feature_ic_decay's "
         "result for this feature.",
     )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ── redundancy ──────────────────────────────────────────────────────────
@@ -387,6 +389,14 @@ class DroppedFeature(BaseModel):
         "'weak' (below the IC floor), or 'capped' (past max_features).",
     )
     detail: str = Field(..., description="The specific numbers behind the reason.")
+    duplicate_of: Optional[str] = Field(
+        None,
+        description="For a 'redundant' drop, the kept feature this one "
+        "restates -- the same name its cluster reports as representative. "
+        "It is here so that 'dropped as a duplicate of what' is a field "
+        "rather than a sentence to parse. None for 'weak' and 'capped', "
+        "which are not about another feature.",
+    )
 
 
 class SelectFeaturesInput(BaseModel):
@@ -439,6 +449,14 @@ class SelectFeaturesInput(BaseModel):
         "reports the selected features' IC on the last 30%. 0 selects on the "
         "whole panel -- measured, that manufactures about 70% of a real "
         "model's headline from pure noise -- and the result warns so.",
+    )
+    include_correlation: bool = Field(
+        False,
+        description="Also return the pairwise correlation matrix over the "
+        "candidates. Off by default because it is O(n^2) in the payload -- "
+        "forty candidates is sixteen hundred numbers -- and `clusters`, "
+        "`vif` and `condition_number`, which always come back, answer what "
+        "it is usually opened for.",
     )
 
     @field_validator("selection_end")
@@ -493,6 +511,32 @@ class SelectFeaturesResult(BaseModel):
         description="Independent signals found among the candidates. This, "
         "not n_considered, is how many ideas the panel actually held.",
     )
+    clusters: List[FeatureCluster] = Field(
+        default_factory=list,
+        description="Every redundancy cluster the selection resolved, "
+        "singletons included. Identical to what get_feature_redundancy "
+        "returns for this panel and threshold -- same members, same "
+        "representative -- so reading which features were one signal does "
+        "not need a second call and a second correlation matrix.",
+    )
+    vif: Dict[str, Stat] = Field(
+        default_factory=dict,
+        description="Variance inflation factor per candidate, over the "
+        "selection window. Above 10 is the usual line; above 100 the feature "
+        "is nearly a linear combination of the others.",
+    )
+    condition_number: Stat = Field(
+        None,
+        description="Condition number of the candidates' correlation matrix "
+        "over the selection window. Above ~30 the panel is collinear enough "
+        "that linear coefficients stop meaning what they appear to mean.",
+    )
+    correlation: Dict[str, Dict[str, Stat]] = Field(
+        default_factory=dict,
+        description="Pearson correlation over the candidates, present only "
+        "when include_correlation was set; empty otherwise, because it is "
+        "O(n^2) and the clusters already carry the decision it supports.",
+    )
 
 
 class FeatureSetSummary(BaseModel):
@@ -505,9 +549,33 @@ class FeatureSetSummary(BaseModel):
         description="Redundancy clusters. Twelve features in three clusters "
         "carry three ideas; reporting twelve overstates the diversification.",
     )
-    mean_abs_rank_ic: Stat
+    mean_abs_rank_ic: Stat = Field(
+        ...,
+        description="Mean |rank IC| over the set on the dates the summary "
+        "read. In-sample whenever nothing was held out.",
+    )
     max_abs_rank_ic: Stat
     condition_number: Stat
+    selection_window: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="start/end/n_dates of the dates this summary read.",
+    )
+    holdout_window: Optional[Dict[str, Any]] = Field(
+        None,
+        description="start/end/n_dates of the dates held out, or None when "
+        "the summary read the whole panel.",
+    )
+    holdout_mean_abs_rank_ic: Stat = Field(
+        None,
+        description="Mean |rank IC| over the set on the held-out dates, "
+        "which this summary never read. The number to compare two sets on. "
+        "None when holdout_fraction was 0 and nothing was held out.",
+    )
+    holdout_max_abs_rank_ic: Stat = Field(
+        None,
+        description="Strongest |rank IC| in the set on the held-out dates. "
+        "None when nothing was held out.",
+    )
 
 
 class FeatureSetDelta(BaseModel):
@@ -530,7 +598,11 @@ class FeatureSetMembership(BaseModel):
     feature: str
     in_left: bool
     in_right: bool
-    abs_rank_ic: Stat
+    abs_rank_ic: Stat = Field(
+        ...,
+        description="|rank IC| on the same dates both summaries read, so the "
+        "table and the summaries cannot disagree about the window.",
+    )
 
 
 class CompareFeatureSetsInput(BaseModel):
@@ -546,6 +618,33 @@ class CompareFeatureSetsInput(BaseModel):
     cluster_threshold: float = Field(
         0.9, ge=0.0, le=1.0, description="Redundancy threshold for both sets."
     )
+    selection_end: Optional[str] = Field(
+        None,
+        description="Last date (YYYY-MM-DD) either summary may read; the "
+        "dates after it are held out and each set's |rank IC| on them comes "
+        "back as holdout_mean_abs_rank_ic. Overrides holdout_fraction.",
+    )
+    holdout_fraction: float = Field(
+        0.0,
+        ge=0.0,
+        lt=1.0,
+        description="Share of the panel's dates, from the end, that neither "
+        "summary reads. 0.0 (default) summarises both sets on every date, "
+        "which is in-sample by construction and warned about in so many "
+        "words. 0.3 summarises on the first 70% and reports each set's IC on "
+        "the last 30%, which is the comparison worth acting on.",
+    )
+
+    @field_validator("selection_end")
+    @classmethod
+    def _valid_selection_end(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        try:
+            pd.Timestamp(v)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"selection_end must be a date: {exc}") from exc
+        return v
 
 
 class CompareFeatureSetsResult(BaseModel):
@@ -560,6 +659,13 @@ class CompareFeatureSetsResult(BaseModel):
     shared: List[str]
     features: List[FeatureSetMembership] = Field(
         ..., description="Every feature in either set, strongest IC first."
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Always carries the in-sample caveat when nothing was "
+        "held out, which is the default. A comparison whose numbers were "
+        "made on every date is a comparison between the sets, not an "
+        "estimate of either one's out-of-sample strength.",
     )
 
 
@@ -616,6 +722,7 @@ class FeatureDriftResult(BaseModel):
         "different failures: the first is a preprocessing problem, the second "
         "means the edge is gone.",
     )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ── stability ───────────────────────────────────────────────────────────
@@ -672,6 +779,7 @@ class FeatureStabilityResult(BaseModel):
         "this number stays at 1.0 through it.",
     )
     worst_block: Optional[int] = None
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ── permutation ─────────────────────────────────────────────────────────
@@ -741,6 +849,7 @@ class PermutationTestResult(BaseModel):
         "Near zero the two nulls agree; at +0.6, where every live feature "
         "sat, only circular_shift is calibrated.",
     )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ── ablation ────────────────────────────────────────────────────────────

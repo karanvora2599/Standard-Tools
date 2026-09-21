@@ -35,14 +35,6 @@ from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
-#: Fits allowed without an explicit acknowledgement. 200 is roughly a
-#: 24-feature panel at 8 folds -- large enough that the common case never
-#: sees this, small enough that the runaway case stops. Deliberately a
-#: number a caller can raise ON PURPOSE rather than a hard limit: the tool
-#: refuses and says what to pass, which turns an accidental afternoon into
-#: a decision.
-DEFAULT_MAX_FITS = 200
-
 #: Metrics where a LOWER value is better, so the sign of "how much worse
 #: without this feature" flips. Getting this wrong would rank the most
 #: important feature as the least, which is the kind of error that reads as
@@ -157,7 +149,6 @@ def summarize_ablation(rows: Sequence[Dict[str, Any]], metric: str) -> Dict[str,
 
 
 __all__ = [
-    "DEFAULT_MAX_FITS",
     "ablation_contributions",
     "estimate_ablation_fits",
     "summarize_ablation",

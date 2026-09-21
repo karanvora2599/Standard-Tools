@@ -480,10 +480,14 @@ def _register_xgboost() -> bool:
     return True
 
 
-HAS_XGBOOST_SURVIVAL = _register_xgboost()
+# Called for the REGISTRATION, which is its whole effect here. The
+# boolean it returns was bound as `HAS_XGBOOST_SURVIVAL` and exported,
+# where it duplicated `boosting.HAS_XGBOOST` -- one probe of the same
+# import, under two names, only one of which the capability report
+# publishes. Read that one.
+_register_xgboost()
 
 __all__ = [
-    "HAS_XGBOOST_SURVIVAL",
     "CoxPHRegressor",
     "XGBAFTSurvival",
     "XGBCoxSurvival",

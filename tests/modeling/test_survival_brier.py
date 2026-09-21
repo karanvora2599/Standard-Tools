@@ -16,8 +16,8 @@ import pytest
 
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.engine import run_experiment
+from standard_quant_tools.modeling.estimators import boosting
 from standard_quant_tools.modeling.estimators.survival import (
-    HAS_XGBOOST_SURVIVAL,
     CoxPHRegressor,
     aft_survival_function,
     breslow_baseline,
@@ -178,7 +178,7 @@ class TestThroughTheEngine:
         assert 0.0 < metrics["integrated_brier"] < 0.25
         assert metrics["concordance"] > 0.6
 
-    @pytest.mark.skipif(not HAS_XGBOOST_SURVIVAL, reason="xgboost not installed")
+    @pytest.mark.skipif(not boosting.HAS_XGBOOST, reason="xgboost not installed")
     @pytest.mark.parametrize("estimator", ["xgboost_cox", "xgboost_aft"])
     def test_the_xgboost_objectives_report_it_too(self, estimator):
         spec = _spec(estimator, {"n_estimators": 60, "max_depth": 2})

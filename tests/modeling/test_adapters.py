@@ -198,7 +198,11 @@ class TestCapabilityReport:
         from standard_quant_tools.modeling.capabilities import modeling_capabilities
 
         caps = modeling_capabilities()
-        assert set(caps["tasks"]) == set(available_tasks())
+        # `tasks` is a dict now: `all` is the adapter table this used to
+        # compare against, and `fitted` is the subset with an estimator
+        # registered in this install.
+        assert set(caps["tasks"]["all"]) == set(available_tasks())
+        assert set(caps["tasks"]["fitted"]) <= set(caps["tasks"]["all"])
         assert len(caps["estimators"]) == len(ESTIMATOR_REGISTRY)
         # `targets` reports buildability now rather than a flat name list:
         # six of the eighteen can be built from a price series and the

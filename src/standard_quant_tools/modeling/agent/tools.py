@@ -48,6 +48,7 @@ from ..capabilities import modeling_capabilities
 from ..dataset.builder import SPEC_HASH_VERSION
 from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
+from ..dataset.lags import parse_lag_column
 from ..engine import run_experiment as _run_experiment
 from ..features.registry import list_features as _list_features
 from ..monitoring import THRESHOLDS, drift_report, prediction_drift, realized_ic
@@ -130,6 +131,15 @@ def list_features(input_data: ListFeaturesInput) -> ListFeaturesResult:
                 scope=d.scope.value,
                 requires=d.requires,
                 lookback=d.lookback,
+                # The two fields that say a feature reads RECORDS rather
+                # than bars. The registry has carried them since
+                # point-in-time features existed and the catalog dropped
+                # them, so the one thing an agent could not learn from
+                # `list_features` was that `fundamental.*` needs a provider
+                # serving that record set -- which it found out from a
+                # build failure instead.
+                frame_kind=d.frame_kind,
+                fields=list(d.fields),
             )
             for d in defs
         ]
@@ -269,6 +279,20 @@ def build_model_ensemble(input_data: BuildEnsembleInput) -> BuildEnsembleResult:
         producer="build_model_ensemble",
     )
     warnings = list(combined["warnings"])
+    # The reference's shape, said at the point of publication rather than
+    # discovered at the point of refusal. `combine_predictions` returns
+    # date/entity/prediction; the realized outcome lives in the dataset the
+    # base models were fit on and is not carried here, so an agent that
+    # reads "an ordinary prediction reference" and hands it to
+    # score_predictions gets a refusal it had no way to anticipate.
+    warnings.append(
+        "NOTE: this reference carries date, entity and prediction and no "
+        "realized outcome. score_predictions needs a 'target' column and "
+        "will refuse it as it stands -- attach the outcomes from the "
+        "dataset the base models were fit on first. The backtest bridge "
+        "(convert_reference -> signal_panel) needs no outcome and reads it "
+        "unchanged."
+    )
     hottest = max(combined["correlations"].values(), default=None)
     if hottest is not None and hottest > 0.95:
         pair = max(combined["correlations"], key=combined["correlations"].get)
@@ -749,6 +773,38 @@ def score_model(input_data: ScoreModelInput) -> ScoreModelResult:
     return ScoreModelResult(**result)
 
 
+def _lag_labels(columns) -> Dict[str, Dict[str, Any]]:
+    """
+    {column: {"feature": base, "lag": depth}} for every lag column among
+    `columns`, and nothing for the rest.
+
+    `lag_column_name` composes `technical.rsi` and 3 into
+    `technical.rsi__lag3` precisely so the two halves can be recovered, and
+    until now nothing recovered them: a spec with `lags=[1,2,3]` on ten
+    features produced forty importance rows of opaque strings, and "which
+    feature is this, and how far back" was left to the reader's guess about
+    a naming convention nobody had told it. A column that does not parse is
+    absent rather than labelled None -- the map says which columns ARE
+    lagged, so an empty map means a spec with no lags.
+    """
+    labels: Dict[str, Dict[str, Any]] = {}
+    for column in columns:
+        parsed = parse_lag_column(str(column))
+        if parsed is not None:
+            base, depth = parsed
+            labels[str(column)] = {"feature": base, "lag": depth}
+    return labels
+
+
+def _labelled_column(column: str) -> str:
+    """One column as a human reads it: the name, and what it means."""
+    parsed = parse_lag_column(str(column))
+    if parsed is None:
+        return str(column)
+    base, depth = parsed
+    return f"{column} ({base} at lag {depth})"
+
+
 def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
     """One tool, four views — avoids five separate inspection tools for
     what's ultimately reading different slices of the same manifest."""
@@ -779,7 +835,13 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             "promotions": [p.to_dict() for p in promotions(input_data.model_id)],
         }
     elif input_data.view == "feature_importance":
-        data = {"feature_importance_summary": manifest.feature_importance_summary}
+        data = {
+            "feature_importance_summary": manifest.feature_importance_summary,
+            # The sibling that makes the keys above readable. Present and
+            # empty when the spec asked for no lags, which is itself the
+            # answer to "is this column a lag of something".
+            "feature_labels": _lag_labels(manifest.feature_importance_summary),
+        }
     elif input_data.view == "validation":
         data = {
             "validation_method": manifest.validation_method,
@@ -1071,6 +1133,10 @@ def monitor_model(input_data: MonitorModelInput) -> MonitorModelResult:
         prediction_drift=drift,
         realized_ic=realized,
         thresholds=dict(THRESHOLDS),
+        # Bound since monitoring shipped and never returned: the drift
+        # numbers above are a distance FROM this, and a distance reported
+        # without its origin cannot be acted on.
+        training_profile=dict(profile or {}),
         overall_status=overall,
         warnings=warnings,
     )
@@ -1692,6 +1758,7 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
         summarize_cross_sectional_ic,
     )
     from standard_quant_tools.modeling.validation.ranking import ranking_metrics
+    from standard_quant_tools.modeling.validation.search import rank_turnover
 
     frame = handoff.resolve(input_data.predictions_ref, expect="predictions")
     for column in (input_data.target_column, input_data.prediction_column, "date"):
@@ -1725,9 +1792,20 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
     entities = frame["entity"].nunique() if "entity" in frame.columns else 1
 
     notes: List[str] = []
+    warnings: List[str] = []
+    # The constant a forecaster who had seen only the training data would
+    # have predicted, as a one-element array because that is all
+    # `baseline_regression_metrics` takes the mean of. Both calls get it:
+    # `regression_metrics` computes its own baseline-relative figures and
+    # was being handed the scored set's own mean too.
+    train_y = (
+        None
+        if input_data.train_mean is None
+        else np.full(1, float(input_data.train_mean))
+    )
     if input_data.task == "regression":
-        metrics = regression_metrics(y_true, y_pred, dates=dates)
-        baseline = baseline_regression_metrics(y_true)
+        metrics = regression_metrics(y_true, y_pred, dates=dates, train_y=train_y)
+        baseline = baseline_regression_metrics(y_true, train_y)
     elif input_data.task == "classification":
         metrics = classification_metrics(
             (y_true > 0).astype(int), (y_pred > 0.5).astype(int), y_pred
@@ -1776,6 +1854,22 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
             "within — the IC block is empty by construction, not by failure."
         )
 
+    # Turnover is a property of the ORDERING, so it needs a cross-section
+    # and an entity column to identify it by. A single-entity frame gets
+    # None rather than zero: an ordering of one never changes, and
+    # reporting 0.0 would read as "costless" rather than "undefined".
+    turnover = None
+    if entities > 1 and "entity" in frame.columns:
+        turnover = float(rank_turnover(y_pred, dates, frame["entity"].to_numpy()))
+        if turnover > 0.3:
+            warnings.append(
+                f"prediction_turnover is {turnover:.3f}: the ordering is "
+                "reshuffled substantially between consecutive dates, so the "
+                "book is rebuilt about that often. An IC earned at this "
+                "turnover has to survive the cost of trading to it -- "
+                "whatever the metrics above say, they are gross."
+            )
+
     beats = None
     if baseline and "r2" in metrics and "baseline_r2" in baseline:
         beats = bool(metrics["r2"] > baseline["baseline_r2"])
@@ -1792,6 +1886,17 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
                 "advance. That makes it harder than a real baseline: "
                 "beating it is strong evidence, and failing to beat it is "
                 "weaker evidence than it looks."
+            )
+            # Also a warning, not only a note: `baseline_r2` is 0.0 by
+            # construction against the scored set's own mean, so
+            # `beats_baseline` is answering a question nobody asked.
+            # `train_mean` is the remedy and it is one number.
+            warnings.append(
+                "baseline_is_oracle=1.0: no `train_mean` was given, so the "
+                "baseline is the scored set's OWN mean and its R2 is 0.0 by "
+                "construction. Pass train_mean=<the training outcomes' "
+                "mean> to compare against the constant a forecaster could "
+                "actually have predicted."
             )
 
     # The adjustment this field promises needs the label's horizon, and
@@ -1817,7 +1922,9 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
         baseline={k: float(v) for k, v in baseline.items()},
         beats_baseline=beats,
         effective_sample_size=ess,
+        prediction_turnover=turnover,
         notes=notes,
+        warnings=warnings,
     )
 
 
@@ -2038,9 +2145,14 @@ def analyze_model_errors(
     ]
     if input_data.feature is not None:
         if input_data.feature not in panel.columns:
+            # Lag columns are named, not listed raw: a refusal offering
+            # `technical.rsi__lag3` among forty near-identical strings is a
+            # list a caller has to decode a naming convention to use, and
+            # the convention exists exactly so it need not be guessed.
+            offered = [_labelled_column(c) for c in features[:15]]
             raise ValidationError(
                 f"feature={input_data.feature!r} is not a column of dataset "
-                f"{manifest.dataset_id!r}. Its panel carries {features[:15]}"
+                f"{manifest.dataset_id!r}. Its panel carries {offered}"
                 f"{' ...' if len(features) > 15 else ''}."
             )
         actuals[input_data.feature] = panel[input_data.feature].to_numpy()
@@ -2220,8 +2332,12 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     (
         "build_model_ensemble",
         "Combine several registered models into one prediction series, and "
-        "publish it as an `sqt://predictions` reference that score_predictions "
-        "and the backtest bridge read like any other. What gets combined is "
+        "publish it as an `sqt://predictions` reference the backtest bridge "
+        "reads like any other. The published frame carries date, entity and "
+        "prediction and NO realized outcome, which is what a backtest does "
+        "not need and scoring cannot do without: score_predictions requires "
+        "a 'target' column and refuses this reference until the realized "
+        "outcomes have been attached to it. What gets combined is "
         "each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold "
         "that did not train on them -- so the combination cannot inherit the "
         "optimism that makes naive stacking look excellent until it meets a "

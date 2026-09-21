@@ -77,8 +77,35 @@ def _target_choices(schema: Dict[str, object]) -> None:
     schema. This is the third option: the schema is generated when a tool
     definition is built, which is after every registration, so an LLM
     reading it sees the same list the validator enforces.
+
+    THE ENUM STAYS COMPLETE and gains a split beside it. Every registered
+    id is legal SOMEWHERE -- `ExternalTarget.target_type` names exactly the
+    labels no price series can produce -- so narrowing the enum to the
+    buildable six would refuse a legal external declaration at the schema.
+    But the same enum on `DatasetSpec.target.type` offered twelve ids that
+    `build_target` refuses by name, with nothing in the schema to tell them
+    apart. `x-buildable` and the sentence below carry the distinction the
+    capability report already makes, to the one place an LLM reads before
+    it picks a value.
     """
     schema["enum"] = sorted(TARGET_KINDS)
+    buildable = sorted(name for name, kind in TARGET_KINDS.items() if kind.buildable)
+    external = sorted(name for name, kind in TARGET_KINDS.items() if not kind.buildable)
+    schema["x-buildable"] = buildable
+    existing = str(schema.get("description") or "").rstrip()
+    schema["description"] = (
+        existing
+        + (" " if existing else "")
+        + (
+            "BUILDABLE FROM A PRICE SERIES (the only values build_model_dataset "
+            f"can derive): {', '.join(buildable)}. The other "
+            f"{len(external)} -- {', '.join(external)} -- are functions of the "
+            "book, of orders or of fills, so nothing in a Close column "
+            "determines them: they arrive through register_external_panel, "
+            "which records a column that already holds the label rather than "
+            "recomputing it, and build_model_dataset refuses them by name."
+        )
+    )
 
 
 #: A registered target id. Validated against the registry and advertised

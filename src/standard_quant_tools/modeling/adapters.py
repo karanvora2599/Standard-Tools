@@ -241,7 +241,12 @@ class ModelAdapter:
             "needs_groups": self.needs_groups,
             "score_has_scale": self.score_has_scale,
             "supports_sample_weight": "sample_weight" in fit_params,
-            "supports_partial_fit": hasattr(estimator_cls, "partial_fit"),
+            # `supports_partial_fit` was reported here and described
+            # sklearn rather than this runtime: nothing in src/, tests/ or
+            # Documentation/ read it, and `estimators/online.py` explains
+            # why incremental fitting is deliberately unreachable -- a
+            # walk-forward fold refits from scratch by design. A flag an
+            # agent cannot act on is an invitation to plan around it.
             # NOT hasattr on the class. sklearn guards some methods with
             # `available_if`, a descriptor that EXISTS on the class and
             # raises only on instance access -- so SGDClassifier reported

@@ -69,6 +69,19 @@ class ExplainRowLossResult(BaseModel):
             "reason. Dropping these to recover data does nothing."
         ),
     )
+    per_entity_rows_dropped: Dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Rows lost per entity. These sum to `rows_lost` exactly -- "
+            "every dropped row belongs to one name -- which the per-column "
+            "counts deliberately do not, because several columns are "
+            "usually missing in the same row. 'Which NAME lost the rows' "
+            "is a different question from 'which feature': one entity "
+            "holding most of the loss is a short history or a gap in one "
+            "feed, and the remedy is a smaller universe or a later start, "
+            "not a shorter lookback."
+        ),
+    )
     warnings: List[str] = Field(default_factory=list)
 
 
@@ -153,13 +166,34 @@ def explain_dataset_row_loss(
             "responsible before assuming the universe is the problem."
         )
 
+    lost = int(report.get("rows_dropped", before - after))
+    per_entity: Dict[str, int] = {
+        str(entity): int(count)
+        for entity, count in (report.get("per_entity_rows_dropped") or {}).items()
+    }
+    # One name carrying most of the loss is a DIFFERENT finding from one
+    # feature carrying it, and the column table cannot show it: a short
+    # history or a gap in one feed looks, per column, exactly like a long
+    # lookback everybody pays. Said once, with the number.
+    if lost:
+        worst = max(per_entity.items(), key=lambda item: item[1], default=None)
+        if worst is not None and worst[1] > lost / 2:
+            warnings.append(
+                f"entity {worst[0]!r} alone accounts for {worst[1]:,} of the "
+                f"{lost:,} lost rows ({worst[1] / lost:.0%}). That is a "
+                "short history or a gap in one name's data, not a lookback "
+                "everybody pays -- dropping a feature will not recover it, "
+                "and dropping that entity or starting later will."
+            )
+
     return ExplainRowLossResult(
         dataset_id=input_data.dataset_id,
         rows_before=before,
         rows_after=after,
-        rows_lost=int(report.get("rows_dropped", before - after)),
+        rows_lost=lost,
         columns=rows,
         free_to_drop=free,
+        per_entity_rows_dropped=per_entity,
         warnings=warnings,
     )
 

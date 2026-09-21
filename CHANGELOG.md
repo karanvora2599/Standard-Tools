@@ -1,5 +1,62 @@
 # Changelog
 
+## The report describes the runtime it runs in, and the results carry what they computed
+
+Phase 1 of `Development/modeling_capability_gaps_plan.md`: nothing new
+on the surface, and every existing answer made true. Two descriptions
+advertised capability that did not exist; the capability report
+described sklearn in one place and a static list in another; five
+results dropped fields their own computation had produced; three
+symbols existed for nobody.
+
+- **Two false descriptions corrected.** `build_model_ensemble` said its
+  reference was one `score_predictions` reads like any other; the frame
+  carries no realized outcome and the call refuses, so the description
+  and a run-time warning now say so. `convert_reference`'s `task` said
+  it was required unless the reference carried a model id; no reference
+  carries one, and the field now says which conversion needs it.
+- **The capability report says what THIS install can fit.** `tasks` was
+  a static list from the adapter table, so a task with no installed
+  estimator was advertised; it is now split into `fitted`,
+  `no_estimator_installed` and `all`, the shape `targets` already had.
+  Target detail carries `censored`, `cross_sectional`, `requires`,
+  `param_schema` and `default_params`, the fields that change what a
+  correct spec says, read from `list_targets()`, which had no caller. A
+  new `calibration` section names the three methods and says the
+  importance flags describe the uncalibrated estimator; the engine warns
+  when calibration wraps a model in `CalibratedClassifierCV` and its
+  importances become NaN by construction, and the run result now carries
+  its `warnings`. The dataset schema's target enum still lists every id,
+  and now says which six can be built from prices and that the rest
+  arrive through `register_external_panel`. `supports_partial_fit`, the
+  one flag that described sklearn rather than this runtime, is gone.
+- **`score_predictions` has a baseline, not an oracle.** It scored every
+  external prediction against the test set's own mean, whose R2 is zero
+  by construction; `train_mean` supplies the training mean to both the
+  metrics and the baseline. It also reports `prediction_turnover`, the
+  bridge between an IC and a net-of-cost P&L, and carries `warnings`
+  beside its `notes`.
+- **Five results return what they computed.** `list_features` names a
+  point-in-time feature's `frame_kind` and `fields`;
+  `explain_dataset_row_loss` reports `per_entity_rows_dropped` and warns
+  when one name holds most of the loss; `monitor_model` returns the
+  `training_profile` its drift numbers were read against;
+  `inspect_model`'s importance view labels `technical.rsi__lag3` as
+  "technical.rsi at lag 3" (`parse_lag_column` has its first caller);
+  `select_features` returns the clusters it resolved, each drop's
+  `duplicate_of`, the VIFs and the condition number, so
+  `get_feature_redundancy` need not be run twice, with the correlation
+  matrix behind `include_correlation`.
+- **`compare_feature_sets` says its numbers are in-sample.** Both sets
+  were summarised on every date, holdout included; the result now
+  carries `warnings` (it was the one feature-lab result without them)
+  and a `holdout_fraction` that reports the held-out IC beside the
+  in-sample one, defaulting to zero so today's numbers do not move.
+- **Three deletions.** `feature_ablation.DEFAULT_MAX_FITS` collided by
+  name with the live limit; `HAS_XGBOOST_SURVIVAL` duplicated the
+  published `HAS_XGBOOST` (the registration it triggered stays);
+  `artifacts.local_store` was called by nothing and documented nowhere.
+
 ## The findings are closed, and the papers that closed them go with them
 
 Every defect in the Databento live findings (D1-D20 and the "Also" lists)

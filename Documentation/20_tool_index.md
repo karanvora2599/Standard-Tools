@@ -35,14 +35,14 @@ advertises 155 of the 211 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 48 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 82 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `modeling` | 22 | 85 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 22 | 89 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 9 | 31 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `feature_lab` | 9 | 33 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **211** | | | |
 
 ---
@@ -634,7 +634,7 @@ Fetch OHLCV, compute requested features/target, persist the panel.
 
 #### `build_model_ensemble`
 
-Combine several registered models into one prediction series, and publish it as an `sqt://predictions` reference that score_predictions and the backtest bridge read like any other. What gets combined is each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold that did not train on them -- so the combination cannot inherit the optimism that makes naive stacking look excellent until it meets a new day. The default is rank_mean rather than mean, because two models on different scales average into a number dominated by whichever has the wider spread, which is its units and not its skill. Reports the pairwise correlation between the base models: two agreeing at 0.98 combine into approximately either of them, and the ensemble's own score cannot show you that.
+Combine several registered models into one prediction series, and publish it as an `sqt://predictions` reference the backtest bridge reads like any other. The published frame carries date, entity and prediction and NO realized outcome, which is what a backtest does not need and scoring cannot do without: score_predictions requires a 'target' column and refuses this reference until the realized outcomes have been attached to it. What gets combined is each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold that did not train on them -- so the combination cannot inherit the optimism that makes naive stacking look excellent until it meets a new day. The default is rank_mean rather than mean, because two models on different scales average into a number dominated by whichever has the wider spread, which is its units and not its skill. Reports the pairwise correlation between the base models: two agreeing at 0.98 combine into approximately either of them, and the ensemble's own score cannot show you that.
 
 **Required:** `model_ids`, `run_id`, `name`  
 **Optional:** `method`, `weights`
@@ -748,7 +748,7 @@ Run a registered model forward and get its predictions for a universe as of a da
 Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns. Works on predictions this library never produced.
 
 **Required:** `predictions_ref`, `task`  
-**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`, `horizon`, `event_column`
+**Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`, `horizon`, `train_mean`, `event_column`
 
 #### `validate_model_spec`
 
@@ -1515,10 +1515,10 @@ Interrogate the FEATURES of a built dataset, before and independently of fitting
 
 #### `compare_feature_sets`
 
-Two feature sets measured on the same panel, with the cost of the difference attached: per-set IC, independent-signal count and condition number, what is unique to each side, and the per-feature IC table. Not a single score, because a larger set almost always has a higher maximum IC and almost always more collinearity, and one number hides half of that trade.
+Two feature sets measured on the same panel, with the cost of the difference attached: per-set IC, independent-signal count and condition number, what is unique to each side, and the per-feature IC table. Not a single score, because a larger set almost always has a higher maximum IC and almost always more collinearity, and one number hides half of that trade. By default both sets are summarised on every date, which is in-sample by construction and warned about; holdout_fraction summarises on an earlier window and re-measures each set on the dates neither summary read.
 
 **Required:** `dataset_id`, `left`, `right`  
-**Optional:** `cluster_threshold`
+**Optional:** `cluster_threshold`, `selection_end`, `holdout_fraction`
 
 #### `get_feature_drift`
 
@@ -1571,7 +1571,7 @@ How often noise on THIS panel produces an IC as large as the observed one, in ei
 
 #### `select_features`
 
-Choose a feature set from a built dataset: keep one feature per redundancy cluster, drop what falls below an IC floor, and return a reason for every exclusion. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the IC floor, because a cluster is one signal and the question is whether THAT signal clears the floor.
+Choose a feature set from a built dataset: keep one feature per redundancy cluster, drop what falls below an IC floor, and return a reason for every exclusion. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the IC floor, because a cluster is one signal and the question is whether THAT signal clears the floor. The redundancy work comes back with the answer -- the clusters get_feature_redundancy would return, the keeper each duplicate was dropped for, VIF and condition number -- so the diagnostics need no second call.
 
 **Required:** `dataset_id`  
-**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `selection_end`, `holdout_fraction`
+**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `selection_end`, `holdout_fraction`, `include_correlation`

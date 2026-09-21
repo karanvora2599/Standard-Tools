@@ -7,9 +7,18 @@ Documentation/15_modeling.md, matching how agent/models.py's own Input
 models nest structured params for the existing analysis surface.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from standard_quant_tools.agent.runtimes._json_safe import finite_or_none
 
 from ..registry.lifecycle import LifecycleStage
 from ..specs import (
@@ -26,6 +35,14 @@ from ..specs import (
 # silence pydantic's "model_" protected-namespace warning (the same fix
 # ModelManifest uses in registry/manifests.py).
 _NO_PROTECTED_NAMESPACES = ConfigDict(protected_namespaces=())
+
+#: A float statistic that may legitimately be absent, and that must never
+#: reach the wire as `NaN`. `NaN` is not valid JSON, and several MCP
+#: clients reject the whole response at the transport layer rather than
+#: the one field that could not be computed -- so a statistic that did not
+#: exist would fail every other number beside it. `feature_models.py:63`
+#: carries the same alias for the feature-lab results.
+Stat = Annotated[Optional[float], BeforeValidator(finite_or_none)]
 
 # ── list_features ──────────────────────────────────────────────────────
 
@@ -53,6 +70,26 @@ class FeatureCatalogEntry(BaseModel):
     scope: str
     requires: List[str]
     lookback: int
+    frame_kind: Optional[str] = Field(
+        None,
+        description=(
+            "POINT_IN_TIME features only: which record set the provider is "
+            "asked for -- 'fundamentals' and the like. None for every "
+            "feature computed from bars alone. This is the field that says "
+            "a feature needs a provider that serves that record set, which "
+            "no other part of the catalog reveals: a spec naming one "
+            "against a bars-only provider fails at build time, not here."
+        ),
+    )
+    fields: List[str] = Field(
+        default_factory=list,
+        description=(
+            "POINT_IN_TIME features only: the record fields the transform "
+            "reads out of `frame_kind`. Empty for everything else. Read it "
+            "with `default_params['max_staleness_days']`, the oldest record "
+            "a panel row is still allowed to use."
+        ),
+    )
 
 
 class ListFeaturesResult(BaseModel):
@@ -161,8 +198,12 @@ class BuildEnsembleResult(BaseModel):
         ...,
         description=(
             "An `sqt://predictions/...` reference to the combined series. "
-            "Score it with score_predictions, or backtest it through "
-            "convert_reference -- it is an ordinary prediction frame."
+            "It carries date, entity and prediction and NO realized "
+            "outcome, which is the difference between the two things you "
+            "might do with it: backtest it through convert_reference -- "
+            "which needs no outcome -- and it is an ordinary prediction "
+            "frame; score it, and score_predictions refuses it for having "
+            "no 'target' column until the realized outcomes are attached."
         ),
     )
     model_ids: List[str] = Field(default_factory=list)
@@ -466,6 +507,20 @@ class RunModelExperimentResult(BaseModel):
         "Feed to modeling.bridge.oos_predictions_to_signal_panel to backtest this model "
         "as a strategy via the existing run_signal_panel_backtest tool.",
     )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Caveats about THIS RUN, as opposed to the dataset's -- those "
+            "travel on the manifest as `dataset_warnings`. What lands here "
+            "is a thing the run did that changes how a number above should "
+            "be read: a calibrated estimator, for instance, whose "
+            "`feature_importance_summary` is NaN by construction because "
+            "the wrapper does not expose the base class's coefficients. "
+            "The engine has always produced these; this result had no "
+            "field for them, so they were dropped between the engine and "
+            "the agent."
+        ),
+    )
 
 
 # ── score_model ─────────────────────────────────────────────────────────
@@ -703,6 +758,19 @@ class MonitorModelResult(BaseModel):
         default_factory=dict,
         description="The lines the statuses were read against. Conventions, "
         "reported with every number rather than instead of it.",
+    )
+    training_profile: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "The reference the drift numbers above were read AGAINST: per "
+            "training feature, the quantile edges (`bins` + 1 of them), the "
+            "missing rate, the mean and the standard deviation of the panel "
+            "the model was fit on. A PSI of 0.3 says the distribution "
+            "moved; only this says what it moved FROM, which is what "
+            "decides whether the new regime is one the model ever saw. "
+            "Recorded at registration, so it cannot be contaminated by the "
+            "window being monitored."
+        ),
     )
     overall_status: Literal["stable", "moderate", "severe", "unknown"]
     warnings: List[str] = Field(default_factory=list)
@@ -1360,6 +1428,21 @@ class ScorePredictionsInput(BaseModel):
             "count of independent observations is deflated accordingly."
         ),
     )
+    train_mean: Optional[float] = Field(
+        None,
+        description=(
+            "The mean of the TRAINING outcomes -- the constant a forecaster "
+            "who had seen only the training data would have predicted. It "
+            "is what the 'predict the mean' baseline should be built from, "
+            "and the scored set's own mean is not a substitute: nobody "
+            "knows the future window's average realized return in advance, "
+            "so a baseline built from it is an ORACLE that a model is being "
+            "held to a standard no real forecaster could meet. Omitted, the "
+            "baseline falls back to that oracle and says so through "
+            "`baseline_is_oracle=1.0`, whose R2 is then 0.0 by construction "
+            "-- which is exactly why it is not a baseline."
+        ),
+    )
     event_column: str = Field(
         "event",
         description=(
@@ -1406,7 +1489,31 @@ class ScorePredictionsResult(BaseModel):
             "raw count is overstated."
         ),
     )
+    prediction_turnover: Stat = Field(
+        None,
+        description=(
+            "How much the signal's ORDERING moves from one date to the "
+            "next: the mean absolute change in each entity's percentile "
+            "rank between consecutive dates, in [0, 1]. The bridge between "
+            "an IC and a net-of-cost P&L -- a 0.05 IC at 0.05 turnover and "
+            "the same IC at 0.60 turnover are different strategies, and "
+            "only the second one's costs can eat the whole edge. Zero for "
+            "an ordering that never changes; a signal reshuffled at random "
+            "every date sits near a third. None for a single entity, where "
+            "there is no cross-section to reorder."
+        ),
+    )
     notes: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Caveats that change how the numbers above should be read -- "
+            "an oracle baseline, a turnover that would have to be paid on "
+            "every date. `notes` carries the explanatory commentary; "
+            "these are the ones that say a headline figure is not what it "
+            "looks like."
+        ),
+    )
 
 
 # ── point-in-time records ───────────────────────────────────────────────

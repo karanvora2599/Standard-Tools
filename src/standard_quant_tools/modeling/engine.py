@@ -21,7 +21,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
-from .adapters import accepts_missing, get_adapter
+from .adapters import _exposes_coefficients, accepts_missing, get_adapter
 from .cache import FoldCache, column_wise_pipeline
 from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import (
@@ -128,6 +128,52 @@ def _calibrated(estimator, model_spec, n_rows: int):
     from sklearn.calibration import CalibratedClassifierCV
 
     return CalibratedClassifierCV(estimator, method=method, cv=folds)
+
+
+def _calibration_importance_warning(
+    model_spec: ModelSpec, estimator_cls: Any
+) -> List[str]:
+    """
+    Said once, at the top of a run that asks for calibration from an
+    estimator that would otherwise have reported importances.
+
+    `_calibrated` wraps the estimator in `CalibratedClassifierCV`, which
+    exposes neither `coef_` nor `feature_importances_`, so
+    `fold_feature_importance` falls through to its NaN branch for every
+    fold and `feature_importance_summary` comes back NaN for every feature.
+    Measured on identical data: {f0: 0.389, f1: 0.318, f2: 0.293} without
+    calibration, {f0: NaN, f1: NaN, f2: NaN} with isotonic.
+
+    Nothing is broken by that and nothing said so. The capability report
+    still advertises `exposes_feature_importance: True` -- correctly, it
+    describes the UNWRAPPED class, which is what `adapters.py:88-91` says
+    the flag must agree with -- so a reader of the two together concludes
+    the model failed to fit rather than that the spec traded one output
+    for another. One sentence, at the point where the trade was made.
+    """
+    method = getattr(model_spec.estimator, "calibration", "none")
+    if method == "none":
+        return []
+    if not (
+        _exposes_coefficients(estimator_cls)
+        or hasattr(estimator_cls, "feature_importances_")
+    ):
+        # The estimator had no importances to lose -- HistGradientBoosting
+        # reports NaN calibrated or not -- so there is nothing to warn
+        # about and a warning here would be noise on every such run.
+        return []
+    return [
+        f"estimator.calibration={method!r} wraps "
+        f"{estimator_cls.__name__} in CalibratedClassifierCV, which exposes "
+        "neither `coef_` nor `feature_importances_`: "
+        "`feature_importance_summary` is therefore NaN for every feature on "
+        "this run, by construction rather than because the fit failed. The "
+        "capability report's `exposes_coefficients` / "
+        "`exposes_feature_importance` flags describe the uncalibrated "
+        "estimator. Run the same spec with calibration='none' to read the "
+        "importances, and keep the calibrated model for anything that "
+        "thresholds a probability."
+    ]
 
 
 def _instantiate(
@@ -606,6 +652,11 @@ def run_experiment(
     validate_params(
         model_spec.task, model_spec.estimator.type, model_spec.estimator.params
     )
+
+    # Caveats about THIS run, returned beside its metrics. Seeded with the
+    # one the run can state before it starts.
+    run_warnings: List[str] = []
+    run_warnings.extend(_calibration_importance_warning(model_spec, estimator_cls))
 
     # Whether the estimator can fit a quantile at all, before any data is
     # touched: the registry declares the parameter, and an estimator
@@ -1456,6 +1507,7 @@ def run_experiment(
             "validation_report": validation_report,
             "oos_predictions_uri": None,
             "n_train_rows_purged_overlap": (n_purged_total if has_label_end else None),
+            "warnings": list(run_warnings),
         }
 
     oos_predictions_df = pd.concat(oos_prediction_frames, ignore_index=True)
@@ -1556,4 +1608,8 @@ def run_experiment(
         # window, which is information the caller needs when reading the
         # OOS metrics.
         "n_train_rows_purged_overlap": (n_purged_total if has_label_end else None),
+        # Caveats about the run itself, as opposed to the dataset's (which
+        # travel on the manifest as `dataset_warnings`). Today: the one
+        # calibration makes to the importances.
+        "warnings": list(run_warnings),
     }

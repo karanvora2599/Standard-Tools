@@ -28,11 +28,13 @@ from .features.registry import list_features as _list_features
 from .preprocessing import list_preprocessors
 from .specs import (
     TARGET_KINDS,
+    EstimatorSpec,
     PreprocessingSpec,
     SearchSpec,
     TargetSpec,
     ValidationSpec,
 )
+from .targets.registry import list_targets
 from .validation import search as _search
 
 
@@ -45,6 +47,57 @@ def _literal_options(model: Any, field: str) -> List[str]:
     annotation = model.model_fields[field].annotation
     args = getattr(annotation, "__args__", ())
     return [a for a in args if isinstance(a, str)]
+
+
+def _numeric_bounds(model: Any, field: str) -> Dict[str, Any]:
+    """The default and the enforced range of a numeric spec field.
+
+    Read off the field's own constraint metadata rather than retyped, for
+    the same reason `_literal_options` reads the Literal: a bound tightened
+    in the spec and copied by hand here is a bound the report gets wrong.
+    """
+    info = model.model_fields[field]
+    bounds: Dict[str, Any] = {
+        "default": info.default,
+        "minimum": None,
+        "maximum": None,
+    }
+    for constraint in info.metadata:
+        for attribute, key in (("ge", "minimum"), ("le", "maximum")):
+            value = getattr(constraint, attribute, None)
+            if value is not None:
+                bounds[key] = value
+    return bounds
+
+
+def _task_report() -> Dict[str, Any]:
+    """Which tasks can actually be FITTED here, not which have an adapter.
+
+    `available_tasks()` reads the static `_ADAPTERS` dict, so it reported
+    `ranking` on a machine whose registry held no ranker at all -- the
+    exact overstatement the `targets` split below exists to prevent, left
+    standing one key above it. The adapters are the tasks the runtime
+    understands; the registry is the tasks it can run.
+    """
+    with_estimator = {task for task, _name in ESTIMATOR_REGISTRY}
+    tasks = available_tasks()
+    return {
+        "fitted": [task for task in tasks if task in with_estimator],
+        "no_estimator_installed": [
+            task for task in tasks if task not in with_estimator
+        ],
+        "all": tasks,
+        "note": (
+            "`fitted` is a task with at least one estimator registered in "
+            "THIS install. A task under `no_estimator_installed` has an "
+            "adapter and a spec that validates its shape, and nothing to "
+            "fit: `validate_model_spec` refuses it with `Available for "
+            "<task>: []`. The usual cause is an optional library -- every "
+            "ranker comes from lightgbm or xgboost, so `ranking` is fitted "
+            "on one machine and not on another; `optional_dependencies` "
+            "says which case this is."
+        ),
+    }
 
 
 def estimator_capabilities() -> List[Dict[str, Any]]:
@@ -91,7 +144,10 @@ def modeling_capabilities() -> Dict[str, Any]:
         )
 
     return {
-        "tasks": available_tasks(),
+        # FROM THE REGISTRY, not from the adapter table -- see
+        # `_task_report`. Same shape as `targets` below, for the same
+        # reason: an agent reads this instead of trying things.
+        "tasks": _task_report(),
         "estimators": estimator_capabilities(),
         "features": {
             "count": len(features),
@@ -125,21 +181,80 @@ def modeling_capabilities() -> Dict[str, Any]:
                 "book, of orders or of fills -- nothing in a Close column "
                 "determines them -- so they arrive through "
                 "register_external_panel, which records what a label IS "
-                "rather than recomputing it."
+                "rather than recomputing it. "
+                # The two `detail` fields that change what a correct spec
+                # says, stated where the ids are listed rather than left to
+                # be discovered by a refusal.
+                "A `censored` label is a duration that may not have been "
+                "observed, so register_external_panel REFUSES it without an "
+                "`event_column` naming the 1/0 indicator beside it, and only "
+                "task='survival' may fit one -- a regression on the duration "
+                "alone reads every censored row as an event at the horizon. "
+                "A `cross_sectional` label is defined against the other "
+                "entities on its date, so on a one-name universe it is "
+                "degenerate: every date's rank is the same number and the "
+                "market-neutral residual is exactly zero."
             ),
+            # FROM `list_targets()`, the registry's own view, rather than
+            # from the `TargetKind` projection -- which carries four of the
+            # nine fields a definition has. `censored` and `cross_sectional`
+            # in particular decide whether a spec is constructible at all,
+            # and were reachable only by reading the source.
             "detail": {
-                name: {
-                    "buildable": kind.buildable,
-                    "tasks": list(kind.tasks),
-                    "continuous": kind.continuous,
-                    "description": kind.description,
+                definition.id: {
+                    "buildable": definition.buildable,
+                    "tasks": list(definition.tasks),
+                    "continuous": definition.continuous,
+                    "description": definition.description,
+                    # Needs an event indicator beside the label; survival
+                    # only. See the note above.
+                    "censored": definition.censored,
+                    # Defined against the date's other entities; degenerate
+                    # on a one-name universe.
+                    "cross_sectional": definition.cross_sectional,
+                    # The OHLCV columns the builder reads, checked against
+                    # the fetched frame before anything is built.
+                    "requires": list(definition.requires),
+                    # What `TargetSpec.params` may name for this label, and
+                    # what it gets if it names nothing. Empty for the
+                    # built-ins, whose parameters are spec fields.
+                    "param_schema": sorted(definition.param_schema.allowed_names),
+                    "default_params": dict(definition.default_params),
                 }
-                for name, kind in sorted(TARGET_KINDS.items())
+                for definition in list_targets()
             },
         },
         "validation": {
             "methods": _literal_options(ValidationSpec, "method"),
             "walk_forward_schemes": _literal_options(ValidationSpec, "scheme"),
+        },
+        # A SECTION OF ITS OWN, because calibration is the one spec field
+        # that silently invalidates a diagnostic reported per estimator
+        # above. `estimators[*].exposes_coefficients` and
+        # `exposes_feature_importance` are read off the UNWRAPPED class --
+        # correctly, that is what `fold_feature_importance` finds when
+        # nothing wraps it -- and `CalibratedClassifierCV` has neither
+        # attribute, so a calibrated run reports `exposes_feature_importance:
+        # True` and an all-NaN `feature_importance_summary`. Proved on
+        # identical data: {f0: 0.389, f1: 0.318, f2: 0.293} uncalibrated
+        # against {f0: NaN, f1: NaN, f2: NaN} isotonic.
+        "calibration": {
+            "methods": _literal_options(EstimatorSpec, "calibration"),
+            "calibration_folds": _numeric_bounds(EstimatorSpec, "calibration_folds"),
+            "note": (
+                "CLASSIFICATION ONLY: calibration maps raw scores onto "
+                "probabilities that mean what they say, fitted on folds held "
+                "out INSIDE each training window, and only classification "
+                "has scores to map. It costs the importances. "
+                "`CalibratedClassifierCV` exposes neither `coef_` nor "
+                "`feature_importances_`, so `feature_importance_summary` is "
+                "NaN for every feature on any run with "
+                "`estimator.calibration != 'none'`, and the "
+                "`exposes_coefficients` / `exposes_feature_importance` flags "
+                "reported per estimator describe the UNCALIBRATED estimator. "
+                "A run that asks for both warns by name rather than leaving "
+                "the NaNs to be read as a broken model."
+            ),
         },
         # FROM THE REGISTRY. This was a hand-written two-item list, which
         # is the failure mode this module's docstring says it exists to

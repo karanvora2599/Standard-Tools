@@ -42,11 +42,7 @@ from standard_quant_tools._runspath import (
 )
 from standard_quant_tools._runspath import runs_dir as _runs_dir
 from standard_quant_tools._runspath import validate_identifier as _validate_identifier
-from standard_quant_tools.artifact_store import (
-    LocalArtifactStore,
-    hash_stream,
-    write_bytes_atomically,
-)
+from standard_quant_tools.artifact_store import hash_stream, write_bytes_atomically
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.error import ValidationError
 
@@ -55,7 +51,6 @@ __all__ = [
     "load_artifact",
     "load_joblib",
     "load_json",
-    "local_store",
     "run_dir",
     "save_artifact",
     "save_joblib",
@@ -80,11 +75,6 @@ def run_dir(artifact_id: str) -> Path:
     """
     _validate_identifier(artifact_id, "artifact_id")
     return _resolved_within_runs_dir(_runs_dir() / artifact_id)
-
-
-def local_store() -> LocalArtifactStore:
-    """The runs directory as an `ArtifactStore`, root resolved per call."""
-    return LocalArtifactStore()
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:

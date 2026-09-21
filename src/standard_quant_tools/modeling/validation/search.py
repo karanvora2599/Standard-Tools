@@ -552,6 +552,7 @@ __all__ = [
     "inner_fold_count",
     "n_search_candidates",
     "optuna_available",
+    "rank_turnover",
     "require_optuna",
     "search_best_params",
     "search_candidates",

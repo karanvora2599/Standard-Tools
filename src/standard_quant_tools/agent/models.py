@@ -5110,8 +5110,14 @@ class ConvertReferenceInput(BaseModel):
                 "column. 'regression', 'ranking' and 'survival' are read as "
                 "continuous scores by sign (a survival score is a risk: higher "
                 "means the event sooner); 'classification' against "
-                "proba_threshold. Required unless the reference carries a "
-                "model_id."
+                "proba_threshold. REQUIRED for to_kind='signal_panel' -- a "
+                "regression prediction thresholded as a probability makes a "
+                "nonsensical but valid-looking panel, so it refuses rather "
+                "than guesses. OPTIONAL for to_kind='score_panel', where "
+                "omitting it passes the predictions through unchanged; give "
+                "it there only for 'classification', which recentres the "
+                "probabilities on proba_threshold so a score's SIGN is the "
+                "predicted direction."
             ),
         )
     )

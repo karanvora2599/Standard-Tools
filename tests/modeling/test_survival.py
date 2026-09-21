@@ -29,7 +29,7 @@ from standard_quant_tools.modeling.agent.tools import (
 )
 from standard_quant_tools.modeling.engine import run_experiment
 from standard_quant_tools.modeling.ensemble import _check_tasks
-from standard_quant_tools.modeling.estimators import survival as survival_estimators
+from standard_quant_tools.modeling.estimators import boosting
 from standard_quant_tools.modeling.estimators.registry import ESTIMATOR_REGISTRY
 from standard_quant_tools.modeling.estimators.survival import CoxPHRegressor
 from standard_quant_tools.modeling.registry.model_registry import load_manifest
@@ -52,7 +52,7 @@ from standard_quant_tools.modeling.validation.survival import (
 
 BETA = np.array([1.0, -0.5, 0.0])
 requires_xgboost = pytest.mark.skipif(
-    not survival_estimators.HAS_XGBOOST_SURVIVAL, reason="xgboost is not installed"
+    not boosting.HAS_XGBOOST, reason="xgboost is not installed"
 )
 
 
