@@ -45,11 +45,11 @@ shipped, generalized to the rest of the surface.
 | `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 20 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 18 | `portfolio_risk` | Turn a view into a position and price what it costs. |
-| `modeling` | 31 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
+| `modeling` | 34 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 17 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
 | `delta_one` | 18 | `delta_one` | Which instrument is the cheapest way to own or hedge an exposure: carry, basis, curves, rolls, hedge sizing and instrument comparison. Takes quotes as arguments; there is no futures provider. |
-| `feature_lab` | 9 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
+| `feature_lab` | 11 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
 
 **Two of these are recent splits, and both were held back until they were
 legal.** `derivatives` left `research` at twelve tools, and
@@ -125,7 +125,7 @@ exactly the points where it matters most.
 the original split, so it is worth recording what the process actually
 required.
 
-The nine tools in it were **built inside `modeling` first** and moved once
+The eleven tools in it were **built inside `modeling` first** and moved once
 the cluster was big enough to stand alone. That order is the rule, not an
 accident of scheduling: a runtime declared empty and filled later spends
 however long it takes to fill as a boundary that isolates nothing, and the

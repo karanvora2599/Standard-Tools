@@ -17,11 +17,21 @@ were scored with it -- narrowing a trained universe of eight names to
 three inverted a forest's ranking (findings D15). Such a model is
 therefore pinned to its training universe unless the caller passes
 universe_policy='allow', and the result then says what was refit.
+
+survival_curves: the same load, the same gates, the same feature matrix,
+and then the question a risk score cannot answer. A survival estimator's
+`predict` orders the entities -- who reaches the event first -- while the
+curve S(t | x) says how likely one particular entity is to still be
+waiting at t. Both come off the same fitted model; only the second is a
+probability, and only the second can be read against a deadline. The two
+entry points share `_scoring_context` so that a curve and a score for the
+same (model, date, universe) rest on one set of gates rather than two.
 """
 
 import hashlib
 import json
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -50,7 +60,9 @@ from .registry.model_registry import (
 )
 
 
-def _deployed_preprocessing(manifest, model_id: str) -> Dict[str, Any]:
+def _deployed_preprocessing(
+    manifest, model_id: str, caller: str = "score_model"
+) -> Dict[str, Any]:
     """
     The transform the deployed estimator was fitted under.
 
@@ -69,7 +81,7 @@ def _deployed_preprocessing(manifest, model_id: str) -> Dict[str, Any]:
     spec = load_model_spec(model_id)
     if spec.preprocessing.normalization != "pooled":
         raise ValidationError(
-            f"score_model: model {model_id!r} was validated under "
+            f"{caller}: model {model_id!r} was validated under "
             f"preprocessing.normalization={spec.preprocessing.normalization!r} "
             "but predates the refit that honours it: its deployed estimator "
             "was fitted on the pooled statistics, so no transform applied now "
@@ -180,37 +192,60 @@ def _interval_statistics(
     }, warnings
 
 
-def score_model(
+@dataclass
+class _ScoringContext:
+    """
+    Everything a prediction needs, and nothing about what KIND of
+    prediction it is: the registered model, the aligned feature matrix,
+    and the record of which entities did not make it into that matrix.
+
+    Whatever an estimator is asked for at `as_of` -- a point score, a
+    band, a survival curve -- rests on exactly the same gates (the
+    training-information cutoff, the feature-implementation provenance,
+    the universe pins, the one-date cross-section, the staleness limit)
+    and exactly the same fitted transform. Two entry points each running
+    those gates in their own words is how one of them ends up enforcing
+    a weaker set; they run once here instead, and each entry point does
+    only the arithmetic that makes it different.
+    """
+
+    manifest: Any
+    estimator: Any
+    universe: List[str]
+    as_of_ts: pd.Timestamp
+    latest: pd.DataFrame
+    X: pd.DataFrame
+    effective_ts: pd.Timestamp
+    staleness_days: int
+    stale_entities: Dict[str, str]
+    missing_entities: List[str]
+    warnings: List[str]
+
+
+def _scoring_context(
     model_id: str,
     as_of: str,
     universe: List[str],
     lookback_days: int = 400,
     max_staleness_days: Optional[int] = None,
     universe_policy: str = "strict",
-) -> Dict[str, Any]:
+    caller: str = "score_model",
+) -> _ScoringContext:
     """
-    Args:
-        universe_policy: 'strict' (default) refuses to score a
-            cross-sectional model on a universe that is not the one it
-            was trained on; 'allow' scores it and returns a warning
-            saying the transform was refit on the scoring cross-section
-            and how its width compares with the training one. A model
-            with universe-scope features is refused either way.
-        lookback_days: calendar days of history fetched before `as_of` so
-            every requested feature's lookback window has enough data —
-            widen this if the model's features use unusually large
-            windows (e.g. a custom feature with lookback > 252 bars).
+    Run every gate and build the feature matrix the registered estimator
+    was fitted to consume.
 
-    Raises:
-        ValidationError: no registered model with `model_id`, or no
-        entity in `universe` has a scoreable row as of `as_of`.
+    `caller` is only the name the refusals use for themselves, so a
+    message written for one entry point does not tell the reader to fix
+    a call they did not make. The gates themselves are identical by
+    construction -- that is the whole reason this is one function.
     """
     # Entities are asset keys in canonical form, whatever spelling arrived,
     # so `missing_entities` and the panel agree on names.
     universe = canonical_universe(universe)
     if universe_policy not in ("strict", "allow"):
         raise ValidationError(
-            f"score_model: universe_policy={universe_policy!r}; expected "
+            f"{caller}: universe_policy={universe_policy!r}; expected "
             "'strict' or 'allow'."
         )
     try:
@@ -264,7 +299,7 @@ def score_model(
                 )
             )
             raise ValidationError(
-                f"score_model: as_of {as_of!r} is not after this model's training "
+                f"{caller}: as_of {as_of!r} is not after this model's training "
                 f"information cutoff, {cutoff_value}. The registered estimator is refit on "
                 "the full training panel, and its forward-return labels consumed prices "
                 "through that date, so scoring at or before it returns a future-trained "
@@ -283,7 +318,7 @@ def score_model(
     preprocessing: Dict[str, Any] = {}
     if state is None:
         stats = load_preprocessing_stats(model_id)
-        preprocessing = _deployed_preprocessing(manifest, model_id)
+        preprocessing = _deployed_preprocessing(manifest, model_id, caller)
     estimator = load_model(model_id)
 
     # The model's OWN bundled, content-verified copy -- not
@@ -303,7 +338,7 @@ def score_model(
     if original_spec_dict.get("provider") == "external":
         raise ValidationError(
             f"model {model_id!r} was trained on an externally registered "
-            "panel, so score_model cannot run: scoring rebuilds features "
+            f"panel, so {caller} cannot run: scoring rebuilds features "
             "from the model's bundled spec, and these features were "
             "computed outside this library. Register a panel covering the "
             "scoring window with register_external_panel, predict with the "
@@ -346,7 +381,7 @@ def score_model(
                 for column, (was, now) in drifted.items()
             )
             raise ValidationError(
-                f"score_model: the implementation of {len(drifted)} feature(s) has "
+                f"{caller}: the implementation of {len(drifted)} feature(s) has "
                 f"changed since model {model_id!r} was trained: {detail}. The "
                 "registered estimator learned coefficients against the OLD "
                 "definition, so scoring now would feed it a differently-computed "
@@ -380,7 +415,7 @@ def score_model(
 
     if universe_scope_features and sorted(universe) != sorted(trained_universe):
         raise ValidationError(
-            f"score_model: this model uses universe-scope feature(s) "
+            f"{caller}: this model uses universe-scope feature(s) "
             f"{sorted(set(universe_scope_features))}, which are computed from the "
             f"ENTIRE universe's return matrix, so the scoring universe must match "
             f"the training universe exactly. Trained on "
@@ -405,7 +440,7 @@ def score_model(
     warnings: List[str] = []
     if cross_sectional and universe_differs and universe_policy == "strict":
         raise ValidationError(
-            "score_model: this model standardizes each feature WITHIN the "
+            f"{caller}: this model standardizes each feature WITHIN the "
             "scoring cross-section (preprocessing step "
             "cross_sectional_standardize), so every row's score depends on "
             "which other entities are scored with it -- a subset is not a "
@@ -431,7 +466,7 @@ def score_model(
     latest = panel.sort_values("date").groupby("entity", as_index=False).tail(1)
     if latest.empty:
         raise ValidationError(
-            f"score_model: no scoreable rows as of {as_of!r} for universe {universe} — "
+            f"{caller}: no scoreable rows as of {as_of!r} for universe {universe} — "
             "try a larger lookback_days."
         )
 
@@ -488,7 +523,7 @@ def score_model(
     staleness_days = int((as_of_ts - effective_ts).days)
     if max_staleness_days is not None and staleness_days > max_staleness_days:
         raise ValidationError(
-            f"score_model: the newest available observation is "
+            f"{caller}: the newest available observation is "
             f"{effective_ts.strftime('%Y-%m-%d')}, {staleness_days} calendar days "
             f"before as_of {as_of!r}, exceeding max_staleness_days="
             f"{max_staleness_days}. Every entity agrees on that date, so this is "
@@ -532,7 +567,7 @@ def score_model(
     ):
         holed = latest.loc[X.isna().any(axis=1).to_numpy(), "entity"].tolist()
         raise ValidationError(
-            f"score_model: {len(holed)} entity row(s) carry a missing feature "
+            f"{caller}: {len(holed)} entity row(s) carry a missing feature "
             f"after the model's preprocessing pipeline ({holed[:5]}"
             f"{'...' if len(holed) > 5 else ''}), and estimator "
             f"{manifest.estimator_type!r} does not accept missing values. "
@@ -540,6 +575,67 @@ def score_model(
             "one, or score a universe whose features are complete as of "
             f"{as_of!r}."
         )
+
+    return _ScoringContext(
+        manifest=manifest,
+        estimator=estimator,
+        universe=universe,
+        as_of_ts=as_of_ts,
+        latest=latest,
+        X=X,
+        effective_ts=effective_ts,
+        staleness_days=staleness_days,
+        stale_entities=stale_entities,
+        missing_entities=missing_entities,
+        warnings=warnings,
+    )
+
+
+def score_model(
+    model_id: str,
+    as_of: str,
+    universe: List[str],
+    lookback_days: int = 400,
+    max_staleness_days: Optional[int] = None,
+    universe_policy: str = "strict",
+) -> Dict[str, Any]:
+    """
+    Args:
+        universe_policy: 'strict' (default) refuses to score a
+            cross-sectional model on a universe that is not the one it
+            was trained on; 'allow' scores it and returns a warning
+            saying the transform was refit on the scoring cross-section
+            and how its width compares with the training one. A model
+            with universe-scope features is refused either way.
+        lookback_days: calendar days of history fetched before `as_of` so
+            every requested feature's lookback window has enough data —
+            widen this if the model's features use unusually large
+            windows (e.g. a custom feature with lookback > 252 bars).
+
+    Raises:
+        ValidationError: no registered model with `model_id`, or no
+        entity in `universe` has a scoreable row as of `as_of`.
+    """
+    context = _scoring_context(
+        model_id,
+        as_of,
+        universe,
+        lookback_days=lookback_days,
+        max_staleness_days=max_staleness_days,
+        universe_policy=universe_policy,
+    )
+    manifest = context.manifest
+    estimator = context.estimator
+    universe = context.universe
+    as_of_ts = context.as_of_ts
+    latest = context.latest
+    X = context.X
+    effective_ts = context.effective_ts
+    staleness_days = context.staleness_days
+    stale_entities = context.stale_entities
+    missing_entities = context.missing_entities
+    warnings = context.warnings
+
     # Through the SAME adapter the folds and the deployed refit used. This
     # was a two-way branch -- regression got `predict`, everything else got
     # `positive_class_proba` -- written when those were the only two tasks.
@@ -657,4 +753,269 @@ def score_model(
         # describes and which said nothing about the interval. Empty for a
         # point-only model -- see _interval_statistics.
         "interval_stats": interval_stats,
+    }
+
+
+#: The survival estimators that can say how likely a row is to still be
+#: waiting at t, not only which row goes first. Named in the refusal,
+#: because "this one cannot" is half an answer.
+_CURVE_ESTIMATORS = ("cox_ph", "xgboost_cox", "xgboost_aft")
+
+
+def _survival_time_grid(
+    estimator: Any,
+    manifest: Any,
+    model_id: str,
+    times: Optional[Sequence[float]],
+    n_times: int,
+) -> "tuple[np.ndarray, Optional[np.ndarray]]":
+    """
+    Where to read the curve, and the baseline knots it is read against.
+
+    An explicit `times` is taken as given -- a deadline is the caller's,
+    not the model's. Otherwise the grid is `n_times` quantiles of the
+    model's own baseline event times, so the points land where the
+    training data actually observed events rather than spread evenly
+    across a range that may be mostly empty. A Cox-family estimator
+    carries those knots; an accelerated-failure-time booster carries a
+    fitted distribution instead, and its grid falls back to the span of
+    training durations its validation recorded (the Brier horizons on the
+    manifest). With neither, there is nothing to guess from and the
+    caller is asked for `times`.
+    """
+    knots = getattr(estimator, "baseline_times_", None)
+    if knots is not None:
+        knots = np.asarray(knots, dtype=float)
+        if knots.size == 0:
+            knots = None
+
+    if times is not None:
+        grid = np.asarray(list(times), dtype=float)
+        if grid.size < 2:
+            raise ValidationError(
+                f"survival_curves: `times` has {grid.size} point(s); a curve "
+                "needs at least two to be a curve. Pass a longer grid, or "
+                "leave `times` unset to read the model's own baseline knots."
+            )
+        if not np.isfinite(grid).all() or (grid < 0).any():
+            raise ValidationError(
+                "survival_curves: every entry of `times` must be a finite, "
+                "non-negative duration in the units the model's target was "
+                "measured in (seconds, bars, days -- whatever the training "
+                "label counted). A negative time has no survival probability."
+            )
+        if not (np.diff(grid) > 0).all():
+            raise ValidationError(
+                "survival_curves: `times` must be strictly increasing. S(t) "
+                "is a non-increasing step function of t, so an out-of-order "
+                "grid would return a curve that appears to rise; the order of "
+                "the columns is part of the claim."
+            )
+        return grid, knots
+
+    n_times = int(n_times)
+    if n_times < 2:
+        raise ValidationError(
+            f"survival_curves: n_times={n_times}; a curve needs at least two "
+            "points. Raise n_times, or pass `times` explicitly."
+        )
+
+    if knots is not None:
+        # Quantiles, not a linear span: the knots ARE the observed event
+        # times, so their quantiles put the grid where the durations are
+        # and not in whatever empty stretch a heavy right tail leaves.
+        # Duplicates collapse, because two identical columns would be two
+        # identical answers charged as two.
+        return np.unique(np.quantile(knots, np.linspace(0.0, 1.0, n_times))), knots
+
+    metrics = manifest.oos_metrics or {}
+    low = metrics.get("brier_horizon_min")
+    high = metrics.get("brier_horizon_max")
+    if low is None or high is None or not np.isfinite([low, high]).all() or high <= low:
+        raise ValidationError(
+            f"survival_curves: the estimator registered for model {model_id!r} "
+            f"({type(estimator).__name__}) carries no baseline event times, and "
+            "this model's validation recorded no horizon span to fall back on, "
+            "so there is nothing from which to pick a default grid. Pass "
+            "`times` explicitly -- the durations this model was trained on are "
+            "in the units of its target, and only you know which deadline the "
+            "decision turns on."
+        )
+    return np.linspace(float(low), float(high), n_times), knots
+
+
+def survival_curves(
+    model_id: str,
+    as_of: str,
+    universe: List[str],
+    *,
+    lookback_days: int = 400,
+    max_staleness_days: Optional[int] = None,
+    universe_policy: str = "strict",
+    times: Optional[Sequence[float]] = None,
+    n_times: int = 32,
+) -> Dict[str, Any]:
+    """
+    S(t | x) for each entity as of a date: how likely each one is to still
+    be waiting at t, beside the risk score that only ranks them.
+
+    Everything up to the feature matrix is `score_model`'s, gate for gate
+    (`_scoring_context`). What is different is the question asked of the
+    fitted estimator afterwards: `predict` gives a hazard, which orders
+    the cross-section and has no units, while `predict_survival_function`
+    gives a probability at each of `times`, which can be read against a
+    deadline. `median_survival` is the first grid point where that
+    probability falls to 0.5 or below, and is None when the curve never
+    crosses inside the grid -- deliberately not the grid's last point,
+    which would report "we stopped looking" as "it happened here".
+
+    Raises:
+        ValidationError: the model is not a survival model; its estimator
+        produces a risk and no curve; `times` is not a strictly increasing
+        non-negative grid; or any gate `score_model` enforces.
+    """
+    manifest = load_manifest(model_id)
+    if manifest.task != "survival":
+        raise ValidationError(
+            f"survival_curves: model {model_id!r} was trained for the "
+            f"{manifest.task!r} task, which has no survival curve. S(t | x) is "
+            "read off a baseline hazard, and only a survival label -- a "
+            "duration together with whether its event was observed -- can "
+            f"estimate one; a {manifest.task!r} model predicts a level, and "
+            "there is no time axis to put it on. Use score_model for this "
+            "model, or train one on a survival target (task='survival', e.g. "
+            "a time_to_fill panel registered with its event_column) and ask "
+            "again."
+        )
+
+    context = _scoring_context(
+        model_id,
+        as_of,
+        universe,
+        lookback_days=lookback_days,
+        max_staleness_days=max_staleness_days,
+        universe_policy=universe_policy,
+        caller="survival_curves",
+    )
+    estimator = context.estimator
+    if not hasattr(estimator, "predict_survival_function"):
+        raise ValidationError(
+            f"survival_curves: model {model_id!r} is fitted with "
+            f"{type(estimator).__name__} (estimator_type "
+            f"{manifest.estimator_type!r}), which produces a risk score and no "
+            "survival function. The risk is NOT returned in its place: it "
+            "orders the entities and is not a probability, so reading it "
+            "against a deadline would put a number on a scale it does not "
+            "have. The survival estimators that carry a curve are "
+            f"{', '.join(_CURVE_ESTIMATORS)} -- retrain with one of those, or "
+            "call score_model, which is where the ordering lives."
+        )
+
+    grid, knots = _survival_time_grid(estimator, manifest, model_id, times, n_times)
+    matrix = np.asarray(
+        estimator.predict_survival_function(context.X.to_numpy(), grid), dtype=float
+    )
+    entities = [str(entity) for entity in context.latest["entity"].to_numpy()]
+    if matrix.shape != (len(entities), grid.size):
+        raise ValidationError(
+            f"survival_curves: {type(estimator).__name__}."
+            "predict_survival_function returned a "
+            f"{matrix.shape} matrix for {len(entities)} entities and "
+            f"{grid.size} times. A curve tool cannot align rows to entities "
+            "it cannot count, and silently reshaping would attach one name's "
+            "probabilities to another."
+        )
+    # The same adapter score_model uses, so a curve and a score for the
+    # same call carry the SAME risk numbers rather than two paths' worth.
+    risk = np.asarray(
+        get_adapter(manifest.task).score(estimator, context.X), dtype=float
+    )
+
+    # The first grid point at or below 0.5. `np.argmax` on the boolean
+    # returns 0 for a row that never crosses, which is why the crossing
+    # flag is carried separately -- a median of grid[0] and "never reached
+    # 0.5" are opposite claims.
+    crossed = matrix <= 0.5
+    any_crossing = crossed.any(axis=1)
+    first_crossing = np.argmax(crossed, axis=1)
+
+    per_entity: List[Dict[str, Any]] = []
+    for row, entity in enumerate(entities):
+        per_entity.append(
+            {
+                "entity": entity,
+                "risk": float(risk[row]),
+                "survival_at_times": [float(value) for value in matrix[row]],
+                "median_survival": (
+                    float(grid[first_crossing[row]])
+                    if bool(any_crossing[row])
+                    else None
+                ),
+            }
+        )
+
+    warnings = list(context.warnings)
+    if knots is not None:
+        if float(grid[-1]) < float(knots[-1]):
+            warnings.append(
+                f"this grid ends at t={float(grid[-1]):.6g}, before the model's "
+                f"last baseline event time ({float(knots[-1]):.6g}): every curve "
+                "is TRUNCATED there. A median_survival of None therefore means "
+                "the curve had not fallen to 0.5 by the end of this grid, NOT "
+                "that the event never comes -- widen `times`, or leave it unset "
+                "to span the baseline."
+            )
+        if float(grid[-1]) > float(knots[-1]):
+            warnings.append(
+                f"this grid extends to t={float(grid[-1]):.6g}, past the model's "
+                f"last baseline event time ({float(knots[-1]):.6g}). The baseline "
+                "cumulative hazard is a step function with no step out there, so "
+                "every probability beyond that point is the last observed value "
+                "held flat -- an extrapolation, not an estimate, and it will "
+                "understate the hazard for as far as it runs."
+            )
+        warnings.append(
+            "proportional hazards: these curves share one baseline, scaled by "
+            "each entity's risk. The ORDERING between them is what the model "
+            f"learned from {int(knots.size)} baseline event time(s); the LEVEL "
+            "of any one of them is the baseline's, estimated on the training "
+            "durations. If the base rate has moved since training -- a slower "
+            "book, a wider spread regime -- the ranking can still be right "
+            "while every probability is off, and nothing in this result can "
+            "tell the two apart."
+        )
+    else:
+        warnings.append(
+            "this estimator carries no baseline event times: the level of every "
+            "curve comes from the fitted accelerated-failure-time distribution "
+            "and the scale its spec fixed, not from an empirical hazard. The "
+            "shape is a modelling assumption, so read the ordering with more "
+            "confidence than the probabilities."
+        )
+    n_never = int((~any_crossing).sum())
+    if n_never:
+        warnings.append(
+            f"{n_never} of {len(entities)} entity curve(s) never reach 0.5 on "
+            "this grid, so their median_survival is None. That is the honest "
+            "answer for a horizon this grid does not cover; it is not a claim "
+            "that the event does not happen."
+        )
+
+    return {
+        "model_id": model_id,
+        "as_of": as_of,
+        # The date the curves were actually computed from, which is not
+        # necessarily the date that was asked for -- see score_model.
+        "effective_score_date": context.effective_ts.strftime("%Y-%m-%d"),
+        "times": [float(value) for value in grid],
+        "per_entity": per_entity,
+        # The cross-section's average curve, which is a description of
+        # this call's universe and not of the model's baseline: it moves
+        # when the universe does.
+        "survival_mean_curve": [float(value) for value in matrix.mean(axis=0)],
+        "n_baseline_knots": int(knots.size) if knots is not None else 0,
+        "n_entities": len(entities),
+        "missing_entities": context.missing_entities,
+        "stale_entities": context.stale_entities,
+        "warnings": warnings,
     }

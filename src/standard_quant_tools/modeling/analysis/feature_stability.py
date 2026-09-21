@@ -120,6 +120,41 @@ def ks_statistic(reference: np.ndarray, current: np.ndarray) -> float:
     return float(np.max(np.abs(cdf_ref - cdf_cur)))
 
 
+def psi_verdict(psi: float) -> str:
+    """
+    The label that goes with a PSI, from the two thresholds above.
+
+    One function rather than the comparison written out at each call site,
+    so every reader of a PSI in this package draws the same line in the
+    same place. A non-finite PSI compares false against both thresholds and
+    comes back 'stable', which is what the single-split report has always
+    said; callers that can distinguish "no drift" from "no measurement"
+    check `np.isfinite` first and say so.
+    """
+    if psi >= PSI_SIGNIFICANT:
+        return "significant"
+    if psi >= PSI_MODERATE:
+        return "moderate"
+    return "stable"
+
+
+def _date_blocks(frame: pd.DataFrame, n_blocks: int) -> List[np.ndarray]:
+    """
+    The panel's dates cut into `n_blocks` contiguous chunks.
+
+    Shared by the block-IC report and the block-PSI curve so the two are
+    the same split. A tool that shows an IC per block beside a PSI per
+    block, computed from two different partitions of the dates, would be
+    inviting a comparison that is not one.
+    """
+    dates = np.sort(pd.to_datetime(frame["date"]).unique())
+    if len(dates) < n_blocks:
+        raise ValidationError(
+            f"{len(dates)} dates cannot be split into {n_blocks} blocks"
+        )
+    return list(np.array_split(dates, n_blocks))
+
+
 def feature_drift(
     panel: pd.DataFrame,
     feature: str,
@@ -178,11 +213,7 @@ def feature_drift(
         return float(series.mean()) if len(series) else float("nan")
 
     ic_before, ic_after = _ic(before), _ic(after)
-    verdict = (
-        "significant"
-        if psi >= PSI_SIGNIFICANT
-        else "moderate" if psi >= PSI_MODERATE else "stable"
-    )
+    verdict = psi_verdict(psi)
 
     ic_flipped = (
         np.isfinite(ic_before)
@@ -242,12 +273,7 @@ def feature_stability(
     if frame.empty:
         raise ValidationError(f"feature {feature!r} has no usable observations")
 
-    dates = np.sort(pd.to_datetime(frame["date"]).unique())
-    if len(dates) < n_blocks:
-        raise ValidationError(
-            f"{len(dates)} dates cannot be split into {n_blocks} blocks"
-        )
-    chunks = np.array_split(dates, n_blocks)
+    chunks = _date_blocks(frame, n_blocks)
 
     blocks: List[Dict[str, Any]] = []
     for index, chunk in enumerate(chunks):
@@ -305,6 +331,84 @@ def feature_stability(
             else None
         ),
     }
+
+
+def psi_by_block(
+    panel: pd.DataFrame,
+    feature: str,
+    *,
+    n_blocks: int = 4,
+    reference: str = "first",
+) -> List[Dict[str, Any]]:
+    """
+    The feature's PSI in each contiguous time block, against an earlier one.
+
+    `feature_drift` asks the same question across ONE boundary, which
+    answers "has it moved" and not "when, and how fast". A feature that
+    drifted once in 2021 and a feature that has been sliding every quarter
+    since give the same single-split PSI, and they are not the same
+    problem: the first is a break to split the sample at, the second is a
+    feature whose definition is decaying and will keep decaying.
+
+    `reference='first'` measures every block against the FIRST one, so a
+    monotone slide accumulates and the curve rises. `reference='previous'`
+    measures each block against the one before it, so the same slide reads
+    flat and only a jump stands out. The two together separate a break from
+    a drift; either alone cannot.
+
+    Block 0 reports `psi=None`. It is the reference under `'first'` and has
+    no predecessor under `'previous'`, and reporting 0.0 there would put a
+    measurement where there is none.
+
+    The blocks are the ones `feature_stability` reports, from the same
+    split of the same rows, so the IC per block and the PSI per block can
+    be read side by side.
+    """
+    _require(panel, feature)
+    if n_blocks < 2:
+        raise ValidationError("n_blocks must be at least 2")
+    if reference not in ("first", "previous"):
+        raise ValidationError(
+            f"psi_by_block: reference={reference!r}; expected 'first' "
+            "(every block against the earliest) or 'previous' (each block "
+            "against the one before it)."
+        )
+
+    frame = panel[["date", "entity", feature, "target"]].dropna(
+        subset=["date", feature, "target"]
+    )
+    if frame.empty:
+        raise ValidationError(f"feature {feature!r} has no usable observations")
+
+    chunks = _date_blocks(frame, n_blocks)
+    dates = pd.to_datetime(frame["date"])
+
+    windows: List[np.ndarray] = []
+    rows: List[Dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        values = frame[dates.isin(chunk)][feature].to_numpy(dtype=float)
+        windows.append(values)
+        if index == 0:
+            psi: Optional[float] = None
+        else:
+            against = windows[0] if reference == "first" else windows[index - 1]
+            psi = population_stability_index(against, values)
+        rows.append(
+            {
+                "block": index,
+                "start": str(pd.Timestamp(chunk[0]).date()),
+                "end": str(pd.Timestamp(chunk[-1]).date()),
+                "n_dates": int(len(chunk)),
+                "psi": psi,
+                # None rather than 'stable' where there is no number: the
+                # verdict is a reading of a PSI, and an absent PSI has not
+                # been read.
+                "psi_verdict": (
+                    psi_verdict(psi) if psi is not None and np.isfinite(psi) else None
+                ),
+            }
+        )
+    return rows
 
 
 def _null_distribution(
@@ -514,4 +618,6 @@ __all__ = [
     "ks_statistic",
     "permutation_test_ic",
     "population_stability_index",
+    "psi_by_block",
+    "psi_verdict",
 ]

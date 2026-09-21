@@ -48,6 +48,14 @@ MAX_FITS_CEILING = 100_000
 #: machine, not the spec, is the constraint.
 MAX_PARALLELISM_CEILING = 64
 
+#: Shuffles a panel-wide significance screen may draw: features times
+#: permutations, counted before the first shuffle and REFUSED over the
+#: ceiling rather than truncated. A draw is one reshuffle plus one pass of
+#: cross-sectional IC over the panel -- about 1.6 ms on a twelve-name
+#: panel -- so this is roughly five minutes of one call, the point past
+#: which a caller wants a shorter feature list rather than a longer wait.
+MAX_PERMUTATION_DRAWS = 200_000
+
 __all__ = [
     "DEFAULT_MAX_FITS",
     "MAX_EXPANDED_COLUMNS",
@@ -55,4 +63,5 @@ __all__ = [
     "MAX_LAG",
     "MAX_PARALLELISM_CEILING",
     "MAX_LAGS_PER_FEATURE",
+    "MAX_PERMUTATION_DRAWS",
 ]

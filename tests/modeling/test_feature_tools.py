@@ -645,6 +645,8 @@ class TestTheSplitFollowedTheRule:
         "get_feature_regime_stability",
         "run_feature_ablation",
         "run_feature_permutation_test",
+        "screen_feature_significance",
+        "screen_feature_stability",
         "select_features",
     ]
 

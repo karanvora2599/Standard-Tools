@@ -1,5 +1,47 @@
 # Changelog
 
+## The statistics that were computed and averaged away
+
+Five tools for numbers the library already computed and threw away
+inside a fold loop, kept for one feature at a time, or never passed a
+survival function at all.
+
+- **`score_prediction_intervals`** asks whether the intervals a model
+  publishes actually cover. The distributional metrics ran inside the
+  engine's fold loop and were averaged into one number; the interval
+  columns were published, re-emitted at scoring time, and unscoreable.
+  Pinball loss per quantile, the crossing rate, and coverage against the
+  nominal level, pooled or by date or by entity, because a band that
+  covered 97% in calm and 62% in a selloff is one pooled number away
+  from looking fine.
+- **`compare_signals`** makes a multiple-testing correction reachable.
+  Holm was applied only inside `compare_models` for registered models
+  sharing a task; a researcher with twelve p-values from anywhere had no
+  correction, and the runtimes that warn their t-statistics "may not
+  survive HAC errors" had the Newey-West estimator one import away.
+  Three modes: two prediction references, two per-date IC series with
+  the HAC variance beside the naive one, or a set of p-values under Holm,
+  Bonferroni or Benjamini-Hochberg. The warning it always carries: this
+  controls the error of these tests, not for the candidates having been
+  selected on the same sample.
+- **`screen_feature_significance`** runs the permutation floor over a
+  whole panel. One feature at a time, the tool said `null_p95_abs` was
+  "the honest floor for `select_features`"; across a panel the floor is
+  their maximum, and a naive threshold keeps features that noise
+  produces one time in twenty. A draw budget bounds the cost, with the
+  ceiling declared in the limits module.
+- **`screen_feature_stability`** reports drift and IC stability for
+  every feature at once, with a per-block PSI curve against the first
+  block or the previous one, so a feature that is no longer the same
+  measurement is visible without knowing its name in advance.
+- **`predict_survival_curve`** returns the curve a survival model
+  learned. The experiment kept the integrated Brier score and discarded
+  the survival matrix; scoring returned a risk score. The tool answers
+  how likely an order is to still be resting at each horizon and when it
+  crosses one half, under every gate `score_model` enforces, and is
+  honest that the level is the baseline's and a median past the grid is
+  unknown, not never.
+
 ## The numbers an agent could only learn by failing are readable
 
 Every item here wraps something the library computed on every call and

@@ -32,6 +32,8 @@ import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 from typing_extensions import Annotated
 
+from ..analysis.feature_stability import PSI_MODERATE, PSI_SIGNIFICANT
+from ..limits import MAX_PERMUTATION_DRAWS
 from ..specs import ModelSpec
 
 
@@ -852,6 +854,266 @@ class PermutationTestResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+# ── panel-wide screens ──────────────────────────────────────────────────
+
+
+class FeatureSignificance(BaseModel):
+    """One feature's observed IC against what this panel's noise produces."""
+
+    model_config = _NO_PROTECTED
+
+    feature: str
+    rank_ic: Stat = Field(
+        ...,
+        description="Observed mean cross-sectional IC. None when the panel "
+        "cannot produce one for this feature -- a constant column has no "
+        "rank correlation, and 0.0 would read as 'no signal' where the "
+        "answer is 'no measurement'.",
+    )
+    p_value: Stat = Field(
+        ...,
+        description="Two-sided empirical p-value against the null, with the "
+        "+1 correction in numerator and denominator so an exact 0 is never "
+        "claimed.",
+    )
+    null_p95_abs: Stat = Field(
+        ...,
+        description="95th percentile of |IC| under the null for THIS "
+        "feature: the IC noise alone produces 5% of the time.",
+    )
+    ic_autocorrelation_lag1: Stat = Field(
+        ...,
+        description="Lag-1 autocorrelation of the observed per-date IC "
+        "series. Near zero the two nulls agree; at +0.6 only "
+        "'circular_shift' is calibrated.",
+    )
+    significant_at_05: bool
+    n_usable_permutations: int = Field(
+        ...,
+        description="Draws that produced a finite IC. 0 means the feature "
+        "was not testable at all.",
+    )
+
+
+class ScreenFeatureSignificanceInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    features: Optional[List[str]] = Field(
+        None,
+        description="Features to test. Defaults to every feature in the "
+        "dataset, which is the point of the screen -- the floor is a "
+        "property of the whole candidate set.",
+    )
+    n_permutations: int = Field(
+        200,
+        ge=20,
+        le=5000,
+        description="Shuffles per feature. 200 resolves a p-value to about "
+        "0.005, which separates 'real' from 'noise' and does not defend a "
+        "0.001 claim. Cost is linear in this and in the feature count.",
+    )
+    method: Literal["spearman", "pearson"] = Field(
+        "spearman",
+        description="Correlation used for the IC: 'spearman' (default, "
+        "rank) or 'pearson'.",
+    )
+    null: Literal["circular_shift", "within_date"] = Field(
+        "circular_shift",
+        description="How the null is drawn. 'circular_shift' (default) "
+        "rolls each entity's feature series by a random offset, destroying "
+        "its link to the target while keeping its own serial correlation. "
+        "'within_date' shuffles inside each date, which destroys that "
+        "serial correlation too and rejected a true null 27-35% of the time "
+        "on autocorrelated features.",
+    )
+    random_seed: int = Field(0, ge=0, description="Seed, so the floor is reproducible.")
+    max_draws: int = Field(
+        20_000,
+        ge=1,
+        le=MAX_PERMUTATION_DRAWS,
+        description="Refuse to start if features x n_permutations exceeds "
+        "this. At about 1.6 ms a draw the default is roughly half a minute "
+        "and the ceiling several minutes; the product is computed before "
+        "the first shuffle and the screen is REFUSED rather than truncated.",
+    )
+
+
+class ScreenFeatureSignificanceResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    features: List[FeatureSignificance] = Field(
+        ..., description="Ordered by |IC|, strongest first."
+    )
+    honest_floor: Stat = Field(
+        ...,
+        description="The largest null_p95_abs across the screened features: "
+        "the min_abs_rank_ic that select_features can be given on THIS "
+        "panel without keeping features whose IC this panel's noise "
+        "reproduces. None when nothing was testable.",
+    )
+    floor_feature: Optional[str] = Field(
+        None, description="The feature whose null set the floor."
+    )
+    n_features: int
+    n_significant: int = Field(
+        ..., description="Features with p < 0.05 against the chosen null."
+    )
+    n_kept_at_floor: int = Field(
+        ...,
+        description="Features whose |IC| clears honest_floor. Compare with "
+        "how many a floor picked by eye would keep -- the warnings say.",
+    )
+    n_draws: int = Field(
+        ...,
+        description="features x n_permutations: the product that was "
+        "checked against max_draws before the first shuffle.",
+    )
+    null: str
+    random_seed: int
+    warnings: List[str] = Field(default_factory=list)
+
+
+class BlockPSI(BaseModel):
+    """One block of the drift curve."""
+
+    model_config = _NO_PROTECTED
+
+    block: int
+    start: str
+    end: str
+    n_dates: int
+    psi: Stat = Field(
+        None,
+        description="PSI of this block against the reference block. None "
+        "for block 0, which IS the reference and has no predecessor -- "
+        "reporting 0.0 there would put a measurement where there is none.",
+    )
+    psi_verdict: Optional[str] = Field(
+        None, description="'stable', 'moderate' or 'significant'; None where psi is."
+    )
+
+
+class FeatureStabilityScreen(BaseModel):
+    """One feature's two failures, and the shape of the first over time."""
+
+    model_config = _NO_PROTECTED
+
+    feature: str
+    split_date: str = Field(
+        ...,
+        description="The boundary the before/after numbers were measured "
+        "across. Defaults to this feature's median date.",
+    )
+    psi: Stat = Field(
+        ...,
+        description="Population Stability Index across the split. Below "
+        "0.10 stable, 0.10-0.25 moderate, above 0.25 significant.",
+    )
+    psi_verdict: str
+    ks_statistic: Stat = Field(
+        ..., description="Largest gap between the two empirical CDFs."
+    )
+    ic_before: Stat
+    ic_after: Stat
+    ic_flipped: bool = Field(
+        ...,
+        description="True when the IC changed SIGN across the split and was "
+        "non-trivial on both sides. Independent of psi: a feature can hold "
+        "its distribution and lose its edge, or drift and keep it.",
+    )
+    ic_overall: Stat = Field(
+        ..., description="Full-sample IC. Across a break it describes neither side."
+    )
+    ic_block_mean: Stat
+    ic_block_std: Stat
+    sign_consistency: Stat = Field(
+        ...,
+        description="Fraction of blocks whose IC has the same sign as the "
+        "full-sample IC. Read with the block ICs: consistent sign with "
+        "collapsing magnitude is decay, and this stays at 1.0 through it.",
+    )
+    worst_block: Optional[int] = None
+    psi_by_block: List[BlockPSI] = Field(
+        ...,
+        description="The drift curve. Under reference='first' a monotone "
+        "slide accumulates and rises; under 'previous' the same slide reads "
+        "flat and only a jump stands out.",
+    )
+
+
+class ScreenFeatureStabilityInput(BaseModel):
+    model_config = _FORBID_EXTRA
+
+    dataset_id: str = Field(
+        ..., description="A dataset_id returned by build_model_dataset."
+    )
+    features: Optional[List[str]] = Field(
+        None,
+        description="Features to screen. Defaults to every feature in the " "dataset.",
+    )
+    n_blocks: int = Field(
+        4,
+        ge=2,
+        le=20,
+        description="Contiguous time blocks for the per-block IC and the "
+        "drift curve. Never shuffled.",
+    )
+    method: Literal["spearman", "pearson"] = Field(
+        "spearman", description="'spearman' or 'pearson'."
+    )
+    split_date: Optional[str] = Field(
+        None,
+        description="YYYY-MM-DD boundary for the before/after halves. "
+        "Defaults to each feature's median date, which splits by TIME "
+        "rather than row count. A date outside the panel is refused.",
+    )
+    reference: Literal["first", "previous"] = Field(
+        "first",
+        description="What each block of the drift curve is measured "
+        "against: the FIRST block (drift accumulates, so a monotone slide "
+        "rises) or the PREVIOUS one (a slide reads flat and a jump stands "
+        "out). Run both to tell a break from a drift.",
+    )
+    max_features: int = Field(
+        200,
+        ge=1,
+        le=1000,
+        description="Refuse rather than return a row per feature past this.",
+    )
+
+
+class ScreenFeatureStabilityResult(BaseModel):
+    model_config = _NO_PROTECTED
+
+    dataset_id: str
+    features: List[FeatureStabilityScreen] = Field(
+        ..., description="Ordered by PSI, most drifted first."
+    )
+    n_features: int
+    n_significant: int = Field(
+        ..., description=f"Features with PSI >= {PSI_SIGNIFICANT}."
+    )
+    n_moderate: int = Field(
+        ..., description=f"Features with PSI in [{PSI_MODERATE}, {PSI_SIGNIFICANT})."
+    )
+    n_stable: int
+    psi_thresholds: Dict[str, float] = Field(
+        ...,
+        description="The two lines the verdicts are drawn at. Conventions "
+        "rather than tests -- there is no null distribution behind them.",
+    )
+    most_drifted: Optional[str] = Field(
+        None, description="The feature with the largest PSI, or None."
+    )
+    n_blocks: int
+    reference: str
+    warnings: List[str] = Field(default_factory=list)
+
+
 # ── ablation ────────────────────────────────────────────────────────────
 
 
@@ -948,9 +1210,16 @@ class FeatureAblationResult(BaseModel):
 
 
 __all__ = [
+    "BlockPSI",
     "FeatureContribution",
     "FeatureAblationResult",
     "FeatureAblationInput",
+    "FeatureSignificance",
+    "FeatureStabilityScreen",
+    "ScreenFeatureSignificanceInput",
+    "ScreenFeatureSignificanceResult",
+    "ScreenFeatureStabilityInput",
+    "ScreenFeatureStabilityResult",
     "StabilityBlock",
     "SelectFeaturesResult",
     "SelectFeaturesInput",

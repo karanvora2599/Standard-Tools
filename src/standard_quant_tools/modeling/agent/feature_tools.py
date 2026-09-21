@@ -27,6 +27,7 @@ WHAT IS ACTUALLY NEW is the interpretation the types make room for:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Sequence
 
 import pandas as pd
@@ -34,6 +35,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.agent.feature_models import (
     AnalyzeFeatureInput,
+    BlockPSI,
     CompareFeatureSetsInput,
     CompareFeatureSetsResult,
     FeatureAblationInput,
@@ -48,11 +50,17 @@ from standard_quant_tools.modeling.agent.feature_models import (
     FeatureProfile,
     FeatureRedundancyInput,
     FeatureRedundancyResult,
+    FeatureSignificance,
     FeatureStabilityInput,
     FeatureStabilityResult,
+    FeatureStabilityScreen,
     ICDecayPoint,
     PermutationTestInput,
     PermutationTestResult,
+    ScreenFeatureSignificanceInput,
+    ScreenFeatureSignificanceResult,
+    ScreenFeatureStabilityInput,
+    ScreenFeatureStabilityResult,
     SelectFeaturesInput,
     SelectFeaturesResult,
 )
@@ -75,6 +83,16 @@ from standard_quant_tools.modeling.analysis.feature_selection import (
 from standard_quant_tools.modeling.analysis.feature_selection import (
     select_features as _select_features,
 )
+
+# The PSI vocabulary is the FEATURE LAB'S one. `monitoring.py` draws the
+# same two lines at 0.10 and 0.25 and calls the top band `severe`; these
+# tools say `significant`, because `get_feature_drift` and
+# `get_feature_regime_stability` already do and an agent reading two words
+# for one number has to guess whether they mean the same thing.
+from standard_quant_tools.modeling.analysis.feature_stability import (
+    PSI_MODERATE,
+    PSI_SIGNIFICANT,
+)
 from standard_quant_tools.modeling.analysis.feature_stability import (
     feature_drift as _feature_drift,
 )
@@ -84,6 +102,10 @@ from standard_quant_tools.modeling.analysis.feature_stability import (
 from standard_quant_tools.modeling.analysis.feature_stability import (
     permutation_test_ic as _permutation_test_ic,
 )
+from standard_quant_tools.modeling.analysis.feature_stability import (
+    psi_by_block as _psi_by_block,
+)
+from standard_quant_tools.modeling.limits import MAX_PERMUTATION_DRAWS
 
 logger = logging.getLogger(__name__)
 
@@ -553,6 +575,410 @@ def run_feature_permutation_test(
     return PermutationTestResult(dataset_id=input_data.dataset_id, **result)
 
 
+def _screen_features(panel, meta, requested, dataset_id: str, what: str) -> List[str]:
+    """
+    The feature list a panel-wide screen will run over.
+
+    `features=[]` is refused rather than read as "all of them". The
+    single-feature tools take one name and cannot express the difference,
+    but a screen can be handed an empty list by a caller that filtered its
+    candidates down to nothing -- and silently screening all forty would
+    answer a question nobody asked, expensively.
+    """
+    if requested is not None and not requested:
+        raise ValidationError(
+            f"{what}: features=[] names nothing to screen. Omit `features` "
+            "to screen every feature in the dataset, or list the ones you "
+            "actually doubt."
+        )
+    features = _resolve_features(meta, requested, dataset_id)
+    for feature in features:
+        _require_feature(panel, feature, dataset_id)
+    return features
+
+
+def _round(value) -> str:
+    """A number for a warning sentence, or the word for its absence."""
+    return "None" if value is None else f"{value:.4f}"
+
+
+def _has_no_cross_section(panel, feature: str) -> bool:
+    """
+    True when the feature cannot have a cross-sectional IC at all.
+
+    `cross_sectional_ic` emits 0.0 for a date whose cross-section is
+    degenerate, deliberately and documented -- it preserves a rule that
+    predates it. That is a defensible choice for an average over mostly
+    usable dates and a misleading one for a column that is constant on
+    every date: the screen would report an IC of 0.0, a null of all 0.0,
+    a p-value of 1.0 and a floor contribution of zero, every one of which
+    is a measurement of nothing. Caught here so the column comes back with
+    no IC instead, which is the same distinction `_finite_or_none` draws
+    at the boundary.
+    """
+    columns = [c for c in ("date", feature, "target") if c in panel.columns]
+    usable = panel[columns].dropna()
+    if usable.empty:
+        return True
+    return bool((usable.groupby("date")[feature].nunique() <= 1).all())
+
+
+def screen_feature_significance(
+    input_data: ScreenFeatureSignificanceInput,
+) -> ScreenFeatureSignificanceResult:
+    """
+    The IC floor this panel supports, measured rather than guessed.
+
+    `select_features(min_abs_rank_ic=...)` takes a number, and the number
+    an agent picks is usually 0.02 because 0.02 sounds small. Whether it is
+    small is a property of the panel: on a short panel with few names,
+    noise alone produces mean ICs well above it, and a floor under the
+    noise level keeps noise. This screen runs the permutation test over
+    every candidate feature and reports the largest `null_p95_abs` among
+    them as `honest_floor` -- the |IC| this panel yields from noise 5% of
+    the time, for the feature whose null is widest.
+
+    The result usually inverts the naive one. On a twelve-name panel a
+    0.02 floor kept four features of ten and the permutation floor, 0.0694,
+    kept none: the four were not weak signals, they were the panel's noise
+    level.
+
+    Cost is `features x n_permutations` draws, about 1.6 ms each. The
+    product is computed BEFORE the first shuffle and the screen is refused
+    past `max_draws`, so a long run is chosen rather than discovered.
+
+    Read `p_value` per feature and `honest_floor` for the set, and read
+    the family-wise warning before treating a list of significant features
+    as a list of discoveries -- twenty features tested at alpha 0.05
+    deliver one significant result from noise alone.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+
+    logger.debug(
+        "[screen_feature_significance] dataset_id=%s n_permutations=%d null=%s",
+        input_data.dataset_id,
+        input_data.n_permutations,
+        input_data.null,
+    )
+    panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    features = _screen_features(
+        panel,
+        meta,
+        input_data.features,
+        input_data.dataset_id,
+        "screen_feature_significance",
+    )
+
+    # Counted before anything is shuffled, for the reason run_feature_ablation
+    # counts its fits before anything is fitted: an afternoon of compute is
+    # a decision, and a decision cannot be made after the fact.
+    n_draws = len(features) * input_data.n_permutations
+    if n_draws > input_data.max_draws:
+        remedy = (
+            f"pass max_draws={n_draws} to accept the cost"
+            if n_draws <= MAX_PERMUTATION_DRAWS
+            else (
+                f"max_draws stops at {MAX_PERMUTATION_DRAWS:,} draws, so this "
+                "screen cannot be bought -- it has to be narrowed"
+            )
+        )
+        raise ValidationError(
+            f"this screen needs {n_draws:,} permutation draws "
+            f"({len(features)} features x {input_data.n_permutations} "
+            f"permutations), over the max_draws={input_data.max_draws:,} "
+            f"ceiling. At about 1.6 ms a draw that is roughly "
+            f"{max(1, round(n_draws * 0.0016 / 60))} minutes. Either narrow "
+            "`features` to the candidates you actually doubt or lower "
+            f"`n_permutations`, or {remedy}."
+        )
+
+    rows: List[FeatureSignificance] = []
+    warnings: List[str] = []
+
+    def _unmeasurable(feature: str) -> FeatureSignificance:
+        return FeatureSignificance(
+            feature=feature,
+            rank_ic=None,
+            p_value=None,
+            null_p95_abs=None,
+            ic_autocorrelation_lag1=None,
+            significant_at_05=False,
+            n_usable_permutations=0,
+        )
+
+    for feature in features:
+        if _has_no_cross_section(panel, feature):
+            warnings.append(
+                f"{feature!r} is not testable: it has no cross-sectional "
+                "variation on any date, so its IC is undefined rather than "
+                "0.0 and there is no null to draw. It sets no floor and was "
+                "not permuted."
+            )
+            rows.append(_unmeasurable(feature))
+            continue
+        try:
+            result = _permutation_test_ic(
+                panel,
+                feature,
+                n_permutations=input_data.n_permutations,
+                method=input_data.method,
+                random_seed=input_data.random_seed,
+                null=input_data.null,
+            )
+        except ValidationError as exc:
+            # A degenerate column does not sink the screen. A constant
+            # feature has no rank correlation and therefore no null to
+            # compare one against, which is a fact about that column --
+            # reported as one, so the other thirty-nine are still answered.
+            warnings.append(
+                f"{feature!r} is not testable and is reported with no IC: {exc}"
+            )
+            rows.append(_unmeasurable(feature))
+            continue
+        rows.append(
+            FeatureSignificance(
+                feature=feature,
+                rank_ic=result["observed_ic"],
+                p_value=result["p_value"],
+                null_p95_abs=result["null_p95_abs"],
+                ic_autocorrelation_lag1=result["ic_autocorrelation_lag1"],
+                significant_at_05=bool(result["significant_at_05"]),
+                n_usable_permutations=int(result["n_usable_permutations"]),
+            )
+        )
+
+    rows.sort(key=lambda r: (r.rank_ic is None, -abs(r.rank_ic or 0.0), r.feature))
+
+    measured = [r for r in rows if r.null_p95_abs is not None]
+    floor_row = max(measured, key=lambda r: r.null_p95_abs) if measured else None
+    honest_floor = floor_row.null_p95_abs if floor_row else None
+    naive_floor = 0.02
+    with_ic = [r for r in rows if r.rank_ic is not None]
+    n_naive = sum(1 for r in with_ic if abs(r.rank_ic) >= naive_floor)
+    n_kept = (
+        sum(1 for r in with_ic if abs(r.rank_ic) >= honest_floor)
+        if honest_floor is not None
+        else 0
+    )
+    n_significant = sum(1 for r in rows if r.significant_at_05)
+
+    if honest_floor is not None:
+        warnings.append(
+            f"select_features(min_abs_rank_ic={honest_floor:.4f}) is the floor "
+            f"THIS panel supports: {floor_row.feature!r} produced an |IC| that "
+            f"large from noise alone 5% of the time under the "
+            f"{input_data.null!r} null. A floor of {naive_floor} keeps "
+            f"{n_naive} of {len(rows)} features here; the measured floor keeps "
+            f"{n_kept}. The difference is not weak signal, it is this panel's "
+            "noise level."
+        )
+
+    autocorrelated = [
+        r
+        for r in rows
+        if r.ic_autocorrelation_lag1 is not None and r.ic_autocorrelation_lag1 > 0.3
+    ]
+    if input_data.null == "within_date" and autocorrelated:
+        worst = max(autocorrelated, key=lambda r: r.ic_autocorrelation_lag1)
+        warnings.append(
+            f"null='within_date' on a panel whose per-date ICs are "
+            f"autocorrelated (up to {worst.ic_autocorrelation_lag1:.2f} on "
+            f"{worst.feature!r}, over 0.3 on {len(autocorrelated)} of "
+            f"{len(rows)} features): shuffling inside a date destroys the "
+            "serial correlation the observed ICs have, and that null rejected "
+            "a true null 27-35% of the time at phi 0.95-0.99 against an "
+            "overlapping label. These p-values are too small by about that "
+            "much. Re-run with null='circular_shift', which rolls each "
+            "entity's series and keeps the serial correlation."
+        )
+
+    if rows:
+        warnings.append(
+            f"{len(rows)} features were tested at alpha 0.05, so "
+            f"{0.05 * len(rows):.1f} significant results are expected from "
+            f"noise alone and {n_significant} came back. These p-values are "
+            "not corrected for having asked the question this many times -- "
+            "compare_signals(mode='adjust') applies a family-wise correction "
+            "to a set of them."
+        )
+
+    return ScreenFeatureSignificanceResult(
+        dataset_id=input_data.dataset_id,
+        features=rows,
+        honest_floor=honest_floor,
+        floor_feature=floor_row.feature if floor_row else None,
+        n_features=len(rows),
+        n_significant=n_significant,
+        n_kept_at_floor=n_kept,
+        n_draws=n_draws,
+        null=input_data.null,
+        random_seed=input_data.random_seed,
+        warnings=warnings,
+    )
+
+
+def screen_feature_stability(
+    input_data: ScreenFeatureStabilityInput,
+) -> ScreenFeatureStabilityResult:
+    """
+    Every feature's drift and every feature's regime dependence, in one
+    pass, with the drift measured block by block rather than once.
+
+    `get_feature_drift` and `get_feature_regime_stability` each answer for
+    ONE feature, and `analyze_features` describes the whole panel without
+    mentioning time -- so a feature that stopped being the same measurement
+    is invisible unless somebody already suspected that feature. On a live
+    panel exactly one feature of ten had drifted (PSI 0.289 against
+    0.006-0.061 for the rest), which is the shape this screen is for.
+
+    Two failures, kept apart because they need different fixes. A feature
+    can drift in DISTRIBUTION and keep its IC, which is a preprocessing
+    problem; or hold its distribution and lose its IC, which means the edge
+    is gone and rescaling will not bring it back. `psi` and `ic_flipped`
+    are reported independently and a feature can show either alone.
+
+    `psi_by_block` is the part a single split cannot give: the same PSI
+    measured against the first block (`reference='first'`, where a monotone
+    slide accumulates and the curve rises) or against the previous one
+    (`reference='previous'`, where that same slide reads flat and only a
+    jump stands out). Running both separates a break from a decay.
+
+    The verdicts are 'stable', 'moderate' and 'significant' at PSI 0.10 and
+    0.25 -- the same two lines and the same words `get_feature_drift` uses,
+    and conventions rather than tests: there is no null distribution behind
+    them.
+    """
+    from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
+
+    logger.debug(
+        "[screen_feature_stability] dataset_id=%s n_blocks=%d reference=%s",
+        input_data.dataset_id,
+        input_data.n_blocks,
+        input_data.reference,
+    )
+    panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    features = _screen_features(
+        panel,
+        meta,
+        input_data.features,
+        input_data.dataset_id,
+        "screen_feature_stability",
+    )
+    if len(features) > input_data.max_features:
+        raise ValidationError(
+            f"this screen would report {len(features)} features, over the "
+            f"max_features={input_data.max_features} ceiling. Name the "
+            "features you are deciding about in `features`, or raise "
+            f"max_features={len(features)} to accept a result that long."
+        )
+
+    rows: List[FeatureStabilityScreen] = []
+    warnings: List[str] = []
+    for feature in features:
+        drift = _feature_drift(
+            panel,
+            feature,
+            split_date=input_data.split_date,
+            method=input_data.method,
+        )
+        stability = _feature_stability(
+            panel,
+            feature,
+            n_blocks=input_data.n_blocks,
+            method=input_data.method,
+        )
+        curve = _psi_by_block(
+            panel,
+            feature,
+            n_blocks=input_data.n_blocks,
+            reference=input_data.reference,
+        )
+        rows.append(
+            FeatureStabilityScreen(
+                feature=feature,
+                split_date=drift["split_date"],
+                psi=drift["psi"],
+                psi_verdict=drift["psi_verdict"],
+                ks_statistic=drift["ks_statistic"],
+                ic_before=drift["ic_before"],
+                ic_after=drift["ic_after"],
+                ic_flipped=bool(drift["ic_flipped"]),
+                ic_overall=stability["ic_overall"],
+                ic_block_mean=stability["ic_block_mean"],
+                ic_block_std=stability["ic_block_std"],
+                sign_consistency=stability["sign_consistency"],
+                worst_block=stability["worst_block"],
+                psi_by_block=[BlockPSI(**block) for block in curve],
+            )
+        )
+
+        # Decay hides behind a good sign_consistency: a feature going
+        # 0.44, 0.44, 0.01, 0.02 keeps consistency 1.0 while its edge
+        # disappears, and neither number says so on its own.
+        block_ics = [
+            block["ic_mean"]
+            for block in stability["blocks"]
+            if block["ic_mean"] is not None and math.isfinite(block["ic_mean"])
+        ]
+        consistency = rows[-1].sign_consistency
+        if (
+            len(block_ics) >= 2
+            and consistency is not None
+            and consistency >= 0.75
+            and abs(block_ics[0]) > 0.02
+            and abs(block_ics[-1]) < 0.5 * abs(block_ics[0])
+        ):
+            warnings.append(
+                f"{feature!r} holds a sign consistency of {consistency:.2f} "
+                f"while its block IC falls from {block_ics[0]:.4f} to "
+                f"{block_ics[-1]:.4f}: a consistent sign with a collapsing "
+                "magnitude is decay, and sign consistency stays high all the "
+                "way through it."
+            )
+
+    rows.sort(key=lambda r: (r.psi is None, -(r.psi or 0.0), r.feature))
+
+    verdicts = [r.psi_verdict for r in rows]
+    drifted = [r for r in rows if r.psi is not None]
+    most_drifted = max(drifted, key=lambda r: r.psi).feature if drifted else None
+
+    for row in rows:
+        if row.psi is not None and row.psi >= PSI_SIGNIFICANT:
+            warnings.append(
+                f"{row.feature!r} has PSI {row.psi:.3f}, at or above "
+                f"{PSI_SIGNIFICANT}: it is no longer the same measurement "
+                f"either side of {row.split_date}, so its full-sample IC "
+                f"({_round(row.ic_overall)}) describes neither side -- it is "
+                f"{_round(row.ic_before)} before and {_round(row.ic_after)} "
+                "after."
+            )
+
+    warnings.append(
+        f"The PSI lines at {PSI_MODERATE} and {PSI_SIGNIFICANT} are "
+        "conventions rather than tests -- there is no null distribution "
+        "behind them, so a 0.24 and a 0.26 are the same evidence with "
+        "different labels. For an IC that IS tested against a null, "
+        "screen_feature_significance permutes this panel."
+    )
+
+    return ScreenFeatureStabilityResult(
+        dataset_id=input_data.dataset_id,
+        features=rows,
+        n_features=len(rows),
+        n_significant=verdicts.count("significant"),
+        n_moderate=verdicts.count("moderate"),
+        n_stable=verdicts.count("stable"),
+        psi_thresholds={
+            "moderate": PSI_MODERATE,
+            "significant": PSI_SIGNIFICANT,
+        },
+        most_drifted=most_drifted,
+        n_blocks=input_data.n_blocks,
+        reference=input_data.reference,
+        warnings=warnings,
+    )
+
+
 def _first_numeric_metric(metrics):
     """
     The metric to compare when the caller did not name one.
@@ -787,6 +1213,45 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         PermutationTestInput,
     ),
     (
+        "screen_feature_significance",
+        "The IC floor this panel supports, for EVERY candidate feature at "
+        "once. select_features(min_abs_rank_ic=...) takes a number, and the "
+        "number an agent picks is usually 0.02 because 0.02 sounds small -- "
+        "whether it is small is a property of the panel. This permutes each "
+        "feature and returns honest_floor, the largest null_p95_abs across "
+        "them: the |IC| this panel yields from noise alone 5% of the time. "
+        "On a twelve-name panel a 0.02 floor kept four features of ten and "
+        "the measured floor of 0.0694 kept none. Per feature: IC, two-sided "
+        "p-value, that feature's own null and the per-date IC "
+        "autocorrelation that says which null is calibrated. Cost is "
+        "features x n_permutations draws at about 1.6 ms each, counted "
+        "before the first shuffle and REFUSED past max_draws rather than "
+        "truncated. Warns with the floor sentence and how many features each "
+        "floor keeps, with the within_date caveat on autocorrelated "
+        "features, and with the family-wise sentence -- twenty features at "
+        "alpha 0.05 deliver one significant result from noise.",
+        ScreenFeatureSignificanceInput,
+    ),
+    (
+        "screen_feature_stability",
+        "Every feature's drift and every feature's regime dependence in one "
+        "pass: PSI and KS across a split, the IC on each side, the IC inside "
+        "each contiguous block, sign consistency -- plus psi_by_block, the "
+        "drift CURVE a single split cannot give. get_feature_drift and "
+        "get_feature_regime_stability answer for one feature and "
+        "analyze_features is silent about time, so a feature that stopped "
+        "being the same measurement is invisible unless you already "
+        "suspected it. Set reference='first' and a monotone slide "
+        "accumulates and the curve rises; set 'previous' and that same slide "
+        "reads flat while a jump stands out, which is how a break is told "
+        "from a decay. Distribution drift and IC decay are reported "
+        "independently because they need different fixes. Refuses an unknown "
+        "feature, a split outside the panel, fewer dates than n_blocks, and "
+        "more features than max_features. Verdicts are the 0.10/0.25 PSI "
+        "conventions get_feature_drift uses -- conventions, not tests.",
+        ScreenFeatureStabilityInput,
+    ),
+    (
         "run_feature_ablation",
         "Refit the model without each feature in turn and report what each "
         "one was worth. The only feature tool that asks a MODEL-RELATIVE "
@@ -818,6 +1283,14 @@ FEATURE_TOOL_DISPATCH = {
         run_feature_permutation_test,
         PermutationTestInput,
     ),
+    "screen_feature_significance": (
+        screen_feature_significance,
+        ScreenFeatureSignificanceInput,
+    ),
+    "screen_feature_stability": (
+        screen_feature_stability,
+        ScreenFeatureStabilityInput,
+    ),
     "run_feature_ablation": (run_feature_ablation, FeatureAblationInput),
 }
 
@@ -834,6 +1307,8 @@ __all__ = [
     "get_feature_regime_stability",
     "run_feature_ablation",
     "run_feature_permutation_test",
+    "screen_feature_significance",
+    "screen_feature_stability",
     "select_features",
 ]
 

@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 220 below.
+advertises 155 of the 225 below.
 
 
 ## The runtimes
@@ -35,15 +35,15 @@ advertises 155 of the 220 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 48 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 82 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `modeling` | 31 | 145 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 34 | 162 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 9 | 33 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **220** | | | |
+| `feature_lab` | 11 | 38 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| **Total** | **225** | | | |
 
 ---
 
@@ -667,6 +667,13 @@ Rank registered models side by side on their out-of-sample metrics, or -- with m
 **Required:** `model_ids`  
 **Optional:** `metric`, `method`, `reference_model_id`, `comparison_metric`, `n_bootstrap`, `block_size`
 
+#### `compare_signals`
+
+Decide whether one signal actually beat another, and correct a family of p-values for having asked more than once. Three modes. mode='paired' compares two published prediction frames on the rows both predicted -- the per-date difference series, a block-bootstrap interval on its mean, and a Diebold-Mariano loss test where the task has a loss with units -- with no registry and no shared manifest required, so an externally computed alpha compares against a model here. mode='ic_series' takes two per-date information-coefficient series inline from anywhere and adds the Newey-West variance of the difference beside the ordinary one: the ratio says how much a t-statistic computed without the correction was overstated, and on a real series it has been measured at 2.8. mode='adjust' applies Holm, Bonferroni or Benjamini-Hochberg to p-values from ANY source -- the correction that a researcher with twelve candidate signals otherwise has no way to reach. Read the verdict, not the headline: a difference of 0.006 in daily IC is routinely inside the noise of one out-of-sample sample, and sorting on it selects the model that got the friendlier draw. None of these corrections controls for the candidates having been SELECTED on this same sample; that is what run_reality_check exists for, and the result says so.
+
+**Required:** `mode`  
+**Optional:** `predictions_ref_a`, `predictions_ref_b`, `task`, `metric`, `horizon`, `ic_a`, `ic_b`, `hac_lag`, `n_bootstrap`, `block_size`, `confidence`, `seed`, `p_values`, `method`, `alpha`
+
 #### `describe_estimator`
 
 What an estimator's params actually accept: every parameter name, its type, its range, its exact choices and the reason behind each bound, plus the rules BETWEEN parameters that no single bound can express. All of it is enforced on every fit and none of it was readable, so the bounds could only be discovered by tripping them -- n_estimators caps at 2000 and num_leaves at 4096; logistic's penalty='l1' needs solver='liblinear' or 'saga' and 'elasticnet' needs 'saga' AND an explicit l1_ratio; sgd accepts a DIFFERENT set of losses per task, because a classifier here is asked for probabilities unconditionally and hinge has none; mlp takes n_hidden_units and n_hidden_layers, not scikit-learn's hidden_layer_sizes tuple, so knowing scikit-learn is what makes the first call wrong. Also reports `calibration`, which the capability report omits entirely and which decides outcomes: a raw random forest's probabilities are compressed by averaging and rarely exceed 0.9, so at proba_threshold=0.9 one selected ZERO rows where the isotonic-calibrated model selected 194. Filter with task and/or name; unfiltered it describes every registered entry and says how large that is. include_unavailable=True adds the estimators whose optional library is not installed here -- declared statically, so their names and bounds are the same on every machine, which is how you learn what a missing library costs and what a ranking model would be called. An unknown name is refused with the same message a spec naming it gets. Fits nothing.
@@ -764,6 +771,13 @@ The schedule run_model_experiment would execute, on the real panel, before it ex
 **Required:** `dataset_id`, `spec`  
 **Optional:** `target`, `include_folds`, `include_candidates`
 
+#### `predict_survival_curve`
+
+Read a registered SURVIVAL model's curve S(t | x) for each entity as of a date: how likely each one is to still be waiting at t, plus the median time until its event. This is the question score_model cannot answer. score_model returns the survival model's risk score, which ranks the cross-section -- who fills first -- and has no units; this returns a probability at each time on a grid, which is what a deadline is read against and what a desk sizes on. Pass `times` to ask about specific horizons, or leave it unset for a grid of quantiles of the model's own baseline event times. median_survival is the first grid time where the curve falls to 0.5 or below, and is null when it never crosses inside the grid -- never the grid's last point. REFUSES: a model whose task is not survival (nothing but a duration-and-event label estimates a baseline hazard); an estimator that produces a risk and no survival function, with no fallback to the risk, because a ranking read as a probability is a number on the wrong scale; a `times` grid that is not strictly increasing and non-negative; a matrix over max_matrix_cells when include_matrix is set; and every gate score_model enforces (training-information cutoff, feature-implementation drift, universe pins, staleness). READ THE LEVEL CAREFULLY: under proportional hazards the ORDERING between these curves is what the model learned, while the LEVEL of any one of them belongs to the baseline hazard estimated on the training durations -- if the base rate has moved since training the ranking can still be right while every probability is off.
+
+**Required:** `model_id`, `as_of`, `universe`  
+**Optional:** `lookback_days`, `max_staleness_days`, `universe_policy`, `times`, `n_times`, `include_matrix`, `max_matrix_cells`
+
 #### `preview_preprocessing`
 
 Fit a preprocessing pipeline on a sample of a built dataset and report what it does to the columns, before an experiment runs it on every fold. Two of the eight registered steps carry traps that are discoverable only at fit time: pca_whiten refuses a panel with any missing value AND refuses n_components greater than the column count, at its own default of 8 -- so it raises on any dataset narrower than eight features -- and missing_indicator appends one <column>__missing per column, doubling the width by design. Both refusals and both widths appear here, on the real panel, for the cost of one fit of the pipeline and no fit of an estimator. Reports each step's width in and out with the columns it added and removed, the per-column statistics before and after, the missing values left (which the engine refuses before it fits), and a pca_whiten step's explained variance ratio. The sample is split BY DATE, never by row: the statistics are fitted on the earlier rows and applied to the later ones, the way a fold does it. Warns when the output columns are no longer feature names, because an importance report is then labelled pc1..pcK, and when a step is not column-wise, because run_feature_ablation must refit rather than project. Fits no estimator.
@@ -805,6 +819,13 @@ Run a registered model forward and get its predictions for a universe as of a da
 
 **Required:** `model_id`, `as_of`, `universe`  
 **Optional:** `lookback_days`, `max_staleness_days`, `universe_policy`
+
+#### `score_prediction_intervals`
+
+Score the quantile and interval columns of a published predictions reference against the realized outcome: pinball loss per level, the quantile crossing rate, and coverage AND width for every symmetric quantile pair and for the lower/upper band. These are the numbers an experiment computes on every fold and averages away, on columns it hands over and that nothing could previously check. Read coverage and width together, always: a band covering 90% of outcomes by spanning ten times the target's spread has told nobody anything, and coverage alone cannot tell the two apart. Set by='date' (or 'entity') for the breakdown that matters most -- exchangeability is the assumption behind a conformal interval and a return panel is not exchangeable across regimes, so a band that covered 97% in a calm stretch and 62% in a selloff pools to a healthy-looking 90%, and only the per-date view separates them. Quantile columns are auto-detected by the convention the library writes them under (q05, q50, q95); a frame with neither quantile nor lower/upper columns is refused naming what was looked for, rather than returning empty statistics. Nothing is fitted and nothing is fetched: this reads the frame it is given, so predictions from another library score on the same yardstick.
+
+**Required:** `predictions_ref`  
+**Optional:** `target_column`, `quantile_columns`, `lower_column`, `upper_column`, `nominal_coverage`, `by`, `min_group_rows`, `max_groups`
 
 #### `score_predictions`
 
@@ -1631,6 +1652,20 @@ How often noise on THIS panel produces an IC as large as the observed one, in ei
 
 **Required:** `dataset_id`, `feature`  
 **Optional:** `n_permutations`, `method`, `random_seed`, `null`
+
+#### `screen_feature_significance`
+
+The IC floor this panel supports, for EVERY candidate feature at once. select_features(min_abs_rank_ic=...) takes a number, and the number an agent picks is usually 0.02 because 0.02 sounds small -- whether it is small is a property of the panel. This permutes each feature and returns honest_floor, the largest null_p95_abs across them: the |IC| this panel yields from noise alone 5% of the time. On a twelve-name panel a 0.02 floor kept four features of ten and the measured floor of 0.0694 kept none. Per feature: IC, two-sided p-value, that feature's own null and the per-date IC autocorrelation that says which null is calibrated. Cost is features x n_permutations draws at about 1.6 ms each, counted before the first shuffle and REFUSED past max_draws rather than truncated. Warns with the floor sentence and how many features each floor keeps, with the within_date caveat on autocorrelated features, and with the family-wise sentence -- twenty features at alpha 0.05 deliver one significant result from noise.
+
+**Required:** `dataset_id`  
+**Optional:** `features`, `n_permutations`, `method`, `null`, `random_seed`, `max_draws`
+
+#### `screen_feature_stability`
+
+Every feature's drift and every feature's regime dependence in one pass: PSI and KS across a split, the IC on each side, the IC inside each contiguous block, sign consistency -- plus psi_by_block, the drift CURVE a single split cannot give. get_feature_drift and get_feature_regime_stability answer for one feature and analyze_features is silent about time, so a feature that stopped being the same measurement is invisible unless you already suspected it. Set reference='first' and a monotone slide accumulates and the curve rises; set 'previous' and that same slide reads flat while a jump stands out, which is how a break is told from a decay. Distribution drift and IC decay are reported independently because they need different fixes. Refuses an unknown feature, a split outside the panel, fewer dates than n_blocks, and more features than max_features. Verdicts are the 0.10/0.25 PSI conventions get_feature_drift uses -- conventions, not tests.
+
+**Required:** `dataset_id`  
+**Optional:** `features`, `n_blocks`, `method`, `split_date`, `reference`, `max_features`
 
 #### `select_features`
 

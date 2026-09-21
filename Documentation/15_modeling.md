@@ -22,7 +22,7 @@ tool #133 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 31 tools, never merged into `agent.get_agent_tools()` /
+with exactly 34 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (180 tools, 8 runtimes)      (31 tools, one pipeline)
+    (180 tools, 8 runtimes)      (34 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 31 modeling tools
+## The 34 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -81,18 +81,21 @@ because the order is the point.
 | `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
 | `evaluate_predictions_portfolio` | a predictions reference (an ensemble, an external alpha, a scored run) + `task` + the same `PredictionTransformSpec` and `PortfolioSimSpec` → the same simulation as `evaluate_model_portfolio`, inheriting interval, provider, calendar and window from a `dataset_id` or taking them explicitly. Provenance names the reference and its producer, not a model id, and says so |
+| `score_prediction_intervals` | a predictions reference carrying quantile or `lower`/`upper` columns → whether the intervals cover: pinball loss per quantile, the crossing rate, and coverage against the nominal level, pooled or `by` date or entity, because a band that covered 97% in calm and 62% in a selloff is one pooled number away from looking fine. These metrics used to run inside the engine's fold loop and be averaged into one number |
+| `compare_signals` | three modes: two prediction references (`paired`, a block bootstrap on the per-date IC difference), two per-date IC series (`ic_series`, with the Newey-West variance beside the naive one), or a set of p-values from anywhere (`adjust`, under Holm, Bonferroni or Benjamini-Hochberg). Always says that this controls the error of THESE tests and not for the candidates having been selected on the same sample, which is `run_reality_check`'s job |
+| `predict_survival_curve` | `model_id` + `as_of` + `universe` (+ `times`) → the survival curve a survival model learned, per entity, and the horizon at which it crosses one half, under every gate `score_model` enforces. The experiment kept the integrated Brier score and discarded the matrix; `score_model` returns the risk. Honest that the level is the baseline's and that a median past the grid is unknown, not never |
 | `promote_model` | `model_id` + `to_stage` + `reason` (+ `actor`, `evidence`) → a lifecycle decision appended to `promotions.jsonl` beside the manifest, one stage at a time: `candidate` → `validated` → `staging` → `production`, or `archived` from anywhere. The manifest is never touched |
 | `monitor_model` | `model_id` + a `score_model` `predictions_uri` (+ `outcomes_ref`) → PSI and KS per feature against the training reference kept at registration, prediction drift against the out-of-sample sample, and — with outcomes — the realized cross-sectional IC beside the validation's, every status reported with the threshold it was read against |
 
 **From a registered model to a backtest, verified.** The bridge from a model's out-of-sample predictions to a signal panel has two branches. Given a `model_id` it reads the task from the manifest, refuses a combinatorial-purged model by name, and verifies the predictions file against the hash the manifest recorded; given a file and a task it takes both on trust, and its own docstring says so. Until `backtest_model_signal` existed only the second branch was reachable from a tool, through `convert_reference` on a published copy of the predictions -- a route that accepted a wrong `task` (a regression model converted as a classifier gave an all-zero panel and a NaN Sharpe with no error anywhere) and a sign-flipped copy alike. `backtest_model_signal` is the verified route and has no `task` argument to get wrong; `convert_reference` remains for predictions that never had a manifest. The scoring side is continuous in the same way: `run_model_experiment`, `build_model_ensemble` and `score_model` publish predictions without the realized outcome, `attach_model_outcomes` joins it, and `score_predictions` reads the result; `evaluate_predictions_portfolio` simulates any of those references as a portfolio.
 
-### The `feature_lab` runtime — 9 more tools, one level down
+### The `feature_lab` runtime — 11 more tools, one level down
 
 Feature work outgrew `analyze_features`. The single nested report is still
 the right overview, but "is this one feature any good, and why" is a
 different question asked at a different point, and answering it inside one
 report meant returning a structure the agent then had to describe in prose.
-Those nine tools were split into their own runtime — each returns named,
+Those eleven tools were split into their own runtime — each returns named,
 typed fields for **one** question:
 
 | Tool | Input → Output |
@@ -103,6 +106,8 @@ typed fields for **one** question:
 | `get_feature_drift` | `dataset_id` + `feature` → PSI, two-sample KS and the IC computed separately either side of a date |
 | `get_feature_regime_stability` | `dataset_id` + `feature` → IC per **contiguous** time block, never shuffled, plus sign consistency |
 | `run_feature_permutation_test` | `dataset_id` + `feature` → two-sided empirical p-value against a circular-shift null that keeps each entity's serial correlation (`null="within_date"` is still available), with the per-date IC's lag-1 autocorrelation beside it |
+| `screen_feature_significance` | `dataset_id` (+ features, permutations, null) → the permutation floor over the whole panel: each feature's rank IC, p-value and `null_p95_abs`, and `honest_floor`, their maximum, which is the `min_abs_rank_ic` this panel supports; a naive threshold keeps features that noise produces one time in twenty. A draw budget bounds the cost, with the ceiling declared in the limits |
+| `screen_feature_stability` | `dataset_id` (+ features, blocks, reference) → drift and IC stability for every feature at once, with a per-block PSI curve against the first block or the previous one, so a feature that is no longer the same measurement is visible without knowing its name in advance |
 | `run_feature_ablation` | `dataset_id` + `ModelSpec` → refit without each feature in turn, reporting what each was worth |
 | `select_features` | `dataset_id` → a chosen set, selected on the first `1 - holdout_fraction` of the dates (or through `selection_end`), each selected feature's IC on the held-out dates beside its selection IC, and a recorded reason for every exclusion. The clusters it resolved, each drop's `duplicate_of`, the VIFs and the condition number come back with it (the correlation matrix behind `include_correlation`), so `get_feature_redundancy` need not be run a second time for the same panel |
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta. Both sets are summarised on every date unless `holdout_fraction` (or `selection_end`) holds dates out, and the result's `warnings` say so: at fraction 0 every IC in it is in-sample by construction, a comparison between the sets rather than an estimate of either one's out-of-sample strength |

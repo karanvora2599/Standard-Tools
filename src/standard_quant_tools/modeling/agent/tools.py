@@ -146,6 +146,19 @@ from .preview_tools import (  # noqa: F401
     preview_preprocessing,
     preview_sample_weights,
 )
+from .statistics_tools import (  # noqa: F401
+    COMPARE_SIGNALS_DESCRIPTION,
+    SCORE_PREDICTION_INTERVALS_DESCRIPTION,
+    CompareSignalsInput,
+    ScorePredictionIntervalsInput,
+    compare_signals,
+    score_prediction_intervals,
+)
+from .survival_tools import (  # noqa: F401
+    PREDICT_SURVIVAL_CURVE_DESCRIPTION,
+    PredictSurvivalCurveInput,
+    predict_survival_curve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3193,6 +3206,21 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         DESCRIBE_EXCHANGE_CALENDAR_DESCRIPTION,
         DescribeExchangeCalendarInput,
     ),
+    (
+        "score_prediction_intervals",
+        SCORE_PREDICTION_INTERVALS_DESCRIPTION,
+        ScorePredictionIntervalsInput,
+    ),
+    (
+        "compare_signals",
+        COMPARE_SIGNALS_DESCRIPTION,
+        CompareSignalsInput,
+    ),
+    (
+        "predict_survival_curve",
+        PREDICT_SURVIVAL_CURVE_DESCRIPTION,
+        PredictSurvivalCurveInput,
+    ),
 ]
 
 
@@ -3523,6 +3551,12 @@ MODELING_TOOL_DISPATCH = {
         describe_exchange_calendar,
         DescribeExchangeCalendarInput,
     ),
+    "score_prediction_intervals": (
+        score_prediction_intervals,
+        ScorePredictionIntervalsInput,
+    ),
+    "compare_signals": (compare_signals, CompareSignalsInput),
+    "predict_survival_curve": (predict_survival_curve, PredictSurvivalCurveInput),
 }
 
 

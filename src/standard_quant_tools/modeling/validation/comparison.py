@@ -37,6 +37,15 @@ and the p-values come back Holm-adjusted. What Holm does not do is control
 for the candidates having been SELECTED on this same sample -- that is what
 SPA-style tests exist for, and the report says so rather than pretending
 the adjustment covers it.
+
+THREE ADJUSTMENTS, TWO QUANTITIES. `holm_adjust` and `bonferroni_adjust`
+control the family-wise error rate; `bh_adjust` controls the false
+discovery rate, which is a weaker claim about each rejection and a
+different one, so the method used travels with the numbers rather than
+being inferred from them. See the CHANGELOG entry of 2026-09-21 for why
+the second and third were added: the first was reachable only through a
+comparison of two registered models, and a family of p-values from
+anywhere else had no correction at all.
 """
 
 from __future__ import annotations
@@ -231,6 +240,69 @@ def holm_adjust(p_values: Sequence[float]) -> List[float]:
     return [float(v) for v in adjusted]
 
 
+def bonferroni_adjust(p_values: Sequence[float]) -> List[float]:
+    """
+    Bonferroni: every p-value multiplied by the number of tests, capped at one.
+
+    The most conservative of the three and the only one that needs no
+    ordering, which is also what makes it the weakest: it spends the whole
+    error budget on the possibility that every null is true at once, so on
+    a family where several effects are real it rejects fewer of them than
+    Holm does while controlling exactly the same quantity. Holm dominates
+    it uniformly -- there is no configuration where Bonferroni rejects
+    something Holm does not -- and it is here because it is the number a
+    reader recognises and checks the other two against by hand.
+    """
+    p = np.asarray(list(p_values), dtype=np.float64)
+    m = p.size
+    if m == 0:
+        return []
+    return [float(min(1.0, m * value)) for value in p]
+
+
+def bh_adjust(p_values: Sequence[float]) -> List[float]:
+    """
+    Benjamini-Hochberg step-up adjustment, monotone and capped at one.
+
+    A DIFFERENT QUANTITY FROM THE OTHER TWO. Holm and Bonferroni control
+    the family-wise error rate, the probability of ONE false rejection
+    anywhere in the family. This controls the false discovery rate, the
+    expected SHARE of the rejections that are false. On twenty tests at
+    0.05 the first promises that a false rejection is unlikely at all; the
+    second allows one of twenty rejections to be false on average, and is
+    therefore far more willing to reject. A rejection under it is a
+    weaker claim, and nothing that reports it should imply otherwise.
+
+    THE STEP IS UP, AND THE MONOTONE PASS IS WHAT MAKES THE ANSWER A
+    P-VALUE. Ordered smallest to largest, the rank-`k` p-value is scaled by
+    `m / k`: the critical constants ASCEND with the rank, where Holm's
+    step-down multipliers descend. Those scaled values are not monotone on
+    their own -- 3/2 * 0.03 exceeds 3/3 * 0.04 -- so the procedure sweeps
+    from the largest rank down keeping a running minimum, exactly as
+    `holm_adjust` sweeps up keeping a running maximum. That pass is not
+    cosmetic: it is what makes `bh_adjust(p)[i] <= alpha` identical to the
+    step-up procedure's own decision (reject every test up to the largest
+    rank whose `p_(k) <= k / m * alpha`). Without it a test whose own
+    scaled value missed alpha would still be rejected when a larger
+    p-value cleared it, and a caller comparing the returned number to
+    alpha would get a different answer from the procedure. These are the
+    values `statsmodels.stats.multitest.multipletests(method='fdr_bh')`
+    and R's `p.adjust(method="BH")` return.
+    """
+    p = np.asarray(list(p_values), dtype=np.float64)
+    m = p.size
+    if m == 0:
+        return []
+    order = np.argsort(p, kind="stable")
+    adjusted = np.empty(m, dtype=np.float64)
+    running = 1.0
+    for rank in range(m, 0, -1):
+        index = order[rank - 1]
+        running = min(running, 1.0, m / rank * p[index])
+        adjusted[index] = running
+    return [float(value) for value in adjusted]
+
+
 def _check_frame(frame: pd.DataFrame, label: str) -> pd.DataFrame:
     missing = [c for c in REQUIRED_COLUMNS if c not in frame.columns]
     if missing:
@@ -360,6 +432,8 @@ def paired_comparison(
 __all__ = [
     "COMPARISON_METRICS",
     "REQUIRED_COLUMNS",
+    "bh_adjust",
+    "bonferroni_adjust",
     "compare_ic_series",
     "diebold_mariano",
     "holm_adjust",

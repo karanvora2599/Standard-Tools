@@ -307,5 +307,5 @@ class TestMonitoring:
             )
 
     def test_the_surface_grew_by_exactly_two(self):
-        assert len(MODELING_TOOL_DISPATCH) == 31
+        assert len(MODELING_TOOL_DISPATCH) == 34
         assert {"promote_model", "monitor_model"} <= set(MODELING_TOOL_DISPATCH)

@@ -256,4 +256,4 @@ class TestNoNewTools:
         # from a model to a backtest). What this test guards
         # is the two names above: a phase-4 capability must still arrive
         # through the registry and the spec, never as a tool.
-        assert len(MODELING_TOOL_DISPATCH) == 31
+        assert len(MODELING_TOOL_DISPATCH) == 34

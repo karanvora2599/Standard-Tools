@@ -101,6 +101,8 @@ _FEATURE_LAB_TOOLS = [
     "get_feature_regime_stability",
     "run_feature_ablation",
     "run_feature_permutation_test",
+    "screen_feature_significance",
+    "screen_feature_stability",
     "select_features",
 ]
 _MODEL_RESEARCH_TOOLS = [
@@ -137,6 +139,9 @@ _MODEL_BUILDER_TOOLS = [
     "score_model",
     "evaluate_model_portfolio",
     "evaluate_predictions_portfolio",
+    "score_prediction_intervals",
+    "compare_signals",
+    "predict_survival_curve",
     "list_models",
     "compare_models",
     "score_predictions",
