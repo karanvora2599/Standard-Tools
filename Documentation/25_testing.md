@@ -13,14 +13,14 @@ the ones above it.
 | Metamorphic relations | `tests/surface/test_metamorphic.py` | Consistently-wrong answers | 4 s |
 | Determinism and purity | `tests/surface/test_determinism.py` | Ignored seeds, mutated arguments | ~7 min |
 | Documentation | `tests/docs/` | Stale counts, undocumented tools, dead links | 6 s |
-| Mutation testing | `Development/mutation_testing.py` | **Tests that would not notice** | ~15 min |
+| Mutation testing | `scripts/mutation_testing.py` | **Tests that would not notice** | ~15 min |
 
 ```bash
 pytest                          # everything
 pytest -m "not slow"            # skips five files, not two: both heavy surface
                                 # suites plus test_strategies and two cpp_bindings
 pytest tests/surface -q         # the surface layers alone
-python Development/mutation_testing.py
+python scripts/mutation_testing.py
 ```
 
 ## Layer 1 — correctness, against planted answers
@@ -309,7 +309,7 @@ guides quoted a count that had been wrong for months.
 a defect.** Those are different claims, and only this layer distinguishes
 them.
 
-`Development/mutation_testing.py` holds a catalogue of deliberate defects —
+`scripts/mutation_testing.py` holds a catalogue of deliberate defects —
 a correction dropped as redundant, a sign flipped, a guard removed, a
 permutation swapped for a resample — and reruns the tests that should care.
 A mutation that **survives** marks a test that is decorative.
@@ -376,9 +376,9 @@ names is worse than no catalogue, because the report still says zero
 survivors.
 
 ```bash
-python Development/mutation_testing.py --list
-python Development/mutation_testing.py --filter granger
-python Development/mutation_testing.py --restore   # after an interruption
+python scripts/mutation_testing.py --list
+python scripts/mutation_testing.py --filter granger
+python scripts/mutation_testing.py --restore   # after an interruption
 ```
 
 ## Adding a tool: what the regime expects
@@ -391,7 +391,7 @@ python Development/mutation_testing.py --restore   # after an interruption
    list so a tool cannot be advertised without being dispatchable.
 4. Re-exports from `agent/tools.py` and `agent/__init__.py.__all__`.
 5. Tests against a **planted** answer, with a null case.
-6. `python Development/generate_tool_index.py`, committed.
+6. `python scripts/generate_tool_index.py`, committed.
 
 Layers 2–5 then cover the tool automatically — the fuzzer, the determinism
 checks and the documentation tests all read the registry, so a tool added

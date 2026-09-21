@@ -730,7 +730,7 @@ print("C++ backend active:", HAS_CPP)
 
 #### Build the extension
 
-Full platform instructions are in [Development/build_guide.md](../Development/build_guide.md). Quick start:
+Full platform instructions are in [30_build_guide.md](30_build_guide.md). Quick start:
 
 ```bash
 # Prerequisites (once)

@@ -17,7 +17,7 @@ taken from `boosting.OPTIONAL_ESTIMATORS`, a static declaration that exists
 whether or not the library does. Nothing here reads a version, a path or an
 install state; the output is the same on every machine at the same commit.
 
-RUN IT WITH:  python Development/generate_modeling_reference.py
+RUN IT WITH:  python scripts/generate_modeling_reference.py
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ HEADER = """# Modeling reference
 
 Every feature, estimator, target and spec option the modeling runtime
 knows, read from its registries. **Generated** by
-`Development/generate_modeling_reference.py` -- a test regenerates it and
+`scripts/generate_modeling_reference.py` -- a test regenerates it and
 fails if this file has drifted, so an entry added without regenerating
 breaks the suite in the commit that added it. The prose that explains
 these lives in [15_modeling.md](15_modeling.md); this is the catalog.

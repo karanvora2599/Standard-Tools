@@ -163,7 +163,7 @@ secrets/
 *claude*
 
 logs
-Development/.mutation_active
+scripts/.mutation_active
 
 # Test output, not source. The surface suite synthesizes arguments from
 # each tool's schema, and `export_audit_bundle` takes a path it WRITES to;
@@ -171,3 +171,10 @@ Development/.mutation_active
 # then committed. tests/surface/synth.py now routes path-shaped fields to a
 # scratch directory, and this makes a stray one unstageable regardless.
 /a
+
+# -----------------------------------------------------------------------------
+# Internal scratchpad
+# -----------------------------------------------------------------------------
+# Plans, findings, surveys and spikes. Working notes, never part of the
+# library; the CHANGELOG is the record of what they led to.
+Development/

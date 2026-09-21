@@ -1,5 +1,5 @@
 """
-Phase 1C of `Development/modeling_capability_gaps_plan.md`: the feature
+The capability-gaps fixes of 2026-09-21 (CHANGELOG): the feature
 lab's two lossy results.
 
   1C.1  `select_features` discards what it paid for. It calls

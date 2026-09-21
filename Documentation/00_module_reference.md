@@ -215,7 +215,7 @@ rolling = rolling_hurst(returns, window=252, step=5)   # pd.Series of H values
 | < 0.45 | mean-reverting | Contrarian / mean-reversion strategies |
 
 > The C++ extension accelerates `hurst_exponent` by 83–131× and `rolling_hurst`
-> by 274× (measured; see [16_performance.md](16_performance.md)). The API is identical with or without it — pure Python fallback is automatic. See [Development/build_guide.md](../Development/build_guide.md).
+> by 274× (measured; see [16_performance.md](16_performance.md)). The API is identical with or without it — pure Python fallback is automatic. See [30_build_guide.md](30_build_guide.md).
 
 ---
 

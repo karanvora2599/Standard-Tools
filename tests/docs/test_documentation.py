@@ -38,7 +38,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent.parent
 DOCS = ROOT / "Documentation"
 README = ROOT / "README.md"
-GENERATOR = ROOT / "Development" / "generate_tool_index.py"
+GENERATOR = ROOT / "scripts" / "generate_tool_index.py"
 INDEX = DOCS / "20_tool_index.md"
 
 
@@ -82,7 +82,7 @@ class TestTheToolIndexIsGenerated:
         after = INDEX.read_text(encoding="utf-8")
         assert before == after, (
             "Documentation/20_tool_index.md is out of date with the tool "
-            "registry. Run `python Development/generate_tool_index.py` and "
+            "registry. Run `python scripts/generate_tool_index.py` and "
             "commit the result -- the index is generated, not written."
         )
 
@@ -520,7 +520,7 @@ class TestNoStaleWholeSurfaceCountSurvivesInAnyPhrasing:
         assert not unused, f"no longer present, so delete: {unused}"
 
 
-MODELING_GENERATOR = ROOT / "Development" / "generate_modeling_reference.py"
+MODELING_GENERATOR = ROOT / "scripts" / "generate_modeling_reference.py"
 MODELING_REFERENCE = DOCS / "29_modeling_reference.md"
 
 
@@ -546,7 +546,7 @@ class TestTheModelingReferenceIsGenerated:
         assert before == after, (
             "Documentation/29_modeling_reference.md is out of date with the "
             "modeling registries. Run "
-            "`python Development/generate_modeling_reference.py` and commit "
+            "`python scripts/generate_modeling_reference.py` and commit "
             "the result -- the reference is generated, not written."
         )
 
@@ -555,16 +555,24 @@ class TestTheModelingReferenceIsGenerated:
         from standard_quant_tools.modeling.specs import TARGET_KINDS
 
         text = MODELING_REFERENCE.read_text(encoding="utf-8")
-        missing = [f"`{name}`" for name in [*FEATURE_REGISTRY, *TARGET_KINDS] if f"`{name}`" not in text]
+        missing = [
+            f"`{name}`"
+            for name in [*FEATURE_REGISTRY, *TARGET_KINDS]
+            if f"`{name}`" not in text
+        ]
         assert not missing, f"absent from the generated reference: {missing}"
 
     def test_every_optional_estimator_is_in_it_whether_or_not_installed(self):
         """The document is the same on every machine, so it must name the
         estimators this machine may not have."""
-        from standard_quant_tools.modeling.estimators.boosting import OPTIONAL_ESTIMATORS
+        from standard_quant_tools.modeling.estimators.boosting import (
+            OPTIONAL_ESTIMATORS,
+        )
 
         text = MODELING_REFERENCE.read_text(encoding="utf-8")
-        missing = [name for _task, name in OPTIONAL_ESTIMATORS if f"`{name}`" not in text]
+        missing = [
+            name for _task, name in OPTIONAL_ESTIMATORS if f"`{name}`" not in text
+        ]
         assert not missing, missing
 
 

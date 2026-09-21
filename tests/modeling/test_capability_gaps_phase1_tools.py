@@ -1,5 +1,5 @@
 """
-Phase 1A of `Development/modeling_capability_gaps_plan.md`: the modeling
+The capability-gaps fixes of 2026-09-21 (CHANGELOG): the modeling
 tool layer says what is true and returns what it already computed.
 
 Nine rows, nine planted answers. Two tool descriptions advertised a

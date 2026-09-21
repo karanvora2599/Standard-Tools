@@ -13,7 +13,7 @@ pip install -e ".[test,dev]"
 
 The optional C++ extension (`_sqt_core`) is not required for development —
 every code path falls back to Numba/pure-Python automatically when it isn't
-built. See [Development/build_guide.md](Development/build_guide.md) if you're
+built. See [Documentation/30_build_guide.md](Documentation/30_build_guide.md) if you're
 working on the C++ side specifically.
 
 Two things about it are worth knowing before you touch a `.cpp` file, because
@@ -127,7 +127,7 @@ counts as one.
   dispatchable, (d) a re-export from `agent/tools.py` and
   `agent/__init__.py`'s `__all__`, which a test also pins, (e) a
   regenerated `Documentation/20_tool_index.md`
-  (`python Development/generate_tool_index.py` — `tests/docs/` fails the
+  (`python scripts/generate_tool_index.py` — `tests/docs/` fails the
   build otherwise), and (f) a matching section in
   `Documentation/07_agent_tools.md` or `09_advanced_agent_tools.md`.
   Adding a whole RUNTIME additionally needs `RUNTIME_CATEGORIES`,

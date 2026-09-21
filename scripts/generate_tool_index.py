@@ -13,7 +13,7 @@ This makes them one action. `tests/docs/test_documentation.py` regenerates
 the file and fails if what is on disk differs, so a tool added without
 regenerating breaks the suite in the same commit that added it.
 
-RUN IT WITH:  python Development/generate_tool_index.py
+RUN IT WITH:  python scripts/generate_tool_index.py
 
 The descriptions are not rewritten here -- they are the same strings the
 model sees when it chooses a tool. That is deliberate. If a description
@@ -57,7 +57,7 @@ HEADER = """# Tool index
 
 Every tool in the library, by runtime, with the description the model
 actually sees. **Generated from the live registry** by
-`Development/generate_tool_index.py` -- a test regenerates it and fails if
+`scripts/generate_tool_index.py` -- a test regenerates it and fails if
 this file has drifted, so a tool added without regenerating breaks the
 suite in the commit that added it.
 

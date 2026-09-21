@@ -384,7 +384,7 @@ class TestNoMutationEscapedIntoTheSource:
     """
     A guard added after a mutation was COMMITTED.
 
-    `Development/mutation_testing.py` edits source files in place and
+    `scripts/mutation_testing.py` edits source files in place and
     restores them in a `finally`. It was running in the background when a
     `git add -A` swept the working tree, so `if False:` landed in a commit
     in place of the overflow bound in `analysis/options.py` -- and the file
@@ -420,7 +420,7 @@ class TestNoMutationEscapedIntoTheSource:
                         offenders.append(f"{path.name}:{number}  {stripped[:60]}")
         assert not offenders, (
             "constant conditions in the source. Either dead code, a disabled "
-            "guard, or a mutation from Development/mutation_testing.py that "
+            "guard, or a mutation from scripts/mutation_testing.py that "
             "escaped into a commit -- run it with --restore. " + "; ".join(offenders)
         )
 
@@ -436,7 +436,7 @@ class TestNoMutationEscapedIntoTheSource:
 
         harness = (
             _Path(__file__).resolve().parent.parent.parent
-            / "Development"
+            / "scripts"
             / "mutation_testing.py"
         )
         import sys

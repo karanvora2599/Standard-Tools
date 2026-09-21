@@ -2,8 +2,7 @@
 
 ## The report describes the runtime it runs in, and the results carry what they computed
 
-Phase 1 of `Development/modeling_capability_gaps_plan.md`: nothing new
-on the surface, and every existing answer made true. Two descriptions
+Nothing new on the surface, and every existing answer made true. Two descriptions
 advertised capability that did not exist; the capability report
 described sklearn in one place and a static list in another; five
 results dropped fields their own computation had produced; three

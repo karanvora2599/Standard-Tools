@@ -2,7 +2,7 @@
 
 Every feature, estimator, target and spec option the modeling runtime
 knows, read from its registries. **Generated** by
-`Development/generate_modeling_reference.py` -- a test regenerates it and
+`scripts/generate_modeling_reference.py` -- a test regenerates it and
 fails if this file has drifted, so an entry added without regenerating
 breaks the suite in the commit that added it. The prose that explains
 these lives in [15_modeling.md](15_modeling.md); this is the catalog.

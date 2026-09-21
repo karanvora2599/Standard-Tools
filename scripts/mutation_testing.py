@@ -6,8 +6,8 @@ catch a defect, and those are different claims. This breaks one specific
 thing at a time and reruns the tests that should care; a mutation that
 SURVIVES marks a test that is decorative.
 
-RUN IT WITH:  python Development/mutation_testing.py
-              python Development/mutation_testing.py --filter granger
+RUN IT WITH:  python scripts/mutation_testing.py
+              python scripts/mutation_testing.py --filter granger
 
 WHAT IT HAS ALREADY CAUGHT. Three mutations survived the first run of this
 catalogue, and two were real:
@@ -326,7 +326,7 @@ def main() -> int:
     if options.restore:
         for path in {p.relative_to(ROOT).as_posix() for p in targets}:
             _git("checkout", "--", path)
-        (ROOT / "Development" / ".mutation_active").unlink(missing_ok=True)
+        (ROOT / "scripts" / ".mutation_active").unlink(missing_ok=True)
         print(f"restored {len({p for p in targets})} file(s) from git")
         return 0
 
@@ -342,11 +342,11 @@ def main() -> int:
     # here can stop another process committing a mutated file, which is why
     # `tests/surface/test_invariants.py` also refuses constant conditions in
     # the source. That happened: `if False:` reached a commit.
-    marker = ROOT / "Development" / ".mutation_active"
+    marker = ROOT / "scripts" / ".mutation_active"
     marker.write_text(
         "A mutation is applied to the source RIGHT NOW. Do not commit.\n"
         "If this file exists and no run is in progress, a run was killed:\n"
-        "  python Development/mutation_testing.py --restore\n",
+        "  python scripts/mutation_testing.py --restore\n",
         encoding="utf-8",
     )
 

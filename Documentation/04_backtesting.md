@@ -106,7 +106,7 @@ had been expressed yet, and back-filling one would be look-ahead.
 | Grid (100 combos) | ~100–300 ms | ~10–40 ms | ~5–20 ms | **10–50×** |
 | Grid (1000 combos) | ~1–3 s | ~0.1–0.3 s | ~50–200 ms | **10–50×** |
 
-See [build_guide.md](../Development/build_guide.md) for build instructions.
+See [30_build_guide.md](30_build_guide.md) for build instructions.
 
 ---
 

@@ -1,5 +1,5 @@
 """
-Phase 1B of `Development/modeling_capability_gaps_plan.md`: the capability
+The capability-gaps fixes of 2026-09-21 (CHANGELOG): the capability
 report, the adapters, the engine's calibration caveat, and the three
 deletions.
 

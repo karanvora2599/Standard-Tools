@@ -91,7 +91,7 @@ endif()
 # A two-step workflow, not a single build: (1) build with SQT_PGO_GENERATE=ON,
 # run a representative workload to collect a profile, (2) build with
 # SQT_PGO_USE=ON to feed that profile back in. See
-# Development/build_guide.md's PGO section for the full local-only workflow
+# Documentation/30_build_guide.md's PGO section for the full local-only workflow
 # -- deliberately NOT wired into any CI workflow (too heavy/fragile for a
 # simple `cmake -B build && cmake --build build` pipeline: it requires an
 # extra training run between two separate builds, and the profile itself is
@@ -100,7 +100,7 @@ endif()
 option(SQT_PGO_GENERATE "Build an instrumented binary for PGO training (local-only, not for distribution)" OFF)
 option(SQT_PGO_USE       "Build using previously-collected PGO profile data (local-only, not for distribution)" OFF)
 if(SQT_PGO_GENERATE AND SQT_PGO_USE)
-    message(FATAL_ERROR "SQT_PGO_GENERATE and SQT_PGO_USE are mutually exclusive -- run the two-step workflow one flag at a time (see Development/build_guide.md).")
+    message(FATAL_ERROR "SQT_PGO_GENERATE and SQT_PGO_USE are mutually exclusive -- run the two-step workflow one flag at a time (see Documentation/30_build_guide.md).")
 endif()
 if(SQT_PGO_GENERATE)
     message(STATUS "PGO:      GENERATE — instrumented build for training, not for distribution")

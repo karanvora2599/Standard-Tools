@@ -45,7 +45,7 @@ poetry install
 
 **Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider). `pip install standard_quant_tools[mcp]` adds the Model Context Protocol SDK and the `sqt-mcp` server, which exposes the whole library to any MCP client — see [Documentation/18_mcp.md](Documentation/18_mcp.md). `pip install standard_quant_tools[polars]` adds optional `polars` interop for a growing subset of functions — pandas remains the default and required backend either way; see [Documentation/14_polars_support.md](Documentation/14_polars_support.md).
 
-> **Note on the C++ extension:** `pip install .` now **builds `_sqt_core` when a C++ toolchain is available** (the backend is scikit-build-core, which drives the project's CMake build). Without a compiler the install still succeeds and you get the pure-Python package — every indicator, backtest and analysis function works through its Numba/pure-Python fallback, and `HAS_CPP` is `False`. That degradation is deliberate: the extension is an optional accelerator, so requiring a compiler to install would turn it into a hard dependency. Pass `-C cmake.define.SQT_REQUIRE_NATIVE=ON` to make a missing toolchain a hard error instead (what CI uses). For the in-place developer build, see [Development/build_guide.md](Development/build_guide.md).
+> **Note on the C++ extension:** `pip install .` now **builds `_sqt_core` when a C++ toolchain is available** (the backend is scikit-build-core, which drives the project's CMake build). Without a compiler the install still succeeds and you get the pure-Python package — every indicator, backtest and analysis function works through its Numba/pure-Python fallback, and `HAS_CPP` is `False`. That degradation is deliberate: the extension is an optional accelerator, so requiring a compiler to install would turn it into a hard dependency. Pass `-C cmake.define.SQT_REQUIRE_NATIVE=ON` to make a missing toolchain a hard error instead (what CI uses). For the in-place developer build, see [Documentation/30_build_guide.md](Documentation/30_build_guide.md).
 
 > **Config & secrets:** copy [`.env.example`](.env.example) to `.env` (already `.gitignore`d) for any local provider configuration — currently `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT` and `SQT_POLYGON_API_KEY`. `standard_quant_tools.config.load_env()` loads it automatically and is a harmless no-op when `.env` doesn't exist (the normal state in CI). In GitHub Actions / GitLab CI, set the same variable names as encrypted secrets and inject them as job-level environment variables instead — no `.env` file involved, no code changes needed either way.
 
@@ -118,7 +118,7 @@ that were not worth doing:
 |---|---|
 | [Documentation/16_performance.md](Documentation/16_performance.md) | Every measured number, the OpenMP and AVX2 paths, the Python-level optimizations, and the honest disappointments kept beside their predictions |
 | [Documentation/17_correctness.md](Documentation/17_correctness.md) | The backend-parity contract that makes the two tiers substitutable, and the audit findings behind it |
-| [Development/build_guide.md](Development/build_guide.md) | Building the extension on Windows / Linux / macOS |
+| [Documentation/30_build_guide.md](Documentation/30_build_guide.md) | Building the extension on Windows / Linux / macOS |
 
 ## Error Handling
 
@@ -225,7 +225,7 @@ NaN/Inf data contract is covered separately, in
 > `src/standard_quant_tools/`, so a second configure directory will overwrite
 > the extension your main build produced. Use the documented
 > `cmake -B build` invocation in
-> [Development/build_guide.md](Development/build_guide.md).
+> [Documentation/30_build_guide.md](Documentation/30_build_guide.md).
 
 ---
 
@@ -263,7 +263,7 @@ NaN/Inf data contract is covered separately, in
 | `Documentation/27_meta.md` | The meta runtime: pre-flight (`describe_tool`, `validate_tool_call`), registry discovery, what a provider can promise, reading published artifacts, and the read-only half of the audit trail |
 | `Documentation/26_data.md` | The data runtime: fetching as a reference other runtimes read, what a provider guarantees, temporal contracts for frames this library did not fetch, bundles, and the unit-versus-definition distinction in ratio comparison |
 | `Documentation/25_testing.md` | The nine-layer testing regime: planted-answer correctness, a second oracle per C++ kernel, the whole-suite run with the extension switched off, whole-surface invariants, schema-synthesized adversarial fuzzing, metamorphic relations, determinism and purity, generated documentation, and mutation testing — with what each layer has actually caught |
-| `Development/build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
+| `Documentation/30_build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
 
 ---
 
