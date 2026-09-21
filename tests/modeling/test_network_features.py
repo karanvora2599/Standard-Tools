@@ -25,13 +25,13 @@ import pytest
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.features.network import (
     MIN_WINDOW,
-    _correlation,
-    _pairwise_correlation,
-    _prim_degrees,
     _avg_correlation,
     _avg_correlation_at,
+    _correlation,
     _mst_degree,
     _mst_degree_at,
+    _pairwise_correlation,
+    _prim_degrees,
 )
 
 
@@ -173,16 +173,22 @@ class TestTheRollingRefit:
             equal_nan=True,
         )
 
-    def test_the_warmup_is_the_window(self) -> None:
+    def test_the_warmup_is_the_window_plus_the_wait_for_the_grid(self) -> None:
+        """Nothing before a full window; the first value at the first
+        grid bar after it, which is at most refit_every - 1 bars later;
+        everything from there on."""
         panel = _star_universe(n_spokes=3, n=300)
         out = _avg_correlation(panel, None, window=126, refit_every=21)
         assert out["HUB"].iloc[:125].isna().all()
-        assert out["HUB"].iloc[125:].notna().all()
+        first = int(out.index.get_loc(out["HUB"].first_valid_index()))
+        assert 125 <= first < 125 + 21
+        assert out["HUB"].iloc[first:].notna().all()
 
     def test_values_are_held_between_refits_not_interpolated(self) -> None:
         panel = _star_universe(n_spokes=3, n=300)
         out = _avg_correlation(panel, None, window=126, refit_every=21)
-        held = out["HUB"].iloc[125:146]
+        first = int(out.index.get_loc(out["HUB"].first_valid_index()))
+        held = out["HUB"].iloc[first : first + 21]
         assert held.nunique() == 1, "a held value must not drift between refits"
 
     def test_the_output_covers_every_entity_and_bar(self) -> None:

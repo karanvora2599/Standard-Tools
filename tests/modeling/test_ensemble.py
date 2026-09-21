@@ -130,6 +130,25 @@ class TestIncomparableQuantitiesAreRefused:
         )
         assert combine_predictions(["reg", "rnk"])["n_rows"] > 0
 
+    def test_but_only_by_rank(self, registry) -> None:
+        """A ranker's score is unscaled and a regressor's is a return, so
+        a level method averages units that differ: measured live, `mean`
+        across the two correlated with the ranker at 0.9996 and with the
+        regressor at 0.45, and warned about nothing."""
+        rng = np.random.default_rng(6)
+        registry("reg", _predictions(lambda i, j: rng.normal(0, 0.01)))
+        registry(
+            "rnk",
+            _predictions(lambda i, j: rng.normal(0, 0.37)),
+            task="ranking",
+        )
+        for method in ("mean", "median"):
+            with pytest.raises(ValidationError, match="different scales"):
+                combine_predictions(["reg", "rnk"], method=method)
+        with pytest.raises(ValidationError, match="different scales"):
+            combine_predictions(["reg", "rnk"], method="weighted", weights=[1, 1])
+        assert combine_predictions(["reg", "rnk"], method="rank_mean")["n_rows"] > 0
+
     def test_different_targets_warn_rather_than_refuse(self, registry) -> None:
         rng = np.random.default_rng(5)
         registry("h5", _predictions(lambda i, j: rng.normal()))

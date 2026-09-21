@@ -68,6 +68,10 @@ def save_model(
     feature_profile: Optional[Dict[str, Any]] = None,
     feature_reference: Optional[Any] = None,
     prediction_reference: Optional[Any] = None,
+    deployed_params: Optional[Dict[str, Any]] = None,
+    deployed_params_source: str = "spec",
+    data_sources: Optional[Dict[str, str]] = None,
+    training_cross_section: Optional[Dict[str, float]] = None,
 ) -> ModelManifest:
     """
     preprocessing_stats: the fit_preprocessing() output computed on the
@@ -122,6 +126,20 @@ def save_model(
     model_spec_path = _artifacts.save_json(
         directory, "model_spec", model_spec.model_dump()
     )
+    # The legacy statistics file cannot express a pipeline that is not
+    # the default pooled pair, and wrote `{}` for one -- which
+    # `apply_preprocessing` reads as the identity, so a reader of the
+    # older file alone would have applied no transform at all. It now
+    # says so by name; the state file is the record.
+    if not preprocessing_stats and preprocessing_state is not None:
+        preprocessing_stats = {
+            "legacy": False,
+            "note": (
+                "This pipeline is not expressible as per-column winsorize/"
+                "zscore statistics; preprocessing_state.json is the fitted "
+                "transform, and apply_preprocessing refuses this file."
+            ),
+        }
     preprocessing_path = _artifacts.save_json(
         directory, "preprocessing_stats", preprocessing_stats
     )
@@ -210,7 +228,16 @@ def save_model(
         version=1,
         task=model_spec.task,
         estimator_type=model_spec.estimator.type,
-        estimator_params=model_spec.estimator.params,
+        # The parameters the deployed estimator carries: the search's
+        # choice when there was one, the spec's otherwise.
+        estimator_params=(
+            dict(deployed_params)
+            if deployed_params is not None
+            else dict(model_spec.estimator.params)
+        ),
+        deployed_params_source=deployed_params_source,
+        data_sources=dict(data_sources or {}),
+        training_cross_section=dict(training_cross_section or {}),
         feature_ids=feature_ids,
         model_input_columns=list(model_input_columns or []),
         target_id=target_id,

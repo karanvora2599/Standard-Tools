@@ -255,7 +255,8 @@ class TestValidateModelSpecEstimatesRealWork:
             if r["searched"]
         ]
         assert searched
-        assert result.estimated_fits == folds + 1 + 3 * 2 * len(searched)
+        # ... plus the full-panel search that chooses the deployed parameters.
+        assert result.estimated_fits == folds + 1 + 3 * 2 * len(searched) + 3 * 2
         assert result.estimated_fits == actual.validation_report["fits"]["planned"]
 
     def test_without_a_dataset_a_walk_forward_count_is_unknown_not_guessed(self):

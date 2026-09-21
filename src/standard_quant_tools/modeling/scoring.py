@@ -7,11 +7,16 @@ modeling.artifacts.save_artifact.
 Reuses dataset.builder.build_dataset(include_target=False) — the scoring
 path deliberately skips target construction, since a forward-return
 target needs `horizon` bars of future data that don't exist for "today".
-Applies the SAME preprocessing stats the registered model's final refit
-used (persisted by registry.model_registry.save_model), not freshly
-fit stats on the scoring universe — otherwise the same input row could
-score differently depending on which other tickers happened to be in the
-scoring call.
+Applies the SAME fitted pipeline the registered model's final refit used
+(persisted by registry.model_registry.save_model). For a POOLED model
+that is a set of statistics, so the same input row scores the same
+whichever other tickers are in the call. For a CROSS-SECTIONAL model it
+is not: the transform fits nothing and standardizes within the rows the
+call contains, so every row's score depends on which other entities
+were scored with it -- narrowing a trained universe of eight names to
+three inverted a forest's ranking (findings D15). Such a model is
+therefore pinned to its training universe unless the caller passes
+universe_policy='allow', and the result then says what was refit.
 """
 
 import hashlib
@@ -76,6 +81,25 @@ def _deployed_preprocessing(manifest, model_id: str) -> Dict[str, Any]:
     return spec.preprocessing.model_dump()
 
 
+def _deployed_is_cross_sectional(
+    manifest, state: Optional[Dict[str, Any]], preprocessing: Dict[str, Any]
+) -> bool:
+    """
+    Whether the deployed pipeline standardizes within the scoring
+    cross-section: from the fitted state's steps when there is one, else
+    from the manifest's resolved steps, else from the scheme name.
+    """
+    steps: List[str] = []
+    if state is not None:
+        steps = [str(s.get("type")) for s in (state.get("steps") or [])]
+    elif manifest.preprocessing.get("steps"):
+        steps = [str(s.get("type")) for s in manifest.preprocessing["steps"]]
+    if "cross_sectional_standardize" in steps:
+        return True
+    scheme = (manifest.preprocessing or preprocessing or {}).get("normalization")
+    return scheme == "cross_sectional"
+
+
 from .specs import DatasetSpec, _parse_date
 
 
@@ -85,9 +109,16 @@ def score_model(
     universe: List[str],
     lookback_days: int = 400,
     max_staleness_days: Optional[int] = None,
+    universe_policy: str = "strict",
 ) -> Dict[str, Any]:
     """
     Args:
+        universe_policy: 'strict' (default) refuses to score a
+            cross-sectional model on a universe that is not the one it
+            was trained on; 'allow' scores it and returns a warning
+            saying the transform was refit on the scoring cross-section
+            and how its width compares with the training one. A model
+            with universe-scope features is refused either way.
         lookback_days: calendar days of history fetched before `as_of` so
             every requested feature's lookback window has enough data —
             widen this if the model's features use unusually large
@@ -100,6 +131,11 @@ def score_model(
     # Entities are asset keys in canonical form, whatever spelling arrived,
     # so `missing_entities` and the panel agree on names.
     universe = canonical_universe(universe)
+    if universe_policy not in ("strict", "allow"):
+        raise ValidationError(
+            f"score_model: universe_policy={universe_policy!r}; expected "
+            "'strict' or 'allow'."
+        )
     try:
         as_of_ts = _parse_date(as_of, "as_of")
     except ValueError as exc:
@@ -278,6 +314,31 @@ def score_model(
             "train a new model on the universe you want to score."
         )
 
+    # ── A cross-sectional model is pinned to its universe too ─────────
+    # `cross_sectional_standardize` fits nothing: it standardizes within
+    # the rows of the call. The module docstring promised that the same
+    # input row scores the same whichever other tickers are in the
+    # call, and for such a model that is false by construction --
+    # narrowing eight trained names to three moved one row's score by
+    # 544% and inverted the ranking (findings D15). The pin above fired
+    # only for universe-scope features; this one fires for the
+    # transform, in the same voice, and can be waived by name.
+    cross_sectional = _deployed_is_cross_sectional(manifest, state, preprocessing)
+    universe_differs = sorted(universe) != sorted(trained_universe)
+    warnings: List[str] = []
+    if cross_sectional and universe_differs and universe_policy == "strict":
+        raise ValidationError(
+            "score_model: this model standardizes each feature WITHIN the "
+            "scoring cross-section (preprocessing step "
+            "cross_sectional_standardize), so every row's score depends on "
+            "which other entities are scored with it -- a subset is not a "
+            "smaller sample but a different transform. Trained on "
+            f"{sorted(trained_universe)}, asked to score {sorted(universe)}. "
+            "Score the training universe, train a new model on the universe "
+            "you want to score, or pass universe_policy='allow' to refit the "
+            "transform on this cross-section and receive a warning saying so."
+        )
+
     start = (as_of_ts - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     # Reconstruct through DatasetSpec(**...) rather than
     # original_spec.model_copy(update=...) -- model_copy does NOT re-run
@@ -321,6 +382,20 @@ def score_model(
         )
     }
     latest = latest.loc[~stale_mask]
+    if cross_sectional and universe_differs:
+        width = manifest.training_cross_section or {}
+        trained_width = (
+            f"median {width['median']:g} (min {width['min']}, max {width['max']})"
+            if width
+            else "unrecorded for this model"
+        )
+        warnings.append(
+            f"cross-sectional transform refit on the scoring cross-section of "
+            f"{len(latest)} entities; the training cross-section was {trained_width} "
+            "entities per date. Every returned score depends on which entities "
+            "were in this call, and is not comparable with a score of the same "
+            "entity from a call with a different universe."
+        )
 
     # ── How old is that shared date? ──────────────────────────────────────
     # Enforcing ONE cross-section date makes every returned prediction
@@ -485,6 +560,7 @@ def score_model(
         "n_entities": int(len(predictions_df)),
         "missing_entities": missing_entities,
         "stale_entities": stale_entities,
+        "warnings": warnings,
         "summary_stats": {
             "mean": float(predictions_df["prediction"].mean()),
             "std": (

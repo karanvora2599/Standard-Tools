@@ -156,6 +156,27 @@ class ModelManifest(BaseModel):
     # is indistinguishable from "no warnings" by design: absence of a
     # recorded warning is not evidence the condition did not hold.
     dataset_warnings: List[str] = Field(default_factory=list)
+    # Where `estimator_params` came from: 'full_panel_search' when one
+    # final inner search on the whole panel chose them, 'last_fold' when
+    # the panel could not support that search and the last searched
+    # fold's choice was deployed, 'spec' when nothing searched. The
+    # refit read the spec's base values whatever the folds had chosen
+    # (findings D14), so a manifest written before this field existed
+    # is 'spec' whether or not its folds searched.
+    deployed_params_source: str = "spec"
+    # Which feed each entity's bars came from, '<provider>:<dataset>',
+    # as the dataset build recorded it. Two models built from the same
+    # spec on two feeds carried identical recorded identity and
+    # differed by 22% on the headline metric (findings D16); this is
+    # the field that tells them apart. An observation, not a request,
+    # so it is outside dataset_spec_hash. Empty for older models.
+    data_sources: Dict[str, str] = Field(default_factory=dict)
+    # Entities per date in the training panel (min/median/max/n_dates).
+    # A cross-sectional transform fits nothing per column, so scoring
+    # a different universe standardizes within a different
+    # cross-section; this is the width that scoring compares against
+    # (findings D15). Empty for older models.
+    training_cross_section: Dict[str, float] = Field(default_factory=dict)
     # The transform the DEPLOYED estimator was fitted under, as
     # PreprocessingSpec.model_dump(): {"normalization": ..., "clip_sigma":
     # ...}. `preprocessing_stats.json` holds the fitted pooled statistics

@@ -136,8 +136,8 @@ class TestTheTaskExists:
 
     def test_an_ensemble_will_not_average_a_hazard_with_a_return(self):
         with pytest.raises(ValidationError, match="hazard"):
-            _check_tasks({"a": "survival", "b": "regression"})
-        _check_tasks({"a": "survival", "b": "survival"})
+            _check_tasks({"a": "survival", "b": "regression"}, "rank_mean")
+        _check_tasks({"a": "survival", "b": "survival"}, "rank_mean")
 
 
 class TestTheMetric:

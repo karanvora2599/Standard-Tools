@@ -314,7 +314,7 @@ class TestThroughTheEngine:
         spec = _tpe_spec(validation=ValidationSpec(method="purged_kfold", n_splits=4))
         result = validate_model_spec(ValidateModelSpecInput(spec=spec))
         assert result.valid
-        assert result.estimated_fits == 4 * (1 + 5 * 2) + 1
+        assert result.estimated_fits == 4 * (1 + 5 * 2) + 1 + 5 * 2
         capabilities = modeling_capabilities()
         assert capabilities["hyperparameter_search"] == ["grid", "random", "tpe"]
         assert capabilities["optional_dependencies"]["optuna"] is True

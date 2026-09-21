@@ -35,7 +35,7 @@ advertises 155 of the 211 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `modeling` | 22 | 84 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 22 | 85 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
@@ -741,7 +741,7 @@ Fit + walk-forward validate + register a model from a persisted dataset.
 Run a registered model forward and get its predictions for a universe as of a date. The step that turns a fitted model into something a backtest can consume, and the one where point-in-time discipline matters most: the `as_of` date is what stops the model seeing features that did not exist yet. Raw probabilities from a tree ensemble are NOT calibrated, so a 0.9 threshold may select no rows at all -- check the distribution before thresholding.
 
 **Required:** `model_id`, `as_of`, `universe`  
-**Optional:** `lookback_days`, `max_staleness_days`
+**Optional:** `lookback_days`, `max_staleness_days`, `universe_policy`
 
 #### `score_predictions`
 

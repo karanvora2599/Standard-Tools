@@ -95,7 +95,7 @@ def load_oos_predictions(model_id: str, *, keep_path: bool = False) -> pd.DataFr
     return out
 
 
-def _check_tasks(tasks: Dict[str, str]) -> None:
+def _check_tasks(tasks: Dict[str, str], method: str) -> None:
     """
     Refuse to average quantities that are not the same quantity.
 
@@ -108,6 +108,11 @@ def _check_tasks(tasks: Dict[str, str]) -> None:
 
     Regression and ranking are allowed together: both emit a continuous
     score whose ordering is the meaning, which is what `SCORE_TASKS` names.
+    Their LEVELS are not comparable, though -- a ranker's score is
+    unscaled and a regressor's is a return -- so only `rank_mean`
+    combines them. Measured live, `mean` across the two had standard
+    deviations 37x apart, correlated with the ranker at 0.9996 and with
+    the regressor at 0.45, and warned about nothing.
     """
     distinct = set(tasks.values())
     if len(distinct) == 1:
@@ -122,6 +127,16 @@ def _check_tasks(tasks: Dict[str, str]) -> None:
             "with survival models."
         )
     if distinct <= set(SCORE_TASKS):
+        if method != "rank_mean":
+            listing = ", ".join(f"{m}={t}" for m, t in sorted(tasks.items()))
+            raise ValidationError(
+                f"these models emit scores on different scales: {listing}. A "
+                "ranking model's score is unscaled and a regression model's is "
+                f"a return, so method={method!r} averages levels whose units "
+                "differ and the blend is whichever model has the larger scale. "
+                "Use method='rank_mean', which compares orderings, to combine a "
+                "regression model with a ranking model."
+            )
         return
     listing = ", ".join(f"{m}={t}" for m, t in sorted(tasks.items()))
     raise ValidationError(
@@ -214,7 +229,7 @@ def combine_predictions(
         tasks[model_id] = manifest.task
         targets[model_id] = manifest.target_id
         frames[model_id] = load_oos_predictions(model_id)
-    _check_tasks(tasks)
+    _check_tasks(tasks, method)
 
     warnings: List[str] = []
     if len(set(targets.values())) > 1:

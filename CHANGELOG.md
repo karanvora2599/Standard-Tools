@@ -1,5 +1,73 @@
 # Changelog
 
+## The model you can score now carries the parameters the folds validated
+
+Phase 2 of `Development/databento_live_fix_plan.md`: the deployed model is
+the validated model. Each item names the number it moves.
+
+- **The refit deploys the searched parameters (D14).** Each fold reassigned
+  its parameters from the inner search and the refit read the spec's base
+  values, so a ridge searched over {0.001, 100, 10000} was deployed at
+  alpha=1.0, a value no fold scored, and a searched forest's deployed
+  predictions correlated with the correct ones at Spearman 0.30. One final
+  inner search on the full panel, under the same purge and embargo the
+  folds used, now chooses the deployed values; one variable feeds the
+  refit, the quantile models and the conformal radius. The plan counts it
+  (`n_fits_final_search`, inside `n_fits_refit`) and refuses it over budget
+  like any other fit, so `estimated_fits` and `fits.planned` grow by
+  candidates x inner folds for a searched spec. The manifest's
+  `estimator_params` are the deployed values, `deployed_params_source`
+  says whether they came from the full-panel search, the last searched
+  fold or the spec, `validation_report.final_search` carries the search,
+  and `inspect_model(view="summary")` shows them.
+- **A cross-sectional model is pinned to its universe (D15).** The
+  cross-sectional step fits nothing, so scoring three of eight trained
+  names standardized within a different cross-section and inverted a
+  forest's ranking. `score_model` now refuses such a model on a universe
+  that is not the trained one, in the voice of the universe-scope refusal;
+  `universe_policy="allow"` scores anyway and the new
+  `ScoreModelResult.warnings` says the transform was refit on the scoring
+  cross-section and how its width compares with the training one, which
+  the manifest records as `training_cross_section`. The scoring docstring
+  no longer promises the opposite.
+- **The lineage names the feed (D16).** `build_model_dataset` persists
+  `data_sources` (entity -> `provider:dataset`) into `dataset_meta.json`
+  and returns it; `run_model_experiment` carries it onto
+  `ModelManifest.data_sources`, and `inspect_model(view="lineage")` shows
+  it. Outside `dataset_spec_hash`, since it is an observation.
+- **A universe-scope value no longer depends on where the frame starts
+  (D17).** `factors.pca_loading`, `factors.pca_factor_return`,
+  `network.avg_correlation` and `network.mst_degree` refit on a grid fixed
+  by each bar's date (`features/schedule.py`: weekdays since 1970 for
+  daily bars) rather than counted from the frame's first bar. Dropping k
+  leading bars now leaves every computable value bit-identical for every
+  k, and truncating trailing bars still leaves every earlier value
+  unchanged. The first refit can sit up to `refit_every - 1` bars after
+  the window, so warm-up grows by that much; values at every date change
+  for any frame whose first bar was not on the grid.
+- **A feature absent from a fold's training rows is refused (D18).** A
+  column that is 100% NaN in a fold's training rows was imputed at the
+  constant and trained on as if it existed there; five of eight live folds
+  did, and the averaged importance said nothing. The engine now refuses it
+  by name with the fold and the remedy before the impute step runs
+  (`hist_gradient_boosting` is refused here rather than dying inside
+  numpy), and records each feature's per-fold training missing rate in
+  `validation_report.missing_rate_by_fold` and on each fold record.
+- **The delisting diagnostic names the entity that binds (D20).** The
+  intersection warning named the latest-starting symbol, which on a
+  universe where every name starts together was whichever came first. It
+  now names the entity whose removal recovers the most dates, computed,
+  with its bar range and the count recovered, or says that no single
+  symbol binds.
+- `capabilities()` reports `coefficients` for `sgd` (its `coef_` comes
+  through `SparseCoefMixin`, not `LinearModel`).
+- `combine_predictions` with `mean`, `median` or `weighted` across a
+  regression and a ranking model is refused by name; `rank_mean` remains
+  the method that compares them.
+- `preprocessing_stats.json` writes `{"legacy": false, "note": ...}` for a
+  pipeline the per-column form cannot express, and `apply_preprocessing`
+  refuses the marker, so `{}` is never read as no preprocessing.
+
 ## The provider that serves the live market bypassed every seam the others share
 
 Phase 1 of `Development/databento_live_fix_plan.md`, from the live findings

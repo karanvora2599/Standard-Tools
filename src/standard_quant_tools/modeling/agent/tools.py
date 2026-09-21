@@ -222,6 +222,10 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             # this panel so small" is answerable later without a rebuild.
             "drop_attribution": built["drop_attribution"],
             "entities_fetched": built["entities_fetched"],
+            # Which feed answered for each entity (findings D16). An
+            # observation about the build, so it sits beside data_hash
+            # and outside spec_hash.
+            "data_sources": built.get("data_sources", {}),
             # rows / n_dates / start_date / end_date.
             **_dataset_extent(built["panel"]),
         },
@@ -235,6 +239,7 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
         target_id=built["target_id"],
         warnings=built["warnings"],
         drop_attribution=built["drop_attribution"],
+        data_sources=built.get("data_sources", {}),
     )
 
 
@@ -708,6 +713,9 @@ def run_model_experiment(
         # existed have no such key, and a missing warning list is not the
         # same claim as an empty one -- see ModelManifest.dataset_warnings.
         "warnings": list(meta.get("warnings", [])) + selection_notes,
+        # The feed per entity, for the manifest. Empty for a dataset
+        # persisted before it was recorded.
+        "data_sources": dict(meta.get("data_sources") or {}),
     }
     result = _run_experiment(dataset, input_data.spec, dataset_id=input_data.dataset_id)
     # Republished with a content kind so the rest of the interconnect can
@@ -736,6 +744,7 @@ def score_model(input_data: ScoreModelInput) -> ScoreModelResult:
         universe=input_data.universe,
         lookback_days=input_data.lookback_days,
         max_staleness_days=input_data.max_staleness_days,
+        universe_policy=input_data.universe_policy,
     )
     return ScoreModelResult(**result)
 
@@ -755,6 +764,13 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # What the estimator was actually fitted on, when the pipeline
             # changed the column set; equal to feature_ids otherwise.
             "model_input_columns": manifest.model_input_columns,
+            # The parameters the DEPLOYED estimator carries and where they
+            # came from. The summary did not show them, and the refit had
+            # been deploying the spec's base values whatever the folds'
+            # searches chose (findings D14).
+            "estimator_params": manifest.estimator_params,
+            "deployed_params_source": manifest.deployed_params_source,
+            "training_cross_section": manifest.training_cross_section,
             "target_id": manifest.target_id,
             "created_at_utc": manifest.created_at_utc,
             # Where the model is in its lifecycle and every decision that
@@ -781,6 +797,9 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
         data = {
             "dataset_id": manifest.dataset_id,
             "dataset_hash": manifest.dataset_hash,
+            # Which feed each entity's bars came from; the field that
+            # tells two builds of one spec apart (findings D16).
+            "data_sources": manifest.data_sources,
             "oos_predictions_uri": manifest.oos_predictions_uri,
             "random_seed": manifest.random_seed,
             "git_commit_sha": manifest.git_commit_sha,

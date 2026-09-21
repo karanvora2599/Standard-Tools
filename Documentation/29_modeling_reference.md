@@ -17,14 +17,14 @@ them the running install actually has.
 | id | scope | temporal | lookback | requires | default params | description |
 |---|---|---|---|---|---|---|
 | `factors.pca_factor_return` | universe | pit_safe | 252 | Close | `refit_every=21`, `window=252` | That date's realized universe return projected onto the currently-held PC1 loadings — a shared macro factor (same value for every entity that date). |
-| `factors.pca_loading` | universe | pit_safe | 252 | Close | `refit_every=21`, `window=252` | Entity's loading on PC1 of the universe return panel, refit every `refit_every` bars and forward-filled between refits. |
+| `factors.pca_loading` | universe | pit_safe | 252 | Close | `refit_every=21`, `window=252` | Entity's loading on PC1 of the universe return panel, refit every `refit_every` bars on a grid fixed by the bar's date (so a value does not depend on where the frame starts) and forward-filled between refits. |
 | `fundamental.diluted_eps` | point_in_time | pit_safe | 0 | fundamentals: income_statement.diluted_earnings_per_share | `max_staleness_days=120` | Diluted earnings per share as filed, joined by filing date; a restatement is a new version from the date it was filed. |
 | `fundamental.net_margin` | point_in_time | pit_safe | 0 | fundamentals: income_statement.net_income_loss, income_statement.revenues | `max_staleness_days=120` | Net income over revenues within one filing, joined by filing date; NaN where revenues are not positive. |
 | `fundamental.revenue_growth_yoy` | point_in_time | pit_safe | 0 | fundamentals: income_statement.revenues | `max_staleness_days=120` | Revenue growth against the same fiscal period a year earlier, with a version at every time either filing changed, so a restated prior year is read from the day it was restated. |
 | `market.momentum` | entity | pit_safe | 20 | Close | `lookback=20` | Trailing close-to-close return over `lookback` bars. |
 | `market.new_high_breakout` | entity | pit_safe | 20 | High, Close | `period=20` | 1.0 if Close breaks above the prior `period`-bar High (today's own bar excluded), else 0.0. NaN until `period` bars of history exist — the warm-up is unknown, not a confirmed non-breakout. |
 | `market.psar_trend` | entity | pit_safe | 1 | High, Low | `af_max=0.2`, `af_start=0.02`, `af_step=0.02` | Parabolic SAR trend direction: 1.0 (uptrend) or -1.0 (downtrend). |
-| `network.avg_correlation` | universe | pit_safe | 126 | Close | `refit_every=21`, `window=126` | Entity's mean correlation to the rest of the universe over a trailing window, refit every `refit_every` bars. Scale-free, unlike a PC1 loading: it says how much company a name keeps rather than how much variance it contributes. |
+| `network.avg_correlation` | universe | pit_safe | 126 | Close | `refit_every=21`, `window=126` | Entity's mean correlation to the rest of the universe over a trailing window, refit every `refit_every` bars on a grid fixed by the bar's date. Scale-free, unlike a PC1 loading: it says how much company a name keeps rather than how much variance it contributes. |
 | `network.mst_degree` | universe | pit_safe | 126 | Close | `refit_every=21`, `window=126` | Entity's degree in the minimum spanning tree of the universe's correlation-distance matrix (Mantegna). Local topology, not a global factor: a hub is a name others route through, which a PC1 loading cannot express. |
 | `risk.atr_pct` | entity | pit_safe | 14 | High, Low, Close | `period=14` | Wilder's Average True Range as a fraction of Close (normalized, comparable across differently-priced stocks). |
 | `risk.bipower_variation` | entity | pit_safe | 22 | Close | `period=20` | Jump-robust annualized volatility from consecutive absolute log returns over `period` bars; realized_volatility above it is jump variance. |
@@ -70,7 +70,7 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | regression | `quantile_gradient_boosting` | `standard_quant_tools.modeling.estimators.boosting.QuantileGradientBoostingRegressor` | `alpha`, `learning_rate`, `max_depth`, `n_estimators` | sample weights, importances, quantiles (`alpha`) |
 | regression | `random_forest` | `sklearn.ensemble._forest.RandomForestRegressor` | `max_depth`, `n_estimators` | sample weights, importances |
 | regression | `ridge` | `sklearn.linear_model._ridge.Ridge` | `alpha`, `fit_intercept`, `max_iter` | sample weights, coefficients |
-| regression | `sgd` | `sklearn.linear_model._stochastic_gradient.SGDRegressor` | `alpha`, `eta0`, `fit_intercept`, `l1_ratio`, `learning_rate`, `loss`, `max_iter`, `penalty`, `random_state`, `tol` | sample weights |
+| regression | `sgd` | `sklearn.linear_model._stochastic_gradient.SGDRegressor` | `alpha`, `eta0`, `fit_intercept`, `l1_ratio`, `learning_rate`, `loss`, `max_iter`, `penalty`, `random_state`, `tol` | sample weights, coefficients |
 | survival | `cox_ph` | `standard_quant_tools.modeling.estimators.survival.CoxPHRegressor` | `alpha`, `max_iter`, `tol` | sample weights, coefficients |
 
 ### Optional

@@ -104,6 +104,14 @@ def apply_preprocessing(
 ) -> pd.DataFrame:
     """Apply stats produced by fit_preprocessing (fit on train) to any
     frame — train or test — sharing the same feature columns."""
+    if stats.get("legacy") is False:
+        # The registry writes this marker for a pipeline the per-column
+        # form cannot express; `{}` was written before, and `{}` here is
+        # the identity, which read as 'no preprocessing'.
+        raise ValidationError(
+            "apply_preprocessing: this preprocessing_stats.json is a marker, "
+            "not a transform: " + str(stats.get("note", ""))
+        )
     # The native path transforms the WHOLE matrix in one fused pass, so it
     # only applies when the frame is exactly the fitted columns in the
     # fitted order. A frame carrying extra columns, or a partial stats dict,
@@ -227,7 +235,11 @@ def _fit_and_apply_with_stats(
     same_columns = list(train.columns) == list(test.columns)
     if train_matrix is None or test_matrix is None or not same_columns:
         stats = fit_preprocessing(train)
-        return apply_preprocessing(train, stats), apply_preprocessing(test, stats), stats
+        return (
+            apply_preprocessing(train, stats),
+            apply_preprocessing(test, stats),
+            stats,
+        )
 
     native = _cpp_core.fit_preprocess_stats(train_matrix, _WINSOR_LOW, _WINSOR_HIGH)
     lo = np.asarray(native["lo"], dtype=np.float64)

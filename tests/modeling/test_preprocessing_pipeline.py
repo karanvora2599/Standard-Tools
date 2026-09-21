@@ -79,7 +79,9 @@ def _panel(n_rows: int = 400, n_cols: int = 4, seed: int = 0) -> pd.DataFrame:
 def _ctx(frame: pd.DataFrame, n_entities: int = 4) -> FoldContext:
     n = len(frame)
     return FoldContext(
-        dates=np.repeat(pd.date_range("2021-01-04", periods=n // n_entities), n_entities),
+        dates=np.repeat(
+            pd.date_range("2021-01-04", periods=n // n_entities), n_entities
+        ),
         entities=np.tile(np.arange(n_entities), n // n_entities),
     )
 
@@ -96,7 +98,9 @@ class TestTheSpecResolves:
         ]
 
     def test_cross_sectional_is_one_stateless_step(self):
-        steps = PreprocessingSpec(normalization="cross_sectional", clip_sigma=2.5).resolved_steps
+        steps = PreprocessingSpec(
+            normalization="cross_sectional", clip_sigma=2.5
+        ).resolved_steps
         assert [(s.type, s.params) for s in steps] == [
             ("cross_sectional_standardize", {"clip_sigma": 2.5})
         ]
@@ -117,7 +121,9 @@ class TestTheSpecResolves:
         spec = PreprocessingSpec(
             steps=[
                 StepSpec(type="winsorize", params={"lower": 0.05, "upper": 0.95}),
-                StepSpec(type="cross_sectional_standardize", params={"clip_sigma": 2.0}),
+                StepSpec(
+                    type="cross_sectional_standardize", params={"clip_sigma": 2.0}
+                ),
             ]
         )
         again = PreprocessingSpec(**spec.model_dump())
@@ -174,14 +180,20 @@ class TestTheStepsReproduceTheOldTransform:
         pd.testing.assert_frame_equal(got_train, expected_train, atol=1e-12, rtol=0)
         pd.testing.assert_frame_equal(got_test, expected_test, atol=1e-12, rtol=0)
         for column in train.columns:
-            assert w_state["lo"][column] == pytest.approx(stats[column]["lo"], abs=1e-12)
-            assert z_state["std"][column] == pytest.approx(stats[column]["std"], abs=1e-12)
+            assert w_state["lo"][column] == pytest.approx(
+                stats[column]["lo"], abs=1e-12
+            )
+            assert z_state["std"][column] == pytest.approx(
+                stats[column]["std"], abs=1e-12
+            )
 
     def test_the_fused_pipeline_equals_the_generic_one(self):
         frame, ctx = _panel(seed=3)
         train, test = frame.iloc[:300], frame.iloc[300:]
         default = PreprocessingSpec().resolved_steps
-        state, fused_train, fused_test = fit_and_apply_pipeline(default, train, test, ctx, ctx)
+        state, fused_train, fused_test = fit_and_apply_pipeline(
+            default, train, test, ctx, ctx
+        )
         assert step_types(state) == ["winsorize", "zscore"]
 
         # A non-default winsorize bound forces the generic path; set it to
@@ -190,13 +202,17 @@ class TestTheStepsReproduceTheOldTransform:
         zscore = build_step("zscore", {})
         w_state = winsor.fit(train, ctx)
         z_state = zscore.fit(winsor.transform(train, w_state, ctx), ctx)
-        generic_test = zscore.transform(winsor.transform(test, w_state, ctx), z_state, ctx)
+        generic_test = zscore.transform(
+            winsor.transform(test, w_state, ctx), z_state, ctx
+        )
         pd.testing.assert_frame_equal(fused_test, generic_test, atol=1e-12, rtol=0)
 
     def test_cross_sectional_step_is_the_function(self):
         frame, ctx = _panel(seed=5)
         state, out = fit_pipeline(
-            PreprocessingSpec(normalization="cross_sectional").resolved_steps, frame, ctx
+            PreprocessingSpec(normalization="cross_sectional").resolved_steps,
+            frame,
+            ctx,
         )
         assert state["steps"][0]["state"] == {}
         pd.testing.assert_frame_equal(
@@ -208,7 +224,9 @@ class TestTheStepsReproduceTheOldTransform:
         state, _ = fit_pipeline(PreprocessingSpec().resolved_steps, frame, ctx)
         assert legacy_stats(state) == fit_preprocessing(frame)
         state, _ = fit_pipeline(
-            [StepSpec(type="winsorize", params={"lower": 0.05, "upper": 0.95})], frame, ctx
+            [StepSpec(type="winsorize", params={"lower": 0.05, "upper": 0.95})],
+            frame,
+            ctx,
         )
         assert legacy_stats(state) == {}
 
@@ -291,9 +309,18 @@ class TestTheEngineRunsThePipeline:
     def test_explicit_steps_run_and_are_reported(self, steps_model):
         model_id, _dataset = steps_model
         manifest = load_manifest(model_id)
-        assert manifest.validation_report["preprocessing_steps"] == ["winsorize", "zscore"]
-        assert [s["type"] for s in manifest.preprocessing["steps"]] == ["winsorize", "zscore"]
-        assert manifest.preprocessing["steps"][0]["params"] == {"lower": 0.05, "upper": 0.95}
+        assert manifest.validation_report["preprocessing_steps"] == [
+            "winsorize",
+            "zscore",
+        ]
+        assert [s["type"] for s in manifest.preprocessing["steps"]] == [
+            "winsorize",
+            "zscore",
+        ]
+        assert manifest.preprocessing["steps"][0]["params"] == {
+            "lower": 0.05,
+            "upper": 0.95,
+        }
         assert "preprocessing_state.json" in manifest.content_hashes
 
     def test_the_deployed_estimator_is_fitted_on_the_persisted_state(self, steps_model):
@@ -303,17 +330,24 @@ class TestTheEngineRunsThePipeline:
         panel, features = dataset["panel"], dataset["feature_ids"]
         state = load_preprocessing_state(model_id)
         expected = Ridge(alpha=ALPHA).fit(
-            apply_pipeline(state, panel[features], FoldContext.from_frame(panel)).to_numpy(),
+            apply_pipeline(
+                state, panel[features], FoldContext.from_frame(panel)
+            ).to_numpy(),
             panel["target"].to_numpy(),
         )
-        np.testing.assert_allclose(load_model(model_id).coef_, expected.coef_, atol=1e-12)
+        np.testing.assert_allclose(
+            load_model(model_id).coef_, expected.coef_, atol=1e-12
+        )
         # And the 5th percentile bound really is the 5th, not the default 1st.
         assert state["steps"][0]["state"]["lo"][features[0]] == pytest.approx(
             float(panel[features[0]].quantile(0.05))
         )
-        assert load_preprocessing_stats(model_id) == {}
+        # The legacy file cannot express this pipeline and says so.
+        assert load_preprocessing_stats(model_id)["legacy"] is False
 
-    def test_the_default_model_still_writes_the_legacy_statistics(self, patched_multi_factory):
+    def test_the_default_model_still_writes_the_legacy_statistics(
+        self, patched_multi_factory
+    ):
         model_id, dataset = _register(
             _dataset_spec(),
             ModelSpec(
@@ -343,7 +377,9 @@ class TestTheEngineRunsThePipeline:
             k: v + 1.0 for k, v in state["steps"][1]["state"]["mean"].items()
         }
         path.write_text(json.dumps(state), encoding="utf-8")
-        with pytest.raises(ValidationError, match="preprocessing_state.json has changed"):
+        with pytest.raises(
+            ValidationError, match="preprocessing_state.json has changed"
+        ):
             score_model(model_id, as_of="2023-12-29", universe=UNIVERSE)
 
     def test_a_model_without_a_state_file_scores_through_the_statistics(
@@ -389,7 +425,10 @@ class _Noop(Preprocessor):
 class TestTheRegistry:
     def test_duplicate_id_refused_without_overwrite(self):
         definition = PreprocessorDefinition(
-            id="test_noop", description="nothing", cls=_Noop, schema=EstimatorParamSchema()
+            id="test_noop",
+            description="nothing",
+            cls=_Noop,
+            schema=EstimatorParamSchema(),
         )
         register_preprocessor(definition)
         try:
@@ -403,7 +442,10 @@ class TestTheRegistry:
         with pytest.raises(ValidationError, match="must agree"):
             register_preprocessor(
                 PreprocessorDefinition(
-                    id="another_name", description="", cls=_Noop, schema=EstimatorParamSchema()
+                    id="another_name",
+                    description="",
+                    cls=_Noop,
+                    schema=EstimatorParamSchema(),
                 )
             )
 

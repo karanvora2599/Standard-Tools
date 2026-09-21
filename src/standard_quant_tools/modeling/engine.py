@@ -359,6 +359,46 @@ def _refuse_missing_after_preprocessing(
     )
 
 
+def _training_missing_rates(
+    train_matrix: np.ndarray, feature_ids: List[str]
+) -> Dict[str, float]:
+    """Each feature's share of NaN in one fold's training rows."""
+    if len(train_matrix) == 0:
+        rates = np.ones(len(feature_ids))
+    else:
+        rates = np.isnan(train_matrix).mean(axis=0)
+    return {f: round(float(r), 4) for f, r in zip(feature_ids, rates)}
+
+
+def _refuse_absent_features(
+    rates: Dict[str, float], fold_number: int, test_dates, model_spec: ModelSpec
+) -> None:
+    """
+    Refuse, by name, a feature that is missing in EVERY training row of a
+    fold. The impute step would fit it as a constant and the fold would
+    train on a feature that does not exist there; an estimator that accepts
+    missing values (hist_gradient_boosting) died inside numpy on the same
+    column instead of saying so.
+    """
+    absent = sorted(f for f, r in rates.items() if r >= 1.0)
+    if not absent:
+        return
+    first = str(pd.Timestamp(test_dates[0]).date())
+    last = str(pd.Timestamp(test_dates[-1]).date())
+    raise ValidationError(
+        f"run_model_experiment: feature(s) {absent} are missing in every "
+        f"training row of fold {fold_number} (test window {first}..{last}). "
+        "A column with no training values cannot be imputed -- the fold "
+        "would train on a constant under the feature's name and its "
+        "importance would be averaged in as if the feature existed there. "
+        "Drop the feature, start the dataset where it is available, build "
+        "with missing.policy='drop', or use a validation scheme whose "
+        "training windows cover it (this run: "
+        f"{model_spec.validation.method}, "
+        f"train_window={getattr(model_spec.validation, 'train_window', None)})."
+    )
+
+
 def _fold_sample_weights(
     model_spec: ModelSpec, index: SampleIndex
 ) -> "np.ndarray | None":
@@ -684,6 +724,76 @@ def run_experiment(
     # question needs asking at all.
     panel_has_missing = bool(np.isnan(feature_matrix).any())
     estimator_accepts_missing = accepts_missing(estimator_cls)
+
+    def _search_on(frame: pd.DataFrame, *, prefix: str):
+        """
+        Choose estimator parameters on `frame` alone: an inner walk-forward
+        under the spec's embargo, purged on each row's own label end, every
+        candidate scored the way the real fit will run it -- the same
+        preprocessing, the same weighting, the adapter's own score, so the
+        search cannot select for a pipeline that is never used. `prefix`
+        keys the inner folds' matrices in the cache: they are a function of
+        the frame and the search's shape, not of the candidate, so each
+        inner fold is preprocessed once rather than once per candidate.
+
+        The folds call this on their training rows; the refit calls it on
+        the full panel, which is how the deployed estimator comes to carry
+        parameters a search actually chose (findings D14).
+        """
+
+        def _fit_predict(params, inner_train, inner_test, fold_index):
+            inner_key = f"{prefix}{fold_index}"
+            matrices = cache.lookup(inner_key, feature_ids)
+            if matrices is None:
+                matrices = _preprocess(model_spec, inner_train, inner_test, feature_ids)
+                cache.store(inner_key, feature_ids, *matrices, projectable=projectable)
+            inner_train_X, inner_test_X = matrices
+            candidate = _instantiate(
+                estimator_cls,
+                params,
+                model_spec.random_seed,
+                n_jobs=model_spec.budget.max_parallelism,
+            )
+            inner_index = SampleIndex.from_frame(inner_train)
+            inner_arrays = adapter.prepare(
+                model_spec,
+                inner_index,
+                inner_train_X,
+                _labels(model_spec, inner_train),
+                _fold_sample_weights(model_spec, inner_index),
+            )
+            _fit(
+                candidate,
+                inner_arrays.X,
+                inner_arrays.y,
+                inner_arrays.sample_weight,
+                group=inner_arrays.group,
+            )
+            # The adapter's score, so a search on a ranker selects using
+            # the ordering score the real fit will produce rather than
+            # whatever `predict` happens to return.
+            predictions = adapter.score(candidate, inner_test_X)
+            probabilities = predictions if model_spec.task == "classification" else None
+            return predictions, probabilities
+
+        return search_best_params(
+            task=model_spec.task,
+            search_spec=model_spec.search,
+            base_params=model_spec.estimator.params,
+            train_frame=frame,
+            feature_ids=feature_ids,
+            random_seed=model_spec.random_seed,
+            fit_predict=_fit_predict,
+            # The inner folds are cut under the SAME discipline as the outer
+            # ones: the spec's embargo, and a purge on each row's own label
+            # end. They were cut with neither, so the candidate that won was
+            # the one that scored best on training rows whose labels had
+            # already seen the inner test window.
+            embargo=model_spec.validation.embargo,
+            label_end=(frame[LABEL_END_COL].to_numpy() if has_label_end else None),
+            max_parallelism=model_spec.budget.max_parallelism,
+        )
+
     for fold in plan.folds:
         train_dates = dates[fold.train_positions]
         test_dates = dates[fold.test_positions]
@@ -730,6 +840,23 @@ def run_experiment(
                 }
             )
             continue
+
+        # ── What each feature IS in this fold, before anything imputes ────
+        # A column that is missing in EVERY training row of a fold has no
+        # median; the impute step fell back to its constant and the fold
+        # trained on a feature that does not exist there, while the run
+        # reported full fold coverage and averaged that fold's importance
+        # in with the rest (findings D18: five of eight folds, 8.87% of the
+        # importance on a feature present in three). Refused by name, and
+        # the per-fold rate recorded beside the averaged importance.
+        fold_missing: "Dict[str, float] | None" = None
+        if panel_has_missing:
+            fold_missing = _training_missing_rates(
+                feature_matrix[train_mask], feature_ids
+            )
+            _refuse_absent_features(
+                fold_missing, len(fold_records), test_dates, model_spec
+            )
 
         train_y = _labels(model_spec, train_df)
         test_y = _labels(model_spec, test_df)
@@ -815,73 +942,9 @@ def run_experiment(
             # search's shape, not of the candidate, so their matrices are
             # keyed under the outer fold's hash and fitted once per inner
             # fold rather than once per candidate per inner fold.
-            inner_prefix = (
-                f"{fold.preprocessing_hash}/inner/{model_spec.search.inner_splits}/"
-            )
-
-            def _fit_predict(params, inner_train, inner_test, fold_index):
-                """Score one candidate the way the real fit will run it —
-                same preprocessing, same weighting — so the search cannot
-                select for a pipeline that is never used."""
-                inner_key = f"{inner_prefix}{fold_index}"
-                matrices = cache.lookup(inner_key, feature_ids)
-                if matrices is None:
-                    matrices = _preprocess(
-                        model_spec, inner_train, inner_test, feature_ids
-                    )
-                    cache.store(
-                        inner_key, feature_ids, *matrices, projectable=projectable
-                    )
-                inner_train_X, inner_test_X = matrices
-                candidate = _instantiate(
-                    estimator_cls,
-                    params,
-                    model_spec.random_seed,
-                    n_jobs=model_spec.budget.max_parallelism,
-                )
-                inner_index = SampleIndex.from_frame(inner_train)
-                inner_arrays = adapter.prepare(
-                    model_spec,
-                    inner_index,
-                    inner_train_X,
-                    _labels(model_spec, inner_train),
-                    _fold_sample_weights(model_spec, inner_index),
-                )
-                _fit(
-                    candidate,
-                    inner_arrays.X,
-                    inner_arrays.y,
-                    inner_arrays.sample_weight,
-                    group=inner_arrays.group,
-                )
-                # The adapter's score, so a search on a ranker selects using
-                # the ordering score the real fit will produce rather than
-                # whatever `predict` happens to return.
-                predictions = adapter.score(candidate, inner_test_X)
-                probabilities = (
-                    predictions if model_spec.task == "classification" else None
-                )
-                return predictions, probabilities
-
-            fold_params, search_report = search_best_params(
-                task=model_spec.task,
-                search_spec=model_spec.search,
-                base_params=model_spec.estimator.params,
-                train_frame=train_df,
-                feature_ids=feature_ids,
-                random_seed=model_spec.random_seed,
-                fit_predict=_fit_predict,
-                # The inner folds are cut under the SAME discipline as the
-                # outer ones: the spec's embargo, and a purge on each row's
-                # own label end. They were cut with neither, so the
-                # candidate that won was the one that scored best on
-                # training rows whose labels had already seen the inner
-                # test window.
-                embargo=model_spec.validation.embargo,
-                label_end=(
-                    train_df[LABEL_END_COL].to_numpy() if has_label_end else None
-                ),
-                max_parallelism=model_spec.budget.max_parallelism,
+            fold_params, search_report = _search_on(
+                train_df,
+                prefix=f"{fold.preprocessing_hash}/inner/{model_spec.search.inner_splits}/",
             )
             search_reports.append(search_report)
 
@@ -975,6 +1038,9 @@ def run_experiment(
                 "n_train_rows": int(len(train_df)),
                 "n_test_rows": int(len(test_df)),
                 "metrics": metrics,
+                # Each feature's missing rate in the rows this fold trained
+                # on; None when the panel carries no holes at all.
+                "missing_rate_train": fold_missing,
                 # What determined this fold's estimator: dataset, rows,
                 # pipeline, estimator, parameters, seed. Two runs that
                 # agree here fitted the same thing.
@@ -1119,6 +1185,67 @@ def run_experiment(
             "metric_distribution": distribution,
         }
 
+    # ── The deployed parameters ───────────────────────────────────────
+    # The refit instantiated from `model_spec.estimator.params` -- the BASE
+    # values -- while each fold had reassigned `fold_params` from its own
+    # inner search, which never reached the refit, the quantile models or
+    # the conformal radius. So a ridge searched over {0.001, 100, 10000}
+    # was deployed at alpha=1.0, a value not in the grid, and a forest
+    # searched over max_depth {6, 8} was deployed at the base depth of 1;
+    # the deployed forest's predictions correlated with the correctly
+    # refitted ones at Spearman 0.30 (findings D14). The rule this file
+    # states for weighting and for preprocessing applies to parameters
+    # too: the deployed pipeline is the validated pipeline.
+    #
+    # One final search on the FULL panel, under the same purge and embargo
+    # the folds searched under, chooses the deployed values; the plan
+    # counted its fits and refused them over budget like any other. When
+    # the panel cannot support the inner folds (it always can when any
+    # fold could) the last searched fold's choice is deployed, and when
+    # nothing searched, the spec's. One variable feeds all three call
+    # sites below, and the manifest says which of the three it was.
+    deployed_params: Dict[str, Any] = dict(model_spec.estimator.params)
+    deployed_params_source = "spec"
+    final_search_report: "Dict[str, Any] | None" = None
+    if model_spec.search is not None:
+        deployed_params, final_search_report = _search_on(
+            panel, prefix=f"{plan.final_search_hash}/final/"
+        )
+        if final_search_report.get("searched"):
+            deployed_params_source = "full_panel_search"
+        else:
+            last_searched = next(
+                (r for r in reversed(search_reports) if r.get("searched")), None
+            )
+            if last_searched is not None:
+                deployed_params = {
+                    **model_spec.estimator.params,
+                    **last_searched["best_params"],
+                }
+                deployed_params_source = "last_fold"
+    # Per feature, the missing rate in each completed fold's training
+    # rows -- the number that says whether an averaged importance was
+    # averaged over folds that actually had the feature (findings D18).
+    missing_rate_by_fold = (
+        {
+            feature: [record["missing_rate_train"][feature] for record in fold_records]
+            for feature in feature_ids
+        }
+        if panel_has_missing
+        else None
+    )
+    # How wide the cross-sections the model was fitted on were. A
+    # cross-sectional transform standardizes within whatever rows a
+    # scoring call contains, so this is what a scoring width is judged
+    # against (findings D15).
+    per_date_width = panel.groupby("date")["entity"].nunique()
+    training_cross_section = {
+        "min": int(per_date_width.min()),
+        "median": float(per_date_width.median()),
+        "max": int(per_date_width.max()),
+        "n_dates": int(len(per_date_width)),
+    }
+
     validation_report = {
         "method": model_spec.validation.method,
         # cpcv only: the metric distribution across paths, which is the
@@ -1139,6 +1266,14 @@ def run_experiment(
         # fold. The second is the useful signal: it means the search was
         # fitting noise, and an averaged "best alpha" would have hidden it.
         "hyperparameter_search": search_reports or None,
+        # The parameters the DEPLOYED estimator was refit with, where they
+        # came from, and the full-panel search that chose them -- beside
+        # the per-fold selections above, so a reader can see whether the
+        # deployed choice agrees with what the folds validated.
+        "deployed_params": deployed_params,
+        "deployed_params_source": deployed_params_source,
+        "final_search": final_search_report,
+        "missing_rate_by_fold": missing_rate_by_fold,
         "n_folds_expected": int(n_expected_folds),
         "n_folds_completed": len(fold_metrics),
         "n_folds_skipped": len(skipped),
@@ -1155,6 +1290,7 @@ def run_experiment(
             "planned": plan.n_fits,
             "folds": plan.n_fits_folds,
             "refit": plan.n_fits_refit,
+            "final_search": plan.n_fits_final_search,
             "candidates_per_fold": plan.n_candidates,
             "max_fits": plan.max_fits,
             "max_parallelism": int(model_spec.budget.max_parallelism),
@@ -1213,7 +1349,7 @@ def run_experiment(
     full_y = _labels(model_spec, panel)
     final_estimator = _instantiate(
         estimator_cls,
-        model_spec.estimator.params,
+        deployed_params,
         model_spec.random_seed,
         n_jobs=model_spec.budget.max_parallelism,
     )
@@ -1262,7 +1398,7 @@ def run_experiment(
             fitted = _fit_quantile_models(
                 estimator_cls,
                 quantile,
-                model_spec.estimator.params,
+                deployed_params,
                 model_spec,
                 full_arrays,
             )
@@ -1270,7 +1406,7 @@ def run_experiment(
         if model_spec.intervals is not None:
             radius, n_calibration = _conformal_radius(
                 estimator_cls,
-                model_spec.estimator.params,
+                deployed_params,
                 model_spec,
                 full_arrays,
             )
@@ -1379,6 +1515,16 @@ def run_experiment(
         # next to the OOS metrics they qualify, not only in the
         # build_model_dataset response the caller may never look at again.
         dataset_warnings=dataset.get("warnings"),
+        # The parameters the deployed estimator actually carries, and
+        # where they came from -- the manifest's `estimator_params` are
+        # these, not the spec's base values (findings D14).
+        deployed_params=deployed_params,
+        deployed_params_source=deployed_params_source,
+        # Which feed each entity's bars came from (findings D16): two
+        # models built from the same spec on two feeds differed by 22%
+        # on the headline metric with identical recorded identity.
+        data_sources=dataset.get("data_sources"),
+        training_cross_section=training_cross_section,
     )
 
     return {

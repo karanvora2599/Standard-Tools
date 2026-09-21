@@ -133,9 +133,13 @@ class TestTheScheduleWithoutAPanel:
             _ridge(validation=_walk_forward(40, 10), search=search), self.dates
         )
         assert all(f.n_inner_folds == 0 and f.n_fits == 1 for f in short.folds)
-        assert short.n_fits == len(short.folds) + 1
+        # The refit's parameters are chosen by one more search on the
+        # full axis, which supports the inner folds even when no fold's
+        # window did; it costs candidates x inner folds beside the refit.
+        assert short.n_inner_final == 3 and short.n_fits_final_search == 4 * 3
+        assert short.n_fits == len(short.folds) + 1 + 4 * 3
         assert all(f.n_inner_folds == 3 and f.n_fits == 1 + 4 * 3 for f in long.folds)
-        assert long.n_fits == 13 * len(long.folds) + 1
+        assert long.n_fits == 13 * len(long.folds) + 1 + 4 * 3
         assert long.n_candidates == 4
         # The spec-only count assumes every fold searches: exact where
         # that is true, an upper bound where it is not.
@@ -156,7 +160,7 @@ class TestTheScheduleWithoutAPanel:
         assert (
             plan.n_candidates == 5 == len(search_candidates(search, spec.random_seed))
         )
-        assert plan.n_fits == (1 + 5 * 2) * len(plan.folds) + 1
+        assert plan.n_fits == (1 + 5 * 2) * len(plan.folds) + 1 + 5 * 2
 
     def test_calibration_multiplies_the_outer_fit_and_the_refit_but_not_the_search(
         self,
@@ -172,8 +176,11 @@ class TestTheScheduleWithoutAPanel:
         assert fits_per_estimator(spec) == 4
         plan = plan_experiment(spec, self.dates)
         assert all(f.n_fits == 4 + 2 * 2 for f in plan.folds)
-        assert plan.n_fits_refit == 4
-        assert plan.n_fits == 8 * len(plan.folds) + 4
+        # The refit itself is four calibrated fits; the full-panel search
+        # that chooses its parameters is uncalibrated, like the folds'.
+        assert plan.n_fits_final_search == 2 * 2
+        assert plan.n_fits_refit == 4 + 2 * 2
+        assert plan.n_fits == 8 * len(plan.folds) + 4 + 2 * 2
 
     def test_no_fold_is_a_refusal_not_an_empty_plan(self):
         with pytest.raises(ValidationError, match="no fold"):
@@ -343,10 +350,13 @@ class TestTheBudget:
         assert planned > 3
         exact = spec.model_copy(update={"budget": ComputeBudgetSpec(max_fits=planned)})
         result = run_experiment(dataset, exact, "ds", register=False)
+        # The refit is one fit plus the full-panel search that chooses its
+        # parameters: three candidates on two inner folds.
         assert result["validation_report"]["fits"] == {
             "planned": planned,
-            "folds": planned - 1,
-            "refit": 1,
+            "folds": planned - 1 - 3 * 2,
+            "refit": 1 + 3 * 2,
+            "final_search": 3 * 2,
             "candidates_per_fold": 3,
             "max_fits": planned,
             "max_parallelism": 1,
@@ -393,7 +403,11 @@ class TestTheBudget:
         )
         result = validate_model_spec(ValidateModelSpecInput(spec=spec))
         assert result.estimated_folds == 7
-        assert result.estimated_fits == fit_count(spec, 7) == 7 * (1 + 3 * 2) + 1
+        # Seven folds of one fit plus three candidates on two inner folds,
+        # the refit, and the full-panel search that chooses its parameters.
+        assert (
+            result.estimated_fits == fit_count(spec, 7) == 7 * (1 + 3 * 2) + 1 + 3 * 2
+        )
         assert result.within_budget is True
         # Walk-forward without a date axis: unknown, and the budget with it.
         result = validate_model_spec(ValidateModelSpecInput(spec=_ridge()))

@@ -87,7 +87,9 @@ def _register(spec: DatasetSpec, model_spec: ModelSpec, dataset_id: str):
     """build + run the way the agent tool does, persisting the spec the
     scoring path needs; returns (model_id, dataset dict)."""
     built = build_dataset(spec)
-    panel_uri = _artifacts.save_artifact(built["panel"], run_id=dataset_id, name="panel")
+    panel_uri = _artifacts.save_artifact(
+        built["panel"], run_id=dataset_id, name="panel"
+    )
     _artifacts.save_json(
         _artifacts.run_dir(dataset_id), "dataset_spec", spec.model_dump()
     )
@@ -100,7 +102,10 @@ def _register(spec: DatasetSpec, model_spec: ModelSpec, dataset_id: str):
         "dataset_spec": spec.model_dump(),
     }
     del panel_uri
-    return run_experiment(dataset, model_spec, dataset_id=dataset_id)["model_id"], dataset
+    return (
+        run_experiment(dataset, model_spec, dataset_id=dataset_id)["model_id"],
+        dataset,
+    )
 
 
 @pytest.fixture
@@ -136,7 +141,9 @@ class TestTheRefitHonoursTheValidatedTransform:
         model_id, dataset = cross_sectional_model
         panel, features = dataset["panel"], dataset["feature_ids"]
         pooled = Ridge(alpha=ALPHA).fit(
-            apply_preprocessing(panel[features], fit_preprocessing(panel[features])).to_numpy(),
+            apply_preprocessing(
+                panel[features], fit_preprocessing(panel[features])
+            ).to_numpy(),
             panel["target"].to_numpy(),
         )
         assert not np.allclose(load_model(model_id).coef_, pooled.coef_, atol=1e-9)
@@ -149,7 +156,9 @@ class TestTheRefitHonoursTheValidatedTransform:
             apply_preprocessing(panel[features], stats).to_numpy(),
             panel["target"].to_numpy(),
         )
-        np.testing.assert_allclose(load_model(model_id).coef_, expected.coef_, atol=1e-12)
+        np.testing.assert_allclose(
+            load_model(model_id).coef_, expected.coef_, atol=1e-12
+        )
         assert load_preprocessing_stats(model_id) == stats
 
     def test_the_manifest_says_which_transform_the_estimator_expects(
@@ -162,10 +171,16 @@ class TestTheRefitHonoursTheValidatedTransform:
             "cross_sectional_standardize"
         ]
         assert cs.preprocessing["steps"][0]["params"] == {"clip_sigma": 3.0}
-        assert load_preprocessing_stats(cross_sectional_model[0]) == {}
+        # The legacy file cannot express this pipeline and says so, rather
+        # than writing `{}`, which apply_preprocessing read as the identity.
+        legacy = load_preprocessing_stats(cross_sectional_model[0])
+        assert legacy["legacy"] is False and "preprocessing_state" in legacy["note"]
         pooled = load_manifest(pooled_model[0])
         assert pooled.preprocessing["normalization"] == "pooled"
-        assert [s["type"] for s in pooled.preprocessing["steps"]] == ["winsorize", "zscore"]
+        assert [s["type"] for s in pooled.preprocessing["steps"]] == [
+            "winsorize",
+            "zscore",
+        ]
         view = inspect_model(
             InspectModelInput(model_id=cross_sectional_model[0], view="validation")
         )

@@ -82,7 +82,8 @@ def fit_count(
     n_inner_folds: Optional[Sequence[int]] = None,
 ) -> int:
     """
-    Fits a spec implies over `n_folds` outer folds, refit included.
+    Fits a spec implies over `n_folds` outer folds, the refit and the
+    final full-panel search that chooses its parameters included.
 
     `n_inner_folds` is per outer fold, the number of inner folds that
     fold's training window supports; omitted, every fold is assumed to
@@ -95,6 +96,10 @@ def fit_count(
     candidates = 0
     if model_spec.search is not None:
         candidates = n_search_candidates(model_spec.search)
+        # The final search on the full panel that chooses the deployed
+        # parameters (findings D14). The whole axis supports at least as
+        # many inner folds as any training window cut from it.
+        total += candidates * int(model_spec.search.inner_splits)
     for i in range(int(n_folds)):
         inner = (
             int(n_inner_folds[i])
@@ -188,6 +193,13 @@ class ExperimentPlan:
     dataset_hash: Optional[str]
     has_panel: bool
     n_purged: Optional[int]
+    #: The final search on the FULL panel that chooses the deployed
+    #: parameters (findings D14): the inner folds the whole date axis
+    #: supports, the fits that costs, and what determines its inner
+    #: matrices for the cache. Zero and None without a search.
+    n_inner_final: int = 0
+    n_fits_final_search: int = 0
+    final_search_hash: Optional[str] = None
 
     @property
     def within_budget(self) -> bool:
@@ -201,7 +213,8 @@ class ExperimentPlan:
             f"{where}: this spec implies {self.n_fits:,} estimator fits "
             f"({len(self.folds)} fold(s) x ({self.fits_per_fit} + "
             f"{self.n_candidates} candidate(s) x inner folds) + "
-            f"{self.n_fits_refit} for the refit), over budget.max_fits="
+            f"{self.n_fits_refit} for the refit, {self.n_fits_final_search} of "
+            "them choosing its parameters on the full panel), over budget.max_fits="
             f"{self.max_fits:,}. Nothing was fitted. Shrink the search grid "
             "or its inner_splits, use fewer folds, or pass "
             f"budget.max_fits={self.n_fits} to accept the cost on purpose."
@@ -216,6 +229,8 @@ class ExperimentPlan:
             "fits_per_fit": self.fits_per_fit,
             "n_fits_folds": self.n_fits_folds,
             "n_fits_refit": self.n_fits_refit,
+            "n_inner_final": self.n_inner_final,
+            "n_fits_final_search": self.n_fits_final_search,
             "n_fits": self.n_fits,
             "max_fits": self.max_fits,
             "within_budget": self.within_budget,
@@ -353,6 +368,30 @@ def plan_experiment(
         )
 
     n_fits_folds = int(sum(f.n_fits for f in folds))
+    # The deployed estimator's parameters are chosen by one more search,
+    # on the full panel under the same purge and embargo the folds
+    # searched under (findings D14: the refit read the spec's base
+    # parameters, which for a ridge grid of {0.001, 100, 10000} deployed
+    # alpha=1.0, a value no fold had scored). Counted here so the
+    # budget refuses it like every other fit.
+    n_inner_final = (
+        inner_fold_count(n_dates, int(search.inner_splits), embargo)
+        if search is not None
+        else 0
+    )
+    n_fits_final_search = int(n_candidates * n_inner_final)
+    final_search_hash = (
+        _content_hash(
+            {
+                "dataset_hash": dataset_hash,
+                "final_search": True,
+                "inner_splits": int(search.inner_splits),
+                "steps": steps,
+            }
+        )
+        if search is not None
+        else None
+    )
     return ExperimentPlan(
         method=model_spec.validation.method,
         n_dates=n_dates,
@@ -360,12 +399,15 @@ def plan_experiment(
         n_candidates=n_candidates,
         fits_per_fit=per_fit,
         n_fits_folds=n_fits_folds,
-        n_fits_refit=per_fit,
-        n_fits=n_fits_folds + per_fit,
+        n_fits_refit=per_fit + n_fits_final_search,
+        n_fits=n_fits_folds + per_fit + n_fits_final_search,
         max_fits=int(model_spec.budget.max_fits),
         dataset_hash=dataset_hash,
         has_panel=panel is not None,
         n_purged=total_purged if panel is not None else None,
+        n_inner_final=int(n_inner_final),
+        n_fits_final_search=n_fits_final_search,
+        final_search_hash=final_search_hash,
     )
 
 

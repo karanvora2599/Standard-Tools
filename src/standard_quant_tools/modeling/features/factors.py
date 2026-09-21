@@ -11,7 +11,11 @@ Both features share one rolling-refit design: refitting PCA on every
 single bar would be wasted work for a value (a factor's own composition)
 that doesn't move much day to day, so PCA is refit only every
 `refit_every` bars over a trailing `window`-bar panel, and the fitted PC1
-is held fixed until the next refit. Each refit calls pca_returns with
+is held fixed until the next refit. The refit bars sit on the grid
+`features.schedule` defines from each bar's own date, not on a count
+from the frame's first bar: anchored on the first bar, a frame fetched
+from a different start refit on different bars and fed the deployed
+estimator a different variable under the same name (findings D17). Each refit calls pca_returns with
 method="power_iteration" rather than the default full SVD -- since only
 PC1 is ever needed here, power iteration is meaningfully cheaper (it
 solves for just the requested component instead of every singular
@@ -48,6 +52,7 @@ from standard_quant_tools.error import ValidationError
 
 from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSupport
 from .registry import register_feature
+from .schedule import refit_mask
 
 
 def _validate_window_params(window: int, refit_every: int, feature_id: str) -> None:
@@ -74,7 +79,7 @@ def _pca_loading(
     _validate_window_params(window, refit_every, "factors.pca_loading")
     n = len(returns_panel)
     out = pd.DataFrame(np.nan, index=returns_panel.index, columns=returns_panel.columns)
-    for end in range(window, n + 1, refit_every):
+    for end in np.flatnonzero(refit_mask(returns_panel.index, window, refit_every)) + 1:
         window_slice = returns_panel.iloc[end - window : end]
         result = _pca_returns(window_slice, n_components=1, method="power_iteration")
         out.iloc[end - 1] = result["loadings"]["PC1"]
@@ -91,8 +96,9 @@ def _pca_factor_return(
     n = len(returns_panel)
     values = pd.Series(np.nan, index=returns_panel.index)
     current_loadings = None
+    refit = refit_mask(returns_panel.index, window, refit_every)
     for i in range(n):
-        if i + 1 >= window and (i + 1 - window) % refit_every == 0:
+        if refit[i]:
             window_slice = returns_panel.iloc[i + 1 - window : i + 1]
             result = _pca_returns(
                 window_slice, n_components=1, method="power_iteration"
@@ -111,7 +117,9 @@ register_feature(
     FeatureDefinition(
         id="factors.pca_loading",
         description="Entity's loading on PC1 of the universe return panel, "
-        "refit every `refit_every` bars and forward-filled between refits.",
+        "refit every `refit_every` bars on a grid fixed by the bar's date "
+        "(so a value does not depend on where the frame starts) and "
+        "forward-filled between refits.",
         fn=_pca_loading,
         default_params={"window": 252, "refit_every": 21},
         temporal_support=TemporalSupport.PIT_SAFE,

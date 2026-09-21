@@ -213,14 +213,16 @@ class TestTheEngineReuses:
         ]
         assert searched
         # One per outer fold, plus one per inner fold of every fold that
-        # searched -- not one per candidate per inner fold.
-        assert len(calls) == n_folds + 2 * len(searched)
+        # searched -- not one per candidate per inner fold -- plus the
+        # two inner folds of the final full-panel search that chooses
+        # the deployed parameters.
+        assert len(calls) == n_folds + 2 * len(searched) + 2
         assert len(calls) < n_folds * (1 + 3 * 2)
         report = result["validation_report"]["cache"]
         assert report["misses"] == len(calls)
-        assert report["hits"] == 2 * 2 * len(
-            searched
-        )  # two more candidates x two folds
+        # Two more candidates x two folds, per search that ran -- the
+        # folds' and the final one.
+        assert report["hits"] == 2 * 2 * (len(searched) + 1)
 
     def test_a_shared_cache_needs_a_dataset_hash(self, dataset):
         unhashed = {k: v for k, v in dataset.items() if k != "data_hash"}

@@ -6,8 +6,13 @@ what to change, in what order, how each change is verified without a key,
 and what is left alone and why. Findings are cited by their number there
 (`D1`..`D20`) or by section.
 
-**Status: phase 1 (the data path) is implemented in the commit that
-carries this paragraph, 2026-09-20; phases 2-7 are the plan.** Each phase
+**Status: phases 1 (the data path) and 2 (the deployed model is the
+validated model) are implemented, 2026-09-20; phases 3-7 are the plan.**
+Phase 2 chose the calendar-anchored form of D17 over the end-anchored
+one: a refit grid fixed by each bar's date keeps BOTH properties -- a
+value is unchanged when leading bars are dropped and when trailing bars
+are truncated -- where an end anchor would have traded the second for
+the first. Each phase
 lands as its own commit with the offline suites green, and each names the
 live check the owner should run afterwards with the engine's interpreter
 and a key (findings §13), because no live check runs here.

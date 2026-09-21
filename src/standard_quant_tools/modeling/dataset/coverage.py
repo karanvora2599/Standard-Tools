@@ -363,25 +363,57 @@ def intersection_warnings(
     if n_union == 0 or n_kept / n_union >= _INTERSECTION_WARN_FRACTION:
         return []
 
-    # Name the binding constraint rather than just the shortfall: with a
-    # complete-case intersection, the entity whose history starts latest is
-    # usually the entire explanation, and it is the one the caller would
-    # drop or replace.
-    latest_start_entity = max(
-        ohlcv_by_entity,
-        key=lambda e: (
-            pd.DatetimeIndex(ohlcv_by_entity[e].index)[0]
-            if len(ohlcv_by_entity[e].index)
-            else pd.Timestamp.min
-        ),
-    )
-    latest_start = pd.DatetimeIndex(ohlcv_by_entity[latest_start_entity].index)[0]
+    # Name the binding constraint, COMPUTED: the entity whose removal
+    # recovers the most dates. This named the latest-STARTING symbol, and
+    # on a universe with one delisted name every symbol starts on the same
+    # date, so `max` named whichever the dict yielded first -- "dropping
+    # AAPL recovers the rest" when dropping AAPL recovered nothing and
+    # dropping the delisted name recovered 87% of the rows (findings D20).
+    # A date is recovered by dropping e exactly when every entity but e
+    # has it, so one pass over the union answers the question for every
+    # entity at once.
+    date_sets = {
+        entity: set(pd.DatetimeIndex(frame.index))
+        for entity, frame in ohlcv_by_entity.items()
+    }
+    n_entities = len(date_sets)
+    presence: Dict[Any, int] = {}
+    for dates in date_sets.values():
+        for date in dates:
+            presence[date] = presence.get(date, 0) + 1
+    recovered = {
+        entity: sum(
+            1
+            for date, count in presence.items()
+            if count == n_entities - 1 and date not in dates
+        )
+        for entity, dates in date_sets.items()
+    }
+    binding = max(sorted(recovered), key=lambda e: recovered[e])
+    # The dates the intersection of the FRAMES loses; the returns panel
+    # above loses one more to the first difference.
+    n_missing = n_union - sum(1 for c in presence.values() if c == n_entities)
+    if recovered[binding] > 0:
+        bars = pd.DatetimeIndex(ohlcv_by_entity[binding].index)
+        remedy = (
+            f"The binding symbol is {binding} (bars {_fmt_date(bars[0])} to "
+            f"{_fmt_date(bars[-1])}): dropping it recovers {recovered[binding]} of "
+            f"the {n_missing} missing date(s)"
+            + (
+                "; the rest are absent from more than one symbol."
+                if recovered[binding] < n_missing
+                else "."
+            )
+        )
+    else:
+        remedy = (
+            "No single symbol is binding: every missing date is absent from at "
+            "least two symbols, so dropping any one of them recovers nothing."
+        )
 
     return [
         f"universe-scope (PCA) features are fit on the {n_kept} date(s) present for "
         f"EVERY entity, out of {n_union} across the universe "
         f"({n_kept / n_union:.0%}) — a complete cross-section is required, so one "
-        f"short history truncates the panel for all entities. The latest-starting "
-        f"symbol is {latest_start_entity} ({_fmt_date(latest_start)}); dropping it, "
-        "or starting the dataset later, recovers the rest."
+        f"short history truncates the panel for all entities. {remedy}"
     ]

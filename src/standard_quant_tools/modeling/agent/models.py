@@ -355,6 +355,14 @@ class BuildModelDatasetResult(BaseModel):
         ),
     )
     feature_ids: List[str]
+    data_sources: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Entity -> the feed its bars came from, '<provider>:<dataset>' "
+        "for a provider that chooses a dataset per window (Databento) and the "
+        "provider name otherwise. Persisted in dataset_meta.json and carried onto "
+        "every model trained from this dataset, so two builds of one spec from "
+        "two feeds can be told apart.",
+    )
     target_id: str
     drop_attribution: Dict[str, Any] = Field(
         default_factory=dict,
@@ -488,6 +496,17 @@ class ScoreModelInput(BaseModel):
         "None (default) does not check; staleness_days is reported either way, "
         "so the gap is never invisible.",
     )
+    universe_policy: Literal["strict", "allow"] = Field(
+        "strict",
+        description="What to do when the model standardizes within the scoring "
+        "cross-section (a cross_sectional preprocessing step) and `universe` is "
+        "not the training universe. 'strict' (default) refuses: every row's score "
+        "depends on which other entities are in the call, so a subset is a "
+        "different transform, not a smaller sample. 'allow' scores anyway and "
+        "returns a warning saying the transform was refit on this cross-section "
+        "and how its width compares with the training one. A model with "
+        "universe-scope features is refused either way.",
+    )
 
     @field_validator("as_of")
     @classmethod
@@ -557,6 +576,13 @@ class ScoreModelResult(BaseModel):
         "observation dates into one 'cross-section', which for a "
         "cross-sectional model means the ranking no longer compares "
         "contemporaneous information.",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Conditions the caller waived or that qualify these scores: "
+        "today, that a cross-sectional transform was refit on the scoring "
+        "cross-section under universe_policy='allow', with the width it had "
+        "against the training width. Empty when nothing qualifies them.",
     )
 
 
@@ -1216,8 +1242,9 @@ class ValidateModelSpecResult(BaseModel):
         None,
         description=(
             "Estimator fits this spec implies: every fold's fit, every search "
-            "candidate on every inner fold, each calibration fold, and the "
-            "full-panel refit -- the same plan run_model_experiment executes. "
+            "candidate on every inner fold, each calibration fold, the "
+            "full-panel refit and the search on the full panel that chooses "
+            "its parameters -- the same plan run_model_experiment executes. "
             "The number that decides whether the experiment takes seconds or "
             "an afternoon. None when it cannot be known: a walk-forward fold "
             "count depends on the dataset's date axis, so without a "

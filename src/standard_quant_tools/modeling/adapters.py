@@ -91,9 +91,19 @@ def _exposes_coefficients(estimator_cls: type) -> bool:
     promises a diagnostic the run then does not produce.
     """
     try:
-        from sklearn.linear_model._base import LinearClassifierMixin, LinearModel
+        from sklearn.linear_model._base import (
+            LinearClassifierMixin,
+            LinearModel,
+            SparseCoefMixin,
+        )
 
-        if issubclass(estimator_cls, (LinearModel, LinearClassifierMixin)):
+        # SGDRegressor is not a LinearModel subclass in sklearn -- it
+        # inherits its `coef_` through SparseCoefMixin -- so `sgd` was
+        # reported as having no coefficients while every run of it
+        # produced signed coefficient importance.
+        if issubclass(
+            estimator_cls, (LinearModel, LinearClassifierMixin, SparseCoefMixin)
+        ):
             return True
     except ImportError:  # pragma: no cover - sklearn is a core dependency
         pass

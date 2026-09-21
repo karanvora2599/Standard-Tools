@@ -37,7 +37,9 @@ day to day, and recomputing an N-by-N correlation plus a spanning tree on
 every bar is work spent on a value that barely changes. They are refit
 every `refit_every` bars over a trailing `window` and held fixed between,
 so the reported value is always the one most recently ESTIMATED, never
-interpolated toward a future one.
+interpolated toward a future one. The refit bars are the grid
+`features.schedule` fixes from each bar's date, so a value at a date is
+the same whatever window the frame was fetched for (findings D17).
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from standard_quant_tools.error import ValidationError
 
 from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSupport
 from .registry import register_feature
+from .schedule import refit_mask
 
 #: Below this a correlation matrix over the window is too noisy to build a
 #: tree from -- the estimate's own error exceeds the differences between
@@ -234,7 +237,7 @@ def _rolling_network(
     _validate(window, refit_every, feature_id)
     n = len(returns_panel)
     out = pd.DataFrame(np.nan, index=returns_panel.index, columns=returns_panel.columns)
-    for end in range(window, n + 1, refit_every):
+    for end in np.flatnonzero(refit_mask(returns_panel.index, window, refit_every)) + 1:
         values = at_window(returns_panel.iloc[end - window : end])
         if values is None:
             continue
@@ -275,7 +278,8 @@ register_feature(
     FeatureDefinition(
         id="network.avg_correlation",
         description="Entity's mean correlation to the rest of the universe "
-        "over a trailing window, refit every `refit_every` bars. Scale-free, "
+        "over a trailing window, refit every `refit_every` bars on a grid fixed "
+        "by the bar's date. Scale-free, "
         "unlike a PC1 loading: it says how much company a name keeps rather "
         "than how much variance it contributes.",
         fn=_avg_correlation,

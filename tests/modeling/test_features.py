@@ -31,6 +31,7 @@ from standard_quant_tools.modeling.features.registry import (
     list_features,
     register_feature,
 )
+from standard_quant_tools.modeling.features.schedule import refit_mask
 
 from .conftest import make_ohlcv
 
@@ -283,9 +284,12 @@ class TestUniverseScopePcaFeatures:
             returns_panel, _CONTEXT, window=window, refit_every=refit_every
         )
 
-        refit_pos = (
-            window - 1
-        )  # first index where i+1 >= window and (i+1-window) % refit_every == 0
+        # The first bar with a full window behind it that sits on the
+        # shared refit grid -- a function of the bar's date, not of the
+        # frame's first bar (findings D17).
+        refit_pos = int(
+            np.flatnonzero(refit_mask(returns_panel.index, window, refit_every))[0]
+        )
         window_slice = returns_panel.iloc[refit_pos + 1 - window : refit_pos + 1]
         # method="power_iteration" matches what the feature itself calls
         # internally (see features/factors.py) -- comparing against the
@@ -326,7 +330,10 @@ class TestPcaFeatureUsesPowerIterationAccurately:
             factor_structured_panel, _CONTEXT, window=200, refit_every=20
         )
 
-        refit_pos = 199
+        # The first grid bar with a full window behind it (findings D17).
+        refit_pos = int(
+            np.flatnonzero(refit_mask(factor_structured_panel.index, 200, 20))[0]
+        )
         window_slice = factor_structured_panel.iloc[refit_pos + 1 - 200 : refit_pos + 1]
         svd_reference = pca_returns(window_slice, n_components=1, method="svd")[
             "loadings"
