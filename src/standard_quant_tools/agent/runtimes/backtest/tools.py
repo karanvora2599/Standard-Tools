@@ -1395,6 +1395,8 @@ def run_portfolio_simulation(
             turnover_pct=float(r["turnover_pct"]),
             gross_leverage_after=float(r["gross_leverage_after"]),
             n_positions=int(r["n_positions"]),
+            n_capped=int(r.get("n_capped", 0) or 0),
+            capped_notional=float(r.get("capped_notional", 0.0) or 0.0),
         )
         for r in raw["rebalance_log"].to_dict(orient="records")
     ]
@@ -1504,6 +1506,8 @@ def run_pair_trade_backtest(
             turnover_pct=float(r["turnover_pct"]),
             gross_leverage_after=float(r["gross_leverage_after"]),
             n_positions=int(r["n_positions"]),
+            n_capped=int(r.get("n_capped", 0) or 0),
+            capped_notional=float(r.get("capped_notional", 0.0) or 0.0),
         )
         for r in raw["rebalance_log"].to_dict(orient="records")
     ]
@@ -1822,7 +1826,9 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         else None
     )
 
-    warnings: List[str] = []
+    # The engine's own warnings first -- the split screen and the fill
+    # caveat -- so the same warning reaches every tool built on it.
+    warnings: List[str] = list(results.get("warnings", []))
     validation_status = "ok"
     if int(results["num_trades"]) < 5:
         warnings.append(
@@ -1856,6 +1862,12 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         ),
         exposure=ExposureSummary(**exposure),
         costs=CostSummary(
+            turnover=round(float(results.get("turnover", turnover)), 6),
+            realized_cost_pct=(
+                round(float(results["realized_cost_pct"]), 6)
+                if "realized_cost_pct" in results
+                else None
+            ),
             total_commission_pct=round(total_commission_pct, 6),
             total_slippage_pct=round(total_slippage_pct, 6),
             total_cost_pct=round(total_commission_pct + total_slippage_pct, 6),

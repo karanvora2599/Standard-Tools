@@ -226,6 +226,11 @@ def _native_portfolio_sim(
                 "turnover_pct": round(float(reb[i, 0]), 6),
                 "gross_leverage_after": round(float(reb[i, 1]), 6),
                 "n_positions": int(reb[i, 2]),
+                # The kernel never caps: a trade over the ADV cap makes it
+                # refuse the configuration, and the loop runs instead.
+                "n_capped": 0,
+                "capped_notional": 0.0,
+                "capped": [],
             }
         )
 
@@ -760,7 +765,11 @@ def run_portfolio_simulation(
     if use_impact_model:
         volatility_mat = np.empty((n_bars, n_tickers), dtype=np.float64)
         for t, i in ticker_pos.items():
-            ret = price_data[t]["Close"].pct_change(fill_method=None).reindex(master_index)
+            ret = (
+                price_data[t]["Close"]
+                .pct_change(fill_method=None)
+                .reindex(master_index)
+            )
             volatility_mat[:, i] = (
                 ret.rolling(impact_lookback, min_periods=1)
                 .std()
@@ -787,6 +796,11 @@ def run_portfolio_simulation(
     gross_records: List[float] = []
     net_records: List[float] = []
     rebalance_log: List[Dict[str, Any]] = []
+    # Trades the ADV cap sized down over the whole simulation, counted by
+    # the rebalance closure below; the kernel never caps (it refuses, and
+    # the loop then runs instead).
+    n_capped_total = 0
+    capped_notional_total = 0.0
     # Running peak of the largest single position, in currency. A scalar
     # rather than a curve: the peak is what a concentration limit is written
     # against, and returning another (n_bars,) series would cost every
@@ -911,6 +925,7 @@ def run_portfolio_simulation(
         """`weights_arr` and `exec_prices` are both (n_tickers,) rows —
         of weights_mat and of the relevant price matrix respectively —
         positionally aligned with `tickers` / `shares_vec`."""
+        nonlocal n_capped_total, capped_notional_total
         nonlocal cash
         equity_now = cash + float(shares_vec @ exec_prices)
 
@@ -933,6 +948,11 @@ def run_portfolio_simulation(
         # delta = target - held, notional = |delta| * p, cost = |notional| *
         # (commission + slippage). Cash accumulates as a sum, which is the
         # only cross-element dependency and is exactly what np.sum does.
+        # Trades sized down to the ADV cap on this rebalance; only the loop
+        # branch can cap, but the log entry below reads them either way.
+        n_capped = 0
+        capped_notional = 0.0
+        capped_tickers: List[str] = []
         if (
             commission_model == "pct"
             and not use_impact_model
@@ -969,6 +989,7 @@ def run_portfolio_simulation(
             cash -= float(np.sum(costs))
             shares_vec[:] = target
         else:
+            turnover_notional = 0.0
             for pos, t in enumerate(tickers):
                 price = float(exec_prices[pos])
                 weight = float(weights_arr[pos])
@@ -1001,7 +1022,6 @@ def run_portfolio_simulation(
                     continue
 
                 trade_notional = abs(delta) * price
-                turnover_notional += trade_notional
 
                 if max_adv_participation is not None:
                     adv = _valid_dollar_volume(t, pos, trigger_bar, exec_date)
@@ -1023,11 +1043,21 @@ def run_portfolio_simulation(
                             "drop the constraint — it is not satisfied by default."
                         )
                     if participation > max_adv_participation + 1e-9:
-                        raise ValidationError(
-                            f"rebalance {exec_date} ticker {t!r}: ADV participation "
-                            f"{participation:.4f} exceeds max_adv_participation={max_adv_participation}"
-                        )
+                        # A CAP, not a kill switch. This raised, so the two
+                        # states of the constraint were 'no effect' and 'no
+                        # result' and a capacity study could not be
+                        # expressed. The trade is sized down to the cap and
+                        # the shortfall is recorded per rebalance.
+                        allowed_notional = float(max_adv_participation) * adv
+                        scale = allowed_notional / trade_notional
+                        capped_notional += trade_notional - allowed_notional
+                        n_capped += 1
+                        capped_tickers.append(t)
+                        delta *= scale
+                        trade_notional = allowed_notional
+                        target_shares = shares_vec[pos] + delta
 
+                turnover_notional += trade_notional
                 cash -= delta * price
                 cash -= _trade_cost(
                     t, pos, delta, trade_notional, trigger_bar, exec_date
@@ -1115,8 +1145,15 @@ def run_portfolio_simulation(
                     round(gross_after / equity_after, 6) if equity_after > 0 else 0.0
                 ),
                 "n_positions": int(np.count_nonzero(np.abs(shares_vec) > 1e-9)),
+                # Trades sized down to max_adv_participation on this
+                # rebalance, and the notional they gave up.
+                "n_capped": int(n_capped),
+                "capped_notional": round(float(capped_notional), 6),
+                "capped": list(capped_tickers),
             }
         )
+        n_capped_total += int(n_capped)
+        capped_notional_total += float(capped_notional)
 
     # ── Native fast path ──────────────────────────────────────────────────
     # The bar loop below is Python. It has already been optimized hard --
@@ -1135,32 +1172,42 @@ def run_portfolio_simulation(
     #
     # Anything else falls through to the loop, which is unchanged: the diff
     # that introduced this is an indent plus this guard.
-    _native = _native_portfolio_sim(
-        close_mat=close_mat,
-        open_mat=open_mat,
-        hl2_mat=hl2_mat,
-        weights_mat=weights_mat,
-        rebalance_index=target_weights.index,
-        master_index=master_index,
-        tickers=tickers,
-        fill_price=fill_price,
-        commission_model=commission_model,
-        use_impact_model=use_impact_model,
-        max_adv_participation=max_adv_participation,
-        initial_capital=initial_capital,
-        commission_pct=commission_pct,
-        sell_commission_rate=sell_commission_rate,
-        slippage_pct=slippage_pct,
-        max_gross_leverage=max_gross_leverage,
-        max_position_pct=max_position_pct,
-        borrow_fee_bps=borrow_fee_bps,
-        margin_interest_rate=margin_interest_rate,
-        per_share_rate=per_share_rate,
-        min_commission=min_commission,
-        impact_coefficient=impact_coefficient,
-        dollar_volume_mat=dollar_volume_mat,
-        volatility_mat=volatility_mat,
-    )
+    try:
+        _native = _native_portfolio_sim(
+            close_mat=close_mat,
+            open_mat=open_mat,
+            hl2_mat=hl2_mat,
+            weights_mat=weights_mat,
+            rebalance_index=target_weights.index,
+            master_index=master_index,
+            tickers=tickers,
+            fill_price=fill_price,
+            commission_model=commission_model,
+            use_impact_model=use_impact_model,
+            max_adv_participation=max_adv_participation,
+            initial_capital=initial_capital,
+            commission_pct=commission_pct,
+            sell_commission_rate=sell_commission_rate,
+            slippage_pct=slippage_pct,
+            max_gross_leverage=max_gross_leverage,
+            max_position_pct=max_position_pct,
+            borrow_fee_bps=borrow_fee_bps,
+            margin_interest_rate=margin_interest_rate,
+            per_share_rate=per_share_rate,
+            min_commission=min_commission,
+            impact_coefficient=impact_coefficient,
+            dollar_volume_mat=dollar_volume_mat,
+            volatility_mat=volatility_mat,
+        )
+    except ValidationError as exc:
+        # The kernel REFUSES a trade over the ADV cap; the loop below sizes
+        # it down and records the shortfall (findings: the cap was a kill
+        # switch, so a capacity study could not be expressed). A capped
+        # configuration therefore runs the loop; every other kernel error
+        # is the caller's and stands.
+        if "exceeds max_adv_participation" not in str(exc):
+            raise
+        _native = None
     if _native is not None:
         (
             equity_records,
@@ -1285,6 +1332,15 @@ def run_portfolio_simulation(
         warnings.append(
             "cash went negative at one or more bars — implied margin borrowing"
         )
+    if n_capped_total:
+        warnings.append(
+            f"ADV cap: {n_capped_total} trade(s) were sized down to "
+            f"max_adv_participation={max_adv_participation}, giving up "
+            f"{capped_notional_total:,.0f} of requested notional in total. The "
+            "book therefore held less than target_weights asked for on those "
+            "rebalances; rebalance_log carries n_capped, capped_notional and "
+            "the tickers per rebalance."
+        )
 
     equity_curve = pd.Series(equity_records, index=master_index, name="equity")
     cash_curve = pd.Series(cash_records, index=master_index, name="cash")
@@ -1313,7 +1369,15 @@ def run_portfolio_simulation(
         "leverage_curve": leverage_curve,
         "rebalance_log": pd.DataFrame(
             rebalance_log,
-            columns=["date", "turnover_pct", "gross_leverage_after", "n_positions"],
+            columns=[
+                "date",
+                "turnover_pct",
+                "gross_leverage_after",
+                "n_positions",
+                "n_capped",
+                "capped_notional",
+                "capped",
+            ],
         ),
         "final_equity": (
             float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital

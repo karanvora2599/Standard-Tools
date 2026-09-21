@@ -522,6 +522,13 @@ class ScreenerInput(BaseModel):
     end_date: Optional[str] = Field(None, description="Historical end for technicals.")
     sort_by: Optional[str] = Field(None, description="Column to sort results by.")
     ascending: bool = Field(True, description="Sort direction.")
+    source: Optional[str] = Field(
+        None,
+        description="Data provider for the bars the technical filters read "
+        "('yfinance', 'databento', 'polygon', ...). None uses the default "
+        "provider. Fundamental filters need a provider that serves "
+        "financial ratios; a bars-only provider fails those tickers by name.",
+    )
     min_beta_obs: int = Field(
         20,
         ge=2,
@@ -2723,6 +2730,17 @@ class RebalanceEvent(BaseModel):
     turnover_pct: float
     gross_leverage_after: float
     n_positions: int
+    n_capped: int = Field(
+        0,
+        description="Trades this rebalance sized DOWN to max_adv_participation. "
+        "The cap used to refuse the whole simulation instead, so its two "
+        "states were no effect and no result.",
+    )
+    capped_notional: float = Field(
+        0.0,
+        description="Dollar notional requested and not traded because of the "
+        "cap, summed over this rebalance's capped trades.",
+    )
 
 
 class PortfolioSimulationResult(BaseModel):
@@ -3382,6 +3400,18 @@ class ExposureSummary(BaseModel):
 
 
 class CostSummary(BaseModel):
+    turnover: Optional[float] = Field(
+        None,
+        description="Position changed, summed over bars, in units of the "
+        "signal (a flat-to-long-to-flat round trip is 2.0). Computed by the "
+        "engine on its way to the returns and previously discarded.",
+    )
+    realized_cost_pct: Optional[float] = Field(
+        None,
+        description="The commission and slippage the engine actually "
+        "charged, as a fraction of capital: turnover x (commission_pct + "
+        "slippage_pct), the same number the returns were reduced by.",
+    )
     total_commission_pct: (
         float  # sum of commission drag across all bars, as a fraction of capital
     )
@@ -5697,6 +5727,12 @@ class EstimateCovarianceResult(BaseModel):
     condition_number: float
     smallest_eigenvalue: float
     annualized: bool
+    n_rows_dropped: int = Field(
+        0,
+        description="Dates dropped because at least one asset had no return "
+        "there. One short history silently removed 400 of 512 rows on a live "
+        "panel and moved risk-parity weights by 12.4% of NAV.",
+    )
     matrix: Dict[str, Dict[str, float]]
     warnings: List[str] = Field(default_factory=list)
 

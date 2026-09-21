@@ -7,8 +7,12 @@ and what is left alone and why. Findings are cited by their number there
 (`D1`..`D20`) or by section.
 
 **Status: phases 1 (the data path), 2 (the deployed model is the
-validated model) and 3 (selection and inference) are implemented,
-2026-09-20; phases 4-7 are the plan.** Phase 3 went one step past its
+validated model), 3 (selection and inference) and 4 (backtest and
+portfolio) are implemented, 2026-09-20; phases 5-7 are the plan.** In
+phase 4 the native portfolio kernel keeps refusing a trade over the ADV
+cap; the engine catches that refusal and runs the Python loop, which
+sizes the trade down, so a capped configuration is correct and merely
+slower until the kernel caps too. Phase 3 went one step past its
 wording on the purge: besides saying `not_applicable` when no label end
 exists, an external panel registered with a horizon and no
 `label_end_column` now gets its label end derived from the horizon, so

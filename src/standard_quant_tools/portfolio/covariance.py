@@ -74,7 +74,16 @@ def estimate_covariance(
         raise ValidationError(
             f"unknown covariance method {method!r}; expected one of {list(METHODS)}"
         )
-    frame = returns.dropna(how="all", axis=1).dropna()
+    kept_columns = returns.dropna(how="all", axis=1)
+    frame = kept_columns.dropna()
+    # Rows removed because SOME asset had no return there. One short
+    # history removed 400 of 512 rows on a live panel with warnings: []
+    # and moved risk-parity weights by 12.4% of NAV; the estimate is
+    # then of the short history's window, not of the requested one.
+    n_rows_dropped = int(len(kept_columns) - len(frame))
+    shortest = (
+        str(kept_columns.notna().sum().idxmin()) if kept_columns.shape[1] else None
+    )
     if frame.shape[0] < 2:
         raise ValidationError(
             f"covariance needs at least 2 complete observations, got "
@@ -122,7 +131,18 @@ def estimate_covariance(
         "condition_number": condition,
         "smallest_eigenvalue": smallest,
         "annualized": True,
-        "warnings": _warnings(method, n_obs, n_assets, condition, smallest, shrinkage),
+        "n_rows_dropped": n_rows_dropped,
+        "warnings": _warnings(
+            method,
+            n_obs,
+            n_assets,
+            condition,
+            smallest,
+            shrinkage,
+            n_rows_dropped=n_rows_dropped,
+            n_rows_total=int(len(kept_columns)),
+            shortest=shortest,
+        ),
     }
 
 
@@ -160,8 +180,28 @@ def _shrink_to_identity(cov: np.ndarray, n_obs: int, n_assets: int):
     return (1.0 - intensity) * cov + intensity * target, intensity
 
 
-def _warnings(method, n_obs, n_assets, condition, smallest, shrinkage) -> List[str]:
+def _warnings(
+    method,
+    n_obs,
+    n_assets,
+    condition,
+    smallest,
+    shrinkage,
+    *,
+    n_rows_dropped: int = 0,
+    n_rows_total: int = 0,
+    shortest=None,
+) -> List[str]:
     out: List[str] = []
+    if n_rows_dropped:
+        out.append(
+            f"{n_rows_dropped} of {n_rows_total} rows were dropped because at "
+            f"least one asset had no return there (the shortest history is "
+            f"{shortest!r}), so the estimate covers only the {n_obs} complete "
+            "rows. Measured live, one short history removed 400 of 512 rows "
+            "and moved risk-parity weights by 12.4% of NAV; drop the short "
+            "asset or start the window where every asset has data."
+        )
     per_parameter = n_obs * n_assets / (n_assets * (n_assets + 1) / 2)
     if method == "sample" and n_assets > n_obs / 4:
         out.append(

@@ -359,9 +359,14 @@ async def screen_stocks_async(
     sort_by: Optional[str] = None,
     ascending: bool = True,
     min_beta_obs: int = DEFAULT_MIN_BETA_OBS,
+    source: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Async screener: evaluates all tickers concurrently via asyncio.gather.
+
+    `source` names the data provider the bars come from (None: the
+    default). The screener was hard-wired to the default provider and
+    could not reach Databento's tape.
 
     Args:
         tickers:    List of ticker symbols to screen.
@@ -407,7 +412,9 @@ async def screen_stocks_async(
         end,
     )
 
-    provider = DataFactory.get_provider()
+    provider = (
+        DataFactory.get_provider(source) if source else DataFactory.get_provider()
+    )
 
     # Pre-fetch SPY once for the whole batch when beta filters are active
     spy_df: Optional[pd.DataFrame] = None
@@ -463,10 +470,15 @@ def _screen_batch(args: tuple) -> pd.DataFrame:
     adding a parameter without threading it here is an immediate TypeError
     rather than a quiet divergence between the two paths.
     """
-    tickers, filters, start_date, end_date, min_beta_obs = args
+    tickers, filters, start_date, end_date, min_beta_obs, source = args
     return asyncio.run(
         screen_stocks_async(
-            tickers, filters, start_date, end_date, min_beta_obs=min_beta_obs
+            tickers,
+            filters,
+            start_date,
+            end_date,
+            min_beta_obs=min_beta_obs,
+            source=source,
         )
     )
 
@@ -483,6 +495,7 @@ def screen_stocks(
     ascending: bool = True,
     n_workers: Optional[int] = None,
     min_beta_obs: int = DEFAULT_MIN_BETA_OBS,
+    source: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Screen a universe of tickers against fundamental and technical filters.
@@ -554,7 +567,14 @@ def screen_stocks(
     if n_workers <= 1:
         result = asyncio.run(
             screen_stocks_async(
-                tickers, filters, start, end, sort_by, ascending, min_beta_obs
+                tickers,
+                filters,
+                start,
+                end,
+                sort_by,
+                ascending,
+                min_beta_obs,
+                source=source,
             )
         )
         result.attrs.setdefault("failed_batches", [])
@@ -577,7 +597,7 @@ def screen_stocks(
         # and a pass are told apart.
         futures = {
             executor.submit(
-                _screen_batch, (batch, filters, start, end, min_beta_obs)
+                _screen_batch, (batch, filters, start, end, min_beta_obs, source)
             ): batch
             for batch in batches
         }

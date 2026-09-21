@@ -1,5 +1,52 @@
 # Changelog
 
+## A split is a real bar to this engine, and now it says so
+
+Phase 4 of `Development/databento_live_fix_plan.md`: the backtest engine
+and the portfolio surface. Each item names the number it moves.
+
+- **The split screen (D6).** Nothing under `backtest/` read the provider's
+  `adjusted` flag, and an unadjusted split was a real -50% bar: LRCX's 10:1
+  split reported buy-and-hold at -62.40% against +276.04% true, and a
+  short held through it printed +93%. `run_strategy` now screens every
+  bar-to-bar move beyond 35% and warns with the dates, phrased by the
+  provider's flag (`adjusted=` argument, or `price_data.attrs["adjusted"]`,
+  which the Databento provider now sets to False). The warning reaches
+  every tool built on the engine; `run_backtest_compact` carries the
+  engine's warnings for the first time.
+- **`run_strategy` returns `turnover` and `realized_cost_pct`**, computed on
+  its way to the returns and previously discarded; `CostSummary` carries
+  both.
+- **A custom `strategy=` callable is range-checked** in `backtest_grid`: a
+  signal outside [-1, 1] is refused by name instead of running a levered
+  book through every combination.
+- **`max_adv_participation` is a cap, not a kill switch.** A trade over
+  the cap is sized down to it and the shortfall is recorded per rebalance
+  (`n_capped`, `capped_notional`, `capped` in the rebalance log, and a
+  warning with the total); it used to refuse the whole simulation, so a
+  capacity study could not be expressed. The native kernel still refuses;
+  the engine catches that and runs the loop.
+- **An indefinite covariance is repaired and the repair is named.** A
+  ragged panel's pairwise covariance had a smallest eigenvalue of -2.77e-03
+  and `max_diversification` returned a negative weighted average volatility
+  with no warning. Every optimiser that takes a covariance now projects it
+  onto the nearest positive semi-definite matrix (eigenvalue flooring) and
+  warns with the eigenvalue that was floored.
+- **`estimate_covariance` says what it dropped**: `n_rows_dropped` and a
+  warning naming the shortest history; one short history removed 400 of
+  512 rows silently and moved risk-parity weights by 12.4% of NAV.
+- **`build_portfolio` refuses a NaN return by default** and names the count
+  and the policies; `missing="zero"` reads it as a flat day, `missing="drop"`
+  removes the date. A NaN passed through and three calculations treated it
+  three ways (+290 bp of CAGR from 20 missing days).
+- **HRP is order-invariant**: columns are sorted by name before the
+  clustering, so the same universe gives the same weights however it is
+  listed (forty permutations moved single weights by up to 8.7 pp).
+- **`plan_rebalance` names an entity missing from `adv`** instead of
+  treating it as untradeable.
+- **The screener takes a `source`**, so it can screen on Databento's tape
+  rather than only the default provider.
+
 ## The selection never sees the holdout, and the null keeps its memory
 
 Phase 3 of `Development/databento_live_fix_plan.md`: selection and

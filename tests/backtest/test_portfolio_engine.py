@@ -100,6 +100,9 @@ class TestZeroCostReferenceCase:
             "turnover_pct",
             "gross_leverage_after",
             "n_positions",
+            "n_capped",
+            "capped_notional",
+            "capped",
         }
         assert log.iloc[0]["n_positions"] == 2
         assert log.iloc[0]["gross_leverage_after"] == pytest.approx(0.8, abs=1e-4)
@@ -440,14 +443,25 @@ class TestCostModels:
         )
         assert with_interest["final_cash"] < no_interest["final_cash"]
 
-    def test_max_adv_participation_exceeded_raises(self, two_ticker_price_data):
+    def test_max_adv_participation_caps_the_trade_and_says_so(
+        self, two_ticker_price_data
+    ):
+        """A cap, not a kill switch: the trade is sized down to the cap and
+        the shortfall is recorded per rebalance. It used to raise, so a
+        capacity study could not be expressed at all."""
         price_data, dates = two_ticker_price_data
         low_volume = {t: df.assign(Volume=10.0) for t, df in price_data.items()}
         target_weights = pd.DataFrame({"AAPL": [0.5], "MSFT": [0.3]}, index=[dates[0]])
-        with pytest.raises(ValidationError, match="ADV participation"):
-            run_portfolio_simulation(
-                low_volume, target_weights, max_adv_participation=0.01
-            )
+        result = run_portfolio_simulation(
+            low_volume, target_weights, max_adv_participation=0.01
+        )
+        first = result["rebalance_log"].iloc[0]
+        assert first["n_capped"] == 2
+        assert first["capped_notional"] > 0
+        assert sorted(first["capped"]) == ["AAPL", "MSFT"]
+        assert any("sized down" in w for w in result["warnings"])
+        # The book holds less than asked: 1% of a $10-per-bar volume.
+        assert float(result["leverage_curve"].max()) < 0.8
 
     def test_max_adv_participation_requires_volume_column(self, two_ticker_price_data):
         price_data, dates = two_ticker_price_data

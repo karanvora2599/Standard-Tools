@@ -144,6 +144,17 @@ def plan_rebalance(
     per_day = _daily_fractions(max_days, urgency)
 
     have_adv = adv is not None
+    if have_adv:
+        # A name absent from `adv` was read as having zero liquidity, so
+        # it never traded and the warning did not say why.
+        missing_adv = [n for n in names if n not in (adv or {})]
+        if missing_adv:
+            raise ValidationError(
+                f"plan_rebalance: adv has no entry for {missing_adv}. A name "
+                "without an ADV would be treated as untradeable and never "
+                "trade; supply its average daily dollar volume, or omit `adv` "
+                "to plan without participation limits."
+            )
     adv_vector = (
         np.array([float((adv or {}).get(n, 0.0)) for n in names], dtype=float)
         if have_adv

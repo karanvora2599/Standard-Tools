@@ -270,6 +270,62 @@ def _compute_trade_stats(trade_log: pd.DataFrame) -> Dict[str, float]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+#: A bar-to-bar move beyond this is screened as a probable split (or a
+#: bad print). No equity moves 35% in a day often; a 2:1 split moves
+#: -50% every time.
+SPLIT_SCREEN_THRESHOLD = 0.35
+
+
+def _split_screen_warnings(prices: pd.Series, adjusted: Optional[bool]) -> List[str]:
+    """
+    One warning naming every bar whose |return| exceeds the split
+    threshold, phrased by what is known about the bars' adjustment.
+    """
+    moves = prices.pct_change(fill_method=None)
+    jumps = moves[moves.abs() > SPLIT_SCREEN_THRESHOLD]
+    if jumps.empty:
+        return []
+    listed = ", ".join(
+        f"{pd.Timestamp(at).date()} ({float(move):+.1%})"
+        for at, move in list(jumps.items())[:5]
+    )
+    more = f" and {len(jumps) - 5} more" if len(jumps) > 5 else ""
+    if adjusted is False:
+        provenance = (
+            "The provider reports adjusted=False, so a split is a real bar "
+            "here and every metric that compounds through it is wrong; "
+            "adjust the prices or fetch adjusted bars"
+        )
+    elif adjusted is True:
+        provenance = (
+            "The provider reports adjusted=True, so this is either a genuine "
+            "move or a bad print; check the bar before trusting the result"
+        )
+    else:
+        provenance = (
+            "Whether these bars are split-adjusted is not known here; if "
+            "they are not, every metric that compounds through such a bar "
+            "is wrong (a 10:1 split read as -90%)"
+        )
+    return [
+        f"SPLIT SCREEN: {len(jumps)} bar(s) move more than "
+        f"{SPLIT_SCREEN_THRESHOLD:.0%} close to close: {listed}{more}. "
+        f"{provenance}."
+    ]
+
+
+def _turnover_and_cost(signals: pd.Series, cost_per_unit: float) -> Dict[str, float]:
+    """Position changed, summed over bars, and the cost that charged --
+    the same lagged positions the returns are computed on."""
+    executed = signals.shift(1).fillna(0.0)
+    pos_diff = executed.diff().fillna(executed.iloc[0])
+    turnover = float(pos_diff.abs().sum())
+    return {
+        "turnover": round(turnover, 6),
+        "realized_cost_pct": round(turnover * float(cost_per_unit), 6),
+    }
+
+
 def run_strategy(
     price_data: pd.DataFrame,
     signal_series: pd.Series,
@@ -279,6 +335,7 @@ def run_strategy(
     include_trade_log: bool = False,
     fill_price: str = "close",
     risk_free_rate: float = 0.0,
+    adjusted: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Vectorized backtesting engine with transaction costs.
@@ -297,6 +354,13 @@ def run_strategy(
             already reported. Passed identically to the native kernel and
             the Python fallback: a machine with the C++ extension built
             must not report a different ratio from one without it.
+        adjusted: whether the bars are split- and dividend-adjusted, when
+            the caller knows (a provider's DataSetMetadata.adjusted). Read
+            from `price_data.attrs['adjusted']` when not passed. Used only
+            to phrase the split screen's warning: this engine compounds
+            every bar return, so an unadjusted split prints as a real
+            -50% bar (a 10:1 split reported buy-and-hold at -62% against
+            +276% true, findings D6).
         fill_price: "close" (default) — a signal known at bar t-1's close is
             assumed filled at that same close, earning bar t's full
             close-to-close return. "next_open" — decomposes each bar into
@@ -435,6 +499,18 @@ def run_strategy(
     # genuinely needed for the return/cost calculation itself).
 
     warnings: List[str] = []
+    # ── The split screen (findings D6) ──────────────────────────────────
+    # Nothing under backtest/ read the provider's `adjusted` flag, and a
+    # split on unadjusted bars is a real -50% bar to this engine: LRCX's
+    # 10:1 split reported buy-and-hold at -62.40% against +276.04% true,
+    # and a short held through it printed a fictitious +93%. The engine
+    # already walks every bar for the total-loss guard; this pass is free.
+    warnings.extend(
+        _split_screen_warnings(
+            prices,
+            adjusted if adjusted is not None else price_data.attrs.get("adjusted"),
+        )
+    )
     if fill_price == "close":
         warnings.append(
             "fill_price='close': a signal known at bar t-1's close is assumed filled "
@@ -566,6 +642,10 @@ def run_strategy(
             "equity_curve": equity_curve,
             "warnings": warnings,
         }
+        # Turnover and the cost it realized, which the Python path computes
+        # on its way to the returns and this path recomputes here from the
+        # same lagged positions; both were dropped on the floor before.
+        result.update(_turnover_and_cost(signals, commission_pct + slippage_pct))
         if include_trade_log:
             executed = signals.shift(1).fillna(0.0)
             # Same reference-price convention the Python path uses: Close[i-1]
@@ -688,6 +768,11 @@ def run_strategy(
         "calmar_ratio": round(cal, 4),
         "equity_curve": equity_curve,
         "warnings": warnings,
+        # Already computed above for the returns; returned rather than
+        # discarded (findings: 'computed at engine.py:604-605 and thrown
+        # away').
+        "turnover": round(float(pos_diff.abs().sum()), 6),
+        "realized_cost_pct": round(float(transaction_costs.sum()), 6),
     }
 
     trade_log = _build_trade_log(ref_prices, prices, executed, cost_per_unit)
@@ -809,6 +894,24 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
     result.pop("trade_log", None)
     result.update(job["params"])
     return result
+
+
+def _checked_custom_signal(signals: Any, label: str) -> pd.Series:
+    """Refuse a custom callable's signal outside [-1, 1] by name."""
+    series = pd.Series(signals)
+    values = series.to_numpy(dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    if finite.size and float(np.abs(finite).max()) > 1.0 + 1e-9:
+        worst = float(finite[np.argmax(np.abs(finite))])
+        raise ValidationError(
+            f"backtest_grid: custom strategy {label!r} produced a signal of "
+            f"{worst:+.4f}, outside [-1, 1]. run_strategy multiplies the lagged "
+            "signal into the bar return, so a value of 2.0 is a 2x levered "
+            "position and nothing in the result would say so. Scale the "
+            "signal to [-1, 1], or run run_portfolio_simulation, which models "
+            "leverage explicitly."
+        )
+    return series
 
 
 def _run_signal_fn_job(
@@ -946,8 +1049,19 @@ def backtest_grid(
 
     is_custom = callable(strategy)
     if is_custom:
-        signal_fn: Callable[..., pd.Series] = strategy  # type: ignore[assignment]
+        raw_signal_fn: Callable[..., pd.Series] = strategy  # type: ignore[assignment]
         strategy_label = getattr(strategy, "__name__", "custom_strategy")
+
+        # A registry strategy emits {-1, 0, 1} by construction. A caller's
+        # callable emits whatever it emits, and a value of 2.0 ran a levered
+        # book through every combination with nothing saying so. Checked
+        # at the one point every path -- fused, batch and sequential --
+        # reads the callable.
+        def signal_fn(price_data_, **params):
+            return _checked_custom_signal(
+                raw_signal_fn(price_data_, **params), strategy_label
+            )
+
     else:
         if strategy not in STRATEGY_REGISTRY:
             raise ValueError(

@@ -782,6 +782,9 @@ class DatabentoProvider(DataProvider):
         """The library's column contract, a naive index, integer volume, and
         the inclusive end enforced -- the same shaping every provider does."""
         out = _normalize_ohlcv_index(self._to_ohlcv(raw_frame, symbol), interval)
+        # What the venue published: no split or dividend adjustment. The
+        # backtest engine's split screen reads this to phrase its warning.
+        out.attrs["adjusted"] = False
         if out["Volume"].notna().all():
             # uint64 from the vendor: `Volume.diff()` on it returned
             # 1.8e19 instead of -1,150,414. int64 like every other provider.

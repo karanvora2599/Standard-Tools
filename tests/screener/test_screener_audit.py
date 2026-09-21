@@ -270,9 +270,11 @@ class TestWorkerTupleCarriesEveryTunable:
             min_beta_obs=7,
         )
         assert captured, "expected the multi-worker path to be taken"
+        # The floor sits before the source, which is the last slot.
         assert all(
-            args[-1] == 7 for args in captured
+            args[-2] == 7 for args in captured
         ), "every batch must carry the caller's floor, not the module default"
+        assert all(args[-1] is None for args in captured)
 
     def test_worker_tuple_shape_matches_what_the_worker_unpacks(self, monkeypatch):
         """Submit-side and unpack-side arity are asserted against each other,
@@ -308,4 +310,4 @@ class TestWorkerTupleCarriesEveryTunable:
             n_workers=2,
         )
         # _screen_batch unpacks exactly this many names.
-        assert all(len(args) == 5 for args in captured)
+        assert all(len(args) == 6 for args in captured)

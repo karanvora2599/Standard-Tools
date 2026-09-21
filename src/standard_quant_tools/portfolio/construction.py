@@ -53,7 +53,56 @@ logger = logging.getLogger(__name__)
 TRADING_DAYS = TRADING_DAYS_PER_YEAR
 
 
+#: An eigenvalue below minus this share of the largest is a genuinely
+#: indefinite matrix rather than rounding; either way the matrix is
+#: repaired, and only the genuine case is warned about loudly.
+_PSD_TOLERANCE = 1e-10
+
+
+def _repair_psd(frame: pd.DataFrame, who: str) -> "tuple[pd.DataFrame, List[str]]":
+    """
+    The nearest positive semi-definite matrix, by flooring the eigenvalues,
+    and a warning naming what was floored.
+
+    Nothing checked this between a caller's covariance and the optimisers.
+    A ragged real panel through `cov(min_periods=30)` gave a smallest
+    eigenvalue of -2.77e-03, and max_diversification then returned a
+    NEGATIVE weighted average volatility with zero warnings. A pairwise
+    covariance is not a covariance of anything; the repair projects it onto
+    the nearest one that is (Higham's eigenvalue clipping), re-symmetrized,
+    and the caller is told by how much.
+    """
+    matrix = frame.to_numpy()
+    eigenvalues, vectors = np.linalg.eigh(matrix)
+    largest = float(eigenvalues.max())
+    smallest = float(eigenvalues.min())
+    if smallest >= -_PSD_TOLERANCE * max(largest, 1e-300):
+        return frame, []
+    floor = _PSD_TOLERANCE * largest
+    repaired = (vectors * np.maximum(eigenvalues, floor)) @ vectors.T
+    repaired = (repaired + repaired.T) / 2.0
+    fixed = pd.DataFrame(repaired, index=frame.index, columns=frame.columns)
+    return fixed, [
+        f"{who}: the covariance matrix is not positive semi-definite (smallest "
+        f"eigenvalue {smallest:.3e} against a largest of {largest:.3e}), which a "
+        "pairwise estimate over a ragged panel produces. It was projected onto "
+        "the nearest PSD matrix by flooring the eigenvalues before use; the "
+        "weights below are for the repaired matrix. Estimate the covariance on "
+        "complete rows (estimate_covariance) to avoid the repair."
+    ]
+
+
 def _covariance_frame(covariance: Any, who: str) -> pd.DataFrame:
+    """The validated matrix, PSD-repaired when it has to be; the repair's
+    warning travels on `frame.attrs['warnings']` for the caller to surface."""
+    frame, notes = _covariance_frame_with_notes(covariance, who)
+    frame.attrs["warnings"] = notes
+    return frame
+
+
+def _covariance_frame_with_notes(
+    covariance: Any, who: str
+) -> "tuple[pd.DataFrame, List[str]]":
     frame = pd.DataFrame(covariance).astype(float)
     if frame.shape[0] != frame.shape[1]:
         raise ValidationError(f"{who}: covariance must be square, got {frame.shape}.")
@@ -71,7 +120,7 @@ def _covariance_frame(covariance: Any, who: str) -> pd.DataFrame:
             f"{who}: a diagonal entry is non-positive, so some asset has "
             "zero or negative variance. Usually a constant price series."
         )
-    return frame
+    return _repair_psd(frame, who)
 
 
 def _portfolio_volatility(weights: np.ndarray, covariance: np.ndarray) -> float:
@@ -132,6 +181,7 @@ def risk_parity(
     equal contributions.
     """
     frame = _covariance_frame(covariance, "risk_parity")
+    psd_notes = list(frame.attrs.get("warnings", []))
     matrix = frame.to_numpy()
     n = matrix.shape[0]
     if n < 2:
@@ -185,7 +235,7 @@ def risk_parity(
     shares = contributions / total if total > 0 else contributions
     error = float(np.max(np.abs(shares - targets)))
 
-    warnings: List[str] = []
+    warnings: List[str] = list(psd_notes)
     if not converged:
         warnings.append(
             f"DID NOT CONVERGE in {max_iterations} iterations (largest "
@@ -260,6 +310,11 @@ def hierarchical_risk_parity(
     sqrt(0.5 * (1 - rho)), implemented without scipy.
     """
     frame = pd.DataFrame(returns).astype(float).dropna()
+    # Sorted by name before anything reads them: the clustering's tie-breaks
+    # follow column position, so forty permutations of one universe moved
+    # single weights by up to 8.7 pp. The weights are keyed by name, and the
+    # same names must give the same weights.
+    frame = frame[sorted(frame.columns, key=str)]
     n_assets = frame.shape[1]
     if n_assets < 2:
         raise ValidationError("hierarchical_risk_parity: needs at least two assets.")
@@ -820,6 +875,7 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
     `hierarchical_risk_parity` is the version that avoids inversion.
     """
     frame = _covariance_frame(covariance, "max_diversification")
+    psd_notes = list(frame.attrs.get("warnings", []))
     matrix = frame.to_numpy()
     n = matrix.shape[0]
     if n < 2:
@@ -854,7 +910,7 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
     condition = float(np.linalg.cond(correlation))
     negative = {str(name): float(w) for name, w in zip(frame.columns, weights) if w < 0}
 
-    warnings: List[str] = []
+    warnings: List[str] = list(psd_notes)
     if negative:
         warnings.append(
             f"{len(negative)} weight(s) came out NEGATIVE, so this solution "
@@ -918,6 +974,7 @@ def marginal_risk_contribution(
     positions are hedges whether or not they were intended as such.
     """
     frame = _covariance_frame(covariance, "marginal_risk_contribution")
+    psd_notes = list(frame.attrs.get("warnings", []))
     series = pd.Series(weights, dtype=float)
     missing = [str(c) for c in frame.columns if str(c) not in series.index]
     if missing:
@@ -958,7 +1015,7 @@ def marginal_risk_contribution(
     hedges = [r["asset"] for r in rows if r["marginal_risk"] < 0]
     outsized = [r for r in rows if r["concentration_flag"]]
 
-    warnings: List[str] = []
+    warnings: List[str] = list(psd_notes)
     if outsized:
         worst = outsized[0]
         warnings.append(

@@ -493,6 +493,7 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
         sort_by=input_data.sort_by,
         ascending=input_data.ascending,
         min_beta_obs=input_data.min_beta_obs,
+        source=input_data.source,
     )
     failed_filters = dict(result_df.attrs.get("failed_filters", {}))
     failed_tickers = dict(result_df.attrs.get("failed_tickers", {}))

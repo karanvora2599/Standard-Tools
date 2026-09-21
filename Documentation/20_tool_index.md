@@ -33,7 +33,7 @@ advertises 155 of the 211 below.
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 47 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `research` | 42 | 48 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 81 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `modeling` | 22 | 85 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
@@ -347,7 +347,7 @@ Fetch company metadata and key financial ratios (PE, P/B, debt/equity, ROE, mark
 Filter a stock universe by fundamental and technical criteria.
 
 **Required:** `tickers`, `filters`  
-**Optional:** `start_date`, `end_date`, `sort_by`, `ascending`, `min_beta_obs`
+**Optional:** `start_date`, `end_date`, `sort_by`, `ascending`, `source`, `min_beta_obs`
 
 ---
 
