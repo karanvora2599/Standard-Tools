@@ -1,312 +1,663 @@
-# Databento against the live market: what two suites found
+# Databento against the live market: what two passes found
 
-A record of the first live tests this library has had against Databento,
-the three defects they found, and the checks that passed.
+A record of the live testing this library has had against Databento, the
+defects it found, the claims it confirmed, and what each fix costs.
 
-**Status: the suites are merged as `941a730` (2026-09-20), 47 tests in
-`tests/data/test_databento_live.py` (29) and
-`tests/data/test_databento_pipeline_live.py` (18). 46 pass, one is a
-strict xfail recording F1.** Every claim below was measured against the
-live feed on 2026-09-20 with the source read at `d04e84e`. No fix is
-applied: F1 and F2 change numbers this library has already produced, and
-that is a decision to take deliberately rather than inside a test commit.
-The baseline before the suites was 7,228 offline tests passing with two
-pre-existing failures; after, 7,267 passing with the same two, and 47 more
-deselected from the default selection.
+**Status.** Two passes. The first (2026-09-20, commit `941a730`) added
+`tests/data/test_databento_live.py` and
+`tests/data/test_databento_pipeline_live.py` — 47 tests, 46 passing and one
+strict xfail. The second, later the same day, ran **twelve parallel
+investigations** over the areas the first pass named as uncovered, and is
+the bulk of this document. Four more regression tests landed as `34899bb`;
+the live suite is now **29 passed, 5 xfailed**. Offline suite unchanged at
+**7,267 passed** with the same two pre-existing failures (section 11).
 
-The short version: the provider parses correctly and the prices are right.
-The **volume** is not, on the default path, by a factor of about thirty —
-and nothing in the returned frame says so.
+**No fix is applied.** Several of these change numbers the library has
+already produced, and that is a decision to take deliberately rather than
+inside a test commit.
 
----
-
-## 1. Why there were no live tests, and why that was half right
-
-`tests/data/test_databento_provider.py` opens by saying every test in it is
-offline, deliberately, because dataset preference, the finalization
-walk-back and entitlement memory "are exactly the parts that are expensive
-to get wrong and impossible to exercise against a live API in a suite."
-
-That is correct about those parts. They are logic, logic is tested with an
-injected client, and a live API would make them flaky rather than better
-covered. Nothing below argues for changing that file.
-
-What an injected client cannot test is whether the bytes coming back are
-the market. A provider that parses a fixture perfectly and returns three
-percent of the volume passes every offline test ever written, because the
-fixture was built from the same assumption as the parser. That is exactly
-what was happening, and F1 is what it looks like.
-
-So the live suites check only the things a fixture cannot, in three ways
-that never take the vendor's word for itself:
-
-1. **Invariants the market guarantees.** A low is not above an open. A
-   book is not crossed. A trade prints inside its own session. No second
-   source needed.
-2. **A second vendor.** Closes and volumes joined against yfinance —
-   different infrastructure, different business, no shared upstream.
-3. **Cross-schema agreement.** The depth feed and the daily bars are
-   different products from different pipelines, so every quote in the book
-   must sit inside that session's own high and low. This is the one that
-   catches a price-scaling error, which is the failure `data/databento.py`
-   exists to prevent and the one a fixture can never demonstrate.
+**Provenance.** Findings marked ✅ I reproduced personally against the live
+feed, in this session, before writing them down. The rest come from the
+parallel investigations, each of which reports its own repro; they are
+recorded as measured but not independently re-run by me.
 
 ---
 
-## 2. Defects found against the live feed
+## 1. The one-paragraph version
 
-### F1. `DATASET_CONSOLIDATED` is not the consolidated tape — *reproduced*
+The **arithmetic in this library is overwhelmingly right.** Optimisers hit
+their optima under 900,000 perturbations, covariance estimators match
+Ledoit–Wolf to 1e-17, Black-Scholes matches a scipy reference to 1e-13,
+greeks match finite differences, the purge and embargo remove exactly the
+rows they should, the continuous-futures stitching matches an independent
+vendor construction to 3 bp over a year, and the Lee-Ready trade classifier
+is **99.7% accurate against the venue's own aggressor flag**.
 
-`data/databento.py:84` sets `DATASET_CONSOLIDATED = "EQUS.MINI"`, and
-`:88-90` states the belief plainly:
+**What is wrong is the data path and the seams.** The default feed is not
+the tape it is documented to be, in price as well as in volume. A daily
+request returns tomorrow. A futures ticker returns an equity. The modeling
+runtime cannot ingest the live provider at all. And several estimators are
+either circular by construction or crash on any real tick tape.
 
-> EQUS.MINI is the consolidated tape and is the best answer whenever it
-> covers the window
+---
 
-`databento_provider.py:250` puts it first in the bar preference, so it
-serves nearly every bar this library produces.
+## 2. Corrections to the first pass
 
-It is not the consolidated tape. Measured over 2026-08-03..2026-09-18
-against yfinance's consolidated daily bars, on four symbols:
+Two things the first pass got wrong, both found by the second.
 
-| dataset | volume ÷ consolidated | median close error |
+**F1 said EQUS.MINI carried "correct prices". It does not.** That claim was
+based on comparing close *levels*, where the median error is about a tenth
+of a percent and looks like a last-print difference. It is not. EQUS.MINI's
+daily bar spans the UTC day and its close is the **last print in that day**,
+which on a busy afternoon is an after-hours trade. Three investigations
+converged on this independently:
+
+| measurement | EQUS.MINI vs the consolidated tape |
+|---|---|
+| ✅ AAPL 2025-04-02 close (tariffs, after the bell) | **208.00** vs **223.89** — 7.1% |
+| ✅ AAPL 2026-07-30 close | 312.75 vs 333.43 — 6.2% |
+| ✅ daily-return RMS error, AAPL, 249 sessions | **74.0 bp** (max 647 bp) |
+| ✅ same, MSFT / PLUG / AMC | 117.9 / **287.2** / 123.1 bp |
+| close deviation, 513 sessions, 12 names | median 13 bp, p95 31–161 bp, **max 1,308 bp** |
+| sessions deviating >25 bp | NVDA **280/513**, TSLA 278/513, AMZN 159/513 |
+| annualised vol error | −5.7% to +5.4% relative |
+| beta vs SPY | wrong by 0.7–12.7%; **JNJ's beta flips sign** (+0.046 → −0.016) |
+
+74 bp RMS is roughly half of AAPL's daily volatility. The level error hides;
+the return error is what every downstream number is built on.
+
+**The fix is not a rename.** ✅ EQUS.SUMMARY matches the tape exactly — 1.0000
+volume ratio and 0.000000 close error on every symbol tried — but it **only
+starts 2024-07-01**, where EQUS.MINI reaches back to 2023-03-28 and
+XNAS.ITCH to 2018-05-01. It also carries only `ohlcv-1d`, `definition` and
+`statistics`. So `_bar_datasets` has to become schema- and range-aware, and
+intraday needs a separate answer where the honest one is a venue feed with
+its share stated rather than a sample feed presented as a tape.
+
+---
+
+## 3. What to fix first
+
+Ordered by how badly a wrong answer propagates, not by how hard it is.
+
+| # | finding | area | why it is first |
+|---|---|---|---|
+| D1 | ✅ A daily request returns tomorrow | data | lookahead into every as-of query |
+| D2 | ✅ Modeling cannot ingest the live provider | modeling | hard crash, no workaround |
+| D3 | ✅ EQUS.MINI is not the tape, in price or volume | data | silently wrong everywhere |
+| D4 | Feature selection scores on the whole panel | modeling | manufactures 70% of a real headline from noise |
+| D5 | ✅ A futures ticker returns an equity | data | silently the wrong instrument |
+| D6 | ✅ Splits compound as returns | backtest | −62% reported against +276% |
+| D7 | ✅ Three estimators crash on any real tick tape | microstructure | the feed they are for |
+| D8 | ✅ Kyle's lambda is circular | microstructure | survives destroying the relationship |
+| D9 | ✅ The IV solver returns its own guess, "converged" | options | silently wrong vol |
+| D10 | Permutation IC test rejects a true null 27–35% | modeling | both "significant" features are noise |
+
+---
+
+## 4. The data layer
+
+### D1. A `1d` request returns one bar more than it asked for, and that bar is the future — DEFECT ✅
+
+`data/databento_provider.py:347-348`. `_to_utc(end_of_day=True)` has
+already pushed a bare end date to next-midnight, which is how the inclusive
+contract is honoured. The `ohlcv-1d` branch then adds another day, and
+Databento's day-granular end is exclusive. Nothing trims: `get_ohlcv` never
+calls `trim_to_inclusive_end`, which polygon (`:671`), yfinance (`:271`)
+and bloomberg (`:378`) all do.
+
+```
+asked 2026-09-16..2026-09-16  -> 2 rows, last index 2026-09-17, last Close 337.00
+asked 2026-09-14..2026-09-16  -> 4 rows, last index 2026-09-17
+asked 2026-09-10..2026-09-16  -> 6 rows, last index 2026-09-17
+asked 2026-09-18..2026-09-18  -> 1 row   (only because 09-19 is a Saturday)
+```
+
+The correct close as of 2026-09-16 is **332.85**; 337.00 is the 17th. Any
+as-of query, walk-forward, or signal-at-close path reads tomorrow. ✅ The
+intraday schemas take the other branch and are exactly right, which
+localises it.
+
+It also costs a **guaranteed-to-fail 422 on every daily request** — the
+first attempt asks two days past the edge, is refused, and walks back,
+burning a round trip and one of six finalization attempts every time.
+
+**Why no test caught it:** `tests/data/test_databento_provider.py:292` and
+`:260` assert against a stub whose `_bars()` returns a fixed five-row frame
+*regardless of the requested window*, so `assert len(frame) == 5` asserts
+the stub's own length.
+
+**Fix:** round the end up to a whole day instead of adding one, and call
+`trim_to_inclusive_end`. Then make the stub slice to `[start, end)`.
+
+### D3. The default feed is a venue sample presented as the consolidated tape — DEFECT ✅
+
+Covered in section 2. `data/databento.py:84` sets
+`DATASET_CONSOLIDATED = "EQUS.MINI"` and `:88-90` states "EQUS.MINI is the
+consolidated tape". Volume is 2.3–3.6% of consolidated; the close is an
+after-hours print.
+
+✅ **The Carbon engine has the same defect from the same cause** — it pins
+`DATABENTO_OHLCV_DATASET=EQUS.MINI`; measured through its own bars provider,
+volume 0.0315 of consolidated.
+
+### D5. A futures root that is also an equity ticker silently returns the equity — DEFECT ✅
+
+`data/databento_provider.py:88` (`_EQUITY_RE`), `:259-280`, enforced at
+`:374`. GLBX.MDP3 is never in the candidate list and `stype_in` is hardwired
+to `raw_symbol`, so `continuous` and `parent` symbology are unreachable.
+
+```
+get_ohlcv("ES") -> 4 rows, close 67.22    (CME had ES at ~7725 that session)
+get_ohlcv("CL") -> 4 rows, close 87.01    (Colgate-Palmolive, not crude)
+get_ohlcv("GC") -> APIError naming three EQUITY datasets
+'ES.c.0' / 'ESZ6' / 'ES.FUT' -> ValidationError
+```
+
+No warning, no error, a four-figure-cheaper instrument. The same door is
+shut for OPRA: every option spelling is refused before any network call, so
+**the library cannot reach options or futures at all**, and `get_metadata`
+does not say so.
+
+**Fix:** recognise the futures and OSI shapes and route them to the right
+dataset and `stype_in`; **refuse bare roots that are also equity tickers as
+ambiguous** rather than resolving them to the equity.
+
+### D11. One provider object serves bars and trades from different tapes — DEFECT
+
+`databento_provider.py:250` (bars: `EQUS.MINI, XNAS.BASIC, XNAS.ITCH`) vs
+`:516` (trades: `XNAS.ITCH, XNAS.BASIC`). Measured, same symbol, same
+five minutes, one object: trades sum **65,579** shares against the minute
+bars' **20,530** — 3.19x, mismatching in every minute. On a single dataset
+the reconciliation is **exact to the share, per minute, on both feeds**, so
+this is not trade-condition filtering; it is two tapes.
+
+### D12. The serving dataset is chosen per window and then discarded — DEFECT
+
+`:424, 484, 505, 545, 583` all do `frame, _dataset = self._fetch(...)`.
+`get_metadata` (`:619-643`) is a static self-report with no dataset field.
+Two adjacent windows get different feeds (✅ measured: `2023-02-01..03-24`
+served by XNAS.ITCH, `2023-03-29..05-31` by EQUS.MINI) whose volumes differ
+tenfold, and the caller cannot tell. A backtest that fetches per year
+splices two feeds and inherits a structural break the market never had.
+
+### Also in the data layer
+
+- **`data/quality.py` never reads Volume** (`grep` → 0 hits), so it gives
+  identical verdicts on a 3%-of-volume frame and the real tape.
+- **`data/comparison.py` compares fundamentals only.** Run live against
+  Databento it returns `n_entities_compared: 0, warnings: []` — which reads
+  as "checked, nothing found" while the caller holds 3% of the tape.
+- **`detect_missing_bars` is 100% false positives** on live US equity data:
+  21 flagged over 500 sessions, **0 real**, all of them genuine holidays.
+  The stated reason (avoiding a calendar dependency) is obsolete —
+  `exchange_calendars` is already a dependency at `modeling/calendar.py:47`.
+- **Databento's own per-session quality flag is never read.** 15 sessions
+  marked `degraded` by the vendor were served unmarked.
+- **Following `DataSetMetadata.timezone` yields zero aligned rows.**
+  yfinance declares `America/New_York` and returns a **tz-naive** index;
+  doing what the metadata says gives 0 of 34 joined rows, and ignoring it
+  gives 34.
+- **`Volume` is `uint64` on Databento and `int64` on yfinance**, so
+  `Volume.diff()` returns `1.8446744e19` instead of −1,150,414. Silent,
+  finite, correct dtype.
+- **`get_temporal_contract` says the data is never restated** while
+  `get_metadata` on the same object says `point_in_time=False`.
+- **`survivorship_free=True` is VERIFIED SOUND** — five real delisted names
+  (ATVI, SGEN, HZNP, VMW, SAVE) return full history at prices matching their
+  deal levels, where yfinance returns `DataNotFoundError` for all five.
+
+---
+
+## 5. Modeling
+
+The feature the owner considers most underrated, and the one with both the
+hardest blocker and the subtlest leak.
+
+### D2. The modeling runtime cannot build a dataset from the live provider — DEFECT ✅
+
+`modeling/dataset/coverage.py:193`:
+
+```
+build_dataset(DatasetSpec(provider="databento", ...))
+  -> TypeError: Cannot subtract tz-naive and tz-aware datetime-like objects
+     at  if actual_start - requested_start > tolerance:
+build_dataset(DatasetSpec(provider="yfinance", ...))   -> builds
+```
+
+`union_dates` comes from the provider index, which Databento returns
+**tz-aware UTC**; `pd.Timestamp(spec.start)` is naive. Every modeling
+dataset on the live provider raises before returning anything.
+
+**Root cause is shared with three other findings.** Databento is the only
+provider that touches neither `_cache` nor `_retry` (`grep` → 0 hits; the
+other three import both), so it never passes `_normalize_ohlcv_index`, the
+single choke point that makes every other provider tz-naive. That one gap
+produces this crash, the silent `reindex` → all-NaN, and the metadata
+timezone trap above.
+
+**Fix:** normalise both sides in `entity_coverage_warnings`, and better,
+route Databento through the normaliser at the provider seam.
+
+### D4. `select_features` scores on the whole panel, holdout included — HAZARD
+
+`modeling/analysis/feature_selection.py:43-141`. `min_abs_rank_ic` and
+`max_features` filter on target correlation measured over **every** date,
+including the ones `run_model_experiment` will later hold out.
+`SelectFeaturesResult` carries no warning and `validation_report` has no
+field recording that its features were chosen this way.
+
+Measured: 60 columns of pure i.i.d. noise added to the live panel, top 5
+selected by full-panel IC, then the same walk-forward run on the selected
+five and on five chosen blind:
+
+| | selected | blind |
 |---|---|---|
-| EQUS.SUMMARY | **1.0000** on all four | **0.000000** |
-| XNAS.BASIC | 0.5789 – 0.9392 | 0.001319 |
-| XNAS.ITCH | 0.1360 – 0.3099 | 0.001403 |
-| **EQUS.MINI** | **0.0227 – 0.0355** | 0.000935 |
+| mean OOS `cs_rank_ic_mean` over 5 seeds | **+0.04510** | **+0.00163** |
+| seeds where selected beat blind | **5 of 5** | |
 
-Per symbol, EQUS.MINI: AAPL 0.0330, MSFT 0.0292, SPY 0.0355, TSLA 0.0227.
-33 joined sessions per symbol. The same sweep over 2026-09-08..2026-09-19
-gives EQUS.MINI 0.0217 – 0.0347 and EQUS.SUMMARY 1.0000 again, so the
-result is the dataset's nature rather than one window's.
+The real four-feature price model scores **+0.0635** on the same folds. So
+**about 70% of the real model's headline is manufacturable from pure noise**
+by following the library's own documented workflow — and the run reports
+`n_train_rows_purged_overlap: 280` and looks perfectly disciplined. The
+engine's split is not at fault; the leak is upstream of it and nothing
+records it.
 
-The prices are fine. That is what makes this dangerous rather than
-obvious: the frame looks entirely healthy — right shape, right index,
-right closes to a tenth of a percent — and every volume-weighted number
-computed from it is wrong by more than thirty times. VWAP, average daily
-volume, dollar-volume ranks, liquidity screens, volume breakouts,
-participation-rate sizing and any turnover constraint in the backtest all
-inherit it silently. A liquidity filter written as "trades more than a
-million shares a day" keeps a different universe than its author believes.
+### D10. `permutation_test_ic` rejects a true null 27–35% of the time — DEFECT
 
-EQUS.SUMMARY is the dataset that matches consolidated volume, share for
-share, on every symbol tried, and its closes match to zero error.
+`modeling/analysis/feature_stability.py:371`, null at `:310`. It shuffles
+within each date, which destroys the cross-sectional link **and** the
+feature's serial correlation, so the null's per-date ICs are independent
+while the observed ones are not.
 
-**The Carbon engine has the same defect from the same cause.** It pins
-`DATABENTO_OHLCV_DATASET=EQUS.MINI` in `services/engine/.env`. Measured
-live through its own bars provider: volume **0.0315** of consolidated,
-close error 0.0011. Its chart volume bars are wrong wherever Databento
-serves them.
+| null feature | on the live panel, real h=5 label | ✅ my replication, i.i.d. target |
+|---|---|---|
+| i.i.d. (the control) | 3.3% ✔ | 1.7% ✔ |
+| AR(1) φ=0.95 | **27.5%** | 5.0% |
+| AR(1) φ=0.99 | **35.0%** | **11.7%** |
 
-**Fix.** EQUS.SUMMARY for `ohlcv-1d`. It is not a rename: EQUS.SUMMARY
-carries only `ohlcv-1d`, `definition` and `statistics`, so `_bar_datasets`
-has to become schema-aware — daily prefers EQUS.SUMMARY, intraday cannot
-use it at all and needs its own preference, where the honest answer is a
-venue feed with its share stated rather than a sample feed presented as a
-tape. Because the change moves every volume number this library has
-produced, it is recorded as a strict xfail
-(`test_the_default_bars_carry_consolidated_volume`) naming the fix, rather
-than made quietly. Remove the xfail with the change.
+✅ I replicated this independently and got the same direction at a milder
+magnitude. The gap is instructive rather than a disagreement: my
+construction uses an i.i.d. target, while the investigation used the real
+overlapping five-bar label, which correlates consecutive per-date ICs on
+the *target* side as well and compounds the effect. The realistic setup is
+theirs, so 11.7% is a floor on the error, not a ceiling.
 
-### F2. Which feed answered depends on the window, and is never reported — *reproduced*
+Every real feature in the live panel sits in that regime (per-date IC lag-1
+autocorrelation +0.60, +0.62, +0.63, +0.21). Both features the tool calls
+significant on real prices are inside the noise once that is accounted for:
+`market.momentum` p=0.0200 against a block-bootstrap 0.2145, `technical.rsi`
+p=0.0020 against 0.0745 — a 10x and a 37x error.
 
-`_bar_datasets` returns a preference list and `_range`
-(`databento_provider.py:282-300`) declines a dataset whose coverage does
-not contain the whole requested window, so the request falls through.
-`CONSOLIDATED_START` is 2023-03-28.
+The suite does not catch it because its calibration test draws i.i.d. noise,
+the one regime where the test *is* calibrated.
 
-One call is therefore served by exactly one dataset, which is the right
-design and means there is no discontinuity *inside* a frame. Confirmed: a
-call spanning 2023-02-01..2023-05-31 is served whole by XNAS.ITCH, with no
-step at the boundary.
+**The fix is already in-tree:** `validation/comparison.py` uses block
+resampling and was verified correctly sized (6.7% at φ=0, 5.8% at φ=0.9).
 
-The problem is between calls. Two adjacent windows are served by different
-feeds:
+### Also in modeling
 
-```
-2023-02-01 .. 2023-03-24   served by XNAS.ITCH    (~30% of consolidated)
-2023-03-29 .. 2023-05-31   served by EQUS.MINI    (~3% of consolidated)
-```
+- **`compare_models(method="paired")` accepts a CPCV model** and joins on a
+  25x cartesian product (19,520 rows for 3,904 honest ones), producing a
+  "significant" p=0.0130. Every other consumer refuses CPCV by name —
+  `bridge.py:81`, `portfolio_eval.py:657`, `ensemble.py:233` — this one path
+  does not.
+- **The outer report cannot distinguish "nothing overlapped" from "the purge
+  never ran".** Without a `label_end_date` column the purge is a no-op and
+  writes `n_train_rows_purged_overlap: 0`, the same value a clean run gives.
+  Measured: 280 training rows whose label lands inside the test window,
+  reported as 0. Two docstrings claim a horizon-based purge that does not
+  exist.
+- **A CPCV fold record names a contiguous test window containing training
+  dates** — fold 1 spans 1,912 rows against `n_test_rows: 1,304`.
+- **`paired_comparison` reports `hit_rate = 0.000` for two identical
+  models**, which reads as "A won every day" when the truth is a tie.
 
-A caller who fetches in chunks — which is what a long backtest, a cache
-fill, or any per-year loop does — splices two feeds whose volumes differ
-by an order of magnitude, at a date fixed by the vendor's coverage rather
-than by anything in the market. The result is a synthetic structural break
-that no corporate action explains and that a regime detector, a volume
-z-score or a turnover model will happily fit.
+### Modeling: claimed fixes verified as HOLDING
 
-And the caller cannot detect it. Every accessor discards the dataset:
+This is the good news, and it is substantial. The plan's claims were tested
+against real prices rather than taken on trust:
 
-```
-databento_provider.py:424   frame, _dataset = self._fetch(...)   # get_ohlcv
-databento_provider.py:484   frame, _dataset = self._fetch(...)   # get_trades
-databento_provider.py:505   frame, _dataset = self._fetch(...)   # get_quotes
-databento_provider.py:545   frame, _dataset = self._fetch(...)   # get_order_book
-databento_provider.py:583   frame, _dataset = self._fetch(...)   # get_order_events
-```
-
-`get_metadata` (`:619-643`) cannot help either: it is a static self-report
-built from constants, with no dataset field and no knowledge of what any
-particular call reached.
-
-**Fix.** Report the dataset that served. `frame.attrs["dataset"]` is the
-cheapest version and survives most pandas operations; a field on
-`DataSetMetadata` is the honest one, but it has to be per-call rather than
-per-provider to mean anything. Either way, add a warning when a request
-falls through to a feed whose volume basis differs from the preferred
-one — a caller who asked for ten years and got two feeds should be told
-once, not never.
-
-### F3. A multi-publisher dataset returns one row per publisher, undeduplicated — *reproduced*
-
-`_to_ohlcv` (`databento_provider.py:428-461`) validates columns, decides
-the price scale, coerces the index and returns `out.sort_index()`. It
-never collapses duplicate timestamps.
-
-DBEQ.BASIC publishes a bar per publisher per session. Through the
-provider, `get_ohlcv("AAPL", "2026-09-14", "2026-09-18")` on that dataset
-returns **15 rows for 5 sessions**, `index.is_unique` **False**, three
-rows per day with different closes (332.54 / 332.41 / 332.79 on
-2026-09-16) and volumes an order of magnitude apart (27,329 / 903,206 /
-183,252).
-
-A caller computing returns gets **14 returns from a 5-session window**,
-most of them cross-publisher noise rather than market moves. Anything
-using `.loc[date]` gets a Series where it expected a scalar.
-
-Severity is bounded by reachability: DBEQ.BASIC is not in the default
-preference (`['EQUS.MINI', 'XNAS.BASIC', 'XNAS.ITCH']`), and the four
-datasets that are all return one row per session. It is reachable through
-`DATABENTO_OHLCV_DATASET=DBEQ.BASIC`, or through the `dataset=` /
-`depth_dataset=` constructor arguments. So this is a configuration hazard
-rather than a live defect — but it is reachable by configuration alone,
-with no error and no warning.
-
-**Fix.** `_to_ohlcv` should refuse or aggregate, not silently pass through.
-Refusing is more in keeping with the rest of this provider: a frame with a
-non-unique index is not an OHLCV series, and the caller needs to know
-which publisher they meant. If aggregating, it is last-close and
-summed-volume per session, and the payload has to say it aggregated.
+- **The inner search purges and embargoes.** 66 inner folds at outer embargo
+  0/5/10: **zero** training rows whose label ends inside the inner test
+  window, every fold. Counts are arithmetically right, not accidentally
+  zero (40 purged = 5 dates × 8 entities for h=5).
+- **CPCV is correct.** Across six (n,k,embargo) settings: folds = C(n,k)
+  exactly, all test sets distinct, train ∩ test empty, every block appearing
+  in exactly C(n−1,k−1) test sets, **zero** per-block purge violations, no
+  training position within the embargo of a block boundary.
+- **The path distribution reproduces exactly** by independent enumeration,
+  and correctly reports 14 of 15 when a path is skipped.
+- **Paired comparison is genuinely paired and correctly sized.** Model
+  against itself → p=1.0000; leaky vs noise → p=0.0010; Newey-West matches
+  statsmodels identically; `holm_adjust` reproduces R's `p.adjust`.
+- **Validation detects overfitting.** Leaky feature → IC +0.998; four noise
+  features → −0.019; real features → +0.064.
+- **Every metric recomputed independently** from persisted OOS predictions
+  agrees to |Δ| = 0.00e+00.
+- **Determinism holds**: same spec and seed → identical folds, identical
+  `node_hash`, max prediction difference 0.0.
 
 ---
 
-## 3. Checked, and not a defect
+## 6. The backtest engine
 
-**CAGR's denominator.** The obvious reference — `len(series) / 252` —
-disagreed with `return_metrics.cagr` in the fourth decimal (0.226549 vs
-0.227039 on two years of AAPL). The library is right and the reference was
-wrong: N closes span N−1 return intervals, and `return_metrics.py` had
-already reasoned that out in its own comment, noting the error is
-negligible on a decade and 5% on a one-month window. The test now asserts
-the correct convention **and** asserts the two conventions differ on this
-window, so it cannot pass by coincidence.
+### D6. Splits are compounded as returns, silently — DEFECT ✅
 
-**Price scaling.** The headline claim of `data/databento.py` — that scale
-is decided from the dtype and cross-checked in both directions, with
-sentinels masked before scaling — holds on real data. No quote in a real
-MBP-10 book exceeded 1e6 (an unmasked `UNDEF_PRICE` would be ~9.2e18), no
-daily close moved more than 35% session to session across two years, and
-every book quote sat inside its own session's high and low.
+Nothing under `backtest/` reads the `adjusted` flag (`grep` finds only a
+local variable in `sizing.py`), though the provider reports `adjusted=False`
+and documents that a split is a real −50% bar.
 
-**The book itself.** Ten seconds of AAPL at the open: 800 snapshots, **0**
-crossed, bids strictly descending and asks strictly ascending on
-**800/800** rows.
+| symbol | split | reported buy-and-hold | true | warnings |
+|---|---|---|---|---|
+| ✅ LRCX | 10:1 | **−62.40%** | **+276.04%** | fill_price only |
+| ✅ ORLY | 15:1 | −92.56% | +11.67% | fill_price only |
+| ✅ NFLX | 10:1 | −89.34% | +6.58% | fill_price only |
+| IBKR | 4:1 | −28.83% | +184.68% | fill_price only |
+
+A short held through a split prints a fictitious **+93%** profit. ✅ Control:
+on a non-split name the engine's arithmetic is right.
+
+**Fix:** screen bar returns for |r| > 0.35 and warn. The engine already
+walks every bar for its total-loss guard, so the pass is free.
+
+### The liquidity surface, poisoned by D3's volume
+
+With **identical prices** and only `Volume` swapped between EQUS.MINI and
+the real tape:
+
+| measure | error |
+|---|---|
+| ADV participation | **14–33x** overstated |
+| capacity at a 5% cap | $5.8m allowed vs **$81.7m** real — 14x understated |
+| `capacity_report` max account | $4.1m vs **$99.6m** — 24x |
+| `days_to_liquidate` | 20–37x overstated |
+| impact-model drag at $100m | 0.393pp vs 0.089pp — 4.4x |
+| `liquidity_adjusted_var` | 3.3x VaR, 5.5x cost, **10 fabricated "cannot exit"** warnings |
+| a $1bn ADV screen | keeps **1 of 12** names; the real tape keeps **12** |
+
+### Also in the backtest and portfolio surface
+
+- **`max_adv_participation` is a kill switch, not a cap** — it raises rather
+  than sizing the trade down, so the two states are "no effect" and "no
+  result"; a capacity study cannot be expressed.
+- **`run_strategy` returns no turnover and no realised cost**, both of which
+  are computed at `engine.py:604-605` and thrown away.
+- **A custom `strategy=` callable is never range-checked**, so a signal of
+  2.0 silently runs a levered book.
+- **Nothing checks PSD** between a caller's covariance and the optimisers.
+  A ragged real panel through `cov(min_periods=30)` gives min eigenvalue
+  −2.77e-03; `max_diversification` then returns a **negative** weighted
+  average volatility with zero warnings.
+- **`estimate_covariance` silently drops incomplete rows** — one short
+  history truncated 400 of 512 rows with `warnings: []`, moving risk-parity
+  weights by 12.4% of NAV.
+- **`build_portfolio` lets NaN through** and three downstream calculations
+  treat it three different ways; 20 missing days added **+290 bp of CAGR**
+  and +0.14 of Sharpe.
+- **HRP is not invariant to column order** — 40 permutations of the same
+  universe moved single weights by up to 8.7 pp.
+- **`plan_rebalance` treats a name missing from `adv` as having zero
+  liquidity**, so it never trades, and the warning does not say why.
+- **The screener is hard-wired to yfinance** and cannot reach Databento.
+
+### The backtest engine: SOUND
+
+- **Execution lag is exactly one bar, proved both directions.** A signal
+  clairvoyant by one bar returns Sharpe 13.82; the same-bar signal, which
+  contains no future information, returns −0.259.
+- **Costs are arithmetically exact** at four settings on both the C++ and
+  Python paths; the portfolio engine matches an independent reimplementation
+  to **4.1e-16 relative**.
+- **Every reported metric reconciles** with plain pandas from the returned
+  equity curve.
+- **C++ and Python agree to the last decimal** across 20 grid combos × 3
+  fill modes and 9 portfolio configurations.
+- **All five sizing rules match closed form**; risk parity's realised risk
+  shares match to 9.8e-12; min-variance and max-Sharpe survive 1.5 million
+  perturbations with **zero** improvements found.
+- **The hedge sign convention is right** and was checked explicitly by grid
+  search: the minimum-variance ratio is −1.168000 against −beta of −1.167920.
 
 ---
 
-## 4. Pre-existing failures, unrelated to data
+## 7. Options, futures and derivatives
+
+### D9. The IV solver returns its initial guess and reports convergence — DEFECT ✅
+
+`analysis/options.py:339-353`. The convergence test is an **absolute price
+tolerance** applied before any step is taken, so where vega is small a vol
+wrong by hundreds of points still prices inside 1e-6.
+
+```
+K=250 T=0.000274 put  true_iv=3.00  returned=0.200000  converged=True  iters=1
+K=500 T=0.002700 put  true_iv=1.20  returned=0.200000  converged=True  iters=1
+K=650 T=0.050000 put  true_iv=0.45  returned=0.200000  converged=True  iters=1
+```
+
+✅ Four of four returned exactly the default `initial_guess=0.2`. Over a
+700-case grid, 549 reported convergence and **28 were off by more than 0.01
+vol, 17 by more than 0.10, worst 2.80**. The bisection fallback the
+docstring promises for small-vega cases is never reached.
+
+### D13. The no-arbitrage bound refuses prices its own pricer produced — DEFECT ✅
+
+`analysis/options.py:318` uses a strict `<` on both sides. For a deep-ITM
+call `black_scholes_price` returns a value **bit-for-bit equal** to the
+intrinsic lower bound:
+
+```
+K=200 T=0.25 sig=0.08: price = lower = 134.9884850488  diff = 0.00e+00 -> ValidationError
+```
+
+77 of 700 cases refused on the bound; 74 more because the pricer underflowed
+to 0.0, and one returned a **negative** option price.
+
+### Also in options and futures
+
+- **`fit_volatility_smile` reports moneyness in a field named `strike`** —
+  a trader is told the arbitrage is at "k=1.00" while `strike_range` in the
+  same payload says [300, 370].
+- **`analyze_strategy` max_loss is half the true worst case** and labels a
+  bounded loss "unbounded", because the scan starts at half the lowest
+  strike rather than zero.
+- **Three carry decompositions do not sum to the basis they decompose** —
+  up to 45% off — in `implied_forward_price`, `cash_futures_basis` and their
+  shared root in `derivatives.py:1062`.
+- **`price_option(model="bachelier", dividend_yield=…)` silently discards
+  the dividend**, with `notes = None`.
+- **`roll_analysis` silently drops 83% of the spread cost** when
+  `spread_ticks` is given without `tick_value`.
+- **`rehedge="drift"` measures the residual of a hypothetical fresh hedge**,
+  not the one held, so the band is bounded by half a contract and can never
+  fire. Measured: the rule sat through **81.8% residual beta** on a 5% band.
+- **The futures engine books zero P&L on every roll day** ($7,025 per
+  contract per year, 5.5 pp of return) and **fills a target it cannot margin
+  then liquidates it in the same bar**, charging both legs — 239 margin calls
+  and 52.6% of starting capital in fees, in a year when ES rose 18.4%.
+
+### Options and futures: SOUND
+
+- **Black-Scholes to 1.14e-13** over 864 cases against an independent scipy
+  reference; **all greeks match finite differences**, including vanna,
+  volga, charm and speed, with no sign errors and correct scalings.
+- **Put-call parity on REAL OPRA quotes**: eight strikes, every one inside
+  half the combined bid-ask spread, worst violation 4.3 bp of spot. This is
+  the strongest available real-world check and the function passes it.
+- **IV on real OPRA mids**: all 16 contracts, max difference from scipy
+  `brentq` **4.6e-09**.
+- **Binomial converges as clean O(1/n)**; the "within about a cent at 200
+  steps" claim is exact.
+- **Continuous-futures stitching matches Databento's own `ES.v.0`** to
+  **2.91 bp over a year**, with the entire disagreement being roll timing;
+  ratio adjustment reproduces the old contract's roll-day return to 0.0000 bp.
+- **Contract multipliers are not hardcoded** — verified against live CME
+  `definition` records for ES, CL and GC.
+- **Day count is consistent** — every core function takes years, and the
+  three internal conversions are all calendar/365 and mutually consistent.
+
+---
+
+## 8. Microstructure and order events
+
+### D7. Three functions crash on any real tick tape — DEFECT ✅
+
+`analysis/microstructure.py:224-227` and `:311`,
+`analysis/liquidity_events.py:205`. All three do
+`.loc[<index with duplicate labels>]`, and real trades share timestamps —
+**32% of prints in a live AAPL minute**, in every window sampled.
+
+```
+✅ effective_spread(t, q)          -> ValueError: cannot reindex on an axis with duplicate labels
+✅ microstructure_summary(t)       -> IndexError: boolean index did not match indexed array
+✅ microstructure_summary(t, q)    -> ValueError: cannot reindex ...
+```
+
+The third is worse because it **does not raise**: `_signed_volume` returns a
+longer, wrong Series by label alignment. Measured on a tape whose total
+volume is 64,780 shares, it reported a net imbalance of **−229,340** — 5.5x
+the truth and 3.5x larger than everything that traded. And
+`detect_liquidity_events` catches only `ValidationError`, so one channel's
+`ValueError` kills all six — and the failing channel is in
+`available_channels()`, so **the obvious call is the one that dies**.
+
+### D8. Kyle's lambda regresses on the sign of its own dependent variable — DEFECT ✅
+
+`analysis/microstructure_estimators.py:563`:
+`signed_volume = np.sign(price_change) * frame["volume"]`, then regressed on
+`price_change`. Since x = sign(y)·V, lambda is positive by construction.
+
+```
+✅ real AAPL bars                     : lambda 1.54e-06  r2 0.609
+✅ returns shuffled, volume permuted  : lambda 1.19e-06  r2 0.328   <- true lambda is ZERO
+   (4 trials, all 1.19-1.69e-06)
+✅ non-circular control, same bars    : lambda -1.73e-10  r2 0.0004
+```
+
+Destroying every real relationship leaves ~80% of the estimate intact. The
+docstring claims the opposite failure mode — that misclassification
+*understates* impact — and the guard against a non-positive lambda protects
+against something that cannot happen.
+
+### Also in microstructure
+
+- ✅ **`intraday_volume_profile` reports a 0% open and close** on a real
+  feed, because it buckets over the observed extended-session range:
+  `open_share 0.00004`, `close_share 0.00000`, `u_shaped False` — and warns
+  the caller that *their data* is unusual. Restricted to regular hours the
+  same bars give 0.234 / 0.153 and `u_shaped True`.
+- ✅ **`estimate_vpin` appends a phantom bucket** from a float residue whose
+  VPIN is exactly 1.0 and which lands last, dominating `current_vpin`
+  (measured: 51 buckets reported for 50 requested).
+- **`roll_spread`'s significance guard is dead in the windowed branch** —
+  it reported 59.2 bp against its own detection floor of 161.4 bp with
+  `significant: None`.
+- **The CUSUM threshold fires on 43% of quiet real channel-windows**,
+  because it is calibrated on i.i.d. noise and real channels are
+  autocorrelated (spread channel lag-1 +0.671, 8/10 false alarms). The
+  constant itself is sound — an i.i.d. control gives 7.0%.
+- **MBO:** `cancel_to_trade` counts every execution twice (T and F are the
+  same trade); every XNAS fill is also counted as a cancellation, flipping
+  `cancel_to_add` across 1.0; `terminated_without_an_add` is **54.5% false**
+  on a CME reopen; `events_per_second` is off by **16,000x** on a
+  snapshot-bearing window; `queue_positions` understates the real queue by
+  33–79% against the `mbp-10` book for the same sequence numbers.
+
+### Microstructure: SOUND
+
+- **Lee-Ready is 99.7% accurate against the venue's own aggressor flag**,
+  on two independent windows, with zero buy-classified-as-sell errors. The
+  tick-rule-only path scores 0.95 and 0.90, so the docstring's "about 85%"
+  is conservative.
+- **`effective_spread`'s realized-horizon alignment is exact** — the
+  forward-asof trick matches an independent `searchsorted` to 0.0 across
+  1,022 trades, and `effective = realized + impact` holds exactly.
+- **Amihud, Corwin-Schultz pairs, order-flow imbalance** all reproduce
+  independently; the OFI overlapping-window trap is handled as documented.
+- **Price scale holds across three schemas** — MBO, trades and daily bars
+  agree, and no sentinel survived into output across 57,000+ records.
+
+---
+
+## 9. The plumbing
+
+- **Databento touches neither the cache nor the retry layer** — `grep` → 0
+  hits, where the other three providers import both. Three identical live
+  requests made three metered fetches. This is the root cause of D2.
+- **The cache key omits the dataset.** Four feeds 30.8x apart in volume
+  collapse to one filename. Latent only because Databento bypasses the
+  cache — and it must be fixed *before* anyone fixes D12.
+- **A cached frame does not round-trip**: parquet changes the index
+  resolution from `datetime64[s]` to `[ms]`, so `hash_dataframe` differs and
+  a replay reports `data_changed` for byte-identical data.
+- **The session cache has no historical guard**, so an unsettled bar is
+  served as final for up to an hour; and the disk guard compares against
+  the local date, so east of UTC+5:30 a mid-session bar is written
+  permanently.
+- **Nothing evicts a cache entry.** The real cache holds 1,574 files / 47 MB,
+  **501 of them a dead generation** that will never be read.
+- **Concurrency**: a cold runs directory produces spurious path-traversal
+  refusals on Windows because the `\\?\` prefix handling exists in one of
+  four copies of the containment check, and the publish path is not the one.
+- **The agent data runtime can only ever reach yfinance**, and its error
+  message says "Only PolygonProvider does" for tick data — ✅ false, since
+  `DatabentoProvider` implements both `get_trades` and `get_quotes`.
+- **`describe_data_capabilities` reports an unconfigured Databento as
+  `available=True`**, because its constructor defers the key check.
+
+---
+
+## 10. Checked and found sound
+
+Beyond the per-area lists above: the retry layer's non-retryable contract
+holds exactly; cache path-traversal defences are correct; artifact-store key
+validation rejects every traversal form tried; `classify_divergence`,
+`data/ratios.py` unit handling, and the `TemporalContract` machinery all
+behave as documented; `DataBundle` container semantics are correct; and the
+vendor's own aggregation identities are **perfect** — `1s → 1m → 1h → 1d`
+reproduces to the share on every dataset tested, in both DST regimes.
+
+---
+
+## 11. Pre-existing failures, unrelated
 
 `tests/surface/test_adversarial_inputs.py::TestTheBaselineHolds` fails two
-tests, before and after this work, unchanged:
-
-- `test_every_tool_without_a_baseline_is_declared` — four modeling tools
-  (`validate_model_spec`, `build_model_dataset`, `run_model_experiment`,
-  `run_feature_ablation`) reject their own synthesized input on a
-  cross-field validator, so they sit in no adversarial or determinism
-  check. Two distinct causes: an unknown preprocessing step `'a1'`, and
-  `missing.policy='drop'` carrying fields that belong to
-  `forward_fill_bounded`.
-- `test_the_synthesizer_covers_most_of_the_surface` — 205 of 209 tools
-  synthesized, 0 declared unsynthesizable.
-
-Collection counts drift between runs because that file synthesizes tests
-from the live tool surface; the offline total moved 7,317 → 7,376 between
-two runs with no source change to the tests themselves.
+tests, before and after both passes, unchanged: four modeling tools reject
+their own synthesized input on a cross-field validator, and 205 of 209 tools
+synthesize with 0 declared unsynthesizable. Collection counts drift between
+runs because that file synthesizes tests from the live tool surface.
 
 ---
 
-## 5. Traps that make a live test lie
+## 12. Traps that make a live test lie
 
-Recorded because each one produces a **passing** test that checks nothing.
+Each produces a **passing** test that checks nothing.
 
-**Inherited dataset pins.** `DatabentoProvider` reads
-`DATABENTO_DATASET`, `DATABENTO_DEPTH_DATASET` and
-`DATABENTO_OHLCV_DATASET` from the environment
-(`databento_provider.py:154-164`, `:246`). The Carbon engine's `.env` sets
-all three. A first pass of this work concluded the `dataset=` constructor
-argument was ignored — it was not; the inherited `DATABENTO_OHLCV_DATASET`
-override was winning, and the conclusion was an artifact of whose `.env`
-had been loaded. Both suites now clear all three in a module-scoped
-autouse fixture and name their dataset outright.
-
-**yfinance `end` is exclusive; Databento's is inclusive.** The same two
-dates name windows differing by one session, and the last one reads as a
-session Databento invented. This produced the only genuine failure of the
-first run.
-
-**yfinance is tz-naive; Databento is UTC-aware.** Joining without
-normalising raises, or worse, silently yields an empty frame — and a test
-written on an empty join passes by comparing nothing to nothing. Both
-suites assert a minimum joined row count before comparing anything.
-
-**Bollinger columns are prefixed** (`BB_Upper`, not `upper`). Asserting
-the label rather than stripping it makes the test about naming.
+- **Inherited dataset pins.** A sibling project's `.env` sets all three
+  Databento dataset variables. A first pass of this work concluded the
+  `dataset=` constructor argument was ignored — it was not; the inherited
+  override was winning. Both suites now clear all three.
+- **yfinance `end` is exclusive; Databento's is inclusive.** The same two
+  dates name windows differing by one session.
+- **yfinance is tz-naive; Databento is UTC-aware.** Joining without
+  normalising silently yields an empty frame, and a test on an empty join
+  passes by comparing nothing to nothing. Both suites assert a minimum
+  joined row count first.
+- **Window end-date luck.** The original suite's window ends on a Friday,
+  which is the one case where D1's extra bar does not appear.
 
 ---
 
-## 6. What the live feed confirmed
+## 13. Cost
 
-The depth measures in `analysis/order_book.py` were written and tested
-against synthetic books because nothing could serve a real one. They now
-run on ten seconds of a real Nasdaq open and produce a market:
+Across all twelve investigations plus my own verification: roughly **75 MB**
+of DBN moved, dominated by one MBO window (50.8 MB) and one OPRA definition
+pull (1.3 MB). `metadata.get_cost` returned **0.00** on every preflight —
+this account is a subscription, not metered per gigabyte. Every OPRA and MBO
+fetch was preflighted with `get_billable_size` first.
 
-| measure | value | reads as |
-|---|---|---|
-| mean touch spread | 1.60 bps | a penny on a $333 stock is ~0.3 bps |
-| book updates | 130 /sec | a real ITCH feed |
-| mid changes | 14 /sec | |
-| order-flow imbalance | 1,265 over 6.16 s | |
-| depth profile | size rises 67 → 110 from level 0 to 4 | books rest more size away from the touch |
-| crossed snapshots | 0 of 800 | |
-
-The microprice stayed inside the touch on every snapshot where it was
-defined, and the depth profile's per-level distances came out monotonically
-increasing — which a synthetic book has to be told to do and a real one
-does on its own.
-
-Cross-vendor, over 34 sessions: median close disagreement **0.13%**, worst
-**0.88%** — consistent with a last-print difference between tapes rather
-than a different number. Annualised volatility and worst drawdown computed
-from each vendor's series agreed within the suite's 3% and 5% bands.
-
----
-
-## 7. Cost
-
-Priced through `metadata.get_cost` and `get_billable_size` before any test
-was written. A full live pass moves **20.06 MB** billable, dominated by
-the single 10-second MBP-10 book (18.1 MB); every other fetch is under
-2 MB and the daily-bar fetches are ~2 KB each. `get_cost` returns **$0.00**
-and `list_unit_prices` returns empty for these datasets on this account,
-which is a subscription rather than metered per gigabyte.
-
-Fixtures are module scoped so a pass fetches each window once. Both files
-are `pytest.mark.integration` and skip without `DATABENTO_API_KEY`, so the
-default selection (`-m "not integration"`) is untouched.
-
-Run them with the **engine's** interpreter — this repo's `.venv311` does
-not have `standard_quant_tools` installed:
+Run the live suites with the **engine's** interpreter; this repo's
+`.venv311` does not have the package installed:
 
 ```
 cd "C:/Users/karan/Documents/Projects/Standard Tools"
@@ -318,24 +669,15 @@ DATABENTO_API_KEY=... \
 
 ---
 
-## 8. Not covered yet
+## 14. Not covered
 
-Named rather than implied, so the gaps are known:
-
-- **`get_order_events` (MBO).** Fetched during exploration and shaped
-  correctly, but no assertions were written for order-lifecycle
-  consistency (an add before its cancel, a fill not exceeding its
-  resting size).
-- **Futures and options.** GLBX.MDP3 and OPRA.PILLAR are entitled on this
-  account and untested here; the continuous-contract stitching in
-  `data/continuous.py` is exactly the kind of logic real data would
-  stress.
-- **The entitlement-denial path.** Tested offline as logic; not provoked
-  live, because doing so needs a dataset the key genuinely lacks.
-- **The backtest engine over real bars.** The suites stop at indicators
-  and metrics. A walk-forward over two years of real prices, with costs
-  and turnover, is the next thing worth adding — and it is the first
-  consumer that F1's volume error would visibly distort, through
-  participation limits and liquidity constraints.
-- **Intraday bars.** Only `ohlcv-1d` is exercised. The `1s`/`1m`/`1h`
-  schemas share the dataset preference and therefore F1 and F2.
+- **The modeling lifecycle** — save/load/score fidelity, ensembles, and the
+  manifest's ability to name the feed a model trained on. An investigation
+  was running when this was written; its findings are not here.
+- **Modeling dataset construction and features** — same.
+- **ICE and Eurex venues**, and options/futures end to end, all blocked by
+  D5 rather than untested by choice.
+- **A live restatement of a Databento bar**, which needs two pulls
+  separated by a correction event.
+- **`optuna`-backed TPE search**, not installed in this environment.
+- **Bloomberg and Polygon** column and dtype contracts — no terminal, no key.
