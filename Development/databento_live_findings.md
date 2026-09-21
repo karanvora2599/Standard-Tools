@@ -3,12 +3,12 @@
 A record of the live testing this library has had against Databento, the
 defects it found, the claims it confirmed, and what each fix costs.
 
-**Status.** Two passes. The first (2026-09-20, commit `941a730`) added
-`tests/data/test_databento_live.py` and
+**Status.** Two passes, complete. The first (2026-09-20, commit `941a730`)
+added `tests/data/test_databento_live.py` and
 `tests/data/test_databento_pipeline_live.py` — 47 tests, 46 passing and one
 strict xfail. The second, later the same day, ran **twelve parallel
-investigations** over the areas the first pass named as uncovered, and is
-the bulk of this document. Four more regression tests landed as `34899bb`;
+investigations** over the areas the first pass named as uncovered; **all
+twelve have reported** and this document is the result. Four more regression tests landed as `34899bb`;
 the live suite is now **29 passed, 5 xfailed**. Offline suite unchanged at
 **7,267 passed** with the same two pre-existing failures (section 11).
 
@@ -230,6 +230,21 @@ build_dataset(DatasetSpec(provider="yfinance", ...))   -> builds
 **tz-aware UTC**; `pd.Timestamp(spec.start)` is naive. Every modeling
 dataset on the live provider raises before returning anything.
 
+✅ **There are two blocking sites, not one.** Clearing the first exposes
+`targets/builtin.py:135`, which allocates `pd.Series(pd.NaT, dtype="datetime64[ns]")`
+and then assigns a tz-aware `DatetimeIndex` into it:
+
+```
+horizon_label_end(bars as the provider returns them) -> TypeError: Invalid value 'DatetimeIndex([...+00:00...])'
+horizon_label_end(bars with tz stripped)             -> ok, 29 label ends
+```
+
+Both are shallow, and that is the good news: with both neutralised the
+build succeeds and **the engine then runs unchanged on the tz-aware panel**
+— same 280 purged rows, same metric. `PolygonProvider` strips tz explicitly
+at `:316,324`; Databento does not, and no test under `tests/modeling/`
+constructs a tz-aware index at all.
+
 **Root cause is shared with three other findings.** Databento is the only
 provider that touches neither `_cache` nor `_retry` (`grep` → 0 hits; the
 other three import both), so it never passes `_normalize_ohlcv_index`, the
@@ -313,6 +328,112 @@ resampling and was verified correctly sized (6.7% at φ=0, 5.8% at φ=0.9).
   dates** — fold 1 spans 1,912 rows against `n_test_rows: 1,304`.
 - **`paired_comparison` reports `hit_rate = 0.000` for two identical
   models**, which reads as "A won every day" when the truth is a tie.
+
+### D17. Universe-scope features depend on where the frame starts, and scoring rebuilds on a different window — DEFECT
+
+`features/factors.py:77` and `features/network.py:237`, both
+`for end in range(window, n + 1, refit_every)`. The refit grid is anchored
+on the frame's **first bar**, so which bars PC1 or the correlation graph are
+refit on depends on where the fetched frame begins rather than on the
+calendar. `score_model` rebuilds features from `as_of - lookback_days`
+(`scoring.py:281-291`), a different anchor — so the deployed estimator is
+fed a different variable under the same column name.
+
+Isolated: recomputing `pca_loading(252, 21)` after dropping *k* leading bars
+is bit-identical **only when k is a multiple of `refit_every`**. At k=1, zero
+of 2,080 values match and the worst differs by 33.6%.
+
+End to end, the training build against the 400-day scoring window:
+
+| feature | identical | median / max abs rel diff | mean per-date rank corr |
+|---|---|---|---|
+| `factors.pca_loading` | 0/192 | 0.51% / 2.35% | 0.9970 |
+| `factors.pca_factor_return` | 0/192 | 0.45% / 16.3% | — |
+| `network.avg_correlation` | 0/192 | 3.3% / 15.3% | 0.9702 |
+| `network.mst_degree` | 162/192 | — / 100% | 0.8868 |
+
+The library already refuses a different *universe* for universe-scope
+features (`scoring.py:268-279`). There is no equivalent guard for a
+different window.
+
+**Fix:** anchor the refit schedule from the END of the frame so the last bar
+is always a refit, or key it off the calendar. Then assert the property
+`score_model` silently relies on: a feature's value at date *t* is unchanged
+when leading bars are removed.
+
+### D18. Under `missing.policy='keep'`, a feature absent from a whole fold trains as a constant — DEFECT
+
+`preprocessing/steps.py:293-305`. Nothing checks whether a column is
+**entirely** missing in a fold's training rows, so `Impute.fit` falls back to
+`fill_value` (0.0) and the feature becomes a constant for both train and
+test of that fold.
+
+Measured on a universe containing one delisted name:
+
+```
+fold 0-2 : pca1 65-76% NaN, imputed at the training median 0.3708
+fold 3-7 : pca1 100%  NaN, imputed at 0.0  -> a constant column
+```
+
+Five of eight folds trained on a feature that does not exist there. The run
+reports `n_folds_completed: 8, fold_coverage: 1.0` and hands back
+`importance = {'mom20': 0.9113, 'pca1': 0.0887}` — **8.87% of the importance
+attributed to a feature present in three folds of eight**, averaged into one
+number with nothing saying so.
+
+Separately, `hist_gradient_boosting` — correctly registered as accepting
+missing values — dies on an all-NaN column with a raw numpy error
+(`window shape cannot be larger than input array shape`) rather than a named
+refusal. `ridge` and `gradient_boosting` are refused by name on the same
+panel, with the right remedy.
+
+**Fix:** refuse, or at minimum record per fold, a column that is 100% NaN in
+a fold's training rows, and put the per-fold missing rate in
+`validation_report` beside the averaged importance.
+
+### D19. `check_leakage` returns `safe=True` for a feature that IS the target — HAZARD
+
+`agent/tools.py:1169-1235`. It inspects each feature's declared
+`temporal_support` and nothing else — never the panel, never the resolved
+parameters — and returns a bare `safe: bool`.
+
+Registering a feature that is literally the h=5 forward return and building
+a real dataset with it:
+
+```
+check_leakage(feature_ids=[..., 'leak.target_copy'])       -> safe=True, findings=[]
+check_leakage(..., dataset_id='ds_1a5c6f12e3e2')           -> safe=True, findings=[]
+```
+
+**The capability exists and works** — it is just in a different tool. On the
+same panel, the empirical screen catches it outright:
+
+```
+market.momentum        flagged=False  ic0=-0.0368
+leak.tomorrow_return   flagged=True   ic0=+0.3667
+leak.target_copy       flagged=True   ic0=+1.0000
+```
+
+**Fix:** when a `dataset_id` is supplied, run the lead-lag screen and fold
+its verdict into `findings`. When it is not, `safe` must carry its scope.
+
+### D20. The delisting diagnostic names the wrong symbol and prescribes a useless remedy — DEFECT
+
+`dataset/coverage.py:358-374` reports the entity whose history *starts*
+latest, but the binding constraint on an intersected panel is usually the
+one that *ends* earliest.
+
+```
+8 liquid names   : 3,584 rows
++ one delisted   :   535 rows   (AAPL drops 448 -> 60)
+warning: "The latest-starting symbol is AAPL (2024-09-03); dropping it,
+          or starting the dataset later, recovers the rest."
+```
+
+All nine start on the same date, so `max` returns whichever the dict yields
+first. Dropping AAPL recovers **nothing**; dropping the delisted name
+recovers **87%** of the rows. Two neighbouring warnings do name it
+correctly, so the information is present — this line points elsewhere.
 
 ### D14. The full-panel refit ignores the hyperparameters the search selected — DEFECT ✅
 
@@ -473,6 +594,57 @@ From the lifecycle investigation, on the same live panel:
   coverage 0.857 and 0.818 against reported 0.85714 and 0.81786.
 - **Degenerate models report honestly** — collapsed estimators report an IC of
   zero rather than a flattering number.
+
+From the dataset-and-features investigation, on the same live bars:
+
+- **The label-overlap purge is exact**, recomputed independently against four
+  splitters: walk-forward at three embargos (240/240, 96/96, 0/0),
+  purged k-fold (160/160) and CPCV (800/800). Zero missed, zero extra, and
+  **zero surviving training rows overlapping a test block** in every case.
+  240 = 6 folds × 5 dates × 8 entities, exactly the horizon.
+- **Cross-sectional normalisation really is within-date**: per-date mean
+  ≤ 3.7e-15 and per-date standard deviation exactly 1.000000, against a
+  pooled contrast whose per-date means span −2.400 to +2.289.
+- **Feature causality holds for all 27 computable features.** Corrupting
+  every bar after a cut date and recomputing changed **zero** values dated on
+  or before it. Worth noting that this investigation's first pass flagged two
+  features here and then found the error was its own off-by-one, and said so.
+- **Every buildable target recomputed independently** to max |diff| 0.0 or
+  zero mismatches, including a brute-force triple-barrier walk.
+- **No off-by-one in the label window**: `label_end_date` matches the
+  entity's own bar `horizon` ahead for **3,584 of 3,584** rows, and unresolved
+  rows are dropped rather than filled.
+- **The OOS stream is genuinely out of sample.** An unconstrained random
+  forest scores in-sample 0.936 against the engine's OOS 0.047, a 20x gap.
+  And the OOS metric *responds* to real leakage: adding a next-day-return
+  feature moves it from 0.034 to 0.355.
+- **`forward_fill_bounded` honours its bound exactly** — 24 values filled
+  (8 entities × 3 bars), zero carried past it, and the count surfaced.
+
+### What the modeling layer inherits from D3
+
+Grafting consolidated volume onto the same bars, so **only volume differs**:
+
+| feature | median ratio | mean per-date cross-sectional rank corr |
+|---|---|---|
+| `volume.amihud_illiquidity` | **27.7x** | 0.866 |
+| `volume.volume_surprise` | 1.03 | **0.709** (negative on some dates) |
+| `volume.obv_roc` | 1.01 | 0.933 |
+| `volume.mfi` | 1.00 | 0.945 |
+| `volume.vwap_deviation` | 0.995 | 0.989 |
+
+Amihud is the only feature whose **level** is wrong, and it is wrong by
+27.7x, because it is the only one that is not a ratio. The others are
+scale-invariant in principle, but the feed's share is not constant — it
+varies by a factor of 2.2 within a single symbol between quiet and busy
+days — so their cross-sections still disagree.
+
+**Importance ranking survives** (Spearman 0.976, top five identical). The
+skill difference does not separate from noise on this sample: a
+volume-only model scores 0.0617 against 0.0974, but the paired per-date
+bootstrap interval is [−0.031, +0.102], and the investigation explicitly
+declined to claim it. That is the right call and it is recorded here for the
+same reason.
 
 ---
 
@@ -807,9 +979,13 @@ DATABENTO_API_KEY=... \
 
 ## 14. Not covered
 
-- **Modeling dataset construction and features** — leakage checks, the
-  missing-data policies, feature alignment and target construction. An
-  investigation was running when this was written; its findings are not here.
+- **An interior gap from a trading halt.** The default feed has no interior
+  session gaps and no zero-volume bars across 26 real symbols; its only real
+  holes are delisting truncations. So the bounded forward-fill was verified
+  against a real trailing hole, not a mid-series halt.
+- **Entities on different trading calendars** — all eight names here share
+  one session index, so the case `build_label_end_dates` exists for could not
+  be exercised.
 - **ICE and Eurex venues**, and options/futures end to end, all blocked by
   D5 rather than untested by choice.
 - **A live restatement of a Databento bar**, which needs two pulls
