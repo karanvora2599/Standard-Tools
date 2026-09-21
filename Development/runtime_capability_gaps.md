@@ -91,9 +91,14 @@ Three findings, in order of how much they change the picture:
    The only net-exposure fields in the entire library are the scalars
    `avg_net_exposure` and `avg_gross_exposure`.
 
-3. **Two live tools return an answer that is wrong and say it is fine.** These
-   are not gaps, and they outrank every proposal in this document. Both are in
-   section 3 as G1 and G2.
+3. **Some things here are not gaps but wrong answers wearing a confident
+   label.** A forged audit record that three independent verifiers call intact
+   (G0). A volatility reported at 7× the truth with `converged: True` (G1). A
+   GARCH fit that fails its own residual test on every name tried, reported as
+   converged (G2). A backtest grid sorted by volatility that returns the highest
+   one (D2). A pre-flight validator that passes input the execution layer
+   refuses (section 4). These outrank every capability proposal in this
+   document, and G0 outranks all of them.
 
 ---
 
@@ -136,7 +141,82 @@ Recorded because correcting a premise is worth as much as confirming one.
 
 ## 3. The arsenal — ranked
 
-### G1 · `get_implied_volatility` reports a ceiling as an estimate — **fix first**
+### G0 · The audit chain can be rewritten and all three verifiers report clean — **fix before anything else**
+
+**This is a security hole, not a capability gap, and it outranks every other
+item in either document.**
+
+The audit log is hash-chained per day, and a chain index records each day's
+**starting** head. **Nothing ever checks a day's *ending* head.** An attacker who
+rewrites a day's records and re-derives the chain from that day's starting
+head — which is published in plaintext in `_chain_index.jsonl` in the same
+directory — produces a file that is internally consistent and correctly linked
+to its own index entry.
+
+Demonstrated by the sweep: one record's payload altered (`qty 200 → 999999`),
+the day re-chained from the published head. All three verification paths pass:
+
+| verification path | verdict on a log with a forged record |
+|---|---|
+| `verify_audit_integrity` (tool, trail scope — the recommended mode) | `intact=True, problems=[]` |
+| `sqt verify` (CLI) | `OK — no integrity problems found.` exit 0 |
+| `scripts/verify_audit_log.py` (shipped **inside the auditor bundle**) | `OK — no integrity problems found.` exit 0 |
+
+`explain_decision` then returns the forged input as authentic with a
+self-consistent `record_hash`.
+
+I verified the cause in the source rather than taking it on report.
+`verify.py:148-156` is the whole cross-day loop:
+
+```python
+for entry in index_entries:
+    ...
+    expected_head = entry.get("chain_head", _GENESIS_HASH)
+    problems.extend(
+        verify_audit_log_integrity(day_path, expected_prev_hash=expected_head)
+    )
+```
+
+Each day's *first* record is checked against its recorded head. The day's
+*last* hash is never captured and never compared to the next entry's
+`chain_head`. The strings `final_record_hash` and `tail` do not appear anywhere
+in `verify.py`.
+
+`verify_audit_trail_integrity`'s own docstring claims it catches "a
+wholesale-regenerated day file with a fabricated-but-internally-consistent
+chain." It does — but only against an attacker who *fabricates* the head. One
+who **reads** it from the index next door defeats it.
+
+**Fix: three lines.** Day N's tail *is* day N+1's recorded `chain_head`; both
+values are already on disk. The sweep implemented and ran the comparison —
+it catches the attack in **2.65 ms across 40 day files**, against 7.28 ms for
+the entire existing trail verify:
+
+```
+2026-09-16 tail=a529874888780b9b   index says 2026-09-17 head=a529874888780b9b   OK
+2026-09-17 tail=f77e21c7ed15c028   index says 2026-09-18 head=704a8b5e9f1d92e1   << MISMATCH
+```
+
+Ship two more things with it. **First**, the `date=` branch is broken in the
+opposite direction: `meta/tools.py:366` calls `_verify_day(path)` with no
+`expected_prev_hash`, so it defaults to the genesis hash — while `verify.py`'s
+own docstring (lines 28–36) says explicitly to pass the index's `chain_head`
+for a cross-day file. **Every day except the first is falsely reported as
+tampered, permanently.** Verified in the source. **Second**, `export_audit_bundle`
+omits every `.checkpoint.json`/`.checkpoint.sig` sidecar sitting in the same
+directory — so the auditor bundle drops the only evidence that catches a
+wholesale rewrite, and its bundled README tells the auditor that signing is
+"planned but not yet implemented" while `signing.py` is installed and working.
+
+**The correct shape for this whole area is read-only widening.** The audit log
+is the artifact that constrains the agent. `gc`, `seal_day`, `hold_day`,
+`release_hold`, `generate_keypair` and `checkpoint_and_sign` are all dead to the
+tool layer and **must stay that way** — an agent that can prune, seal, unhold or
+re-sign its own history can launder it, and a policy-driven deletion is
+indistinguishable from the attack the chain exists to detect. Their read-only
+counterparts (`is_held`, `gc_candidates` as a preview) belong in G11.
+
+### G1 · `get_implied_volatility` reports a ceiling as an estimate
 
 **HIGH, and it is a wrong answer, not a gap.** A deep-ITM call priced at its
 no-arbitrage lower bound has no identifiable volatility: every σ at or below the
@@ -345,6 +425,37 @@ Ship with it: `compute_indicator_panel` drops **all seven** indicator period
 parameters that `get_technical_panel` exposes, so a persisted RSI feature is
 always RSI(14).
 
+### G11 · `describe_audit_log` and `find_decisions` — the provenance family is unreachable in practice
+
+**HIGH.** The audit trail has five tools (`verify_audit_integrity`,
+`export_audit_bundle`, `explain_decision`, `replay_decision`,
+`compare_decisions`) and an agent holding a 200-record log can only verify
+wholesale, export wholesale, or explain **one** record by an id it must already
+possess.
+
+It usually cannot possess one. `dispatch()` returns only the payload, and
+`last_request_id()` is not a tool — so **MCP clients receive the id as
+`_meta.request_id` and in-process agents never do.** That asymmetry alone makes
+three of the five tools unreachable outside MCP.
+
+- `describe_audit_log(include_days=False)` → `audit_dir`, `recording_enabled`,
+  `days`, `oldest_date`, `newest_date`, `total_records`, `total_bytes`,
+  `retention_days`, `redacted_fields`, `signing_configured`, and per-day
+  `{date, records, bytes, first_utc, last_utc, held, sealed, checkpoint_signed}`.
+  **Measured 7.18 ms** on 40 days / 200 records; 365 bytes summary-only.
+- `find_decisions(tool_name, status, start_date, end_date, limit=50)` →
+  the request ids the other three tools need. **Measured 4.67 ms** over 200
+  records, and it surfaced **40 error records no tool can reach today**.
+
+Together they also close three defects: `export_audit_bundle` demands a date
+range nothing can supply (a range outside the log returns 5,381 bytes, 0 day
+files, status ok — indistinguishable from a real export); with
+`SQT_AUDIT_ENABLED=0` the verifier returns `intact=True, problems=[]`, so **"the
+trail is intact" and "there is no trail" are the same answer**; and the seven
+`SQT_AUDIT_*` settings that govern recording, redaction and retention are
+reported by **zero** tools — the same unreadable-configuration shape the
+modeling sweep found in the parameter bounds.
+
 ---
 
 ## 4. MEDIUM
@@ -409,6 +520,57 @@ No cache introspection exists anywhere in the 211 tools beyond a path string.
 is orphaned between two tools, and the Databento notes are the ones that matter
 (they name the EQUS.MINI sampling problem explicitly).
 
+**The enforced-but-unreadable shape, again.** This is the third area in two
+documents where a rule is checked on every call and reported by no tool.
+Verified personally:
+
+```
+validate_tool_call("calculate_series_metrics", {"series": {"values": [NaN,NaN,NaN]}})
+  -> {"valid": True, "problems": []}
+
+...the same call, executed
+  -> ValidationError: Input Series for sharpe_ratio contains no observations
+     (every value is NaN). This is the absence of data rather than data with gaps.
+```
+
+`validate_tool_call` runs the pydantic layer only; `numeric_contract.py` is a
+second enforcement layer applied at execution — inf always rejected, prices
+strictly > 0, equity positive-start-only, `periods_per_year` ceiling 31,536,000,
+covariance symmetry at rtol 1e-9, bool refused as an int — and **none of it is
+reported anywhere**. An agent learns each rule by triggering it. Propose
+`describe_numeric_contract()` (measured 0.0002 ms, a static dict) and have
+`validate_tool_call` run the contract layer too.
+
+Alongside it, **20 `SQT_*` settings are consulted across the library and zero
+tools mention any of them**. Grepping the serialized output of every offline
+descriptive tool — `describe_runtime` (9,913 chars), `list_modeling_capabilities`
+(19,221) and five others — found no hits. The only configuration door is
+`describe_data_capabilities(source="polygon")` naming one key in prose. Propose
+`describe_effective_config(include_paths=True)` reporting secrets as
+`set: true/false` only (measured 0.0096 ms). Design it **with** G11, since both
+would otherwise report the audit settings.
+
+**Artifacts cannot be enumerated.** `artifact_store.py` is a complete 36-symbol
+storage layer — atomic write, content hash, key validation, root containment,
+`list()` — and the tool surface touches it **zero times**, including on the one
+dispatch that actually wrote an artifact to disk. The only artifact-named tools
+are `describe_artifact`, which refuses the store's own key format (its `uri`
+resolves against the process CWD rather than `SQT_RUNS_DIR`, so a valid store key
+fails containment, and the absolute path then fails because the tool is
+Parquet-only) and `compare_artifacts`, which **does not touch artifacts at all** —
+its schema is `a: object, b: object`, diffing two inline dicts. Propose
+`list_artifacts(run_id=None, include_hash=False, limit=200)`; `list()` is 0.846 ms
+for 16 keys, 0.513 ms prefix-scoped, 11.5 ms with hashes — hence hash opt-in.
+
+**The tool surface is poorer than MCP on the same record.** A stored
+`DecisionRecord` has 19 fields; `explain_decision` returns 15. The MCP resource
+`sqt://audit/{request_id}` returns all 19. The notable loss is
+`strategy_source_hash` — `provenance.py` hashes a registered strategy's source
+precisely so a run can be tied to the code that ran, and it never crosses.
+Similarly `verify_replay` computes the new output and per-source old/new hashes
+and discards all of it, so an agent gets `code_changed` and can never see *what*
+changed.
+
 **A composition trap worth fixing:** `compare_ratio_frames` returns three
 structurally-null fields (`classify_divergence` never emits the keys it reads),
 drops the exact conversion `ratio`, and — passed the obvious sibling output from
@@ -452,6 +614,21 @@ Stated so the question is closed.
   Exposing it hands the agent the inferior option next to the better one.
 - **`bloomberg_provider.py`** — 580 lines, inert here, and *correctly reported*
   as unavailable with install instructions. No action.
+- **Every mutating audit function** — `gc`, `seal_day`, `hold_day`,
+  `release_hold`, `generate_keypair`, `checkpoint_and_sign`. All six are dead to
+  the tool layer and all six must stay that way; this is the one place in the
+  library where a dead function is dead *on purpose and load-bearingly so*.
+  `gc`'s own docstring makes the argument: the hash chain "has no way to
+  distinguish a legitimate, policy-driven deletion from tampering", so an
+  agent-callable deletion is indistinguishable from the attack the log exists to
+  detect — not even behind a confirm flag. `release_hold` is the subtle one:
+  lifting a legal hold is the precondition for a later `gc`. And the two signing
+  functions touch the **private** key: verification with a public key is safe
+  and already exposed, but an agent that can re-sign a checkpoint can re-anchor
+  a rewritten day and defeat the one check the chain cannot perform on itself.
+- **`SQT_AUDIT_REDACT_SALT`** — report *that* redaction is configured and
+  *which* fields, never the salt. Disclosing it re-enables the offline
+  brute-force the salt exists to prevent.
 
 ---
 
@@ -483,6 +660,20 @@ Stated so the question is closed.
   equity.
 - **`specs`-style configuration is fully wired**: no declared-but-ignored tool
   input field anywhere, and no unwired input model.
+- **MCP has zero tool asymmetry**: `build_catalog()` returns 211 entries against
+  211 runtime tools — nothing is exposed on one surface only. Resources *are*
+  discoverable (`list_resources` and `list_resource_templates` are registered
+  alongside the other six handlers). MCP additionally carries five prompts
+  (`screen_and_backtest`, `factor_research_note`, `pair_trade_study`,
+  `build_and_validate_model`, `risk_review`) with no tool equivalent — a
+  workflow surface only MCP clients see, which is a design choice rather than a
+  gap.
+- **The audit storage backend is fully live**, contrary to the scan's largest
+  single claim: all eight concrete `LocalFilesystemBackend` methods execute on
+  **every audited tool call**; the six that looked dead are `Protocol` stubs
+  whose bodies are `...` and can never execute. Four more writer methods run
+  only on the **first write of a new calendar day** — a cold path, not a dead
+  one.
 
 ---
 
@@ -579,6 +770,42 @@ flag it; it remains live across the boundary.
 ref's actual kind** — a `returns_panel` labelled `fundamentals` was accepted, and
 `validate_data_bundle` then gave a confident PIT verdict about the wrong thing.
 
+**D17 · `replay.py:188` raises `TypeError` on a real path.** It passes
+`data_sources_match=` to `ReplayResult`, whose field is `data_source_matches`.
+The path that reaches it is a call that **failed** originally and **succeeds** on
+replay — the "the failure no longer reproduces" case, which is a useful answer.
+`replay_decision` catches it and returns `verdict="failed"` with the note
+*"replay could not run: ReplayResult.__init__() got an unexpected keyword
+argument 'data_sources_match'"*. The correct answer is silently replaced by a
+machinery error.
+
+**D18 · Checkpoint verification is self-invalidating and reports it as a
+compromise.** `verify_audit_integrity(date=today, public_key_path=k)` works
+exactly once after signing: the tool call itself appends a record to today's
+file, moving the final record hash past the signed checkpoint. Measured: records
+1 → 2 across one call; library verify `True` → `False`. Every subsequent call
+returns `intact=False, sig=False, problems=[]` — a compromise verdict with
+**zero** explanation. `verify_checkpoint_signature` collapses six distinct
+causes (no checkpoint, missing sig file, wrong key, corrupt sig, legitimate
+content drift, exception) into one boolean. It should return a
+`signature_state` naming which.
+
+**D19 · A second implementation of a rule the contract layer owns.**
+`optimize_risk_parity` on an asymmetric matrix raises *"the covariance matrix is
+not symmetric"*, which reads exactly like `numeric_contract.py:328` — but the
+profiler shows zero hits there; the message comes from an independent
+implementation in `portfolio/construction.py:114`. Same class:
+`describe_artifact` hashes with a private raw `hashlib.sha256(...)` (64 chars)
+instead of the store's `hash_bytes` (16 chars). Both agree today, by inspection
+rather than by construction. Worth noting mainly because confirming coverage by
+*error text* rather than by profiler is how "covered" and "covered twice" get
+confused.
+
+**D20 · Two genuinely dead safety checks.** `require_aligned`
+(`numeric_contract.py:195`) — the "equal length is not alignment" check — has
+zero importers in `src/`. `validate_dataframe` (`validation.py:67`) has zero
+applications. Both are the kind of guard whose absence is silent.
+
 **D16 · Two stale docstrings that cost the agent a correct call.**
 `get_data_quality_report` claims it has no holiday calendar and will report every
 holiday as a gap — measured **0 gaps across all of 2024**, because it uses
@@ -590,18 +817,27 @@ serves today.
 
 ## 8. Suggested order
 
-1. **G1 and G2** — the two tools that return a wrong answer labelled confident.
-   Both are result-model changes costing ~0. Nothing else on this list outranks
-   a 7× volatility reported as converged.
-2. **D1** — a blocker on the library's own documented chain.
-3. **D2, D3, D4, D5, D16** — a wrong sort, two false promises, a two-headed
-   response, and a silently ignored configuration. All small, all misleading.
-4. **G5** (which dataset answered) and **D10** (the `ge=0` bound) — zero-cost
+1. **G0** — the audit chain hole, the `date=` false alarm, and the missing
+   checkpoint sidecars. Three lines, 2.65 ms, and it is the only item here that
+   is a security property rather than a convenience. Everything else can wait
+   behind it.
+2. **G1 and G2** — the two tools that return a wrong answer labelled confident.
+   Both are result-model changes costing ~0. Nothing else outranks a 7×
+   volatility reported as converged.
+3. **D1** — a blocker on the library's own documented chain.
+4. **D2, D3, D4, D5, D16, D17** — a wrong sort, two false promises, a two-headed
+   response, a silently ignored configuration, and a `TypeError` standing in for
+   a correct answer. All small, all misleading.
+5. **G5** (which dataset answered) and **D10** (the `ge=0` bound) — zero-cost
    changes that stop silent wrongness.
-5. **G3** (state curves) — one pattern, five engines, zero marginal compute.
-6. **G6, G7, G9, G10** — closed-form frontier, BL posterior, series metrics,
-   indicator panel. All small, all unlock something with no other door.
-7. **G8** (Kyle tick path), then **G4** (depth fetch) — G4 last of the HIGHs
+6. **G3** (state curves) — one pattern, five engines, zero marginal compute.
+7. **G6, G7, G9, G10, G11** — closed-form frontier, BL posterior, series
+   metrics, indicator panel, audit inventory and search. All small, all unlock
+   something with no other door.
+8. **The enforced-but-unreadable trio** — `describe_numeric_contract`,
+   `describe_effective_config`, `list_artifacts`, plus making
+   `validate_tool_call` run the contract layer it currently skips.
+9. **G8** (Kyle tick path), then **G4** (depth fetch) — G4 last of the HIGHs
    because it is the only one that spends money, and its schema must carry the
    billable size.
 
