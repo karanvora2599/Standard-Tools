@@ -81,14 +81,17 @@ class TestIsHistorical:
         assert _is_historical("2099-12-31") is False
 
     def test_today_not_historical(self):
-        from datetime import date
+        # The UTC date: the guard compared against the LOCAL date, so east
+        # of UTC+5:30 a session still trading was already yesterday.
+        from datetime import datetime, timezone
 
-        assert _is_historical(date.today().isoformat()) is False
+        today = datetime.now(timezone.utc).date()
+        assert _is_historical(today.isoformat()) is False
 
     def test_yesterday_is_historical(self):
-        from datetime import date, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
         assert _is_historical(yesterday) is True
 
 
@@ -228,9 +231,11 @@ class TestParquetCacheWrite:
         self, tmp_path: Path, minimal_ohlcv: pd.DataFrame
     ):
         """Data fetched with today as end_date should NOT be written to Parquet."""
-        from datetime import date
+        # Today on the guard's clock, which is UTC: the local date can already
+        # be yesterday there, and yesterday is historical.
+        from datetime import datetime, timezone
 
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
 
         with patch("yfinance.Ticker") as mock_ticker:
             mock_ticker.return_value.history.return_value = minimal_ohlcv.copy().rename(

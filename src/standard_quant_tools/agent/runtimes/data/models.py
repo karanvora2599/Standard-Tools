@@ -95,6 +95,13 @@ class _Fetch(BaseModel):
         ),
     )
     name: str = Field(..., description="Names this artifact within the run.")
+    source: Optional[str] = Field(
+        None,
+        description="Data provider to fetch from ('yfinance', 'polygon', "
+        "'databento', ...). None uses the default provider. This runtime "
+        "could only ever reach the default before, so a tick tape or a "
+        "quote panel from Databento was out of reach.",
+    )
 
 
 class FetchOhlcvInput(_Fetch):
@@ -132,11 +139,17 @@ class FetchQuotePanelInput(_Fetch):
 class FetchFinancialRatiosInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     symbol: str = Field(..., description="One ticker.")
+    source: Optional[str] = Field(
+        None, description="Data provider; None uses the default."
+    )
 
 
 class DatasetMetadataInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     symbol: str = Field(..., description="A representative ticker.")
+    source: Optional[str] = Field(
+        None, description="Data provider; None uses the default."
+    )
     interval: str = Field("1d", description="Bar interval the claim is about.")
 
 

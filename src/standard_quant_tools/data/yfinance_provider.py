@@ -167,7 +167,7 @@ class YFinanceProvider(DataProvider):
         result = self._fetch_ohlcv_uncached(
             symbol, start_date, end_date, interval, start_str, end_str
         )
-        _session_cache_set(cache_key, result)
+        _session_cache_set(cache_key, result, end=end_str)
         return result.copy()
 
     @retry(times=3, delay=1)

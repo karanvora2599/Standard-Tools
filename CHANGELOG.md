@@ -1,5 +1,39 @@
 # Changelog
 
+## The cache serves what it has, says what it is, and forgets what it will never read
+
+Phase 7 of `Development/databento_live_fix_plan.md`: plumbing, and the
+last phase of the plan for the live findings.
+
+- **`sqt cache gc` collects the dead generation.** The live cache held
+  1,574 files, 501 of them a format generation the reader never looks up
+  again. `cache gc` lists them; `--confirm` deletes them; nothing else is
+  evicted, and a file without a generation prefix is not the cache's to
+  remove.
+- **The session cache does not serve an unsettled bar as final.** Its
+  hour-long TTL served a still-forming bar for up to an hour; a window
+  whose end is not yet historical is now kept for one minute, which still
+  makes three identical requests in one run one metered fetch.
+- **The disk guard compares against the UTC date.** It compared against
+  the local date, so east of UTC+5:30 a session still trading was already
+  "yesterday" and its mid-session bar was cached permanently.
+- **One containment check, used by every root.** The OHLCV cache, the
+  artifact store, the runs directory and the audit-bundle export each
+  checked that a resolved path lay inside its root, and one of the four
+  knew about Windows' extended-length prefix; a cold runs directory was
+  refused as a traversal. `_containment.require_within` handles the prefix
+  once and all four call it.
+- **The data runtime takes a `source`.** Every fetch tool, the ratios tool
+  and the metadata tool accept `source`, so a tick tape or a quote panel
+  can come from Databento; the runtime could only ever reach the default
+  provider before. The refusal for a provider without ticks names the
+  providers that serve them (Polygon and Databento), where it said only
+  Polygon did.
+- **`describe_data_capabilities` reports an unconfigured Databento as
+  `available=False`** with the reason: the provider constructs without a
+  key and fails on its first fetch, and the report took construction for
+  availability.
+
 ## A repeated timestamp is two rows, and a bar cannot sign its own flow
 
 Phase 6 of `Development/databento_live_fix_plan.md`: microstructure. Each

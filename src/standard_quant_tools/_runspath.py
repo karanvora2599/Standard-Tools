@@ -31,6 +31,7 @@ import os
 import re
 from pathlib import Path
 
+from standard_quant_tools._containment import require_within
 from standard_quant_tools.error import ValidationError
 
 #: The environment variable that relocates the runs root.
@@ -82,8 +83,6 @@ def resolve_within_runs_dir(path: Path) -> Path:
     """
     root = runs_dir().resolve()
     resolved = path.resolve()
-    if not resolved.is_relative_to(root):
-        raise ValidationError(
-            f"resolved path {resolved} escapes {RUNS_DIR_ENV} ({root})"
-        )
-    return resolved
+    return require_within(
+        resolved, root, f"resolved path {resolved} escapes {RUNS_DIR_ENV} ({root})"
+    )

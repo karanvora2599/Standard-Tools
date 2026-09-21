@@ -19,15 +19,17 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import date as _date
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Union
 
 import pandas as pd
 from cachetools import TTLCache
 
+from standard_quant_tools._containment import require_within
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -84,14 +86,36 @@ _session_cache = TTLCache(maxsize=100, ttl=3600)
 _session_cache_lock = threading.Lock()
 
 
+#: How long a window whose last bar is still forming may be served from
+#: the session cache. The cache's own TTL is an hour, which served an
+#: unsettled bar as final for up to an hour (findings, the plumbing); a
+#: minute keeps three identical requests in one run to one metered fetch
+#: without pretending a live bar is history.
+_UNSETTLED_TTL_SECONDS = 60.0
+
+
 def _session_cache_get(key):
     with _session_cache_lock:
-        return _session_cache.get(key)
+        entry = _session_cache.get(key)
+    if entry is None:
+        return None
+    value, expires_at = entry
+    if expires_at is not None and time.monotonic() >= expires_at:
+        with _session_cache_lock:
+            _session_cache.pop(key, None)
+        return None
+    return value
 
 
-def _session_cache_set(key, value) -> None:
+def _session_cache_set(key, value, *, end=None) -> None:
+    """Store a fetched window. `end` is the window's inclusive end bound;
+    a window that is not yet historical is kept only for
+    _UNSETTLED_TTL_SECONDS, because its last bar is still moving."""
+    expires_at = None
+    if end is not None and not _is_historical(end):
+        expires_at = time.monotonic() + _UNSETTLED_TTL_SECONDS
     with _session_cache_lock:
-        _session_cache[key] = value
+        _session_cache[key] = (value, expires_at)
 
 
 # ── Persistent Parquet disk cache ─────────────────────────────────────────────
@@ -360,22 +384,14 @@ def _parquet_path(
     )
     root = _CACHE_ROOT.resolve()
     resolved = path.resolve()
-    # On Windows, Path.resolve() calls into GetFinalPathNameByHandle for a
-    # path that actually exists on disk, which returns the "\\?\"-prefixed
-    # extended-length form — but for a path that doesn't exist yet (or is
-    # short enough), it's returned without that prefix. _CACHE_ROOT and the
-    # full file path can therefore disagree on the prefix even though they
-    # denote the same location, causing a false-positive "escapes cache
-    # dir" rejection. Compare with the prefix stripped from both sides;
-    # still return the real `resolved` path (the prefix is harmless to the
-    # filesystem APIs that consume it).
-    root_cmp = Path(str(root).removeprefix("\\\\?\\"))
-    resolved_cmp = Path(str(resolved).removeprefix("\\\\?\\"))
-    if not resolved_cmp.is_relative_to(root_cmp):
-        raise ValidationError(
-            f"resolved cache path {resolved} escapes SQT_CACHE_DIR ({root})"
-        )
-    return resolved
+    # The extended-length prefix Windows puts on a resolved path that
+    # exists is handled inside require_within, once, for every root this
+    # library writes under.
+    return require_within(
+        resolved,
+        root,
+        f"resolved cache path {resolved} escapes SQT_CACHE_DIR ({root})",
+    )
 
 
 def _safe_parquet_path(
@@ -407,11 +423,44 @@ def _safe_parquet_path(
 def _is_historical(end_date: Union[str, datetime, _date]) -> bool:
     """Return True when end_date is strictly before today (bar is fully formed,
     so it's eligible for the disk cache — see the cache-root comment above for
-    why "historical" doesn't mean the adjusted values can never change)."""
+    why "historical" doesn't mean the adjusted values can never change).
+
+    TODAY IS THE UTC DATE. The comparison used the local date, so east of
+    UTC+5:30 a session still trading was already 'yesterday' and its
+    mid-session bar was written to the disk cache permanently (findings,
+    the plumbing). Every provider's bars are on the UTC clock after
+    normalisation, and so is this guard."""
     try:
-        return _norm_date(end_date) < _date.today().isoformat()
+        return _norm_date(end_date) < datetime.now(timezone.utc).date().isoformat()
     except Exception:
         return False
+
+
+_GENERATION_RE = re.compile(r"^v\d+_")
+
+
+def dead_generations(*, dry_run: bool = True) -> "list[Path]":
+    """
+    Cache files written under an earlier format version, which are never
+    read again: the reader looks up the current version's name only.
+    Returned sorted; deleted when `dry_run` is False. Nothing else in the
+    directory is touched -- a file that does not carry a generation prefix
+    is not this cache's to remove. The live cache held 1,574 files, 501 of
+    them a dead generation (findings, the plumbing).
+    """
+    root = _CACHE_ROOT
+    if not root.exists():
+        return []
+    current = f"{_CACHE_FORMAT_VERSION}_"
+    dead = sorted(
+        p
+        for p in root.glob("*.parquet")
+        if _GENERATION_RE.match(p.name) and not p.name.startswith(current)
+    )
+    if not dry_run:
+        for p in dead:
+            p.unlink(missing_ok=True)
+    return dead
 
 
 def _write_parquet_atomic(path: Path, df: pd.DataFrame) -> None:

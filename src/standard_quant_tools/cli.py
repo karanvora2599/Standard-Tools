@@ -239,6 +239,16 @@ def cmd_gc(
     )
 
 
+def cmd_cache_gc(confirm: bool = False) -> List[Path]:
+    """Dry-run (the default) lists the OHLCV cache files of a dead format
+    generation; confirm=True deletes them. Nothing else is evicted: the
+    current generation is the cache, and files without a generation prefix
+    are not this cache's to remove."""
+    from standard_quant_tools.data._cache import dead_generations
+
+    return dead_generations(dry_run=not confirm)
+
+
 def cmd_seal(date: str, audit_dir: Optional[Path] = None) -> Path:
     return audit.seal_day(date, audit_dir=audit_dir)
 
@@ -342,6 +352,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Override SQT_AUDIT_RETENTION_DAYS for this invocation.",
     )
 
+    p_cache = sub.add_parser(
+        "cache",
+        help="Maintain the OHLCV disk cache. `cache gc` lists (or with "
+        "--confirm deletes) files of a dead format generation, which are "
+        "never read again; nothing else is evicted.",
+    )
+    p_cache.add_argument("action", choices=["gc"], help="gc: dead generations.")
+    p_cache.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Actually delete. Without this flag, only lists the files.",
+    )
+
     p_seal = sub.add_parser(
         "seal", help="Chmod a day file read-only (not WORM — see docs)."
     )
@@ -424,6 +447,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"{verb}:")
                 for d in dates:
                     print(f"  - {d}")
+        elif args.command == "cache":
+            paths = cmd_cache_gc(confirm=args.confirm)
+            if not paths:
+                verb = "deleted" if args.confirm else "of a dead generation"
+                print(f"No cache files {verb}.")
+            else:
+                verb = "Deleted" if args.confirm else "Dead generation (dry-run)"
+                print(f"{verb}: {len(paths)} file(s)")
+                for p in paths:
+                    print(f"  - {p.name}")
         elif args.command == "seal":
             path = cmd_seal(args.date)
             print(f"Sealed {path} read-only.")

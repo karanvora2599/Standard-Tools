@@ -37,6 +37,7 @@ import uuid
 from pathlib import Path
 from typing import BinaryIO, List, Optional, Protocol, runtime_checkable
 
+from standard_quant_tools._containment import require_within
 from standard_quant_tools._runspath import runs_dir, validate_identifier
 from standard_quant_tools.error import ValidationError
 
@@ -147,9 +148,9 @@ class LocalArtifactStore:
         validate_key(key)
         root = self.root.resolve()
         resolved = (root / key).resolve()
-        if not resolved.is_relative_to(root):
-            raise ValidationError(f"artifact key {key!r} escapes the store root {root}")
-        return resolved
+        return require_within(
+            resolved, root, f"artifact key {key!r} escapes the store root {root}"
+        )
 
     def put(self, key: str, data: bytes) -> str:
         path = self._path(key)

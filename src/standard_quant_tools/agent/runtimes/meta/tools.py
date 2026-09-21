@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._containment import require_within
 from standard_quant_tools.agent.models import (
     ArgumentProblem,
     CompareDataSourcesInput,
@@ -448,12 +449,13 @@ def _contained_bundle_path(requested: str) -> Path:
         ).resolve()
         bundles = root / "bundles"
         resolved = (bundles / candidate).resolve()
-        if not resolved.is_relative_to(bundles):
-            raise ValidationError(
-                f"export_audit_bundle: out_path {requested!r} resolves to "
-                f"{resolved}, which escapes {bundles}. Give a name, or an "
-                "absolute path if the bundle belongs somewhere specific."
-            )
+        require_within(
+            resolved,
+            bundles,
+            f"export_audit_bundle: out_path {requested!r} resolves to "
+            f"{resolved}, which escapes {bundles}. Give a name, or an "
+            "absolute path if the bundle belongs somewhere specific.",
+        )
         resolved.parent.mkdir(parents=True, exist_ok=True)
 
     if resolved.exists():
@@ -703,6 +705,15 @@ def describe_data_capabilities(
         available = False
         unavailable_reason = str(exc)
 
+    # A provider that constructs without credentials and fails on its
+    # first fetch (Databento reads DATABENTO_API_KEY lazily) reported
+    # available=True; it says so itself now.
+    if provider is not None and getattr(provider, "is_configured", True) is False:
+        available = False
+        unavailable_reason = (
+            getattr(provider, "unconfigured_reason", None)
+            or "the provider has no credentials configured"
+        )
     provider_cls = type(provider) if provider is not None else _PROVIDER_CLASSES[source]
 
     def _overrides(method: str) -> bool:

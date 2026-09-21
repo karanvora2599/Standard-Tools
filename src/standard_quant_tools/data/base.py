@@ -323,8 +323,9 @@ class DataProvider(ABC):
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not provide tick-level trades. "
-            "Only PolygonProvider does, and it needs a plan tier that "
-            "includes trades (see Documentation/01_data_fetching.md). Bar "
+            "PolygonProvider (on a plan tier that includes trades) and "
+            "DatabentoProvider (from the venue tape) do -- source='polygon' "
+            "or source='databento' (see Documentation/01_data_fetching.md). Bar "
             "data cannot substitute: spreads and signed order flow are not "
             "recoverable from an OHLCV row."
         )
@@ -396,9 +397,10 @@ class DataProvider(ABC):
             NotImplementedError: this provider has no quote feed.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} does not provide quotes. Only "
-            "PolygonProvider does, and it needs a plan tier that includes "
-            "quotes (see Documentation/01_data_fetching.md). The "
+            f"{type(self).__name__} does not provide quotes. "
+            "PolygonProvider (on a plan tier that includes quotes) and "
+            "DatabentoProvider do -- source='polygon' or source='databento' "
+            "(see Documentation/01_data_fetching.md). The "
             "Corwin-Schultz and Amihud estimators in "
             "`analysis`/`get_liquidity_metrics` exist precisely because this "
             "data is usually absent -- they are proxies, and they say so."

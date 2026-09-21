@@ -37,7 +37,7 @@ advertises 155 of the 211 below.
 | `backtest` | 35 | 82 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `modeling` | 22 | 85 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `data` | 18 | 23 KB | *(one surface)* | [26_data.md](26_data.md) |
+| `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
@@ -950,49 +950,50 @@ What a registered dataset holds -- columns, dtypes, row count, depth levels, fil
 
 Fetch a company's financial ratios and flag the ones that are implausible on their face -- a negative price-to-book, a dividend yield above a plausible ceiling. The flag is a weak signal in one direction only: it catches values that are obviously wrong, never values that are merely incorrect.
 
-**Required:** `symbol`
+**Required:** `symbol`  
+**Optional:** `source`
 
 #### `fetch_ohlcv`
 
 Fetch one symbol's OHLCV bars and publish them as an `sqt://` price_panel reference rather than returning the rows inline. Reach for this when the bars themselves are the thing another tool needs -- an indicator series, a custom signal, a panel join -- instead of going through an analysis tool that wants to do something else with them. The reference is what crosses runtimes; the frame never has to enter the conversation.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `interval`
+**Optional:** `source`, `interval`
 
 #### `fetch_ohlcv_panel`
 
 Fetch a whole universe's OHLCV in one call and publish it stacked long, with an `entity` column, as a price_panel reference. Tickers that returned nothing are named in `warnings` and are ABSENT from the panel rather than present as NaN, which matters because a complete-case join downstream will not see them at all.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
-**Optional:** `interval`
+**Optional:** `source`, `interval`
 
 #### `fetch_quote_panel`
 
 Fetch top-of-book quotes and publish them as a quote_panel reference, which is what signing trades by the Lee-Ready rule needs alongside a tape. Top of book ONLY -- depth is a different call, and provider='databento' serves it through get_order_book. Queue position is in neither: it needs an order-level feed and cannot be inferred from aggregated size at a level.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `limit`
+**Optional:** `source`, `limit`
 
 #### `fetch_returns_panel`
 
 Fetch a universe and publish a wide date-by-ticker frame of returns as a returns_panel reference. This is the shape most panel analysis wants -- PCA, correlation, factor regressions and portfolio construction all consume it directly -- so computing it once and handing over the reference avoids every consumer rebuilding it from prices.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
-**Optional:** `interval`
+**Optional:** `source`, `interval`
 
 #### `fetch_tick_tape`
 
 Fetch individual trades and publish them as a tick_tape reference, for the microstructure tools that measure rather than estimate. Needs a provider with a tick feed. A tape is large, so `limit` caps it -- and when the cap is hit the result says so, because a truncated tape makes every rate and total computed from it understate the real one.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `limit`
+**Optional:** `source`, `limit`
 
 #### `get_dataset_metadata`
 
 What the active provider GUARANTEES about the data it serves: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates.
 
 **Required:** `symbol`  
-**Optional:** `interval`
+**Optional:** `source`, `interval`
 
 #### `infer_temporal_contract`
 

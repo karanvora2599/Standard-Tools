@@ -123,6 +123,13 @@ def _resolved(ref: str, expect: Optional[str] = None) -> Any:
         ) from exc
 
 
+def _provider(input_data: Any):
+    """The provider a tool input names, or the default. The runtime could
+    only ever reach the default before (findings, the plumbing)."""
+    source = getattr(input_data, "source", None)
+    return DataFactory.get_provider(source) if source else DataFactory.get_provider()
+
+
 def _fetched(what: str, call, tool: str) -> pd.DataFrame:
     """
     Run a provider fetch, translating a missing capability into a refusal.
@@ -138,8 +145,10 @@ def _fetched(what: str, call, tool: str) -> pd.DataFrame:
     except NotImplementedError as exc:
         raise ValidationError(
             f"{tool} needs {what}, and the active provider does not serve "
-            f"it: {exc} Call describe_data_capabilities to see what this "
-            "environment can actually reach before trying again."
+            f"it: {exc} Providers that do: source='polygon' (on a plan tier "
+            "with ticks) and source='databento' (from the venue tape); pass "
+            "`source` to this tool, or call describe_data_capabilities to see "
+            "what this environment can actually reach."
         ) from exc
 
 
@@ -186,7 +195,7 @@ def _published(
 
 def fetch_ohlcv(input_data: FetchOhlcvInput) -> FetchResult:
     """One symbol's OHLCV bars, published as a `price_panel` reference."""
-    provider = DataFactory.get_provider()
+    provider = _provider(input_data)
     frame = provider.get_ohlcv(
         input_data.symbol,
         input_data.start_date,
@@ -291,7 +300,7 @@ def fetch_returns_panel(input_data: FetchReturnsPanelInput) -> FetchResult:
 
 def fetch_tick_tape(input_data: FetchTickTapeInput) -> FetchResult:
     """Individual trades, published as a `tick_tape` reference."""
-    provider = DataFactory.get_provider()
+    provider = _provider(input_data)
     frame = _fetched(
         "a tick feed",
         lambda: provider.get_trades(
@@ -322,7 +331,7 @@ def fetch_tick_tape(input_data: FetchTickTapeInput) -> FetchResult:
 
 def fetch_quote_panel(input_data: FetchQuotePanelInput) -> FetchResult:
     """Top-of-book quotes, published as a `quote_panel` reference."""
-    provider = DataFactory.get_provider()
+    provider = _provider(input_data)
     frame = _fetched(
         "a top-of-book quote feed",
         lambda: provider.get_quotes(
@@ -358,7 +367,7 @@ def fetch_financial_ratios(
     input_data: FetchFinancialRatiosInput,
 ) -> FinancialRatiosResult:
     """A company's ratios, with the ones that look wrong flagged."""
-    provider = DataFactory.get_provider()
+    provider = _provider(input_data)
     ratios = provider.get_financial_ratios(input_data.symbol)
     payload = (
         ratios.model_dump()
@@ -376,7 +385,7 @@ def get_dataset_metadata(
     input_data: DatasetMetadataInput,
 ) -> DatasetMetadataResult:
     """What the active provider guarantees about the data it serves."""
-    provider = DataFactory.get_provider()
+    provider = _provider(input_data)
     meta = provider.get_metadata(input_data.symbol, input_data.interval)
     warnings = []
     if getattr(meta, "point_in_time", False) is False:

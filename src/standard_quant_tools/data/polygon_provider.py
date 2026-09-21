@@ -596,7 +596,7 @@ class PolygonProvider(DataProvider):
             return cached_df.copy()
 
         result = self._get_ohlcv_uncached(symbol, start_str, end_str, interval)
-        _session_cache_set(cache_key, result)
+        _session_cache_set(cache_key, result, end=end_str)
         return result.copy()
 
     @retry(times=3, delay=1)

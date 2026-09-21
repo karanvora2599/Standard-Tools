@@ -296,6 +296,22 @@ class DatabentoProvider(DataProvider):
         self._instance_token = uuid.uuid4()
 
     # ── client and datasets ──────────────────────────────────────────
+    @property
+    def is_configured(self) -> bool:
+        """Whether a key is present. The constructor defers the key check to
+        the first fetch, so `describe_data_capabilities` reported an
+        unconfigured provider as available (findings, the plumbing)."""
+        return bool(self._api_key)
+
+    @property
+    def unconfigured_reason(self) -> Optional[str]:
+        if self._api_key:
+            return None
+        return (
+            "DATABENTO_API_KEY is not set. The provider constructs without a "
+            "key and fails on its first fetch; set the variable to use it."
+        )
+
     def _get_client(self) -> Any:
         with self._lock:
             if self._client is not None or self._client_failed:
@@ -706,7 +722,7 @@ class DatabentoProvider(DataProvider):
         result = self._fetch_ohlcv_uncached(
             symbol, start_date, end_date, interval, schema, start_str, end_str
         )
-        _session_cache_set(key, result)
+        _session_cache_set(key, result, end=end_str)
         return _with_attrs(result.copy(), result.attrs)
 
     @retry(times=3, delay=1)

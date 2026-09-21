@@ -6,10 +6,14 @@ what to change, in what order, how each change is verified without a key,
 and what is left alone and why. Findings are cited by their number there
 (`D1`..`D20`) or by section.
 
-**Status: phases 1 (the data path), 2 (the deployed model is the
-validated model), 3 (selection and inference), 4 (backtest and
-portfolio), 5 (options and futures) and 6 (microstructure) are
-implemented, 2026-09-20; phase 7 is the plan.** Phase 6's queue-position
+**Status: every phase is implemented, 2026-09-20: 1 (the data path), 2
+(the deployed model is the validated model), 3 (selection and inference),
+4 (backtest and portfolio), 5 (options and futures), 6 (microstructure)
+and 7 (plumbing).** What remains is the owner's live pass, listed in the
+verification table below: nothing here ran against a key. Phase 7 keeps
+an unsettled window in the session cache for one minute rather than
+refusing to cache it at all, so three identical requests in one run
+still cost one metered fetch. Phase 6's queue-position
 check against `mbp-10` is pinned with a synthetic snapshot rather than
 the findings' sequence numbers, which are not in the repository; the
 live check for the owner is listed in the verification table. The Kyle
@@ -462,3 +466,4 @@ Live, per phase, by the owner (findings §13 has the command):
 | 4 | LRCX buy-and-hold across its split carries the split warning |
 | 5 | the four IV cases return the true vol |
 | 6 | `microstructure_summary` on a live AAPL minute returns |
+| 7 | `sqt cache gc` lists the 501 dead files; `describe_data_capabilities(source='databento')` without a key says `available=False`; `fetch_tick_tape(source='databento')` returns a tape |
