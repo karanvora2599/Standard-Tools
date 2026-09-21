@@ -86,6 +86,7 @@ Ordered by how badly a wrong answer propagates, not by how hard it is.
 | D2 | ✅ Modeling cannot ingest the live provider | modeling | hard crash, no workaround |
 | D3 | ✅ EQUS.MINI is not the tape, in price or volume | data | silently wrong everywhere |
 | D4 | Feature selection scores on the whole panel | modeling | manufactures 70% of a real headline from noise |
+| D14 | ✅ The deployed model is not the one that was validated | modeling | the reported metrics describe a model you cannot obtain |
 | D5 | ✅ A futures ticker returns an equity | data | silently the wrong instrument |
 | D6 | ✅ Splits compound as returns | backtest | −62% reported against +276% |
 | D7 | ✅ Three estimators crash on any real tick tape | microstructure | the feed they are for |
@@ -313,6 +314,115 @@ resampling and was verified correctly sized (6.7% at φ=0, 5.8% at φ=0.9).
 - **`paired_comparison` reports `hit_rate = 0.000` for two identical
   models**, which reads as "A won every day" when the truth is a tie.
 
+### D14. The full-panel refit ignores the hyperparameters the search selected — DEFECT ✅
+
+`modeling/engine.py:1214-1219`, and the same at `:1265` (quantile models) and
+`:1273` (the conformal radius).
+
+✅ Confirmed at the source. Each fold sets `fold_params = model_spec.estimator.params`
+and then **reassigns it** from `search_best_params` when a search exists
+(`:866`). The refit instantiates from `model_spec.estimator.params` — the
+**base** values. `fold_params` never reaches it. `save_model` then writes
+those base values into the manifest, so the only recorded description of the
+deployed estimator is a configuration the search may never have scored.
+
+| spec | selected per fold | deployed |
+|---|---|---|
+| `random_forest`, grid `max_depth [6, 8]` | 8,8,8,8,6,8,8 | **max_depth 1** (the base) |
+| `ridge`, grid `alpha [0.001, 100, 10000]` | 0.001 ×4, 10000 ×3 | **alpha 1.0**, which is **not in the grid** |
+
+The forest's deployed predictions correlate with the correctly-refitted ones
+at Spearman **0.2971**. The ridge coefficients differ by a factor of 4.7. The
+reported `cs_rank_ic_mean` describes folds fitted at α ∈ {0.001, 10000}; the
+artifact you can actually score is α = 1.0.
+
+Nothing warns. `inspect_model(view="summary")` does not even return
+`estimator_params`, and no test asserts the deployed estimator carries the
+searched values.
+
+This is the rule the same file states one field over for weighting
+(`:1246-1254`, "weighted the same way the folds were") and for preprocessing
+(`:1184-1196`) — and it is the plan's own constraint that "the deployed
+pipeline is the validated pipeline".
+
+**Fix:** carry a deliberate choice into the refit and record it — the last
+fold's `best_params` with a `deployed_params_source` field, or one final
+inner search on the whole panel. Structurally, make the three call sites read
+one variable, and refuse to deploy a configuration no fold ever scored.
+
+### D15. A cross-sectional model's deployed transform is refit on the scoring universe — DEFECT
+
+`modeling/scoring.py:356-372`, against the module docstring at `:9-14`, which
+promises the opposite: that it applies registered stats "not freshly fit
+stats on the scoring universe — otherwise the same input row could score
+differently depending on which other tickers happened to be in the scoring
+call."
+
+For a `cross_sectional` model that is false by construction, because
+`cross_sectional_standardize` fits nothing and standardises within whatever
+rows the call contains. Measured through the real `score_model`, narrowing
+the universe from the trained 8 names to 3:
+
+| model | worst rank agreement vs the full universe | largest move of one row |
+|---|---|---|
+| ridge, cross-sectional | Spearman **−0.500** | 284% |
+| random forest, cross-sectional | Spearman **−1.000** (fully inverted) | 544% |
+| pooled sibling, same call | invariant (4.3e-19) | — |
+
+The universe-pin guard at `:246-263` only fires for `FeatureScope.UNIVERSE`
+features, and `ScoreModelResult` has no `warnings` field at all. This is the
+same failure as the plan's F1, arriving through the universe rather than
+through the code path.
+
+**Fix:** record the training cross-section width per date, and refuse — or
+at minimum warn — when a cross-sectional model is scored on a universe that
+is not the trained one, in the same voice as the existing refusal at `:252`.
+And correct the docstring.
+
+### D16. The lineage cannot name the feed the prices came from — DEFECT
+
+`specs.py:463-482`; `DatasetSpec.provider` is the only source field. The
+provider picks a dataset at fetch time and records it only into an audit
+decision record that the modeling build never opens. Searching the manifest,
+`dataset_meta.json` and `dataset_spec.json` for every dataset name: all
+absent.
+
+The same spec built twice, pinned to two different datasets:
+
+```
+              dataset_spec_hash        dataset_hash        cs_rank_ic
+EQUS.MINI     99c83bd0...(identical)   f159a045e098f4e1    0.04583
+XNAS.ITCH     99c83bd0...(identical)   264ee0b6959cefbe    0.05583
+```
+
+Two models with **identical recorded spec identity**, 22% apart on the
+headline metric and about 20% apart on every coefficient. `dataset_hash`
+proves they differ but cannot say why, and nothing in the package can
+reproduce either.
+
+**Fix:** carry the dataset the provider already knows into `build_dataset`'s
+result and persist it as `ModelManifest.data_source`, per entity since the
+fallback is per symbol. Keep it out of `dataset_spec_hash` — it is an
+observation, not a request.
+
+### Also in the modeling lifecycle
+
+- **`capabilities()` says `sgd` has no coefficients** while the run reports
+  signed coefficient importance for it with perfect sign consistency. The
+  direction is under-promise, so nothing breaks, but an agent choosing an
+  interpretable model is told wrong.
+- **`combine_predictions(method="mean")` across regression and ranking is
+  the ranker**, silently: standard deviations differ 37x, the blend
+  correlates with the ranker at 0.9996 and the regressor at 0.4509, and
+  `warnings` is empty. The module docstring explains exactly why this is
+  wrong. `rank_mean` is the default and is the mitigation.
+- **`preprocessing_stats.json` is `{}`** for every pipeline the legacy form
+  cannot express, and `apply_preprocessing(X, {})` is the identity. The live
+  path never reaches it.
+- **Rewriting `manifest.json` alone rewrites a model's recorded track
+  record** — no self-hash, and `inspect_model` reads `oos_metrics` straight
+  out of it. The remedy exists and works: signing catches it.
+
 ### Modeling: claimed fixes verified as HOLDING
 
 This is the good news, and it is substantial. The plan's claims were tested
@@ -337,6 +447,32 @@ against real prices rather than taken on trust:
   agrees to |Δ| = 0.00e+00.
 - **Determinism holds**: same spec and seed → identical folds, identical
   `node_hash`, max prediction difference 0.0.
+
+From the lifecycle investigation, on the same live panel:
+
+- **The plan's F1 — "validated cross-sectionally, deployed pooled" — holds
+  exactly.** The fold transform recomputed independently versus the one
+  `score_model` applies: **max |ΔX| = 0.000e+00**, **max |Δpred| = 0.000e+00**,
+  Spearman 1.000000. And the measurement discriminates: the pre-fix pooled
+  deployment reproduces the plan's own numbers on this panel (Spearman 0.8372
+  against the plan's 0.84).
+- **F2 — ranking models score.** A registered ranker with no `predict_proba`
+  trained, registered and scored cleanly through `RankingAdapter`.
+- **F8 — ensembles.** All four methods match an independent recomputation at
+  **max |d| = 0.0**.
+- **Importance is labelled by the pipeline's output columns**, verified on a
+  PCA pipeline where the keys are `pc1..pc3` rather than the dataset's four.
+- **Round-trip fidelity is exact, not float-noise**: persisted state
+  byte-identical, max |Δpred| = 0.0.
+- **Determinism is exact**: two runs, nine content hashes equal including
+  `model.joblib`'s bytes.
+- **Artifact integrity holds on every artifact tampered**, and `model.joblib`
+  is refused *before* `joblib.load`, so no pickle executes. Signing catches a
+  post-signature manifest edit.
+- **The distributional lifecycle reconciles**: independently recomputed
+  coverage 0.857 and 0.818 against reported 0.85714 and 0.81786.
+- **Degenerate models report honestly** — collapsed estimators report an IC of
+  zero rather than a flattering number.
 
 ---
 
@@ -671,10 +807,9 @@ DATABENTO_API_KEY=... \
 
 ## 14. Not covered
 
-- **The modeling lifecycle** — save/load/score fidelity, ensembles, and the
-  manifest's ability to name the feed a model trained on. An investigation
-  was running when this was written; its findings are not here.
-- **Modeling dataset construction and features** — same.
+- **Modeling dataset construction and features** — leakage checks, the
+  missing-data policies, feature alignment and target construction. An
+  investigation was running when this was written; its findings are not here.
 - **ICE and Eurex venues**, and options/futures end to end, all blocked by
   D5 rather than untested by choice.
 - **A live restatement of a Databento bar**, which needs two pulls
