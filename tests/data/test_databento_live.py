@@ -590,3 +590,140 @@ class TestTheOperationalClaims:
         with pytest.raises(ValidationError) as caught:
             provider.get_ohlcv(SYMBOL, BAR_START, BAR_END, interval="1w")
         assert "1d" in str(caught.value)
+
+
+# --- 7. defects found by the second pass, recorded rather than fixed --------
+#
+# Each of these is reproduced against the live feed. They are strict xfails so
+# the suite stays green while the defect stands and goes RED the moment someone
+# fixes it, which is the signal to delete the xfail rather than the test.
+
+
+class TestTheDailyWindowIsOffByOneSession:
+    """The single most serious finding of the second pass.
+
+    `_get_range` (databento_provider.py:347-348) adds a day to an `end` that
+    `_to_utc(end_of_day=True)` has already pushed to the next midnight, and
+    Databento's day-granular end is exclusive. So a request through date X
+    returns X and X+1, and nothing trims it -- the other three providers in
+    this library all call `trim_to_inclusive_end`; this one does not.
+
+    It is a lookahead leak, not a row count. A caller who asks for bars
+    "as of" a date is handed the next session's close.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "databento_provider.py:347 adds a day to an end that _to_utc has "
+            "already rolled to next-midnight, and get_ohlcv never trims. Asking "
+            "for one session returns two, the second being the future. Fix: "
+            "round the end up to a whole day instead of adding one, and call "
+            "trim_to_inclusive_end as polygon/yfinance/bloomberg do."
+        ),
+    )
+    def test_one_session_asked_for_is_one_session_returned(self, provider):
+        one = provider.get_ohlcv(SYMBOL, SESSION, SESSION, interval="1d")
+        assert len(one) == 1, (
+            f"asked for {SESSION} alone and got {len(one)} bars ending "
+            f"{one.index[-1].date()}"
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the same off-by-one, stated as the lookahead it actually is",
+    )
+    def test_the_last_bar_is_not_the_next_session_s_close(self, provider):
+        """2026-09-16 closed at 332.85. 337.00 is the 17th."""
+        frame = provider.get_ohlcv(SYMBOL, "2026-09-10", SESSION, interval="1d")
+        last = frame.index[-1]
+        assert str(last.date()) <= SESSION, (
+            f"a window ending {SESSION} returned a bar dated {last.date()} "
+            f"whose close is {float(frame['Close'].iloc[-1])}"
+        )
+
+    def test_the_intraday_schemas_do_not_share_the_defect(self, provider):
+        """Passing, and it localises the bug: only the `ohlcv-1d` branch of
+        `_get_range` adds the extra day."""
+        for interval in ("1h", "1m"):
+            frame = provider.get_ohlcv(SYMBOL, "2026-09-14", SESSION, interval=interval)
+            days = {str(ts.date()) for ts in frame.index}
+            assert max(days) == SESSION, f"{interval} reached {max(days)}"
+
+
+class TestTheDefaultFeedsCloseIsNotTheOfficialClose:
+    """The first pass reported that EQUS.MINI's prices were correct and only
+    its volume was wrong. That was too kind, and this is the correction.
+
+    EQUS.MINI's daily bar spans the UTC day and its `close` is the last print
+    in that day -- which on a busy afternoon is an after-hours trade, not the
+    official close. The level is usually within a tenth of a percent, so the
+    error hides in a price series and surfaces in the returns computed from it.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "EQUS.MINI's daily close is the last print of the UTC day, which is "
+            "frequently an after-hours trade. On 2025-04-02 it reports 208.00 "
+            "against the tape's 223.89, a 7.1% error, because the tariff "
+            "announcement moved the stock after the bell. Fix is F1's: prefer "
+            "EQUS.SUMMARY for daily bars."
+        ),
+    )
+    def test_a_news_afternoon_closes_where_the_tape_closed(self):
+        import databento as db
+
+        client = db.Historical(os.environ["DATABENTO_API_KEY"])
+
+        def close_on(dataset: str, day: str) -> float:
+            frame = client.timeseries.get_range(
+                dataset=dataset, schema="ohlcv-1d", symbols=[SYMBOL],
+                start=day, end=(pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat(),
+                stype_in="raw_symbol",
+            ).to_df()
+            return float(frame["close"].iloc[0])
+
+        mini = close_on("EQUS.MINI", "2025-04-02")
+        tape = close_on("EQUS.SUMMARY", "2025-04-02")
+        assert abs(mini - tape) / tape < 0.01, (
+            f"EQUS.MINI closed {SYMBOL} at {mini} and the consolidated tape at "
+            f"{tape}, a {abs(mini - tape) / tape:.2%} difference"
+        )
+
+
+class TestABacktestCompoundsASplitAsAReturn:
+    """`backtest/` never reads the `adjusted` flag the provider sets.
+
+    The provider is honest -- `get_metadata` reports `adjusted=False` and the
+    docstring says a split is a real -50% bar. Nothing under `backtest/` looks,
+    so a 10-for-1 split is compounded as a -90% session.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "backtest/engine.py has no corporate-action awareness: grep for "
+            "'adjusted' under backtest/ finds only a local variable in sizing.py. "
+            "Buy-and-hold on LRCX across its 2024-10-03 ten-for-one split reports "
+            "-62.4% against a true +276%. Fix: screen bar returns for |r| > 0.35 "
+            "and warn -- the engine already walks every bar for its total-loss "
+            "guard, so the pass is free."
+        ),
+    )
+    def test_a_ten_for_one_split_does_not_read_as_a_ninety_percent_loss(self, provider):
+        from standard_quant_tools.backtest.engine import run_strategy
+
+        bars = provider.get_ohlcv("LRCX", "2024-09-03", "2026-09-18", interval="1d")
+        worst = float(bars["Close"].pct_change().min())
+        assert worst > -0.5, f"a {worst:.1%} session is a split, not a return"
+
+        out = run_strategy(
+            bars, pd.Series(1.0, index=bars.index),
+            commission_pct=0.0, slippage_pct=0.0,
+        )
+        warned = " ".join(out.get("warnings") or [])
+        assert "split" in warned.lower() or out["total_return"] > 0, (
+            f"buy-and-hold reported {out['total_return']:.2%} across a split and "
+            f"warned only about: {warned[:80]}"
+        )
