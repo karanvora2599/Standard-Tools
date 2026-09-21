@@ -78,7 +78,7 @@ Thirty-two high-level agentic tools that compose the library's existing primitiv
 | Tool | What it does | Key output fields |
 |---|---|---|
 | `get_option_pricing` | Black-Scholes-Merton price and Greeks (delta, gamma, vega, theta, rho) for a European option | `price`, `greeks.delta`, `greeks.gamma`, `greeks.vega`, `greeks.theta`, `greeks.rho` |
-| `get_implied_volatility` | Solve for the volatility that reproduces an observed European option price (Newton-Raphson + bisection fallback) | `implied_volatility`, `converged`, `method` |
+| `get_implied_volatility` | Solve for the volatility that reproduces an observed European option price. Newton-Raphson converges on the volatility step (`tol_sigma`), not on an untaken step's price error — a short-dated put used to come back at the initial guess with `converged=True` — and hands over to bisection below a vega floor; a price at the intrinsic bound is admitted and flagged | `implied_volatility`, `converged`, `method`, `price_error`, `at_bound` |
 
 ---
 
@@ -1934,7 +1934,7 @@ are not implemented — each needs infrastructure this repo doesn't have yet.
 
 | Field | Type | Description |
 |---|---|---|
-| `n_rebalances`, `rebalance_log` | — | One `RebalanceEvent` per rebalance date: `date`, `turnover_pct`, `gross_leverage_after`, `n_positions` |
+| `n_rebalances`, `rebalance_log` | — | One `RebalanceEvent` per rebalance date: `date`, `turnover_pct`, `gross_leverage_after`, `n_positions`, plus `n_capped` and `capped_notional` — the trades `max_adv_participation` sized down on that date and the notional they gave up |
 | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95` | `float` | Computed from the engine's `equity_curve` via the **existing** metrics functions — no new metric math |
 | `information_ratio` | `float?` | Present only when `benchmark` is set |
 | `final_equity`, `final_cash` | `float` | Account state at the last bar |
@@ -1994,6 +1994,12 @@ section has the full reference):** `commission_model` (`"pct"` default or
 (+ `impact_coefficient`/`impact_lookback`), `borrow_fee_bps`,
 `margin_interest_rate`, and `max_adv_participation` — all optional,
 defaulting to today's exact flat-cost, no-constraint behavior.
+`max_adv_participation` is a **cap**: a trade over it is sized down to the
+cap and the shortfall recorded per rebalance (`n_capped`, `capped_notional`
+on the `RebalanceEvent`, and a warning with the run's total). It used to
+refuse the whole simulation, so its two states were "no effect" and "no
+result" and a capacity study could not be expressed; a participation that
+cannot be *estimated* (no usable volume baseline) is still refused by name.
 `borrow_fee_bps`/`margin_interest_rate` accrue using the actual elapsed
 **calendar** days since the previous bar (e.g. 3 days over a Friday →
 Monday gap), not a hardcoded 1 — so financing cost is not under-accrued
@@ -2299,9 +2305,9 @@ equity_curve = load_artifact(result.equity_curve_uri).squeeze("columns")
 | `summary` | `PerformanceSummary` | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio` |
 | `risk` | `RiskSummary` | `max_drawdown`, `var_95`, `cvar_95` |
 | `exposure` | `ExposureSummary` | Same shape as `get_backtest_diagnostics`' `exposure` field |
-| `costs` | `CostSummary` | `total_commission_pct`, `total_slippage_pct`, `total_cost_pct` (sums of per-bar cost drag as a fraction of capital, not dollarized), `num_trades` |
+| `costs` | `CostSummary` | `turnover` (position changed, summed over bars, in units of the signal), `realized_cost_pct` (the commission and slippage the engine actually charged, `turnover × (commission_pct + slippage_pct)`), `total_commission_pct`, `total_slippage_pct`, `total_cost_pct` (sums of per-bar cost drag as a fraction of capital, not dollarized), `num_trades` |
 | `equity_curve_uri`, `trades_uri` | `str`, `str?` | Parquet file paths from `backtest/artifacts.py`'s `save_artifact` — load with `load_artifact(uri)`. `trades_uri` is `None` when the strategy never traded |
-| `warnings` | `List[str]` | E.g. too few trades to draw reliable conclusions |
+| `warnings` | `List[str]` | The engine's own warnings first — the split screen (a bar-to-bar move beyond 35%, phrased by the provider's `adjusted` flag) and the `fill_price` caveat — then the tool's, e.g. too few trades to draw reliable conclusions |
 | `validation_status` | `str` | `"ok"` or `"warning"` (currently: `< 5` trades) |
 
 **Artifact storage:** `SQT_RUNS_DIR` (default

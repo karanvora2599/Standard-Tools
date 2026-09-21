@@ -43,6 +43,13 @@ range. `get_option_pricing` says so in its description and `12_options.md`
 says so at length, and it remains the easiest way to get a badly wrong
 number out of this library.
 
+Bachelier also has **no dividend term** — it prices a forward-like normal
+underlying — so `price_option(model="bachelier", dividend_yield=...)` is
+refused by name rather than pricing as if the dividend were zero. It used
+to discard the dividend silently, with `notes` empty; pass
+`dividend_yield=0` and a forward that already carries the dividend, or
+use a lognormal model.
+
 ### The expected move is not a bound
 
 `get_expected_move` returns a **one standard deviation** move. It gets
@@ -148,6 +155,12 @@ reaches negative variance at an ordinary distance from the money, so a
 strike outside the fitted range returns a refusal rather than a
 polynomial's opinion.
 
+**A violation is reported where a trader can act on it.** Each entry in
+`arbitrage_violations` carries `moneyness` (`K/F`) and `strike` in the
+underlying's own units, nearest the money first. The moneyness used to be
+reported under a field named `strike`, so a trader was told the arbitrage
+sat at "k=1.00" while `strike_range` in the same payload said `[300, 370]`.
+
 ## What the hedge costs
 
 ### `simulate_delta_hedge`
@@ -204,7 +217,7 @@ down-spot/up-vol diagonal rather than a row.
 | `get_volatility_cone` | Where today's implied sits in this name's own realized history |
 | `analyze_vol_term_structure` | Contango or backwardation, and the forward vols a calendar spread prices |
 | `check_put_call_parity` | Are these two quotes mutually consistent, and if not, why |
-| `get_implied_forward` | The carry forward, with financing, dividend and borrow broken out |
+| `get_implied_forward` | The carry forward, with financing, dividend and borrow broken out *(the three sum exactly to `forward − spot`: each is applied to the running forward in the order `components_order` states — financing, then dividend, then borrow. Compounded alone from spot, as they used to be, the cross terms went missing and the three were up to 45% short of the basis they decomposed; `analyze_cash_futures_basis` inherits the same decomposition)* |
 | `get_expected_move` | What move is priced — as one standard deviation, not a bound |
 | `simulate_delta_hedge` | What the hedge earns, and how widely that varies |
 | `get_option_risk_scenarios` | Full revaluation over spot × vol, not a Taylor estimate |
@@ -216,12 +229,20 @@ Full argument lists: [20_tool_index.md](20_tool_index.md#derivatives--derivative
 `analyze_option_strategy` finds breakevens numerically, by scanning the
 payoff for sign changes. A short call has no worst case, and a numerical
 scan cannot find one that does not exist — so when the extreme sits at the
-edge of the scanned range the result says `max_loss_unbounded: true` rather
-than returning the edge as though it were a bound.
+open edge of the scanned range the result says `max_loss_unbounded: true`
+rather than returning the edge as though it were a bound.
 
 A finite number standing in for an infinite risk is the single most
 dangerous thing a payoff calculator can return, and it is what returning
 `profit[0]` without the flag would do.
+
+**The scan runs from a spot of zero to twice the highest strike** (801
+points). It used to start at half the lowest strike, which put a put's
+worst case outside it: `max_loss` came back at half the true figure and,
+because the extreme sat at the scan's edge, a bounded loss was labelled
+unbounded. Zero is a floor for a price rather than a horizon, so with the
+default grid only the *right* edge can be open; a caller-supplied
+`spot_range` is scanned as given, with both edges open.
 
 ## Related
 

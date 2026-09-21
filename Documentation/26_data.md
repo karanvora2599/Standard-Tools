@@ -22,6 +22,13 @@ another agent could reason over.**
 ## These tools return a reference, not the data
 
 Every fetch tool here publishes an `sqt://` artifact and returns its id.
+Every one of them — and `fetch_financial_ratios` and `get_dataset_metadata`
+— takes an optional `source` (`"yfinance"`, `"polygon"`, `"databento"`,
+...); left out, the default provider answers. This runtime could only ever
+reach the default before, so a tick tape or a quote panel from Databento
+was out of reach, and the refusal for a provider without ticks said only
+Polygon served them. It now names both providers that do and the `source`
+that selects them.
 
 ```
 fetch_ohlcv_panel(tickers=[...], run_id="study7", name="bars")

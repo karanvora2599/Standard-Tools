@@ -53,7 +53,11 @@ Because every comparison against `NaN` is `False`, code that *gates* on these
 must test finiteness explicitly rather than relying on a comparison — a
 `max_adv_participation` limit would otherwise be silently satisfied by absent
 data. `run_portfolio_simulation` rejects an unestimable participation by name
-rather than letting it pass a constraint that a merely large trade fails.
+rather than letting it pass a constraint that a merely large trade fails. A
+participation that *is* estimable and exceeds the cap is a different case:
+the trade is sized down to the cap and the shortfall recorded (see
+[Liquidity constraint](#true-portfolio-simulation-shared-cash) below), because
+"could not be measured" and "too large" call for different remedies.
 
 The same applies to guards written as comparisons: `days_to_liquidate` checked
 `avg_daily_volume <= 0`, which `NaN` does not satisfy, so a `NaN` volume
@@ -154,7 +158,16 @@ print(f"Calmar Ratio   : {result['calmar_ratio']:.2f}")
 print(f"Win Rate       : {result['win_rate']:.1%}")
 print(f"Profit Factor  : {result['profit_factor']:.2f}")
 print(f"Num Trades     : {result['num_trades']}")
+print(f"Turnover       : {result['turnover']:.1f}")        # position changed, summed over bars
+print(f"Realized cost  : {result['realized_cost_pct']:.2%}")  # what commission + slippage actually charged
 ```
+
+`turnover` is the position changed, summed over bars, in units of the
+signal — a flat-to-long-to-flat round trip is 2.0 — and `realized_cost_pct`
+is `turnover × (commission_pct + slippage_pct)`, the exact number the
+returns were reduced by. The engine computed both on its way to the returns
+and used to throw them away; `run_backtest_compact`'s `CostSummary` now
+carries them as `turnover` and `realized_cost_pct`.
 
 ## Every fill mode runs natively
 
@@ -304,6 +317,23 @@ result without it — so the engine knew a simulation might contain look-ahead
 while the output an LLM reads said nothing. `fill_price` and `strategy_type`
 are `Literal`-typed, so an unsupported value is rejected at the boundary
 rather than deep inside dispatch.
+
+**The split screen.** Nothing under `backtest/` read the provider's
+`adjusted` flag, and to this engine an unadjusted split is a real bar: it
+compounds every close-to-close return, so LRCX's 10:1 split reported
+buy-and-hold at **−62%** against +276% true, and a short held through it
+printed a fictitious +93%. `run_strategy` now screens every bar-to-bar move
+beyond 35% (`SPLIT_SCREEN_THRESHOLD`) and emits a `SPLIT SCREEN` warning
+naming the dates and the moves. The wording depends on what is known about
+the bars: pass `adjusted=` (a provider's `DataSetMetadata.adjusted`), or let
+the engine read `price_data.attrs["adjusted"]` — the Databento provider sets
+it to `False` on the frames it returns — and the warning says whether the
+bar is a real move on adjusted data or a split that every compounded metric
+is wrong through. The pass is free: the engine already walks every bar for
+its total-loss guard. The warning travels in `result["warnings"]` like the
+fill caveat, so it reaches every tool built on the engine;
+`run_backtest_compact` used to build its own warning list from scratch and
+now starts from the engine's.
 
 **Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
 isn't finite and `> 0`, or if `commission_pct`/`slippage_pct` isn't finite
@@ -738,6 +768,15 @@ A custom callable still gets the full C++ batch-kernel speedup when
 in-process to build the signal matrix before shipping it to C++ in one call —
 it never inspects *how* the signal was produced.
 
+**The signal is range-checked.** A registry strategy emits `{-1, 0, 1}` by
+construction; a caller's callable emits whatever it emits, and
+`run_strategy` multiplies the lagged signal straight into the bar return, so
+a value of `2.0` ran a 2× levered book through every combination with
+nothing in the results saying so. `backtest_grid` now refuses a custom
+callable whose signal leaves `[-1, 1]`, naming the callable and the worst
+value, on every path — fused, batch and sequential. Scale the signal, or use
+`run_portfolio_simulation`, which models leverage explicitly.
+
 `backtest/strategy.py`'s `VectorizedStrategy` is the formal type for
 `my_signal` above — every `STRATEGY_REGISTRY` entry already satisfies it
 structurally, so annotating a custom callable as `VectorizedStrategy`
@@ -862,7 +901,7 @@ result = run_portfolio_simulation(
 
 print(f"Final equity : ${result['final_equity']:,.2f}")
 print(f"Final cash   : ${result['final_cash']:,.2f}")
-print(result["rebalance_log"])           # date, turnover_pct, gross_leverage_after, n_positions
+print(result["rebalance_log"])           # date, turnover_pct, gross_leverage_after, n_positions, n_capped, capped_notional, capped
 print(result["equity_curve"].tail())      # drifts between rebalances, doesn't jump
 ```
 
@@ -897,7 +936,9 @@ all.
 is `gross_exposure_curve / equity_curve`, the continuous version of
 `rebalance_log`'s point-in-time `gross_leverage_after`), `rebalance_log`
 (`pd.DataFrame`: `date`, `turnover_pct`, `gross_leverage_after`,
-`n_positions`), `final_equity`, `final_cash`, four peak diagnostics
+`n_positions`, plus `n_capped`, `capped_notional` and `capped` — the trades
+the ADV cap sized down on that rebalance, the notional they gave up and the
+tickers involved), `final_equity`, `final_cash`, four peak diagnostics
 (below), and `warnings` (`list[str]`).
 
 ### Peaks, not just averages
@@ -1042,13 +1083,24 @@ result = run_portfolio_simulation(
   trading calendar. Both default to `0.0` (today's exact behavior — no
   financing cost beyond the existing "cash went negative" warning).
 
-**Liquidity constraint:** pass `max_adv_participation=0.1` to reject (raise
-`ValidationError`) any rebalance trade whose notional exceeds 10% of the
-ticker's own rolling average dollar volume — same fail-fast pattern as
-`max_gross_leverage`/`max_position_pct`. Requires a `'Volume'` column. Built
-on `backtest/constraints.py`'s `adv_participation()` — see the "Liquidity &
-Capacity Diagnostics" section below for the full module, including the
-standalone `capacity_report()` (not wired into the simulation itself).
+**Liquidity constraint:** pass `max_adv_participation=0.1` to cap any
+rebalance trade at 10% of the ticker's own rolling average dollar volume. A
+trade over the cap is **sized down to it**, not refused: the book then holds
+less than `target_weights` asked for on that rebalance, and the shortfall is
+recorded — `n_capped`, `capped_notional` and `capped` (the tickers) on the
+rebalance-log row, and one warning with the totals for the run. It used to
+raise `ValidationError` instead, which made the constraint a kill switch
+rather than a cap: its two states were "no effect" and "no result", and a
+capacity study — how much of the target does the market let you hold — could
+not be expressed at all. What is still refused, by name, is a participation
+that cannot be *estimated* (no usable volume baseline for that ticker and
+date): a constraint the caller asked for is not satisfied by absent data.
+Requires a `'Volume'` column. Built on `backtest/constraints.py`'s
+`adv_participation()` — see the "Liquidity & Capacity Diagnostics" section
+below for the full module, including the standalone `capacity_report()` (not
+wired into the simulation itself). The native kernel still refuses a trade
+over the cap; the engine catches that refusal and runs the Python loop, so a
+capped configuration is correct and merely slower until the kernel caps too.
 
 **Scope, stated explicitly:** short-sale proceeds are credited to cash in
 full with no margin haircut modeling beyond the flat `margin_interest_rate`
@@ -1166,7 +1218,7 @@ cost = per_share_commission(shares=500, rate_per_share=0.005, minimum=1.0)
 
 | Function | Signature | Behavior |
 |---|---|---|
-| `adv_participation` | `(notional, avg_dollar_volume)` | Fraction of average dollar volume a trade's notional represents; `0.0` if `avg_dollar_volume <= 0`. What `max_adv_participation` above checks under the hood. |
+| `adv_participation` | `(notional, avg_dollar_volume)` | Fraction of average dollar volume a trade's notional represents; `NaN` ("not estimable") when `avg_dollar_volume` is non-positive or non-finite, which the simulator refuses rather than reads as zero. What `max_adv_participation` above checks under the hood. |
 | `days_to_liquidate` | `(shares, avg_daily_volume, max_participation)` | Estimated trading days to unwind a position without exceeding `max_participation` of average daily volume. Raises `ValidationError` if `avg_daily_volume <= 0` or `max_participation <= 0`. |
 | `sector_exposure` | `(weights, sectors)` | Aggregate portfolio weight by sector; tickers missing from `sectors` are bucketed into `"Unknown"` rather than dropped. |
 | `capacity_report` | `(tickers, avg_dollar_volumes, target_weights, max_participation)` | Per-ticker max account size deployable at `max_participation` of its own ADV, given its target weight. Returns `per_ticker`, `binding_ticker` (tightest constraint, `None` if every weight is 0), `max_account_size`. Raises `ValidationError` on missing tickers or `max_participation <= 0`. |

@@ -67,7 +67,12 @@ windows `run_stress_test` accepts.
 **`describe_data_capabilities`** answers whether the active provider serves
 tick trades, top-of-book quotes or async OHLCV, and which bar intervals it
 accepts. Most environments have no tick feed, so asking first is the
-difference between a routed request and a refused one.
+difference between a routed request and a refused one. `available` means
+configured, not merely constructible: Databento builds without a key and
+fails on its first fetch, and the report took construction for
+availability; with `DATABENTO_API_KEY` unset it now says `available=False`
+and names the variable in `unavailable_reason`, while the capability flags
+still describe the class — what you could reach once it is configured.
 
 **`describe_temporal_contract`** asks what a source can say about *when*
 its facts became knowable — **before anything is fetched**. A quarterly

@@ -164,6 +164,7 @@ sqt export --start D --end D --out F # zip a date range + manifest + standalone 
 sqt keygen [--out DIR]                # generate an Ed25519 keypair (local development only)
 sqt anchor <date> [--key PATH]        # sign a checkpoint anchoring a day's chain endpoint
 sqt verify --checkpoint <date> --pubkey PATH   # verify a checkpoint's signature (public key only)
+sqt cache gc [--confirm]             # list (or delete) OHLCV disk-cache files of a dead format generation; nothing else is evicted
 ```
 
 `sqt replay` exits 0 if the output reproduced exactly, 1 on a confirmed mismatch, 2 if the record has no output hash to compare against. `sqt verify` exits 0 if clean, 1 if any problems are found. A dependency-free standalone verifier (`scripts/verify_audit_log.py`) is also available for external auditors who don't want to install the package. `SQT_AUDIT_REDACT_FIELDS` (comma-separated dotted field paths) replaces matching `input` fields — and, best-effort, an `error_message` that echoes one back — with a non-reversible content-hash placeholder before a record is written; set `SQT_AUDIT_REDACT_SALT` to a long random secret so that placeholder isn't brute-forceable offline for a small value space (an unset salt still works but logs a one-time warning).

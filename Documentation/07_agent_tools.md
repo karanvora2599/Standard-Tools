@@ -2208,7 +2208,7 @@ print(f"Example params: {playbook['example_params']}")
 |---|---|
 | `OptionPricingResult` | `option_type`, `price`, `greeks` (`OptionGreeks`), `d1`, `d2` |
 | `OptionGreeks` | `delta`, `gamma`, `vega` (per 1.0 of volatility, not per vol point), `theta` (per year, not per day), `rho` |
-| `ImpliedVolatilityResult` | `implied_volatility`, `converged`, `iterations`, `method` (`"newton"`/`"bisection"`) |
+| `ImpliedVolatilityResult` | `implied_volatility`, `converged` (on the volatility step, `tol_sigma`, never on a price tolerance alone), `iterations`, `method` (`"newton"`/`"bisection"`), `price_error` (absolute pricing error at the returned volatility), `at_bound` (the price sits at intrinsic, so the volatility is a ceiling rather than an estimate) |
 
 ---
 

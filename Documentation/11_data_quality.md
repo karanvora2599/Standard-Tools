@@ -71,14 +71,23 @@ stale = detect_stale_prices(df, n=3)
 jumps = detect_price_jumps(df, threshold=0.15)
 ```
 
-**`detect_missing_bars(df)`** — flags weekday gaps in the index. **Calendar-free
-heuristic, stated explicitly:** it infers expected trading days from the
-data's own weekday pattern (`pandas.bdate_range`), not a real market-holiday
-calendar (this repo doesn't depend on `pandas_market_calendars` or similar
-— see [04_backtesting.md](04_backtesting.md)'s minimal-dependency stance).
-U.S. market holidays (Thanksgiving, Christmas, etc.) will therefore show up
-as false-positive "gaps." Treat findings as leads to investigate, not
-proven defects.
+**`detect_missing_bars(df, calendar="XNYS")`** — flags sessions missing from
+the index. **Against the exchange calendar when it can:** with the optional
+`exchange_calendars` package installed, expected sessions come from the named
+calendar and a holiday is not a gap. Without it, the function falls back to
+the data's own weekday pattern (`pandas.bdate_range`), and U.S. market
+holidays (Thanksgiving, Christmas, etc.) show up as false-positive "gaps" —
+on a live year every one of the 21 reported gaps was a holiday, which is why
+the calendar path exists. Each entry says which it used, `"basis":
+"calendar"` or `"weekday"`, so a reader knows whether a finding is a lead or
+a defect.
+
+**`detect_volume_anomalies(df, window=20, thin_fraction=0.05)`** — flags bars
+whose `Volume` is zero (`kind="zero"`) or below `thin_fraction` of the
+trailing `window`-bar median (`kind="thin"`), with the median beside each.
+A sample feed that carries a few percent of the consolidated tape reads as
+thin against a full-volume history, and a halted session reads as zero;
+neither is visible from prices alone.
 
 **`detect_stale_prices(df, n=3)`** — flags runs of `n`+ consecutive
 identical `Close` values, a likely stale/frozen quote (a real market rarely
@@ -105,9 +114,10 @@ result = get_data_quality_report(DataQualityReportInput(
 ))
 
 print(result.metadata)          # dataset provenance, as a dict
-print(result.missing_bars)      # [{"date": ..., "weekday": ...}, ...]
+print(result.missing_bars)      # [{"date": ..., "weekday": ..., "basis": "calendar" | "weekday"}, ...]
 print(result.stale_price_runs)  # [{"start": ..., "end": ..., "price": ..., "run_length": ...}, ...]
 print(result.price_jumps)       # [{"date": ..., "pct_change": ...}, ...]
+print(result.volume_anomalies)  # [{"date": ..., "volume": ..., "trailing_median": ..., "kind": "zero" | "thin"}, ...]
 ```
 
 See [09_advanced_agent_tools.md](09_advanced_agent_tools.md) for the tool's

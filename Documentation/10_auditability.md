@@ -492,6 +492,7 @@ sqt export --start D --end D --out F # package a date range into an auditor-read
 sqt keygen [--out DIR]                # generate an Ed25519 keypair (local dev only)
 sqt anchor <date> [--key PATH]        # sign a checkpoint for a calendar day
 sqt verify --checkpoint <date> --pubkey PATH   # verify a checkpoint's signature
+sqt cache gc [--confirm]             # list (or delete) OHLCV cache files of a dead format generation
 ```
 
 ```bash

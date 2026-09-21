@@ -207,7 +207,7 @@ wrong number that every downstream screen silently inherits.
 
 ## Caching & Retry
 
-- **TTL cache**: identical calls within 1 hour return a `.copy()` of the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that
+- **TTL cache**: identical calls within 1 hour return a `.copy()` of the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that. A window whose end is not yet historical (its last bar is still forming) is kept for **60 seconds** only — the hour-long TTL used to serve an unsettled bar as final for up to an hour, and a minute still turns three identical requests in one run into one metered fetch. Every provider goes through this cache, Databento included (it used to bypass both caches and the retry layer, so three identical live requests were three metered fetches)
 - **Retry**: up to 3 attempts, waiting 1s then 2s between attempts (exponential backoff, factor 2) on transient failures
 - **Cache key**: `(provider_name, instance_token, symbol, start_date, end_date, interval)` — `get_ohlcv` checks the session cache itself rather than via a `@cached()` decorator wrapping the whole method, so an audit record is written on every call, including a session-cache hit, not just on a live fetch. The per-instance token (a UUID, not `id(self)` — CPython can reuse a freed object's `id()`) keeps a fresh provider instance from transparently reusing another instance's cached result. The cache dict itself is guarded by a module-level lock (`data/_cache.py`), so concurrent threads hitting the same or different instances/args at once are safe — the lock only wraps the get/set, not the network fetch, so calls to different keys still run concurrently
 - **Copy-on-return**: every `get_ohlcv` call — session-cache hit, disk-cache hit, or live fetch — returns a fresh copy, so a caller mutating the result in place can't corrupt the cached object shared with the next caller
@@ -223,13 +223,16 @@ df = fresh_provider.get_ohlcv("AAPL", "2023-01-01", "2024-01-01")
 
 ## Persistent Parquet Cache
 
-Every `get_ohlcv` call for a **historical date range** (end date before today) is automatically saved as a Parquet file. Subsequent calls — even from a completely new Python process — skip the network entirely and load from disk.
+Every `get_ohlcv` call for a **historical date range** (end date before today, on the **UTC** date — the guard compared against the local date, so east of UTC+5:30 a session still trading was already "yesterday" and its mid-session bar was written to disk permanently) is automatically saved as a Parquet file. Subsequent calls — even from a completely new Python process — skip the network entirely and load from disk.
 
 ```
-~/.cache/standard_quant_tools/ohlcv/AAPL_2020-01-01_2024-01-01_1d.parquet
+~/.cache/standard_quant_tools/ohlcv/v3_yfinance_AAPL_2020-01-01_2024-01-01_1d.parquet
+~/.cache/standard_quant_tools/ohlcv/v3_databento-EQUS.SUMMARY_AAPL_2024-07-01_2025-06-30_1d.parquet
 ```
 
-**Why only historical ranges?** "Historical" here means the bar is no longer forming — it does *not* mean the cached values can never change. Data is fetched with `auto_adjust=True`, so a later corporate action (split, special dividend) can retroactively revise the adjusted Close/Open/High/Low for dates already on disk. The cache trades that small staleness risk for avoiding repeated network calls; a symbol with a recent corporate action needs the cache cleared or bypassed (`SQT_CACHE_DIR`) rather than assuming it self-heals. Today's still-forming bar always goes through the in-process TTL cache (1 hour) instead, never the disk cache.
+The filename carries the format generation, the provider and — for a provider that chooses a dataset per window — the dataset that answered, so two feeds 30x apart in volume never share one file.
+
+**Why only historical ranges?** "Historical" here means the bar is no longer forming — it does *not* mean the cached values can never change. Data is fetched with `auto_adjust=True`, so a later corporate action (split, special dividend) can retroactively revise the adjusted Close/Open/High/Low for dates already on disk. The cache trades that small staleness risk for avoiding repeated network calls; a symbol with a recent corporate action needs the cache cleared or bypassed (`SQT_CACHE_DIR`) rather than assuming it self-heals. Today's still-forming bar always goes through the in-process session cache instead (for 60 seconds, not the hour a settled window gets), never the disk cache.
 
 ```python
 import time
@@ -251,6 +254,8 @@ print(f"Cached call: {time.perf_counter() - t0:.3f}s")
 **Corrupt cache files evict themselves**: if a Parquet file on disk fails to read (truncated write, disk corruption, etc.), it's logged, deleted, and the data is transparently refetched from yfinance and rewritten — callers never see the corrupt file or an exception because of it.
 
 **Cache path safety**: `symbol`, `start_date`/`end_date`, and `interval` are all validated (allow-listed characters, `..` rejected) before being used to build the Parquet filename, and the resolved path is checked to still resolve inside the cache root — a malformed or adversarial symbol string (these are LLM-reachable via `get_ohlcv`'s own parameters) can't write outside `SQT_CACHE_DIR`. A symbol that fails this check doesn't cause `get_ohlcv` itself to fail, though: caching is an optimization, not a correctness requirement, so every provider degrades gracefully by skipping the disk cache for that one call (still served live/from the session cache) rather than raising `ValidationError` for a symbol its own live-fetch path can otherwise handle fine.
+
+**Dead generations are collected, not read.** A format bump (see the `v3` note above) leaves the previous generation's files on disk, never looked up again; a live cache held 1,574 files, 501 of them dead. `sqt cache gc` lists them and `sqt cache gc --confirm` deletes them — only files carrying an old generation prefix, never the current generation and never a file without one.
 
 **Override the cache directory** via the `SQT_CACHE_DIR` environment variable:
 
@@ -501,11 +506,80 @@ than silently guessing a mapping.
 
 ---
 
+## Databento Provider
+
+`standard_quant_tools.data.databento_provider.DatabentoProvider` implements
+the same `DataProvider` ABC against Databento Historical, and is the one
+provider that serves every tier: bars, ticks, top-of-book quotes, L2 depth
+(`get_order_book`) and order-by-order events (`get_order_events`).
+
+```python
+provider = DataFactory.get_provider("databento")   # reads DATABENTO_API_KEY
+df = provider.get_ohlcv("AAPL", "2024-07-01", "2025-06-30")
+df.attrs["dataset"]                                 # "EQUS.SUMMARY"
+```
+
+**The key comes from the environment.** `DATABENTO_API_KEY`, never an
+argument. The provider constructs without one and fails on its first fetch,
+naming the variable — which is why `describe_data_capabilities` reports an
+unconfigured Databento as `available=False` rather than taking construction
+for availability.
+
+**Which feed answers a daily request, and why it matters.** Databento
+publishes several equity datasets and they are not the same tape:
+
+| Dataset | What it is | Used for |
+|---|---|---|
+| `EQUS.SUMMARY` | the consolidated tape exactly (`ohlcv-1d`, from 2024-07-01) | any daily window it covers, first |
+| `EQUS.MINI` | a **sample** feed — 2-4% of consolidated volume, a UTC-day close | the daily fallback before 2024-07-01 |
+| `XNAS.BASIC`, `XNAS.ITCH` | one venue's feeds (`XNAS.ITCH` also carries depth) | intraday bars, ticks, quotes, depth |
+
+`EQUS.MINI` used to be the default and was documented as the consolidated
+tape, so daily closes and volumes read a few percent low with no warning.
+`EQUS.SUMMARY` answers any daily window from 2024-07-01 first; the sample
+feed is the fallback before it; intraday asks the venue feeds only, in the
+same order the tick methods use, so bars and ticks for one window come from
+one tape. The dataset that answered travels on `frame.attrs["dataset"]` and
+in `get_metadata(...).notes`, and the disk cache is keyed by it. Override
+the daily choice with `DATABENTO_OHLCV_DATASET` (or `DATABENTO_DATASET` /
+`DATABENTO_DEPTH_DATASET` for the venue and depth feeds).
+
+**A daily request no longer returns tomorrow.** The daily request ended one
+day past the inclusive end and nothing trimmed, so every as-of query on this
+provider read the next session's close (D1). `end_date` is inclusive here as
+on every other provider, and Databento now shares the session cache, the
+disk cache, the retry layer and the index normaliser the others use — it
+used to bypass all of them, which is why the bars skipped normalisation, a
+cached frame did not round-trip, and three identical live requests were
+three metered fetches (D2). The frame carries `attrs["adjusted"] = False`
+(the venue publishes unadjusted, which the backtest split screen reads), and
+`get_temporal_contract("bars")` reports `revisions="unknown"` to agree with
+`point_in_time=False`.
+
+**A futures root is not an equity.** `ES`, `CL` and `GC` are equity tickers
+as well as roots, and the provider used to resolve them to the equity —
+`get_ohlcv("CL")` returned Colgate-Palmolive (D5). A bare ambiguous root is
+now refused with the spellings for each reading: `ES.c.0` (front
+continuous), `ESZ6` (a contract), `ES.FUT` (the parent) and OSI option
+strings route to the futures and options datasets (`GLBX.MDP3`,
+`OPRA.PILLAR`; override with `DATABENTO_FUTURES_DATASET` /
+`DATABENTO_OPTIONS_DATASET`), while `ES~equity` names the ticker.
+
+**`DataSetMetadata` gained a `notes` list** — the served dataset, the index
+normalisation and any ambiguity travel in it — and its `timezone` is now
+documented as a label for a normalised, naive index rather than a live
+zone.
+
+---
+
 ## Tick data (`get_trades` / `get_quotes`)
 
-The first optional capability on the provider contract. **Only
-`PolygonProvider` implements it**, and only on a plan tier that includes
-tick data — the free tier serves bars and fundamentals but returns 403 here.
+The first optional capability on the provider contract. **Two providers
+implement it**: `PolygonProvider`, on a plan tier that includes tick data
+(the free tier serves bars and fundamentals but returns 403 here), and
+`DatabentoProvider`, from the venue tape. `DataFactory.get_provider("polygon")`
+or `("databento")` selects one; the agent data runtime's fetch tools take the
+same choice as `source`.
 
 ```python
 trades = provider.get_trades("AAPL", "2024-01-02", "2024-01-03")
@@ -519,7 +593,8 @@ Four things worth knowing before you use them:
 
 **They are not abstract methods.** yfinance and Bloomberg inherit a base
 implementation that raises `NotImplementedError` naming the provider, naming
-the one that does work, and refusing to offer bars as a substitute. Making
+the two that do work (the message said only Polygon did, which was false
+once Databento served both), and refusing to offer bars as a substitute. Making
 them abstract would break those two providers at *import* time to express
 something better said at the point of use — and the substitution is the real
 hazard: a "trade" derived from an OHLCV row is a fiction every

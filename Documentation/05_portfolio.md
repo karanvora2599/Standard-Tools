@@ -33,6 +33,23 @@ print(f"Mean daily return : {port_returns.mean():.4f}")
 print(f"Annual return     : {port_returns.mean() * 252:.2%}")
 ```
 
+**A missing return is refused, not passed through.** A `NaN` in
+`returns_df` used to go straight into the weighted sum, and the three
+calculations downstream each read the resulting `NaN` their own way — on a
+live panel, 20 missing days added **+290 bp of CAGR** and +0.14 of Sharpe.
+`build_portfolio` now refuses by default, naming how many returns are
+missing and in which columns, and takes a policy when you have decided what
+a hole means:
+
+```python
+build_portfolio(returns_df, weights, missing="zero")  # the asset earned nothing that day; its weight sat in cash
+build_portfolio(returns_df, weights, missing="drop")  # remove every date any asset is missing
+```
+
+Neither is the default because neither is neutral: `"zero"` keeps the
+calendar and understates variance, `"drop"` keeps the arithmetic and
+shortens the history.
+
 ---
 
 ## Full Portfolio Metrics
@@ -345,6 +362,13 @@ mean-variance in most published comparisons and it is not the highest-Sharpe
 portfolio under any model. It buys stability by giving up the claim to be
 optimal.
 
+**The weights do not depend on the order you listed the assets in.** The
+clustering's tie-breaks follow column position, and forty permutations of
+one universe moved single weights by up to **8.7 pp** — the same names,
+different numbers, with nothing to say which permutation was the answer.
+Columns are now sorted by name before anything reads them, so the weights
+are a function of the universe and its returns alone.
+
 ### `optimize_max_diversification`
 
 Maximizes the **diversification ratio** — the weighted average of the
@@ -361,6 +385,23 @@ being *uncorrelated* rather than for being quiet.
 
 It does invert the correlation matrix, and reports the condition number for
 exactly that reason.
+
+### An indefinite covariance is repaired, and the repair is named
+
+Nothing checked positive semi-definiteness between a caller's covariance
+and the optimizers, and a pairwise estimate over a ragged panel —
+`cov(min_periods=30)` on real prices with one short history — is not a
+covariance of anything: its smallest eigenvalue was **−2.77e-03**, and
+`optimize_max_diversification` returned a *negative* weighted average
+volatility with zero warnings. Every tool that takes a covariance
+(`optimize_risk_parity`, `optimize_max_diversification`,
+`get_marginal_risk_contribution`, `get_factor_exposure_budget`,
+`run_portfolio_scenarios`) now projects an indefinite matrix onto the
+nearest positive semi-definite one by flooring its eigenvalues (Higham's
+clipping, re-symmetrized) and warns with the eigenvalue that was floored;
+the weights returned are for the repaired matrix. The warning is the thing
+to act on: estimate the covariance on complete rows (`estimate_covariance`,
+below) and the repair never runs.
 
 ## What the portfolio is actually exposed to
 
@@ -493,3 +534,22 @@ from consuming it. A sample covariance on a short window is badly
 conditioned, and feeding one straight into a mean-variance solver produces
 confident weights built on noise — inspecting the estimate first is what
 makes that visible rather than showing up as an implausible allocation.
+
+**It says what it dropped.** The estimate uses complete rows only, so one
+asset with a short history removes every date it lacks for *all* of them:
+on a live panel one such history silently removed **400 of 512 rows** with
+`warnings: []`, and the risk-parity weights built on the remainder moved by
+12.4% of NAV. The result now carries `n_rows_dropped`, and when it is not
+zero a warning names the count and the asset with the shortest history, so
+the choice — drop the asset, or start the window where every asset has
+data — is the caller's rather than the estimator's.
+
+## Planning the transition
+
+`plan_rebalance` schedules the path from current to target weights under a
+participation cap, priced by `adv` (average daily dollar volume per name).
+A name missing from `adv` used to be read as having **zero** liquidity: it
+never traded, and the warning did not say why. It is now refused by name —
+supply that name's ADV, or omit `adv` altogether to plan without
+participation limits, which the result then reports as an unpriced
+transition rather than a free one.

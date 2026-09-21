@@ -62,6 +62,13 @@ of them, and the error falls as the spread grows. Below the floor, any
 number the formula returns is noise that happened to land on the negative
 side.
 
+**The guard runs in the windowed branch too.** With `window=` set it used
+to apply only to the full-sample covariance, which that branch never
+computed, so a rolling run on live bars reported 59 bp against its own
+161 bp detection floor with `significant: null`. The windowed estimate is
+now judged on the median window's covariance against a window-sized
+standard error, and `significant` is always a verdict.
+
 **On a trending series it returns `null`, not zero.** The literature's usual
 fix — substitute zero when the covariance is positive — produces a tidy
 series with a systematic downward bias, and the zeros cluster in exactly the
@@ -132,16 +139,33 @@ measure here with a direct trading interpretation — multiply lambda by the
 size you intend to trade and you have an estimate of the impact you will
 cause.
 
-**The signing is the weak link.** Kyle's model is about buyer- versus
-seller-initiated volume, which needs trades matched against quotes. From
-bars, the sign of the day's return stands in. The tick rule agrees with the
-true classification about 85% of the time on a liquid name and materially
-worse on an illiquid one — and illiquid names are where lambda matters.
-Misclassification attenuates the slope toward zero, so this **understates**
-impact, and understates it most exactly where impact is largest.
+**The sign is the whole question, and from bars alone the estimate is
+circular.** Kyle's model is about buyer- versus seller-initiated volume,
+which needs trades matched against quotes. From bars the only sign
+available is the bar's own return, so `x = sign(y) · V` is regressed on
+`y`: lambda is positive by construction and `r_squared` measures nothing.
+Measured on live AAPL bars, shuffling the returns and permuting the volume
+— destroying every real relationship — left 80% of the estimate intact,
+where a non-circular control gave a lambda of zero. The docstring used to
+claim the opposite failure (that misclassification *understates* impact),
+and the guard against a non-positive lambda protected against something
+that could not happen.
+
+The bars path is kept because it is what a daily dataset can offer, and it
+now says what it is: the result carries `circular=True` and
+`sign_source="return_sign"`, and the warning states that lambda is positive
+by construction. Pass a tape instead — `kyle_lambda(trades=..., quotes=...,
+freq="1min")` — and the flow is signed by Lee-Ready (99.7% accurate against
+the venue's own aggressor flag; the tick rule without quotes), bucketed at
+`freq`, and the **midpoint** change is regressed on it, because a last
+trade price carries the bid-ask bounce whose sign is also in the signed
+volume. That path returns `circular=False`, and on a market with no impact
+at all it finds a lambda near zero, which is the test that separates a
+measurement from an artefact.
 
 Check `r_squared` before sizing anything: a lambda from a regression
-explaining 2% of the variance has a standard error larger than itself.
+explaining 2% of the variance has a standard error larger than itself — and
+on the bars path, do not read it at all.
 
 ### `get_order_flow_imbalance`
 
@@ -181,6 +205,13 @@ Two caveats are attached to every result, and both matter:
   one-sidedness of flow; calling that "informed trading" is a model
   assumption, not a measurement.
 
+**The residue bucket is gone.** The bucket walk used to append whatever
+volume was left after the last full bucket as one more bucket: a float
+residue of a single bar, whose imbalance was exactly 1.0 by construction
+and which landed *last* — so it dominated `current_vpin`, and 51 buckets
+came back for 50 requested. The trailing partial bucket is now dropped and
+its size reported as `residual_volume`; `n_buckets` is what was asked for.
+
 ### `get_intraday_volume_profile`
 
 The U-shape every execution schedule is built on: volume concentrates at the
@@ -193,6 +224,19 @@ Needs intraday bars with timestamps. **Daily bars are refused** rather than
 aggregated into a meaningless single bucket, and the closing bucket's share
 is flagged separately because closing-auction volume has risen for a decade
 on index flows, so a profile fitted over several years understates today's.
+
+**The session, not the observed range.** A feed that carries extended
+hours — Databento's, whose bars sit on a UTC clock after normalisation —
+was bucketed from 4am to 8pm, so the "open" and "close" buckets held the
+pre- and post-market trickle: `open_share 0.00004`, `close_share 0.0`,
+`u_shaped False`, and a warning that the caller's data was unusual.
+Restricted to the regular session the same bars gave 0.234 / 0.153 and
+`u_shaped True`. Pass `index_timezone` (`"UTC"` for Databento bars) or a
+tz-aware index, and both profiles — the bars-based estimator and the
+trades-based `get_trade_profile` — bucket `session` (default 09:30–16:00)
+in `exchange_timezone` (default New York) and report the
+`extended_hours_share` beside it. A naive index with no `index_timezone` is
+taken as already in session time, which is what yfinance bars are.
 
 ### `get_implementation_shortfall`
 
@@ -260,6 +304,33 @@ liquidity provider kept; the impact half is what the trade moved. They
 imply opposite remedies — impact says trade smaller, realized says trade
 somewhere else — and unsplit, neither is visible.
 
+**A repeated timestamp is two rows, not one label.** Real tapes repeat
+timestamps — 32% of the prints in a live AAPL minute share one with the
+print before — and three functions aligned trades to their signs by
+*label*: `effective_spread` and `microstructure_summary` raised ("cannot
+reindex on an axis with duplicate labels"), and the liquidity detector's
+signed-volume channel fanned rows out by label and reported a net
+imbalance of −229,340 on a tape whose whole volume was 64,780. Every
+consumer now aligns by position, and the signed volume cannot exceed what
+traded. The signing rule itself is unchanged; only the bookkeeping was
+wrong.
+
+**`detect_liquidity_events` reports the channel's memory, and isolates a
+channel's failure.** The CUSUM threshold is calibrated for i.i.d. noise,
+and real channels are not: a spread channel with lag-1 autocorrelation
++0.67 fired on 43% of quiet real windows at the default, where an i.i.d.
+control gives 7%. Every channel result now carries `lag1_autocorrelation`,
+the `threshold` it was judged against, and `false_alarm_rate_at_threshold`
+— how often an AR(1) null with that memory crosses the threshold on a
+window this long, simulated — so a detection is read against the rate it
+was made at. `calibrate_threshold=True` (on the tool and the library
+function) takes the threshold from that null's 95th percentile instead,
+which puts the false-alarm rate back at 5% whatever the channel's memory.
+And a channel that fails for any reason is reported as `unavailable` with
+the exception's name; it used to catch only `ValidationError`, so one
+channel's `ValueError` killed all six — and the failing channel was in
+`available_channels()`, so the obvious call was the one that died.
+
 ## The tools
 
 | Tool | Needs ticks | Answers |
@@ -305,7 +376,7 @@ deeper feed than `get_order_book`.
 | --- | --- |
 | **Queue ahead** | Resting size at an order's own price level when it arrives — the number that decides whether a passive order fills. Depth gives the level total and cannot say how much is in front of you |
 | **Order lifetime** | Time from add to cancel or fill. No snapshot equivalent exists at all |
-| **Cancel-to-add, cancel-to-trade** | A snapshot sees size vanish and cannot tell a cancel from a fill |
+| **Cancel-to-add, cancel-to-trade** | A snapshot sees size vanish and cannot tell a cancel from a fill. A trade is counted ONCE: the `T` prints when the feed carries them, else the fills — an execution is a `T` and an `F` for the same event, and counting both counted every trade twice |
 | **Event intensity by action** | A snapshot stream measures the SAMPLING rate when sampled and the update rate when not, and nothing in the frame says which |
 
 ### Censoring is counted, not folded in
@@ -322,6 +393,26 @@ A `CLEAR` wipes the book, so the queue accumulators reset on one rather than
 carrying depth across a boundary where none existed. A `MODIFY` is counted
 but does not adjust queue depth: whether it loses priority depends on the
 venue's own rule, and guessing would be worse than saying so.
+
+### A snapshot is the book, not an event
+
+A window that opens with a snapshot — the vendor's flag bit 32, or a
+`snapshot` column the caller supplies — carries the orders already resting
+as `ADD` records that repeat state rather than report a change. Reading
+them as events got three numbers wrong at once on a live CME reopen: the
+resting orders were counted as arrivals, so `events_per_second` came out
+16,000× too high on a snapshot-bearing window; a later cancel of one of
+them was "terminated without an add", which was 54.5% of that count; and
+dropping them instead understated the queue ahead of a real arrival by
+33–79% against the `mbp-10` book for the same sequence numbers.
+
+Snapshot records now seed the queue accumulators without counting as
+arrivals (`n_snapshot_orders`), explain a later cancel or fill
+(`terminated_from_snapshot`, with `resting_at_open` for the ones the
+window saw resting) instead of leaving it censored, and are excluded from
+the event counts, the rates and the clock (`n_snapshot_events`). The
+reference path keeps `flags` and `snapshot` when the registered panel
+carries them, so a Databento extract's snapshot bit reaches the metrics.
 
 ### Size
 

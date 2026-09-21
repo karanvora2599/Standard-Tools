@@ -54,7 +54,7 @@ because the order is the point.
 |---|---|
 | `list_modeling_capabilities` | → tasks, estimators and what each supports (sample weights, probabilities, query groups, coefficients, importances), features, validation schemes, preprocessing, weighting, and which optional libraries are installed. `targets` splits into **`buildable`** (the six `build_model_dataset` can derive from a Close series) and **`external_only`** (the twelve that are functions of the book, of orders or of fills, and arrive through `register_external_panel`) — it used to list all eighteen flat, which is a worse place to overstate than a tool is, since an agent reads this INSTEAD of trying things |
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback) |
-| `check_leakage` | a feature set → whether it is temporally safe to fit on, answered **before** a dataset is built with it |
+| `check_leakage` | a feature set → whether it is temporally safe to fit on, from each feature's declared temporal support, answered **before** a dataset is built with it; with a `dataset_id`, the empirical lead-lag screen also runs on the built panel, and `scope` says which of the two `safe` rests on |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
 | `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve |
 | `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels |
@@ -91,9 +91,9 @@ typed fields for **one** question:
 | `get_feature_ic_decay` | `dataset_id` + `feature` → the lead-lag IC curve as ordered points, with the peak named |
 | `get_feature_drift` | `dataset_id` + `feature` → PSI, two-sample KS and the IC computed separately either side of a date |
 | `get_feature_regime_stability` | `dataset_id` + `feature` → IC per **contiguous** time block, never shuffled, plus sign consistency |
-| `run_feature_permutation_test` | `dataset_id` + `feature` → two-sided empirical p-value against a within-date shuffle null |
+| `run_feature_permutation_test` | `dataset_id` + `feature` → two-sided empirical p-value against a circular-shift null that keeps each entity's serial correlation (`null="within_date"` is still available), with the per-date IC's lag-1 autocorrelation beside it |
 | `run_feature_ablation` | `dataset_id` + `ModelSpec` → refit without each feature in turn, reporting what each was worth |
-| `select_features` | `dataset_id` → a chosen set, with a recorded reason for every exclusion |
+| `select_features` | `dataset_id` → a chosen set, selected on the first `1 - holdout_fraction` of the dates (or through `selection_end`), each selected feature's IC on the held-out dates beside its selection IC, and a recorded reason for every exclusion |
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta |
 
 `feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table;
@@ -164,15 +164,34 @@ the shape leaves room for a recommendation rather than a table:
   the whole way down.
 - **`run_feature_permutation_test` is the one to run before believing a
   small IC.** On a few hundred dates and a couple of dozen entities, an IC
-  of 0.03 is inside the range noise produces routinely. The feature is
-  shuffled within each date, which states the null exactly, and the p-value
-  is two-sided so a strong negative IC counts as strong. Its `null_p95_abs`
-  is the defensible floor to pass to `select_features(min_abs_rank_ic=...)`.
+  of 0.03 is inside the range noise produces routinely. The null rolls each
+  entity's feature series by a random offset (`null="circular_shift"`):
+  the link to the target is destroyed and the feature's own serial
+  correlation is not, so the null's per-date ICs are as autocorrelated as
+  the observed ones. The within-date shuffle that used to be the null
+  destroyed both, and on live features — per-date IC autocorrelation
+  +0.6 — it rejected a true null 27–35% of the time; it remains available
+  as `null="within_date"`, and the result reports `null` and
+  `ic_autocorrelation_lag1` so a reader can see which regime a feature is
+  in. The p-value is two-sided so a strong negative IC counts as strong.
+  Its `null_p95_abs` is the defensible floor to pass to
+  `select_features(min_abs_rank_ic=...)`.
 
 `select_features` deliberately has no greedy search. A selector scored on
 the panel it selects from manufactures overfit that looks like evidence, and
 an agent handed that output cannot tell. It drops duplicates and the
-unmeasurable, and records a reason for every exclusion.
+unmeasurable, and records a reason for every exclusion. **It does not read
+the whole panel either.** Redundancy and the IC floor used to be measured
+over every date, holdout included, so a walk-forward run on the selected
+features started biased: the top five of sixty pure-noise columns chosen
+that way scored +0.045 out of sample against +0.002 for five chosen blind,
+about 70% of a real model's headline. Selection now reads the first
+`1 - holdout_fraction` of the dates (default 0.3 held out) or the dates
+through `selection_end`, and the result carries `selection_window`,
+`holdout_window`, every candidate's `selection_ic` and each selected
+feature's `holdout_ic` — the number to believe, since the selection IC
+chose the features and is optimistic by construction. `holdout_fraction=0`
+selects on everything, and the warning says so.
 
 **A statistic that comes back as `null` was not computed.** That is not the
 same as zero: a panel with too few entities per date has no cross-section,
@@ -359,6 +378,21 @@ composition) that barely moves day to day. `factors.pca_factor_return`
 projects each day's realized return onto the currently-held loadings, so
 it still updates every bar even though the loadings only change at each
 refit.
+
+**The refit bars sit on a grid fixed by the bar's date**, not counted from
+the frame's first bar (`features/schedule.py`: weekdays since 1970 for
+daily bars, the bar's own spacing for faster ones). Anchored on the first
+bar, a frame fetched from a different start refit on different bars, and
+`score_model` rebuilds features from `as_of - lookback_days` — a different
+anchor than the training build — so the deployed estimator was fed a
+different variable under the same column name: recomputing after dropping
+one leading bar changed every value, the worst by 33.6%. On the grid a
+value at a date is the same whatever window the frame was fetched for,
+dropping leading bars leaves every computable value bit-identical, and
+truncating trailing bars leaves every earlier value unchanged. The price
+is warm-up: the first refit is the first grid bar with a full window
+behind it, up to `refit_every - 1` bars after the window itself. The
+network features below share the grid.
 
 Each refit calls `pca_returns(..., n_components=1, method="power_iteration")`
 rather than the default full SVD — since only PC1 is ever needed here,
@@ -548,7 +582,7 @@ to build the dataset:
 | `survivorship_free=False` | Delisted securities are not queryable, so any universe of currently-listed symbols is a survivors-only sample. Backtested returns are biased upward and walk-forward validation does not correct for it. |
 | partial history | A symbol covers materially less than the universe's date range — it listed inside the window, or stopped early. It is weighted far less than its presence in `universe` suggests. |
 | requested start/end unavailable | The window that came back is shorter than the one asked for, before any feature lookback is consumed. |
-| PCA intersection | Universe-scope features need a complete cross-section, so one short history truncates the panel *for every entity*. The warning names the latest-starting symbol, which is usually the whole explanation. |
+| PCA intersection | Universe-scope features need a complete cross-section, so one short history truncates the panel *for every entity*. The warning names the entity whose removal recovers the most dates — computed, not inferred from the latest start, which on a universe where every name starts together named whichever came first — with its bar range and the count recovered, or says that no single symbol binds. |
 | non-daily interval | Feature default *parameters* are stated in trading days and are not rescaled (above). Annualization is no longer part of this caveat — see below. |
 | provider guarantees undetermined | `get_metadata` was unavailable or failed, so the point-in-time and survivorship caveats could not be checked at all. Deliberately **not** the same as an empty warning list: absence of evidence is reported as absence of evidence. |
 
@@ -617,6 +651,16 @@ they qualify, and the build-time tool response is transient. An empty list
 on an older model is indistinguishable from "no warnings" by design:
 absence of a recorded warning is not evidence the condition did not hold.
 
+`data_sources` travels the same way: the feed each entity's bars came from
+(`provider:dataset` for a provider that chooses a dataset per window, the
+provider name otherwise), persisted in `dataset_meta.json`, returned by
+`build_model_dataset`,
+carried as `ModelManifest.data_sources` and shown in the lineage view. Two
+models built from one spec on two Databento feeds carried identical
+recorded identity and differed by 22% on the headline metric; this is the
+field that tells them apart. It is an observation about the build, not a
+request, so it sits outside `dataset_spec_hash`.
+
 
 ### Missing data: three policies, in two layers
 
@@ -665,8 +709,16 @@ random forests, LightGBM and XGBoost yes; the linear models, the MLP and
 SGD no — can read the hole directly. One that does not is refused **by
 name, before any fold is fitted**, with the step that would close it,
 rather than failing inside sklearn several frames down; `score_model`
-makes the same check. An infinity is still refused under every policy: it
-is a degenerate computation, not a missing one.
+makes the same check. **A column that is missing in every training row of
+a fold is refused by name**, with the fold and the remedy, before the
+impute step runs: the step would fit it as a constant and the fold would
+train on a feature that does not exist there — five of eight live folds
+did, and the averaged importance said nothing. Each feature's per-fold
+training missing rate is recorded in `validation_report.missing_rate_by_fold`
+and on each fold record as `missing_rate_train` (`None` when the panel has
+no holes), so an averaged importance can be read against the folds that
+actually had the feature. An infinity is still refused under every policy:
+it is a degenerate computation, not a missing one.
 
 `drop_attribution` under `keep` still reports what `drop` *would* have
 removed, because that is the number a caller deciding between the two
@@ -745,12 +797,17 @@ owned it.
 ### The horizon is required
 
 A panel arrives with a `target` column and no statement of what that column
-means. The engine needs the horizon for the target-overlap purge — the rule
-that stops a label spanning bars t..t+h from being trained on beside a fold
-boundary inside that span. It cannot be inferred from the data, and
-defaulting it would not fail; it would **silently disable the purge**. So it
-is required, and it is the one thing about an external panel this tool
-refuses to guess.
+means. The engine purges on each row's **label end** — the rule that stops
+a label spanning bars t..t+h from being trained on beside a fold boundary
+inside that span — and for a fixed-horizon label without a
+`label_end_column` the registration derives that end from the horizon, `h`
+rows ahead on the entity's own calendar. It did not: the purge reads only
+the column, the column was never written, and an external panel with 280
+training rows whose label reached the test window reported `0` purged
+while this section said the horizon was purging. The horizon cannot be
+inferred from the data, and without it there is no label end and no purge,
+so it is required, and it is the one thing about an external panel this
+tool refuses to guess.
 
 Supply `label_end_column` as well for a label that can end early — a triple
 barrier — so the purge uses the real end rather than the nominal horizon.
@@ -999,7 +1056,7 @@ declined instead, and the tool surfaces it as a warning.
 
 `network.avg_correlation` and `network.mst_degree` describe where an entity
 sits in the correlation graph its universe forms, refit on a rolling window
-like the PCA factors beside them.
+like the PCA factors beside them, on the same date-fixed grid.
 
 They are chosen for what they are **not**: eigenvector centrality of a
 correlation matrix is its leading eigenvector, which `factors.pca_loading`
@@ -1040,7 +1097,11 @@ and this library asks every classifier for one on every fold — so
 than a full re-solve, and `learning_rate`/`eta0` are an optimizer-level
 expression of recency that composes with `weighting.method='time_decay'`
 rather than replacing it. Both need scaled inputs, which the engine's
-per-fold winsorize-and-zscore already provides.
+per-fold winsorize-and-zscore already provides. `sgd` regression carries
+its `coef_` through sklearn's `SparseCoefMixin` rather than `LinearModel`,
+so the capability report used to say it had no coefficients while every
+run of it produced signed coefficient importance; it reports
+`exposes_coefficients` now.
 
 `engine.run_experiment` refuses any estimator type not in this registry —
 no arbitrary `sklearn` import, no `exec()`. An LLM builds a declarative
@@ -1311,6 +1372,12 @@ dates — an integer embargo under-purges exactly there. The count of purged
 rows is reported as `n_train_rows_purged_overlap` rather than applied
 silently: a large value means the horizon is consuming a real fraction of
 each training window, which changes how you read the metrics.
+`validation_report.purge` says whether the purge could run at all:
+`"label_end"` when the panel carries `label_end_date`, `"not_applicable"`
+when it does not — and then `n_train_rows_purged_overlap` is `None`, not
+`0`. Without that column the purge was a no-op that wrote `0`, the same
+value a clean run gives, on a panel with 280 overlapping rows; the inner
+search's report says the same.
 
 **`embargo` therefore does not need to cover the horizon.** It remains
 useful for feature-side lookback bleed.
@@ -1382,7 +1449,11 @@ date, fold coverage, the target horizon, purged-row count, and **per-fold**
 metrics with train/test windows. A single averaged number cannot show
 performance decay over time, reveal which regime drove the result, or
 expose that one fold carried everything — and a run where 8 of 10 folds
-were skipped previously looked identical to a clean 2-fold run.
+were skipped previously looked identical to a clean 2-fold run. Under
+`cpcv` a fold's test set is several blocks with training dates between
+them, and one `test_start..test_end` span read as a window containing
+them; each fold record carries `test_blocks`, one start and end per
+contiguous run.
 
 Each fold records both `train_end` — the last date **actually fit**, after
 label-overlap purging — and `scheduled_train_end`, the window end the
@@ -1429,10 +1500,29 @@ coefficients (routine under L1) are excluded from `sign_consistency` rather
 than counted as agreeing with either side.
 
 After validation, the registered model is refit on the **full** panel —
-folds are for validation, deployment uses every observation. The
-preprocessing stats from that final refit are persisted alongside the model
+folds are for validation, deployment uses every observation. The fitted
+preprocessing state from that final refit is persisted alongside the model
 so `score_model` applies the identical transform, rather than refitting on
-whatever universe happens to be in the scoring call.
+whatever universe happens to be in the scoring call — for a pooled
+transform, that is; a cross-sectional one fits nothing and is pinned to
+its universe instead (see `score_model` below).
+
+**The refit carries the parameters the folds validated.** Each fold
+reassigned its parameters from the inner search, and the refit read the
+spec's base values, which the search may never have scored: a ridge
+searched over {0.001, 100, 10000} was deployed at `alpha=1.0`, a value not
+in the grid, and a forest searched over `max_depth` {6, 8} at the base
+depth of 1 — its deployed predictions correlated with the correctly
+refitted ones at Spearman 0.30. One final inner search on the full panel,
+under the same purge and embargo the folds used, now chooses the deployed
+parameters, and one variable feeds the refit, the quantile models and the
+conformal radius. The manifest's `estimator_params` are the deployed
+values; `deployed_params_source` says whether they came from that
+`full_panel_search`, from the `last_fold` searched when the panel could not
+support the inner folds, or from the `spec` when nothing searched;
+`validation_report.final_search` keeps the search beside the per-fold
+selections, and `inspect_model(view="summary")` shows `estimator_params`,
+`deployed_params_source` and `training_cross_section`.
 
 
 ---
@@ -1674,7 +1764,11 @@ panel, the deployed estimator's predictions under the two transforms agreed
 at Spearman 0.84. A model registered before the state file existed scores
 through its statistics file when that describes a validated pipeline, and
 is refused by name when it does not; its walk-forward OOS predictions
-remain valid either way.
+remain valid either way. The legacy `preprocessing_stats.json` is still
+written beside the state for an older reader; for a pipeline the
+per-column form cannot express it holds `{"legacy": false, "note": ...}`
+rather than `{}`, which `apply_preprocessing` read as the identity, and it
+refuses that marker.
 
 `ctx` carries the rows' dates and entities, because a cross-sectional step
 has to know which rows share a date. It never carries the target: a step
@@ -1832,10 +1926,17 @@ report = result["validation_report"]["hyperparameter_search"]
 That output is from a real run, and it is the useful signal: the search
 picked a *different* alpha on most folds, which means it was fitting noise.
 A single averaged "best alpha" would have hidden that completely.
+`validation_report.final_search` is the entry for the search on the full
+panel that chose what the registered estimator carries, and
+`deployed_params` beside it are those values — read them against the
+per-fold list, since a deployed choice the folds never agreed on is the
+same signal one level up.
 
 **What it costs.** Roughly `(grid size × inner_splits)` extra fits per outer
-fold. A 12-point grid with 3 inner splits over 20 outer folds is 720 fits
-where there was 20. That is why it is opt-in. If the training window is too
+fold, plus the same again once for the final search on the full panel that
+chooses the deployed parameters. A 12-point grid with 3 inner splits over
+20 outer folds is 756 fits where there was 20. That is why it is opt-in.
+If the training window is too
 short to be split `inner_splits` times, the search declines for that fold
 and says so in `reason`, rather than selecting on two dates.
 
@@ -1913,8 +2014,10 @@ returns rather than re-deriving any of it. A plan carries:
 - **the candidate list** the search will score, from the same enumeration
   and the same seeded sample the search walks;
 - **the fit count**: per fold, one fit (times `calibration_folds` for a
-  calibrated classifier) plus candidates × inner folds, and one refit on
-  the full panel after the folds;
+  calibrated classifier) plus candidates × inner folds, and after the
+  folds one refit on the full panel plus the final search that chooses its
+  parameters — candidates × the inner folds the whole axis supports,
+  `n_fits_final_search`, counted inside `n_fits_refit`;
 - **a content hash per fold**: `node_hash` over everything that determines
   the fitted estimator (dataset hash, the fold's rows, the resolved
   preprocessing pipeline, the feature set, the estimator and its parameters,
@@ -1923,7 +2026,8 @@ returns rather than re-deriving any of it. A plan carries:
   *preprocessed matrices* alone.
 
 `validation_report["fits"]` records what the plan said the run would cost
-(`planned`, split into `folds` and `refit`, with `candidates_per_fold`)
+(`planned`, split into `folds`, `refit` and `final_search`, with
+`candidates_per_fold`)
 beside the ceiling it was checked against. A fold skipped at run time cost
 less than planned; nothing costs more.
 
@@ -1933,11 +2037,11 @@ over it is refused before the first fit, by name, with the count and what
 would bring it under:
 
 ```
-run_model_experiment: this spec implies 1,281 estimator fits (16 fold(s) x
-(1 + 20 candidate(s) x inner folds) + 1 for the refit), over
-budget.max_fits=500. Nothing was fitted. Shrink the search grid or its
-inner_splits, use fewer folds, or pass budget.max_fits=1281 to accept the
-cost on purpose.
+run_model_experiment: this spec implies 1,341 estimator fits (16 fold(s) x
+(1 + 20 candidate(s) x inner folds) + 61 for the refit, 60 of them
+choosing its parameters on the full panel), over budget.max_fits=500.
+Nothing was fitted. Shrink the search grid or its inner_splits, use fewer
+folds, or pass budget.max_fits=1341 to accept the cost on purpose.
 ```
 
 Nothing is quietly shortened: a search that ran half its grid is not the
@@ -1950,8 +2054,9 @@ panel is never loaded — so `estimated_fits` is the plan's number and
 `within_budget` says whether the experiment would be refused; over budget
 is reported as a problem at `where="budget"` with the `max_fits` that
 would accept it. Without a dataset, purged K-fold and CPCV have a known
-fold count and the estimate assumes every fold searches, which is the most
-the spec can cost; walk-forward's fold count depends on the date axis and
+fold count and the estimate assumes every fold — and the full panel —
+searches, which is the most the spec can cost; walk-forward's fold count
+depends on the date axis and
 is reported as unknown rather than guessed.
 
 `feature_ablation`'s own `max_fits` is a separate ceiling on the whole
@@ -2107,6 +2212,16 @@ nothing either way.
 `|IC| ≥ 0.05` floor, a leak in a feature too persistent to judge, or a leak
 that is constant across the whole sample. It tells an agent where to look.
 
+`check_leakage` runs it too, when it has a panel to run it on. On its own
+that tool reads each feature's *declared* temporal support and nothing
+else, and a feature registered as point-in-time safe that was literally
+the five-bar forward return came back `safe=True` with no findings. With a
+`dataset_id` the screen now runs on every requested feature column of the
+built panel; a flagged column is a finding with
+`temporal_support="empirical"`, `screen` carries every column's verdict,
+and `scope` says what `safe` rests on — `declared_temporal_support_only`
+without a dataset, `declared_and_empirical` with one.
+
 ### One horizon, for now
 
 Everything is measured against the panel's own `target`, because that is the
@@ -2244,7 +2359,11 @@ declared.
 **What a risk is not.** An ensemble refuses to average a survival model
 with a regressor or a ranker: a hazard ordering says which name's event
 comes first, not which name's return is larger, and `rank_mean` of the
-two ranks names by a quantity nobody asked for. `fill_probability` stays
+two ranks names by a quantity nobody asked for. A regressor and a ranker
+combine by rank alone: their levels are a return and an unscaled score,
+so `mean`, `median` and `weighted` across the two are refused by name —
+measured live, `mean` correlated with the ranker at 0.9996 and with the
+regressor at 0.45, and warned about nothing. `fill_probability` stays
 a classification label; deriving it from a survival curve at a horizon is
 a later convenience, not a change to what the label is.
 
@@ -2779,6 +2898,20 @@ not a narrower one). A model built purely from entity-scope features keeps
 the freedom to score a new universe, which is the whole point of the
 permission.
 
+**A cross-sectional model is pinned to its universe too.**
+`cross_sectional_standardize` fits nothing: it standardizes within the rows
+of the call, so every row's score depends on which other entities were
+scored with it. Narrowing eight trained names to three moved one row's
+score by 544% and inverted a forest's ranking, with nothing in the result
+saying so, while the pooled sibling was invariant. Such a model is refused
+on a universe other than the trained one, in the same voice as the refusal
+above, unless the caller passes `universe_policy="allow"`; the result's
+`warnings` then say the transform was refit on the scoring cross-section
+and how its width compares with the manifest's `training_cross_section`
+(min, median and max entities per date in the training panel). The
+statement earlier that scoring applies the persisted statistics whatever
+else is in the call is true of a pooled model only.
+
 **Feature implementations are checked before scoring.** The manifest's
 `feature_provenance` records, per output column, the feature id, its
 resolved params, and a hash of the feature function's own source. Editing a
@@ -2980,14 +3113,22 @@ mdl_a  vs  ref   0.041           0.047           +0.006       [-0.004, +0.016]  
 on a different label, or a different task, is refused by name: two labels
 are two questions, and a comparison on rows whose "truth" differs would be
 arithmetic on both. The label a multi-horizon model was fit on is resolved
-by the same helper `analyze_model_errors` uses.
+by the same helper `analyze_model_errors` uses. A `cpcv` model is refused
+here by name, as `combine_predictions`, `evaluate_model_portfolio` and
+`oos_predictions_to_signal_panel` refuse it: its OOS frame predicts each
+row once per path, so the join on (date, entity) was a 25× cartesian
+product that produced a "significant" p=0.013 from nothing.
 
 The nulls are tested as *rates*: a single seed rejects at the 5% level one
 time in twenty by design, so the tests check that twenty and forty
 independent nulls reject about that often rather than that one particular
 draw happens not to. A model compared against its own twin — the same spec
-registered twice — reports a difference of exactly zero, a hit rate of
-zero and `indistinguishable`.
+registered twice — reports a difference of exactly zero, `n_ties` equal to
+`n_dates`, a `hit_rate` of `None` and `indistinguishable`. The hit rate is
+the candidate's share of *decided* dates, ties excluded, with `n_ties`
+beside it and `n_a_better` and `n_b_better` on the `paired_comparison`
+result underneath; a rate of 0.0 over all dates read as the candidate
+losing every day when the truth was a tie.
 
 ---
 

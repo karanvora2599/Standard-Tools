@@ -132,7 +132,7 @@ iv = implied_volatility(option_price=price, spot=42, strike=40, time_to_expiry=0
 print(iv["implied_volatility"], iv["converged"], iv["method"])  # 0.20, True, "newton"
 ```
 
-`implied_volatility` solves via Newton-Raphson (vega as the derivative) with a bisection fallback over `[1e-6, 5.0]` when Newton fails to converge — the standard robust design for this exact problem. See [Documentation/12_options.md](12_options.md) for the full reference, including unit conventions for `vega`/`theta` and the no-arbitrage bound check `implied_volatility` runs before solving.
+`implied_volatility` solves via Newton-Raphson (vega as the derivative) and declares convergence on the **volatility step** it just took (`tol_sigma`, the price tolerance scaled by vega), handing over to a bisection over `[1e-6, 5.0]` when vega falls below a floor or a step leaves the bracket. It used to test an absolute price tolerance *before* taking a step, so where vega is small it returned its initial guess as "converged" — 0.2 for true vols of 3.00, 1.20 and 0.45 on short-dated puts. The result reports `price_error` and `at_bound`; a price bit-for-bit at intrinsic (which the pricer itself produces deep in the money) is admitted and returned as the largest volatility that still reproduces it, with `at_bound=True`, and a price of 0.0 is refused as underflow rather than searched. See [Documentation/12_options.md](12_options.md) for the full reference, including unit conventions for `vega`/`theta` and the no-arbitrage bound check `implied_volatility` runs before solving.
 
 ### Regression
 
@@ -278,6 +278,8 @@ result = run_portfolio_simulation(
 )
 print(result['final_equity'], result['leverage_curve'].mean)
 ```
+
+`max_adv_participation` is a cap, not a kill switch: a trade over it is sized down to the cap and the shortfall is recorded per rebalance (`n_capped`, `capped_notional`, `capped` in `rebalance_log`, plus a summary warning). It used to refuse the whole simulation, so a capacity study could not be expressed.
 
 Pluggable building blocks compose into `run_portfolio_simulation` (or can be used standalone):
 
@@ -542,10 +544,10 @@ feed. Each names what it is a proxy for and how it fails.
 | `roll_spread(prices,...)` | Effective spread from bid-ask bounce, with a `smallest_detectable_spread` floor |
 | `corwin_schultz_spread(ohlc)` | Spread from the high-low range; reports the negative fraction |
 | `amihud_illiquidity(ohlcv,...)` | Price move per dollar traded, reported as a percentile |
-| `kyle_lambda(ohlcv,...)` | Market depth from signed order flow |
+| `kyle_lambda(ohlcv,...)` / `kyle_lambda(trades=, quotes=, freq=)` | Market depth from signed order flow. From bars the sign is the bar's own return, so the result says `circular=True`; from a tape the flow is Lee-Ready signed and the midpoint change is regressed on it |
 | `order_flow_imbalance(ohlcv,...)` | Signed imbalance, with non-overlapping persistence |
-| `estimate_vpin(ohlcv,...)` | Flow one-sidedness in volume time |
-| `intraday_volume_profile(bars,...)` | The U-shape, for scheduling |
+| `estimate_vpin(ohlcv,...)` | Flow one-sidedness in volume time; the trailing residue bucket is dropped and reported as `residual_volume` |
+| `intraday_volume_profile(bars, index_timezone=...)` | The U-shape, for scheduling — bucketed over the regular session when the index carries a zone, with `extended_hours_share` |
 | `implementation_shortfall(...)` | Perold decomposition: delay, impact, opportunity, fees |
 
 Deep guide: [22_microstructure.md](22_microstructure.md)
@@ -613,7 +615,7 @@ actually exposed to.
 | Function | Description |
 |---|---|
 | `risk_parity(covariance,...)` | Equal risk contribution, or an explicit risk budget |
-| `hierarchical_risk_parity(returns)` | Allocation without inverting the covariance matrix |
+| `hierarchical_risk_parity(returns)` | Allocation without inverting the covariance matrix; columns are sorted by name first, so the weights do not depend on the order the universe was listed in |
 | `max_diversification(covariance)` | Maximizes the diversification ratio |
 | `factor_exposure_budget(...)` | What the portfolio is a bet on, once names collapse into factors |
 | `concentration_analysis(weights)` | Effective N, Herfindahl, top-k share |

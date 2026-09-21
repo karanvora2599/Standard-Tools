@@ -192,6 +192,20 @@ print(f"Passed: {len(result)} / {len(sp500)}")
 | `1` | Single process (asyncio only) — best for small lists and notebooks |
 | `> 1` | ProcessPoolExecutor — best for 50+ tickers |
 
+## Which provider the bars come from
+
+`screen_stocks`, `screen_stocks_async` and the `run_screener` tool take
+`source` — a provider name such as `"databento"` or `"polygon"` — and
+`None` (the default) uses the default provider. The screener was hard-wired
+to the default and could not reach Databento's consolidated tape at all,
+which mattered because a volume-based screen against a sample feed keeps
+different names: a $1bn ADV screen kept 1 of 12 names on the sample feed and
+all 12 on the real tape. `source` travels in the worker tuple, so a
+multi-process run screens the same source every batch. Fundamental filters
+still need a provider that serves financial ratios; on a bars-only provider
+those tickers land in `failed_tickers` by name rather than passing a filter
+they were never measured against.
+
 ---
 
 ## Via Agent Tool

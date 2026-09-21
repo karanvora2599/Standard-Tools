@@ -55,12 +55,15 @@ result = implied_volatility(
     spot=42, strike=40, time_to_expiry=0.5, risk_free_rate=0.10, option_type="call",
 )
 print(result)
-# {'implied_volatility': 0.2, 'converged': True, 'iterations': 1, 'method': 'newton'}
+# {'implied_volatility': 0.2, 'converged': True, 'iterations': 3, 'method': 'newton',
+#  'price_error': 1.2e-12, 'at_bound': False}
 ```
 
-**Solve method:** Newton-Raphson (vega as the derivative) with a bisection fallback over `[1e-6, 5.0]` (500% annualized vol — a deliberately generous practical cap) when Newton fails to converge or steps outside that bracket. Newton alone is not robust here: vega can be tiny for deep ITM/OTM options, making a raw Newton step overshoot or divide by ~zero. Bisection is slower but guaranteed to converge whenever a solution exists in the bracket, since Black-Scholes price is strictly increasing in volatility for any fixed inputs.
+**Solve method:** Newton-Raphson (vega as the derivative) with a bisection fallback over `[1e-6, 5.0]` (500% annualized vol — a deliberately generous practical cap) when vega falls below `VEGA_FLOOR` or a step leaves that bracket. Newton alone is not robust here: vega can be tiny for deep ITM/OTM options, making a raw Newton step overshoot or divide by ~zero. Bisection is slower but guaranteed to converge whenever a solution exists in the bracket, since Black-Scholes price is strictly increasing in volatility for any fixed inputs.
 
-**No-arbitrage bound check runs first:** `option_price` must lie strictly between the option's lower bound (volatility → 0) and upper bound (volatility → ∞); a price outside that range raises `ValidationError` immediately rather than searching for a volatility that can't exist.
+**Convergence is declared on volatility, not on price.** The test used to be an absolute price tolerance (`tol`) applied *before* any step was taken, so where vega is small a volatility wrong by hundreds of points still priced inside `1e-6` and the solver returned its initial guess with `converged=True`: four short-dated puts came back at exactly `0.2` for true vols of 3.00, 1.20 and 0.45, and over a 700-case grid 28 of the 549 "converged" answers were off by more than 0.01 vol. A Newton step is now always taken, and the solver has converged when the step it just took moved volatility by less than `tol_sigma` (default `1e-8`) — which is the price tolerance scaled by vega, and is meaningful at any vega. Bisection converges on the width of its bracket. `tol` remains the price tolerance the result reports `price_error` against; it no longer declares convergence on its own.
+
+**No-arbitrage bound check runs first:** `option_price` must lie between the option's lower bound (volatility → 0) and upper bound (volatility → ∞); a price outside that range raises `ValidationError` immediately rather than searching for a volatility that can't exist. Equality within `BOUND_TOLERANCE` is *inside* the bound — the pricer itself produces a deep-in-the-money price bit-for-bit equal to intrinsic, and a strict `<` refused 77 of 700 such prices. A price at intrinsic is solved by bisection for the largest volatility that still reproduces it and comes back with `at_bound=True`: every volatility at or below that number prices the same, so it is a ceiling rather than an estimate. A price of `0.0` is refused with the reason: it is what the pricer returns when an option is so far from the money that its value underflows, and no volatility is identifiable from it.
 
 ```python
 from standard_quant_tools.error import ValidationError
@@ -68,7 +71,7 @@ from standard_quant_tools.error import ValidationError
 try:
     implied_volatility(option_price=50.0, spot=42, strike=40, time_to_expiry=0.5, risk_free_rate=0.10)
 except ValidationError as e:
-    print(e)   # "... is outside the no-arbitrage range (0.000000, 42.000000) ..."
+    print(e)   # "... is outside the no-arbitrage range [0.000000, 42.000000] ..."
 ```
 
 ---
