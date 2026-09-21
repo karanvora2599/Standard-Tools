@@ -124,6 +124,34 @@ def allowed_params(task: str, name: str) -> "list[str]":
     return _PARAM_SCHEMAS[key].allowed_names
 
 
+def param_schema(task: str, name: str) -> EstimatorParamSchema:
+    """
+    The whole schema behind one registered estimator: every parameter's
+    bound and the cross-parameter checks.
+
+    `allowed_params` returns the NAMES, which is all an error message
+    needs. The bounds themselves — the 2000-tree ceiling, the solvers a
+    penalty is implemented for, the losses that yield a probability — are
+    enforced on every call through `_PARAM_SCHEMAS` and, until this
+    existed, were readable only by importing a private dict. A caller that
+    wants to describe the allowlist rather than validate against it needs
+    the schema, and going private for it is how a description drifts from
+    what is actually enforced.
+
+    Raises:
+        ValidationError: unknown (task, name) — the same refusal
+        `get_estimator_class` gives, so a name that is refused here is
+        refused there.
+    """
+    key = (task, name)
+    if key not in _PARAM_SCHEMAS:
+        allowed = sorted(n for t, n in ESTIMATOR_REGISTRY if t == task)
+        raise ValidationError(
+            f"unknown estimator name={name!r} for task={task!r} — allowed: {allowed}"
+        )
+    return _PARAM_SCHEMAS[key]
+
+
 def validate_param_value(task: str, name: str, param: str, value: Any) -> None:
     """
     Check ONE parameter's value against its bound, without the

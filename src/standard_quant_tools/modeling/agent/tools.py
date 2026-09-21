@@ -17,7 +17,7 @@ better.
                             there is no separate "just fit" tool.
     score_model           — model_id + as_of + universe -> predictions
                             artifact.
-    inspect_model          — one tool, four views, instead of four
+    inspect_model          — one tool, five views, instead of five
                             separate inspection tools.
     evaluate_model_portfolio — model_id + transform/portfolio specs ->
                             OOS predictions run through the shared-cash
@@ -44,6 +44,7 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..analysis import build_feature_report
+from ..assets import fetch_plan
 from ..capabilities import modeling_capabilities
 from ..dataset.builder import SPEC_HASH_VERSION
 from ..dataset.builder import build_dataset as _build_dataset
@@ -61,6 +62,17 @@ from ..specs import TASKS, DatasetSpec, FeatureSpec, TargetSpec, targets_for_tas
 from .dataset_tools import (  # noqa: F401
     ExplainRowLossInput,
     explain_dataset_row_loss,
+)
+from .discovery_tools import (  # noqa: F401
+    DESCRIBE_ESTIMATOR_DESCRIPTION,
+    DESCRIBE_EXCHANGE_CALENDAR_DESCRIPTION,
+    ESTIMATE_FEATURE_WARMUP_DESCRIPTION,
+    DescribeEstimatorInput,
+    DescribeExchangeCalendarInput,
+    EstimateFeatureWarmupInput,
+    describe_estimator,
+    describe_exchange_calendar,
+    estimate_feature_warmup,
 )
 from .models import (
     AnalyzeFeaturesInput,
@@ -122,6 +134,17 @@ from .portfolio_tools import (  # noqa: F401
     EVALUATE_PREDICTIONS_PORTFOLIO_DESCRIPTION,
     EvaluatePredictionsPortfolioInput,
     evaluate_predictions_portfolio,
+)
+from .preview_tools import (  # noqa: F401
+    PLAN_MODEL_EXPERIMENT_DESCRIPTION,
+    PREVIEW_PREPROCESSING_DESCRIPTION,
+    PREVIEW_SAMPLE_WEIGHTS_DESCRIPTION,
+    PlanModelExperimentInput,
+    PreviewPreprocessingInput,
+    PreviewSampleWeightsInput,
+    plan_model_experiment,
+    preview_preprocessing,
+    preview_sample_weights,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,7 +219,32 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
         input_data.spec.provider,
         input_data.spec.interval,
     )
+    # Two universe keys that resolve to one provider symbol are refused
+    # at the tool boundary, before anything is constructed or fetched. No
+    # shipped provider resolves a venue, so 'BHP@XNYS' beside 'BHP@XASX'
+    # would fetch one series and register it as two entities. The builder
+    # refuses the same pair, but only after the provider has been built
+    # and its point-in-time contract read; asking first costs a dict and
+    # makes the refusal the first thing the caller sees.
+    fetch_plan(list(input_data.spec.universe))
     built = _build_dataset(input_data.spec)
+
+    # The calendar this spec took from its universe's venue, if it took
+    # one. `calendar` is part of the dataset's identity -- it decides the
+    # sessions every later annualization counts -- and a spec that arrived
+    # without one and left with XNYS looked, afterwards, exactly like one
+    # that asked for XNYS. The adoption is reported here and recorded in
+    # the metadata, so a reader does not have to infer it from the venue
+    # suffixes.
+    adopted_calendar = input_data.spec.calendar_adopted_from_venue
+    warnings = list(built["warnings"])
+    if adopted_calendar is not None:
+        warnings.append(
+            f"calendar adopted from the universe's venue: {adopted_calendar}. "
+            "No calendar was given and every universe key names that venue, so "
+            "it became this dataset's calendar and part of its identity. Pass "
+            "DatasetSpec.calendar explicitly to choose a different one."
+        )
 
     dataset_id = f"ds_{uuid.uuid4().hex[:12]}"
     panel_uri = _artifacts.save_artifact(
@@ -235,6 +283,13 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             # tool response they may not have kept.
             "provider": input_data.spec.provider,
             "interval": input_data.spec.interval,
+            # The venue code this dataset's calendar was INFERRED from,
+            # or None when the calendar was given (or none was resolved).
+            # dataset_spec.json records the resulting calendar but cannot
+            # say it was inferred; validate_model_spec reads this key off
+            # the metadata it already loads and says so before an
+            # experiment is spent on the dataset.
+            "calendar_adopted_from_venue": adopted_calendar,
             "warnings": built["warnings"],
             # Per-column row loss from feature/target alignment. Kept with
             # the dataset rather than only in the tool response, so "why is
@@ -256,7 +311,7 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
         entities=built["entities"],
         feature_ids=built["feature_ids"],
         target_id=built["target_id"],
-        warnings=built["warnings"],
+        warnings=warnings,
         drop_attribution=built["drop_attribution"],
         data_sources=built.get("data_sources", {}),
     )
@@ -425,6 +480,11 @@ def register_external_panel(
             "entities": loaded["entities"],
             "provider": "external",
             "interval": input_data.interval,
+            # Recorded for the same reason a built dataset records it: the
+            # synthesized spec adopts a calendar when every entity name
+            # carries one venue, and that calendar is part of the
+            # dataset's identity whether or not anything was fetched.
+            "calendar_adopted_from_venue": spec.calendar_adopted_from_venue,
             "warnings": warnings,
             # Nothing was aligned here -- the panel arrived aligned -- so
             # there is no per-column row loss to attribute. An empty map is
@@ -852,7 +912,7 @@ def _labelled_column(column: str) -> str:
 
 
 def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
-    """One tool, four views — avoids five separate inspection tools for
+    """One tool, five views — avoids five separate inspection tools for
     what's ultimately reading different slices of the same manifest."""
     manifest = load_manifest(input_data.model_id)
 
@@ -901,7 +961,7 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # for a model registered before it was recorded.
             "preprocessing": manifest.preprocessing,
         }
-    else:  # lineage
+    elif input_data.view == "lineage":
         data = {
             "dataset_id": manifest.dataset_id,
             "dataset_hash": manifest.dataset_hash,
@@ -929,6 +989,150 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # trusting a model, and it now says whether the package is
             # still the one that was registered.
             "package": verify_model_package(input_data.model_id).to_dict(),
+        }
+    else:  # provenance
+        # Everything the manifest recorded about its own identity, and
+        # nothing it has to re-read an artifact to answer. `lineage`
+        # re-verifies the whole package, which is the expensive part of
+        # it; this view opens one JSON file and one process fingerprint,
+        # so it can be called before deciding whether the expensive check
+        # is worth running.
+        #
+        # The fields here were written at registration and reachable from
+        # no view at all, while three of them decide whether a call will
+        # be refused: the information cutoff score_model gates `as_of` on,
+        # the per-column feature provenance scoring re-checks, and whether
+        # a conformal band was deployed. Each was previously discoverable
+        # only by making the call and reading the refusal.
+        from ..registry.environment import (
+            environment_differences,
+            environment_fingerprint,
+        )
+
+        distribution = dict(manifest.distribution or {})
+        conformal = distribution.get("conformal") or None
+        monitoring = dict(manifest.monitoring or {})
+        trained_environment = dict(manifest.environment or {})
+        current_environment = environment_fingerprint()
+        # Nothing recorded is not "everything differs". A manifest written
+        # before the fingerprint existed would otherwise report one
+        # difference per key of the current environment and drown the
+        # reader; the empty side is said once, in `warnings`, instead.
+        differences = (
+            environment_differences(trained_environment, current_environment)
+            if trained_environment
+            else {}
+        )
+        warnings: List[str] = []
+        if manifest.training_information_cutoff is None:
+            if manifest.train_end_date is None:
+                warnings.append(
+                    "Neither training_information_cutoff nor train_end_date was "
+                    "recorded, so score_model enforces no cutoff at all on this "
+                    "model: an as_of inside its training window returns a "
+                    "future-trained prediction and nothing refuses it. Retrain "
+                    "to get the cutoff recorded."
+                )
+            else:
+                warnings.append(
+                    "training_information_cutoff was not recorded, so score_model "
+                    f"gates as_of on train_end_date ({manifest.train_end_date}) "
+                    "instead -- the last FEATURE date, which is the weaker "
+                    "guarantee. This model's labels consumed prices past that "
+                    "date, so the genuinely unsafe window extends further than "
+                    "the value shown. Retrain to get the exact cutoff."
+                )
+        if not manifest.feature_provenance:
+            warnings.append(
+                "feature_provenance is empty: this model predates per-column "
+                "provenance, so scoring cannot tell whether a feature's "
+                "implementation has changed since it was trained, and will not "
+                "refuse a run on a moved implementation. Retrain to record it."
+            )
+        if not trained_environment:
+            warnings.append(
+                "environment is empty: this model predates the recorded "
+                "numerical fingerprint, so there is nothing to compare this "
+                "machine's numpy, BLAS or thread caps against. `current` is "
+                "reported alone and `differences` is empty because one side is "
+                "missing, not because the two agree."
+            )
+        for key, moved in differences.items():
+            warnings.append(
+                f"environment moved since training: {key} was "
+                f"{moved['trained']!r}, is now {moved['current']!r}."
+            )
+        data = {
+            "model_id": manifest.model_id,
+            "version": manifest.version,
+            "created_at_utc": manifest.created_at_utc,
+            # The date score_model gates `as_of` on: max(label_end_date),
+            # which a horizon-h target pushes h bars past the last feature
+            # date. The earliest legal scoring date was previously
+            # readable only by eating the refusal.
+            "training_information_cutoff": manifest.training_information_cutoff,
+            # The last FEATURE date. Lineage, and the weaker fallback the
+            # gate uses for a manifest written before the cutoff existed.
+            "train_end_date": manifest.train_end_date,
+            "dataset_id": manifest.dataset_id,
+            # The identity of the feature/target DEFINITION, independent
+            # of the mutable dataset_spec.json, with the form of the hash
+            # so a verifier recomputes the same one.
+            "dataset_spec_hash": manifest.dataset_spec_hash,
+            "dataset_spec_hash_version": manifest.dataset_spec_hash_version,
+            # {filename: digest} for every artifact in the model's own
+            # directory. The expectations `lineage` re-verifies; listed
+            # here so a reader knows what is covered without paying for
+            # the re-verification.
+            "content_hashes": manifest.content_hashes,
+            # joblib always, plus skops when the estimator could be
+            # written without pickle -- which is the format that loads
+            # without executing it.
+            "formats": manifest.formats,
+            # Panel column -> {feature_id, params, implementation_hash}.
+            # Scoring re-derives this from the bundled spec and refuses
+            # when an implementation hash has moved, so this is the field
+            # that decides whether a scoring call will run at all.
+            "feature_provenance": manifest.feature_provenance,
+            "feature_implementation_hashes": manifest.feature_implementation_hashes,
+            # Whether a distribution was deployed beside the point
+            # estimator. `has_conformal` is the precondition for
+            # transform.method='uncertainty_scaled', which divides each
+            # prediction by its interval width and refuses a model whose
+            # scored frame carries no lower/upper columns -- until now
+            # learnable only by running the portfolio evaluation and
+            # reading the refusal.
+            "distribution": {
+                "has_conformal": conformal is not None,
+                "quantile_levels": list(distribution.get("quantiles") or []),
+                "alpha": (conformal or {}).get("alpha"),
+                "raw": distribution,
+            },
+            # What monitor_model compares a scored universe against. A
+            # model registered before references were kept has neither,
+            # and monitor_model refuses it by name.
+            "monitoring": {
+                "has_feature_reference": bool(monitoring.get("feature_reference_uri")),
+                "has_prediction_reference": bool(
+                    monitoring.get("prediction_reference_uri")
+                ),
+                "feature_reference_rows": monitoring.get("feature_reference_rows"),
+                "prediction_reference_rows": monitoring.get(
+                    "prediction_reference_rows"
+                ),
+            },
+            # What COMPUTED the model against what would compute it now.
+            # The capability report carries no numpy version, no BLAS and
+            # no thread count, so this diff is the only route to the
+            # current numerics -- and the difference between coefficients
+            # that reproduce to twelve digits and to four.
+            "environment": {
+                "trained": trained_environment,
+                "current": current_environment,
+                "differences": differences,
+                "matches": bool(trained_environment) and not differences,
+            },
+            "warnings": warnings,
         }
 
     return InspectModelResult(
@@ -1530,6 +1734,13 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
     modest can imply thousands of fits once an inner search grid multiplies
     through every fold, and the difference between seconds and an afternoon
     is not visible anywhere in the spec itself.
+
+    With a `dataset_id` this also checks two things about the dataset that
+    nothing else reports until something fetches: that its entity keys
+    resolve to distinct provider symbols (two that do not are one price
+    series wearing two identities), and whether its calendar was adopted
+    from a venue every universe key names rather than chosen. Both are read
+    from the dataset's metadata — no panel is loaded and nothing is fetched.
     """
     from standard_quant_tools.modeling.estimators.registry import (
         ESTIMATOR_REGISTRY,
@@ -1543,6 +1754,7 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
     estimator = spec.estimator.type
     problems: List[SpecProblem] = []
     notes: List[str] = []
+    warnings: List[str] = []
     allowed: List[str] = []
 
     if (task, estimator) not in ESTIMATOR_REGISTRY:
@@ -1664,6 +1876,44 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
                 f"({meta.get('rows', 'unknown')} rows, "
                 f"{n_dates if n_dates is not None else 'unknown'} dates)."
             )
+            # The dataset's entity keys, read off the same metadata, put
+            # through the symbol resolution every later fetch uses. Two
+            # keys that resolve to one provider symbol are one series
+            # under two identities, and the refusal otherwise arrives
+            # from whatever fetches next -- scoring, the portfolio
+            # evaluation, a point-in-time join -- after the universe has
+            # been budgeted. A panel registered by reference can carry
+            # such a pair, because registering it fetched nothing.
+            try:
+                fetch_plan([str(e) for e in meta.get("entities", [])])
+            except ValidationError as exc:
+                problems.append(
+                    SpecProblem(
+                        where="dataset_id",
+                        problem=str(exc),
+                        suggestion=(
+                            "Rebuild the dataset with entity keys that resolve "
+                            "to distinct provider symbols; every tool that "
+                            "fetches prices for this dataset refuses it as it "
+                            "stands."
+                        ),
+                    )
+                )
+            # A calendar nothing asked for. It decides the sessions every
+            # annualization counts and is part of the dataset's identity,
+            # and the built spec cannot say afterwards whether it was
+            # given or inferred -- so the build recorded which, and this
+            # is where it is read, from metadata, before an experiment is
+            # spent on the dataset.
+            adopted = meta.get("calendar_adopted_from_venue")
+            if adopted:
+                warnings.append(
+                    f"calendar adopted from the universe's venue: {adopted}. "
+                    f"Dataset {input_data.dataset_id!r} was built without an "
+                    "explicit calendar and every universe key names that venue, "
+                    "so it became the dataset's calendar and part of its "
+                    "identity."
+                )
 
     # ── How much work this implies ────────────────────────────────────
     # The fold count used to be read off `validation.n_splits`, which every
@@ -1754,6 +2004,7 @@ def validate_model_spec(input_data: ValidateModelSpecInput) -> ValidateModelSpec
         max_fits=int(spec.budget.max_fits),
         within_budget=within_budget,
         notes=notes,
+        warnings=warnings,
     )
 
 
@@ -2744,7 +2995,10 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Check a ModelSpec before spending an experiment on it: that the "
         "estimator exists for the task, that its parameters are accepted, "
         "and how many fits the spec implies once a search grid multiplies "
-        "through every fold. Fetches nothing and fits nothing.",
+        "through every fold. Given a dataset_id it also checks that dataset's "
+        "entity keys resolve to distinct provider symbols and reports a "
+        "calendar it adopted from its universe's venue. Fetches nothing and "
+        "fits nothing.",
         ValidateModelSpecInput,
     ),
     (
@@ -2788,7 +3042,13 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     ),
     (
         "inspect_model",
-        "Inspect a registered model's summary/importance/validation/lineage.",
+        "Inspect a registered model's summary/importance/validation/lineage/"
+        "provenance. The provenance view is the one to read BEFORE scoring or "
+        "sizing: it reports the training information cutoff score_model gates "
+        "`as_of` on (the earliest legal scoring date), whether a conformal band "
+        "was deployed (the precondition for the uncertainty_scaled transform), "
+        "the per-column feature provenance scoring re-checks, and how the "
+        "environment that fitted the model differs from this one.",
         InspectModelInput,
     ),
     (
@@ -2902,6 +3162,36 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "direction signal is re-evaluated every bar, which is a valid "
         "strategy but not the same thing as holding for 20 days.",
         BacktestModelSignalInput,
+    ),
+    (
+        "estimate_feature_warmup",
+        ESTIMATE_FEATURE_WARMUP_DESCRIPTION,
+        EstimateFeatureWarmupInput,
+    ),
+    (
+        "plan_model_experiment",
+        PLAN_MODEL_EXPERIMENT_DESCRIPTION,
+        PlanModelExperimentInput,
+    ),
+    (
+        "preview_sample_weights",
+        PREVIEW_SAMPLE_WEIGHTS_DESCRIPTION,
+        PreviewSampleWeightsInput,
+    ),
+    (
+        "preview_preprocessing",
+        PREVIEW_PREPROCESSING_DESCRIPTION,
+        PreviewPreprocessingInput,
+    ),
+    (
+        "describe_estimator",
+        DESCRIBE_ESTIMATOR_DESCRIPTION,
+        DescribeEstimatorInput,
+    ),
+    (
+        "describe_exchange_calendar",
+        DESCRIBE_EXCHANGE_CALENDAR_DESCRIPTION,
+        DescribeExchangeCalendarInput,
     ),
 ]
 
@@ -3223,6 +3513,15 @@ MODELING_TOOL_DISPATCH = {
     "list_modeling_capabilities": (
         list_modeling_capabilities,
         ListModelingCapabilitiesInput,
+    ),
+    "estimate_feature_warmup": (estimate_feature_warmup, EstimateFeatureWarmupInput),
+    "plan_model_experiment": (plan_model_experiment, PlanModelExperimentInput),
+    "preview_sample_weights": (preview_sample_weights, PreviewSampleWeightsInput),
+    "preview_preprocessing": (preview_preprocessing, PreviewPreprocessingInput),
+    "describe_estimator": (describe_estimator, DescribeEstimatorInput),
+    "describe_exchange_calendar": (
+        describe_exchange_calendar,
+        DescribeExchangeCalendarInput,
     ),
 }
 

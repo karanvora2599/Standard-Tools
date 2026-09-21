@@ -180,6 +180,12 @@ class TestModelingDispatch:
             "compare_models",
             "check_leakage",
             "validate_model_spec",
+            "estimate_feature_warmup",
+            "plan_model_experiment",
+            "preview_sample_weights",
+            "preview_preprocessing",
+            "describe_estimator",
+            "describe_exchange_calendar",
             "score_predictions",
             # Point-in-time joins. The records arrive inline
             # because no provider here serves them yet, which is a

@@ -99,12 +99,6 @@ class ModelManifest(BaseModel):
     # loads without executing pickle. A manifest written before this
     # field existed reads as joblib only, which is what it has.
     formats: List[str] = Field(default_factory=lambda: ["joblib"])
-    # The serialization formats the estimator was written in. Every
-    # registration has joblib; `skops` is added when the package is
-    # installed and can serialize the estimator, and is the format that
-    # loads without executing pickle. A manifest written before this
-    # field existed reads as joblib only, which is what it has.
-    formats: List[str] = Field(default_factory=lambda: ["joblib"])
 
     _coerce_metric_nulls = field_validator(
         "oos_metrics", "feature_importance_summary", mode="before"

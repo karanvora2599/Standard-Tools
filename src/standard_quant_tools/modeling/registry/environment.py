@@ -108,4 +108,56 @@ def environment_fingerprint() -> Dict[str, Any]:
     }
 
 
-__all__ = ["PACKAGES", "THREAD_VARIABLES", "environment_fingerprint"]
+def _flatten(mapping: Any, prefix: str = "") -> Dict[str, Any]:
+    """A nested fingerprint as one level of dotted keys, so two of them
+    can be compared key by key instead of block by block."""
+    flat: Dict[str, Any] = {}
+    if not isinstance(mapping, dict):
+        return flat
+    for key, value in mapping.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, dict):
+            flat.update(_flatten(value, f"{path}."))
+        else:
+            flat[path] = value
+    return flat
+
+
+def environment_differences(
+    trained: Dict[str, Any], current: Dict[str, Any]
+) -> Dict[str, Dict[str, Any]]:
+    """
+    What moved between the environment a model was fitted in and the one
+    asking now, as `{"packages.numpy": {"trained": ..., "current": ...}}`.
+
+    Both sides are flattened to dotted keys first, because the interesting
+    unit is a single version or a single thread cap, not the block it sits
+    in: reporting that `packages` differs says nothing an agent can act on,
+    while reporting that `packages.scikit-learn` moved from 1.5.2 to 1.6.0
+    names the thing to reinstall.
+
+    A key on one side only is a difference with None on the other, and
+    stays one even when the other side recorded None explicitly -- "this
+    manifest predates the field" and "this package is not installed" are
+    different facts, and collapsing them would hide the first.
+
+    Empty on both sides, or equal on every key, is an empty mapping: the
+    caller reads that as "the numerics are the ones that fitted it".
+    """
+    left = _flatten(trained)
+    right = _flatten(current)
+    differences: Dict[str, Dict[str, Any]] = {}
+    for key in sorted(set(left) | set(right)):
+        in_left, in_right = key in left, key in right
+        if in_left and in_right and left[key] == right[key]:
+            continue
+        differences[key] = {"trained": left.get(key), "current": right.get(key)}
+    return differences
+
+
+__all__ = [
+    "PACKAGES",
+    "THREAD_VARIABLES",
+    "environment_differences",
+    "environment_fingerprint",
+]

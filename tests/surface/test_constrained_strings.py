@@ -63,6 +63,9 @@ MUST_BE_LITERAL = {
 DELIBERATELY_UNCONSTRAINED = {
     ("detect_liquidity_events", "freq"): "any pandas offset alias",
     ("register_external_panel", "interval"): "any pandas offset alias",
+    ("estimate_feature_warmup", "interval"): (
+        "any pandas offset alias, the same field as DatasetSpec.interval"
+    ),
     ("analyze_stock_risk", "period"): "refuses: 'not a recognized window'",
     ("describe_data_capabilities", "source"): "refuses: unknown data provider",
     ("describe_temporal_contract", "source"): "refuses: unknown data provider",

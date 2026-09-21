@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 214 below.
+advertises 155 of the 220 below.
 
 
 ## The runtimes
@@ -35,7 +35,7 @@ advertises 155 of the 214 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 48 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 82 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `modeling` | 25 | 106 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 31 | 145 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
@@ -43,7 +43,7 @@ advertises 155 of the 214 below.
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 33 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **214** | | | |
+| **Total** | **220** | | | |
 
 ---
 
@@ -667,6 +667,27 @@ Rank registered models side by side on their out-of-sample metrics, or -- with m
 **Required:** `model_ids`  
 **Optional:** `metric`, `method`, `reference_model_id`, `comparison_metric`, `n_bootstrap`, `block_size`
 
+#### `describe_estimator`
+
+What an estimator's params actually accept: every parameter name, its type, its range, its exact choices and the reason behind each bound, plus the rules BETWEEN parameters that no single bound can express. All of it is enforced on every fit and none of it was readable, so the bounds could only be discovered by tripping them -- n_estimators caps at 2000 and num_leaves at 4096; logistic's penalty='l1' needs solver='liblinear' or 'saga' and 'elasticnet' needs 'saga' AND an explicit l1_ratio; sgd accepts a DIFFERENT set of losses per task, because a classifier here is asked for probabilities unconditionally and hinge has none; mlp takes n_hidden_units and n_hidden_layers, not scikit-learn's hidden_layer_sizes tuple, so knowing scikit-learn is what makes the first call wrong. Also reports `calibration`, which the capability report omits entirely and which decides outcomes: a raw random forest's probabilities are compressed by averaging and rarely exceed 0.9, so at proba_threshold=0.9 one selected ZERO rows where the isotonic-calibrated model selected 194. Filter with task and/or name; unfiltered it describes every registered entry and says how large that is. include_unavailable=True adds the estimators whose optional library is not installed here -- declared statically, so their names and bounds are the same on every machine, which is how you learn what a missing library costs and what a ranking model would be called. An unknown name is refused with the same message a spec naming it gets. Fits nothing.
+
+*No required arguments.*  
+**Optional:** `task`, `name`, `include_unavailable`
+
+#### `describe_exchange_calendar`
+
+List the exchange calendars this installation knows, and resolve one into the numbers that annualize an intraday model: sessions per year (counted over the calendar's complete years, so holidays are in it -- NYSE is 251.6, not 252), session length in minutes (390 for NYSE, 510 for London, 1440 for a crypto venue), bars per session at a given interval (a 6.5-hour session at '1h' is SEVEN bars, the stub counted, because the provider emits it) and bars per year. This is the value DatasetSpec.calendar takes, and without this tool the only ways to find a valid code were to guess one or to read the handful of names that fit inside a refusal. An unrecognised code is refused with the identical message DatasetSpec gives, so a code that passes here passes there. A daily-or-coarser interval is NOT refused: it reports bars_per_session=None and says in warnings why a venue is not needed for it -- daily, weekly and monthly bars annualize by calendar arithmetic, and only an intraday interval depends on how long the venue is open. Where the optional calendar package is not installed, listing returns an empty catalog with a warning rather than failing, and resolving a named calendar is refused by name. Fetches nothing.
+
+*No required arguments.*  
+**Optional:** `calendar`, `interval`, `name_contains`
+
+#### `estimate_feature_warmup`
+
+How many bars of history a feature spec burns before its first usable row, at the parameters you are actually requesting. The catalog's lookback is a static number recorded against a feature's DEFAULT parameters, so it is simply wrong the moment a window is overridden: market.momentum is catalogued at 20 bars and consumes 900 when asked for lookback=900, and statistical.hurst is catalogued at 200 and consumes 500 at window=500. This reports declared beside resolved for every feature, names the one that BINDS (the only one worth shortening), adds the deepest lag on top -- lags are warm-up too, charged once at the deepest -- and converts the total into calendar days, which is the unit score_model's lookback_days is given in. That argument has no default that can be right for every spec: too small and scoring refuses with an empty panel, and nothing in the library derived it. Point-in-time features contribute nothing and are named, because their freshness is a staleness bound on records rather than a count of bars. This is the pre-build form of the question explain_dataset_row_loss answers afterwards, once a build has already been paid for. Unknown feature ids and invalid lags are refused here exactly as the dataset builder would refuse them. Fetches nothing.
+
+**Required:** `features`  
+**Optional:** `interval`, `calendar`
+
 #### `evaluate_model_portfolio`
 
 Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transform predictions into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure.
@@ -689,7 +710,7 @@ Which column cost which training rows, and which are free to drop. Reports n_mis
 
 #### `inspect_model`
 
-Inspect a registered model's summary/importance/validation/lineage.
+Inspect a registered model's summary/importance/validation/lineage/provenance. The provenance view is the one to read BEFORE scoring or sizing: it reports the training information cutoff score_model gates `as_of` on (the earliest legal scoring date), whether a conformal band was deployed (the precondition for the uncertainty_scaled transform), the per-column feature provenance scoring re-checks, and how the environment that fitted the model differs from this one.
 
 **Required:** `model_id`  
 **Optional:** `view`
@@ -736,6 +757,27 @@ Feature and prediction drift of a scored universe against the model's training r
 **Required:** `model_id`, `predictions_uri`  
 **Optional:** `features_uri`, `outcomes_ref`
 
+#### `plan_model_experiment`
+
+The schedule run_model_experiment would execute, on the real panel, before it executes any of it: every fold with its train and test dates, the training ROWS the label-overlap purge removes from each, the inner folds each training window can actually support, the candidates the search will score, and the estimator fits all of that implies against the spec's own budget.max_fits. validate_model_spec answers the cost question with one integer computed on a date COUNT and no panel, so it cannot see the purge, cannot see a training window too short for its inner search, and reports n_purged as null on every fold; this runs the same planner the engine runs, with the panel, so the numbers are the numbers that will run. Three things it shows that nothing else does: fits_per_fit, the multiplier that turns three quantiles and five conformal blocks into nine fits per fold; a fold with n_inner_folds=0, which silently costs one fit and deploys the spec's base parameters rather than searched ones; and, with include_candidates, the actual parameter combinations -- where a log-spacing mistake is visible before 720 fits are spent on it. An over-budget plan is REPORTED here (within_budget=false plus the refusal text as a warning), not refused: refusing a dry run of a cost would defeat it, and run_model_experiment still refuses. Fits nothing.
+
+**Required:** `dataset_id`, `spec`  
+**Optional:** `target`, `include_folds`, `include_candidates`
+
+#### `preview_preprocessing`
+
+Fit a preprocessing pipeline on a sample of a built dataset and report what it does to the columns, before an experiment runs it on every fold. Two of the eight registered steps carry traps that are discoverable only at fit time: pca_whiten refuses a panel with any missing value AND refuses n_components greater than the column count, at its own default of 8 -- so it raises on any dataset narrower than eight features -- and missing_indicator appends one <column>__missing per column, doubling the width by design. Both refusals and both widths appear here, on the real panel, for the cost of one fit of the pipeline and no fit of an estimator. Reports each step's width in and out with the columns it added and removed, the per-column statistics before and after, the missing values left (which the engine refuses before it fits), and a pca_whiten step's explained variance ratio. The sample is split BY DATE, never by row: the statistics are fitted on the earlier rows and applied to the later ones, the way a fold does it. Warns when the output columns are no longer feature names, because an importance report is then labelled pc1..pcK, and when a step is not column-wise, because run_feature_ablation must refit rather than project. Fits no estimator.
+
+**Required:** `dataset_id`, `preprocessing`  
+**Optional:** `sample_rows`, `split_fraction`
+
+#### `preview_sample_weights`
+
+What a WeightingSpec would actually do to the training rows, before a model is fitted under it. The weighting method is selectable on every ModelSpec, is applied inside the engine, and its distribution is reported nowhere -- so choosing a half_life_days is choosing blind. Returns the percentiles of the weights, the ratio of the heaviest row to the lightest, the share of total weight sitting on the newest tenth of the dates, and two effective sample sizes that measure different things: the Kish size sum(w)^2/sum(w^2), which is these weights' own dispersion, beside the overlap-based count that every out-of-sample metric is already reported against. A weighting whose max/min is 30 is not a correction, it is a re-selection of the sample under another name, and that is visible here and in no result afterwards. method='none' is summarized as the flat weights it is rather than refused. Uniqueness weighting on a panel that carries no label end dates gets the library's own refusal, unchanged, which is the point of asking here first. Fits nothing.
+
+**Required:** `dataset_id`, `weighting`  
+**Optional:** `target`
+
 #### `promote_model`
 
 Record a lifecycle decision for a registered model: candidate -> validated -> staging -> production one stage at a time, or archived from anywhere, with a reason and the evidence it rests on. The manifest is untouched; the stage is read off an append-only log.
@@ -773,7 +815,7 @@ Score a predictions reference against its realized outcome — accuracy metrics,
 
 #### `validate_model_spec`
 
-Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Fetches nothing and fits nothing.
+Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Given a dataset_id it also checks that dataset's entity keys resolve to distinct provider symbols and reports a calendar it adopted from its universe's venue. Fetches nothing and fits nothing.
 
 **Required:** `spec`  
 **Optional:** `dataset_id`, `target`

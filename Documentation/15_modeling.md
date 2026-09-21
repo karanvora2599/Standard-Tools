@@ -22,7 +22,7 @@ tool #133 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 25 tools, never merged into `agent.get_agent_tools()` /
+with exactly 31 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (180 tools, 8 runtimes)      (25 tools, one pipeline)
+    (180 tools, 8 runtimes)      (31 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 25 modeling tools
+## The 31 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -64,10 +64,16 @@ because the order is the point.
 | `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing |
 | `validate_pit_records` | point-in-time records → whether they are joinable, checked before anything is joined |
 | `join_point_in_time` | `dataset_id` + records → each panel row gets the most recent record **available by then**, never the one describing that date |
-| `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, how many fits the spec implies once a search grid multiplies through every fold, and whether that is under the spec's `budget.max_fits` |
+| `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, how many fits the spec implies once a search grid multiplies through every fold, and whether that is under the spec's `budget.max_fits`; with a `dataset_id`, a universe whose keys resolve to one provider symbol is refused here, before any fetch, and a calendar the build adopted from the universe's venue is named in `warnings` |
+| `plan_model_experiment` | `dataset_id` + `ModelSpec` → the split before the fit: every fold's train and test spans, the rows the purge removes, the inner folds the window supports (zero when it is too short, and that fold is then priced at one fit), the fits per estimator that quantiles and conformal blocks multiply, the fold hashes `run_model_experiment` will reproduce, and the candidate grid on request. Over budget is reported with `within_budget=False`, not refused; the run still refuses |
+| `estimate_feature_warmup` | a list of `FeatureSpec` (+ interval, calendar) → how many bars the panel burns before its first complete row: each feature's lookback RESOLVED from its requested parameters rather than the catalog's default (`market.momentum` at a 900-bar lookback is 900 bars, not 20) plus the deepest lag, with the binding feature named and a calendar-day estimate. This is the number `score_model(lookback_days=)` needs |
+| `preview_sample_weights` | `dataset_id` + `WeightingSpec` → the weight distribution the engine would fit under (percentiles, max/min ratio, the share on the newest decile) and its Kish effective sample size beside the overlap-based one, which measure different things |
+| `preview_preprocessing` | `dataset_id` + `PreprocessingSpec` → each step's columns in and out on a by-date split of the panel, the state shape the engine produces, the explained variance of a whitening step, and the two traps that used to surface only inside a fit: `pca_whiten` refuses NaN and more components than columns, and `missing_indicator` doubles the width |
+| `describe_estimator` | optional `task` and `name` → the bounds behind every parameter name the capability report lists bare (the 2,000-tree ceiling and why, the 4,096 leaves, the solver-by-penalty matrix, the losses with no probability, `n_hidden_units` rather than `hidden_layer_sizes`), the compatibility notes, the calibration options, and with `include_unavailable` the optional estimators this machine lacks. Sized to one estimator; the unfiltered payload is tens of kilobytes and says so |
+| `describe_exchange_calendar` | optional `calendar` and `interval` → the venues the calendar library knows and, for one, its sessions per year, session length and bars per session, with the same refusal `DatasetSpec.calendar` gives an unknown code |
 | `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
 | `list_models` | → every registered model, newest first, with task, estimator, headline OOS metric and source dataset |
-| `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
+| `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage` \| `provenance`) → that slice of the registered model's manifest. `provenance` is the slice no other view returned: the information cutoff `score_model` gates `as_of` on, the conformal band the artifact carries (the precondition for `uncertainty_scaled`), the feature provenance enforced at scoring time, the content hashes, the monitoring references, and a diff of the environment the model was trained in against the current one |
 | `compare_models` | several `model_id`s → ranked side by side on their out-of-sample metrics |
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread |
 | `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable |

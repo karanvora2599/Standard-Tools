@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     field_validator,
     model_validator,
 )
@@ -467,6 +468,13 @@ class DatasetSpec(BaseModel):
     # `valid: True` while the embargo the caller asked for was 0.
     model_config = ConfigDict(extra="forbid")
 
+    # Set by _calendar_from_the_universe_s_venue when it assigns
+    # `calendar` from a venue every universe key names. Private, so it
+    # never enters model_dump(), the persisted dataset_spec.json or
+    # dataset_spec_hash -- the spec's identity is unchanged by the fact
+    # that something recorded how it was resolved.
+    _calendar_adopted_from_venue: Optional[str] = PrivateAttr(default=None)
+
     # max_length alongside min_length: universe fetching creates a task per
     # symbol, and while a semaphore bounds how many run at once it does not
     # bound how many are created. One valid-looking tool call could
@@ -635,6 +643,16 @@ class DatasetSpec(BaseModel):
         step. Only when the calendar library is present -- without it
         nothing could read the code, and the annualization refusal that
         names the library still applies.
+
+        The adoption is RECORDED as well as performed. `calendar` is part
+        of the dataset's identity, and a spec that arrived without one and
+        left with `XNYS` looks identical afterwards to one that asked for
+        `XNYS`; only this attribute can tell the two apart, so the tools
+        that build and check a spec can say which calendar was inferred
+        rather than leaving it to be discovered from the panel. It is a
+        private attribute, so it is outside `model_dump()` and therefore
+        outside `dataset_spec_hash` -- an observation about how the spec
+        was resolved, not a field of it.
         """
         if self.calendar is not None:
             return self
@@ -650,7 +668,15 @@ class DatasetSpec(BaseModel):
             self.calendar = validate_calendar_name(venue, "DatasetSpec.universe venue")
         except ValidationError as exc:
             raise ValueError(str(exc)) from exc
+        self._calendar_adopted_from_venue = self.calendar
         return self
+
+    @property
+    def calendar_adopted_from_venue(self) -> Optional[str]:
+        """The calendar code this spec took from its universe's venue, or
+        None when `calendar` was given explicitly, when the keys name no
+        single venue, or when the calendar library is absent."""
+        return self._calendar_adopted_from_venue
 
     @model_validator(mode="after")
     def _fillable_features_exist(self) -> "DatasetSpec":

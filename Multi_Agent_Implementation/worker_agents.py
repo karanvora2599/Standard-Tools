@@ -122,6 +122,12 @@ _MODEL_RESEARCH_TOOLS = [
     "list_datasets",
     "check_leakage",
     "validate_model_spec",
+    "estimate_feature_warmup",
+    "plan_model_experiment",
+    "preview_sample_weights",
+    "preview_preprocessing",
+    "describe_estimator",
+    "describe_exchange_calendar",
 ]
 _MODEL_BUILDER_TOOLS = [
     "run_model_experiment",

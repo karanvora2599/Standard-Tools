@@ -1,5 +1,52 @@
 # Changelog
 
+## The numbers an agent could only learn by failing are readable
+
+Every item here wraps something the library computed on every call and
+nobody could read: a lookback the catalog understates by 45x, an
+experiment plan reduced to one integer on a fake date axis, the
+exchange calendars behind one boolean, parameter bounds enforced on
+every call and absent from the report, a dozen manifest fields no view
+returned, and two spec choices whose consequences appeared only after a
+fit. Six new tools and one new view.
+
+- **`estimate_feature_warmup`** resolves each feature's real lookback
+  from its requested parameters (`market.momentum` at a 900-bar lookback
+  is 900 bars, not the catalog's 20) and adds the deepest lag: the
+  number `score_model(lookback_days=)` needs and that
+  `explain_dataset_row_loss` could explain only after a build was paid
+  for.
+- **`plan_model_experiment`** shows the split before the fit: every
+  fold's train and test spans, the rows purged, the inner folds the
+  window supports (zero when it is too short, and that fold then costs
+  one fit), the fits per estimator that quantiles and conformal blocks
+  multiply, and the candidate grid on request. Over budget is reported,
+  not refused; `run_model_experiment` still refuses.
+- **`describe_exchange_calendar`** lists the venues the calendar library
+  knows and, for one, its sessions per year, session length and bars per
+  session, with the same refusal `DatasetSpec` gives for an unknown code.
+- **`describe_estimator`** returns the bounds behind each parameter name
+  and the notes written beside them (the 2,000-tree ceiling, the 4,096
+  leaves, the solver-by-penalty matrix, the losses that have no
+  probability), the optional estimators a machine lacks, and the
+  calibration options, in a payload sized to one estimator rather than
+  the whole report.
+- **`preview_sample_weights`** and **`preview_preprocessing`** report
+  what a weighting or a preprocessing spec does to the panel before a
+  fit: the weight distribution and its effective sample size beside the
+  overlap-based one, and each step's columns in and out, including the
+  two traps that used to surface only inside the engine.
+- **`inspect_model(view="provenance")`** returns the information cutoff
+  `score_model` gates on, the conformal band the artifact carries, the
+  feature provenance enforced at scoring time, the content hashes, the
+  monitoring references, and a diff of the trained environment against
+  the current one. The manifest's `formats` field was declared twice.
+- **The universe's venue is reported, not silently adopted.** A universe
+  whose keys resolve to one provider symbol is refused by
+  `validate_model_spec` before any fetch, and a calendar inferred from
+  the universe's venue is named in the warnings of both
+  `validate_model_spec` and `build_model_dataset`.
+
 ## The verified branch of the bridge is the one the agent gets
 
 The bridge from a registered model to a backtest has two branches. One

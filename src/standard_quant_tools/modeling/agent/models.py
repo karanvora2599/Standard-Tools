@@ -821,8 +821,24 @@ class InspectModelInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
     model_id: str
-    view: Literal["summary", "feature_importance", "validation", "lineage"] = Field(
-        "summary", description="Which slice of the registered model to return."
+    view: Literal[
+        "summary",
+        "feature_importance",
+        "validation",
+        "lineage",
+        "provenance",
+    ] = Field(
+        "summary",
+        description=(
+            "Which slice of the registered model to return. 'provenance' is "
+            "the manifest's recorded identity: the training information "
+            "cutoff score_model gates `as_of` on, the dataset spec hash and "
+            "per-artifact content hashes, the per-column feature provenance "
+            "scoring re-checks, whether a conformal band was deployed, and "
+            "how the environment that fitted the model differs from this "
+            "one. It verifies nothing and re-reads no artifact, so it is "
+            "cheap where 'lineage' is not."
+        ),
     )
 
 
@@ -1547,6 +1563,15 @@ class ValidateModelSpecResult(BaseModel):
         ),
     )
     notes: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Conditions that do not make the spec invalid but change what "
+            "gets built -- notably a calendar this dataset adopted from its "
+            "universe's venue rather than being given one, which is part of "
+            "the dataset's identity and was visible nowhere."
+        ),
+    )
 
 
 # ── score_predictions ───────────────────────────────────────────────────
