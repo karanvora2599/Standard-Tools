@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from standard_quant_tools._runspath import RUNS_DIR_ENV, resolve_within_runs_dir
 from standard_quant_tools.audit.provenance import _git_sha, _package_version
 from standard_quant_tools.error import ValidationError
 
@@ -187,6 +188,15 @@ def save_model(
     # seeded samples PSI and KS are computed against. Hashed like every
     # other artifact, because a reference that could be edited is a
     # drift report that could be made to say anything.
+    #
+    # Every `*_uri` below is the artifact's FILENAME inside this model's
+    # own directory, not the absolute path it was written to. A package
+    # is copied to another root -- another machine, another
+    # SQT_RUNS_DIR -- as a directory of files beside its manifest, and an
+    # absolute path recorded here named a directory that does not exist
+    # there (or, worse, an equally real one on the same machine that the
+    # containment check then refused). `resolve_model_artifact` reads
+    # these back, and still resolves a path recorded by an older version.
     monitoring: Dict[str, Any] = {}
     if feature_profile is not None:
         profile_path = _artifacts.save_json(
@@ -201,14 +211,14 @@ def save_model(
             feature_reference, run_id=model_id, name="feature_reference"
         )
         content_hashes["feature_reference"] = _artifacts.hash_file(Path(uri))
-        monitoring["feature_reference_uri"] = uri
+        monitoring["feature_reference_uri"] = Path(uri).name
         monitoring["feature_reference_rows"] = int(len(feature_reference))
     if prediction_reference is not None:
         uri = _artifacts.save_artifact(
             prediction_reference, run_id=model_id, name="prediction_reference"
         )
         content_hashes["prediction_reference"] = _artifacts.hash_file(Path(uri))
-        monitoring["prediction_reference_uri"] = uri
+        monitoring["prediction_reference_uri"] = Path(uri).name
         monitoring["prediction_reference_rows"] = int(len(prediction_reference))
     if quantile_models_path is not None:
         content_hashes["quantile_models.joblib"] = _artifacts.hash_file(
@@ -220,8 +230,16 @@ def save_model(
         )
     if oos_predictions_uri:
         oos_path = Path(oos_predictions_uri)
-        if oos_path.exists():
+        if not oos_path.is_file():
+            # A caller that already names the file relative to the model
+            # directory, which is the form the manifest records.
+            oos_path = directory / oos_path.name
+        if oos_path.is_file():
             content_hashes["oos_predictions"] = _artifacts.hash_file(oos_path)
+        # Recorded by filename, for the reason the monitoring references
+        # are: the predictions travel with the package, the absolute path
+        # they were written to does not.
+        oos_predictions_uri = Path(oos_predictions_uri).name
 
     manifest = ModelManifest(
         model_id=model_id,
@@ -411,13 +429,64 @@ def load_distribution(model_id: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
     return state, models
 
 
+def resolve_model_artifact(model_id: str, uri: str) -> Path:
+    """
+    The readable path of one artifact a manifest names, whichever way the
+    manifest names it.
+
+    A manifest records its Parquet artifacts -- the out-of-sample
+    predictions and the two monitoring references -- by FILENAME inside
+    the model's own directory, so a package copied to another runs root
+    (or another machine) still finds them beside its manifest. Three
+    cases, in order:
+
+    1. The file sits in the model's directory. This is the recorded form,
+       and it is also where a legacy absolute path's filename lands, so a
+       manifest written before the change resolves here too -- including
+       one that has since been pulled into a different root.
+    2. Nothing is in the directory, but the manifest carries an absolute
+       path that is still readable inside THIS runs root. That is a model
+       registered by an older version and never moved.
+    3. Neither: refused by name. A path from another root is deliberately
+       not followed, which is what case 2 goes through the runs-directory
+       containment check to guarantee -- a manifest is data, and a data
+       file naming a path outside the runs root is exactly the read this
+       library does not do.
+    """
+    directory = _artifacts.run_dir(model_id)
+    filename = Path(str(uri)).name
+    candidate = directory / filename
+    if filename and candidate.is_file():
+        return candidate
+    legacy = Path(str(uri))
+    if legacy.is_absolute() and legacy.is_file():
+        try:
+            return resolve_within_runs_dir(legacy)
+        except ValidationError:
+            pass
+    raise ValidationError(
+        f"model {model_id!r} records {str(uri)!r} as one of its artifacts, but "
+        f"{filename!r} is not in the model's directory ({directory}) and the "
+        f"recorded path is not readable inside this {RUNS_DIR_ENV}. A model "
+        "package carries its artifacts beside its manifest, so one pulled "
+        "from an artifact store should be re-pulled (pull_model_package) "
+        "rather than read from wherever it was first registered."
+    )
+
+
 def load_monitoring_reference(
     model_id: str,
 ) -> "tuple[Dict[str, Any], Optional[Any], Optional[Any]]":
     """
     (feature profile, feature reference frame, prediction reference frame)
-    for `monitor_model`, each verified against the manifest first; the
-    frames are None for a model registered before they were kept.
+    for `monitor_model`, each verified against the manifest first.
+
+    A frame is None only when the manifest records no URI for it at all,
+    which is a model registered before the references were kept. A
+    manifest that names a reference the directory does not have is a
+    broken package, not an old one, and says so -- telling somebody to
+    retrain a model whose reference is sitting one directory away is
+    advice that costs a training run and fixes nothing.
     """
     manifest = load_manifest(model_id)
     directory = _artifacts.run_dir(model_id)
@@ -431,22 +500,26 @@ def load_monitoring_reference(
         )
         profile = _artifacts.load_json(str(profile_path))
     features = predictions = None
-    feature_uri = manifest.monitoring.get("feature_reference_uri")
-    if feature_uri and Path(str(feature_uri)).exists():
+    if "feature_reference_uri" in manifest.monitoring:
+        path = resolve_model_artifact(
+            model_id, str(manifest.monitoring["feature_reference_uri"])
+        )
         _artifacts.verify_file(
-            Path(str(feature_uri)),
+            path,
             manifest.content_hashes.get("feature_reference"),
             "feature_reference",
         )
-        features = _artifacts.load_artifact(str(feature_uri))
-    prediction_uri = manifest.monitoring.get("prediction_reference_uri")
-    if prediction_uri and Path(str(prediction_uri)).exists():
+        features = _artifacts.load_artifact(str(path))
+    if "prediction_reference_uri" in manifest.monitoring:
+        path = resolve_model_artifact(
+            model_id, str(manifest.monitoring["prediction_reference_uri"])
+        )
         _artifacts.verify_file(
-            Path(str(prediction_uri)),
+            path,
             manifest.content_hashes.get("prediction_reference"),
             "prediction_reference",
         )
-        predictions = _artifacts.load_artifact(str(prediction_uri))
+        predictions = _artifacts.load_artifact(str(path))
     return profile, features, predictions
 
 

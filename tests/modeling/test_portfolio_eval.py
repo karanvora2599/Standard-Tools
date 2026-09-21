@@ -551,9 +551,17 @@ class TestEndToEnd:
         """Structural validation passes on an edited file that kept its
         shape, so without the digest check a rewritten prediction column
         would produce a clean and entirely fictional equity curve."""
-        from standard_quant_tools.modeling.registry.model_registry import load_manifest
+        from standard_quant_tools.modeling.registry.model_registry import (
+            load_manifest,
+            resolve_model_artifact,
+        )
 
-        uri = load_manifest(registered_model).oos_predictions_uri
+        uri = str(
+            resolve_model_artifact(
+                registered_model,
+                load_manifest(registered_model).oos_predictions_uri,
+            )
+        )
         tampered = _artifacts.load_artifact(uri)
         tampered["prediction"] = tampered["prediction"] * -1.0
         tampered.to_parquet(uri)

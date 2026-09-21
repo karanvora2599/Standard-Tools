@@ -73,7 +73,10 @@ from standard_quant_tools.modeling.agent.tools import (
     score_model,
     score_predictions,
 )
-from standard_quant_tools.modeling.registry.model_registry import load_manifest
+from standard_quant_tools.modeling.registry.model_registry import (
+    load_manifest,
+    resolve_model_artifact,
+)
 from standard_quant_tools.modeling.specs import (
     DatasetSpec,
     EstimatorSpec,
@@ -190,7 +193,9 @@ class TestTheVerifiedRouteToABacktest:
         other. Both are asserted, because the contrast is the finding.
         """
         model = _trained(_dataset())
-        registered = Path(load_manifest(model.model_id).oos_predictions_uri)
+        registered = resolve_model_artifact(
+            model.model_id, load_manifest(model.model_id).oos_predictions_uri
+        )
         published = tmp_path / "runs" / model.model_id / "oos_predictions_ref.parquet"
         assert published.exists(), "run_model_experiment publishes a copy"
 

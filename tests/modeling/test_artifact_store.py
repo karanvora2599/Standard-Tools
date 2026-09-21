@@ -186,8 +186,10 @@ class TestPackage:
             target.get(f"{model_id}/manifest.json")
             == (_artifacts.run_dir(model_id) / "manifest.json").read_bytes()
         )
+        # The model id is the only key prefix a package is written under,
+        # and it is validated as one before anything is copied.
         with pytest.raises(ValidationError):
-            mirror_model_package(model_id, target, prefix="../elsewhere")
+            mirror_model_package("../elsewhere", target)
 
     @pytest.mark.skipif(not fsspec_available(), reason="fsspec is not installed")
     def test_a_mirror_to_an_object_store_is_verified_through_it(
@@ -195,11 +197,11 @@ class TestPackage:
     ):
         model_id = _train_a_model_with_spec(_dataset_spec(), dataset_id="ds_bucket")
         target = FsspecArtifactStore(f"memory://sqt-mirror/{uuid4().hex}")
-        uris = mirror_model_package(model_id, target, prefix="mirror_a")
+        uris = mirror_model_package(model_id, target)
         assert all(uri.startswith("memory://") for uri in uris.values())
         manifest = load_manifest(model_id)
         assert (
-            target.hash("mirror_a/model.joblib")
+            target.hash(f"{model_id}/model.joblib")
             == manifest.content_hashes["model.joblib"]
         )
-        assert target.list("mirror_a") == sorted(f"mirror_a/{name}" for name in uris)
+        assert target.list(model_id) == sorted(f"{model_id}/{name}" for name in uris)

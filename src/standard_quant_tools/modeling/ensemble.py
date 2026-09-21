@@ -29,7 +29,6 @@ scorecard measures, so it aligns the combination with the judging.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -42,7 +41,7 @@ from .features.transforms import (
     cross_sectional_counts,
     rank_within_date,
 )
-from .registry.model_registry import load_manifest
+from .registry.model_registry import load_manifest, resolve_model_artifact
 from .specs import SCORE_TASKS
 
 #: How the base predictions become one series.
@@ -70,16 +69,20 @@ def load_oos_predictions(model_id: str, *, keep_path: bool = False) -> pd.DataFr
             "there is nothing honest to combine. Only a model registered by "
             "run_model_experiment has them."
         )
+    # Resolved inside the model's own directory, so a package pulled from
+    # an artifact store combines its own predictions rather than looking
+    # for the absolute path of the machine that registered it.
+    path = resolve_model_artifact(model_id, str(uri))
     # The same check `bridge.py` performs before backtesting, and for the
     # same reason: the structural validation below passes on an edited file
     # that keeps its shape, so a changed prediction column would combine
     # cleanly into numbers the registered model never emitted.
     _artifacts.verify_file(
-        Path(str(uri)),
+        path,
         manifest.content_hashes.get("oos_predictions"),
         "oos_predictions",
     )
-    frame = _artifacts.load_artifact(str(uri))
+    frame = _artifacts.load_artifact(str(path))
     missing = [c for c in PREDICTION_COLUMNS if c not in frame.columns]
     if missing:
         raise ValidationError(

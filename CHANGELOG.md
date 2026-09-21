@@ -1,5 +1,40 @@
 # Changelog
 
+## The registry's security control has an interface, and a pulled model works where it lands
+
+Signing worked end to end and no tool could ask for it. `verify_model_package`
+runs the signature check only when a signature file is present or the
+caller requires one, and `manifest.json` cannot hash itself, so an edited
+manifest with its signature deleted verified clean through `inspect_model`.
+Promotion consulted nothing: a model with a corrupted artifact was driven
+to production while the same session's `inspect_model` reported it
+mismatched. The audit subsystem had this control; the model registry did
+not.
+
+- **`attest_model_package`** verifies a registered package and requires a
+  signature by default, taking a public key to pin. The library default
+  stays permissive so an unsigned in-house model is still mirrorable and
+  inspectable; the tool's default is the strict one, because an
+  attestation that passes an unsigned package reproduces the defect at a
+  new address.
+- **`promote_model` gates on integrity.** It refuses to move a model whose
+  package does not verify, names what mismatched, and records the
+  manifest's digest in the promotion's evidence; a caller can record the
+  decision anyway by saying so. `inspect_model` accepts a public key path.
+- **A pulled model can be monitored.** The manifest stored its monitoring
+  and out-of-sample references as absolute paths of the registering
+  machine, so a package pulled into another root either said it was
+  registered before references were kept or tripped the runs-directory
+  containment check. References are stored as bare filenames inside the
+  model's directory and resolved there, with the old absolute form still
+  accepted when it names the same file.
+- **`list_remote_models` and `pull_model_package`** reach the mirror from
+  a tool: list what a store holds, pull one into this root with the
+  promotion log it travelled with, require a signature or pin a key, and
+  refuse an unknown store scheme by name. `mirror_model_package` no
+  longer takes a prefix, which produced a package nothing could list or
+  pull.
+
 ## The statistics that were computed and averaged away
 
 Five tools for numbers the library already computed and threw away

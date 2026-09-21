@@ -155,6 +155,11 @@ _MODEL_BUILDER_TOOLS = [
     # with its evidence, and drift is what it checks before recommending one.
     "promote_model",
     "monitor_model",
+    # The integrity question the promotion rests on: is the package still
+    # the one that was registered, and did a key anybody trusts say so.
+    "attest_model_package",
+    "list_remote_models",
+    "pull_model_package",
 ]
 
 

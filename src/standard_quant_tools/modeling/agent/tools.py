@@ -34,6 +34,7 @@ score_model already occupies. The tool count was never the invariant;
 "every tool is a decision the agent makes, not plumbing" was.
 """
 
+import hashlib
 import logging
 import uuid
 from pathlib import Path
@@ -54,9 +55,10 @@ from ..engine import run_experiment as _run_experiment
 from ..features.registry import list_features as _list_features
 from ..monitoring import THRESHOLDS, drift_report, prediction_drift, realized_ic
 from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
+from ..registry import signing as _signing
 from ..registry.lifecycle import current_stage, promote, promotions
 from ..registry.model_registry import load_manifest, load_monitoring_reference
-from ..registry.package import verify_model_package
+from ..registry.package import PackageVerification, verify_model_package
 from ..scoring import score_model as _score_model
 from ..specs import TASKS, DatasetSpec, FeatureSpec, TargetSpec, targets_for_task
 from .dataset_tools import (  # noqa: F401
@@ -81,6 +83,8 @@ from .models import (
     AnalyzeModelErrorsResult,
     AttachModelOutcomesInput,
     AttachModelOutcomesResult,
+    AttestModelPackageInput,
+    AttestModelPackageResult,
     BacktestModelSignalInput,
     BacktestModelSignalResult,
     BuildEnsembleInput,
@@ -145,6 +149,14 @@ from .preview_tools import (  # noqa: F401
     plan_model_experiment,
     preview_preprocessing,
     preview_sample_weights,
+)
+from .remote_tools import (  # noqa: F401
+    LIST_REMOTE_MODELS_DESCRIPTION,
+    PULL_MODEL_PACKAGE_DESCRIPTION,
+    ListRemoteModelsInput,
+    PullModelPackageInput,
+    list_remote_models,
+    pull_model_package,
 )
 from .statistics_tools import (  # noqa: F401
     COMPARE_SIGNALS_DESCRIPTION,
@@ -1001,7 +1013,16 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # when there is one. This is the view someone opens before
             # trusting a model, and it now says whether the package is
             # still the one that was registered.
-            "package": verify_model_package(input_data.model_id).to_dict(),
+            #
+            # `public_key_path` pins the key that signature has to carry;
+            # unpinned, a signature is checked against the key it carries,
+            # which is a weaker statement. What this view will NOT do is
+            # require a signature -- an unsigned package is still a
+            # lineage answer -- so attest_model_package is where that is
+            # asked. See the CHANGELOG entry of 2026-09-21.
+            "package": verify_model_package(
+                input_data.model_id, public_key=input_data.public_key_path
+            ).to_dict(),
         }
     else:  # provenance
         # Everything the manifest recorded about its own identity, and
@@ -1333,6 +1354,93 @@ def list_models(input_data: ListModelsInput) -> ListModelsResult:
     )
 
 
+def _manifest_digest(model_id: str, report: PackageVerification) -> str:
+    """The sha256 of the manifest bytes a verification was made over.
+
+    The signature record already carries it, computed over the exact
+    bytes that were checked; without a signature it is computed here from
+    the same bytes the signer would have read, so the two forms of the
+    field are the same number and a promotion's evidence reads the same
+    whether or not anybody signed.
+    """
+    signature = report.signature or {}
+    recorded = signature.get("manifest_sha256")
+    if recorded:
+        return str(recorded)
+    return hashlib.sha256(_signing._manifest_bytes(model_id)[1]).hexdigest()
+
+
+def attest_model_package(
+    input_data: AttestModelPackageInput,
+) -> AttestModelPackageResult:
+    """
+    Is this package still the one that was registered, and did a key
+    anybody trusts say so.
+
+    Two different questions, and the second is the one that is easy to
+    lose. Every artifact is hashed into the manifest at registration, so
+    an artifact edited afterwards is caught by re-hashing it -- but the
+    manifest is the root of those hashes and cannot contain its own, so
+    anything that rewrites BOTH an artifact and the manifest passes every
+    hash check there is. Only the Ed25519 signature over the manifest
+    bytes catches that, and deleting `manifest.sig` is strictly easier
+    than forging one, which is why this tool requires a signature by
+    default where the library function it calls does not: an attestation
+    that returns ok on an unsigned package answers a different, weaker
+    question than the one it was asked.
+
+    What a signature establishes depends on whether a key was pinned, and
+    the result says which of the two it was.
+    """
+    report = verify_model_package(
+        input_data.model_id,
+        require_signature=input_data.require_signature,
+        public_key=input_data.public_key_path,
+    )
+    signature = report.signature
+    key_pinned = bool((signature or {}).get("key_pinned"))
+    warnings: List[str] = []
+    if report.mismatched or report.missing:
+        warnings.append(
+            "This package is not the one that was registered: "
+            f"{report.mismatched or 'nothing'} no longer hash to the manifest "
+            f"and {report.missing or 'nothing'} is gone. Nothing here says "
+            "which change was deliberate -- re-register the model from its "
+            "source, or pull the package again from wherever it is intact."
+        )
+    if signature is None and report.signature_error is None:
+        warnings.append(
+            "This package is unsigned, and a signature was not required, so "
+            "the content hashes are all that was checked. They detect an "
+            "edited artifact; they cannot detect a manifest rewritten "
+            "together with the artifact it describes, because the manifest "
+            "is the root of those hashes. Sign it with a key you control to "
+            "make that detectable."
+        )
+    if signature is not None and not key_pinned:
+        warnings.append(
+            "No verification key was pinned, so the signature was checked "
+            f"only against the key it carries ({signature.get('public_key', '')[:16]}"
+            "...). A valid signature under an unknown key proves the manifest "
+            "and the signature were written together, not that anyone you "
+            "trust wrote them. Pass public_key_path, or set "
+            f"{_signing.VERIFY_KEY_ENV}."
+        )
+    return AttestModelPackageResult(
+        model_id=input_data.model_id,
+        ok=report.ok,
+        verified=report.verified,
+        mismatched=report.mismatched,
+        missing=report.missing,
+        unhashed=report.unhashed,
+        signature=signature,
+        signature_error=report.signature_error,
+        key_pinned=key_pinned,
+        manifest_sha256=_manifest_digest(input_data.model_id, report),
+        warnings=warnings,
+    )
+
+
 def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
     """
     Record a lifecycle decision for a registered model.
@@ -1344,13 +1452,62 @@ def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
     append-only log says. One stage at a time on the way up, so nothing
     reaches production without somebody having recorded that the evidence
     was read.
+
+    The package is re-verified here, before the decision is written,
+    because a stage is exactly that statement about the evidence and the
+    evidence has to be the one that was registered: a model whose
+    `model.joblib` no longer hashes to its manifest could otherwise be
+    walked from candidate to production while every inspection of it
+    reported the mismatch. The check lives in this handler rather than in
+    the lifecycle module, which knows nothing about packages and is
+    imported BY the module that verifies them; `registry/mirror.py`
+    records the same reasoning about the same import direction. What it
+    found is written into the promotion's evidence -- the manifest digest
+    and the file count -- so the record names the artifacts, not just the
+    model id. See the CHANGELOG entry of 2026-09-21.
     """
+    report = verify_model_package(
+        input_data.model_id,
+        require_signature=input_data.require_signature,
+        public_key=input_data.public_key_path,
+    )
+    manifest_sha256 = _manifest_digest(input_data.model_id, report)
+    evidence = [
+        f"manifest_sha256={manifest_sha256}",
+        f"package_verified={len(report.verified)} files",
+        *input_data.evidence,
+    ]
+    if not report.ok:
+        findings: List[str] = []
+        if report.mismatched:
+            findings.append(f"no longer hash to the manifest: {report.mismatched}")
+        if report.missing:
+            findings.append(f"hashed by the manifest and gone: {report.missing}")
+        if report.signature_error:
+            findings.append(f"signature: {report.signature_error}")
+        detail = "; ".join(findings)
+        if input_data.require_verified_package:
+            raise ValidationError(
+                f"promote_model: the package for model {input_data.model_id!r} "
+                f"does not verify, so {input_data.to_stage!r} was not recorded "
+                f"({detail}). A stage is a statement that somebody read the "
+                "evidence, so the evidence has to be the one that was "
+                "registered: re-register the model from its source, or pull "
+                "the package again from where it is intact. Pass "
+                "require_verified_package=False to record the decision "
+                "anyway, which writes this failure into the promotion's "
+                "evidence rather than losing it."
+            )
+        # The waiver is part of the record. A promotion whose package did
+        # not verify is a decision somebody made with that in front of
+        # them, and the log is where that has to be readable later.
+        evidence.insert(2, f"package_check_waived: {detail}")
     record = promote(
         input_data.model_id,
         input_data.to_stage,
         input_data.reason,
         actor=input_data.actor,
-        evidence=input_data.evidence,
+        evidence=evidence,
     )
     return PromoteModelResult(
         model_id=input_data.model_id,
@@ -1359,6 +1516,8 @@ def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
         timestamp_utc=record.timestamp_utc,
         actor=record.actor,
         history=[p.to_dict() for p in promotions(input_data.model_id)],
+        manifest_sha256=manifest_sha256,
+        package_ok=report.ok,
     )
 
 
@@ -3096,8 +3255,36 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Record a lifecycle decision for a registered model: candidate -> "
         "validated -> staging -> production one stage at a time, or archived "
         "from anywhere, with a reason and the evidence it rests on. The "
-        "manifest is untouched; the stage is read off an append-only log.",
+        "manifest is untouched; the stage is read off an append-only log. "
+        "The package is re-verified first and a promotion of a model whose "
+        "artifacts no longer match their registered hashes is REFUSED, "
+        "because a stage is a statement that somebody read the evidence and "
+        "the evidence has to be the one that was registered; the manifest "
+        "digest the decision rested on is written into its evidence. Pass "
+        "require_verified_package=False to record the decision anyway, and "
+        "require_signature=True where a signed manifest is the bar.",
         PromoteModelInput,
+    ),
+    (
+        "attest_model_package",
+        "Is a registered package still the one that was registered, and did "
+        "a key anybody trusts say so. Re-hashes every artifact the manifest "
+        "covers, names what no longer matches, what is missing and what the "
+        "hashes do not cover at all, and checks the Ed25519 signature over "
+        "the manifest. The hashes alone cannot catch a manifest rewritten "
+        "together with the artifact it describes -- the manifest is the root "
+        "of those hashes and cannot contain its own -- and deleting "
+        "manifest.sig is strictly easier than forging one, which is why this "
+        "tool requires a signature by DEFAULT where the library call behind "
+        "it does not: an attestation that returns ok on an unsigned package "
+        "answers a weaker question than the one it was asked. Pass "
+        "require_signature=False to attest the hashes alone, and "
+        "public_key_path to pin the key -- unpinned, a valid signature "
+        "proves only that the manifest and the signature were written "
+        "together. inspect_model(view='lineage') reports the same check "
+        "beside the rest of a model's provenance; this is the one that can "
+        "insist on it.",
+        AttestModelPackageInput,
     ),
     (
         "monitor_model",
@@ -3220,6 +3407,16 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "predict_survival_curve",
         PREDICT_SURVIVAL_CURVE_DESCRIPTION,
         PredictSurvivalCurveInput,
+    ),
+    (
+        "list_remote_models",
+        LIST_REMOTE_MODELS_DESCRIPTION,
+        ListRemoteModelsInput,
+    ),
+    (
+        "pull_model_package",
+        PULL_MODEL_PACKAGE_DESCRIPTION,
+        PullModelPackageInput,
     ),
 ]
 
@@ -3533,6 +3730,7 @@ MODELING_TOOL_DISPATCH = {
     ),
     "list_models": (list_models, ListModelsInput),
     "promote_model": (promote_model, PromoteModelInput),
+    "attest_model_package": (attest_model_package, AttestModelPackageInput),
     "monitor_model": (monitor_model, MonitorModelInput),
     "list_datasets": (list_datasets, ListDatasetsInput),
     "compare_models": (compare_models, CompareModelsInput),
@@ -3557,6 +3755,8 @@ MODELING_TOOL_DISPATCH = {
     ),
     "compare_signals": (compare_signals, CompareSignalsInput),
     "predict_survival_curve": (predict_survival_curve, PredictSurvivalCurveInput),
+    "list_remote_models": (list_remote_models, ListRemoteModelsInput),
+    "pull_model_package": (pull_model_package, PullModelPackageInput),
 }
 
 

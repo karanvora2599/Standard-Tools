@@ -45,7 +45,7 @@ shipped, generalized to the rest of the surface.
 | `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 20 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 18 | `portfolio_risk` | Turn a view into a position and price what it costs. |
-| `modeling` | 34 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
+| `modeling` | 37 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 17 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
 | `delta_one` | 18 | `delta_one` | Which instrument is the cheapest way to own or hedge an exposure: carry, basis, curves, rolls, hedge sizing and instrument comparison. Takes quotes as arguments; there is no futures provider. |

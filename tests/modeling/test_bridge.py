@@ -346,11 +346,14 @@ class TestOosArtifactIntegrity:
         assert panel
 
     def test_edited_predictions_rejected_via_model_id(self, patched_multi_factory):
-        from standard_quant_tools.modeling.registry.model_registry import load_manifest
+        from standard_quant_tools.modeling.registry.model_registry import (
+            load_manifest,
+            resolve_model_artifact,
+        )
 
         model_id = self._train()
         manifest = load_manifest(model_id)
-        path = Path(manifest.oos_predictions_uri)
+        path = resolve_model_artifact(model_id, manifest.oos_predictions_uri)
 
         # A shape-preserving edit: same columns, same dtypes, same
         # (entity, date) pairs, all finite. Only the values change.
@@ -375,10 +378,15 @@ class TestOosArtifactIntegrity:
         trust to check against. The same tampered file loads fine here,
         which is exactly why model_id is the preferred entry point.
         """
-        from standard_quant_tools.modeling.registry.model_registry import load_manifest
+        from standard_quant_tools.modeling.registry.model_registry import (
+            load_manifest,
+            resolve_model_artifact,
+        )
 
         model_id = self._train()
-        path = Path(load_manifest(model_id).oos_predictions_uri)
+        path = resolve_model_artifact(
+            model_id, load_manifest(model_id).oos_predictions_uri
+        )
         df = pd.read_parquet(path)
         df["prediction"] = df["prediction"] * -1.0
         df.to_parquet(path)

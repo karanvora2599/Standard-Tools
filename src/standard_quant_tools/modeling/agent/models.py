@@ -679,6 +679,108 @@ class ScoreModelResult(BaseModel):
     )
 
 
+# ── attest_model_package ─────────────────────────────────────────────────
+
+
+class AttestModelPackageInput(BaseModel):
+    """Is a registered package still the one that was registered, and did
+    a key anybody trusts say so."""
+
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    model_id: str
+    require_signature: bool = Field(
+        True,
+        description=(
+            "Treat an unsigned package as a finding rather than a pass. "
+            "True here, where the library's own verification defaults to "
+            "False: the content hashes detect an edited artifact, and only "
+            "the Ed25519 signature over the manifest detects a manifest "
+            "rewritten together with it -- and deleting a signature is "
+            "strictly easier than forging one. Set it to False to attest "
+            "the hashes alone, for a package registered somewhere no "
+            "signing key was configured."
+        ),
+    )
+    public_key_path: Optional[str] = Field(
+        None,
+        description=(
+            "Pin the Ed25519 public key the signature has to carry: a path "
+            "to a raw 32-byte key file, or the key as 64 hex characters. "
+            "SQT_MODEL_VERIFY_KEY_PATH is used when this is omitted, and "
+            "with neither, a signature is checked only against the key it "
+            "carries -- reported as key_pinned=False, because that "
+            "establishes that the manifest and the signature were written "
+            "together and nothing about who wrote them."
+        ),
+    )
+
+
+class AttestModelPackageResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    model_id: str
+    ok: bool = Field(
+        ...,
+        description="Nothing mismatched, nothing hashed is missing, and the "
+        "signature check -- when one was run or required -- passed.",
+    )
+    verified: List[str] = Field(
+        default_factory=list,
+        description="Files whose bytes still hash to what the manifest recorded.",
+    )
+    mismatched: List[str] = Field(
+        default_factory=list,
+        description="Files present whose hash no longer matches the manifest.",
+    )
+    missing: List[str] = Field(
+        default_factory=list,
+        description="Files the manifest hashes that are no longer there.",
+    )
+    unhashed: List[str] = Field(
+        default_factory=list,
+        description="Files present that the manifest does not cover: the "
+        "signature, the promotion log, scoring outputs. Named so a reader "
+        "knows what the hashes do NOT vouch for.",
+    )
+    signature: Optional[Dict[str, Any]] = Field(
+        None,
+        description="The verified signature record -- algorithm, public key, "
+        "when it was signed, the manifest digest it was made over. None when "
+        "the package is unsigned and a signature was not required.",
+    )
+    signature_error: Optional[str] = Field(
+        None,
+        description="Why the signature did not establish what it was asked "
+        "to: unsigned, signed under a key other than the pinned one, or a "
+        "signature that does not verify against the manifest as it now reads.",
+    )
+    key_pinned: bool = Field(
+        False,
+        description="Whether the signature was checked against a key the "
+        "caller supplied, rather than only against the key the signature "
+        "carries. The difference is the whole point of pinning one.",
+    )
+    manifest_sha256: Optional[str] = Field(
+        None,
+        description="The digest of the manifest bytes this attestation was "
+        "made over -- the value to quote in a promotion's evidence, so the "
+        "decision names the manifest it rested on.",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What this attestation did not establish: an unsigned "
+        "package, a signature under a key nobody pinned, a package that no "
+        "longer matches its manifest.",
+    )
+
+
 # ── promote_model / monitor_model ────────────────────────────────────────
 
 
@@ -706,7 +808,39 @@ class PromoteModelInput(BaseModel):
     evidence: List[str] = Field(
         default_factory=list,
         description="References the decision rests on: an evaluate_model_portfolio "
-        "weights_uri, a monitor_model predictions_uri, a compare_models run.",
+        "weights_uri, a monitor_model predictions_uri, a compare_models run. The "
+        "manifest digest and the package check are prepended to whatever is "
+        "passed here, so the record names the artifacts the decision was about.",
+    )
+    require_verified_package: bool = Field(
+        True,
+        description=(
+            "Refuse the promotion when the package no longer matches its "
+            "manifest -- an artifact edited or deleted since registration. A "
+            "stage is a statement that somebody read the evidence, so the "
+            "evidence has to be the one that was registered. Set it to False "
+            "to record the decision anyway; the waiver and what failed are "
+            "then written into the promotion's evidence rather than lost."
+        ),
+    )
+    require_signature: bool = Field(
+        False,
+        description=(
+            "Also require a valid Ed25519 signature over the manifest. Off "
+            "by default, because a shop that signs nothing would otherwise "
+            "be unable to promote anything at all; on, it is the only check "
+            "that catches a manifest rewritten together with the artifacts "
+            "it describes. attest_model_package answers the same question "
+            "without recording a decision."
+        ),
+    )
+    public_key_path: Optional[str] = Field(
+        None,
+        description=(
+            "Pin the Ed25519 public key that signature has to carry: a path "
+            "to a raw 32-byte key file, or the key as 64 hex characters. "
+            "SQT_MODEL_VERIFY_KEY_PATH is used when this is omitted."
+        ),
     )
 
 
@@ -722,6 +856,20 @@ class PromoteModelResult(BaseModel):
         default_factory=list,
         description="Every promotion recorded for this model, oldest first, "
         "from the append-only promotions.jsonl beside the manifest.",
+    )
+    manifest_sha256: Optional[str] = Field(
+        None,
+        description="The digest of the manifest bytes this decision was "
+        "recorded against, written into the promotion's evidence as well: "
+        "months later it is what says WHICH version of the package somebody "
+        "accepted.",
+    )
+    package_ok: Optional[bool] = Field(
+        None,
+        description="Whether the package still matched its manifest at the "
+        "moment of the decision. Reported even when require_verified_package "
+        "was False, so a waived check is visible here and in the evidence "
+        "rather than only in the absence of a refusal.",
     )
 
 
@@ -840,6 +988,31 @@ class InspectModelInput(BaseModel):
             "cheap where 'lineage' is not."
         ),
     )
+    public_key_path: Optional[str] = Field(
+        None,
+        description=(
+            "For view='lineage' only: pin the Ed25519 public key the "
+            "package's manifest signature has to carry, as a path to a raw "
+            "32-byte key file or the key as 64 hex characters. Without it a "
+            "signature is checked against the key it carries, which "
+            "establishes that the manifest and the signature were written "
+            "together and nothing about who wrote them. The other views "
+            "verify nothing, so passing it with one of them is refused "
+            "rather than ignored; attest_model_package is the tool that can "
+            "also REQUIRE a signature."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_key_needs_the_view_that_verifies(self) -> "InspectModelInput":
+        if self.public_key_path is not None and self.view != "lineage":
+            raise ValueError(
+                f"public_key_path has nothing to check in view={self.view!r} -- "
+                "only 'lineage' re-verifies the package. Ask for "
+                "view='lineage', or call attest_model_package, which verifies "
+                "and nothing else."
+            )
+        return self
 
 
 class InspectModelResult(BaseModel):

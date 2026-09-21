@@ -81,7 +81,11 @@ from .bridge import (
 )
 from .dataset.fetch import fetch_universe_ohlcv
 from .features.base import periods_per_year_for_interval
-from .registry.model_registry import load_dataset_spec, load_manifest
+from .registry.model_registry import (
+    load_dataset_spec,
+    load_manifest,
+    resolve_model_artifact,
+)
 from .specs import PortfolioSimSpec, PredictionTransformSpec
 
 logger = logging.getLogger(__name__)
@@ -674,7 +678,14 @@ def evaluate_model_portfolio(
     # structural validation passes on an edited file that kept its shape,
     # so an altered prediction column would otherwise produce a clean and
     # entirely fictional equity curve.
-    predictions_uri = str(manifest.oos_predictions_uri)
+    #
+    # Resolved through the registry rather than opened as a path: the
+    # manifest names this artifact by its filename in the model's own
+    # directory, so a package pulled into another runs root reads its own
+    # predictions instead of the registering machine's.
+    predictions_uri = str(
+        resolve_model_artifact(model_id, str(manifest.oos_predictions_uri))
+    )
     _artifacts.verify_file(
         Path(predictions_uri),
         manifest.content_hashes.get("oos_predictions"),

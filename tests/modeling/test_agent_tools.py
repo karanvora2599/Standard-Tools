@@ -206,6 +206,15 @@ class TestModelingDispatch:
             # against a reference kept at registration -- a question
             # score_model cannot answer about its own output.
             "monitor_model",
+            # A decision, not plumbing: whether to trust a package at
+            # all. The content hashes are checked by every loader, but
+            # only this one can INSIST on the signature over the
+            # manifest, which is the single check that survives a
+            # manifest rewritten together with the artifacts it
+            # describes -- and it is what the promotion gate rests on.
+            "attest_model_package",
+            "list_remote_models",
+            "pull_model_package",
             # The nine feature tools that used to sit here moved to the
             # feature_lab runtime -- see tests/modeling/test_feature_tools.py.
             # modeling is one ordered pipeline; feature work is a

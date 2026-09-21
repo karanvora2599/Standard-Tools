@@ -57,7 +57,10 @@ from standard_quant_tools.modeling.portfolio_eval import (
     evaluate_model_portfolio,
     predictions_to_score_panel,
 )
-from standard_quant_tools.modeling.registry.model_registry import load_manifest
+from standard_quant_tools.modeling.registry.model_registry import (
+    load_manifest,
+    resolve_model_artifact,
+)
 from standard_quant_tools.modeling.scoring import _interval_statistics, score_model
 from standard_quant_tools.modeling.specs import (
     ConformalSpec,
@@ -119,9 +122,17 @@ def trained(patched_multi_factory):
     return {"dataset_id": dataset.dataset_id, "model_ids": model_ids}
 
 
+def _registered_oos_path(model_id: str) -> str:
+    """The model's registered OOS predictions, resolved inside the model's
+    own directory -- the manifest names the artifact by filename."""
+    return str(
+        resolve_model_artifact(model_id, load_manifest(model_id).oos_predictions_uri)
+    )
+
+
 def _publish_oos(model_id: str, name: str, producer: str = "test_publisher") -> str:
     """The model's registered OOS predictions, republished as a reference."""
-    frame = _artifacts.load_artifact(str(load_manifest(model_id).oos_predictions_uri))
+    frame = _artifacts.load_artifact(_registered_oos_path(model_id))
     return handoff.publish(
         frame, "predictions", "refeval", name, producer=producer, overwrite=True
     )
@@ -213,9 +224,7 @@ class TestTheSimulatorTakesAReference:
         alternative histories, not a sequence. The model path refuses cpcv
         off the manifest; a bare frame has only its shape to give it
         away."""
-        frame = _artifacts.load_artifact(
-            str(load_manifest(trained["model_ids"][0]).oos_predictions_uri)
-        )
+        frame = _artifacts.load_artifact(_registered_oos_path(trained["model_ids"][0]))
         doubled = pd.concat([frame.assign(path=0), frame.assign(path=1)])
         ref = handoff.publish(
             doubled, "predictions", "refeval", "cpcv_shaped", producer="test"
@@ -278,9 +287,7 @@ class TestTheSimulatorTakesAReference:
 
     def test_a_reference_without_a_producer_says_so(self, trained):
         ref = handoff.publish(
-            _artifacts.load_artifact(
-                str(load_manifest(trained["model_ids"][0]).oos_predictions_uri)
-            ),
+            _artifacts.load_artifact(_registered_oos_path(trained["model_ids"][0])),
             "predictions",
             "refeval",
             "oos_anonymous",
@@ -331,7 +338,7 @@ class TestTheSimulatorTakesAReference:
         assert result.provenance["provider"] == "mock"
 
     def test_a_raw_artifact_path_is_not_a_reference(self, trained):
-        uri = str(load_manifest(trained["model_ids"][0]).oos_predictions_uri)
+        uri = _registered_oos_path(trained["model_ids"][0])
         with pytest.raises(ValidationError, match="raw artifact path"):
             evaluate_predictions_portfolio(
                 EvaluatePredictionsPortfolioInput(

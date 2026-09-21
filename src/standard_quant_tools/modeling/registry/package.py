@@ -117,19 +117,23 @@ def verify_model_package(
     return report
 
 
-def mirror_model_package(
-    model_id: str,
-    store: ArtifactStore,
-    *,
-    prefix: Optional[str] = None,
-) -> Dict[str, str]:
+def mirror_model_package(model_id: str, store: ArtifactStore) -> Dict[str, str]:
     """
-    Copy a verified package to `store`, re-hashing every covered file
-    through the target; returns `{filename: uri}` on the target.
+    Copy a verified package to `store` under the model id, re-hashing
+    every covered file through the target; returns `{filename: uri}` on
+    the target.
 
     A package that does not verify locally is refused rather than copied,
     because a mirror of a tampered package is a tampered package with a
     second address.
+
+    The model id is the only key prefix a package is written under, and
+    that is a property the other two halves of this module depend on:
+    `list_remote_models` finds a package by the `mdl_` prefix of its key,
+    and `pull_model_package` refuses a manifest that names an id other
+    than the one it was asked for. A copy written under any other prefix
+    is therefore one that nothing can list and nothing can pull -- bytes
+    in a bucket with no way back. See the CHANGELOG entry of 2026-09-21.
     """
     local = verify_model_package(model_id)
     if local.missing or local.mismatched:
@@ -142,15 +146,14 @@ def mirror_model_package(
         _filename_for(entry): digest
         for entry, digest in manifest.content_hashes.items()
     }
-    target_prefix = prefix or model_id
-    validate_identifier(target_prefix, "prefix")
+    validate_identifier(model_id, "model_id")
     source = LocalArtifactStore()
     filenames = [key.split("/", 1)[1] for key in source.list(model_id)]
     ordered = [f for f in filenames if f != MANIFEST_FILE] + [MANIFEST_FILE]
     uris: Dict[str, str] = {}
     for filename in ordered:
         data = source.get(f"{model_id}/{filename}")
-        key = f"{target_prefix}/{filename}"
+        key = f"{model_id}/{filename}"
         uris[filename] = store.put(key, data)
         expected = expected_by_filename.get(filename)
         if expected is not None:

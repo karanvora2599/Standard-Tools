@@ -26,7 +26,10 @@ from standard_quant_tools.modeling.bridge import oos_predictions_to_signal_panel
 from standard_quant_tools.modeling.calendar import calendar_available
 from standard_quant_tools.modeling.dataset.builder import build_dataset
 from standard_quant_tools.modeling.portfolio_eval import evaluate_model_portfolio
-from standard_quant_tools.modeling.registry.model_registry import load_manifest
+from standard_quant_tools.modeling.registry.model_registry import (
+    load_manifest,
+    resolve_model_artifact,
+)
 from standard_quant_tools.modeling.scoring import score_model
 from standard_quant_tools.modeling.specs import DatasetSpec
 
@@ -152,5 +155,8 @@ class TestThroughTheRuntime:
         assert result["n_entities"] == 3 if "n_entities" in result else True
         with pytest.raises(ValidationError, match="venue or asset class"):
             oos_predictions_to_signal_panel(
-                oos_predictions_uri=manifest.oos_predictions_uri, task=manifest.task
+                oos_predictions_uri=str(
+                    resolve_model_artifact(model_id, manifest.oos_predictions_uri)
+                ),
+                task=manifest.task,
             )

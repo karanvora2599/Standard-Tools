@@ -21,6 +21,7 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling import artifacts as _artifacts
 from standard_quant_tools.modeling.ensemble import combine_predictions
 
 DATES = pd.date_range("2024-01-01", periods=40, freq="B")
@@ -42,9 +43,14 @@ def registry(tmp_path, monkeypatch):
     store = {}
 
     def _register(model_id, frame, *, task="regression", target_id="forward_return:5"):
-        path = tmp_path / f"{model_id}.parquet"
+        # Written where a registered model keeps its predictions, and
+        # recorded the way a manifest records them: by filename inside the
+        # model's own directory.
+        directory = _artifacts.run_dir(model_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "oos_predictions.parquet"
         frame.to_parquet(path)
-        store[model_id] = _Manifest(model_id, task, target_id, str(path))
+        store[model_id] = _Manifest(model_id, task, target_id, path.name)
         return model_id
 
     monkeypatch.setattr(

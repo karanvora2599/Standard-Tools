@@ -22,7 +22,7 @@ tool #133 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 34 tools, never merged into `agent.get_agent_tools()` /
+with exactly 37 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (180 tools, 8 runtimes)      (34 tools, one pipeline)
+    (180 tools, 8 runtimes)      (37 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 34 modeling tools
+## The 37 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -84,7 +84,10 @@ because the order is the point.
 | `score_prediction_intervals` | a predictions reference carrying quantile or `lower`/`upper` columns → whether the intervals cover: pinball loss per quantile, the crossing rate, and coverage against the nominal level, pooled or `by` date or entity, because a band that covered 97% in calm and 62% in a selloff is one pooled number away from looking fine. These metrics used to run inside the engine's fold loop and be averaged into one number |
 | `compare_signals` | three modes: two prediction references (`paired`, a block bootstrap on the per-date IC difference), two per-date IC series (`ic_series`, with the Newey-West variance beside the naive one), or a set of p-values from anywhere (`adjust`, under Holm, Bonferroni or Benjamini-Hochberg). Always says that this controls the error of THESE tests and not for the candidates having been selected on the same sample, which is `run_reality_check`'s job |
 | `predict_survival_curve` | `model_id` + `as_of` + `universe` (+ `times`) → the survival curve a survival model learned, per entity, and the horizon at which it crosses one half, under every gate `score_model` enforces. The experiment kept the integrated Brier score and discarded the matrix; `score_model` returns the risk. Honest that the level is the baseline's and that a median past the grid is unknown, not never |
-| `promote_model` | `model_id` + `to_stage` + `reason` (+ `actor`, `evidence`) → a lifecycle decision appended to `promotions.jsonl` beside the manifest, one stage at a time: `candidate` → `validated` → `staging` → `production`, or `archived` from anywhere. The manifest is never touched |
+| `attest_model_package` | `model_id` (+ `public_key_path`) → whether the registered package verifies: every hashed file against its digest, and the manifest's signature, REQUIRED by default. The library's own default is permissive, so an unsigned in-house model stays mirrorable and inspectable; an attestation that passed an unsigned package would reproduce the defect it exists to close, since deleting a signature is easier than forging one. A valid signature under an unpinned key proves the manifest and the signature were written together, not that anyone you trust wrote them, and the result says so |
+| `list_remote_models` | a store URL (or `SQT_MODEL_MIRROR_URL`) → the model ids the mirror holds; an unknown scheme is refused naming the ones that work |
+| `pull_model_package` | `model_id` + a store URL → the package registered into this runs root with the promotion log it travelled with, verified file by file, optionally requiring a signature or pinning a key; a second pull refuses without `overwrite`, and an unsigned package is accepted with a warning that says so |
+| `promote_model` | `model_id` + `to_stage` + `reason` (+ `actor`, `evidence`) → a lifecycle decision appended to `promotions.jsonl` beside the manifest, one stage at a time: `candidate` → `validated` → `staging` → `production`, or `archived` from anywhere. The manifest is never touched. The decision is GATED on integrity: a package whose files do not verify against their digests is refused, naming what mismatched, because a stage is a statement that somebody read the evidence and the evidence must be the one that was registered; `require_verified_package=False` records the decision anyway, `require_signature` and `public_key_path` demand a pinned signature, and the manifest's digest is written into the promotion's evidence |
 | `monitor_model` | `model_id` + a `score_model` `predictions_uri` (+ `outcomes_ref`) → PSI and KS per feature against the training reference kept at registration, prediction drift against the out-of-sample sample, and — with outcomes — the realized cross-sectional IC beside the validation's, every status reported with the threshold it was read against |
 
 **From a registered model to a backtest, verified.** The bridge from a model's out-of-sample predictions to a signal panel has two branches. Given a `model_id` it reads the task from the manifest, refuses a combinatorial-purged model by name, and verifies the predictions file against the hash the manifest recorded; given a file and a task it takes both on trust, and its own docstring says so. Until `backtest_model_signal` existed only the second branch was reachable from a tool, through `convert_reference` on a published copy of the predictions -- a route that accepted a wrong `task` (a regression model converted as a classifier gave an all-zero panel and a NaN Sharpe with no error anywhere) and a sign-flipped copy alike. `backtest_model_signal` is the verified route and has no `task` argument to get wrong; `convert_reference` remains for predictions that never had a manifest. The scoring side is continuous in the same way: `run_model_experiment`, `build_model_ensemble` and `score_model` publish predictions without the realized outcome, `attach_model_outcomes` joins it, and `score_predictions` reads the result; `evaluate_predictions_portfolio` simulates any of those references as a portfolio.
@@ -2792,7 +2795,7 @@ Two operations are written against the protocol:
 | Operation | What it does |
 |---|---|
 | `verify_model_package(model_id, require_signature=False, public_key=None)` | hashes every artifact the manifest covers and names the `verified`, `mismatched` and `missing` files; names the `unhashed` files too — the signature, the promotion log, scoring outputs — so a reader knows what the hashes do **not** vouch for; carries the signature record or the reason it failed. `inspect_model(view="lineage")` reports it as `package` |
-| `mirror_model_package(model_id, store, prefix=None)` | copies a verified package to another store, manifest **last** so the commit-point property holds on the target, re-hashing every covered file *through the target* after the copy; refuses a package that does not verify locally, because a mirror of a tampered package is a tampered package with a second address |
+| `mirror_model_package(model_id, store)` | copies a verified package to another store under the model id (the only prefix a package is written under: `list_remote_models` finds it by that key and `pull_model_package` refuses a manifest naming another id), manifest **last** so the commit-point property holds on the target, re-hashing every covered file *through the target* after the copy; refuses a package that does not verify locally, because a mirror of a tampered package is a tampered package with a second address |
 
 ```python
 from standard_quant_tools.artifact_store import store_from_url
@@ -2810,6 +2813,19 @@ uris = mirror_model_package(model_id, store_from_url("s3://models/registry"))
 > still address the local runs directory by path, so the fsspec store is a
 > **target** for a verified package rather than a root the registry runs
 > from. Saying otherwise would be a claim the code does not make good on.
+
+**A pulled package works where it lands.** The manifest used to store its
+monitoring references and its out-of-sample predictions as absolute paths
+of the registering machine, so a package pulled into another runs root
+either reported that it was registered before references were kept or
+tripped the runs-directory containment check. They are stored as bare
+filenames inside the model's directory and resolved there by
+`resolve_model_artifact(model_id, uri)`, which still accepts the old
+absolute form when it names the same file and refuses a path outside
+this runs root rather than following it. From a tool, `list_remote_models`
+and `pull_model_package` reach the mirror, and `attest_model_package`
+asks the question `verify_model_package` answers with the signature
+required by default.
 
 ### The skops bundle
 

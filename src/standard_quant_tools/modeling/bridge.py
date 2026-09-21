@@ -75,7 +75,7 @@ from standard_quant_tools.modeling.specs import SCORE_TASKS, TASKS, Task
 
 from . import artifacts as _artifacts
 from .assets import is_qualified
-from .registry.model_registry import load_manifest
+from .registry.model_registry import load_manifest, resolve_model_artifact
 
 
 def _refuse_cpcv(manifest: Any, where: str) -> None:
@@ -278,7 +278,13 @@ def oos_predictions_to_signal_panel(
             )
         task = manifest.task
         _refuse_cpcv(manifest, "oos_predictions_to_signal_panel")
-        oos_predictions_uri = manifest.oos_predictions_uri
+        # The manifest names this artifact by its filename in the model's
+        # own directory, so the package reads its own predictions in
+        # whatever runs root it was pulled into rather than the absolute
+        # path of the machine that registered it.
+        oos_predictions_uri = str(
+            resolve_model_artifact(model_id, str(manifest.oos_predictions_uri))
+        )
         # Authoritative, unlike inferring a hole from date spacing: the
         # engine records exactly which folds were skipped and why. Only
         # available in model_id mode, which is one more reason it's the
