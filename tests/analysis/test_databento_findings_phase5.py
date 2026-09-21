@@ -1,7 +1,7 @@
 """
-Phase 5 of Development/databento_live_fix_plan.md: options and futures.
+Phase 5 of the Databento live fix plan (CHANGELOG, 2026-09-20): options and futures.
 
-The live findings (Development/databento_live_findings.md, D9, D13 and
+The live findings (CHANGELOG, 2026-09-20; D9, D13 and
 "Also in options and futures") measured each of these on real prices. The
 tests here reproduce each defect's shape offline and pin the fix:
 

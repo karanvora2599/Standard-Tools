@@ -1,6 +1,7 @@
 """
 Regressions on the modeling tool surface found by reading it against the
-runtime it fronts (Development/modeling_runtime_plan.md, section 2).
+runtime it fronts (the modeling runtime plan's defect list; CHANGELOG,
+phase 0, 2026-09-20).
 
 Each class pins one finding. The shape of every finding was the same: a
 tool that was registered, dispatchable and documented, and whose answer was

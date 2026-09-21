@@ -1,7 +1,7 @@
 """
-Phase 3 of Development/databento_live_fix_plan.md: selection and inference.
+Phase 3 of the Databento live fix plan (CHANGELOG, 2026-09-20): selection and inference.
 
-The live findings (Development/databento_live_findings.md, D4, D10, D19
+The live findings (CHANGELOG, 2026-09-20; D4, D10, D19
 and the CPCV and paired items) measured each of these on real prices. The
 tests here reproduce each defect's shape offline and pin the fix:
 

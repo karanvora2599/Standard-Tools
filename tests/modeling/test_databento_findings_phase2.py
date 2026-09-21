@@ -1,8 +1,8 @@
 """
-Phase 2 of Development/databento_live_fix_plan.md: the deployed model is
+Phase 2 of the Databento live fix plan (CHANGELOG, 2026-09-20): the deployed model is
 the validated model.
 
-The live findings (Development/databento_live_findings.md, D14-D18, D20)
+The live findings (CHANGELOG, 2026-09-20; D14-D18, D20)
 measured each of these on real prices. The tests here reproduce each
 defect's shape offline and pin the fix:
 

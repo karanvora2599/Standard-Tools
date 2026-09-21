@@ -1,8 +1,8 @@
 """
 The live findings, reproduced offline: phase 1 of
-Development/databento_live_fix_plan.md.
+the Databento live fix plan (CHANGELOG, 2026-09-20).
 
-Each test here is a finding from `databento_live_findings.md` planted into
+Each test here is a finding from the live pass planted into
 the stub client, which now answers the window it is asked for. The
 questions are the ones the live pass asked: does a daily request return
 tomorrow (D1); does the index reach the modeling runtime tz-naive (D2);

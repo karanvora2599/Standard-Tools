@@ -2,19 +2,25 @@
 
 A survey of the library's functions against its 211-tool surface, run on
 2026-09-20 as six parallel read-only passes -- one per package slice and one
-over every tool body -- and synthesized here. The six reports are the
-evidence and live beside this file in `tool_surface_survey/`; every claim
-below cites the report that made it, and every count is the survey's count
-on that date.
+over every tool body -- and synthesized here. The six reports were the
+evidence; every claim below cites the report that made it, and every
+count is the survey's count on that date. The reports were removed on
+2026-09-21 once this file held their conclusions, and the last commit
+that carries them is `e005a3a`
+(`git show e005a3a:Development/tool_surface_survey/<report>`).
+
+**Status:** Wave 1 (section 6) landed on 2026-09-20. Waves 2 and 3
+(section 7) and the proposals in sections 2-5 are not built, and this
+file stays for them.
 
 | Report | Slice | Lines read |
 |---|---|---|
-| [`tool_map.md`](tool_surface_survey/tool_map.md) | every tool body, mapped to the library functions it calls | 211 tools |
-| [`analysis.md`](tool_surface_survey/analysis.md) | `analysis/` (21 modules) | ~10,850 |
-| [`modeling.md`](tool_surface_survey/modeling.md) | `modeling/` except the tool layer | ~21,000 |
-| [`backtest_portfolio_screener.md`](tool_surface_survey/backtest_portfolio_screener.md) | `backtest/`, `backtesting/`, `portfolio/`, `screener/` | ~11,000 |
-| [`data_audit_mcp.md`](tool_surface_survey/data_audit_mcp.md) | `data/`, `audit/`, `mcp/`, top-level modules | ~13,900 |
-| [`delta_one_indicators_metrics.md`](tool_surface_survey/delta_one_indicators_metrics.md) | `delta_one/`, `indicators/`, `metrics/` | ~6,965 |
+| `tool_map.md` | every tool body, mapped to the library functions it calls | 211 tools |
+| `analysis.md` | `analysis/` (21 modules) | ~10,850 |
+| `modeling.md` | `modeling/` except the tool layer | ~21,000 |
+| `backtest_portfolio_screener.md` | `backtest/`, `backtesting/`, `portfolio/`, `screener/` | ~11,000 |
+| `data_audit_mcp.md` | `data/`, `audit/`, `mcp/`, top-level modules | ~13,900 |
+| `delta_one_indicators_metrics.md` | `delta_one/`, `indicators/`, `metrics/` | ~6,965 |
 
 The rule the survey applied is the repository's own: a tool earns its place
 by being a **decision the agent makes, not plumbing**. Every proposal below

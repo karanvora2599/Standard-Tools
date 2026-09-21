@@ -86,7 +86,7 @@ DATASET_NASDAQ_BASIC = "XNAS.BASIC"
 DATASET_DEPTH = "XNAS.ITCH"
 
 #: EQUS.MINI carries the consolidated SYMBOL SET, not the consolidated
-#: tape. Measured live (Development/databento_live_findings.md, D3): its
+#: tape. Measured live (Databento findings D3, CHANGELOG 2026-09-20): its
 #: volume is 2-4% of consolidated, and its daily close is the last print
 #: of the UTC day, which on a busy afternoon is an after-hours trade --
 #: 74 bp RMS daily-return error on AAPL. It is the daily fallback for a

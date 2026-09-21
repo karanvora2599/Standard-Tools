@@ -1,7 +1,7 @@
 """
-Phase 7 of Development/databento_live_fix_plan.md: plumbing.
+Phase 7 of the Databento live fix plan (CHANGELOG, 2026-09-20): plumbing.
 
-The live findings (Development/databento_live_findings.md, section 9)
+The live findings (CHANGELOG, 2026-09-20, the plumbing)
 named each of these. The tests here pin the fix:
 
   gc          `sqt cache gc` removes a dead format generation and nothing else

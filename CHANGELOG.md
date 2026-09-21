@@ -1,5 +1,30 @@
 # Changelog
 
+## The findings are closed, and the papers that closed them go with them
+
+Every defect in the Databento live findings (D1-D20 and the "Also" lists)
+and every phase of the plan that fixed them landed between `2fda339` and
+`e005a3a`; the modeling runtime plan's phases 0-10 landed before that. The
+three documents and the six tool-survey reports behind
+`Development/tool_surface_analysis.md` are removed. The last commit that
+carries them is `e005a3a` (`git show e005a3a:Development/<name>`), and the
+entries below this one are their record. What each left open now lives
+where a reader would look for it:
+
+- **Two data-layer items the findings named and the fix deferred**, in
+  `Documentation/01_data_fetching.md`: Databento's per-session `degraded`
+  flag is not read, and `compare_ratio_sources` compares fundamentals only.
+- **The owner's live checks, one per phase, and what the live pass did not
+  reach**, in `Documentation/25_testing.md`: nothing in the seven phases
+  ran against a key.
+- **The sequence half of the modeling plan's phase 8** stays a proposal,
+  and `Documentation/15_modeling.md` says why there is no TCN.
+- **Waves 2 and 3 of the tool-surface analysis** are not built, so that
+  file stays; only its evidence reports go.
+
+`Development/build_guide.md` stays: it is the build guide, not a plan. The
+docstrings that cited the removed files by path cite this log instead.
+
 ## The cache serves what it has, says what it is, and forgets what it will never read
 
 Phase 7 of `Development/databento_live_fix_plan.md`: plumbing, and the

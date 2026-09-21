@@ -1,7 +1,7 @@
 """
-Phase 6 of Development/databento_live_fix_plan.md: microstructure.
+Phase 6 of the Databento live fix plan (CHANGELOG, 2026-09-20): microstructure.
 
-The live findings (Development/databento_live_findings.md, D7, D8 and
+The live findings (CHANGELOG, 2026-09-20; D7, D8 and
 "Also in microstructure") measured each of these on real ticks. The tests
 here reproduce each defect's shape offline and pin the fix:
 

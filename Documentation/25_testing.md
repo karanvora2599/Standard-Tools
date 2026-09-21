@@ -397,6 +397,36 @@ Layers 2–5 then cover the tool automatically — the fuzzer, the determinism
 checks and the documentation tests all read the registry, so a tool added
 today is fuzzed today.
 
+## What only a live key establishes
+
+The Databento fixes of 2026-09-20 were reproduced offline against a stub
+client that honours windows and finalization, so the daily off-by-one
+and its cousins are pinned without a key. What a key adds is the
+vendor's own numbers, and that pass is the owner's. The suites are
+`tests/data/test_databento_live.py` and
+`tests/data/test_databento_pipeline_live.py`, run with
+`DATABENTO_API_KEY` set, `-m integration`, and an interpreter that has
+`databento` installed; every OPRA and MBO fetch is preflighted with
+`get_billable_size`. The checks, one per phase of the fix:
+
+| phase | check |
+|---|---|
+| 1 | a daily close on `d` equals the tape's; `frame.attrs["dataset"]` is `EQUS.SUMMARY`; `build_dataset(provider="databento")` builds; `ES.c.0` prices and bare `ES` is refused |
+| 2 | a searched model's `estimator_params` are in the grid; scoring a subset universe on a cross-sectional model is refused |
+| 3 | `permutation_test_ic` on `market.momentum` gives a p-value near the block-bootstrap value |
+| 4 | LRCX buy-and-hold across its split carries the split warning |
+| 5 | the four IV cases return the true volatility |
+| 6 | `microstructure_summary` on a live AAPL minute returns |
+| 7 | `sqt cache gc` lists the dead files; `describe_data_capabilities(source="databento")` without a key says `available=False`; `fetch_tick_tape(source="databento")` returns a tape |
+
+What the live pass did not reach, so nothing here has measured it: an
+interior gap from a trading halt (the feed's only real holes were
+delisting truncations, so the bounded forward-fill was verified against
+a trailing hole); entities on different trading calendars; ICE and Eurex
+venues, and options and futures end to end; a live restatement of a bar,
+which needs two pulls separated by a correction; `optuna`-backed TPE
+search; and the Bloomberg and Polygon column and dtype contracts.
+
 ## What none of this establishes
 
 That the numbers are *useful*. The regime checks that a statistic is

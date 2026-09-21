@@ -570,6 +570,14 @@ normalisation and any ambiguity travel in it — and its `timezone` is now
 documented as a label for a normalised, naive index rather than a live
 zone.
 
+**Two things the live pass left open.** Databento marks some sessions
+`degraded`, and this provider does not read that flag, so a session the
+vendor marks is served unmarked; reading it needs the `statistics`
+schema and an entitlement check the fix could not run. And
+`compare_ratio_sources` compares fundamentals only: run against a
+provider that serves bars, it reports zero entities compared with no
+warnings, which means nothing was compared, not that nothing was found.
+
 ---
 
 ## Tick data (`get_trades` / `get_quotes`)

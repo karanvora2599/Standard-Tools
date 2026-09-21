@@ -1,8 +1,8 @@
 """
-Phase 4 of Development/databento_live_fix_plan.md: the backtest engine and
+Phase 4 of the Databento live fix plan (CHANGELOG, 2026-09-20): the backtest engine and
 the portfolio surface.
 
-The live findings (Development/databento_live_findings.md, D6 and "Also
+The live findings (CHANGELOG, 2026-09-20; D6 and "Also
 in the backtest and portfolio surface") measured each of these on real
 prices. The tests here reproduce each defect's shape offline and pin the
 fix:
