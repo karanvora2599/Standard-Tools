@@ -203,7 +203,10 @@ class BuildEnsembleResult(BaseModel):
             "might do with it: backtest it through convert_reference -- "
             "which needs no outcome -- and it is an ordinary prediction "
             "frame; score it, and score_predictions refuses it for having "
-            "no 'target' column until the realized outcomes are attached."
+            "no 'target' column. attach_model_outcomes("
+            "predictions_ref=<this ref>, "
+            "dataset_id=<the dataset the base models were fit on>) joins the "
+            "realized label and publishes the reference that scores."
         ),
     )
     model_ids: List[str] = Field(default_factory=list)
@@ -606,6 +609,20 @@ class ScoreModelResult(BaseModel):
         "should never be something the caller has to go and derive.",
     )
     predictions_uri: str
+    predictions_ref: Optional[str] = Field(
+        None,
+        description=(
+            "Typed handoff reference for the same predictions "
+            "(sqt://predictions/...). This is the one to pass onward: "
+            "`handoff.resolve` refuses a raw artifact path under `expect=`, "
+            "so `predictions_uri` alone could be monitored for drift and "
+            "never scored against outcomes or traded. Feed it to "
+            "attach_model_outcomes (which joins the realized label and makes "
+            "it scoreable) or to convert_reference. Content-addressed and "
+            "idempotent: re-scoring the same model, date and universe "
+            "republishes the same reference."
+        ),
+    )
     predictions_hash: str = Field(
         "",
         description="Content digest of the written predictions artifact. The "
@@ -622,6 +639,21 @@ class ScoreModelResult(BaseModel):
         "universe has drifted from the training panel.",
     )
     summary_stats: Dict[str, float]
+    interval_stats: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "The conformal band's WIDTH, when the model emits one: mean, "
+            "median, min and max width, how many rows carry an interval, "
+            "and the width as a multiple of the prediction spread. "
+            "`summary_stats` describes the point prediction and says "
+            "nothing about the interval beside it, so a band thirty times "
+            "the width of the whole cross-section came back looking "
+            "exactly like a tight one. Empty for a point-only model: an "
+            "absent interval is not a zero-width one. No coverage figure "
+            "-- coverage needs realized outcomes, and at `as_of` they do "
+            "not exist yet."
+        ),
+    )
     missing_entities: List[str] = Field(
         default_factory=list,
         description="Requested universe symbols that had no scoreable row as of "
@@ -964,6 +996,151 @@ class EvaluateModelPortfolioResult(BaseModel):
         "could not reach target gross, an ambiguous annualization factor, plus "
         "the dataset coverage warnings carried from the model manifest and any "
         "raised by the simulator itself (insolvency, negative cash).",
+    )
+
+
+# ── backtest_model_signal ───────────────────────────────────────────────
+#
+# The VERIFIED route from a registered model to a backtest. The other one
+# -- publish the predictions, convert_reference(task=...) -- reads a COPY
+# of the artifact with no manifest behind it, so it cannot check the task
+# and cannot check the digest. This input exists to make both of those
+# unrepresentable rather than merely discouraged.
+
+
+class BacktestModelSignalInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    #
+    # There is deliberately NO `task` field. The manifest is the source of
+    # the task, and with extra="forbid" a caller cannot even spell a
+    # mismatch -- which is the one thing the other route to a backtest
+    # accepts silently, thresholding raw forward returns against a
+    # probability cutoff into an all-zero panel that backtests to
+    # `sharpe nan` with no error anywhere.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    model_id: str = Field(
+        ...,
+        description=(
+            "A model_id from run_model_experiment. Its manifest resolves the "
+            "predictions artifact, the task and the recorded content digest "
+            "together, so none of the three can disagree with the others."
+        ),
+    )
+    run_id: str = Field(
+        ...,
+        description=(
+            "Run id to publish the signal panel under. Letters, digits, '_' "
+            "and '-' only."
+        ),
+    )
+    name: str = Field(..., description="Artifact name for the published signal panel.")
+    deadband: float = Field(
+        0.0,
+        ge=0.0,
+        description=(
+            "Score tasks only (regression and ranking): a prediction whose "
+            "magnitude is at or below this becomes flat (0.0) instead of a "
+            "full-size position on what is probably noise. 0 (default) takes "
+            "every prediction's sign."
+        ),
+    )
+    proba_threshold: float = Field(
+        0.5,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Classification only: long above this probability. With "
+            "long_only=False it must also be >= 0.5, because a symmetric "
+            "decision boundary below the midpoint would make the long and "
+            "short conditions overlap."
+        ),
+    )
+    long_only: bool = Field(
+        True,
+        description=(
+            "Classification only: treat the negative class as FLAT rather "
+            "than short. 'Not predicted up' is not the same claim as "
+            "'predicted down', which is why this is the default."
+        ),
+    )
+
+
+class BacktestModelSignalResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    signal_panel_ref: str = Field(
+        ...,
+        description=(
+            "An `sqt://signal_panel/...` reference holding {ticker: {date: "
+            "value}} with every value exactly -1.0, 0.0 or 1.0. Pass it to "
+            "run_signal_panel_backtest as `signal_panel_ref` with "
+            "signal_type='direction' and fill_price='next_open'. Nothing was "
+            "backtested here: the fill convention, the costs, the tickers "
+            "and the date range are backtest decisions, and this runtime "
+            "does not own them."
+        ),
+    )
+    model_id: str
+    task: str = Field(
+        ...,
+        description=(
+            "Read from the manifest, never from the caller. A score task "
+            "(regression or ranking) becomes the sign of the prediction; "
+            "classification thresholds the positive-class probability."
+        ),
+    )
+    entities: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The panel's outer keys, which is what "
+            "SignalPanelBacktestInput.tickers must match."
+        ),
+    )
+    n_dates: int = Field(
+        0,
+        description=(
+            "Dates on the panel's shared calendar. Every entity carries all "
+            "of them -- an entity with no prediction on a date is explicitly "
+            "flat, because a hole would vanish from the price axis rather "
+            "than reading as no position."
+        ),
+    )
+    first_date: str = ""
+    last_date: str = ""
+    n_long: int = Field(0, description="Panel cells equal to 1.0.")
+    n_flat: int = Field(
+        0,
+        description=(
+            "Panel cells equal to 0.0, including the densified ones. A "
+            "figure close to the whole panel is the symptom of a signal that "
+            "sits inside its deadband or under its probability threshold "
+            "almost everywhere -- which backtests to a flat curve rather "
+            "than an error."
+        ),
+    )
+    n_short: int = Field(0, description="Panel cells equal to -1.0.")
+    oos_predictions_hash: Optional[str] = Field(
+        None,
+        description=(
+            "The digest recorded in the manifest at registration, VERIFIED "
+            "against the file before it was read. None only for a model "
+            "registered before content hashing existed, where there was no "
+            "root of trust to check against."
+        ),
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The fill-price advisory this panel must be backtested under, "
+            "plus the dataset coverage warnings carried from the model's "
+            "manifest."
+        ),
     )
 
 
@@ -1512,6 +1689,166 @@ class ScorePredictionsResult(BaseModel):
             "every date. `notes` carries the explanatory commentary; "
             "these are the ones that say a headline figure is not what it "
             "looks like."
+        ),
+    )
+
+
+# ── attach_model_outcomes ───────────────────────────────────────────────
+#
+# What makes this library's own output scoreable. Neither
+# run_model_experiment's reference (date, entity, prediction, lower, upper)
+# nor build_model_ensemble's (date, entity, prediction) carries the
+# realized label, so score_predictions refused both for having no 'target'
+# column -- the library could build an ensemble and backtest it and could
+# not produce one statistical number for it.
+
+
+class AttachModelOutcomesInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something -- the same failure strategy_params.py
+    # exists to stop one layer down, at the boundary where a model is
+    # the one choosing the names.
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
+
+    model_id: Optional[str] = Field(
+        None,
+        description=(
+            "PREFERRED. A registered model, whose manifest resolves the "
+            "predictions, the dataset and the label it was actually fit on "
+            "together -- so none of them can disagree. The predictions "
+            "artifact is verified against its recorded digest on the way in."
+        ),
+    )
+    predictions_ref: Optional[str] = Field(
+        None,
+        description=(
+            "An `sqt://predictions/...` reference instead of a model: an "
+            "ensemble from build_model_ensemble, a scored universe from "
+            "score_model, or predictions this library never produced. "
+            "Requires dataset_id, because nothing on a reference says which "
+            "dataset's realized label its rows should be joined to."
+        ),
+    )
+    dataset_id: Optional[str] = Field(
+        None,
+        description=(
+            "The dataset carrying the realized outcomes. REQUIRED with "
+            "predictions_ref and REFUSED with model_id, where it is read "
+            "from the manifest rather than taken on trust."
+        ),
+    )
+    target: Optional[str] = Field(
+        None,
+        description=(
+            "Which declared label to join, by NAME ('h5', 'h30'), for a "
+            "dataset registered with several horizons. Omitted on such a "
+            "dataset the call is REFUSED rather than silently scored "
+            "against the primary: the wrong label produces numbers that "
+            "look fine and describe a different outcome. Unnecessary for a "
+            "single-label dataset, and unnecessary with model_id, whose "
+            "manifest names the label it was fit on."
+        ),
+    )
+    run_id: str = Field(
+        ...,
+        description=(
+            "Run id to publish the joined frame under. Letters, digits, '_' "
+            "and '-' only."
+        ),
+    )
+    name: str = Field(..., description="Artifact name for the joined frame.")
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "AttachModelOutcomesInput":
+        if (self.model_id is None) == (self.predictions_ref is None):
+            raise ValueError(
+                "pass exactly one of model_id (preferred -- resolves the "
+                "predictions, the dataset and the label together from the "
+                "manifest) or predictions_ref."
+            )
+        if self.predictions_ref is not None and not self.dataset_id:
+            raise ValueError(
+                "dataset_id is required with predictions_ref: a predictions "
+                "reference carries no realized outcome and nothing on it "
+                "says which dataset's label these rows should be joined to. "
+                "Pass the dataset the predictions were made against."
+            )
+        if self.model_id is not None and self.dataset_id is not None:
+            raise ValueError(
+                "dataset_id is read from the model's manifest, so passing it "
+                "here could only contradict the model's own lineage. Pass it "
+                "with predictions_ref, or pass model_id alone."
+            )
+        return self
+
+
+class AttachModelOutcomesResult(BaseModel):
+    model_config = _NO_PROTECTED_NAMESPACES
+
+    ref: str = Field(
+        ...,
+        description=(
+            "An `sqt://predictions/...` reference carrying exactly date, "
+            "entity, prediction and target. This is what score_predictions "
+            "reads: pass it as `predictions_ref` with the `task` and the "
+            "`horizon` reported below."
+        ),
+    )
+    task: Optional[str] = Field(
+        None,
+        description=(
+            "What score_predictions should read the prediction column as. "
+            "Read from the manifest on the model path. On the reference "
+            "path there is no manifest, so this is the task the dataset's "
+            "label admits when it admits exactly one, and None when it "
+            "admits several -- a forward return is scoreable as regression "
+            "or as ranking, and which one is being claimed is the caller's "
+            "decision rather than the dataset's."
+        ),
+    )
+    target_id: Optional[str] = Field(
+        None,
+        description=(
+            "The label that was actually joined, in the manifest's own "
+            "'<type>:<horizon>' spelling -- so what was scored is on the "
+            "record beside the numbers."
+        ),
+    )
+    horizon: Optional[int] = Field(
+        None,
+        description=(
+            "Bars the joined label looks forward, parsed from target_id. "
+            "Pass it straight to score_predictions' `horizon`: an "
+            "overlapping forward return has far fewer independent "
+            "observations than rows, and a t-statistic read off the raw "
+            "count is overstated by roughly that factor. Currently an agent "
+            "has to remember it from dataset-build time."
+        ),
+    )
+    columns: List[str] = Field(
+        default_factory=list,
+        description="The published frame's columns, in order.",
+    )
+    n_rows: int = Field(0, description="Rows that matched an outcome.")
+    n_predictions_unmatched: int = Field(
+        0,
+        description=(
+            "Prediction rows with no outcome row on their (date, entity) -- "
+            "dropped rather than carried as a null target. Nonzero is normal "
+            "at the end of a sample, where the forward label has not "
+            "resolved yet; a figure close to the whole frame usually means "
+            "the predictions and the dataset are not about the same panel."
+        ),
+    )
+    first_date: str = ""
+    last_date: str = ""
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Label-selection notes, how many predictions found no outcome, "
+            "and the dataset coverage warnings carried from the manifest."
         ),
     )
 

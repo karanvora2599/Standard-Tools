@@ -103,6 +103,83 @@ def _deployed_is_cross_sectional(
 from .specs import DatasetSpec, _parse_date
 
 
+def _interval_statistics(
+    predictions_df: pd.DataFrame,
+) -> tuple[Dict[str, float], List[str]]:
+    """
+    What the conformal band a scored model emits actually looks like.
+
+    `summary_stats` describes the POINT prediction and says nothing about
+    the interval beside it, so a band thirty times the width of the whole
+    cross-section -- measured, on a ridge model whose predictions ranged
+    over 0.0024 while the mean interval width was 0.169 -- came back from
+    scoring looking exactly like a tight one. The width is the model's own
+    statement of how much it does not know, and no view returned it.
+
+    Empty for a point-only model: an absent interval is not a zero-width
+    one, and a dict of zeros would read as perfect confidence.
+
+    There is deliberately no coverage number here. Coverage is the fraction
+    of realized outcomes that fell inside the band, and at `as_of` the
+    outcomes do not exist yet -- computing one against anything available
+    now would mean scoring the interval on the data it was calibrated on.
+    """
+    if not {"lower", "upper"} <= set(predictions_df.columns):
+        return {}, []
+
+    widths = predictions_df["upper"].to_numpy(dtype=float) - predictions_df[
+        "lower"
+    ].to_numpy(dtype=float)
+    widths = widths[np.isfinite(widths)]
+    if widths.size == 0:
+        return {}, []
+
+    stats: Dict[str, float] = {
+        "interval_mean_width": float(np.mean(widths)),
+        "interval_median_width": float(np.median(widths)),
+        "interval_min_width": float(np.min(widths)),
+        "interval_max_width": float(np.max(widths)),
+        "n_intervals": int(widths.size),
+    }
+
+    # The band against what it is a band AROUND. An absolute width means
+    # nothing without the scale of the predictions it brackets: 0.169 is
+    # narrow for a price and absurd for a daily return forecast, and the
+    # ratio is what says which case this is.
+    predictions = predictions_df["prediction"].to_numpy(dtype=float)
+    predictions = predictions[np.isfinite(predictions)]
+    warnings: List[str] = []
+    spread = (
+        float(np.max(predictions) - np.min(predictions)) if predictions.size else 0.0
+    )
+    # A one-name cross-section has a spread of exactly zero, and so does a
+    # model that predicted the same number for everything. Dividing by it
+    # would emit an infinity; the key is absent instead, because "the ratio
+    # is undefined here" is a different claim from "the ratio is enormous".
+    if np.isfinite(spread) and spread > 0:
+        ratio = stats["interval_mean_width"] / spread
+        if np.isfinite(ratio):
+            stats["interval_width_over_prediction_spread"] = float(ratio)
+            if ratio > 1.0:
+                warnings.append(
+                    "the prediction interval is wider than the entire "
+                    f"cross-section's spread: mean width {stats['interval_mean_width']:.6g} "
+                    f"against a prediction range of {spread:.6g} ({ratio:.1f}x). "
+                    "Every name's band contains every other name's point "
+                    "prediction, so the interval says the model cannot "
+                    "distinguish them at all -- the RANKING may still be "
+                    "usable, the level is not, and any position size derived "
+                    "from the width will be. Check the conformal alpha and "
+                    "the calibration residuals the radius came from."
+                )
+
+    return {
+        key: value
+        for key, value in stats.items()
+        if not isinstance(value, float) or np.isfinite(value)
+    }, warnings
+
+
 def score_model(
     model_id: str,
     as_of: str,
@@ -544,6 +621,11 @@ def score_model(
         overwrite=True,
     )
 
+    # Appended to `warnings` before it is returned, so an implausible band
+    # is read beside the number it makes implausible.
+    interval_stats, interval_warnings = _interval_statistics(predictions_df)
+    warnings.extend(interval_warnings)
+
     return {
         "model_id": model_id,
         "as_of": as_of,
@@ -571,4 +653,8 @@ def score_model(
             "min": float(predictions_df["prediction"].min()),
             "max": float(predictions_df["prediction"].max()),
         },
+        # The band BESIDE the point prediction, which summary_stats above
+        # describes and which said nothing about the interval. Empty for a
+        # point-only model -- see _interval_statistics.
+        "interval_stats": interval_stats,
     }

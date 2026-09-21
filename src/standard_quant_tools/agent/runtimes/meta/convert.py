@@ -92,14 +92,18 @@ def _predictions_to_signal_panel(input_data, source):
 
 def _predictions_to_score_panel(input_data, source):
     from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.modeling.portfolio_eval import predictions_to_score_panel
 
     frame = handoff.resolve(input_data.ref, expect="predictions")
-    required = {"date", "entity", "prediction"}
-    missing = required - set(frame.columns)
-    if missing:
-        raise ValidationError(
-            f"a predictions frame needs {sorted(required)}; missing {sorted(missing)}"
-        )
+    # The same coercion the signal-panel conversion makes, for the same
+    # reason: a `predictions` reference can be produced by anything, and a
+    # frame whose dates are strings is a representation detail, not a
+    # wrong answer. The reshape below requires datetime64.
+    if "date" in frame.columns and not pd.api.types.is_datetime64_any_dtype(
+        frame["date"]
+    ):
+        frame = frame.copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="raise")
     # `task` was accepted and ignored here, while the SIGNAL panel
     # conversion refuses without it -- and for the reason that applies just
     # as well to this one: "a regression prediction thresholded as a
@@ -132,11 +136,30 @@ def _predictions_to_score_panel(input_data, source):
             "task='classification' to have them recentred."
         )
 
-    panel: Dict[str, Dict[str, float]] = {}
-    for row in frame.itertuples(index=False):
-        panel.setdefault(str(row.entity), {})[str(row.date)] = (
-            float(row.prediction) - offset
-        )
+    # ONE reshape, the modeling package's, rather than the second
+    # implementation that used to live here. That one checked three column
+    # names and then let a duplicate (entity, date) pair overwrite itself
+    # as the panel was assembled row by row -- a smaller but perfectly
+    # valid-looking panel, which is the failure
+    # `_validate_predictions_frame` was written to stop and which only the
+    # simulator's path was protected from. A duplicate, a non-finite
+    # prediction and an empty frame are now refused here with the same
+    # messages the simulator gives.
+    wide = predictions_to_score_panel(
+        frame,
+        input_data.task,
+        input_data.ref,
+        proba_threshold=float(input_data.proba_threshold),
+    )
+    # NaN is dropped rather than emitted: the pivot materializes every
+    # (entity, date) pair, and a pair the model said nothing about is
+    # absent from a score panel, not scored as missing.
+    panel: Dict[str, Dict[str, float]] = {
+        str(entity): {
+            str(date): float(value) for date, value in wide[entity].dropna().items()
+        }
+        for entity in wide.columns
+    }
     return panel, notes
 
 

@@ -40,7 +40,7 @@ Everything above concerns the 180-tool analysis and backtest surface. There
 are two more: `standard_quant_tools.modeling.agent`, 20 tools, and the
 9-tool `feature_lab` runtime — neither of which the library merges into the
 first, see [15_modeling.md](15_modeling.md) for why. 180 + 20 + 9 is the
-211-tool whole surface. The example implementations keep the same
+214-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 
 | | Analysis registry | Modeling registry |

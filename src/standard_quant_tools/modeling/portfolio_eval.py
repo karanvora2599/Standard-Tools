@@ -44,7 +44,7 @@ artifact/provenance plumbing that makes the result auditable.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -89,6 +89,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "apply_exposure_targets",
     "evaluate_model_portfolio",
+    "evaluate_predictions_portfolio",
     "predictions_to_score_panel",
     "select_rebalance_dates",
     "transform_predictions_to_weights",
@@ -104,17 +105,38 @@ _EPS = 1e-12
 
 
 def predictions_to_score_panel(
-    predictions_df: pd.DataFrame, task: str, source: str = "<predictions>"
+    predictions_df: pd.DataFrame,
+    task: Optional[str],
+    source: str = "<predictions>",
+    proba_threshold: float = 0.5,
 ) -> pd.DataFrame:
     """
     Reshape a long (date, entity, prediction) OOS artifact into the wide
     date x entity panel every sizing function expects.
 
-    Classification predictions are recentered to `proba - 0.5` rather than
-    left as a raw positive-class probability. It makes `method="sign"` mean
-    the same thing for every task: positive score = the model is bullish. A
-    raw probability is in [0, 1], so its sign is +1 for every name and
-    every date — a "long everything" portfolio that looks like a signal.
+    THE one implementation of this reshape. `meta/convert.py` used to carry
+    a second one that checked three column names and nothing else, so a
+    duplicate (entity, date) pair silently overwrote itself there while the
+    same frame was refused here — two answers to one question, and the
+    quieter one was the one an agent reached through `convert_reference`.
+    That module now calls this function.
+
+    Classification predictions are recentered to `proba - proba_threshold`
+    rather than left as a raw positive-class probability. It makes
+    `method="sign"` mean the same thing for every task: positive score =
+    the model is bullish. A raw probability is in [0, 1], so its sign is +1
+    for every name and every date — a "long everything" portfolio that
+    looks like a signal. The threshold is a parameter, defaulting to the
+    0.5 this recentring was written with, because a classifier calibrated
+    to a rarer event has its decision boundary somewhere else and
+    subtracting 0.5 from it would encode a different claim than the model
+    makes.
+
+    `task=None` passes the predictions through unchanged and is a
+    deliberate option, not a missing argument: a caller holding a score of
+    unstated provenance is better served by a panel of exactly what it
+    holds than by an offset picked on its behalf. A task that IS given must
+    be a real one.
 
     A RANKING model's predictions pass through unchanged, like a
     regressor's, because a ranker emits a relative score and not a
@@ -129,14 +151,14 @@ def predictions_to_score_panel(
     weighting step treats NaN as "not in the cross-section on that date"
     and gives it zero WEIGHT, which is the honest reading.
     """
-    if task not in TASKS:
+    if task is not None and task not in TASKS:
         raise ValidationError(f"task must be one of {list(TASKS)}, got {task!r}.")
     _validate_predictions_frame(predictions_df, source)
     panel = predictions_df.pivot(index="date", columns="entity", values="prediction")
     panel = panel.sort_index()
     panel.columns.name = None
     if task == "classification":
-        panel = panel - 0.5
+        panel = panel - float(proba_threshold)
     return panel
 
 
@@ -636,8 +658,133 @@ def evaluate_model_portfolio(
     """
     transform = transform or PredictionTransformSpec()
     portfolio = portfolio or PortfolioSimSpec()
-    warnings: List[str] = []
+    _assert_spec_limits(transform, portfolio)
 
+    manifest = load_manifest(model_id)
+    _refuse_cpcv(manifest, "evaluate_model_portfolio")
+    dataset_spec = load_dataset_spec(model_id)
+    interval = str(dataset_spec.get("interval", "1d"))
+    provider_name = str(dataset_spec.get("provider", "yfinance"))
+
+    # The calendar the dataset was built under, so an intraday model's
+    # Sharpe is annualized by the bars its venue actually has.
+    calendar = dataset_spec.get("calendar")
+
+    # Verified before loading, for the same reason bridge.py verifies:
+    # structural validation passes on an edited file that kept its shape,
+    # so an altered prediction column would otherwise produce a clean and
+    # entirely fictional equity curve.
+    predictions_uri = str(manifest.oos_predictions_uri)
+    _artifacts.verify_file(
+        Path(predictions_uri),
+        manifest.content_hashes.get("oos_predictions"),
+        "oos_predictions",
+    )
+    predictions_df = _artifacts.load_artifact(predictions_uri)
+    skipped_folds = (manifest.validation_report or {}).get("skipped_folds") or None
+
+    result = _simulate_predictions_portfolio(
+        predictions_df,
+        manifest.task,
+        interval=interval,
+        provider_name=provider_name,
+        calendar=str(calendar) if calendar else None,
+        start=str(dataset_spec["start"]),
+        end=str(dataset_spec["end"]),
+        transform=transform,
+        portfolio=portfolio,
+        run_id=model_id,
+        source=predictions_uri,
+        skipped_folds=skipped_folds,
+        extra_warnings=manifest.dataset_warnings,
+    )
+    # Every input that determined the numbers above, so a reported Sharpe
+    # can be traced back to the exact predictions and weights that produced
+    # it. The predictions hash is the manifest's own recorded digest
+    # (already verified above), so all three identify bytes on disk rather
+    # than a path that may have been rewritten.
+    result["provenance"] = {
+        "oos_predictions_uri": predictions_uri,
+        "oos_predictions_hash": manifest.content_hashes.get("oos_predictions", ""),
+        "dataset_id": manifest.dataset_id,
+        "dataset_spec_hash": manifest.dataset_spec_hash,
+        "estimator_type": manifest.estimator_type,
+        **result["provenance"],
+    }
+    return {"model_id": model_id, **result}
+
+
+def evaluate_predictions_portfolio(
+    predictions_df: pd.DataFrame,
+    task: Optional[str],
+    *,
+    interval: str,
+    provider_name: str,
+    calendar: Optional[str],
+    start: str,
+    end: str,
+    transform: Optional[PredictionTransformSpec] = None,
+    portfolio: Optional[PortfolioSimSpec] = None,
+    run_id: str,
+    source: str = "<predictions>",
+) -> Dict[str, Any]:
+    """
+    The same evaluation for predictions that are not a registered model's:
+    an ensemble, an externally computed alpha, a converted panel.
+
+    What the model path reads from a manifest, this one is told: the task,
+    and the five dataset fields (interval, provider, calendar, start, end)
+    that say which bars to price the book against and how to annualize it.
+    Nothing else in the simulation ever looked at the manifest.
+
+    There is no content-hash check here because there is no registered
+    digest to check against — the caller's store is the root of trust, and
+    the reference it resolved is recorded in the result's provenance
+    instead. That is a weaker claim than `evaluate_model_portfolio`'s and
+    is spelled differently on purpose.
+
+    Returns the same dict shape, with `source_ref` in place of `model_id`.
+    """
+    transform = transform or PredictionTransformSpec()
+    portfolio = portfolio or PortfolioSimSpec()
+
+    # A combinatorial-purged frame carries one prediction per (entity,
+    # date, PATH), so the duplicate check below would reject it with a
+    # message about overwriting rows — true, but not the remedy. The model
+    # path refuses cpcv by name off the manifest; a bare frame has no
+    # manifest, and the `path` column is the shape that gives it away.
+    if "path" in predictions_df.columns:
+        raise ValidationError(
+            f"{source} carries a 'path' column, which is the shape of "
+            "combinatorial purged cross-validation: one prediction per "
+            "(entity, date, path), so there is no single out-of-sample "
+            "track record to simulate — the paths are alternative "
+            "histories, not a sequence. Evaluate a model validated with "
+            "walk_forward, or collapse the paths to one series deliberately "
+            "before publishing the reference."
+        )
+
+    result = _simulate_predictions_portfolio(
+        predictions_df,
+        task,
+        interval=interval,
+        provider_name=provider_name,
+        calendar=calendar,
+        start=start,
+        end=end,
+        transform=transform,
+        portfolio=portfolio,
+        run_id=run_id,
+        source=source,
+    )
+    return {"source_ref": source, **result}
+
+
+def _assert_spec_limits(
+    transform: PredictionTransformSpec, portfolio: PortfolioSimSpec
+) -> None:
+    """The two spec limits the simulator would reject every rebalance date
+    under, refused before any data is fetched."""
     if transform.gross_exposure > portfolio.max_gross_leverage + 1e-9:
         raise ValidationError(
             f"transform.gross_exposure ({transform.gross_exposure}) exceeds "
@@ -653,18 +800,40 @@ def evaluate_model_portfolio(
             "rejected."
         )
 
-    manifest = load_manifest(model_id)
-    _refuse_cpcv(manifest, "evaluate_model_portfolio")
-    dataset_spec = load_dataset_spec(model_id)
-    interval = str(dataset_spec.get("interval", "1d"))
-    provider_name = str(dataset_spec.get("provider", "yfinance"))
 
-    # The calendar the dataset was built under, so an intraday model's
-    # Sharpe is annualized by the bars its venue actually has.
-    calendar = dataset_spec.get("calendar")
-    periods_per_year = periods_per_year_for_interval(
-        interval, str(calendar) if calendar else None
-    )
+def _simulate_predictions_portfolio(
+    predictions_df: pd.DataFrame,
+    task: Optional[str],
+    *,
+    interval: str,
+    provider_name: str,
+    calendar: Optional[str],
+    start: str,
+    end: str,
+    transform: PredictionTransformSpec,
+    portfolio: PortfolioSimSpec,
+    run_id: str,
+    source: str,
+    skipped_folds: Optional[List[Any]] = None,
+    extra_warnings: Iterable[str] = (),
+) -> Dict[str, Any]:
+    """
+    Predictions -> score panel -> weights -> shared-cash simulation ->
+    metrics, for a frame from anywhere.
+
+    Everything below the manifest lookup in `evaluate_model_portfolio` was
+    already frame-only; this is that half, named, so a reference and a
+    registered model reach the identical arithmetic instead of one of them
+    getting a second implementation that drifts.
+
+    Returns the result dict WITHOUT the identity field: the caller names
+    what it evaluated (`model_id` or `source_ref`) and adds whatever
+    lineage it can vouch for to `provenance`.
+    """
+    _assert_spec_limits(transform, portfolio)
+    warnings: List[str] = []
+
+    periods_per_year = periods_per_year_for_interval(interval, calendar)
     if periods_per_year is None:
         periods_per_year = 252
         warnings.append(
@@ -675,26 +844,15 @@ def evaluate_model_portfolio(
             "interval. Build the dataset with DatasetSpec.calendar set."
         )
 
-    # Verified before loading, for the same reason bridge.py verifies:
-    # structural validation passes on an edited file that kept its shape,
-    # so an altered prediction column would otherwise produce a clean and
-    # entirely fictional equity curve.
-    predictions_uri = str(manifest.oos_predictions_uri)
-    _artifacts.verify_file(
-        Path(predictions_uri),
-        manifest.content_hashes.get("oos_predictions"),
-        "oos_predictions",
-    )
-    predictions_df = _artifacts.load_artifact(predictions_uri)
+    # Whatever names these predictions to a reader of the refusals below:
+    # a registered model's artifact URI, or a published reference.
+    predictions_uri = source
     if transform.method == "uncertainty_scaled":
         # Before the pivot, where the interval columns still stand beside
         # the prediction: the score the sizer sees is prediction / width.
         predictions_df = scale_by_uncertainty(predictions_df, predictions_uri)
-    score_panel = predictions_to_score_panel(
-        predictions_df, manifest.task, predictions_uri
-    )
+    score_panel = predictions_to_score_panel(predictions_df, task, predictions_uri)
 
-    skipped_folds = (manifest.validation_report or {}).get("skipped_folds") or None
     # The same continuity contract the bridge enforces, and for a related
     # reason: a hole in the OOS calendar means the model produced nothing
     # over a span, and the portfolio would sit in a stale position across
@@ -710,7 +868,7 @@ def evaluate_model_portfolio(
     entities = [str(c) for c in score_panel.columns]
     if len(entities) < 2:
         raise ValidationError(
-            f"model {model_id!r} has OOS predictions for {len(entities)} "
+            f"{predictions_uri} has predictions for {len(entities)} "
             "entity(ies). A portfolio evaluation needs a cross-section to "
             "allocate across — with one name there is no allocation decision, "
             "only a timing one. Use bridge.oos_predictions_to_signal_panel + "
@@ -729,8 +887,8 @@ def evaluate_model_portfolio(
     fetched = fetch_universe_ohlcv(
         provider,
         list(plan.values()),
-        str(dataset_spec["start"]),
-        str(dataset_spec["end"]),
+        start,
+        end,
         interval,
     )
     price_data = {
@@ -828,20 +986,20 @@ def evaluate_model_portfolio(
             f"{transform.method!r}: its weights come from book membership, not "
             "from score magnitude, so scaling the score cannot change them."
         )
-    warnings.extend(manifest.dataset_warnings)
+    warnings.extend(extra_warnings)
 
     weights_hash = hash_dataframe(weights)
     weights_uri = _artifacts.save_artifact(
         weights,
-        run_id=model_id,
+        run_id=run_id,
         name=f"target_weights_{weights_hash}",
         overwrite=True,
     )
 
     logger.debug(
-        "[evaluate_model_portfolio] model=%s  entities=%d  rebalances=%d  "
+        "[evaluate_portfolio] source=%s  entities=%d  rebalances=%d  "
         "method=%s  freq=%s  gross=%.3f  net=%.3f  fill=%s",
-        model_id,
+        source,
         len(entities),
         len(rebalance_dates),
         transform.method,
@@ -878,13 +1036,12 @@ def evaluate_model_portfolio(
     equity_hash = hash_dataframe(equity_curve.to_frame(name="equity"))
     equity_uri = _artifacts.save_artifact(
         equity_curve,
-        run_id=model_id,
+        run_id=run_id,
         name=f"portfolio_equity_{equity_hash}",
         overwrite=True,
     )
 
     return {
-        "model_id": model_id,
         "metrics": metrics,
         "transform_diagnostics": transform_diagnostics,
         "coverage": {
@@ -898,22 +1055,17 @@ def evaluate_model_portfolio(
         },
         "target_weights_uri": weights_uri,
         "equity_curve_uri": equity_uri,
-        # Every input that determined the numbers above, so a reported
-        # Sharpe can be traced back to the exact predictions and weights
-        # that produced it. The predictions hash is the manifest's own
-        # recorded digest (already verified above), so all three identify
-        # bytes on disk rather than a path that may have been rewritten.
+        # The inputs that determined the numbers above and that this
+        # function can vouch for on its own. A caller holding a manifest
+        # adds the lineage only it knows (the predictions digest, the
+        # dataset and the estimator) on top.
         "provenance": {
-            "oos_predictions_uri": predictions_uri,
-            "oos_predictions_hash": manifest.content_hashes.get("oos_predictions", ""),
             "target_weights_hash": weights_hash,
             "equity_curve_hash": equity_hash,
-            "dataset_id": manifest.dataset_id,
-            "dataset_spec_hash": manifest.dataset_spec_hash,
-            "task": manifest.task,
-            "estimator_type": manifest.estimator_type,
+            "task": task,
             "interval": interval,
             "provider": provider_name,
+            "calendar": calendar,
             "periods_per_year": int(periods_per_year),
             "transform_spec": transform.model_dump(),
             "portfolio_spec": portfolio.model_dump(),

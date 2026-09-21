@@ -1,5 +1,47 @@
 # Changelog
 
+## The verified branch of the bridge is the one the agent gets
+
+The bridge from a registered model to a backtest has two branches. One
+reads the task from the manifest, refuses a combinatorial-purged model by
+name, and verifies the predictions file against the hash the manifest
+recorded; the other takes a task on trust and a file on trust. Only the
+second was reachable from a tool, through `convert_reference` on a copy
+of the predictions, and it accepted a wrong task (an all-zero panel and
+a NaN Sharpe, no error anywhere) and a sign-flipped copy alike. Three
+tools and three fields make the verified path the reachable one.
+
+- **`backtest_model_signal`** takes a model id and nothing else about
+  the task, so a mismatch cannot be expressed; verifies the OOS
+  predictions against the manifest before it converts them; refuses a
+  cpcv model with the walk-forward remedy; and publishes the signal
+  panel for `run_signal_panel_backtest` to price. The backtest runtime
+  still owns the fill price and the costs. A model-to-backtest workflow
+  no longer passes through the `meta` runtime.
+- **`attach_model_outcomes`** joins a model's out-of-sample predictions,
+  or any predictions reference plus a dataset, to the realized target and
+  publishes a reference `score_predictions` can read, refusing a
+  multi-horizon panel rather than guessing its label. `build_model_ensemble`
+  could build an ensemble and backtest it but never score it; now its
+  reference is scoreable through this tool, and its description says so.
+- **`evaluate_predictions_portfolio`** runs the portfolio simulator on
+  any predictions reference (an ensemble, an external alpha, a scored
+  run), inheriting the interval, provider, calendar and window from a
+  dataset id or taking them explicitly; the same transform and portfolio
+  specs, the same result shape, with provenance naming the reference and
+  its producer instead of a model id.
+- **`score_model` publishes a reference** beside the path it returned:
+  a live scoring run can now be attached to outcomes and scored, or
+  converted and traded, instead of ending at a file only `monitor_model`
+  would accept. It also reports `interval_stats` when the model carries a
+  conformal band, and warns when the band is wider than the entire
+  cross-section's spread.
+- **One `predictions -> score_panel`.** The simulator's implementation,
+  which validates the frame, is the only one; `convert_reference` now
+  delegates to it with its own `proba_threshold`, so a duplicate
+  `(entity, date)`, a non-finite prediction and an empty frame are refused
+  where they used to collapse silently.
+
 ## The report describes the runtime it runs in, and the results carry what they computed
 
 Nothing new on the surface, and every existing answer made true. Two descriptions

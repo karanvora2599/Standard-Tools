@@ -67,6 +67,10 @@ from .models import (
     AnalyzeFeaturesResult,
     AnalyzeModelErrorsInput,
     AnalyzeModelErrorsResult,
+    AttachModelOutcomesInput,
+    AttachModelOutcomesResult,
+    BacktestModelSignalInput,
+    BacktestModelSignalResult,
     BuildEnsembleInput,
     BuildEnsembleResult,
     BuildModelDatasetInput,
@@ -113,6 +117,11 @@ from .models import (
     SpecProblem,
     ValidateModelSpecInput,
     ValidateModelSpecResult,
+)
+from .portfolio_tools import (  # noqa: F401
+    EVALUATE_PREDICTIONS_PORTFOLIO_DESCRIPTION,
+    EvaluatePredictionsPortfolioInput,
+    evaluate_predictions_portfolio,
 )
 
 logger = logging.getLogger(__name__)
@@ -288,10 +297,12 @@ def build_model_ensemble(input_data: BuildEnsembleInput) -> BuildEnsembleResult:
     warnings.append(
         "NOTE: this reference carries date, entity and prediction and no "
         "realized outcome. score_predictions needs a 'target' column and "
-        "will refuse it as it stands -- attach the outcomes from the "
-        "dataset the base models were fit on first. The backtest bridge "
-        "(convert_reference -> signal_panel) needs no outcome and reads it "
-        "unchanged."
+        "will refuse it as it stands. attach_model_outcomes("
+        "predictions_ref=<this ref>, dataset_id=<the dataset the base models "
+        "were fit on>) joins the realized label and publishes the reference "
+        "that scores -- and reports the `horizon` score_predictions wants "
+        "with it. The backtest bridge (convert_reference -> signal_panel) "
+        "needs no outcome and reads it unchanged."
     )
     hottest = max(combined["correlations"].values(), default=None)
     if hottest is not None and hottest > 0.95:
@@ -770,6 +781,41 @@ def score_model(input_data: ScoreModelInput) -> ScoreModelResult:
         max_staleness_days=input_data.max_staleness_days,
         universe_policy=input_data.universe_policy,
     )
+    # Republished with a content kind, the same step run_model_experiment
+    # takes for its out-of-sample frame. Without it a live scoring run was
+    # a dead end: `predictions_uri` is a filesystem path, `handoff.resolve`
+    # refuses a raw path under `expect=`, and every consumer that could do
+    # something with these numbers -- attach_model_outcomes,
+    # score_predictions, convert_reference, the portfolio simulator --
+    # takes a reference. A scored universe could be monitored for drift and
+    # could never be scored against outcomes or traded.
+    from standard_quant_tools.agent.runtimes import handoff
+    from standard_quant_tools.backtest.artifacts import load_artifact
+
+    # The effective score date, not `as_of`: the name says which bar the
+    # predictions were computed from, and those are not always the same
+    # date. Dashes stripped because a handoff identifier is
+    # [A-Za-z0-9_-] only.
+    #
+    # overwrite=True because the artifact this republishes is
+    # content-addressed: the same model, date and universe re-scored on
+    # unchanged data produce the same digest and therefore the same name,
+    # so the second call would otherwise collide with its own identical
+    # output. Any change in the predictions changes the digest and lands
+    # on a different reference, leaving the earlier one intact for whoever
+    # recorded it.
+    scored_name = (
+        f"scored_{str(result['effective_score_date']).replace('-', '')}"
+        f"_{str(result['predictions_hash'])[:8]}"
+    )
+    result["predictions_ref"] = handoff.publish(
+        load_artifact(result["predictions_uri"]),
+        "predictions",
+        input_data.model_id,
+        scored_name,
+        producer="modeling.score_model",
+        overwrite=True,
+    )
     return ScoreModelResult(**result)
 
 
@@ -914,6 +960,79 @@ def evaluate_model_portfolio(
         portfolio=input_data.portfolio,
     )
     return EvaluateModelPortfolioResult(**result)
+
+
+def backtest_model_signal(
+    input_data: BacktestModelSignalInput,
+) -> BacktestModelSignalResult:
+    """
+    Turn a registered model's out-of-sample predictions into a DIRECTION
+    signal panel and publish it for the backtest runtime to price.
+
+    The VERIFIED route. `modeling.bridge` has always had two branches: one
+    that takes a model_id -- reading the task from the manifest, refusing
+    a combinatorial-CV model by name, and checking the predictions file
+    against the digest recorded at registration -- and one that takes a
+    raw artifact URI and can check neither. Only the second was reachable
+    from a tool, through the published COPY of the predictions, so the
+    agent's only path to a backtest was the one the bridge's own docstring
+    calls "explicitly unverified".
+
+    Nothing is backtested here. The panel is published and
+    run_signal_panel_backtest prices it, because the fill convention, the
+    costs, the tickers and the date range are backtest decisions and this
+    runtime does not own them.
+    """
+    from standard_quant_tools.agent.runtimes import handoff
+
+    from ..bridge import oos_predictions_to_signal_panel
+
+    manifest = load_manifest(input_data.model_id)
+    # No `task` argument: the manifest's is the only one, which is what
+    # makes a mismatch unrepresentable rather than merely discouraged.
+    panel = oos_predictions_to_signal_panel(
+        model_id=input_data.model_id,
+        deadband=input_data.deadband,
+        proba_threshold=input_data.proba_threshold,
+        long_only=input_data.long_only,
+    )
+    ref = handoff.publish(
+        panel,
+        "signal_panel",
+        input_data.run_id,
+        input_data.name,
+        producer="modeling.backtest_model_signal",
+    )
+
+    # Every entity is densified onto the panel's shared calendar by the
+    # bridge, so any one of them gives the date axis.
+    calendar = sorted({date for series in panel.values() for date in series})
+    values = [value for series in panel.values() for value in series.values()]
+    warnings = [
+        "Backtest this panel with fill_price='next_open'. Modeling features "
+        "are computed from bar t's own OHLC, so a signal dated t is not "
+        "knowable until t's close has printed -- filling it at that same "
+        "close is the look-ahead run_strategy's own fill_price warning "
+        "describes. The prediction target is close[t] -> close[t+h], so the "
+        "forecast is defined from t onward and execution genuinely happens "
+        "after t."
+    ]
+    warnings.extend(list(manifest.dataset_warnings or []))
+
+    return BacktestModelSignalResult(
+        signal_panel_ref=ref,
+        model_id=input_data.model_id,
+        task=str(manifest.task),
+        entities=sorted(panel),
+        n_dates=len(calendar),
+        first_date=calendar[0] if calendar else "",
+        last_date=calendar[-1] if calendar else "",
+        n_long=sum(1 for value in values if value > 0),
+        n_flat=sum(1 for value in values if value == 0),
+        n_short=sum(1 for value in values if value < 0),
+        oos_predictions_hash=manifest.content_hashes.get("oos_predictions"),
+        warnings=warnings,
+    )
 
 
 #: Metric each task is ranked by when the caller names none. Ranking a
@@ -1953,6 +2072,84 @@ def _label_name_for_target_id(meta, target_id: str):
     return matches[0] if len(matches) == 1 else None
 
 
+def _target_id_for_label(meta, label: Optional[str]):
+    """The '<type>:<horizon>' id of one declared label, or the dataset's
+    own primary id when no label was selected. The inverse of
+    `_label_name_for_target_id`, and the number `horizon` is parsed out of."""
+    for declaration in meta.get("targets") or []:
+        if str(declaration["name"]) == str(label):
+            return (
+                f"{declaration.get('target_type', 'forward_return')}:"
+                f"{declaration['horizon']}"
+            )
+    return meta.get("target_id")
+
+
+def _outcomes_frame(dataset_id: str, target_id_or_label, purpose: str, asked_by=None):
+    """
+    A dataset's panel with `target` pointed at ONE declared label, plus
+    the selection notes.
+
+    The dataset half of what every tool that joins predictions back to
+    realized outcomes needs, lifted out of `_panel_with_selected_target`
+    so a MODEL path and a REFERENCE path share one ambiguity refusal
+    rather than growing two that can disagree.
+
+    `target_id_or_label` is either a manifest's `target_id` (it carries
+    the colon -- "forward_return:5") or the NAME of a declared label
+    ("h30"). None means "whatever the panel's plain `target` column
+    holds", which is only unambiguous for a dataset declaring at most one
+    label: a multi-horizon panel duplicates its PRIMARY onto `target`, so
+    reading it without being asked to would answer a different question
+    from the one put.
+    """
+    panel, meta, _directory = _load_dataset_panel(dataset_id)
+    declared = meta.get("targets") or []
+    names = [str(d["name"]) for d in declared]
+    notes: List[str] = []
+    requested = None if target_id_or_label is None else str(target_id_or_label)
+    who = asked_by or f"dataset {dataset_id!r}"
+
+    label = None
+    if requested is not None:
+        label = _label_name_for_target_id(meta, requested)
+        if label is None and requested in names:
+            label = requested
+
+    if label is not None:
+        panel, _target_id, notes = _select_target(panel, meta, label, dataset_id)
+    elif requested is not None and ":" not in requested:
+        # A label NAME this dataset does not carry. `_select_target` owns
+        # that refusal (it names what the dataset does carry), so it is
+        # raised from there rather than restated here.
+        _select_target(panel, meta, requested, dataset_id)
+    elif requested is not None:
+        if declared and "target" not in panel.columns:
+            raise ValidationError(
+                f"{who} was fit on target_id={requested!r}, and dataset "
+                f"{dataset_id!r} declares no single label matching it. "
+                f"{purpose} cannot be computed against a label that cannot "
+                "be identified -- the wrong one would produce numbers that "
+                "look fine and describe a different outcome."
+            )
+    elif len(names) > 1:
+        raise ValidationError(
+            f"dataset {dataset_id!r} declares {len(names)} labels {names} "
+            f"and none was named, so which outcome {purpose} means is "
+            "ambiguous. The panel's plain 'target' column holds the PRIMARY "
+            f"label ({names[0]!r}) and scoring against it unasked would "
+            "answer a different question from the one put -- a 30-bar "
+            "forecast judged against a 1-bar outcome looks like a bad model "
+            f"rather than a wrong join. Pass target=<one of {names}>."
+        )
+    if "target" not in panel.columns:
+        raise ValidationError(
+            f"dataset {dataset_id!r} has no 'target' column, so there are no "
+            "outcomes to compare these predictions against."
+        )
+    return panel, meta, notes
+
+
 def _panel_with_selected_target(manifest, purpose: str):
     """
     The model's training panel with `target` pointed at the label it was
@@ -1964,29 +2161,12 @@ def _panel_with_selected_target(manifest, purpose: str):
     means. Refuses, rather than guessing, when the dataset declares
     several labels and none matches the manifest's target id.
     """
-    panel, meta, _directory = _load_dataset_panel(manifest.dataset_id)
-    notes: List[str] = []
-    label = _label_name_for_target_id(meta, manifest.target_id)
-    if label is not None:
-        panel, _target_id, notes = _select_target(
-            panel, meta, label, manifest.dataset_id
-        )
-    elif (meta.get("targets") or []) and "target" not in panel.columns:
-        raise ValidationError(
-            f"model {manifest.model_id!r} was fit on target_id="
-            f"{manifest.target_id!r}, and dataset {manifest.dataset_id!r} "
-            f"declares no single label matching it. {purpose} cannot be "
-            "computed against a label that cannot be identified -- the wrong "
-            "one would produce numbers that look fine and describe a "
-            "different outcome."
-        )
-    if "target" not in panel.columns:
-        raise ValidationError(
-            f"dataset {manifest.dataset_id!r} has no 'target' column, so "
-            "there are no outcomes to compare this model's predictions "
-            "against."
-        )
-    return panel, meta, notes
+    return _outcomes_frame(
+        manifest.dataset_id,
+        manifest.target_id,
+        purpose,
+        asked_by=f"model {manifest.model_id!r}",
+    )
 
 
 def _oos_with_actuals(model_id: str):
@@ -2010,6 +2190,174 @@ def _oos_with_actuals(model_id: str):
             "compare it on."
         )
     return frame, manifest
+
+
+def attach_model_outcomes(
+    input_data: AttachModelOutcomesInput,
+) -> AttachModelOutcomesResult:
+    """
+    Join predictions to the outcome they were predicting, and publish the
+    result as a reference score_predictions can read.
+
+    The step that was missing between this library's own output and its
+    own scorer. Everything it does was already here -- the OOS frame, the
+    dataset's realized label, the refusal to guess which label a
+    multi-horizon dataset means -- but only behind two private helpers,
+    so an ensemble could be built and backtested and never scored.
+    """
+    import pandas as pd
+
+    from standard_quant_tools.agent.runtimes import handoff
+
+    from ..bridge import _refuse_cpcv
+    from ..ensemble import load_oos_predictions
+
+    warnings: List[str] = []
+    manifest = None
+    task: Optional[str] = None
+
+    if input_data.model_id is not None:
+        manifest = load_manifest(input_data.model_id)
+        # A cpcv model predicts each (date, entity) once per PATH it was
+        # tested in, so its frame carries several predictions per row. The
+        # join below would attach the same outcome to each of them and
+        # every statistic downstream would be computed on a multiplied
+        # sample -- the exact failure `compare_models(method='paired')`
+        # was producing a 'significant' p-value from.
+        _refuse_cpcv(manifest, "attach_model_outcomes")
+        # Verifies the artifact against the manifest's recorded digest
+        # before reading it, so an edited predictions file fails here
+        # rather than being scored.
+        predictions = load_oos_predictions(input_data.model_id)
+        dataset_id = str(manifest.dataset_id)
+        requested = input_data.target or manifest.target_id
+        task = manifest.task
+        asked_by = f"model {input_data.model_id!r}"
+        warnings.extend(list(manifest.dataset_warnings or []))
+    else:
+        frame = handoff.resolve(input_data.predictions_ref, expect="predictions")
+        missing = [
+            column
+            for column in ("date", "entity", "prediction")
+            if column not in frame.columns
+        ]
+        if missing:
+            raise ValidationError(
+                f"{input_data.predictions_ref!r} is missing column(s) "
+                f"{missing}; it holds {list(frame.columns)}. Attaching an "
+                "outcome needs the prediction and the (date, entity) it "
+                "belongs to."
+            )
+        predictions = frame[["date", "entity", "prediction"]].copy()
+        # Coerced here rather than demanded of every publisher: a
+        # `predictions` reference can come from anything. A date that
+        # cannot be parsed still fails.
+        predictions["date"] = pd.to_datetime(predictions["date"], errors="raise")
+        predictions["entity"] = predictions["entity"].astype(str)
+        dataset_id = str(input_data.dataset_id)
+        requested = input_data.target
+        asked_by = f"reference {input_data.predictions_ref!r}"
+
+    duplicated = predictions.duplicated(subset=["entity", "date"])
+    if duplicated.any():
+        sample = predictions.loc[duplicated, ["entity", "date"]].head(3)
+        raise ValidationError(
+            f"{asked_by}: {int(duplicated.sum())} duplicate (entity, date) "
+            f"prediction row(s), e.g. {sample.to_dict('records')}. Each pair "
+            "must be unique -- joining one outcome onto several predictions "
+            "multiplies the sample, and every statistic computed from it."
+        )
+
+    panel, meta, notes = _outcomes_frame(
+        dataset_id, requested, "Attaching outcomes", asked_by=asked_by
+    )
+    warnings.extend(notes)
+
+    if requested is None:
+        target_id = meta.get("target_id")
+    elif ":" in str(requested):
+        target_id = str(requested)
+    else:
+        target_id = _target_id_for_label(meta, requested)
+    if manifest is not None and target_id != manifest.target_id:
+        warnings.append(
+            f"WARNING: target={input_data.target!r} selects {target_id!r}, "
+            f"and model {input_data.model_id!r} was fit on "
+            f"{manifest.target_id!r}. These predictions are being scored "
+            "against a label they were not trained to predict, which is a "
+            "different question rather than a better measurement of the "
+            "same one."
+        )
+    # The same parse `compare_models(method='paired')` performs on a
+    # manifest's target id, so the horizon this reports and the horizon the
+    # paired comparison corrects for are one number.
+    try:
+        horizon: Optional[int] = int(str(target_id).rsplit(":", 1)[1])
+    except (IndexError, ValueError, TypeError):
+        horizon = None
+
+    if task is None and target_id:
+        # A reference has no manifest, so the task is whatever the
+        # dataset's LABEL admits. Exactly one and it is not a guess;
+        # several and it is a decision, which is the caller's to make.
+        target_type = str(target_id).rsplit(":", 1)[0]
+        candidates = [t for t in TASKS if target_type in targets_for_task(t)]
+        if len(candidates) == 1:
+            task = candidates[0]
+        elif candidates:
+            warnings.append(
+                f"NOTE: the label {target_id!r} is scoreable as "
+                f"{sorted(candidates)}, and a reference carries no manifest "
+                "to say which was claimed -- so `task` is left unset rather "
+                "than picked. Pass score_predictions the one these "
+                "predictions were produced for."
+            )
+
+    actuals = panel[["date", "entity", "target"]].copy()
+    actuals["date"] = pd.to_datetime(actuals["date"])
+    actuals["entity"] = actuals["entity"].astype(str)
+    actuals = actuals[actuals["target"].notna()]
+    joined = predictions.merge(actuals, on=["date", "entity"], how="inner")
+    if joined.empty:
+        raise ValidationError(
+            f"none of {asked_by}'s {len(predictions):,} prediction rows match "
+            f"a row in dataset {dataset_id!r} on (date, entity), so there are "
+            "no outcomes to attach. The usual causes are a different "
+            "universe, a different date range, and a forward label that has "
+            "not resolved yet for the dates predicted."
+        )
+
+    out = joined[["date", "entity", "prediction", "target"]].reset_index(drop=True)
+    unmatched = int(len(predictions) - len(out))
+    if unmatched:
+        warnings.append(
+            f"NOTE: {unmatched:,} of {len(predictions):,} prediction rows had "
+            f"no resolved {target_id!r} outcome in dataset {dataset_id!r} and "
+            "were dropped rather than carried as a null target. At the end of "
+            "a sample this is the forward label not having closed yet; a "
+            "large share of the frame usually means the predictions and the "
+            "dataset are not about the same panel."
+        )
+
+    ref = handoff.publish(
+        out,
+        "predictions",
+        input_data.run_id,
+        input_data.name,
+        producer="modeling.attach_model_outcomes",
+    )
+    return AttachModelOutcomesResult(
+        ref=ref,
+        task=task,
+        target_id=target_id,
+        horizon=horizon,
+        columns=list(out.columns),
+        n_rows=int(len(out)),
+        n_predictions_unmatched=unmatched,
+        first_date=str(pd.Timestamp(out["date"].min()).date()),
+        last_date=str(pd.Timestamp(out["date"].max()).date()),
+        warnings=warnings,
+    )
 
 
 def _paired_against_reference(input_data, reference: str):
@@ -2336,8 +2684,11 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "reads like any other. The published frame carries date, entity and "
         "prediction and NO realized outcome, which is what a backtest does "
         "not need and scoring cannot do without: score_predictions requires "
-        "a 'target' column and refuses this reference until the realized "
-        "outcomes have been attached to it. What gets combined is "
+        "a 'target' column and refuses this reference as it stands. "
+        "attach_model_outcomes(predictions_ref=<this ref>, dataset_id=<the "
+        "dataset the base models were fit on>) joins the realized label and "
+        "publishes the reference that scores, which is how you find out "
+        "whether the combination was worth building. What gets combined is "
         "each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold "
         "that did not train on them -- so the combination cannot inherit the "
         "optimism that makes naive stacking look excellent until it meets a "
@@ -2348,6 +2699,29 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "two agreeing at 0.98 combine into approximately either of them, and "
         "the ensemble's own score cannot show you that.",
         BuildEnsembleInput,
+    ),
+    (
+        "attach_model_outcomes",
+        "Join predictions to the outcome they were predicting and publish "
+        "the result -- the step that makes this library's own output "
+        "scoreable. run_model_experiment's reference and "
+        "build_model_ensemble's both carry date, entity and prediction and "
+        "no realized label, so score_predictions refuses them for having no "
+        "'target' column; this publishes the same rows with the outcome "
+        "attached. Takes a model_id (preferred: the manifest resolves the "
+        "predictions, the dataset and the label the model was actually fit "
+        "on together, and the predictions artifact is verified against the "
+        "digest recorded at registration) or any predictions_ref plus the "
+        "dataset_id whose realized label to join -- an ensemble, a scored "
+        "universe, predictions this library never produced. Also reports "
+        "the `horizon` score_predictions wants for the overlapping-label "
+        "sample-size correction, which an agent otherwise has to remember "
+        "from dataset-build time. REFUSES rather than guesses when a "
+        "dataset declares several horizons and none was named: a 30-bar "
+        "forecast judged against a 1-bar outcome reads as a bad model "
+        "rather than a wrong join. Refuses a combinatorial-CV model by "
+        "name, whose several predictions per row would multiply the sample.",
+        AttachModelOutcomesInput,
     ),
     (
         "register_external_panel",
@@ -2494,6 +2868,40 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "portfolio: transform predictions into target weights and simulate "
         "them with costs, returning Sharpe, drawdown, turnover and exposure.",
         EvaluateModelPortfolioInput,
+    ),
+    (
+        "evaluate_predictions_portfolio",
+        EVALUATE_PREDICTIONS_PORTFOLIO_DESCRIPTION,
+        EvaluatePredictionsPortfolioInput,
+    ),
+    (
+        "backtest_model_signal",
+        "Turn a registered model's out-of-sample predictions into a "
+        "tradeable signal panel and publish it, then price it with "
+        "run_signal_panel_backtest(signal_panel_ref=..., "
+        "signal_type='direction', fill_price='next_open'). THE VERIFIED "
+        "ROUTE from a model to a backtest, and the reason to prefer it over "
+        "publishing the predictions and calling convert_reference: the task "
+        "is read from the model's own manifest -- there is no `task` "
+        "argument to get wrong -- and the predictions file is checked "
+        "against the digest recorded when the model was registered. The "
+        "other route reads a COPY with no manifest behind it, so a "
+        "regression model's predictions handed to classification handling "
+        "produce an all-zero panel that backtests to sharpe nan with no "
+        "error anywhere, and a copy with every prediction's sign flipped is "
+        "accepted without complaint. Refuses by name: a combinatorial-CV "
+        "model (several predictions per date, so no single trading path -- "
+        "retrain with validation.method='walk_forward'), entities carrying "
+        "a venue or asset class (the backtest runtime addresses prices by "
+        "bare symbol -- use evaluate_model_portfolio), a predictions file "
+        "that has changed since it was registered, and an out-of-sample "
+        "calendar with a hole in it. Runs no backtest itself: the fill "
+        "price, the costs, the tickers and the date range are backtest "
+        "decisions. Note that the target horizon and the holding period are "
+        "different objects -- a 20-day forecast turned into a daily "
+        "direction signal is re-evaluated every bar, which is a valid "
+        "strategy but not the same thing as holding for 20 days.",
+        BacktestModelSignalInput,
     ),
 ]
 
@@ -2778,6 +3186,14 @@ MODELING_TOOL_DISPATCH = {
     "validate_pit_records": (validate_pit_records, PitRecordsInput),
     "join_point_in_time": (join_point_in_time, JoinPointInTimeInput),
     "build_model_ensemble": (build_model_ensemble, BuildEnsembleInput),
+    "attach_model_outcomes": (
+        attach_model_outcomes,
+        AttachModelOutcomesInput,
+    ),
+    "backtest_model_signal": (
+        backtest_model_signal,
+        BacktestModelSignalInput,
+    ),
     "register_external_panel": (
         register_external_panel,
         RegisterExternalPanelInput,
@@ -2792,6 +3208,10 @@ MODELING_TOOL_DISPATCH = {
     "evaluate_model_portfolio": (
         evaluate_model_portfolio,
         EvaluateModelPortfolioInput,
+    ),
+    "evaluate_predictions_portfolio": (
+        evaluate_predictions_portfolio,
+        EvaluatePredictionsPortfolioInput,
     ),
     "list_models": (list_models, ListModelsInput),
     "promote_model": (promote_model, PromoteModelInput),

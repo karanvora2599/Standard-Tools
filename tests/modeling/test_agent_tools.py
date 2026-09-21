@@ -150,6 +150,18 @@ class TestModelingDispatch:
             # average of models on different scales is dominated by
             # whichever has the wider spread.
             "build_model_ensemble",
+            # A decision, not plumbing: which realized outcome a set of
+            # predictions is answerable to. A multi-horizon dataset makes
+            # it a real choice, and this tool refuses to make it silently.
+            # Without it the library could build an ensemble and backtest
+            # it and could not produce one statistical number for it.
+            "attach_model_outcomes",
+            # The VERIFIED route from a model to a backtest: the task
+            # comes from the manifest, so there is no way to spell a
+            # mismatch, and the predictions are checked against the
+            # digest recorded at registration. The route that existed
+            # before went through a copy with neither check.
+            "backtest_model_signal",
             # Not whether the model is good -- WHERE it is wrong. An
             # aggregate score cannot separate a broadly mediocre model
             # from one that is excellent except where you trade.
@@ -162,6 +174,7 @@ class TestModelingDispatch:
             "score_model",
             "inspect_model",
             "evaluate_model_portfolio",
+            "evaluate_predictions_portfolio",
             "list_models",
             "list_datasets",
             "compare_models",

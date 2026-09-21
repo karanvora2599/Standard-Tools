@@ -22,7 +22,7 @@ tool #133 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 22 tools, never merged into `agent.get_agent_tools()` /
+with exactly 25 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (180 tools, 8 runtimes)      (22 tools, one pipeline)
+    (180 tools, 8 runtimes)      (25 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 22 modeling tools
+## The 25 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -69,11 +69,16 @@ because the order is the point.
 | `list_models` | → every registered model, newest first, with task, estimator, headline OOS metric and source dataset |
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage`) → that slice of the registered model's manifest |
 | `compare_models` | several `model_id`s → ranked side by side on their out-of-sample metrics |
-| `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact |
+| `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread |
+| `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable |
+| `backtest_model_signal` | `model_id` → the model's out-of-sample predictions as a `signal_panel` reference for `run_signal_panel_backtest`, through the VERIFIED branch of the bridge: the task comes from the manifest (there is no `task` argument to get wrong), the predictions file is checked against the hash the manifest recorded, and a cpcv model is refused by name with the walk-forward remedy |
 | `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
+| `evaluate_predictions_portfolio` | a predictions reference (an ensemble, an external alpha, a scored run) + `task` + the same `PredictionTransformSpec` and `PortfolioSimSpec` → the same simulation as `evaluate_model_portfolio`, inheriting interval, provider, calendar and window from a `dataset_id` or taking them explicitly. Provenance names the reference and its producer, not a model id, and says so |
 | `promote_model` | `model_id` + `to_stage` + `reason` (+ `actor`, `evidence`) → a lifecycle decision appended to `promotions.jsonl` beside the manifest, one stage at a time: `candidate` → `validated` → `staging` → `production`, or `archived` from anywhere. The manifest is never touched |
 | `monitor_model` | `model_id` + a `score_model` `predictions_uri` (+ `outcomes_ref`) → PSI and KS per feature against the training reference kept at registration, prediction drift against the out-of-sample sample, and — with outcomes — the realized cross-sectional IC beside the validation's, every status reported with the threshold it was read against |
+
+**From a registered model to a backtest, verified.** The bridge from a model's out-of-sample predictions to a signal panel has two branches. Given a `model_id` it reads the task from the manifest, refuses a combinatorial-purged model by name, and verifies the predictions file against the hash the manifest recorded; given a file and a task it takes both on trust, and its own docstring says so. Until `backtest_model_signal` existed only the second branch was reachable from a tool, through `convert_reference` on a published copy of the predictions -- a route that accepted a wrong `task` (a regression model converted as a classifier gave an all-zero panel and a NaN Sharpe with no error anywhere) and a sign-flipped copy alike. `backtest_model_signal` is the verified route and has no `task` argument to get wrong; `convert_reference` remains for predictions that never had a manifest. The scoring side is continuous in the same way: `run_model_experiment`, `build_model_ensemble` and `score_model` publish predictions without the realized outcome, `attach_model_outcomes` joins it, and `score_predictions` reads the result; `evaluate_predictions_portfolio` simulates any of those references as a portfolio.
 
 ### The `feature_lab` runtime — 9 more tools, one level down
 

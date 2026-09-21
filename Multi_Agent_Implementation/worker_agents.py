@@ -130,9 +130,16 @@ _MODEL_BUILDER_TOOLS = [
     "inspect_model",
     "score_model",
     "evaluate_model_portfolio",
+    "evaluate_predictions_portfolio",
     "list_models",
     "compare_models",
     "score_predictions",
+    # The two doors onto what a model is worth. attach_model_outcomes joins
+    # the realized label onto a predictions reference, which is what makes
+    # this runtime's own output scoreable at all; backtest_model_signal
+    # publishes the verified signal panel the backtest agent prices.
+    "attach_model_outcomes",
+    "backtest_model_signal",
     # Lifecycle and monitoring: a promotion is a decision this agent records
     # with its evidence, and drift is what it checks before recommending one.
     "promote_model",

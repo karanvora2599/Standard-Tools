@@ -250,7 +250,10 @@ class TestNoNewTools:
         # feature matrix this library did not build, to 19 for
         # build_model_ensemble, which is the choice to combine, and to
         # 20 for analyze_model_errors, which is where a model is wrong
-        # rather than how wrong on average. What this test guards
+        # rather than how wrong on average, and to 24 with
+        # attach_model_outcomes (which realized outcome these predictions
+        # are answerable to) and backtest_model_signal (the verified route
+        # from a model to a backtest). What this test guards
         # is the two names above: a phase-4 capability must still arrive
         # through the registry and the spec, never as a tool.
-        assert len(MODELING_TOOL_DISPATCH) == 22
+        assert len(MODELING_TOOL_DISPATCH) == 25

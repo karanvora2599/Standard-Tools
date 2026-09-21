@@ -2,7 +2,7 @@
 
 Every tool in the library, by runtime, with the description the model
 actually sees. **Generated from the live registry** by
-`Development/generate_tool_index.py` -- a test regenerates it and fails if
+`scripts/generate_tool_index.py` -- a test regenerates it and fails if
 this file has drifted, so a tool added without regenerating breaks the
 suite in the commit that added it.
 
@@ -26,7 +26,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 211 below.
+advertises 155 of the 214 below.
 
 
 ## The runtimes
@@ -35,7 +35,7 @@ advertises 155 of the 211 below.
 |---|---:|---:|---|---|
 | `research` | 42 | 48 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `backtest` | 35 | 82 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `modeling` | 22 | 89 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 25 | 106 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
@@ -43,7 +43,7 @@ advertises 155 of the 211 below.
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 9 | 33 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **211** | | | |
+| **Total** | **214** | | | |
 
 ---
 
@@ -626,6 +626,20 @@ WHERE a registered model is wrong, not merely how wrong on average. An R2 cannot
 **Required:** `model_id`  
 **Optional:** `feature`, `period`, `top_n`
 
+#### `attach_model_outcomes`
+
+Join predictions to the outcome they were predicting and publish the result -- the step that makes this library's own output scoreable. run_model_experiment's reference and build_model_ensemble's both carry date, entity and prediction and no realized label, so score_predictions refuses them for having no 'target' column; this publishes the same rows with the outcome attached. Takes a model_id (preferred: the manifest resolves the predictions, the dataset and the label the model was actually fit on together, and the predictions artifact is verified against the digest recorded at registration) or any predictions_ref plus the dataset_id whose realized label to join -- an ensemble, a scored universe, predictions this library never produced. Also reports the `horizon` score_predictions wants for the overlapping-label sample-size correction, which an agent otherwise has to remember from dataset-build time. REFUSES rather than guesses when a dataset declares several horizons and none was named: a 30-bar forecast judged against a 1-bar outcome reads as a bad model rather than a wrong join. Refuses a combinatorial-CV model by name, whose several predictions per row would multiply the sample.
+
+**Required:** `run_id`, `name`  
+**Optional:** `model_id`, `predictions_ref`, `dataset_id`, `target`
+
+#### `backtest_model_signal`
+
+Turn a registered model's out-of-sample predictions into a tradeable signal panel and publish it, then price it with run_signal_panel_backtest(signal_panel_ref=..., signal_type='direction', fill_price='next_open'). THE VERIFIED ROUTE from a model to a backtest, and the reason to prefer it over publishing the predictions and calling convert_reference: the task is read from the model's own manifest -- there is no `task` argument to get wrong -- and the predictions file is checked against the digest recorded when the model was registered. The other route reads a COPY with no manifest behind it, so a regression model's predictions handed to classification handling produce an all-zero panel that backtests to sharpe nan with no error anywhere, and a copy with every prediction's sign flipped is accepted without complaint. Refuses by name: a combinatorial-CV model (several predictions per date, so no single trading path -- retrain with validation.method='walk_forward'), entities carrying a venue or asset class (the backtest runtime addresses prices by bare symbol -- use evaluate_model_portfolio), a predictions file that has changed since it was registered, and an out-of-sample calendar with a hole in it. Runs no backtest itself: the fill price, the costs, the tickers and the date range are backtest decisions. Note that the target horizon and the holding period are different objects -- a 20-day forecast turned into a daily direction signal is re-evaluated every bar, which is a valid strategy but not the same thing as holding for 20 days.
+
+**Required:** `model_id`, `run_id`, `name`  
+**Optional:** `deadband`, `proba_threshold`, `long_only`
+
 #### `build_model_dataset`
 
 Fetch OHLCV, compute requested features/target, persist the panel.
@@ -634,7 +648,7 @@ Fetch OHLCV, compute requested features/target, persist the panel.
 
 #### `build_model_ensemble`
 
-Combine several registered models into one prediction series, and publish it as an `sqt://predictions` reference the backtest bridge reads like any other. The published frame carries date, entity and prediction and NO realized outcome, which is what a backtest does not need and scoring cannot do without: score_predictions requires a 'target' column and refuses this reference until the realized outcomes have been attached to it. What gets combined is each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold that did not train on them -- so the combination cannot inherit the optimism that makes naive stacking look excellent until it meets a new day. The default is rank_mean rather than mean, because two models on different scales average into a number dominated by whichever has the wider spread, which is its units and not its skill. Reports the pairwise correlation between the base models: two agreeing at 0.98 combine into approximately either of them, and the ensemble's own score cannot show you that.
+Combine several registered models into one prediction series, and publish it as an `sqt://predictions` reference the backtest bridge reads like any other. The published frame carries date, entity and prediction and NO realized outcome, which is what a backtest does not need and scoring cannot do without: score_predictions requires a 'target' column and refuses this reference as it stands. attach_model_outcomes(predictions_ref=<this ref>, dataset_id=<the dataset the base models were fit on>) joins the realized label and publishes the reference that scores, which is how you find out whether the combination was worth building. What gets combined is each model's OUT-OF-SAMPLE predictions -- rows predicted by a fold that did not train on them -- so the combination cannot inherit the optimism that makes naive stacking look excellent until it meets a new day. The default is rank_mean rather than mean, because two models on different scales average into a number dominated by whichever has the wider spread, which is its units and not its skill. Reports the pairwise correlation between the base models: two agreeing at 0.98 combine into approximately either of them, and the ensemble's own score cannot show you that.
 
 **Required:** `model_ids`, `run_id`, `name`  
 **Optional:** `method`, `weights`
@@ -659,6 +673,13 @@ Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transfo
 
 **Required:** `model_id`  
 **Optional:** `transform`, `portfolio`
+
+#### `evaluate_predictions_portfolio`
+
+Evaluate ANY published predictions reference as a shared-cash portfolio: transform them into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure. The same simulator evaluate_model_portfolio runs, reached by reference instead of by model_id -- which is what makes an ensemble from build_model_ensemble, an externally computed alpha, or a converted panel tradeable rather than only describable. `task` is REQUIRED and is the one thing a reference cannot tell you: a classifier's probabilities are all positive, so read as regression scores they produce a long-everything book that simulates cleanly and means nothing. Prices come from `dataset_id` (inheriting its interval, provider, calendar, start and end) or from those fields given explicitly. Unlike evaluate_model_portfolio there is no registered content hash behind the predictions -- the reference and its producer are recorded in provenance instead, and a tampered copy is not detectable here. For a registered model, prefer evaluate_model_portfolio.
+
+**Required:** `predictions_ref`, `task`, `run_id`  
+**Optional:** `dataset_id`, `interval`, `provider`, `calendar`, `start_date`, `end_date`, `transform`, `portfolio`
 
 #### `explain_dataset_row_loss`
 

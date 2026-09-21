@@ -130,7 +130,7 @@ def _panel(n_entities: int = 12, n_dates: int = 40, seed: int = 0) -> pd.DataFra
 
 
 def _publish(frame: pd.DataFrame, name: str) -> str:
-    return handoff.publish(frame, kind="predictions", run_id="phase1a", name=name)
+    return handoff.publish(frame, kind="predictions", run_id="scored_frames", name=name)
 
 
 # ── 1A.1 ────────────────────────────────────────────────────────────────
@@ -181,7 +181,7 @@ class TestTheEnsembleRefSaysWhatItCarries:
         ]
         result = build_model_ensemble(
             BuildEnsembleInput(
-                model_ids=model_ids, run_id="phase1a_ens", name="combined"
+                model_ids=model_ids, run_id="ensemble_caveat", name="combined"
             )
         )
         frame = handoff.resolve(result.ref, expect="predictions")
@@ -218,7 +218,7 @@ class TestConvertReferenceTaskDescription:
                 ConvertReferenceInput(
                     ref=ref,
                     to_kind="signal_panel",
-                    run_id="phase1a_conv",
+                    run_id="convert_task",
                     name="signal",
                 )
             )
@@ -228,7 +228,7 @@ class TestConvertReferenceTaskDescription:
         ref = _publish(frame, "convert_score")
         result = convert_reference(
             ConvertReferenceInput(
-                ref=ref, to_kind="score_panel", run_id="phase1a_conv", name="scores"
+                ref=ref, to_kind="score_panel", run_id="convert_task", name="scores"
             )
         )
         assert result.kind == "score_panel"
