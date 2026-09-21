@@ -1195,7 +1195,12 @@ def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
     finding out during a build means the build already happened.
 
     With a `dataset_id`, also reports that panel's point-in-time coverage:
-    how much of it is genuinely as-of rather than back-filled.
+    how much of it is genuinely as-of rather than back-filled -- and runs
+    the empirical lead-lag screen on every requested feature the panel
+    carries. The declared check alone said `safe=True` for a feature that
+    was literally the five-bar forward return (findings D19); the screen
+    flags it at IC 1.000. Without a dataset the result says its `safe`
+    rests on declarations only.
     """
     from standard_quant_tools.modeling.dataset.leakage import (
         PointInTimeViolation,
@@ -1234,8 +1239,15 @@ def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
         )
 
     coverage = {}
+    screen: Dict[str, Dict[str, Any]] = {}
+    scope = "declared_temporal_support_only"
     if input_data.dataset_id is not None:
-        _panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
+        from standard_quant_tools.agent.runtimes._json_safe import finite_or_none
+        from standard_quant_tools.modeling.analysis.feature_report import (
+            lead_lag_ic_curve,
+        )
+
+        panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
         coverage = {
             key: meta[key]
             for key in ("rows", "start_date", "end_date", "warnings")
@@ -1246,11 +1258,74 @@ def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
             "panel is the one that was built; it does not re-derive whether "
             "each value was available on its own date."
         )
+        # The empirical screen, on the panel as built: a feature whose IC
+        # peaks sharply at shift zero and falls away on both sides is
+        # reading its own answer, whatever its declaration says.
+        columns = [f for f in (meta.get("feature_ids") or []) if f in panel.columns]
+        if input_data.feature_ids is not None:
+            wanted = set(input_data.feature_ids)
+            columns = [f for f in columns if f in wanted]
+        if "target" not in panel.columns:
+            notes.append(
+                "The dataset carries no target column, so the empirical "
+                "lead-lag screen cannot run on it; `safe` rests on the "
+                "declared temporal support alone."
+            )
+        elif not columns:
+            notes.append(
+                "None of the requested features is a column of this dataset, "
+                "so the empirical screen had nothing to test; `safe` rests on "
+                "the declared temporal support alone."
+            )
+        else:
+            scope = "declared_and_empirical"
+            for column in columns:
+                try:
+                    curve = lead_lag_ic_curve(panel, column)
+                except ValidationError as exc:
+                    screen[column] = {
+                        "flagged": False,
+                        "reason": f"not screened: {exc}",
+                    }
+                    continue
+                screen[column] = {
+                    "ic_at_zero": finite_or_none(curve["ic_at_zero"]),
+                    "peak_ratio": finite_or_none(curve["peak_ratio"]),
+                    "persistence": finite_or_none(curve["persistence"]),
+                    "flagged": bool(curve["flagged"]),
+                    "reason": curve["reason"],
+                }
+                if curve["flagged"]:
+                    findings.append(
+                        LeakageFinding(
+                            feature_id=column,
+                            temporal_support="empirical",
+                            problem=(
+                                f"lead-lag screen: {curve['reason']} (IC at "
+                                f"shift 0 {curve['ic_at_zero']:+.4f})"
+                            ),
+                        )
+                    )
+            notes.append(
+                f"The empirical lead-lag screen ran on {len(columns)} feature "
+                "column(s) of the built panel. It is a screen, not a proof: a "
+                "leak below the IC floor, or in a feature too persistent to "
+                "judge, passes it (each column's verdict is in `screen`)."
+            )
+    else:
+        notes.append(
+            "No dataset_id: `safe` rests on each feature's DECLARED temporal "
+            "support only. A feature whose declaration is wrong -- one that "
+            "reads its own target -- passes this check; supply a dataset_id "
+            "to run the empirical lead-lag screen on the built panel."
+        )
 
     return CheckLeakageResult(
         n_features_checked=len(ids),
         safe=not findings,
+        scope=scope,
         findings=findings,
+        screen=screen,
         dataset_coverage=coverage,
         notes=notes,
     )
@@ -1832,14 +1907,21 @@ def _oos_with_actuals(model_id: str):
 
 def _paired_against_reference(input_data, reference: str):
     """Every other candidate against the reference, Holm-adjusted."""
+    from ..bridge import _refuse_cpcv
     from ..validation.comparison import holm_adjust, paired_comparison
 
     reference_frame, reference_manifest = _oos_with_actuals(reference)
+    # A cpcv model predicts each row once per path, so the join below
+    # was a cartesian product (19,520 rows for 3,904 honest ones) and
+    # produced a 'significant' p=0.013 from nothing. Every other
+    # consumer refused it by name; this one did not.
+    _refuse_cpcv(reference_manifest, "compare_models(method='paired')")
     results = []
     for model_id in input_data.model_ids:
         if model_id == reference:
             continue
         frame, manifest = _oos_with_actuals(model_id)
+        _refuse_cpcv(manifest, "compare_models(method='paired')")
         if manifest.task != reference_manifest.task:
             raise ValidationError(
                 f"compare_models: {model_id!r} is a {manifest.task!r} model and "
@@ -1896,7 +1978,10 @@ def _paired_against_reference(input_data, reference: str):
             confidence=r["confidence"],
             p_value=r["p_value"],
             p_value_holm=p_holm,
-            hit_rate=r["hit_rate"],
+            # NaN when every date tied (NaN != NaN), which is what two
+            # identical models produce and what read as 'lost every day'.
+            hit_rate=r["hit_rate"] if r["hit_rate"] == r["hit_rate"] else None,
+            n_ties=r["n_ties"],
             block_size=r["block_size"],
             verdict=verdicts[r["verdict"]],
             diebold_mariano=r["diebold_mariano"],

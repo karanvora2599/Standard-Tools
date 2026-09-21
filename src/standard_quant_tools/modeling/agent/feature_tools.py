@@ -345,6 +345,13 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     Redundancy is resolved BEFORE the IC floor. A cluster is one signal, so
     the question is whether that signal clears the floor, asked once through
     its representative -- not whether each restatement clears it separately.
+
+    The selection reads the first `1 - holdout_fraction` of the panel's
+    dates (or through `selection_end`) and reports each selected
+    feature's IC on the dates after that. Selecting on the whole panel
+    put the walk-forward holdout inside the selection, and the top five
+    of sixty noise columns chosen that way scored +0.045 out of sample
+    against +0.002 for five chosen blind (findings D4).
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -360,6 +367,8 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         cluster_threshold=input_data.cluster_threshold,
         min_abs_rank_ic=input_data.min_abs_rank_ic,
         max_features=input_data.max_features,
+        selection_end=input_data.selection_end,
+        holdout_fraction=input_data.holdout_fraction,
     )
     return SelectFeaturesResult(
         dataset_id=input_data.dataset_id,
@@ -368,6 +377,11 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         n_considered=result["n_considered"],
         n_selected=result["n_selected"],
         n_clusters=result["n_clusters"],
+        selection_window=result["selection_window"],
+        holdout_window=result["holdout_window"],
+        selection_ic=result["selection_ic"],
+        holdout_ic=result["holdout_ic"],
+        warnings=result["warnings"],
     )
 
 
@@ -476,9 +490,12 @@ def run_feature_permutation_test(
     one.
 
     An IC of 0.03 over 60 dates and 20 entities is a number noise produces
-    routinely, and no amount of staring at it reveals that. The feature is
-    shuffled within each date, which states the null exactly: the feature
-    carries no cross-sectional information within a date.
+    routinely, and no amount of staring at it reveals that. The null rolls
+    each entity's feature series by a random offset (`null='circular_shift'`),
+    which destroys the link to the target and keeps the feature's own
+    serial correlation. Shuffling within each date (`null='within_date'`)
+    destroys both, and on live features -- per-date IC autocorrelation
+    +0.6 -- it rejected a true null 27-35% of the time (findings D10).
 
     The p-value is TWO-SIDED. A feature with an IC of -0.20 is a strong
     feature with a sign, not a weak one, and a one-sided test would report
@@ -505,6 +522,7 @@ def run_feature_permutation_test(
         n_permutations=input_data.n_permutations,
         method=input_data.method,
         random_seed=input_data.random_seed,
+        null=input_data.null,
     )
     return PermutationTestResult(dataset_id=input_data.dataset_id, **result)
 

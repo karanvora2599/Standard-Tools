@@ -31,12 +31,12 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.modeling.validation.metrics import (
-    check_ic_method,
-)
 from standard_quant_tools.modeling.features.transforms import (
     HAS_CPP,
     _cpp_core,
+)
+from standard_quant_tools.modeling.validation.metrics import (
+    check_ic_method,
 )
 
 from ..validation.metrics import cross_sectional_ic
@@ -368,6 +368,44 @@ def _null_distribution(
     return null
 
 
+def _circular_shift_null(
+    target: np.ndarray,
+    values: np.ndarray,
+    dates: np.ndarray,
+    entities: np.ndarray,
+    n_permutations: int,
+    method: str,
+    random_seed: int,
+) -> np.ndarray:
+    """
+    One mean IC per draw, each entity's feature series rolled in time by
+    its own random offset.
+
+    The roll keeps every entity's serial correlation and marginal
+    distribution and destroys only the alignment with the target -- which
+    is the null an autocorrelated feature actually lives under. A
+    within-date shuffle also destroys the serial correlation, so its null
+    ICs are independent across dates while the observed ones are not, and
+    its p-values are too small by exactly that much: 27-35% rejections of a
+    true null at phi 0.95-0.99 against an overlapping label (findings D10).
+    """
+    order = np.lexsort((dates, pd.factorize(entities)[0]))
+    ordered_entities = entities[order]
+    breaks = np.flatnonzero(ordered_entities[1:] != ordered_entities[:-1]) + 1
+    groups = np.split(order, breaks)
+    rng = np.random.default_rng(random_seed)
+    null = np.empty(n_permutations, dtype=float)
+    shifted = values.copy()
+    for i in range(n_permutations):
+        for positions in groups:
+            m = len(positions)
+            if m > 1:
+                shifted[positions] = np.roll(values[positions], int(rng.integers(1, m)))
+        series = cross_sectional_ic(target, shifted, dates, method=method)
+        null[i] = float(series.mean()) if len(series) else np.nan
+    return null
+
+
 def permutation_test_ic(
     panel: pd.DataFrame,
     feature: str,
@@ -375,22 +413,23 @@ def permutation_test_ic(
     n_permutations: int = 200,
     method: str = "spearman",
     random_seed: int = 0,
+    null: str = "circular_shift",
 ) -> Dict[str, Any]:
     """
     How often noise produces an IC this large.
 
-    The feature is shuffled WITHIN each date, which states the null exactly:
-    "this feature carries no cross-sectional information within a date". It
-    preserves the entities per date, the feature's marginal distribution and
-    the target's cross-sectional shape, so nothing but the link is destroyed.
-
-    Measured, a global shuffle produces a null within 2% of this one -- and
-    on reflection that is expected rather than surprising, since the IC is
-    computed within each date and averaged, so a global shuffle also
-    delivers a random assignment inside each date. Within-date is kept
-    because it is the null as stated and holds by construction on panel
-    shapes that have not been measured, not because the alternative was
-    found to be dramatically wrong.
+    `null='circular_shift'` (default) rolls each entity's feature series in
+    time by a random offset: the link to the target is destroyed and the
+    feature's serial correlation is not, so the null's per-date ICs are as
+    autocorrelated as the observed ones. `null='within_date'` shuffles the
+    feature within each date -- the null as it was stated before, "no
+    cross-sectional information within a date" -- which also destroys the
+    serial correlation. On i.i.d. features the two agree; on the live
+    panel, where every feature's per-date IC had lag-1 autocorrelation
+    +0.6, the within-date null rejected a true null 27-35% of the time and
+    called two features significant that a block bootstrap put at p=0.21
+    and p=0.07 (findings D10). `ic_autocorrelation_lag1` in the result says
+    which regime a feature is in.
 
     Returns a two-sided empirical p-value with the +1 correction in both
     numerator and denominator, so a p of exactly 0 is never reported --
@@ -401,6 +440,11 @@ def permutation_test_ic(
     _require(panel, feature)
     if n_permutations < 1:
         raise ValidationError("n_permutations must be at least 1")
+    if null not in ("circular_shift", "within_date"):
+        raise ValidationError(
+            f"permutation_test_ic: null={null!r}; expected 'circular_shift' or "
+            "'within_date'."
+        )
 
     frame = panel[["date", "entity", feature, "target"]].dropna(
         subset=["date", feature, "target"]
@@ -420,11 +464,27 @@ def permutation_test_ic(
             "to test for significance"
         )
 
-    null = _null_distribution(
-        target, values, dates, n_permutations, method, random_seed
+    if null == "within_date":
+        draws = _null_distribution(
+            target, values, dates, n_permutations, method, random_seed
+        )
+    else:
+        draws = _circular_shift_null(
+            target,
+            values,
+            dates,
+            frame["entity"].to_numpy(),
+            n_permutations,
+            method,
+            random_seed,
+        )
+    ic_autocorrelation = (
+        float(observed_series.autocorr(1))
+        if len(observed_series) >= 3
+        else float("nan")
     )
 
-    usable = _finite(null)
+    usable = _finite(draws)
     at_least_as_extreme = int(np.sum(np.abs(usable) >= abs(observed)))
     p_value = (at_least_as_extreme + 1) / (usable.size + 1)
 
@@ -441,6 +501,8 @@ def permutation_test_ic(
         "p_value": float(p_value),
         "significant_at_05": bool(p_value < 0.05),
         "random_seed": int(random_seed),
+        "null": null,
+        "ic_autocorrelation_lag1": ic_autocorrelation,
     }
 
 

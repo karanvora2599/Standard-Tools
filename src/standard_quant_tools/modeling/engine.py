@@ -63,7 +63,7 @@ from .validation.ranking import (
 )
 from .validation.search import require_optuna, search_best_params
 from .validation.survival import EVENT_COL, survival_labels
-from .validation.walk_forward import build_splitter
+from .validation.walk_forward import build_splitter, contiguous_runs
 from .validation.weights import build_sample_weights
 
 
@@ -1035,6 +1035,17 @@ def run_experiment(
                 "scheduled_train_end": str(pd.Timestamp(train_dates[-1]).date()),
                 "test_start": str(pd.Timestamp(test_dates[0]).date()),
                 "test_end": str(pd.Timestamp(test_dates[-1]).date()),
+                # The test BLOCKS, one per contiguous run of dates. Under cpcv
+                # a fold's test set is several blocks with training dates
+                # between them, and the start..end span above read as one
+                # window: 1,912 rows against n_test_rows 1,304.
+                "test_blocks": [
+                    {
+                        "start": str(pd.Timestamp(dates[first]).date()),
+                        "end": str(pd.Timestamp(dates[last]).date()),
+                    }
+                    for first, last in contiguous_runs(fold.test_positions)
+                ],
                 "n_train_rows": int(len(train_df)),
                 "n_test_rows": int(len(test_df)),
                 "metrics": metrics,
@@ -1281,7 +1292,12 @@ def run_experiment(
             round(len(fold_metrics) / n_expected_folds, 4) if n_expected_folds else 0.0
         ),
         "skipped_folds": skipped,
-        "n_train_rows_purged_overlap": n_purged_total,
+        # The purge runs on each row's recorded label end. Without that
+        # column it cannot run, and 0 was what it reported either way --
+        # the same value a clean run gives -- on a panel with 280 rows
+        # whose label reached the test window. None says it never ran.
+        "purge": "label_end" if has_label_end else "not_applicable",
+        "n_train_rows_purged_overlap": n_purged_total if has_label_end else None,
         "target_horizon": horizon,
         # What the plan said this would cost, against the ceiling it was
         # checked against. A fold skipped at run time cost less than
@@ -1439,7 +1455,7 @@ def run_experiment(
             "n_folds": len(fold_metrics),
             "validation_report": validation_report,
             "oos_predictions_uri": None,
-            "n_train_rows_purged_overlap": n_purged_total,
+            "n_train_rows_purged_overlap": (n_purged_total if has_label_end else None),
         }
 
     oos_predictions_df = pd.concat(oos_prediction_frames, ignore_index=True)
@@ -1539,5 +1555,5 @@ def run_experiment(
         # the target horizon is consuming a real fraction of each training
         # window, which is information the caller needs when reading the
         # OOS metrics.
-        "n_train_rows_purged_overlap": n_purged_total,
+        "n_train_rows_purged_overlap": (n_purged_total if has_label_end else None),
     }

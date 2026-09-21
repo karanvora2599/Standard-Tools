@@ -522,8 +522,12 @@ class TestSelectFeatures:
         """The two tools resolve the same clusters on the same panel. If
         they disagreed about which member to keep, an agent following both
         would get contradictory drop lists."""
+        # On the same window: the redundancy tool reads the whole panel, so
+        # the selection must too for the representatives to agree.
         selected = select_features(
-            SelectFeaturesInput(dataset_id=dataset, cluster_threshold=0.0)
+            SelectFeaturesInput(
+                dataset_id=dataset, cluster_threshold=0.0, holdout_fraction=0.0
+            )
         )
         redundancy = get_feature_redundancy(
             FeatureRedundancyInput(dataset_id=dataset, cluster_threshold=0.0)

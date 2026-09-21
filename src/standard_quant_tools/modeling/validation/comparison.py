@@ -91,7 +91,9 @@ def compare_ic_series(
     """
     if not 0 < confidence < 1:
         raise ValidationError(f"confidence must be in (0, 1), got {confidence!r}")
-    joined = pd.concat([ic_a.rename("a"), ic_b.rename("b")], axis=1, join="inner").dropna()
+    joined = pd.concat(
+        [ic_a.rename("a"), ic_b.rename("b")], axis=1, join="inner"
+    ).dropna()
     n = int(len(joined))
     if n < 10:
         raise ValidationError(
@@ -106,6 +108,8 @@ def compare_ic_series(
     n_bootstrap = max(100, int(n_bootstrap))
 
     observed = float(diff.mean())
+    wins = int(np.sum(diff > 0.0))
+    losses = int(np.sum(diff < 0.0))
     rng = np.random.default_rng(int(seed))
     draws = _moving_block_means(diff, n_bootstrap, block_size, rng)
     alpha = (1.0 - confidence) / 2.0
@@ -126,7 +130,12 @@ def compare_ic_series(
         "ci_upper": upper,
         "confidence": float(confidence),
         "p_value": p_value,
-        "hit_rate": float(np.mean(diff > 0.0)),
+        # Decided dates only: two identical models tie on every date, and
+        # a share of ALL dates read that as 'b lost every day'.
+        "hit_rate": (float(wins / (wins + losses)) if wins + losses else float("nan")),
+        "n_b_better": wins,
+        "n_a_better": losses,
+        "n_ties": int(n - wins - losses),
         "block_size": int(block_size),
         "n_bootstrap": int(n_bootstrap),
         "verdict": _verdict(observed, lower, upper),
@@ -175,7 +184,9 @@ def diebold_mariano(
     """
     from scipy.stats import norm
 
-    joined = pd.concat([loss_a.rename("a"), loss_b.rename("b")], axis=1, join="inner").dropna()
+    joined = pd.concat(
+        [loss_a.rename("a"), loss_b.rename("b")], axis=1, join="inner"
+    ).dropna()
     n = int(len(joined))
     if n < 10:
         raise ValidationError(
@@ -283,7 +294,9 @@ def paired_comparison(
             "paired; check their test spans."
         )
     disagreement = (joined["target_a"] - joined["target_b"]).abs()
-    if not np.allclose(joined["target_a"], joined["target_b"], atol=1e-12, equal_nan=True):
+    if not np.allclose(
+        joined["target_a"], joined["target_b"], atol=1e-12, equal_nan=True
+    ):
         raise ValidationError(
             "paired_comparison: the realized outcomes disagree on "
             f"{int((disagreement > 1e-12).sum())} shared row(s). The two models "
@@ -296,8 +309,12 @@ def paired_comparison(
     method = "spearman" if metric == "cs_rank_ic" else "pearson"
     dates = joined["date"].to_numpy()
     truth = joined["target"].to_numpy(dtype=np.float64)
-    ic_a = cross_sectional_ic(truth, joined["prediction_a"].to_numpy(dtype=np.float64), dates, method)
-    ic_b = cross_sectional_ic(truth, joined["prediction_b"].to_numpy(dtype=np.float64), dates, method)
+    ic_a = cross_sectional_ic(
+        truth, joined["prediction_a"].to_numpy(dtype=np.float64), dates, method
+    )
+    ic_b = cross_sectional_ic(
+        truth, joined["prediction_b"].to_numpy(dtype=np.float64), dates, method
+    )
     difference = compare_ic_series(
         ic_a,
         ic_b,

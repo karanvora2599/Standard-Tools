@@ -42,7 +42,7 @@ advertises 155 of the 211 below.
 | `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 9 | 30 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `feature_lab` | 9 | 31 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **211** | | | |
 
 ---
@@ -1566,11 +1566,11 @@ Refit the model without each feature in turn and report what each one was worth.
 How often noise on THIS panel produces an IC as large as the observed one, in either direction. Shuffles the feature within each date, which states the null exactly -- the feature carries no cross-sectional information within a date -- and returns a TWO-SIDED empirical p-value, so a strongly negative IC is significant rather than ignored. null_p95_abs is the IC this panel yields from noise alone 5% of the time, which is the defensible floor for select_features(min_abs_rank_ic=...). Cost is linear in n_permutations.
 
 **Required:** `dataset_id`, `feature`  
-**Optional:** `n_permutations`, `method`, `random_seed`
+**Optional:** `n_permutations`, `method`, `random_seed`, `null`
 
 #### `select_features`
 
 Choose a feature set from a built dataset: keep one feature per redundancy cluster, drop what falls below an IC floor, and return a reason for every exclusion. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the IC floor, because a cluster is one signal and the question is whether THAT signal clears the floor.
 
 **Required:** `dataset_id`  
-**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`
+**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `selection_end`, `holdout_fraction`

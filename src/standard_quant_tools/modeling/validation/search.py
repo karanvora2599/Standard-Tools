@@ -441,6 +441,7 @@ def search_best_params(
         # carried no label ends, not that nothing overlapped.
         "n_train_rows_purged_overlap": purged_per_fold,
         "purged_on_label_end": label_end is not None,
+        "purge": "label_end" if label_end is not None else "not_applicable",
         "best_params": best["params"],
         "best_score": best["score"],
         # Sorted best-first and kept whole: a caller can see how flat the

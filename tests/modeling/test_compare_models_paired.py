@@ -88,7 +88,9 @@ class TestATwinIsIndistinguishable:
         assert pair.model_id == twin and pair.reference_model_id == a
         assert pair.mean_difference == 0.0
         assert pair.ci_lower <= 0.0 <= pair.ci_upper
-        assert pair.hit_rate == 0.0
+        # Every date is a tie, which is what the result now says -- a hit
+        # rate of 0.0 read as 'the candidate lost every day'.
+        assert pair.hit_rate is None and pair.n_ties == pair.n_dates
         assert pair.verdict == "indistinguishable"
         assert pair.mean_candidate == pair.mean_reference
         assert pair.p_value_holm >= pair.p_value
@@ -108,7 +110,11 @@ class TestADifferentCandidate:
         assert pair.n_dates > 30 and pair.n_rows > pair.n_dates
         assert pair.ci_lower <= pair.mean_difference <= pair.ci_upper
         assert 0.0 <= pair.p_value <= 1.0
-        assert pair.verdict in {"candidate_better", "reference_better", "indistinguishable"}
+        assert pair.verdict in {
+            "candidate_better",
+            "reference_better",
+            "indistinguishable",
+        }
         assert pair.diebold_mariano is not None
         assert pair.diebold_mariano["loss"] == "squared_error"
         assert pair.diebold_mariano["lag"] == 4  # a five-bar label overlaps four
@@ -121,7 +127,10 @@ class TestADifferentCandidate:
         c = _train(regression_dataset, _model(alpha=100.0))
         result = compare_models(
             CompareModelsInput(
-                model_ids=[a, b, c], method="paired", reference_model_id=a, n_bootstrap=200
+                model_ids=[a, b, c],
+                method="paired",
+                reference_model_id=a,
+                n_bootstrap=200,
             )
         )
         assert [p.model_id for p in result.pairs] == [b, c]
@@ -143,7 +152,9 @@ class TestRefusals:
     def test_a_reference_outside_the_candidates(self):
         with pytest.raises(PydanticValidationError, match="not in model_ids"):
             CompareModelsInput(
-                model_ids=["mdl_a", "mdl_b"], method="paired", reference_model_id="mdl_c"
+                model_ids=["mdl_a", "mdl_b"],
+                method="paired",
+                reference_model_id="mdl_c",
             )
 
     def test_a_different_label_is_refused(self, patched_multi_factory):

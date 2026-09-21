@@ -219,9 +219,11 @@ class RegisterExternalPanelInput(BaseModel):
         description=(
             "Bars ahead the target was measured over, for a panel with ONE "
             "label. Not inferable and not defaulted: the engine purges "
-            "training rows whose label window overlaps the test fold, and an "
-            "absent horizon silently disables that purge rather than "
-            "failing. Supply this or `targets`, never both."
+            "training rows whose label END falls inside a test window, and "
+            "when no label_end_column is given the registration derives each "
+            "row's label end from this horizon (that many rows ahead on the "
+            "entity's own calendar). Without a horizon there is no label end "
+            "and no purge. Supply this or `targets`, never both."
         ),
     )
     targets: Optional[List[ExternalTarget]] = Field(
@@ -433,12 +435,16 @@ class RunModelExperimentResult(BaseModel):
         "the result, or expose how much of the walk-forward schedule "
         "actually ran.",
     )
-    n_train_rows_purged_overlap: int = Field(
+    n_train_rows_purged_overlap: Optional[int] = Field(
         0,
-        description="Training rows dropped because their forward-return "
-        "label would have resolved inside the test window. A large count "
+        description="Training rows dropped because their label would have "
+        "resolved inside the test window, purged on each row's recorded "
+        "label_end_date. None when the panel carries no such column and the "
+        "purge could not run at all -- that used to read 0, the same value a "
+        "clean run gives, on a panel with 280 overlapping rows. A large count "
         "means the target horizon consumes a real fraction of each training "
-        "window — relevant when reading the OOS metrics.",
+        "window — relevant when reading the OOS metrics; "
+        "validation_report.purge says which case this is.",
     )
     oos_predictions_ref: Optional[str] = Field(
         None,
@@ -1090,8 +1096,16 @@ class PairedComparison(BaseModel):
     p_value_holm: float = Field(
         ..., description="The same, Holm-adjusted across every candidate in this call."
     )
-    hit_rate: float = Field(
-        ..., description="Share of dates the candidate's IC exceeded the reference's."
+    hit_rate: Optional[float] = Field(
+        None,
+        description="Share of DECIDED dates -- ties excluded -- on which the "
+        "candidate's IC exceeded the reference's. None when every date tied, "
+        "which is what two identical models produce and what a rate of 0.0 "
+        "read as: the candidate losing every day.",
+    )
+    n_ties: int = Field(
+        0,
+        description="Dates on which the two per-date ICs were exactly equal.",
     )
     block_size: int
     verdict: Literal["candidate_better", "reference_better", "indistinguishable"]
@@ -1169,8 +1183,25 @@ class LeakageFinding(BaseModel):
 
 class CheckLeakageResult(BaseModel):
     n_features_checked: int
-    safe: bool
+    safe: bool = Field(
+        ...,
+        description="No finding. Read `scope` before trusting it: without a "
+        "dataset_id this rests on each feature's DECLARED temporal support, "
+        "and a feature that reads its own target passes that check.",
+    )
+    scope: Literal["declared_temporal_support_only", "declared_and_empirical"] = Field(
+        "declared_temporal_support_only",
+        description="What `safe` rests on: the registry's declarations alone, "
+        "or those plus the empirical lead-lag screen run on the built panel "
+        "(a dataset_id was supplied and the panel carries a target).",
+    )
     findings: List[LeakageFinding] = Field(default_factory=list)
+    screen: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Per screened feature column: IC at shift 0, peak ratio, "
+        "persistence, whether it was flagged and why. Empty without a "
+        "dataset_id.",
+    )
     dataset_coverage: Dict[str, Any] = Field(
         default_factory=dict,
         description="Point-in-time coverage, when a dataset_id was supplied.",

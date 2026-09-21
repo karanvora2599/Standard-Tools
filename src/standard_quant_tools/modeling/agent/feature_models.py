@@ -28,7 +28,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+import pandas as pd
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 from typing_extensions import Annotated
 
 from ..specs import ModelSpec
@@ -423,6 +424,33 @@ class SelectFeaturesInput(BaseModel):
         "means no cap. A cap for a caller with a budget, not a ranking to "
         "trust -- the gap between the 20th and 21st feature is usually noise.",
     )
+    selection_end: Optional[str] = Field(
+        None,
+        description="Last date (YYYY-MM-DD) the selection may read; the dates "
+        "after it are held out and each selected feature's IC on them is "
+        "reported as `holdout_ic`. Overrides holdout_fraction.",
+    )
+    holdout_fraction: float = Field(
+        0.3,
+        ge=0.0,
+        lt=1.0,
+        description="Share of the panel's dates, from the end, that the "
+        "selection never reads. 0.3 (default) selects on the first 70% and "
+        "reports the selected features' IC on the last 30%. 0 selects on the "
+        "whole panel -- measured, that manufactures about 70% of a real "
+        "model's headline from pure noise -- and the result warns so.",
+    )
+
+    @field_validator("selection_end")
+    @classmethod
+    def _valid_selection_end(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        try:
+            pd.Timestamp(v)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"selection_end must be a date: {exc}") from exc
+        return v
 
 
 class SelectFeaturesResult(BaseModel):
@@ -432,6 +460,26 @@ class SelectFeaturesResult(BaseModel):
     selected: List[str] = Field(
         ..., description="The kept features, strongest |rank IC| first."
     )
+    selection_window: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="start/end/n_dates of the dates the selection read.",
+    )
+    holdout_window: Optional[Dict[str, Any]] = Field(
+        None,
+        description="start/end/n_dates of the dates held out, or None when the "
+        "selection read the whole panel.",
+    )
+    selection_ic: Dict[str, Stat] = Field(
+        default_factory=dict,
+        description="Each candidate's rank IC on the selection window. "
+        "In-sample for the features it chose.",
+    )
+    holdout_ic: Dict[str, Stat] = Field(
+        default_factory=dict,
+        description="Each SELECTED feature's rank IC on the held-out dates, "
+        "which the selection never read. The number to believe.",
+    )
+    warnings: List[str] = Field(default_factory=list)
     dropped: List[DroppedFeature] = Field(
         ...,
         description="Every exclusion with its reason. Read this before "
@@ -650,6 +698,16 @@ class PermutationTestInput(BaseModel):
     random_seed: int = Field(
         0, ge=0, description="Seed, so the p-value is reproducible."
     )
+    null: Literal["circular_shift", "within_date"] = Field(
+        "circular_shift",
+        description="How the null is drawn. 'circular_shift' (default) rolls "
+        "each entity's feature series by a random offset, destroying its link "
+        "to the target while keeping the feature's own serial correlation, so "
+        "an autocorrelated feature against an overlapping label is tested "
+        "against the null it actually lives under. 'within_date' shuffles "
+        "within each date, which also destroys the serial correlation and "
+        "rejected a true null 27-35% of the time on live features.",
+    )
 
 
 class PermutationTestResult(BaseModel):
@@ -676,6 +734,13 @@ class PermutationTestResult(BaseModel):
     )
     significant_at_05: bool
     random_seed: int
+    null: str = Field("within_date", description="The null the p-value is against.")
+    ic_autocorrelation_lag1: Stat = Field(
+        None,
+        description="Lag-1 autocorrelation of the observed per-date IC series. "
+        "Near zero the two nulls agree; at +0.6, where every live feature "
+        "sat, only circular_shift is calibrated.",
+    )
 
 
 # ── ablation ────────────────────────────────────────────────────────────

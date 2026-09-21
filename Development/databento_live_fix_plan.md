@@ -6,8 +6,13 @@ what to change, in what order, how each change is verified without a key,
 and what is left alone and why. Findings are cited by their number there
 (`D1`..`D20`) or by section.
 
-**Status: phases 1 (the data path) and 2 (the deployed model is the
-validated model) are implemented, 2026-09-20; phases 3-7 are the plan.**
+**Status: phases 1 (the data path), 2 (the deployed model is the
+validated model) and 3 (selection and inference) are implemented,
+2026-09-20; phases 4-7 are the plan.** Phase 3 went one step past its
+wording on the purge: besides saying `not_applicable` when no label end
+exists, an external panel registered with a horizon and no
+`label_end_column` now gets its label end derived from the horizon, so
+the purge the two docstrings described actually runs there.
 Phase 2 chose the calendar-anchored form of D17 over the end-anchored
 one: a refit grid fixed by each bar's date keeps BOTH properties -- a
 value is unchanged when leading bars are dropped and when trailing bars

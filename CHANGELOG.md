@@ -1,5 +1,58 @@
 # Changelog
 
+## The selection never sees the holdout, and the null keeps its memory
+
+Phase 3 of `Development/databento_live_fix_plan.md`: selection and
+inference. Each item names the number it moves.
+
+- **`select_features` selects on a window and reports the holdout IC
+  (D4).** Redundancy and the IC floor were measured over every date,
+  including the ones a later walk-forward run holds out; the top five of
+  sixty pure-noise columns chosen that way scored +0.045 out of sample
+  against +0.002 for five chosen blind, about 70% of the real model's
+  headline. Selection now reads dates through `selection_end` or the first
+  `1 - holdout_fraction` (default 0.3) of the panel, and the result carries
+  `selection_window`, `holdout_window`, every candidate's `selection_ic`
+  and each selected feature's `holdout_ic`, with a warning saying which
+  number to believe. `holdout_fraction=0` selects on the whole panel and
+  says so. The tool input gains both fields.
+- **The permutation null keeps each feature's serial correlation (D10).**
+  The within-date shuffle destroyed the feature's autocorrelation along
+  with its link to the target, and rejected a true null 27-35% of the time
+  on live features against an overlapping label; two features it called
+  significant sat at p=0.21 and p=0.07 under a block bootstrap.
+  `permutation_test_ic(null="circular_shift")`, the default, rolls each
+  entity's series by a random offset instead; `null="within_date"` remains
+  available and is named for what it is. The result reports `null` and
+  the lag-1 autocorrelation of the per-date IC series, which says which
+  regime a feature is in. p-values on autocorrelated features grow.
+- **`check_leakage` screens the panel when it has one (D19).** A feature
+  that was literally the five-bar forward return passed as `safe=True` on
+  its declaration. With a `dataset_id` the lead-lag screen now runs on
+  every requested feature column of the built panel, a flagged feature is
+  a finding with `temporal_support="empirical"`, `screen` carries each
+  column's verdict, and `scope` says whether `safe` rests on declarations
+  alone or on declarations and the screen.
+- **`compare_models(method="paired")` refuses a cpcv model** by name, as
+  the bridge, the portfolio evaluation and the ensemble do: the join on
+  (date, entity) was a 25x cartesian product that produced a
+  "significant" p=0.013 from nothing.
+- **The purge report says whether the purge ran.** `validation_report.purge`
+  is `"label_end"` or `"not_applicable"`, and `n_train_rows_purged_overlap`
+  is None, not 0, when the panel carries no label end (the same 0 a clean
+  run gives was reported on a panel with 280 overlapping rows); the inner
+  search report says the same. An external panel registered with a
+  horizon and no `label_end_column` now gets `label_end_date` derived from
+  the horizon, per entity, so the purge the docstrings described runs on
+  it; the docstrings say what happens.
+- **A cpcv fold record names its test blocks** (`test_blocks`, one per
+  contiguous run of dates); the single start..end span read as a window
+  containing training dates.
+- **`paired_comparison` counts ties.** `n_ties`, `n_a_better`, `n_b_better`
+  are reported and `hit_rate` is the candidate's share of DECIDED dates,
+  None when every date tied, which two identical models produce and which
+  a hit rate of 0.0 read as the candidate losing every day.
+
 ## The model you can score now carries the parameters the folds validated
 
 Phase 2 of `Development/databento_live_fix_plan.md`: the deployed model is

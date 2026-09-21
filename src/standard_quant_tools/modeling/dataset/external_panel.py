@@ -22,11 +22,17 @@ a built one.
 
 WHAT THE CALLER MUST STILL DECLARE. The horizon. A panel arrives with a
 `target` column and no statement of what that column MEANS, and the engine
-needs the horizon for the target-overlap purge -- the rule that stops a
-label spanning bars t..t+h from being trained on beside a fold boundary
-inside that span. Inferring it from the data is not possible and defaulting
-it would silently disable the purge, so it is required and it is the one
-thing about an external panel this module refuses to guess.
+purges on each row's LABEL END -- the rule that stops a label spanning
+bars t..t+h from being trained on beside a fold boundary inside that
+span. For a fixed-horizon label without a `label_end_column` the
+registration derives that end from the horizon, `h` rows ahead on the
+entity's own calendar. It did not: the purge reads only the column, the
+column was never written, and an external panel with 280 training rows
+whose label reached the test window reported 0 purged while this
+docstring said the horizon was purging (findings, the outer report).
+Inferring the horizon from the data is not possible and without it there
+is no label end and no purge, so it is required and it is the one thing
+about an external panel this module refuses to guess.
 """
 
 from __future__ import annotations
@@ -39,9 +45,11 @@ from standard_quant_tools.data import external as _external
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.features.base import RESERVED_PANEL_COLUMNS
 
-#: The canonical long-panel columns. `label_end_date` is optional: without
-#: it the engine purges on the horizon alone, which is correct for a fixed
-#: horizon and not for a triple-barrier label that can end early.
+#: The canonical long-panel columns. `label_end_date` is optional in the
+#: FILE: without it the registration derives each row's end from the
+#: target's horizon, which is exact for a fixed horizon and a superset for
+#: a triple-barrier label that can end early (purging on the horizon end
+#: removes at least the rows the true end would).
 PANEL_DATE = "date"
 PANEL_ENTITY = "entity"
 PANEL_TARGET = "target"
@@ -181,6 +189,14 @@ def _resolve_columns(
     return rename, features
 
 
+def _label_end_from_horizon(panel: pd.DataFrame, horizon: int) -> pd.Series:
+    """The date `horizon` rows ahead of each row within its entity, in the
+    entity's own date order; NaT for rows the panel ends before."""
+    ordered = panel[[PANEL_ENTITY, PANEL_DATE]].sort_values([PANEL_ENTITY, PANEL_DATE])
+    ends = ordered.groupby(PANEL_ENTITY, sort=False)[PANEL_DATE].shift(-horizon)
+    return ends.reindex(panel.index)
+
+
 def load_external_panel(
     path: str,
     *,
@@ -279,6 +295,16 @@ def load_external_panel(
                     "count is not an indicator."
                 )
             panel[events] = values.astype(float)
+
+    # A fixed-horizon label without a label-end column: the end is the
+    # date `horizon` rows ahead on the entity's own calendar, NaT where the
+    # panel ends first -- the rule the built-in labels use -- so the
+    # engine's purge has the column it reads.
+    for target in targets:
+        ends = label_end_column_for(target["name"])
+        horizon = target.get("horizon")
+        if ends not in panel.columns and horizon:
+            panel[ends] = _label_end_from_horizon(panel, int(horizon))
 
     # The primary is duplicated onto the plain names, so a multi-horizon
     # panel still reads as an ordinary one to every consumer that has
