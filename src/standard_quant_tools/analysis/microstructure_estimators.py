@@ -152,10 +152,12 @@ def roll_spread(
                 f"roll_spread: window={window} is too short for a covariance."
             )
         estimates: List[Optional[float]] = []
+        window_covs: List[float] = []
         array = changes.to_numpy()
         for end in range(window, len(array) + 1):
             chunk = array[end - window : end]
             cov = float(np.cov(chunk[1:], chunk[:-1])[0, 1])
+            window_covs.append(cov)
             estimates.append(2.0 * math.sqrt(-cov) if cov < 0 else None)
         usable = [e for e in estimates if e is not None]
         undefined_fraction = 1.0 - len(usable) / len(estimates) if estimates else 1.0
@@ -168,7 +170,11 @@ def roll_spread(
             "p25_spread": float(np.percentile(usable, 25)) if usable else None,
             "p75_spread": float(np.percentile(usable, 75)) if usable else None,
         }
-        covariance = float("nan")
+        # The median window's covariance against a window-sized standard
+        # error, so the significance guard below runs here too. It was
+        # NaN, so `significant` was None and a 59 bp estimate was reported
+        # against its own 161 bp detection floor with no verdict (findings).
+        covariance = float(np.median(window_covs))
         covariance_se = covariance_se * math.sqrt(len(changes) / window)
 
     # The smallest spread this sample could distinguish from zero. Below
@@ -527,9 +533,12 @@ def amihud_illiquidity(
 
 
 def kyle_lambda(
-    ohlcv: pd.DataFrame,
+    ohlcv: Optional[pd.DataFrame] = None,
     *,
     window: Optional[int] = None,
+    trades: Optional[pd.DataFrame] = None,
+    quotes: Optional[pd.DataFrame] = None,
+    freq: str = "1min",
 ) -> Dict[str, Any]:
     """
     Kyle's lambda: the price impact of a unit of signed order flow.
@@ -540,29 +549,46 @@ def kyle_lambda(
     you intend to trade and you have an estimate of the impact you will
     cause.
 
-    THE SIGN COMES FROM THE TICK RULE and that is the weak link. Kyle's model
-    is about SIGNED order flow, meaning buyer- versus seller-initiated
-    volume, which requires trades matched against quotes. From bars, the sign
-    of the day's return stands in for it. On a liquid name the tick rule
-    agrees with the true classification about 85% of the time; on an illiquid
-    one it is materially worse -- and illiquid names are where lambda
-    matters. The misclassification attenuates the slope toward zero, so this
-    UNDERSTATES impact, and it understates it most where impact is largest.
+    THE SIGN IS THE WHOLE QUESTION. Kyle's model is about SIGNED order
+    flow -- buyer- against seller-initiated volume -- which needs trades
+    matched against quotes. Pass `trades` (and `quotes`) and the flow is
+    signed by Lee-Ready, which is 99.7% accurate against the venue's own
+    aggressor flag, bucketed at `freq`, and regressed honestly.
+
+    FROM BARS ALONE THE ESTIMATE IS CIRCULAR. The only sign available is
+    the bar's own return, so x = sign(y) * V is regressed on y: lambda is
+    positive by construction and r_squared measures nothing. Measured
+    live, shuffling the returns and permuting the volume -- destroying
+    every real relationship -- left 80% of the estimate intact (findings
+    D8). The bars path is kept because it is what a daily dataset can
+    offer, and the result says `circular=True` so nobody sizes an order
+    off it without knowing.
 
     R-SQUARED IS THE NUMBER TO CHECK. A lambda from a regression that
     explains 2% of the variance is a number with a standard error larger
     than itself. It is returned next to the estimate rather than buried.
     """
-    frame = _require_columns(ohlcv, ["close", "volume"], "kyle_lambda")
-    frame = frame.dropna()
-    frame = frame[(frame["close"] > 0) & (frame["volume"] > 0)]
-    _enough(len(frame), "kyle_lambda")
-
-    price_change = frame["close"].diff()
-    # The tick rule: the day's direction signs the day's volume.
-    signed_volume = np.sign(price_change) * frame["volume"]
-    data = pd.DataFrame({"dp": price_change, "signed": signed_volume}).dropna()
-    data = data[data["signed"] != 0]
+    if trades is not None:
+        frame, data, sign_source = _kyle_data_from_trades(trades, quotes, freq)
+        circular = False
+    else:
+        if ohlcv is None:
+            raise ValidationError(
+                "kyle_lambda: pass bars (`ohlcv`) or a trade tape (`trades`, "
+                "with `quotes` for a Lee-Ready sign)."
+            )
+        frame = _require_columns(ohlcv, ["close", "volume"], "kyle_lambda")
+        frame = frame.dropna()
+        frame = frame[(frame["close"] > 0) & (frame["volume"] > 0)]
+        _enough(len(frame), "kyle_lambda")
+        price_change = frame["close"].diff()
+        # The bar's own direction signs the bar's volume: circular, and
+        # said so below.
+        signed_volume = np.sign(price_change) * frame["volume"]
+        data = pd.DataFrame({"dp": price_change, "signed": signed_volume}).dropna()
+        data = data[data["signed"] != 0]
+        sign_source = "return_sign"
+        circular = True
     _enough(len(data), "kyle_lambda", minimum=20)
 
     def _fit(chunk: pd.DataFrame):
@@ -603,20 +629,29 @@ def kyle_lambda(
             "none of the price variation, so this lambda has a standard "
             "error larger than itself. Do not size an order off it."
         )
-    if lam <= 0:
+    if circular:
         warnings.append(
-            "Lambda came out non-positive, which is not economically "
-            "meaningful -- buying should push the price up. It usually "
-            "means the tick-rule signing is failing on this name, which "
-            "happens on illiquid or heavily-crossed names."
+            "CIRCULAR: from bars the flow is signed by the TICK RULE on the "
+            "bar's own return, so x = sign(y) * volume is regressed on y. "
+            "Lambda is positive by construction and r_squared measures "
+            "nothing -- shuffling the returns and permuting the volume left "
+            "80% of a live estimate intact. Pass trades (and quotes) for a "
+            "Lee-Ready sign that does not know the answer."
         )
-    warnings.append(
-        "Order flow is signed by the TICK RULE, not by matching trades "
-        "against quotes. That is right about 85% of the time on liquid "
-        "names and worse on illiquid ones; misclassification attenuates the "
-        "slope toward zero, so this understates impact -- and understates "
-        "it most exactly where impact is largest."
-    )
+    else:
+        if lam <= 0:
+            warnings.append(
+                "Lambda came out non-positive, which is not economically "
+                "meaningful -- buying should push the price up. With a "
+                "genuine sign this is what a true lambda near zero looks "
+                "like in noise; do not size an order off it."
+            )
+        warnings.append(
+            f"Order flow is signed by {sign_source} on the trade tape and "
+            f"bucketed at {freq}; misclassification attenuates the slope "
+            "toward zero, so this understates impact where the sign is "
+            "wrong most, which is on illiquid names."
+        )
 
     return {
         "n_observations": int(len(data)),
@@ -629,8 +664,63 @@ def kyle_lambda(
         "mean_price": mean_price,
         "mean_volume": mean_volume,
         "rolling": rolling,
+        # Whether the sign was read off the dependent variable (bars) or
+        # from the tape (trades), and which rule signed it.
+        "circular": bool(circular),
+        "sign_source": sign_source,
+        "freq": freq if trades is not None else None,
         "warnings": warnings,
     }
+
+
+def _kyle_data_from_trades(
+    trades: pd.DataFrame, quotes: Optional[pd.DataFrame], freq: str
+) -> "tuple[pd.DataFrame, pd.DataFrame, str]":
+    """
+    Bars of signed volume and price change from a trade tape: each trade
+    signed by Lee-Ready (quotes) or the tick rule (no quotes), summed per
+    `freq` bucket beside the bucket's last price.
+    """
+    from standard_quant_tools.analysis.microstructure import _signs_positional
+
+    tape = trades.set_index("timestamp") if "timestamp" in trades.columns else trades
+    book = (
+        quotes.set_index("timestamp")
+        if quotes is not None and "timestamp" in quotes.columns
+        else quotes
+    )
+    if not isinstance(tape.index, pd.DatetimeIndex):
+        raise ValidationError(
+            "kyle_lambda: trades need a datetime index or a `timestamp` column "
+            "to be bucketed in time."
+        )
+    signs = _signs_positional(tape, book)
+    keep = np.isfinite(signs) & (signs != 0)
+    size = tape["size"].astype(float).to_numpy()
+    price = tape["price"].astype(float).to_numpy()
+    signed = (
+        pd.Series(size[keep] * signs[keep], index=tape.index[keep]).resample(freq).sum()
+    )
+    # The price that moves is the MIDPOINT when quotes are given: a last
+    # trade price carries the bid-ask bounce, whose sign is the last
+    # trade's side, which is also in the signed volume -- a spurious
+    # positive lambda on a market with no impact at all.
+    if book is not None:
+        from standard_quant_tools.analysis.microstructure import quoted_spread
+
+        mids = quoted_spread(book)["mid"]
+        last = mids.resample(freq).last().ffill()
+    else:
+        last = pd.Series(price, index=tape.index).resample(freq).last().ffill()
+    volume = pd.Series(size, index=tape.index).resample(freq).sum()
+    bars = pd.DataFrame({"close": last, "volume": volume}).dropna()
+    bars = bars[bars["volume"] > 0]
+    _enough(len(bars), "kyle_lambda")
+    data = pd.DataFrame(
+        {"dp": bars["close"].diff(), "signed": signed.reindex(bars.index)}
+    ).dropna()
+    data = data[data["signed"] != 0]
+    return bars, data, ("lee_ready" if book is not None else "tick_rule")
 
 
 # ── flow ────────────────────────────────────────────────────────────────
@@ -811,13 +901,22 @@ def estimate_vpin(
                 current_sell += take
             filled += take
             remaining -= take
-            if filled >= bucket_size - 1e-9:
+            if filled >= bucket_size * (1.0 - 1e-12):
                 buys.append(current_buy)
                 sells.append(current_sell)
                 current_buy = current_sell = filled = 0.0
-    if filled > 0:
+    # The trailing partial bucket is NOT appended. It held a float residue
+    # of one bar, its VPIN was exactly 1.0 by construction, and it landed
+    # last -- dominating current_vpin, with 51 buckets reported for 50
+    # requested (findings).
+    # The last bucket closes on the last bar's volume to within rounding:
+    # the sum of the takes equals the total only in exact arithmetic, so
+    # a bucket short by a few ulps is full, not residue.
+    if filled >= bucket_size * (1.0 - 1e-9):
         buys.append(current_buy)
         sells.append(current_sell)
+        filled = 0.0
+    residual_volume = float(filled)
 
     buys_a = np.asarray(buys)
     sells_a = np.asarray(sells)
@@ -859,6 +958,7 @@ def estimate_vpin(
     return {
         "n_buckets": int(imbalance.size),
         "bucket_volume": float(bucket_size),
+        "residual_volume": residual_volume,
         "window": window,
         "current_vpin": current,
         "current_percentile": percentile,
@@ -875,6 +975,9 @@ def intraday_volume_profile(
     bars: pd.DataFrame,
     *,
     n_buckets: int = 13,
+    index_timezone: Optional[str] = None,
+    exchange_timezone: str = "America/New_York",
+    session: "tuple[str, str]" = ("09:30", "16:00"),
 ) -> Dict[str, Any]:
     """
     How volume distributes across the trading day, and what that implies for
@@ -897,6 +1000,18 @@ def intraday_volume_profile(
     Needs INTRADAY bars with a datetime index. Daily bars have no intraday
     shape to describe and are refused rather than aggregated into a
     meaningless single bucket.
+
+    THE SESSION, NOT THE OBSERVED RANGE. A feed that carries extended
+    hours (Databento's, whose index is UTC) was bucketed from 4am to 8pm,
+    so the open and close buckets held pre- and post-market trickle:
+    open_share 0.00004, close_share 0.0, u_shaped False, and a warning
+    that the caller's data was unusual (findings). Restricted to the
+    regular session the same bars gave 0.234 / 0.153 and u_shaped True.
+    Pass `index_timezone` (the index's own zone, 'UTC' for Databento
+    bars) or a tz-aware index, and the profile is bucketed over
+    `session` in `exchange_timezone` with the extended-hours share
+    reported beside it. A naive index with no `index_timezone` is taken
+    as already in session time.
     """
     frame = pd.DataFrame(bars)
     lower = {str(c).lower(): c for c in frame.columns}
@@ -913,6 +1028,30 @@ def intraday_volume_profile(
         )
     volume = pd.Series(frame[lower["volume"]].astype(float).values, index=frame.index)
     volume = volume.dropna()
+    extended_share: Optional[float] = None
+    if index_timezone is not None or volume.index.tz is not None:
+        local = (
+            volume.index.tz_localize(index_timezone)
+            if volume.index.tz is None
+            else volume.index
+        ).tz_convert(exchange_timezone)
+        stamps = local.tz_localize(None)
+        session_minutes = stamps.hour * 60 + stamps.minute
+        lo_m, hi_m = _session_bounds(session)
+        regular = (session_minutes >= lo_m) & (session_minutes < hi_m)
+        total_all = float(volume.sum())
+        extended_share = (
+            float(volume.to_numpy()[~regular].sum() / total_all)
+            if total_all > 0
+            else None
+        )
+        if not regular.any():
+            raise ValidationError(
+                f"intraday_volume_profile: no bar inside the {session[0]}-"
+                f"{session[1]} session in {exchange_timezone}; every bar is "
+                "extended hours."
+            )
+        volume = pd.Series(volume.to_numpy()[regular], index=stamps[regular])
     _enough(len(volume), "intraday_volume_profile")
 
     minutes = volume.index.hour * 60 + volume.index.minute
@@ -986,8 +1125,23 @@ def intraday_volume_profile(
         "trough_share": trough,
         "trough_bucket": trough_bucket,
         "open_to_trough_ratio": float(first / trough) if trough > 0 else None,
+        "session": list(session),
+        "extended_hours_share": extended_share,
         "warnings": warnings,
     }
+
+
+def _session_bounds(session) -> "tuple[int, int]":
+    def _minutes(label: str) -> int:
+        hours, minutes = str(label).split(":")
+        return int(hours) * 60 + int(minutes)
+
+    lo, hi = _minutes(session[0]), _minutes(session[1])
+    if hi <= lo:
+        raise ValidationError(
+            f"session={tuple(session)!r} must end after it starts (HH:MM, HH:MM)."
+        )
+    return lo, hi
 
 
 def implementation_shortfall(

@@ -139,6 +139,16 @@ class OrderEventResult(BaseModel):
         "EXCLUDED from the lifetime averages, because their true lifetime is "
         "longer than anything this window can see.",
     )
+    terminated_from_snapshot: int = Field(
+        0,
+        description="Terminated orders the window's snapshot had shown resting: "
+        "explained by the snapshot rather than censored.",
+    )
+    n_snapshot_events: int = Field(
+        0,
+        description="Snapshot records in the window. They seed the queue and are "
+        "excluded from the counts, the rates and the clock.",
+    )
     truncated: bool = False
     warnings: List[str] = Field(default_factory=list)
 
@@ -154,7 +164,11 @@ def _events_from_reference(ref: str, cap: int):
             "external dataset. Only a panel registered with "
             "register_external_dataset can be streamed here."
         )
-    wanted = [c for c in lib.ORDER_EVENT_COLUMNS if c in handle.columns]
+    wanted = [
+        c
+        for c in (*lib.ORDER_EVENT_COLUMNS, "flags", "snapshot")
+        if c in handle.columns
+    ]
     chunks: List[pd.DataFrame] = []
     read = 0
     truncated = False
@@ -214,6 +228,8 @@ def get_order_event_metrics(input_data: OrderEventInput) -> OrderEventResult:
         cancelled=LifetimeSummary(**lifetimes["cancelled"]),
         still_resting=lifetimes["still_resting"],
         terminated_without_an_add=lifetimes["terminated_without_an_add"],
+        terminated_from_snapshot=lifetimes.get("terminated_from_snapshot", 0),
+        n_snapshot_events=rates.get("n_snapshot_events", 0),
         truncated=truncated,
         warnings=notes + list(metrics["warnings"]),
     )

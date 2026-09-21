@@ -1,5 +1,51 @@
 # Changelog
 
+## A repeated timestamp is two rows, and a bar cannot sign its own flow
+
+Phase 6 of `Development/databento_live_fix_plan.md`: microstructure. Each
+item names the number it moves.
+
+- **Three functions no longer crash on a real tape (D7).** 32% of prints
+  in a live minute share a timestamp, and `effective_spread`,
+  `microstructure_summary` and the liquidity detector's signed-volume
+  channel aligned trades to their signs by LABEL: the first two raised,
+  and the third fanned rows out and reported a net imbalance of -229,340
+  on a tape whose whole volume was 64,780. Every consumer now aligns by
+  position (`_signs_positional`), the signed volume cannot exceed what
+  traded, and `detect_liquidity_events` isolates every channel's failure
+  by name instead of letting one channel's ValueError kill all six.
+- **Kyle's lambda says when it is circular (D8).** From bars the only
+  sign is the bar's own return, so x = sign(y)·V was regressed on y:
+  lambda was positive by construction and r² measured nothing (shuffling
+  the returns left 80% of the estimate). The bars path now returns
+  `circular=True`, `sign_source="return_sign"` and says so; `kyle_lambda(trades=,
+  quotes=)` signs the flow by Lee-Ready, buckets it at `freq`, regresses
+  the MIDPOINT change on it, and finds nothing on a market with no impact.
+- **The volume profile buckets the regular session.** A feed carrying
+  extended hours was bucketed 4am to 8pm and reported a 0% open and
+  close; with a tz-aware index or `index_timezone` ("UTC" for Databento
+  bars) both profiles bucket `session` in `exchange_timezone` and report
+  `extended_hours_share`.
+- **`estimate_vpin` drops the residue bucket**, which held a float residue
+  of one bar, had VPIN 1.0 by construction and dominated `current_vpin`
+  (51 buckets for 50 requested); `residual_volume` says what it held.
+- **`roll_spread`'s significance guard runs in the windowed branch**, on
+  the median window's covariance against a window-sized standard error;
+  `significant` was None there.
+- **The CUSUM detector reports its memory.** Every result carries the
+  channel's `lag1_autocorrelation`, the `threshold` it was judged against
+  and the `false_alarm_rate_at_threshold` an AR(1) null with that memory
+  implies on a window this long (a spread channel at +0.67 fired on 43% of
+  quiet windows at the i.i.d. default); `calibrate_threshold=True` takes
+  the threshold from that null's 95th percentile instead.
+- **A snapshot is the book, not an event (MBO).** Snapshot records (the
+  vendor's flag bit, or a `snapshot` column) seed the queue without
+  counting as arrivals, explain a later cancel or fill instead of leaving
+  it "terminated without an add" (54.5% of the censored count on a CME
+  reopen), and are excluded from the event counts, rates and clock
+  (`events_per_second` was off by 16,000x). A trade is one event: the T
+  prints when the feed carries them, else the fills, never both.
+
 ## The solver converges on volatility, not on a step it never took
 
 Phase 5 of `Development/databento_live_fix_plan.md`: options and futures.

@@ -1325,6 +1325,7 @@ def detect_liquidity_events(
         quotes=quotes,
         freq=input_data.freq,
         threshold=input_data.threshold,
+        calibrate_threshold=input_data.calibrate_threshold,
         reference_fraction=input_data.reference_fraction,
     )
     return LiquidityEventsResult(

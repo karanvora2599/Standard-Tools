@@ -146,6 +146,31 @@ def sign_trades(
     prior price -- are dropped rather than defaulted, because assigning
     them a side would put a coin flip into a mean.
     """
+    return _classified(_sign_series(trades, quotes))
+
+
+def _signs_positional(
+    trades: pd.DataFrame, quotes: Optional[pd.DataFrame] = None
+) -> np.ndarray:
+    """
+    Every trade's sign in the trades' OWN ROW ORDER: NaN where no rule
+    decided, 0 where the rules cancelled, +1/-1 otherwise.
+
+    Real tapes repeat timestamps -- 32% of prints in a live AAPL minute --
+    and a label-based `.loc[signs.index]` on such an index either raises
+    ('cannot reindex on an axis with duplicate labels') or fans rows out
+    by label: `_signed_volume` reported a net imbalance of -229,340 on a
+    tape whose whole volume was 64,780 (findings D7). Positions never
+    collide, so every consumer here aligns by position.
+    """
+    return _sign_series(trades, quotes).to_numpy(dtype=float)
+
+
+def _sign_series(
+    trades: pd.DataFrame, quotes: Optional[pd.DataFrame] = None
+) -> pd.Series:
+    """The full-length sign series behind `sign_trades`, one entry per
+    trade row in order, undecided trades left as NaN."""
     trades = _require_frame(trades, _TRADE_COLUMNS, "trades")
     price = trades["price"].astype(float)
 
@@ -157,30 +182,35 @@ def sign_trades(
     tick_sign = np.sign(price.diff()).replace(0.0, np.nan).ffill()
 
     if quotes is None:
-        return _classified(pd.Series(tick_sign, index=price.index, dtype="float64"))
+        return pd.Series(tick_sign.to_numpy(), index=price.index, dtype="float64")
 
     q = quoted_spread(quotes)
     if q.empty:
-        return _classified(pd.Series(tick_sign, index=price.index, dtype="float64"))
+        return pd.Series(tick_sign.to_numpy(), index=price.index, dtype="float64")
 
+    # The prevailing mid per trade, matched BY POSITION: the trades are
+    # sorted stably with their row number carried along, matched to the
+    # last quote strictly before them, and the mids scattered back by row
+    # number. A repeated timestamp is then just two rows.
+    n = len(price)
+    order = np.argsort(price.index.to_numpy(), kind="stable")
+    left = pd.DataFrame({"_pos": np.arange(n)[order]}, index=price.index[order])
     matched = pd.merge_asof(
-        pd.DataFrame({"price": price}).sort_index(),
+        left,
         q[["mid"]].sort_index(),
         left_index=True,
         right_index=True,
         direction="backward",
         allow_exact_matches=False,
     )
-    mid = matched["mid"]
-    quote_sign = np.sign(matched["price"] - mid)
+    mid = np.full(n, np.nan)
+    mid[matched["_pos"].to_numpy()] = matched["mid"].to_numpy(dtype=float)
+    quote_sign = np.sign(price.to_numpy(dtype=float) - mid)
+    has_mid = np.isfinite(mid)
     # At the midpoint (or with no prevailing quote) the quote comparison
     # says nothing, so the tick test decides.
-    signs = pd.Series(
-        np.where((quote_sign != 0) & mid.notna(), quote_sign, tick_sign),
-        index=price.index,
-        dtype="float64",
-    )
-    return _classified(signs)
+    signs = np.where((quote_sign != 0) & has_mid, quote_sign, tick_sign.to_numpy())
+    return pd.Series(signs, index=price.index, dtype="float64")
 
 
 def effective_spread(
@@ -220,11 +250,18 @@ def effective_spread(
             "spread, so there is no midpoint to measure trades against."
         )
 
-    side = sign_trades(trades, quotes)
+    # By position, not by label: `.loc[side.index]` raised on any tape
+    # with a repeated timestamp (findings D7).
+    signs = _signs_positional(trades, quotes)
+    keep = np.isfinite(signs) & (signs != 0)
     frame = pd.DataFrame(
-        {"price": trades["price"].astype(float), "size": trades["size"].astype(float)}
-    ).loc[side.index]
-    frame["side"] = side
+        {
+            "price": trades["price"].astype(float).to_numpy()[keep],
+            "size": trades["size"].astype(float).to_numpy()[keep],
+            "side": signs[keep].astype(int),
+        },
+        index=trades.index[keep],
+    )
 
     matched = pd.merge_asof(
         frame.sort_index(),
@@ -305,11 +342,13 @@ def microstructure_summary(
             "which is materially less accurate than Lee-Ready, and no "
             "spread could be measured."
         ]
-        signs = sign_trades(trades)
-        summary["n_signed"] = int(len(signs))
+        signs = _signs_positional(trades)
+        keep = np.isfinite(signs) & (signs != 0)
+        sized = size.to_numpy(dtype=float)[keep]
+        summary["n_signed"] = int(keep.sum())
         summary["buy_volume_fraction"] = (
-            float(size.loc[signs.index][signs > 0].sum() / size.loc[signs.index].sum())
-            if len(signs)
+            float(sized[signs[keep] > 0].sum() / sized.sum())
+            if keep.any() and sized.sum() > 0
             else float("nan")
         )
         return summary
@@ -409,8 +448,25 @@ def trade_size_profile(trades: pd.DataFrame, buckets: int = 5) -> Dict[str, Any]
     }
 
 
+def _session_minutes(session) -> "tuple[int, int]":
+    def _minutes(label: str) -> int:
+        hours, minutes = str(label).split(":")
+        return int(hours) * 60 + int(minutes)
+
+    lo, hi = _minutes(session[0]), _minutes(session[1])
+    if hi <= lo:
+        raise ValidationError(
+            f"session={tuple(session)!r} must end after it starts (HH:MM, HH:MM)."
+        )
+    return lo, hi
+
+
 def intraday_volume_profile(
-    trades: pd.DataFrame, freq: str = "30min"
+    trades: pd.DataFrame,
+    freq: str = "30min",
+    *,
+    session: "tuple[str, str]" = ("09:30", "16:00"),
+    exchange_timezone: str = "America/New_York",
 ) -> Dict[str, Any]:
     """
     Volume by time of day, as a fraction of the session.
@@ -423,12 +479,42 @@ def intraday_volume_profile(
     """
     trades = _require_frame(trades, _TRADE_COLUMNS, "trades")
     size = trades["size"].astype(float)
-    by_bucket = size.groupby(trades.index.floor(freq).time).sum()
+    # A tape stamped with a timezone is bucketed over the REGULAR SESSION
+    # in the exchange's clock, and the extended-hours share is reported
+    # beside it. Bucketing over the observed range of a live feed put the
+    # open at 4am and the close at 8pm, reported a 0% open and close, and
+    # warned the caller that THEIR data was unusual (findings). A naive
+    # index is taken as already in session time and profiled as given.
+    extended_share: Optional[float] = None
+    index = trades.index
+    if isinstance(index, pd.DatetimeIndex) and index.tz is not None:
+        local = index.tz_convert(exchange_timezone)
+        minutes = local.hour * 60 + local.minute
+        lo_m, hi_m = _session_minutes(session)
+        regular = (minutes >= lo_m) & (minutes < hi_m)
+        total_all = float(size.sum())
+        extended_share = (
+            float(size.to_numpy()[~regular].sum() / total_all)
+            if total_all > 0
+            else None
+        )
+        if not regular.any():
+            raise ValidationError(
+                f"no trades inside the {session[0]}-{session[1]} session in "
+                f"{exchange_timezone}; every print is extended hours."
+            )
+        size = pd.Series(
+            size.to_numpy()[regular], index=local.tz_localize(None)[regular]
+        )
+        index = size.index
+    by_bucket = size.groupby(index.floor(freq).time).sum()
     total = float(by_bucket.sum())
     if total <= 0:
         raise ValidationError("no positive volume to profile")
     return {
         "freq": freq,
+        "session": list(session),
+        "extended_hours_share": extended_share,
         "buckets": [
             {"time": str(when), "volume_fraction": round(float(volume / total), 6)}
             for when, volume in by_bucket.items()

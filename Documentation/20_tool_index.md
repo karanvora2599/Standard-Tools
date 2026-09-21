@@ -1320,7 +1320,7 @@ Sign a tick tape buyer- or seller-initiated and publish the signed series, which
 CUSUM change detection over tick-derived liquidity channels -- when the spread, depth, trade intensity or signed flow regime CHANGED, rather than what it is on average. Declares every channel it knows about, including the ones this feed cannot supply.
 
 **Required:** `symbol`, `start_date`, `end_date`, `channels`  
-**Optional:** `freq`, `threshold`, `reference_fraction`, `source`
+**Optional:** `freq`, `calibrate_threshold`, `threshold`, `reference_fraction`, `source`
 
 #### `estimate_corwin_schultz_spread`
 

@@ -5505,6 +5505,20 @@ class ChannelResult(BaseModel):
         "arbitrarily large. Judge the shock from `shift`, not `severity`.",
     )
     notes: List[str] = Field(default_factory=list)
+    threshold: Optional[float] = Field(
+        None, description="The decision threshold this channel was judged against."
+    )
+    threshold_calibrated: bool = False
+    lag1_autocorrelation: Optional[float] = Field(
+        None,
+        description="The channel's own memory, which the i.i.d. threshold ignores.",
+    )
+    false_alarm_rate_at_threshold: Optional[float] = Field(
+        None,
+        description="How often an AR(1) null with this channel's autocorrelation "
+        "crosses the threshold on a window this long (simulated). The design "
+        "rate is 5%; read a detection against this number.",
+    )
     n_observations: Optional[int] = None
     n_reference: Optional[int] = None
 
@@ -5539,6 +5553,15 @@ class LiquidityEventsInput(BaseModel):
         "1min",
         description="Bucket size for every channel, e.g. '30s', '1min', "
         "'5min'. Smaller buckets detect faster and are noisier.",
+    )
+    calibrate_threshold: bool = Field(
+        False,
+        description="Take the CUSUM threshold from a simulated AR(1) null with "
+        "each channel's own lag-1 autocorrelation (95th percentile of its "
+        "peak statistic), instead of `threshold`. Real channels are "
+        "autocorrelated -- a spread channel at +0.67 fired on 43% of quiet "
+        "windows at the i.i.d. default -- and every result reports the "
+        "false-alarm rate its threshold implies either way.",
     )
     threshold: float = Field(
         9.0,

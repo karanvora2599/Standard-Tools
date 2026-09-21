@@ -8,8 +8,14 @@ and what is left alone and why. Findings are cited by their number there
 
 **Status: phases 1 (the data path), 2 (the deployed model is the
 validated model), 3 (selection and inference), 4 (backtest and
-portfolio) and 5 (options and futures) are implemented, 2026-09-20;
-phases 6-7 are the plan.** Phase 5's investigation of the futures
+portfolio), 5 (options and futures) and 6 (microstructure) are
+implemented, 2026-09-20; phase 7 is the plan.** Phase 6's queue-position
+check against `mbp-10` is pinned with a synthetic snapshot rather than
+the findings' sequence numbers, which are not in the repository; the
+live check for the owner is listed in the verification table. The Kyle
+regression on a tape moves on the MIDPOINT when quotes are supplied,
+because a last trade price carries the bid-ask bounce whose sign is
+also in the signed flow. Phase 5's investigation of the futures
 engine found both causes local: the roll day's variation margin is
 skipped because one price series cannot carry the old contract's close,
 so the engine now takes `roll_day_prior_prices` and books it; and a

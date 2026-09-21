@@ -37,6 +37,7 @@ trigger.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -187,7 +188,7 @@ def _signed_volume(
     Buy volume minus sell volume, signed by the Lee-Ready rule the library
     already implements rather than by a fresh one.
     """
-    from standard_quant_tools.analysis.microstructure import sign_trades
+    from standard_quant_tools.analysis.microstructure import _signs_positional
 
     # sign_trades matches each trade to the quote that preceded it, so it
     # needs a real time INDEX rather than a timestamp column -- and it
@@ -201,8 +202,15 @@ def _signed_volume(
         if quotes is not None and "timestamp" in quotes.columns
         else quotes
     )
-    signs = sign_trades(indexed, quoted)
-    sized = indexed.loc[signs.index, "size"] * signs
+    # By POSITION. `.loc[signs.index]` on a tape with repeated timestamps
+    # fanned rows out by label and reported a net imbalance 3.5x larger
+    # than everything that traded (findings D7).
+    signs = _signs_positional(indexed, quoted)
+    keep = np.isfinite(signs) & (signs != 0)
+    sized = pd.Series(
+        indexed["size"].astype(float).to_numpy()[keep] * signs[keep],
+        index=indexed.index[keep],
+    )
     return sized.resample(freq).sum()
 
 
@@ -357,9 +365,23 @@ def cusum(
     slack: float = DEFAULT_SLACK,
     threshold: float = DEFAULT_THRESHOLD,
     reference_fraction: float = DEFAULT_REFERENCE_FRACTION,
+    calibrate_threshold: bool = False,
+    n_simulations: int = 200,
+    seed: int = 0,
 ) -> Dict[str, Any]:
     """
     Two-sided CUSUM over one channel.
+
+    THE THRESHOLD IS CALIBRATED FOR I.I.D. NOISE AND REAL CHANNELS ARE
+    NOT. A spread channel with lag-1 autocorrelation +0.67 fired on 43%
+    of quiet real windows at the default threshold, where an i.i.d.
+    control gives 7% (findings). So the result reports the channel's
+    lag-1 autocorrelation and the false-alarm rate the threshold implies
+    under an AR(1) null with that autocorrelation, simulated over
+    `n_simulations` paths of this length. With `calibrate_threshold`
+    the threshold is instead taken from that simulation -- the 95th
+    percentile of the null's peak statistic -- so the false-alarm rate
+    is 5% whatever the channel's memory.
 
     The baseline mean and standard deviation come from the FIRST
     `reference_fraction` of the series and nothing later. Standardizing
@@ -426,7 +448,20 @@ def cusum(
             ],
             "n_observations": int(len(values)),
             "n_reference": int(n_reference),
+            "threshold": float(threshold),
+            "threshold_calibrated": False,
+            "lag1_autocorrelation": None,
+            "false_alarm_rate_at_threshold": None,
         }
+
+    # The channel's memory, and what it does to the threshold.
+    lag1 = _lag1_autocorrelation(values.to_numpy(dtype=float))
+    null_peaks = _ar1_null_peaks(
+        lag1, len(values), n_reference, slack, n_simulations, seed
+    )
+    if calibrate_threshold:
+        threshold = float(np.percentile(null_peaks, 95))
+    false_alarm_rate = float(np.mean(null_peaks >= threshold))
 
     standardized = (values - mean) / std
     # The recursion is genuinely sequential -- each step reads the previous
@@ -461,6 +496,14 @@ def cusum(
     degenerate = coefficient_of_variation < DEGENERATE_BASELINE_CV
 
     notes = []
+    if false_alarm_rate > 0.10 and not calibrate_threshold:
+        notes.append(
+            f"the channel's lag-1 autocorrelation is {lag1:+.2f}, and at "
+            f"threshold {threshold:g} an AR(1) null with that memory crosses "
+            f"{false_alarm_rate:.0%} of the time on a window this long (the "
+            "design rate is 5% for i.i.d. noise). Read a detection here "
+            "against that rate, or pass calibrate_threshold=True."
+        )
     if degenerate:
         notes.append(
             f"the reference window is nearly constant (mean {mean:.6g}, sd "
@@ -489,7 +532,59 @@ def cusum(
         "n_observations": int(len(values)),
         "n_reference": int(n_reference),
         "value_at_peak": float(values.iloc[peak_index]),
+        "threshold": float(threshold),
+        "threshold_calibrated": bool(calibrate_threshold),
+        "lag1_autocorrelation": lag1,
+        "false_alarm_rate_at_threshold": false_alarm_rate,
     }
+
+
+def _lag1_autocorrelation(values: np.ndarray) -> float:
+    """Lag-1 autocorrelation of the whole series; NaN below three points
+    or without variance."""
+    if values.size < 3:
+        return float("nan")
+    centred = values - values.mean()
+    denominator = float((centred**2).sum())
+    if denominator <= 0:
+        return float("nan")
+    return float((centred[1:] * centred[:-1]).sum() / denominator)
+
+
+def _ar1_null_peaks(
+    rho: float,
+    n: int,
+    n_reference: int,
+    slack: float,
+    n_simulations: int,
+    seed: int,
+) -> np.ndarray:
+    """
+    The peak CUSUM statistic of `n_simulations` AR(1) paths with
+    autocorrelation `rho`, each standardized against its own reference
+    window and scanned outside it exactly as `cusum` scans the data.
+    """
+    phi = float(np.clip(rho if np.isfinite(rho) else 0.0, -0.95, 0.95))
+    rng = np.random.default_rng(seed)
+    n_simulations = max(int(n_simulations), 20)
+    innovations = rng.standard_normal((n_simulations, n))
+    paths = np.empty_like(innovations)
+    paths[:, 0] = innovations[:, 0] / math.sqrt(max(1.0 - phi * phi, 1e-6))
+    for t in range(1, n):
+        paths[:, t] = phi * paths[:, t - 1] + innovations[:, t]
+    reference = paths[:, :n_reference]
+    scale = reference.std(axis=1, ddof=1, keepdims=True)
+    scale = np.where(scale > 0, scale, 1.0)
+    z = (paths - reference.mean(axis=1, keepdims=True)) / scale
+    up = np.zeros(n_simulations)
+    down = np.zeros(n_simulations)
+    peaks = np.zeros(n_simulations)
+    for t in range(1, n):
+        up = np.maximum(0.0, up + z[:, t] - slack)
+        down = np.maximum(0.0, down - z[:, t] - slack)
+        if t >= n_reference:
+            peaks = np.maximum(peaks, np.maximum(up, down))
+    return peaks
 
 
 def _severity(peak: float, threshold: float) -> str:
@@ -511,6 +606,7 @@ def detect_liquidity_events(
     slack: float = DEFAULT_SLACK,
     threshold: float = DEFAULT_THRESHOLD,
     reference_fraction: float = DEFAULT_REFERENCE_FRACTION,
+    calibrate_threshold: bool = False,
 ) -> Dict[str, Any]:
     """
     Run the detector over several channels and report which ones broke.
@@ -569,13 +665,23 @@ def detect_liquidity_events(
                 slack=slack,
                 threshold=threshold,
                 reference_fraction=reference_fraction,
+                calibrate_threshold=calibrate_threshold,
             )
-        except ValidationError as exc:
+        except Exception as exc:  # noqa: BLE001
+            # EVERY failure is isolated to its channel. Catching only
+            # ValidationError let one channel's ValueError kill all six,
+            # and the failing channel was in available_channels(), so the
+            # obvious call was the one that died (findings D7).
+            reason = (
+                str(exc)
+                if isinstance(exc, ValidationError)
+                else f"{name!r} could not be computed: {type(exc).__name__}: {exc}"
+            )
             unavailable.append(
                 {
                     "channel": name,
                     "requires": ", ".join(channel.requires),
-                    "reason": str(exc),
+                    "reason": reason,
                 }
             )
             continue

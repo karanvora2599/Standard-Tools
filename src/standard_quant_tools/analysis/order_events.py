@@ -92,6 +92,28 @@ def _require(frame: pd.DataFrame, name: str = "order events") -> pd.DataFrame:
     return frame
 
 
+#: Databento's snapshot bit: the record repeats state (the book at the
+#: window's open) rather than reporting a change.
+F_SNAPSHOT = 32
+
+
+def _snapshot_mask(frame: pd.DataFrame) -> np.ndarray:
+    """
+    Which rows are snapshot records: a `snapshot` column when the caller
+    supplied one, else the vendor's flag bit, else none. A snapshot row
+    is the book as it stood, not an event: it must seed the queue and
+    explain a later cancel, and it must not count as an arrival, a rate
+    or a clock tick (findings: 54.5% of 'terminated without an add' were
+    snapshot orders; events_per_second was off by 16,000x).
+    """
+    if "snapshot" in frame.columns:
+        return frame["snapshot"].fillna(False).astype(bool).to_numpy()
+    if "flags" in frame.columns:
+        flags = pd.to_numeric(frame["flags"], errors="coerce").fillna(0).astype("int64")
+        return ((flags & F_SNAPSHOT) != 0).to_numpy()
+    return np.zeros(len(frame), dtype=bool)
+
+
 def _elapsed_seconds(stamps: pd.Series) -> Optional[float]:
     valid = pd.to_datetime(stamps, errors="coerce").dropna()
     if len(valid) < 2:
@@ -118,11 +140,13 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
     """
     resting: Dict[Any, float] = {}
     ahead: List[float] = []
-    for action, side, price, size in zip(
+    n_snapshot_orders = 0
+    for action, side, price, size, is_snapshot in zip(
         events["action"].to_numpy(),
         events["side"].to_numpy(),
         pd.to_numeric(events["price"], errors="coerce").to_numpy(dtype="float64"),
         pd.to_numeric(events["size"], errors="coerce").to_numpy(dtype="float64"),
+        _snapshot_mask(events),
     ):
         if action == CLEAR:
             resting.clear()
@@ -131,7 +155,14 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
             continue
         key = (side, price)
         if action == ADD:
-            ahead.append(resting.get(key, 0.0))
+            # A snapshot add is the book as it stood: it seeds the queue
+            # every later arrival waits behind, and is not itself an
+            # arrival. Dropping it understated real queues by 33-79%
+            # against the mbp-10 book for the same sequence numbers.
+            if is_snapshot:
+                n_snapshot_orders += 1
+            else:
+                ahead.append(resting.get(key, 0.0))
             resting[key] = resting.get(key, 0.0) + size
         elif action in (CANCEL, FILL):
             resting[key] = max(0.0, resting.get(key, 0.0) - size)
@@ -141,6 +172,7 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
             "mean_queue_ahead": None,
             "median_queue_ahead": None,
             "share_joining_empty": None,
+            "n_snapshot_orders": int(n_snapshot_orders),
         }
     values = np.asarray(ahead, dtype="float64")
     return {
@@ -150,6 +182,7 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
         # A high share means the level is usually empty when you arrive,
         # which is a different market from one where you always queue.
         "share_joining_empty": float((values == 0.0).mean()),
+        "n_snapshot_orders": int(n_snapshot_orders),
     }
 
 
@@ -164,21 +197,36 @@ def order_lifetimes(events: pd.DataFrame) -> Dict[str, Any]:
     worst for exactly the long-resting orders a queue study cares about.
     """
     added: Dict[Any, Any] = {}
+    # Orders the window's snapshot showed already resting: known, but
+    # with no observable start, so a later cancel or fill is neither a
+    # measured lifetime nor a mystery.
+    known_at_open: set = set()
     filled: List[float] = []
     cancelled: List[float] = []
     censored = 0
+    from_snapshot = 0
     stamps = pd.to_datetime(events["timestamp"], errors="coerce")
-    for order_id, action, when in zip(
-        events["order_id"].to_numpy(), events["action"].to_numpy(), stamps
+    for order_id, action, when, is_snapshot in zip(
+        events["order_id"].to_numpy(),
+        events["action"].to_numpy(),
+        stamps,
+        _snapshot_mask(events),
     ):
         if pd.isna(when):
             continue
         if action == ADD:
-            added[order_id] = when
+            if is_snapshot:
+                known_at_open.add(order_id)
+            else:
+                added[order_id] = when
         elif action in (CANCEL, FILL):
             start = added.pop(order_id, None)
             if start is None:
-                censored += 1
+                if order_id in known_at_open:
+                    known_at_open.discard(order_id)
+                    from_snapshot += 1
+                else:
+                    censored += 1
                 continue
             seconds = (when - start).total_seconds()
             (cancelled if action == CANCEL else filled).append(float(seconds))
@@ -200,6 +248,11 @@ def order_lifetimes(events: pd.DataFrame) -> Dict[str, Any]:
         # for the same reason the left-censored count is.
         "still_resting": int(len(added)),
         "terminated_without_an_add": censored,
+        # Terminated orders the snapshot had shown resting: explained,
+        # not censored -- they were 54.5% of the censored count on a CME
+        # reopen before the snapshot was read.
+        "terminated_from_snapshot": int(from_snapshot),
+        "resting_at_open": int(len(known_at_open) + from_snapshot),
     }
 
 
@@ -211,18 +264,27 @@ def event_rates(events: pd.DataFrame) -> Dict[str, Any]:
     the window has no duration -- one event, or every event on the same
     timestamp. Zero would read as a quiet market.
     """
-    seconds = _elapsed_seconds(events["timestamp"])
-    counts = events["action"].value_counts().to_dict()
-    total = int(len(events))
+    # Snapshot records are the book, not events: they neither count nor
+    # tick the clock (a snapshot-bearing window read 16,000x too many
+    # events per second before this).
+    snapshot = _snapshot_mask(events)
+    live = events.loc[~snapshot] if snapshot.any() else events
+    seconds = _elapsed_seconds(live["timestamp"])
+    counts = live["action"].value_counts().to_dict()
+    total = int(len(live))
     per_action = {str(k): int(v) for k, v in counts.items()}
     rates = (
         {str(k): float(v) / seconds for k, v in per_action.items()} if seconds else {}
     )
     adds = per_action.get(ADD, 0)
     cancels = per_action.get(CANCEL, 0)
-    trades = per_action.get(TRADE, 0) + per_action.get(FILL, 0)
+    # ONE execution is a T (the print) and an F (the resting order it
+    # hit): counting both counted every trade twice. Trades are the T
+    # prints when the feed carries them, else the fills.
+    trades = per_action.get(TRADE, 0) or per_action.get(FILL, 0)
     return {
         "n_events": total,
+        "n_snapshot_events": int(snapshot.sum()),
         "elapsed_seconds": seconds,
         "events_per_second": (total / seconds) if seconds else None,
         "counts_by_action": per_action,
@@ -264,6 +326,12 @@ def order_event_metrics(
         )
 
     rates = event_rates(frame)
+    if rates.get("n_snapshot_events"):
+        warnings.append(
+            f"NOTE: {rates['n_snapshot_events']:,} snapshot record(s) seed the "
+            "queue and explain later cancels; they are excluded from the "
+            "event counts, the rates and the clock."
+        )
     if rates["elapsed_seconds"] is None:
         warnings.append(
             "WARNING: every event carries the same timestamp, or there is "
